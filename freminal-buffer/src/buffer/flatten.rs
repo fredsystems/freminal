@@ -12,7 +12,8 @@
 //!
 //! ## Per-row flatten cache
 //!
-//! Each entry in [`Buffer::row_cache`](super::Buffer::row_cache) is a
+//! Each entry in the row cache (the cache table of `Buffer::rows`, see
+//! `RowStore::cache`) is a
 //! [`RowCacheEntry`] that bundles:
 //!
 //! - `chars`: flat per-row `TChar` sequence (wide-continuation cells skipped)
@@ -35,7 +36,7 @@
 use std::sync::Arc;
 
 use freminal_common::buffer_states::{
-    buffer_type::BufferType, format_tag::FormatTag, tchar::TChar, url::Url,
+    buffer_type::BufferType, format_tag::FormatTag, row_number::RowNumber, tchar::TChar, url::Url,
 };
 
 use crate::image_store::ImagePlacement;
@@ -155,7 +156,7 @@ pub struct RowCacheEntry {
     ///
     /// Every `set_image_cell_at` / `place_image` / `place_image_at` /
     /// `clear_image_placements_*` site in `images.rs` sets `row.dirty` and
-    /// clears `row_cache[i]`, so this is always refreshed in the same pass
+    /// clears the row's cache entry, so this is always refreshed in the same pass
     /// that rebuilds the rest of the entry.
     ///
     /// [`Cell::image_cell`]: crate::cell::Cell::image_cell
@@ -187,18 +188,27 @@ impl Default for RowCacheEntry {
 
 /// Identifies which flatten "window" a cached merge was built from.
 ///
-/// Two calls with an identical `MergeWindowFp` cover *the same row range at
-/// the same detection setting* — a necessary (but not sufficient; see
+/// Two calls with an identical `MergeWindowFp` cover *the same logical rows
+/// at the same detection setting* -- a necessary (but not sufficient; see
 /// [`MergeCache`]'s doc comment) precondition for reusing a cached merge's
 /// prefix instead of redoing it from scratch.
+///
+/// The window is keyed by the **logical number** of its first row (Task
+/// 125.16), not by its physical bounds. A row keeps its [`RowNumber`] for as
+/// long as it is retained, so "same start number and same length" means
+/// "window position `r` holds the same row as last time" no matter how many
+/// rows were evicted from the front in between. Physical bounds could not say
+/// that: at scrollback capacity every line feed pushes one row and evicts one,
+/// leaving the bounds numerically identical while every row's identity had
+/// shifted down by one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::buffer) struct MergeWindowFp {
-    /// Absolute (buffer-wide) row index the flatten window starts at, as
-    /// returned by `Buffer::visible_window_bounds`.
-    visible_start: usize,
-    /// Absolute (buffer-wide, exclusive) row index the flatten window ends
-    /// at, as returned by `Buffer::visible_window_bounds`.
-    visible_end: usize,
+    /// Logical number of the first row in the flatten window (see
+    /// `RowStore::number_of`).
+    start: RowNumber,
+    /// Number of rows in the flatten window, i.e. the difference of the
+    /// bounds returned by `Buffer::visible_window_bounds`.
+    len: usize,
     /// `Buffer::auto_detect_urls` at the time of the merge. A toggle changes
     /// what `RowCacheEntry::auto_urls`/`bytes` contain for every row, so it
     /// must invalidate a cached merge exactly like a window-bounds change.
@@ -219,26 +229,33 @@ pub(in crate::buffer) struct MergeWindowFp {
 ///
 /// # Why `fp` + `first_rebuilt_row` alone are not sufficient
 ///
-/// `MergeWindowFp` equality only proves the window covers the *same row
-/// range* at the *same detection setting* — not that every individual row
-/// within that range still holds the content it held when this cache was
-/// built. The `first_rebuilt_row` signal (any row that was `dirty` or had a
-/// `None` cache entry on the current call) catches ordinary edits, but
-/// **cannot** catch an in-place *rotation* of already-clean cache entries
-/// between row indices without touching their `dirty`/`None` status — which
-/// is exactly what `scroll.rs`'s confined scroll-region primitives
-/// (`scroll_slice_up`/`scroll_slice_down`) and the whole-buffer `scroll_up`
-/// do. Those three sites don't rely on `fp`/`first_rebuilt_row` at all: each
-/// one sets `self.merge_cache = None` explicitly, at the exact point where
-/// it performs the rotation, forcing the next flatten to take the
-/// full-merge fallback instead of reusing a now-stale prefix. See
-/// `Buffer::merge_cache`'s field doc for the complete accounting of every
-/// invalidation mechanism (fingerprint, `first_rebuilt_row`, and the
-/// explicit-`None` sites) and which sites rely on which.
+/// `MergeWindowFp` equality only proves the window covers the *same logical
+/// rows* (same first row number, same length) at the *same detection
+/// setting* -- not that every individual row within it still holds the
+/// content it held when this cache was built. The `first_rebuilt_row` signal
+/// (any row that was `dirty` or had a `None` cache entry on the current call)
+/// catches ordinary edits, but **cannot** catch an in-place *rotation* of
+/// already-clean cache entries between row indices without touching their
+/// `dirty`/`None` status -- which is exactly what `scroll.rs`'s confined
+/// scroll-region primitives (`scroll_slice_up`/`scroll_slice_down`) do. A
+/// rotation changes which content sits at a given row number, and the number
+/// is the one thing the fingerprint trusts. Those two sites don't rely on
+/// `fp`/`first_rebuilt_row` at all: each one sets `self.merge_cache = None`
+/// explicitly, at the exact point where it performs the rotation, forcing the
+/// next flatten to take the full-merge fallback instead of reusing a
+/// now-stale prefix. See `Buffer::merge_cache`'s field doc for the complete
+/// accounting of every invalidation mechanism (fingerprint,
+/// `first_rebuilt_row`, and the explicit-`None` sites) and which sites rely
+/// on which.
+///
+/// Front eviction (`enforce_scrollback_limit`, `scroll_up`,
+/// `erase_scrollback`) is **not** such a site since Task 125.16: it removes
+/// rows without renumbering the survivors, so it changes the fingerprint
+/// exactly when it changes which rows the window holds.
 ///
 /// Every fast-path use of this cache is ALSO cross-checked against the
 /// full-merge oracle under `debug_assert_eq!` before being returned (`#405`
-/// Part C's load-bearing safety net) — release-cost-free. This is not the
+/// Part C's load-bearing safety net) -- release-cost-free. This is not the
 /// mechanism the confined-rotation case above relies on (that's the
 /// explicit `merge_cache = None` in `scroll.rs`); it is a general backstop
 /// that turns any *other*, not-yet-discovered divergence here into an
@@ -513,8 +530,8 @@ impl Buffer {
     ///
     /// The fast path requires ALL of:
     /// - a previous [`MergeCache`] exists,
-    /// - its [`MergeWindowFp`] (window bounds + auto-detect) matches this
-    ///   call's,
+    /// - its [`MergeWindowFp`] (first-row logical number + window length +
+    ///   auto-detect) matches this call's,
     /// - a `boundary` row index exists (`min` of `first_rebuilt_row` — from
     ///   Step 1 — and the smallest `row_idx` in `refined_auto_urls` — from
     ///   Step 1.5; either can be `None`, in which case the other alone is
@@ -595,14 +612,11 @@ impl Buffer {
         // compressed (the common live-view case).
         self.ensure_decompressed(visible_start..visible_end);
         let auto_detect = self.auto_detect_urls;
-        let fp = MergeWindowFp {
-            visible_start,
-            visible_end,
-            auto_detect,
-        };
+        let fp = self.merge_window_fp(visible_start, visible_end);
 
-        let rows_slice = &mut self.rows[visible_start..visible_end];
-        let cache_slice = &mut self.row_cache[visible_start..visible_end];
+        let (rows, cache, _) = self.rows.split_mut();
+        let rows_slice = &mut rows[visible_start..visible_end];
+        let cache_slice = &mut cache[visible_start..visible_end];
         let merge_cache = &mut self.merge_cache;
         let epoch_counter = &mut self.row_epoch_counter;
 
@@ -678,9 +692,10 @@ impl Buffer {
         // window.
         self.ensure_decompressed(visible_start..visible_end);
         let auto_detect = self.auto_detect_urls;
+        let (rows, cache, _) = self.rows.split_mut();
         Self::rows_as_tchars_and_tags_cached(
-            &mut self.rows[visible_start..visible_end],
-            &mut self.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
         )
     }
@@ -717,11 +732,7 @@ impl Buffer {
     #[must_use]
     pub fn visible_row_epochs(&mut self, scroll_offset: usize, extra_rows: usize) -> Vec<u64> {
         let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, extra_rows);
-        let fp = MergeWindowFp {
-            visible_start,
-            visible_end,
-            auto_detect: self.auto_detect_urls,
-        };
+        let fp = self.merge_window_fp(visible_start, visible_end);
 
         if let Some(cached) = self.merge_cache.as_ref()
             && cached.fp == fp
@@ -733,6 +744,22 @@ impl Buffer {
         (visible_start..visible_end)
             .map(|_| Self::next_row_epoch(counter))
             .collect()
+    }
+
+    /// The [`MergeWindowFp`] of the flatten window spanning retained row
+    /// indices `[start, end)` (the bounds from
+    /// [`Self::visible_window_bounds`]).
+    ///
+    /// Keys the window by its first row's logical number and its length, so
+    /// front eviction that leaves the same rows in the window leaves the
+    /// fingerprint unchanged, and eviction that slides the window onto
+    /// different rows changes it.
+    fn merge_window_fp(&self, start: usize, end: usize) -> MergeWindowFp {
+        MergeWindowFp {
+            start: self.rows.number_of(start),
+            len: end.saturating_sub(start),
+            auto_detect: self.auto_detect_urls,
+        }
     }
 
     /// Issue a fresh, never-reused content-epoch stamp.
@@ -1216,9 +1243,10 @@ impl Buffer {
         self.ensure_decompressed(0..visible_start);
 
         let auto_detect = self.auto_detect_urls;
+        let (rows, cache, _) = self.rows.split_mut();
         let result = Self::rows_as_tchars_and_tags_cached(
-            &mut self.rows[..visible_start],
-            &mut self.row_cache[..visible_start],
+            &mut rows[..visible_start],
+            &mut cache[..visible_start],
             auto_detect,
         );
 
@@ -1240,9 +1268,9 @@ impl Buffer {
         // Visible rows are never in this slice (`..visible_start` excludes
         // them), so their cache is untouched: they re-render every frame and
         // must stay warm.
-        for (row, entry) in self.rows[..visible_start]
+        for (row, entry) in rows[..visible_start]
             .iter_mut()
-            .zip(self.row_cache[..visible_start].iter_mut())
+            .zip(cache[..visible_start].iter_mut())
         {
             if row.is_compact() {
                 *entry = None;
@@ -1867,29 +1895,90 @@ impl Buffer {
         self.height
     }
 
+    /// Resolve a logical row range to retained indices for text extraction.
+    ///
+    /// `start_row` / `end_row` are stable [`RowNumber`]s (Task 125.17), so a
+    /// selection taken before an eviction still names the same text after it.
+    ///
+    /// - A `start_row` that has been evicted (below [`Self::row_base`]) clamps
+    ///   to the oldest retained row and is reported as
+    ///   [`ExtractStart::ClampedToOldest`], so the caller can begin that row at
+    ///   column `0` rather than at a column that belonged to vanished text.
+    /// - An `end_row` past the last retained row clamps to the last row and is
+    ///   reported as [`ExtractEnd::ClampedToNewest`], so a linear extraction
+    ///   runs to the end of that row rather than stopping at a column that
+    ///   belonged to a row that does not exist yet (a young terminal's window
+    ///   is taller than its text, so Select All ends past the last row).
+    /// - `None` when nothing is extractable: either endpoint lies in the other
+    ///   screen's row namespace, `start_row` is past the last retained row, or
+    ///   `end_row` has itself been evicted (the whole range is gone).
+    fn resolve_extract_range(
+        &self,
+        start_row: RowNumber,
+        end_row: RowNumber,
+    ) -> Option<ExtractRange> {
+        let base = self.row_base();
+        if start_row.is_alternate() != base.is_alternate()
+            || end_row.is_alternate() != base.is_alternate()
+        {
+            return None;
+        }
+        let len = self.rows.len();
+        // Both rows share `base`'s namespace, so plain ordering against `base`
+        // is meaningful: a row below it has been evicted.
+        let last = len.checked_sub(1)?;
+        let end_index = end_row.rows_after(base)?;
+        let (end, end_edge) = if end_index > last {
+            (last, ExtractEnd::ClampedToNewest)
+        } else {
+            (end_index, ExtractEnd::Exact)
+        };
+        let (start, start_edge) = if start_row < base {
+            (0, ExtractStart::ClampedToOldest)
+        } else {
+            (start_row.rows_after(base)?, ExtractStart::Exact)
+        };
+        if start >= len {
+            return None;
+        }
+        Some(ExtractRange {
+            start,
+            end,
+            start_edge,
+            end_edge,
+        })
+    }
+
     /// Extract the text content of a selection range from the buffer.
     ///
-    /// Coordinates are buffer-absolute row indices (0 = first row in the full
-    /// buffer including scrollback). Columns are 0-indexed cell positions.
-    /// The range is inclusive on both ends: `[start_row, start_col]` through
-    /// `[end_row, end_col]`.
+    /// Rows are stable logical [`RowNumber`]s (the same numbering as
+    /// [`Self::row_base`]), so a range stays attached to its text when rows
+    /// are evicted from the front. A `start_row` that has been evicted clamps
+    /// to the oldest retained row, beginning at column `0`; a range whose
+    /// `end_row` has been evicted yields an empty string. Columns are 0-indexed
+    /// cell positions. The range is inclusive on both ends:
+    /// `[start_row, start_col]` through `[end_row, end_col]`.
     ///
     /// Trailing whitespace on each row is trimmed (standard terminal behaviour).
     /// Rows are separated by `'\n'`.
     #[must_use]
     pub fn extract_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
     ) -> String {
         use std::fmt::Write as _;
 
-        if start_row >= self.rows.len() {
+        let Some(range) = self.resolve_extract_range(start_row, end_row) else {
             return String::new();
-        }
-        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+        };
+        let (start_row, end_row) = (range.start, range.end);
+        let start_col = match range.start_edge {
+            ExtractStart::Exact => start_col,
+            ExtractStart::ClampedToOldest => 0,
+        };
 
         let mut result = String::new();
 
@@ -1902,7 +1991,10 @@ impl Buffer {
 
             let col_begin = if row_idx == start_row { start_col } else { 0 };
             let col_end = if row_idx == end_row {
-                end_col
+                match range.end_edge {
+                    ExtractEnd::Exact => end_col,
+                    ExtractEnd::ClampedToNewest => cells.len().saturating_sub(1),
+                }
             } else {
                 cells.len().saturating_sub(1)
             };
@@ -1941,21 +2033,26 @@ impl Buffer {
     /// `col_min = start_col.min(end_col)` and `col_max = start_col.max(end_col)`.
     /// Rows are joined with `\n`.  Trailing whitespace is trimmed per row.
     ///
+    /// Rows are logical [`RowNumber`]s with the same clamping as
+    /// [`Self::extract_text`]; a block keeps its column range when its start
+    /// row is clamped, because the columns of a rectangle do not belong to any
+    /// one row.
+    ///
     /// This is the copy behaviour for Alt+drag (block/rectangular) selections.
     #[must_use]
     pub fn extract_block_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
     ) -> String {
         use std::fmt::Write as _;
 
-        if start_row >= self.rows.len() {
+        let Some(range) = self.resolve_extract_range(start_row, end_row) else {
             return String::new();
-        }
-        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+        };
+        let (start_row, end_row) = (range.start, range.end);
         let col_min = start_col.min(end_col);
         let col_max = start_col.max(end_col);
 
@@ -1993,6 +2090,40 @@ impl Buffer {
 
         result
     }
+}
+
+/// How the start of an extraction range was resolved.
+///
+/// A named enum rather than a `bool` so the "start row was evicted" case is
+/// visible at each use site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractStart {
+    /// The start row is retained; its start column applies as given.
+    Exact,
+    /// The start row was evicted and clamped to the oldest retained row.
+    ClampedToOldest,
+}
+
+/// How the end of an extraction range was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractEnd {
+    /// The end row is retained; its end column applies as given.
+    Exact,
+    /// The end row was past the last retained row and clamped to it.
+    ClampedToNewest,
+}
+
+/// A logical extraction range resolved to retained indices.
+#[derive(Debug, Clone, Copy)]
+struct ExtractRange {
+    /// Retained index of the first row to extract.
+    start: usize,
+    /// Retained index of the last row to extract (inclusive).
+    end: usize,
+    /// Whether `start` is the requested row or a clamp to the oldest row.
+    start_edge: ExtractStart,
+    /// Whether `end` is the requested row or a clamp to the newest row.
+    end_edge: ExtractEnd,
 }
 
 /// Convert a byte range into a character range using a `byte_to_char` map.
@@ -2499,7 +2630,7 @@ mod scrollback_eviction_tests {
 
         for (row, entry) in buf.rows[..visible_start]
             .iter()
-            .zip(buf.row_cache[..visible_start].iter())
+            .zip(buf.rows.cache()[..visible_start].iter())
         {
             if row.is_compact() {
                 assert!(
@@ -2527,14 +2658,18 @@ mod scrollback_eviction_tests {
         // Warm the visible row cache first.
         let _ = buf.visible_as_tchars_and_tags(0);
         assert!(
-            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            buf.rows.cache()[visible_start..]
+                .iter()
+                .all(Option::is_some),
             "sanity: visible row cache should be populated before the scrollback flatten"
         );
 
         let _ = buf.scrollback_as_tchars_and_tags(0);
 
         assert!(
-            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            buf.rows.cache()[visible_start..]
+                .iter()
+                .all(Option::is_some),
             "a scrollback flatten must not evict the visible window's row cache"
         );
     }
@@ -2613,7 +2748,7 @@ mod scrollback_eviction_tests {
         // Eviction only targets `is_compact()` rows; a Live (opt-out) row's
         // cache is left untouched.
         assert!(
-            buf.row_cache[0].is_some(),
+            buf.rows.cache()[0].is_some(),
             "a non-compact (image) scrollback row's cache must not be evicted"
         );
         assert!(!buf.rows[0].is_compact());
@@ -2934,14 +3069,15 @@ mod incremental_merge_equivalence_tests {
         // directly (bypassing `merge_cache` entirely), so gating must stay
         // disabled here too — same as the real `merge_row_caches_full`
         // (scrollback/full-merge) callers.
+        let (rows, cache, _) = buf.rows.split_mut();
         let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
-            &mut buf.rows[visible_start..visible_end],
-            &mut buf.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
             false,
         );
         let actual =
-            Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined);
+            Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined);
 
         assert_eq!(
             expected, actual,
@@ -3105,7 +3241,7 @@ mod incremental_merge_tests {
     use crate::buffer::Buffer;
     use crate::row::RowJoin;
     use freminal_common::buffer_states::{
-        fonts::FontWeight, format_tag::FormatTag, tchar::TChar, url::Url,
+        fonts::FontWeight, format_tag::FormatTag, row_number::RowNumber, tchar::TChar, url::Url,
     };
     use freminal_common::colors::TerminalColor;
     use proptest::prelude::*;
@@ -3153,13 +3289,14 @@ mod incremental_merge_tests {
         let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
         buf.ensure_decompressed(visible_start..visible_end);
         let auto_detect = buf.auto_detect_urls;
+        let (rows, cache, _) = buf.rows.split_mut();
         let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
-            &mut buf.rows[visible_start..visible_end],
-            &mut buf.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
             false,
         );
-        Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined)
+        Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined)
     }
 
     /// Minimal deterministic linear congruential generator (mirrors the one
@@ -3320,7 +3457,7 @@ mod incremental_merge_tests {
         }
 
         let (_chars, tags, _row_offsets, url_indices) = &first;
-        assert!(!url_indices.is_empty());
+        assert_ne!(url_indices.as_slice(), []);
         assert!(
             url_indices
                 .iter()
@@ -3671,11 +3808,13 @@ mod incremental_merge_tests {
     // Confined scroll-region rotation regression tests
     //
     // These prove the fix named in `Buffer::merge_cache`'s field doc: the
-    // explicit `self.merge_cache = None;` in `scroll_slice_up`,
-    // `scroll_slice_down`, and `scroll_up` (scroll.rs) forces a full
-    // re-merge after a confined in-place row rotation, instead of serving
-    // a cached incremental merge whose prefix reuse can't observe that
-    // already-clean row_cache entries moved to different indices.
+    // explicit `self.merge_cache = None;` in `scroll_slice_up` and
+    // `scroll_slice_down` (scroll.rs) forces a full re-merge after a
+    // confined in-place row rotation, instead of serving a cached
+    // incremental merge whose prefix reuse can't observe that already-clean
+    // row_cache entries moved to different indices. The whole-buffer
+    // `scroll_up` and scrollback-capacity eviction cases below are instead
+    // observed by the logical-row-number fingerprint (Task 125.16).
     // ────────────────────────────────────────────────────────────────
 
     /// `scroll_slice_up(first, last)` rotates rows `[first, last]` up by
@@ -3719,12 +3858,12 @@ mod incremental_merge_tests {
     }
 
     /// Whole-buffer `scroll_up` (used e.g. for autowrap-at-bottom-margin and
-    /// primary-buffer LF at the live bottom) is the same rotation bug class
-    /// as the confined `scroll_slice_up`/`_down` above — `rows.remove(0)` +
-    /// `rows.push(new_row)` nets to the same `rows.len()`, silently
-    /// shifting every clean cache entry down by one index. Verifies its own
-    /// explicit `merge_cache = None` (named alongside the other two in
-    /// `Buffer::merge_cache`'s field doc) is equally load-bearing.
+    /// primary-buffer LF at the live bottom) evicts the top row and pushes a
+    /// blank one, netting the same `rows.len()` while every clean cache entry
+    /// moves down one index. It no longer nulls `merge_cache` (Task 125.16):
+    /// the eviction advances the store's base, so the logical-number
+    /// fingerprint changes and forces the full merge. This is the regression
+    /// guard for that: it fails if the fingerprint stops observing the slide.
     #[test]
     fn incremental_merge_matches_oracle_after_whole_buffer_scroll_up() {
         let mut buf = build_plain_buffer(20, 8);
@@ -3740,28 +3879,23 @@ mod incremental_merge_tests {
         );
     }
 
-    /// Task #405 regression guard: `Buffer::enforce_scrollback_limit`
-    /// (`resize_and_alt.rs`) is a fourth rotation site in the same family as
-    /// `scroll_slice_up`/`_down` and whole-buffer `scroll_up` proven above.
+    /// Task #405 regression guard (re-based on logical row numbers by Task
+    /// 125.16): `Buffer::enforce_scrollback_limit` (`resize_and_alt.rs`).
     /// Once scrollback is at capacity, every LF pushes a new row at the
-    /// bottom and then drains `overflow` rows from the front
-    /// (`self.rows.drain(0..overflow)` + `self.row_cache.drain(0..overflow)`),
-    /// netting `rows.len()` unchanged. Since `visible_window_bounds` derives
-    /// purely from `rows.len()` and `height` (both unchanged), the resulting
-    /// `MergeWindowFp` is numerically IDENTICAL to the fingerprint the
-    /// previous call's `merge_cache` was built against, even though every
-    /// row's identity within that window just rotated down by `overflow` —
-    /// so `enforce_scrollback_limit` now contains its own explicit
-    /// `self.merge_cache = None;` at the rotation point, mirroring the other
-    /// three sites (see `Buffer::merge_cache`'s field doc).
+    /// bottom and then evicts `overflow` rows from the front, netting
+    /// `rows.len()` unchanged. A fingerprint built from the physical window
+    /// bounds is therefore numerically IDENTICAL to the one the previous
+    /// call's `merge_cache` was built against, even though every surviving
+    /// row's index just shifted down by `overflow`; that is why this site
+    /// used to null `merge_cache` explicitly. `MergeWindowFp` now holds the
+    /// window's first logical row number, which the eviction advances, so the
+    /// fingerprint changes and the explicit null is gone.
     ///
     /// This test warms `merge_cache`, then drives many LFs past the
     /// scrollback cap, re-flattening after every single one (so the
     /// fingerprint never gets a chance to visibly change between
-    /// rotations) and checks each result against the independent oracle. It
-    /// is the regression guard for that fix: if the `merge_cache = None;`
-    /// line in `enforce_scrollback_limit` is ever removed or bypassed, this
-    /// test fails.
+    /// rotations) and checks each result against the independent oracle. If
+    /// the fingerprint ever stops observing the slide, this test fails.
     #[test]
     fn incremental_merge_matches_oracle_after_scrollback_capacity_rotation() {
         let width = 20;
@@ -3814,7 +3948,8 @@ mod incremental_merge_tests {
         );
         let content_rows = height - 1;
         for (k, absolute_row) in (visible_start..visible_end).enumerate() {
-            let actual_row_text = buf.extract_text(absolute_row, 0, absolute_row, width - 1);
+            let number = buf.row_number_at(absolute_row);
+            let actual_row_text = buf.extract_text(number, 0, number, width - 1);
             let expected = if k < content_rows {
                 // Bottom-most content line is `line{total_lines-1}`, sitting
                 // one row above the trailing blank; walk upward from there.
@@ -3830,6 +3965,134 @@ mod incremental_merge_tests {
                 "row {absolute_row} (window position {k}): expected {expected:?} via extract_text"
             );
         }
+    }
+
+    /// Text of every row in the visible window, read through
+    /// `Buffer::extract_text`, which touches neither the row cache nor the
+    /// merge cache.
+    fn window_texts(buf: &Buffer, width: usize) -> Vec<String> {
+        let (start, end) = buf.visible_window_bounds(0, 0);
+        (start..end)
+            .map(|row| {
+                let number = buf.row_number_at(row);
+                buf.extract_text(number, 0, number, width - 1)
+            })
+            .collect()
+    }
+
+    /// Task 125.16: front eviction at scrollback capacity with **identical
+    /// row content**. Identical rows are the hard case for a logical-number
+    /// fingerprint: a window that slid onto different rows with the same
+    /// text is indistinguishable from the old one by content, so a result
+    /// that matches the oracle proves nothing about whether the cache was
+    /// consulted correctly. What is checked instead, on every line feed:
+    ///
+    /// - the merge matches the independent oracle;
+    /// - the cached fingerprint names the window's actual first row number,
+    ///   and advances by exactly one per push+evict;
+    /// - a window position's content epoch changes exactly when the text at
+    ///   that position changed -- never under-reported when a distinctive
+    ///   row travels through the window, and carried forward (no repaint)
+    ///   while identical rows slide past.
+    #[test]
+    fn incremental_merge_matches_oracle_at_capacity_with_identical_rows() {
+        let width = 20;
+        let height = 5;
+        let mut buf = Buffer::new(width, height).with_scrollback_limit(5);
+        let capacity = buf.height + buf.scrollback_limit;
+
+        let mut previous: Option<(Vec<String>, Vec<u64>)> = None;
+        let mut previous_start: Option<RowNumber> = None;
+        for i in 0..80 {
+            // Mostly one repeated line, with a distinctive one every 17th so
+            // content both stays identical and changes while rows evict.
+            let line = if i % 17 == 8 { "MARKER" } else { "same" };
+            buf.insert_text(&text(line));
+            buf.handle_lf();
+            buf.handle_cr();
+
+            let actual = buf.visible_as_tchars_and_tags(0);
+            let oracle = independent_oracle(&mut buf);
+            assert_eq!(actual, oracle, "line {i}: diverged from the oracle");
+
+            let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+            let epochs = buf.visible_row_epochs(0, 0);
+            let texts = window_texts(&buf, width);
+
+            let cached_fp = buf
+                .merge_cache
+                .as_ref()
+                .expect("a flatten populates the merge cache")
+                .fp;
+            let start = buf.rows.number_of(visible_start);
+            assert_eq!(cached_fp.start, start, "line {i}: fingerprint start");
+            assert_eq!(cached_fp.len, visible_end - visible_start);
+
+            if buf.rows.len() >= capacity
+                && let Some(prev) = previous_start
+            {
+                assert_eq!(
+                    start,
+                    prev.saturating_add(1),
+                    "line {i}: at capacity each push+evict slides the window by one row"
+                );
+            }
+
+            // While the buffer is still filling, the window grows; positions
+            // only correspond between two frames once its length is stable.
+            if let Some((prev_texts, prev_epochs)) = &previous
+                && prev_epochs.len() == epochs.len()
+            {
+                for r in 0..epochs.len() {
+                    let text_changed = texts[r] != prev_texts[r];
+                    let epoch_changed = epochs[r] != prev_epochs[r];
+                    assert_eq!(
+                        epoch_changed, text_changed,
+                        "line {i}, window row {r}: text {:?} -> {:?}, epoch {} -> {}",
+                        prev_texts[r], texts[r], prev_epochs[r], epochs[r]
+                    );
+                }
+            }
+            previous = Some((texts, epochs));
+            previous_start = Some(start);
+        }
+    }
+
+    /// Task 125.16: eviction that leaves the window on exactly the same rows
+    /// (`erase_scrollback` drops only rows above the window) must keep the
+    /// fingerprint, so the cached merge is correctly *reused* rather than
+    /// rebuilt. The physical window bounds change here (the window collapses
+    /// to index 0), which is precisely what the old bounds-keyed fingerprint
+    /// keyed on.
+    #[test]
+    fn erase_scrollback_keeps_the_merge_cache_when_the_window_rows_are_unchanged() {
+        let width = 20;
+        let mut buf = Buffer::new(width, 5).with_scrollback_limit(50);
+        for i in 0..20 {
+            buf.insert_text(&text(&format!("line{i:04}")));
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+        let (before_chars, ..) = buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+        let before_fp = buf.merge_cache.as_ref().expect("populated").fp;
+        let before_texts = window_texts(&buf, width);
+        assert!(buf.visible_window_start(0) > 0, "test needs scrollback");
+
+        buf.erase_scrollback();
+        assert_eq!(buf.visible_window_start(0), 0, "scrollback is gone");
+
+        let (after_chars, ..) = buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+        let after_fp = buf.merge_cache.as_ref().expect("populated").fp;
+        assert_eq!(after_fp, before_fp, "same rows, same logical window");
+        assert!(
+            Arc::ptr_eq(&before_chars, &after_chars),
+            "an unchanged window must be served from the cached merge"
+        );
+        assert_eq!(window_texts(&buf, width), before_texts);
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(actual, oracle);
     }
 
     // ────────────────────────────────────────────────────────────────

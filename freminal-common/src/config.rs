@@ -2344,7 +2344,7 @@ size = 14.0
         // is on out of the box).
         assert!(cfg.patterns);
         assert_eq!(cfg.pattern_list, default_paste_guard_patterns());
-        assert!(!cfg.pattern_list.is_empty());
+        assert_ne!(cfg.pattern_list, [] as [String; 0]);
     }
 
     #[test]
@@ -3294,7 +3294,7 @@ copy = "Ctrl+Shift+C"
         let map = cfg.build_binding_map().expect("should build map");
 
         // Copy should have no bindings.
-        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+        assert_eq!(map.all_combos_for(KeyAction::Copy), []);
     }
 
     // -----------------------------------------------------------------

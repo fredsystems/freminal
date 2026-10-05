@@ -97,9 +97,11 @@ no context, no driver.
 not a design tradeoff to weigh. State this plainly in code comments and
 commit messages so nobody retries the trait-implementation approach.
 
-The trait has 396 methods and 12 associated types; freminal uses only **49
-distinct entry points** (enumerated below, and frozen in code at
-`freminal/src/gui/renderer/gl_facade/surface.rs`). freminal is monomorphic
+The trait has 396 methods and 12 associated types; freminal used only **49
+distinct entry points** when this task was built (enumerated below, and frozen
+in code at `freminal/src/gui/renderer/gl_facade/surface.rs`). Task 125.8
+deliberately extended that surface to **56** for asynchronous GPU timestamp
+queries; see "The 56 entry points". freminal is monomorphic
 over a concrete `&glow::Context` throughout — call-site counts are
 `freminal/src/gui/renderer/gpu.rs` 268, `toast_pass.rs` 37,
 `toast_text_pass.rs` 37, `widget.rs` 4, `app_impl.rs` 5 — with 52 parameters
@@ -136,7 +138,8 @@ enum GlTarget<'a> {
 ```
 
 Every renderer signature changes from `gl: &glow::Context` to
-`gl: &Gl<'_>`. All 47 methods live on `Gl` as thin dispatch: the `Real` arm
+`gl: &Gl<'_>`. All 47 methods (the activation estimate; 49 as built, 56 after
+Task 125.8) live on `Gl` as thin dispatch: the `Real` arm
 delegates directly to `glow::Context`; the `Recording` arm appends a
 call-record entry and returns a fabricated handle where one is expected.
 
@@ -155,7 +158,7 @@ in a test, this facade's zero-cost claim for the default build must be
 **verified by a benchmark**, not merely asserted in a doc comment — see
 123.6.
 
-### The 49 entry points
+### The 56 entry points
 
 For sizing the facade and driving 123.1's guard. This list is frozen in code
 as `GL_CALL_SURFACE` in `freminal/src/gui/renderer/gl_facade/surface.rs`;
@@ -166,16 +169,28 @@ active_texture, attach_shader, bind_buffer, bind_framebuffer, bind_texture,
 bind_vertex_array, buffer_data_size, buffer_data_u8_slice,
 buffer_sub_data_u8_slice, check_framebuffer_status, clear, clear_color,
 compile_shader, create_buffer, create_framebuffer, create_program,
-create_shader, create_texture, create_vertex_array, delete_buffer,
-delete_framebuffer, delete_program, delete_shader, delete_texture,
-delete_vertex_array, disable, draw_arrays, draw_arrays_instanced, enable,
-enable_vertex_attrib_array, framebuffer_texture_2d, get_program_info_log,
-get_program_link_status, get_shader_compile_status, get_shader_info_log,
-get_uniform_location, link_program, pixel_store_i32, scissor, shader_source,
-tex_image_2d, tex_parameter_i32, tex_sub_image_2d, uniform_1_f32,
-uniform_1_i32, uniform_2_f32, use_program, vertex_attrib_divisor,
-vertex_attrib_pointer_f32
+create_query, create_shader, create_texture, create_vertex_array,
+delete_buffer, delete_framebuffer, delete_program, delete_query,
+delete_shader, delete_texture, delete_vertex_array, disable, draw_arrays,
+draw_arrays_instanced, enable, enable_vertex_attrib_array,
+framebuffer_texture_2d, get_parameter_string, get_program_info_log,
+get_program_link_status, get_query_parameter_u32, get_query_parameter_u64,
+get_shader_compile_status, get_shader_info_log, get_uniform_location,
+link_program, pixel_store_i32, query_counter, scissor, shader_source,
+supported_extensions, tex_image_2d, tex_parameter_i32, tex_sub_image_2d,
+uniform_1_f32, uniform_1_i32, uniform_2_f32, use_program,
+vertex_attrib_divisor, vertex_attrib_pointer_f32
 ```
+
+Task 123 built and audited the first 49. Task 125.8 added the seven
+query/capability methods (`create_query`, `delete_query`, `query_counter`,
+`get_query_parameter_u32`, `get_query_parameter_u64`,
+`get_parameter_string`, `supported_extensions`). None is a draw, a state
+change, or an upload, so the three derived metric groups below are
+unchanged. They are issued only under the `gpu-profiling` feature and only
+on a context that reports timer-query capability; `init` reads `GL_VERSION`
+once under that feature, which is why the `init_dominates_a_single_frame`
+count is feature-aware.
 
 Derived metric groups the recording log must be able to answer without a
 second pass:
@@ -279,22 +294,22 @@ stability over an observation period — see 123.12's stop condition.
 
 ## Subtask summary
 
-| Subtask | Phase | Title                                                              |
-| ------- | ----- | ------------------------------------------------------------------ |
+| Subtask | Phase | Title                                                               |
+| ------- | ----- | ------------------------------------------------------------------- |
 | 123.1   | 1     | Enumerate and freeze the GL call surface, with a compile-time guard |
-| 123.2   | 1     | Define the `Gl` facade and `RecordingState`                        |
+| 123.2   | 1     | Define the `Gl` facade and `RecordingState`                         |
 | 123.3   | 1     | Handle fabrication for the recording backend                        |
-| 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
+| 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                 |
 | 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
 | 123.6   | 1     | Verify zero production overhead (static proof; see re-scope note)   |
 | 123.6b  | 2     | Verify dispatch cost by reading emitted code (replaced benchmark)   |
-| 123.7   | 1     | Headless render-path driver                                          |
+| 123.7   | 1     | Headless render-path driver                                         |
 | 123.8   | 1     | Workload assertion tests against the recording log                  |
-| 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
-| 123.10  | 2     | `flake.nix`: Mesa, llvmpipe, Xvfb (STOP for `nix develop`)           |
-| 123.11  | 2     | Offscreen pbuffer GL context                                         |
-| 123.12  | 2     | Readback, golden storage, comparison, and tolerance policy           |
-| 123.13  | 2     | New Nix-based CI job for Phase 2                                     |
+| 123.9   | 1     | Wire Phase 1 into the existing CI matrix                            |
+| 123.10  | 2     | `flake.nix`: Mesa, llvmpipe, Xvfb (STOP for `nix develop`)          |
+| 123.11  | 2     | Offscreen pbuffer GL context                                        |
+| 123.12  | 2     | Readback, golden storage, comparison, and tolerance policy          |
+| 123.13  | 2     | New Nix-based CI job for Phase 2                                    |
 | 123.14  | both  | Quantified findings report                                          |
 
 Ordering: 123.1 through 123.9 are Phase 1 and largely sequential (each
@@ -542,7 +557,7 @@ zero-cost claim holds at the shape production uses: facade and direct call
 compile to byte-identical code. The single extra pointer load appears only
 in a deliberately pessimistic `inline(never)` control.) In a default build `GlTarget` has exactly one variant, so
 Rust lays it out identically to `&glow::Context` with no discriminant, and
-the `match` in all 49 methods is irrefutable: there is nothing to
+the `match` in every facade method is irrefutable: there is nothing to
 discriminate, so there is no condition to test. That is an argument from
 the language's semantics, and it is good evidence — but it is an argument,
 not a measurement. **No test here reads generated code, so "no per-call

@@ -8,8 +8,9 @@
 //! The search runs on the GUI thread against a full-buffer `TChar` corpus
 //! (scrollback + visible) fetched on demand from the PTY thread via
 //! `InputEvent::RequestSearchBuffer`.  The cached corpus is stored in
-//! `SearchState::cached_full_buffer` and refreshed whenever `total_rows`
-//! changes (indicating new PTY output).
+//! `SearchState::cached_full_buffer` and refreshed whenever the buffer's
+//! extent (`row_base` + `total_rows`) changes, which at scrollback capacity
+//! happens on every evicted row even though `total_rows` itself is frozen.
 //!
 //! # Data flow
 //!
@@ -19,14 +20,16 @@
 //!    which responds with the concatenated scrollback + visible `TChar` data.
 //! 4. On each frame where `SearchState::needs_refresh()` is true, `run_search()`
 //!    is called against the cached full buffer and results stored in
-//!    `SearchState::matches`.  Match rows are buffer-absolute.
+//!    `SearchState::matches`.  Match rows are stable logical row numbers
+//!    (`RowNumber`), numbered from the corpus's `row_base`.
 //! 5. `matches_to_highlights()` filters to the visible window and converts
 //!    rows to screen-relative for the renderer vertex builder.
-//! 6. The current match scroll offset is updated by `scroll_to_match()`.
+//! 6. The current match scroll offset is updated by `scroll_to_match()`,
+//!    which converts the match's row number to a buffer index at the seam.
 
 use crossbeam_channel::Sender;
 use egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Shadow, Ui};
-use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;
 
@@ -180,12 +183,11 @@ fn byte_range_to_display_cols(
 /// Run a substring search over all rows in the provided `TChar` buffer.
 ///
 /// Returns a `Vec<MatchSpan>` in document order (top row first, left-to-right
-/// within each row).  Each span's `row` is the 0-indexed row within the input
-/// buffer and `col_start`/`col_end` are display-column indices within that row
-/// (wide characters such as CJK ideographs occupy two columns).
-///
-/// When the input is the full scrollback + visible corpus, `row` values are
-/// buffer-absolute (0 = first scrollback row).
+/// within each row).  Row `i` of the input buffer is numbered `first_row + i`
+/// (the corpus's `row_base`), so each span's `row` is the stable logical
+/// number of the row it was found on; `col_start`/`col_end` are display-column
+/// indices within that row (wide characters such as CJK ideographs occupy two
+/// columns).
 ///
 /// When the query is empty the result is always empty.
 ///
@@ -203,6 +205,7 @@ pub fn run_search(
     regex_mode: bool,
     case_sensitive: bool,
     visible_chars: &[TChar],
+    first_row: RowNumber,
 ) -> (Vec<MatchSpan>, Option<String>) {
     if query.is_empty() {
         return (Vec::new(), None);
@@ -248,7 +251,7 @@ pub fn run_search(
                         continue;
                     }
                     matches.push(MatchSpan {
-                        row,
+                        row: first_row.saturating_add(row),
                         col_start,
                         col_end: col_start + display_width - 1,
                     });
@@ -275,7 +278,7 @@ pub fn run_search(
                     break;
                 }
                 matches.push(MatchSpan {
-                    row,
+                    row: first_row.saturating_add(row),
                     col_start,
                     col_end: col_start + display_width - 1,
                 });
@@ -296,28 +299,30 @@ pub fn run_search(
 /// Convert `SearchState::matches` into `MatchHighlight` instances suitable
 /// for the renderer vertex builder.
 ///
-/// Only matches whose row falls within the visible window
-/// `[visible_window_start, visible_window_start + term_height)` are included.
-/// Buffer-absolute rows are converted to screen-relative rows for rendering.
+/// Only matches whose row falls within the `term_height` rows starting at
+/// `window_start` are included. Logical row numbers are converted to rows
+/// relative to the window for rendering; a match whose row is evicted (below
+/// the window) or in the other screen's namespace is simply not drawn.
 ///
 /// The current match uses `is_current = true`; all others use `is_current = false`.
 #[must_use]
 pub fn matches_to_highlights(
     state: &SearchState,
-    visible_window_start: usize,
+    window_start: RowNumber,
     term_height: usize,
 ) -> Vec<MatchHighlight> {
-    let win_end = visible_window_start + term_height;
     state
         .matches
         .iter()
         .enumerate()
-        .filter(|(_, span)| span.row >= visible_window_start && span.row < win_end)
-        .map(|(i, span)| MatchHighlight {
-            row: span.row - visible_window_start,
-            col_start: span.col_start,
-            col_end: span.col_end,
-            is_current: i == state.current_match,
+        .filter_map(|(i, span)| {
+            let row = span.row.rows_after(window_start)?;
+            (row < term_height).then_some(MatchHighlight {
+                row,
+                col_start: span.col_start,
+                col_end: span.col_end,
+                is_current: i == state.current_match,
+            })
         })
         .collect()
 }
@@ -334,8 +339,9 @@ pub fn matches_to_highlights(
 /// no change was needed (no matches, or the offset did not change).
 pub fn scroll_to_match(view_state: &mut ViewState, snap: &TerminalSnapshot) -> Option<usize> {
     let span = view_state.search_state.current()?;
-    // `span.row` is buffer-absolute (0 = first scrollback row).
-    let abs_row = span.row;
+    // `span.row` is a stable row number; resolve it to this snapshot's buffer
+    // index. A match whose row has since been evicted has nowhere to scroll to.
+    let abs_row = snap.retained_index_of(span.row)?;
 
     // We want abs_row to be visible. Compute the scroll_offset that centres it.
     let half_height = snap.term_height / 2;
@@ -400,9 +406,17 @@ pub fn jump_to_prev_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
     let window_start = max_start.saturating_sub(snap.scroll_offset);
 
     // Find the last prompt row strictly above the current window start.
-    let target = snap.prompt_rows.iter().rev().find(|&&r| r < window_start)?;
+    // Prompt marks are logical row numbers; resolve each to a buffer index
+    // (a lingering mark whose row was evicted resolves to nothing and is
+    // skipped).
+    let target = snap
+        .prompt_rows
+        .iter()
+        .rev()
+        .filter_map(|&r| snap.retained_index_of(r))
+        .find(|&r| r < window_start)?;
 
-    let new_start = (*target).min(max_start);
+    let new_start = target.min(max_start);
     let new_scroll_offset = max_start
         .saturating_sub(new_start)
         .min(snap.max_scroll_offset);
@@ -433,9 +447,14 @@ pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
     let window_start = max_start.saturating_sub(snap.scroll_offset);
 
     // Find the first prompt row strictly after the current window start.
-    let target = snap.prompt_rows.iter().find(|&&r| r > window_start)?;
+    // See `jump_to_prev_command` for the number -> index resolution.
+    let target = snap
+        .prompt_rows
+        .iter()
+        .filter_map(|&r| snap.retained_index_of(r))
+        .find(|&r| r > window_start)?;
 
-    let new_start = (*target).min(max_start);
+    let new_start = target.min(max_start);
     let new_scroll_offset = max_start
         .saturating_sub(new_start)
         .min(snap.max_scroll_offset);
@@ -667,7 +686,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::tchar::TChar;
+    use freminal_terminal_emulator::snapshot::BufferExtent;
 
     /// Build a `Vec<TChar>` from a slice of row strings.
     fn make_chars(rows: &[&str]) -> Vec<TChar> {
@@ -707,18 +728,18 @@ mod tests {
     #[test]
     fn search_empty_query_returns_no_matches() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("", false, false, &chars);
-        assert!(matches.is_empty());
+        let (matches, err) = run_search("", false, false, &chars, RowNumber::ZERO);
+        assert_eq!(matches, []);
         assert!(err.is_none());
     }
 
     #[test]
     fn search_single_match_on_first_row() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("hello", false, false, &chars);
+        let (matches, err) = run_search("hello", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].row, 0);
+        assert_eq!(matches[0].row, RowNumber::new(0));
         assert_eq!(matches[0].col_start, 0);
         assert_eq!(matches[0].col_end, 4); // "hello" = cols 0-4
     }
@@ -726,7 +747,7 @@ mod tests {
     #[test]
     fn search_match_in_middle_of_row() {
         let chars = make_chars(&["abc foo bar"]);
-        let (matches, err) = run_search("foo", false, false, &chars);
+        let (matches, err) = run_search("foo", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 4);
@@ -736,7 +757,7 @@ mod tests {
     #[test]
     fn search_multiple_matches_same_row() {
         let chars = make_chars(&["abcabc"]);
-        let (matches, err) = run_search("abc", false, false, &chars);
+        let (matches, err) = run_search("abc", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].col_start, 0);
@@ -746,17 +767,17 @@ mod tests {
     #[test]
     fn search_matches_across_rows() {
         let chars = make_chars(&["foo bar", "baz foo"]);
-        let (matches, err) = run_search("foo", false, false, &chars);
+        let (matches, err) = run_search("foo", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].row, 0);
-        assert_eq!(matches[1].row, 1);
+        assert_eq!(matches[0].row, RowNumber::new(0));
+        assert_eq!(matches[1].row, RowNumber::new(1));
     }
 
     #[test]
     fn search_case_insensitive() {
         let chars = make_chars(&["Hello WORLD"]);
-        let (matches, err) = run_search("hello", false, false, &chars);
+        let (matches, err) = run_search("hello", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_end, 4);
@@ -765,9 +786,9 @@ mod tests {
     #[test]
     fn search_no_match_returns_empty() {
         let chars = make_chars(&["hello world"]);
-        let (matches, err) = run_search("xyz", false, false, &chars);
+        let (matches, err) = run_search("xyz", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     #[test]
@@ -775,7 +796,7 @@ mod tests {
         // U+4E16 (世) and U+754C (界) are each 2 display columns wide.
         // "世界hi" → display columns: 世=0-1, 界=2-3, h=4, i=5
         let chars = make_chars(&["世界hi"]);
-        let (matches, err) = run_search("hi", false, false, &chars);
+        let (matches, err) = run_search("hi", false, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 4);
@@ -787,7 +808,7 @@ mod tests {
     #[test]
     fn search_regex_basic_match() {
         let chars = make_chars(&["foo123bar"]);
-        let (matches, err) = run_search(r"\d+", true, false, &chars);
+        let (matches, err) = run_search(r"\d+", true, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 3);
@@ -797,17 +818,17 @@ mod tests {
     #[test]
     fn search_invalid_regex_returns_error() {
         let chars = make_chars(&["hello"]);
-        let (matches, err) = run_search(r"[invalid", true, false, &chars);
-        assert!(matches.is_empty());
+        let (matches, err) = run_search(r"[invalid", true, false, &chars, RowNumber::ZERO);
+        assert_eq!(matches, []);
         assert!(err.is_some());
     }
 
     #[test]
     fn search_regex_no_match_returns_empty() {
         let chars = make_chars(&["hello"]);
-        let (matches, err) = run_search(r"\d+", true, false, &chars);
+        let (matches, err) = run_search(r"\d+", true, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     // ── run_search: case sensitivity ───────────────────────────────────────
@@ -815,7 +836,7 @@ mod tests {
     #[test]
     fn search_case_sensitive_substring_rejects_different_case() {
         let chars = make_chars(&["Hello WORLD"]);
-        let (matches, err) = run_search("hello", false, true, &chars);
+        let (matches, err) = run_search("hello", false, true, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert!(
             matches.is_empty(),
@@ -826,7 +847,7 @@ mod tests {
     #[test]
     fn search_case_sensitive_substring_matches_exact_case() {
         let chars = make_chars(&["Hello hello HELLO"]);
-        let (matches, err) = run_search("hello", false, true, &chars);
+        let (matches, err) = run_search("hello", false, true, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1, "exactly one case-sensitive match");
         assert_eq!(matches[0].col_start, 6);
@@ -835,7 +856,7 @@ mod tests {
     #[test]
     fn search_case_insensitive_regex_matches_mixed_case() {
         let chars = make_chars(&["FOO bar Baz"]);
-        let (matches, err) = run_search("foo", true, false, &chars);
+        let (matches, err) = run_search("foo", true, false, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].col_start, 0);
@@ -844,7 +865,7 @@ mod tests {
     #[test]
     fn search_case_sensitive_regex_rejects_different_case() {
         let chars = make_chars(&["FOO bar"]);
-        let (matches, err) = run_search("foo", true, true, &chars);
+        let (matches, err) = run_search("foo", true, true, &chars, RowNumber::ZERO);
         assert!(err.is_none());
         assert!(
             matches.is_empty(),
@@ -859,12 +880,12 @@ mod tests {
         let mut state = SearchState {
             matches: vec![
                 MatchSpan {
-                    row: 0,
+                    row: RowNumber::new(0),
                     col_start: 0,
                     col_end: 2,
                 },
                 MatchSpan {
-                    row: 1,
+                    row: RowNumber::new(1),
                     col_start: 0,
                     col_end: 2,
                 },
@@ -881,12 +902,12 @@ mod tests {
         let mut state = SearchState {
             matches: vec![
                 MatchSpan {
-                    row: 0,
+                    row: RowNumber::new(0),
                     col_start: 0,
                     col_end: 2,
                 },
                 MatchSpan {
-                    row: 1,
+                    row: RowNumber::new(1),
                     col_start: 0,
                     col_end: 2,
                 },
@@ -952,7 +973,7 @@ mod tests {
             is_open: true,
             query: "foo".to_string(),
             matches: vec![MatchSpan {
-                row: 0,
+                row: RowNumber::new(0),
                 col_start: 0,
                 col_end: 2,
             }],
@@ -963,18 +984,28 @@ mod tests {
             last_searched_regex: true,
             last_searched_case_sensitive: false,
             cached_full_buffer: Some(visible),
-            last_known_total_rows: 10,
+            last_known_extent: Some(BufferExtent {
+                row_base: RowNumber::new(3),
+                total_rows: 10,
+            }),
             buffer_request_state: crate::gui::view_state::BufferRequestState::Idle,
+            searched_extent: Some(BufferExtent {
+                row_base: RowNumber::new(3),
+                total_rows: 10,
+            }),
+            last_corpus_request_at: Some(1.5),
         };
         state.close();
         assert!(!state.is_open);
-        assert!(state.matches.is_empty());
+        assert_eq!(state.matches, []);
         assert_eq!(state.current_match, 0);
-        assert!(state.last_searched_query.is_empty());
+        assert_eq!(state.last_searched_query, "");
         assert!(!state.last_searched_regex);
         assert!(!state.last_searched_case_sensitive);
         assert!(state.cached_full_buffer.is_none());
-        assert_eq!(state.last_known_total_rows, 0);
+        assert_eq!(state.last_known_extent, None);
+        assert_eq!(state.searched_extent, None);
+        assert_eq!(state.last_corpus_request_at, None);
         assert_eq!(
             state.buffer_request_state,
             crate::gui::view_state::BufferRequestState::Idle
@@ -988,12 +1019,12 @@ mod tests {
         let state = SearchState {
             matches: vec![
                 MatchSpan {
-                    row: 0,
+                    row: RowNumber::new(0),
                     col_start: 0,
                     col_end: 2,
                 },
                 MatchSpan {
-                    row: 1,
+                    row: RowNumber::new(1),
                     col_start: 0,
                     col_end: 2,
                 },
@@ -1002,7 +1033,7 @@ mod tests {
             ..SearchState::default()
         };
         // Both matches are within the visible window [0, 10).
-        let highlights = matches_to_highlights(&state, 0, 10);
+        let highlights = matches_to_highlights(&state, RowNumber::new(0), 10);
         assert_eq!(highlights.len(), 2);
         assert!(!highlights[0].is_current);
         assert!(highlights[1].is_current);
@@ -1013,17 +1044,17 @@ mod tests {
         let state = SearchState {
             matches: vec![
                 MatchSpan {
-                    row: 5,
+                    row: RowNumber::new(5),
                     col_start: 0,
                     col_end: 2,
                 },
                 MatchSpan {
-                    row: 15,
+                    row: RowNumber::new(15),
                     col_start: 0,
                     col_end: 3,
                 },
                 MatchSpan {
-                    row: 25,
+                    row: RowNumber::new(25),
                     col_start: 1,
                     col_end: 4,
                 },
@@ -1032,7 +1063,7 @@ mod tests {
             ..SearchState::default()
         };
         // Visible window: rows [10, 20). Only match at row 15 is visible.
-        let highlights = matches_to_highlights(&state, 10, 10);
+        let highlights = matches_to_highlights(&state, RowNumber::new(10), 10);
         assert_eq!(highlights.len(), 1);
         assert_eq!(highlights[0].row, 5); // 15 - 10 = screen row 5
         assert!(highlights[0].is_current); // match index 1 is current
@@ -1042,7 +1073,7 @@ mod tests {
     fn highlights_converts_absolute_to_screen_relative() {
         let state = SearchState {
             matches: vec![MatchSpan {
-                row: 100,
+                row: RowNumber::new(100),
                 col_start: 3,
                 col_end: 7,
             }],
@@ -1050,11 +1081,178 @@ mod tests {
             ..SearchState::default()
         };
         // Visible window starts at row 90, height 24.
-        let highlights = matches_to_highlights(&state, 90, 24);
+        let highlights = matches_to_highlights(&state, RowNumber::new(90), 24);
         assert_eq!(highlights.len(), 1);
         assert_eq!(highlights[0].row, 10); // 100 - 90 = screen row 10
         assert_eq!(highlights[0].col_start, 3);
         assert_eq!(highlights[0].col_end, 7);
+    }
+
+    // ── Logical match rows across eviction (Task 125.17) ───────────────────
+
+    fn match_at(row: u64) -> MatchSpan {
+        MatchSpan {
+            row: RowNumber::new(row),
+            col_start: 0,
+            col_end: 2,
+        }
+    }
+
+    #[test]
+    fn run_search_numbers_rows_from_the_corpus_base() {
+        let chars = make_chars(&["alpha", "needle", "beta", "needle"]);
+        let (matches, err) = run_search("needle", false, false, &chars, RowNumber::new(40));
+        assert!(err.is_none());
+        let rows: Vec<RowNumber> = matches.iter().map(|m| m.row).collect();
+        assert_eq!(rows, vec![RowNumber::new(41), RowNumber::new(43)]);
+    }
+
+    /// A match is stored by stable row number, so converting it for a window
+    /// that has slid (rows evicted) lands on the same text, not the same
+    /// screen row.
+    #[test]
+    fn highlights_follow_their_text_as_the_window_slides() {
+        let state = SearchState {
+            matches: vec![match_at(105)],
+            ..SearchState::default()
+        };
+        let before = matches_to_highlights(&state, RowNumber::new(100), 10);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].row, 5);
+
+        // Three rows evicted: the window's first row is now number 103.
+        let after = matches_to_highlights(&state, RowNumber::new(103), 10);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].row, 2, "same text, three screen rows higher");
+    }
+
+    #[test]
+    fn highlights_omit_a_match_whose_row_is_above_the_window() {
+        let state = SearchState {
+            matches: vec![match_at(105)],
+            ..SearchState::default()
+        };
+        assert_eq!(
+            matches_to_highlights(&state, RowNumber::new(106), 10).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn highlights_omit_a_match_in_the_other_screens_namespace() {
+        let state = SearchState {
+            matches: vec![match_at(105)],
+            ..SearchState::default()
+        };
+        assert_eq!(
+            matches_to_highlights(&state, RowNumber::ALTERNATE_BASE, 10).len(),
+            0
+        );
+    }
+
+    fn scroll_snapshot(row_base: u64) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.row_base = RowNumber::new(row_base);
+        snap.total_rows = 100;
+        snap.term_height = 10;
+        snap.max_scroll_offset = 90;
+        snap
+    }
+
+    #[test]
+    fn scroll_to_match_resolves_the_logical_row_against_the_snapshot() {
+        // Match on row number 130; with base 100 that is retained index 30.
+        let mut vs = ViewState::new();
+        vs.search_state.matches = vec![match_at(130)];
+
+        let snap_a = scroll_snapshot(100);
+        let offset_a = scroll_to_match(&mut vs, &snap_a);
+
+        // The same match after 10 rows were evicted is retained index 20, so
+        // the scroll offset needed to centre it differs by exactly 10.
+        let snap_b = scroll_snapshot(110);
+        let offset_b = scroll_to_match(&mut vs, &snap_b);
+        assert_eq!(offset_a, Some(65), "index 30 centred: start 25, max 90");
+        assert_eq!(offset_b, Some(75), "index 20 centred: start 15, max 90");
+    }
+
+    #[test]
+    fn scroll_to_match_does_nothing_for_an_evicted_match() {
+        let mut vs = ViewState::new();
+        vs.search_state.matches = vec![match_at(95)];
+        vs.scroll_offset = 7;
+        let snap = scroll_snapshot(100);
+        assert_eq!(scroll_to_match(&mut vs, &snap), None);
+        assert_eq!(vs.scroll_offset, 7, "the view must not move");
+    }
+
+    /// End to end against a real emulator at scrollback capacity: the search
+    /// finds the same logical row before and after eviction, the corpus
+    /// goes stale even though `total_rows` is frozen, and the match still
+    /// resolves to the text it was found on.
+    #[test]
+    fn search_survives_eviction_at_capacity() {
+        use freminal_terminal_emulator::interface::TerminalEmulator;
+
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        let _ = emu.set_win_size(20, 5, 8, 16);
+        // Fill the buffer to capacity (10 scrollback + 5 visible rows), then
+        // write the needle so it is one of the newest rows and outlives the
+        // evictions below.
+        while emu.internal.handler.buffer().rows().len() < 15 {
+            emu.handle_incoming_data(b"filler\r\n");
+        }
+        emu.handle_incoming_data(b"needle\r\n");
+        let corpus_a = emu.internal.handler.search_corpus(0);
+        let (found_a, _) = run_search(
+            "needle",
+            false,
+            false,
+            &corpus_a.chars,
+            corpus_a.extent.row_base,
+        );
+        assert_eq!(found_a.len(), 1);
+        let row = found_a[0].row;
+
+        let mut state = SearchState {
+            last_known_extent: Some(corpus_a.extent),
+            matches: found_a,
+            ..SearchState::default()
+        };
+
+        // Two more lines at capacity: two rows evicted, total_rows frozen.
+        emu.handle_incoming_data(b"later one\r\nlater two\r\n");
+        let snap = emu.build_snapshot();
+        assert_eq!(
+            snap.total_rows, corpus_a.extent.total_rows,
+            "total_rows is frozen"
+        );
+        assert!(snap.row_base > RowNumber::ZERO, "setup: rows were evicted");
+        assert!(
+            state.corpus_is_stale(snap.extent()),
+            "the corpus must be reported stale at capacity"
+        );
+
+        // A refreshed corpus finds the very same logical row ...
+        let corpus_b = emu.internal.handler.search_corpus(0);
+        assert_eq!(corpus_b.extent, snap.extent());
+        let (found_b, _) = run_search(
+            "needle",
+            false,
+            false,
+            &corpus_b.chars,
+            corpus_b.extent.row_base,
+        );
+        assert_eq!(found_b.len(), 1);
+        assert_eq!(found_b[0].row, row, "the match stays on its text");
+        // ... which now sits two retained rows higher.
+        let index_a = row.rows_after(corpus_a.extent.row_base);
+        assert_eq!(
+            snap.retained_index_of(row),
+            index_a.and_then(|i| i.checked_sub(2))
+        );
+        state.last_known_extent = Some(corpus_b.extent);
+        assert!(!state.corpus_is_stale(snap.extent()));
     }
 
     // ── expand_by_shadow_margin (Task 124.14d) ──────────────────────────────
@@ -1104,5 +1302,86 @@ mod tests {
         let expanded = expand_by_shadow_margin(area_rect, Shadow::NONE);
 
         assert_eq!(expanded, area_rect);
+    }
+
+    // ── jump-to-command with logical row numbers (Task 125.14) ───────────
+
+    /// A snapshot of `total_rows` rows, numbered from `base`, `term_height`
+    /// visible, scrolled `scroll_offset` rows back, carrying `marks` as its
+    /// prompt rows.
+    fn jump_snap(
+        base: u64,
+        total_rows: usize,
+        term_height: usize,
+        scroll_offset: usize,
+        marks: &[u64],
+    ) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.row_base = RowNumber::new(base);
+        snap.total_rows = total_rows;
+        snap.term_height = term_height;
+        snap.scroll_offset = scroll_offset;
+        snap.max_scroll_offset = total_rows - term_height;
+        snap.prompt_rows = Arc::from(
+            marks
+                .iter()
+                .copied()
+                .map(RowNumber::new)
+                .collect::<Vec<_>>(),
+        );
+        snap
+    }
+
+    #[test]
+    fn jump_to_prev_command_resolves_marks_against_the_row_base() {
+        // 100 rows numbered 1000..1100, 10 visible, live bottom: window top is
+        // index 90. Marks at numbers 1020 / 1050 are indices 20 / 50.
+        let snap = jump_snap(1000, 100, 10, 0, &[1020, 1050]);
+        let mut vs = ViewState::new();
+
+        let new_offset = jump_to_prev_command(&mut vs, &snap);
+
+        // Highest mark above the window is index 50 -> offset 90 - 50 = 40.
+        assert_eq!(new_offset, Some(40));
+        assert_eq!(vs.scroll_offset, 40);
+    }
+
+    #[test]
+    fn jump_to_next_command_resolves_marks_against_the_row_base() {
+        // Scrolled back 60 rows: window top is index 30.
+        let snap = jump_snap(1000, 100, 10, 60, &[1020, 1050, 1070]);
+        let mut vs = ViewState::new();
+
+        let new_offset = jump_to_next_command(&mut vs, &snap);
+
+        // Lowest mark below the window top (index 30) is index 50.
+        assert_eq!(new_offset, Some(40));
+    }
+
+    #[test]
+    fn jump_to_prev_command_skips_a_lingering_evicted_mark() {
+        // The mark at number 500 was evicted (below the base of 1000) but a
+        // stale entry can linger behind a retained one; it must not be treated
+        // as row 0.
+        let snap = jump_snap(1000, 100, 10, 0, &[1050, 500]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_prev_command(&mut vs, &snap), Some(40));
+    }
+
+    #[test]
+    fn jump_to_prev_command_with_only_evicted_marks_does_nothing() {
+        let snap = jump_snap(1000, 100, 10, 0, &[10, 20]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_prev_command(&mut vs, &snap), None);
+    }
+
+    #[test]
+    fn jump_to_next_command_with_only_evicted_marks_does_nothing() {
+        let snap = jump_snap(1000, 100, 10, 60, &[10, 20]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_next_command(&mut vs, &snap), None);
     }
 }

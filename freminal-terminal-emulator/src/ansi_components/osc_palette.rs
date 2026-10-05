@@ -284,7 +284,7 @@ mod tests {
         // Index 300 is > 255, should produce no output
         let payload = b"4;300;rgb:ff/ff/ff\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
         // OSC 4 ; 10 BEL (missing color spec)
         let payload = b"4;10\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -324,7 +324,7 @@ mod tests {
         // OSC 104 ; 300 BEL — index > 255
         let payload = b"104;300\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         // OSC 4 ; 7 ; notacolor BEL — parse_color_spec fails → warn, no output
         let payload = b"4;7;notacolor\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -354,6 +354,6 @@ mod tests {
         // A non-numeric string after "104;" will be parsed as an AnsiOscToken::String.
         let payload = b"104;notanumber\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

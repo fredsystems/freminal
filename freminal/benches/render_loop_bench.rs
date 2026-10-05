@@ -34,6 +34,10 @@ use freminal::gui::renderer::{
     BackgroundFrame, FgRenderOptions, build_background_instances, build_foreground_instances,
 };
 use freminal::gui::shaping::ShapingCache;
+use freminal_common::buffer_states::cursor::StateColors;
+use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::colors::TerminalColor;
 use freminal_common::config::Config;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -699,6 +703,79 @@ fn build_shaped_lines_for_size(
     (lines, fm)
 }
 
+#[derive(Clone, Copy)]
+enum BackgroundCorpus {
+    AllDefault,
+    Sparse,
+    Dense,
+}
+
+impl BackgroundCorpus {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::AllDefault => "all_default",
+            Self::Sparse => "sparse_10_percent",
+            Self::Dense => "dense_100_percent",
+        }
+    }
+}
+
+fn build_shaped_lines_for_background_corpus(
+    width: usize,
+    height: usize,
+    corpus: BackgroundCorpus,
+) -> (
+    Vec<std::sync::Arc<freminal::gui::shaping::ShapedLine>>,
+    FontManager,
+) {
+    let (chars, _) = ligature_heavy_visible_chars(width, height);
+    let mut tags = Vec::new();
+    let mut range_start = 0;
+    let mut current_background = TerminalColor::DefaultBackground;
+    let mut cell_index = 0;
+
+    for (char_index, character) in chars.iter().enumerate() {
+        let background = if matches!(character, TChar::NewLine) {
+            current_background
+        } else {
+            let background = match corpus {
+                BackgroundCorpus::AllDefault => TerminalColor::DefaultBackground,
+                BackgroundCorpus::Sparse if cell_index % 10 == 0 => TerminalColor::Blue,
+                BackgroundCorpus::Sparse => TerminalColor::DefaultBackground,
+                BackgroundCorpus::Dense => TerminalColor::Blue,
+            };
+            cell_index += 1;
+            background
+        };
+
+        if background != current_background {
+            if range_start < char_index {
+                tags.push(FormatTag {
+                    start: range_start,
+                    end: char_index,
+                    colors: StateColors::default().with_background_color(current_background),
+                    ..FormatTag::default()
+                });
+            }
+            range_start = char_index;
+            current_background = background;
+        }
+    }
+    tags.push(FormatTag {
+        start: range_start,
+        end: chars.len(),
+        colors: StateColors::default().with_background_color(current_background),
+        ..FormatTag::default()
+    });
+
+    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+    let mut cache = ShapingCache::new();
+    #[allow(clippy::cast_precision_loss)]
+    let cell_w = fm.cell_width() as f32;
+    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+    (lines, fm)
+}
+
 // ---------------------------------------------------------------
 // bench_bg_instances — instanced background buffer builder
 // ---------------------------------------------------------------
@@ -825,98 +902,107 @@ fn bench_fg_instances(c: &mut Criterion) {
 fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
     let width = 200;
     let height = 50;
-    let (lines, fm) = build_shaped_lines_for_size(width, height);
-
     let mut group = c.benchmark_group("instanced_bg_partial_dirty");
-
-    let cell_width = fm.cell_width();
-    let cell_height = fm.cell_height();
-    let ascent = fm.ascent();
-    let underline_offset = fm.underline_offset();
-    let strikeout_offset = fm.strikeout_offset();
-    let stroke_size = fm.stroke_size();
-
     let cursor_pixel_pos = (0.0_f32, 0.0_f32);
     let cursor_style = CursorVisualStyle::BlockCursorSteady;
 
-    group.throughput(Throughput::Elements((width * height) as u64));
-    group.bench_function(
-        BenchmarkId::new("build_bg_instances_all_rows", "200x50"),
-        |b| {
-            let mut instances = Vec::new();
-            let mut deco = Vec::new();
-            b.iter(|| {
-                let _cursor_quad_appended = build_background_instances(
-                    &BackgroundFrame {
-                        shaped_lines: &lines,
-                        cell_width,
-                        cell_height,
-                        ascent,
-                        underline_offset,
-                        strikeout_offset,
-                        stroke_size,
-                        show_cursor: true,
-                        cursor_blink_on: true,
-                        cursor_pixel_pos,
-                        cursor_width_scale: 1.0,
-                        cursor_visual_style: &cursor_style,
-                        selection: None,
-                        selection_is_block: false,
-                        match_highlights: &[],
-                        command_block_hover_rows: None,
-                        term_width_cols: 0,
-                        theme: &CATPPUCCIN_MOCHA,
-                        cursor_color_override: None,
-                        reverse_screen: false,
-                    },
-                    &mut instances,
-                    &mut deco,
-                );
-                std::hint::black_box(instances.len());
-                std::hint::black_box(deco.len());
-            });
-        },
-    );
+    for corpus in [
+        BackgroundCorpus::AllDefault,
+        BackgroundCorpus::Sparse,
+        BackgroundCorpus::Dense,
+    ] {
+        let (lines, fm) = build_shaped_lines_for_background_corpus(width, height, corpus);
+        let cell_width = fm.cell_width();
+        let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
+        let underline_offset = fm.underline_offset();
+        let strikeout_offset = fm.strikeout_offset();
+        let stroke_size = fm.stroke_size();
+        let parameter = if matches!(corpus, BackgroundCorpus::AllDefault) {
+            "200x50".to_owned()
+        } else {
+            format!("200x50_{}", corpus.label())
+        };
 
-    group.throughput(Throughput::Elements(width as u64));
-    let single_row = &lines[24..25];
-    group.bench_function(
-        BenchmarkId::new("build_bg_instances_one_row", "200x50"),
-        |b| {
-            let mut instances = Vec::new();
-            let mut deco = Vec::new();
-            b.iter(|| {
-                let _cursor_quad_appended = build_background_instances(
-                    &BackgroundFrame {
-                        shaped_lines: single_row,
-                        cell_width,
-                        cell_height,
-                        ascent,
-                        underline_offset,
-                        strikeout_offset,
-                        stroke_size,
-                        show_cursor: true,
-                        cursor_blink_on: true,
-                        cursor_pixel_pos,
-                        cursor_width_scale: 1.0,
-                        cursor_visual_style: &cursor_style,
-                        selection: None,
-                        selection_is_block: false,
-                        match_highlights: &[],
-                        command_block_hover_rows: None,
-                        term_width_cols: 0,
-                        theme: &CATPPUCCIN_MOCHA,
-                        cursor_color_override: None,
-                        reverse_screen: false,
-                    },
-                    &mut instances,
-                    &mut deco,
-                );
-                std::hint::black_box(instances.len());
-                std::hint::black_box(deco.len());
-            });
-        },
-    );
+        group.throughput(Throughput::Elements((width * height) as u64));
+        group.bench_function(
+            BenchmarkId::new("build_bg_instances_all_rows", &parameter),
+            |b| {
+                let mut instances = Vec::with_capacity(width * height * 6);
+                let mut deco = Vec::with_capacity(width * height * 12);
+                b.iter(|| {
+                    let _cursor_quad_appended = build_background_instances(
+                        &BackgroundFrame {
+                            shaped_lines: &lines,
+                            cell_width,
+                            cell_height,
+                            ascent,
+                            underline_offset,
+                            strikeout_offset,
+                            stroke_size,
+                            show_cursor: true,
+                            cursor_blink_on: true,
+                            cursor_pixel_pos,
+                            cursor_width_scale: 1.0,
+                            cursor_visual_style: &cursor_style,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
+                            theme: &CATPPUCCIN_MOCHA,
+                            cursor_color_override: None,
+                            reverse_screen: false,
+                        },
+                        &mut instances,
+                        &mut deco,
+                    );
+                    std::hint::black_box(instances.len());
+                    std::hint::black_box(deco.len());
+                });
+            },
+        );
+
+        group.throughput(Throughput::Elements(width as u64));
+        let single_row = &lines[24..25];
+        group.bench_function(
+            BenchmarkId::new("build_bg_instances_one_row", &parameter),
+            |b| {
+                let mut instances = Vec::with_capacity(width * 6);
+                let mut deco = Vec::with_capacity(width * 12);
+                b.iter(|| {
+                    let _cursor_quad_appended = build_background_instances(
+                        &BackgroundFrame {
+                            shaped_lines: single_row,
+                            cell_width,
+                            cell_height,
+                            ascent,
+                            underline_offset,
+                            strikeout_offset,
+                            stroke_size,
+                            show_cursor: true,
+                            cursor_blink_on: true,
+                            cursor_pixel_pos,
+                            cursor_width_scale: 1.0,
+                            cursor_visual_style: &cursor_style,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
+                            theme: &CATPPUCCIN_MOCHA,
+                            cursor_color_override: None,
+                            reverse_screen: false,
+                        },
+                        &mut instances,
+                        &mut deco,
+                    );
+                    std::hint::black_box(instances.len());
+                    std::hint::black_box(deco.len());
+                });
+            },
+        );
+    }
 
     group.finish();
 }
@@ -941,40 +1027,98 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
     let ascent = fm.ascent();
     let opts = FgRenderOptions::all_visible(None);
 
+    let mut all_rows_atlas = GlyphAtlas::default();
+    let mut all_rows_instances = Vec::with_capacity(width * height * 13);
+    build_foreground_instances(
+        &lines,
+        &mut all_rows_atlas,
+        &fm,
+        cell_height,
+        ascent,
+        &opts,
+        &CATPPUCCIN_MOCHA,
+        &mut all_rows_instances,
+    );
+
     group.throughput(Throughput::Elements((width * height) as u64));
     group.bench_function(
         BenchmarkId::new("build_fg_instances_all_rows", "200x50"),
         |b| {
-            b.iter_batched(
-                || (GlyphAtlas::default(), Vec::new()),
-                |(mut atlas, mut instances)| {
-                    build_foreground_instances(
-                        &lines,
-                        &mut atlas,
-                        &fm,
-                        cell_height,
-                        ascent,
-                        &opts,
-                        &CATPPUCCIN_MOCHA,
-                        &mut instances,
-                    );
-                    std::hint::black_box(instances.len());
-                },
-                BatchSize::SmallInput,
-            );
+            b.iter(|| {
+                build_foreground_instances(
+                    &lines,
+                    &mut all_rows_atlas,
+                    &fm,
+                    cell_height,
+                    ascent,
+                    &opts,
+                    &CATPPUCCIN_MOCHA,
+                    &mut all_rows_instances,
+                );
+                std::hint::black_box(all_rows_instances.len());
+            });
         },
     );
 
     group.throughput(Throughput::Elements(width as u64));
     let single_row = &lines[24..25];
+    let mut one_row_atlas = GlyphAtlas::default();
+    let mut one_row_instances = Vec::with_capacity(width * 13);
+    build_foreground_instances(
+        &lines,
+        &mut one_row_atlas,
+        &fm,
+        cell_height,
+        ascent,
+        &opts,
+        &CATPPUCCIN_MOCHA,
+        &mut one_row_instances,
+    );
     group.bench_function(
         BenchmarkId::new("build_fg_instances_one_row", "200x50"),
         |b| {
+            b.iter(|| {
+                build_foreground_instances(
+                    single_row,
+                    &mut one_row_atlas,
+                    &fm,
+                    cell_height,
+                    ascent,
+                    &opts,
+                    &CATPPUCCIN_MOCHA,
+                    &mut one_row_instances,
+                );
+                std::hint::black_box(one_row_instances.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_fg_atlas_rasterization(c: &mut Criterion) {
+    let width = 200;
+    let height = 50;
+    let (lines, fm) = build_shaped_lines_for_size(width, height);
+    let cell_height = fm.cell_height();
+    let ascent = fm.ascent();
+    let opts = FgRenderOptions::all_visible(None);
+    let mut group = c.benchmark_group("instanced_fg_atlas_rasterization");
+
+    group.throughput(Throughput::Elements((width * height) as u64));
+    group.bench_function(
+        BenchmarkId::new("build_fg_instances_cold_atlas", "200x50"),
+        |b| {
             b.iter_batched(
-                || (GlyphAtlas::default(), Vec::new()),
+                || {
+                    (
+                        GlyphAtlas::default(),
+                        Vec::with_capacity(width * height * 13),
+                    )
+                },
                 |(mut atlas, mut instances)| {
                     build_foreground_instances(
-                        single_row,
+                        &lines,
                         &mut atlas,
                         &fm,
                         cell_height,
@@ -1381,6 +1525,7 @@ criterion_group!(
         bench_fg_instances,
         bench_bg_instances_partial_dirty,
         bench_fg_instances_partial_dirty,
+        bench_fg_atlas_rasterization,
         bench_shape_placeholder_line,
         bench_build_visuals,
         bench_image_animation_tick,

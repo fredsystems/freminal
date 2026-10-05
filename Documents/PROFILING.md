@@ -279,6 +279,338 @@ cumulative mean read 388 µs/frame while the differenced steady-state window was
 measurements, the three findings, and the known gaps in the Finding 3 spike. Do
 not re-derive those numbers and do not restate them more strongly than §2A does.
 
+## Task 125 parity fixtures
+
+Task 125 compares Freminal with pinned WezTerm and Ghostty binaries under
+matched configurations. The fixtures live under `assets/profiling/task125/` and
+must not read normal terminal, shell, or `btop` configuration.
+
+### Shell and environment
+
+All three terminals run
+`/run/current-system/sw/bin/bash --noprofile --rcfile <fixture> -i`. The absolute
+path is load-bearing: a Nix development shell places the non-interactive Bash
+derivation on `PATH`, while the NixOS system path resolves the complete
+`bash-interactive` build needed for correct PTY/readline behavior. The driver
+uses `env -i` with an isolated `HOME` and XDG directory set, so selecting the
+system binary does not source the operator's profile or inherit their shell
+configuration.
+
+Each Freminal run pre-seeds only
+`$XDG_STATE_HOME/freminal/state.toml`'s `first_run_complete = true`. Without
+that bit, a deliberately fresh XDG state opens the welcome modal and measures
+onboarding chrome instead of the requested workload. No other application
+state is reused or seeded.
+
+The controlled terminal state is a matched PTY grid in Hyprland's stable tiled
+allocation, CaskaydiaCove Nerd Font at 12
+points, 1.05 line height, enabled ligatures, opaque background, block cursor,
+no cursor trail, no background image, and no custom shader. Blink and steady
+cursor modes are separate fixtures. Scrollback capacity has headroom above the
+10,000-line scrolling corpus in every terminal.
+
+Hyprland controls geometry. Every test window spawns into the same tiled slot
+with the pointer left at the same position, so outer pixel bounds are stable
+between runs. The driver persists the first sample's Hyprland monitor,
+workspace, position, and size tuple and rejects any later sample in that series
+that differs. `stty` against the spawned shell's PTY records each terminal's
+actual grid. CaskaydiaCove's integer-pixel metrics differ by backend, so forcing
+an exact common grid would require unequal font sizes or coarse cell-width
+steps; that is a worse confound than recording the difference. Synthetic
+workloads stay within the common 124x31 region. `btop` remains a product-level
+same-window-size workload and is not claimed to be cell-count-normalized.
+
+### Window-spawn discipline
+
+Running `preflight` opens no window:
+
+```sh
+assets/profiling/task125/run-matrix.sh preflight
+```
+
+`collector-preflight` also opens no window. It validates the unprivileged perf
+events and the privileged scheduler tracepoint syntax; it may request sudo
+authentication:
+
+```sh
+assets/profiling/task125/run-matrix.sh collector-preflight
+```
+
+Every command that opens a GUI prints the terminal, cursor mode, workload,
+warm-up, and expected interaction first, then waits for confirmation unless
+`--assume-ready` was explicitly supplied. An automation agent must additionally
+notify the maintainer in chat before invoking such a command; the script prompt
+does not replace that notification.
+
+Hyprland initially places the small new window under the current pointer. The
+resulting startup pointer events are expected and excluded by the warm-up. For
+all non-pointer workloads, leave the spawned window focused and do not type,
+click, resize, or move the pointer over it. Pointer workloads are separate and
+prompt when physical movement must begin.
+
+Smoke one terminal at a time only after giving that notice:
+
+```sh
+assets/profiling/task125/run-matrix.sh smoke freminal blink
+assets/profiling/task125/run-matrix.sh smoke wezterm blink
+assets/profiling/task125/run-matrix.sh smoke ghostty blink
+```
+
+After changing feature-gated live profiling, use the sustained-output smoke to
+force at least one 120-observation summary. It opens one Freminal window and
+validates the discrete renderer identity, the task 125.5/125.6 live-render
+summary, and the task 125.8 and 125.9 GPU timing flushes before cleanup --
+`FREMINAL_BIN` must therefore be built with
+`--features frame-profiling,gpu-profiling`:
+
+```sh
+assets/profiling/task125/run-matrix.sh profile-smoke
+```
+
+Collector smoke commands add a 10-second counter interval after the warm-up.
+The one-terminal form is for diagnosis; the three-terminal form checks the
+complete matched collection path:
+
+```sh
+assets/profiling/task125/run-matrix.sh collector-smoke-one freminal /tmp/task125-one
+assets/profiling/task125/run-matrix.sh collector-smoke /tmp/task125-all
+```
+
+Teardown is PID/start-time scoped. The driver records the launched PID and
+`/proc/<pid>/stat` start time, discovers only its descendants, sends `TERM`, and
+uses `KILL` only for surviving members of that exact tree. Process-name and
+pattern-based cleanup (`pkill`, `killall`, or `pkill -f`) is forbidden.
+
+### Staged parity protocol
+
+The unattended workloads include `sustained-output` (a 200-line burst every
+20 ms, replacing the whole view each time) and `streaming-output` (one
+fixed-width line every 20 ms, scrolling the view by one row as `tail -f` or
+`cargo build` does); the pair separates dense full-redraw throughput from
+one-line scroll cost. Because `sustained-output` repeats `seq 1 200`, its
+visible screen is identical after every burst, and a terminal that detects
+unchanged pixels may skip drawing; `sustained-output-varying` (confirm-only,
+not in `screen`) prints `seq n n+199` with `n` advancing each burst so every
+frame changes, and is the dense-throughput comparison to cite.
+`sustained-output-marked` repeats the `sustained-output`
+burst pattern with each burst wrapped in OSC 133 marks (`A`, a fixed prompt
+text, `B`, `C` before the `seq` and `D;0` after), so every terminal records
+prompts and command blocks, and every 25th burst idles for 0.15 s instead of
+0.02 s. That gap exceeds Freminal's 100 ms idle tick, so scrollback
+compaction and compression engage. All three terminals receive identical
+bytes; the shell, not `wtype`, expands the `\033` and `\007` escapes.
+
+Freminal only honours an OSC 133 `A`/`B`/`C`/`D` marker tagged
+`freminal=1;fid=<id>` (`parse_ftcs_params`), so the workload emits
+`133;A;freminal=1;fid=$n`, `133;B;freminal=1;fid=$n`,
+`133;C;freminal=1;fid=$n` and `133;D;0;freminal=1;fid=$n`, with `$n` the burst
+counter. An earlier revision emitted bare `133;A` and friends, which Freminal
+silently ignored: it recorded no prompt row and no command block, so the
+"marked" samples were plain `sustained-output` under another name. The printf
+formats live in `workloads.sh` (`TASK125_MARKED_PROMPT_FORMAT` and
+`TASK125_MARKED_FINISH_FORMAT`); the integration test
+`freminal-terminal-emulator/tests/task125_marked_workload.rs` reads that file,
+expands exactly those formats, replays the bytes through a headless emulator
+and asserts that every burst yields a prompt row and a finished command block
+with exit code 0, so the workload cannot regress to untagged marks without
+failing `cargo test`. The peers tolerate the extra options: Ghostty's OSC 133
+parser reads options by key and ignores unknown or malformed ones; WezTerm
+ignores unknown `key=value` options on `A`, `C` and `D`, but treats a `B`
+that carries any parameter as an unrecognised sequence (it is dropped without
+a log line under the default `log_unknown_escape_sequences = false`), so
+WezTerm records the prompt and output marks but not the command-start mark.
+That is one byte-trivial sequence per burst; it is recorded here so a
+Freminal-vs-WezTerm `sustained-output-marked` gap is read with it in mind.
+This was checked against the upstream `main` sources of both projects, not the
+pinned builds.
+
+The `scrollback` workload preloads `seq 1 10000` and then alternates
+**Shift+PageUp** and **Shift+PageDown** (`wtype -M shift -k Page_Up -m shift`).
+Plain PageUp/PageDown is forwarded to the shell by all three terminals and
+leaves the viewport at the bottom, which measures an idle prompt. Shift+PageUp
+and Shift+PageDown are scrollback in Freminal (default `scroll_page_up` /
+`scroll_page_down` bindings), WezTerm (`ScrollByPage`) and Ghostty
+(`scroll_page_up` / `scroll_page_down`); the fixtures bind only F6-F9, which
+`wezterm show-keys` and `ghostty +list-keybinds` confirm against the rendered
+fixtures.
+
+Do not run seven 60-second captures for every workload.
+
+1. `screen` runs three 20-second samples after a five-second warm-up for every
+   non-pointer workload (eleven, including `streaming-output` and
+   `sustained-output-marked`). It spawns 99 windows and takes approximately 41
+   minutes.
+2. `pointer-screen` runs the same short protocol for pointer motion, separately
+   because every sample needs physical maintainer interaction. It spawns nine
+   windows and takes approximately four minutes.
+3. `confirm` runs seven 60-second samples after a 10-second warm-up only for
+   workloads whose screen is noisy, shows a meaningful gap, or controls a
+   remediation decision. One confirmed workload takes approximately 24
+   minutes.
+
+Commands write raw captures outside the repository:
+
+```sh
+assets/profiling/task125/run-matrix.sh screen /tmp/freminal-task125-screen
+assets/profiling/task125/run-matrix.sh pointer-screen /tmp/freminal-task125-pointer
+assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idle-blink btop
+```
+
+Freminal runs receive a narrow `RUST_LOG` filter inside the otherwise-clean
+environment. Its Task 121 frame summaries, Task 125 live-render summaries, and
+Task 125.8 and 125.9 GPU timing flushes are written to `freminal.stdout.log` in that
+sample's external raw directory; WezTerm and Ghostty do not receive the Rust
+logging environment. Keeping the log beside each sample preserves pane/frame
+attribution without reading the operator's normal logging configuration or
+mixing sequential runs.
+
+Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
+summary uses seed 125 and 10,000 bootstrap resamples (`summarize.py`, covered
+by `test_summarize.py`: `python3 -m unittest
+assets/profiling/task125/test_summarize.py`). Screening selects work; a
+material final gap is declared only from confirmation when the paired median
+task-clock delta is at least 0.5 ms per wall-second and its bootstrap 95%
+confidence interval excludes zero. A bootstrap percentile interval over fewer
+than five paired samples is only the spread of the resampled values, so
+screening output (three repeats) labels it `range=[low,high]` and flags a
+material screen result as "screen only"; only samples of five or more print
+`ci95=[low,high]`. The machine-readable result keeps its `ci95_low` and
+`ci95_high` field names and adds `n_pairs` and `interval_kind` (`range` or
+`ci95`).
+
+### Sample integrity checks
+
+The driver fails a sample, rather than recording a number that does not mean
+what its label says:
+
+- **Workload liveness.** Shell-driven workloads (`sparse-row`, `btop`,
+  `sustained-output*`, `streaming-output`) must have a live child of the
+  fixture shell both before the interval and at its end. The typing and
+  scrollback input loops must still be running half a second after they start
+  and must reach their deadline.
+- **Focus.** Synthetic input is sent only to the window this run spawned. Every
+  input-loop iteration (and the pre-warm-up typing) first checks that the
+  Hyprland active window is that window, and the loop stops, failing the
+  sample, if focus has left it. The loop PID is recorded for cleanup, and the
+  loops start only after every counter is armed and every discovery call has
+  finished, so the interval contains the whole workload and none of the setup.
+- **Renderer identity.** Each Freminal sample's `Active OpenGL renderer` line is
+  parsed from `freminal.stdout.log` and saved as `gl-renderer`. A software
+  rasteriser (`llvmpipe`, `softpipe`, `swrast`) or a renderer that does not
+  contain `TASK125_EXPECTED_RENDERER` (default `AMD Radeon RX 7900 XTX`) fails
+  the sample.
+- **GPU fdinfo.** A terminal process that exposes no `drm-engine-gfx` fdinfo on
+  the expected render node fails the sample. Set
+  `TASK125_ALLOW_GPU_UNAVAILABLE=1` to record it anyway; `gpu_gfx_ns` is then
+  blank, never zero, and `gpu_status` says `unavailable`.
+- **Counter sanity.** A `drm-engine-gfx` counter that goes backwards, or a
+  terminal GUI thread created during the interval, invalidates the sample.
+
+The sample CSV therefore ends with `gpu_status` and `exited_tids` columns after
+`grid_cols`; `summarize.py` reads only the columns it needs and ignores the
+rest. `environment.txt` records the resolved path and SHA-256 of the Freminal,
+WezTerm and Ghostty binaries, the Freminal `RUST_LOG` filter, and the expected
+renderer string.
+
+Cleanup runs on every exit path: INT and TERM now exit after cleanup (they
+previously resumed the series), one failed kill does not stop the rest, and the
+background `sudo perf` collectors and input loops are stopped along with the
+terminal process trees. Every launched terminal is owned by its PID and start
+time from the instant it is spawned, so an abort while waiting for its window
+still tears it down.
+
+### Scheduler and GPU counters
+
+Task-clock, cycles, and instructions use unprivileged `perf stat`; user and
+system CPU time come from differenced `/proc/<pid>/stat` ticks. With this host's
+`perf_event_paranoid=2`, an unprivileged context-switch event is forced to
+user-only and reports zero because the switch occurs in kernel context, so a
+separate privileged per-process `perf stat` records context switches. The
+measured target is the
+mapped terminal GUI process and all of its threads, not descendants: charging
+the fixture shell, `btop`, or output generator to the terminal would invalidate
+the comparison. Separately tracked shell roots exist only for safe teardown.
+
+The kernel already provides `sched:sched_wakeup`, but this host mounts tracefs
+as `root:root` mode `0700`. The driver performs `sudo -v` before opening any
+window and runs only the system-wide, terminal-thread-filtered wakeup collector
+through `sudo`. It never remounts or changes tracefs permissions, and never
+relabels context switches as wakeups.
+
+The wakeup filter and integrity baseline are built from the same thread-list
+snapshot after warm-up. Only a thread **created** during the interval
+invalidates the sample, because its wakeups were not in the filter. A thread
+that exits during the interval was in the filter from the start and its CPU
+time folds into the process, so exits do not invalidate the sample; they are
+counted in the `exited_tids` CSV column instead. A thread created and
+destroyed entirely inside the interval cannot be detected by endpoint
+comparison; this is a residual limitation of aggregate `perf stat` filtering
+and must be considered if later profiles show dynamic thread creation.
+
+For external GPU comparison, `amdgpu_top --json --process --no-pc` discovers
+the discrete Navi 31 device and process DRM clients without enabling GRBM
+polling. The metric is the difference in cumulative `drm-engine-gfx` time from
+the mapped GUI process's `/proc/<pid>/fdinfo/*` entries, deduplicated by DRM
+client id. The GUI process must have an open file descriptor on the expected
+discrete-GPU render node. Device-wide utilization is not attributed to one
+terminal. If per-process fdinfo is absent or remains below measurable
+resolution under an active control, cross-terminal GPU parity is
+`INCONCLUSIVE`; Freminal's later asynchronous GL queries still provide internal
+attribution but cannot prove peer parity.
+
+### Chrome and total-frame GPU timing (Task 125.9)
+
+Build with `--features gpu-profiling` (independent of `frame-profiling`). Each
+window measures four asynchronous GPU timestamp pairs per painted frame and
+logs a flush every 60 completed total-frame samples under the target
+`freminal_windowing::task_125::gpu_timing`, with the message
+`Task 125.9 chrome and frame GPU timing flush`. Enable it with
+`RUST_LOG=freminal_windowing::task_125::gpu_timing=debug`; `run-matrix.sh`
+already does. The terminal renderer's own upload and draw timings (Task 125.8)
+use the separate target `freminal::task_125::gpu_timing`.
+
+| Field | Meaning |
+| --- | --- |
+| `window_id` | The window that owns the GL context the queries ran on |
+| `renderer` | `GL_RENDERER` string, read once at window creation |
+| `capability` | `Available` (desktop GL 3.3+ or `GL_ARB_timer_query`) or `Unavailable` (GLES, older GL); `Unavailable` issues no queries and every counter stays zero |
+| `chrome_ns_total`, `chrome_sample_count` | Cumulative chrome GPU time: head plus tail. The count is the lower of the head and tail completed counts |
+| `band_ns_total`, `band_sample_count` | Cumulative terminal-band GPU time |
+| `total_ns_total`, `total_sample_count` | Cumulative whole-frame GPU time |
+| `last_latency_frames` | Painted frames between issue and availability for the latest sample |
+| `dropped_sample_count` | Samples rejected because the 64-slot ring was full |
+| `pending_sample_count` | Samples issued but not yet read back |
+
+All totals are cumulative since window creation; divide by the matching sample
+count for a mean. Read them with these rules:
+
+- **Intervals are GPU-timeline elapsed time between two timestamps, not busy
+  time.** They include GPU idle gaps: while the CPU is still recording work
+  inside a span (for example the terminal callback's vertex rebuild and
+  upload during the band), the GPU may wait and that wait is inside the
+  interval. A large band value with a small Task 125.8 upload + draw value
+  therefore points at CPU-side recording cost inside the band, not GPU
+  shading cost.
+- **Chrome is head plus tail.** The two spans are measured separately and
+  summed; the band between them is excluded.
+- **The band is a cross-check, never a subtraction substitute.** Compare it
+  with the Task 125.8 `terminal_upload` + `terminal_draw` figures; do not
+  derive either one by subtracting from the other, or from the total.
+- **The total spans the clear, the texture sets, the three paints, and the
+  texture frees.** It excludes the buffer swap, `pre_present_notify`, and any
+  compositor or scan-out latency, none of which is GPU execution of the
+  frame's own commands.
+- **A `FrameDamage::None` frame issues no sample.** It submits no GPU work
+  (it still applies egui texture deltas, which are not timed), so it is
+  absent from every count and does not advance the latency clock.
+- **Latency is per window and in painted frames.** The unit is not window
+  frames and not milliseconds. A result is never read on the frame that issued
+  it; `last_latency_frames` of `0` is therefore a bug.
+- **llvmpipe numbers are never performance evidence.** A software rasteriser
+  validates that the lifecycle is correct (samples complete on a later frame,
+  nothing leaks, nothing drops); its durations say nothing about a real GPU.
+  Findings use real-hardware runs only.
+
 ## What this cannot measure
 
 - **Pixels.** There is no headless-GL or pixel-readback harness — the "436.9

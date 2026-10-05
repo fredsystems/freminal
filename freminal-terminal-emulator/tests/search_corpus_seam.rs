@@ -42,7 +42,7 @@ fn corpus_row_indices_match_buffer_rows_across_the_seam() {
     }
 
     let corpus = emu.internal.handler.search_corpus(0);
-    let rows = corpus_rows(&corpus);
+    let rows = corpus_rows(&corpus.chars);
     let total_rows = emu.internal.handler.buffer().rows().len();
 
     assert_eq!(
@@ -69,7 +69,7 @@ fn seam_does_not_fuse_last_scrollback_row_with_first_visible_row() {
         emu.handle_incoming_data(format!("row{i}\r\n").as_bytes());
     }
 
-    let rows = corpus_rows(&emu.internal.handler.search_corpus(0));
+    let rows = corpus_rows(&emu.internal.handler.search_corpus(0).chars);
     assert!(
         !rows.iter().any(|r| r == "row3row4"),
         "the scrollback/visible seam fused two rows: {rows:?}"
@@ -90,7 +90,7 @@ fn blank_scrollback_row_still_gets_a_separator() {
         emu.handle_incoming_data(format!("row{i}\r\n").as_bytes());
     }
 
-    let rows = corpus_rows(&emu.internal.handler.search_corpus(0));
+    let rows = corpus_rows(&emu.internal.handler.search_corpus(0).chars);
     let total_rows = emu.internal.handler.buffer().rows().len();
     assert_eq!(
         rows.len(),
@@ -109,7 +109,51 @@ fn no_scrollback_means_no_leading_separator() {
     let _ = emu.set_win_size(10, 5, 8, 16);
     emu.handle_incoming_data(b"alpha\r\nbeta");
 
-    let rows = corpus_rows(&emu.internal.handler.search_corpus(0));
+    let rows = corpus_rows(&emu.internal.handler.search_corpus(0).chars);
     assert_eq!(rows[0], "alpha", "row 0 must be the first visible row");
     assert_eq!(rows[1], "beta");
+}
+
+/// Task 125.17: the corpus is tagged with the rows it was cut from, and that
+/// tag keeps pace with the buffer at scrollback capacity, where the row
+/// count freezes but the base advances.
+#[test]
+fn corpus_extent_matches_the_snapshot_and_advances_at_capacity() {
+    let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+    let _ = emu.set_win_size(10, 3, 8, 16);
+    for i in 0..4 {
+        emu.handle_incoming_data(format!("row{i}\r\n").as_bytes());
+    }
+
+    let corpus = emu.internal.handler.search_corpus(0);
+    let snap = emu.build_snapshot();
+    assert_eq!(corpus.extent, snap.extent(), "corpus and snapshot agree");
+    assert_eq!(
+        corpus_rows(&corpus.chars).len(),
+        corpus.extent.total_rows,
+        "corpus row count is the extent's row count"
+    );
+
+    // Fill to capacity, then keep going: total_rows freezes, row_base moves.
+    for i in 0..200 {
+        emu.handle_incoming_data(format!("fill{i}\r\n").as_bytes());
+    }
+    let at_capacity = emu.internal.handler.search_corpus(0);
+    assert!(
+        at_capacity.extent.row_base > corpus.extent.row_base,
+        "the corpus base must advance with eviction"
+    );
+    let frozen_total = at_capacity.extent.total_rows;
+    emu.handle_incoming_data(b"one more\r\n");
+    let next = emu.internal.handler.search_corpus(0);
+    assert_eq!(next.extent.total_rows, frozen_total, "total_rows is frozen");
+    assert_ne!(
+        next.extent, at_capacity.extent,
+        "yet the extent still differs, so a staleness check can see it"
+    );
+
+    // Corpus row i is buffer row `row_base + i`: the last row holds the cursor
+    // line, and the one above it the final written line.
+    let rows = corpus_rows(&next.chars);
+    assert_eq!(rows[rows.len() - 2], "one more");
 }

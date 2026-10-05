@@ -976,7 +976,7 @@ mod tests {
         // Just "P" + ESC '\' — inner content is empty
         let dcs = b"P\x1b\\";
         let inner = TerminalHandler::strip_dcs_envelope(dcs);
-        assert!(inner.is_empty());
+        assert_eq!(inner, []);
     }
 
     #[test]
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn undouble_esc_empty() {
         let result = TerminalHandler::undouble_esc(b"");
-        assert!(result.is_empty());
+        assert_eq!(result, []);
     }
 
     #[test]
@@ -1061,7 +1061,7 @@ mod tests {
     #[test]
     fn double_esc_empty() {
         let result = TerminalHandler::double_esc(b"");
-        assert!(result.is_empty());
+        assert_eq!(result, []);
     }
 
     #[test]

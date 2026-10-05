@@ -19,8 +19,61 @@
 //! Kept as a standalone module so the formatter can be unit-tested
 //! without an egui or GPU context.
 
-use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
+use freminal_common::buffer_states::{
+    command_block::{CommandBlock, CommandStatus},
+    row_number::RowNumber,
+};
 use std::time::Duration;
+
+/// A [`CommandBlock`]'s row boundaries resolved to retained buffer indices.
+///
+/// The snapshot carries each block's rows as stable [`RowNumber`]s (Task
+/// 125.14); the GUI's row math (gutters, folds, hit-testing, jump-to-command)
+/// works in retained buffer indices, the coordinates of
+/// `TerminalSnapshot::visible_window_start`. This is the one seam between the
+/// two: resolve a block against the snapshot's `row_base` and use the indices.
+///
+/// Resolution reproduces what the pre-125.14 eviction-time rewrite gave these
+/// fields: a block whose *prompt* row has been evicted no longer exists
+/// ([`Self::resolve`] returns `None`), and any other boundary that has been
+/// evicted clamps to the oldest retained row (index `0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRows {
+    /// Retained index of the prompt-start row (`OSC 133 A`).
+    pub prompt_start: usize,
+    /// Retained index of the command-input row (`OSC 133 B`), if recorded.
+    pub command_start: Option<usize>,
+    /// Retained index of the output-start row (`OSC 133 C`), if recorded.
+    pub output_start: Option<usize>,
+    /// Retained index of the finishing row (`OSC 133 D`); `None` while running.
+    pub end: Option<usize>,
+}
+
+impl BlockRows {
+    /// Resolve `block` against a snapshot whose oldest retained row is numbered
+    /// `row_base`.
+    ///
+    /// `None` if the block's prompt row cannot be resolved: it has been
+    /// evicted, or it lies in the other screen's row namespace (a primary
+    /// block while the alternate screen is up, or the reverse). A later field
+    /// in the other namespace resolves as absent (`None`), not as a clamped
+    /// index.
+    #[must_use]
+    pub fn resolve(block: &CommandBlock, row_base: RowNumber) -> Option<Self> {
+        // Same namespace: an evicted (below-base) boundary clamps to the
+        // oldest retained row. Other namespace: the boundary is absent.
+        let index = |row: RowNumber| {
+            (row.is_alternate() == row_base.is_alternate())
+                .then(|| row.rows_after(row_base).unwrap_or(0))
+        };
+        Some(Self {
+            prompt_start: block.prompt_start_row.rows_after(row_base)?,
+            command_start: block.command_start_row.and_then(index),
+            output_start: block.output_start_row.and_then(index),
+            end: block.end_row.and_then(index),
+        })
+    }
+}
 
 /// Find the command block containing the given buffer-absolute `row`, for
 /// gutter coloring, hover, and click hit-testing.
@@ -29,7 +82,8 @@ use std::time::Duration;
 /// A still-running block (no `end_row`) is treated as extending to
 /// `running_extent` — the last visible buffer row — so its gutter bar
 /// fills down to the live prompt.  Returns `None` for rows not covered by
-/// any block.
+/// any block.  `row_base` is the snapshot's row base, used to resolve each
+/// block's row numbers to buffer indices (see [`BlockRows`]).
 ///
 /// When blocks overlap (which should not happen for well-formed OSC 133
 /// streams, but is not structurally prevented), the **last** matching
@@ -38,14 +92,17 @@ use std::time::Duration;
 #[must_use]
 pub fn gutter_block_for_row(
     blocks: &[CommandBlock],
+    row_base: RowNumber,
     row: usize,
     running_extent: usize,
 ) -> Option<&CommandBlock> {
     let mut found = None;
     for block in blocks {
-        let start = block.prompt_start_row;
-        let end = block.end_row.unwrap_or(running_extent);
-        if row >= start && row <= end {
+        let Some(rows) = BlockRows::resolve(block, row_base) else {
+            continue;
+        };
+        let end = rows.end.unwrap_or(running_extent);
+        if row >= rows.prompt_start && row <= end {
             found = Some(block);
         }
     }
@@ -60,10 +117,11 @@ pub fn gutter_block_for_row(
 #[must_use]
 pub fn gutter_status_for_row(
     blocks: &[CommandBlock],
+    row_base: RowNumber,
     row: usize,
     running_extent: usize,
 ) -> Option<CommandStatus> {
-    gutter_block_for_row(blocks, row, running_extent).map(CommandBlock::status)
+    gutter_block_for_row(blocks, row_base, row, running_extent).map(CommandBlock::status)
 }
 
 /// Whether a command block can be folded.
@@ -92,12 +150,14 @@ pub const fn block_is_foldable(block: &CommandBlock) -> bool {
 #[must_use]
 pub fn duration_label_anchor_row(
     block: &CommandBlock,
+    row_base: RowNumber,
     win_start: usize,
     win_end: usize,
     running_extent: usize,
 ) -> Option<usize> {
-    let start = block.prompt_start_row;
-    let end = block.end_row.unwrap_or(running_extent);
+    let rows = BlockRows::resolve(block, row_base)?;
+    let start = rows.prompt_start;
+    let end = rows.end.unwrap_or(running_extent);
     if end < win_start || start >= win_end {
         return None;
     }
@@ -298,6 +358,12 @@ mod tests {
     use freminal_common::buffer_states::command_block::CommandBlockId;
     use std::time::SystemTime;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     /// Build a finished block spanning `[prompt_start, end]` with the given
     /// exit code.
     fn finished_block(prompt_start: usize, end: usize, exit: Option<i32>) -> CommandBlock {
@@ -305,10 +371,10 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: prompt_start,
-            command_start_row: Some(prompt_start),
-            output_start_row: Some(prompt_start + 1),
-            end_row: Some(end),
+            prompt_start_row: rn(prompt_start),
+            command_start_row: Some(rn(prompt_start)),
+            output_start_row: Some(rn(prompt_start + 1)),
+            end_row: Some(rn(end)),
             exit_code: exit,
             cwd: None,
             started_at: started,
@@ -322,9 +388,9 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: prompt_start,
-            command_start_row: Some(prompt_start),
-            output_start_row: Some(prompt_start + 1),
+            prompt_start_row: rn(prompt_start),
+            command_start_row: Some(rn(prompt_start)),
+            output_start_row: Some(rn(prompt_start + 1)),
             end_row: None,
             exit_code: None,
             cwd: None,
@@ -337,9 +403,18 @@ mod tests {
     #[test]
     fn gutter_status_none_when_no_block_contains_row() {
         let blocks = [finished_block(2, 5, Some(0))];
-        assert_eq!(gutter_status_for_row(&blocks, 0, 100), None);
-        assert_eq!(gutter_status_for_row(&blocks, 1, 100), None);
-        assert_eq!(gutter_status_for_row(&blocks, 6, 100), None);
+        assert_eq!(
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 0, 100),
+            None
+        );
+        assert_eq!(
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 1, 100),
+            None
+        );
+        assert_eq!(
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 6, 100),
+            None
+        );
     }
 
     #[test]
@@ -347,15 +422,15 @@ mod tests {
         let blocks = [finished_block(2, 5, Some(0))];
         // prompt_start_row (2) and end_row (5) are both inside the block.
         assert_eq!(
-            gutter_status_for_row(&blocks, 2, 100),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 2, 100),
             Some(CommandStatus::Success)
         );
         assert_eq!(
-            gutter_status_for_row(&blocks, 5, 100),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 5, 100),
             Some(CommandStatus::Success)
         );
         assert_eq!(
-            gutter_status_for_row(&blocks, 3, 100),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 3, 100),
             Some(CommandStatus::Success)
         );
     }
@@ -366,15 +441,15 @@ mod tests {
         let failure = [finished_block(0, 3, Some(127))];
         let unknown = [finished_block(0, 3, None)];
         assert_eq!(
-            gutter_status_for_row(&success, 1, 100),
+            gutter_status_for_row(&success, RowNumber::ZERO, 1, 100),
             Some(CommandStatus::Success)
         );
         assert_eq!(
-            gutter_status_for_row(&failure, 1, 100),
+            gutter_status_for_row(&failure, RowNumber::ZERO, 1, 100),
             Some(CommandStatus::Failure(127))
         );
         assert_eq!(
-            gutter_status_for_row(&unknown, 1, 100),
+            gutter_status_for_row(&unknown, RowNumber::ZERO, 1, 100),
             Some(CommandStatus::Unknown)
         );
     }
@@ -384,17 +459,20 @@ mod tests {
         let blocks = [running_block(4)];
         // Inside [4, running_extent=10].
         assert_eq!(
-            gutter_status_for_row(&blocks, 4, 10),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 4, 10),
             Some(CommandStatus::Running)
         );
         assert_eq!(
-            gutter_status_for_row(&blocks, 10, 10),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 10, 10),
             Some(CommandStatus::Running)
         );
         // Above prompt start — not in the block.
-        assert_eq!(gutter_status_for_row(&blocks, 3, 10), None);
+        assert_eq!(gutter_status_for_row(&blocks, RowNumber::ZERO, 3, 10), None);
         // Past the running extent — not painted.
-        assert_eq!(gutter_status_for_row(&blocks, 11, 10), None);
+        assert_eq!(
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 11, 10),
+            None
+        );
     }
 
     #[test]
@@ -406,12 +484,12 @@ mod tests {
             finished_block(5, 9, Some(1)), // failure, spans 5..=9
         ];
         assert_eq!(
-            gutter_status_for_row(&blocks, 5, 100),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 5, 100),
             Some(CommandStatus::Failure(1))
         );
         // Row only in the first block stays success.
         assert_eq!(
-            gutter_status_for_row(&blocks, 1, 100),
+            gutter_status_for_row(&blocks, RowNumber::ZERO, 1, 100),
             Some(CommandStatus::Success)
         );
     }
@@ -419,10 +497,11 @@ mod tests {
     #[test]
     fn gutter_block_for_row_returns_the_block_not_just_status() {
         let blocks = [finished_block(2, 5, Some(7))];
-        let hit = gutter_block_for_row(&blocks, 3, 100).expect("row 3 is inside the block");
-        assert_eq!(hit.prompt_start_row, 2);
+        let hit = gutter_block_for_row(&blocks, RowNumber::ZERO, 3, 100)
+            .expect("row 3 is inside the block");
+        assert_eq!(hit.prompt_start_row, rn(2));
         assert_eq!(hit.exit_code, Some(7));
-        assert!(gutter_block_for_row(&blocks, 6, 100).is_none());
+        assert!(gutter_block_for_row(&blocks, RowNumber::ZERO, 6, 100).is_none());
     }
 
     // ── block_is_foldable ────────────────────────────────────────────────
@@ -448,7 +527,10 @@ mod tests {
         // Block spans rows 2..=5.  The label must anchor on row 5 (last),
         // not row 2 (first) — the regression this subtask fixes.
         let block = finished_block(2, 5, Some(0));
-        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(5));
+        assert_eq!(
+            duration_label_anchor_row(&block, RowNumber::ZERO, 0, 24, 23),
+            Some(5)
+        );
     }
 
     #[test]
@@ -456,21 +538,30 @@ mod tests {
         // Block ends at row 30 but the viewport bottom (win_end exclusive)
         // is 24, so the anchor clamps to row 23.
         let block = finished_block(2, 30, Some(0));
-        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(23));
+        assert_eq!(
+            duration_label_anchor_row(&block, RowNumber::ZERO, 0, 24, 23),
+            Some(23)
+        );
     }
 
     #[test]
     fn anchor_none_when_block_entirely_above_viewport() {
         // Block 0..=3 is entirely above a window starting at row 10.
         let block = finished_block(0, 3, Some(0));
-        assert_eq!(duration_label_anchor_row(&block, 10, 34, 33), None);
+        assert_eq!(
+            duration_label_anchor_row(&block, RowNumber::ZERO, 10, 34, 33),
+            None
+        );
     }
 
     #[test]
     fn anchor_none_when_block_entirely_below_viewport() {
         // Block starts at row 50, window is rows 0..24.
         let block = finished_block(50, 53, Some(0));
-        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), None);
+        assert_eq!(
+            duration_label_anchor_row(&block, RowNumber::ZERO, 0, 24, 23),
+            None
+        );
     }
 
     #[test]
@@ -478,6 +569,135 @@ mod tests {
         // A running block (no end_row) extends to running_extent (23), so
         // its label anchors there.
         let block = running_block(4);
-        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(23));
+        assert_eq!(
+            duration_label_anchor_row(&block, RowNumber::ZERO, 0, 24, 23),
+            Some(23)
+        );
+    }
+
+    // ── BlockRows / logical row numbers (Task 125.14) ────────────────────
+
+    /// A finished block whose four rows are the given absolute numbers.
+    fn numbered_block(
+        prompt: u64,
+        command: Option<u64>,
+        output: Option<u64>,
+        end: Option<u64>,
+    ) -> CommandBlock {
+        let mut block = finished_block(0, 0, Some(0));
+        block.prompt_start_row = RowNumber::new(prompt);
+        block.command_start_row = command.map(RowNumber::new);
+        block.output_start_row = output.map(RowNumber::new);
+        block.end_row = end.map(RowNumber::new);
+        block
+    }
+
+    #[test]
+    fn block_rows_resolve_numbers_to_indices_against_the_base() {
+        let block = numbered_block(105, Some(106), Some(107), Some(110));
+        let rows = BlockRows::resolve(&block, RowNumber::new(100)).unwrap();
+        assert_eq!(
+            rows,
+            BlockRows {
+                prompt_start: 5,
+                command_start: Some(6),
+                output_start: Some(7),
+                end: Some(10),
+            }
+        );
+    }
+
+    #[test]
+    fn block_rows_resolve_with_zero_base_is_the_identity() {
+        let block = numbered_block(3, Some(3), None, None);
+        let rows = BlockRows::resolve(&block, RowNumber::ZERO).unwrap();
+        assert_eq!(rows.prompt_start, 3);
+        assert_eq!(rows.command_start, Some(3));
+        assert_eq!(rows.output_start, None);
+        assert_eq!(rows.end, None);
+    }
+
+    #[test]
+    fn block_rows_resolve_is_none_when_the_prompt_row_is_evicted() {
+        let block = numbered_block(99, Some(100), Some(101), Some(102));
+        assert_eq!(BlockRows::resolve(&block, RowNumber::new(100)), None);
+    }
+
+    #[test]
+    fn block_rows_clamp_an_evicted_later_field_to_the_oldest_row() {
+        // The pre-125.14 eviction rewrite saturated such a field at row 0.
+        let block = numbered_block(100, Some(98), Some(99), Some(105));
+        let rows = BlockRows::resolve(&block, RowNumber::new(100)).unwrap();
+        assert_eq!(rows.prompt_start, 0);
+        assert_eq!(rows.command_start, Some(0));
+        assert_eq!(rows.output_start, Some(0));
+        assert_eq!(rows.end, Some(5));
+    }
+
+    #[test]
+    fn gutter_lookup_uses_the_base_to_convert_block_rows() {
+        let blocks = [numbered_block(105, Some(105), Some(106), Some(108))];
+        let base = RowNumber::new(100);
+        // Indices 5..=8 are covered; the same indices at base 0 would not be.
+        assert!(gutter_block_for_row(&blocks, base, 5, 100).is_some());
+        assert!(gutter_block_for_row(&blocks, base, 8, 100).is_some());
+        assert!(gutter_block_for_row(&blocks, base, 4, 100).is_none());
+        assert!(gutter_block_for_row(&blocks, base, 9, 100).is_none());
+        assert!(gutter_block_for_row(&blocks, RowNumber::ZERO, 5, 100).is_none());
+    }
+
+    #[test]
+    fn gutter_lookup_skips_a_block_whose_prompt_was_evicted() {
+        let blocks = [numbered_block(50, Some(50), Some(51), Some(60))];
+        assert!(gutter_block_for_row(&blocks, RowNumber::new(100), 0, 100).is_none());
+    }
+
+    #[test]
+    fn running_block_extends_to_the_running_extent_in_index_space() {
+        let mut block = numbered_block(105, Some(105), Some(106), None);
+        block.finished_at = None;
+        let blocks = [block];
+        let base = RowNumber::new(100);
+        assert!(gutter_block_for_row(&blocks, base, 20, 20).is_some());
+        assert!(gutter_block_for_row(&blocks, base, 21, 20).is_none());
+    }
+
+    #[test]
+    fn duration_anchor_uses_the_base_to_convert_block_rows() {
+        let block = numbered_block(105, Some(105), Some(106), Some(108));
+        let base = RowNumber::new(100);
+        assert_eq!(duration_label_anchor_row(&block, base, 0, 24, 23), Some(8));
+        // Entirely above the window once expressed as indices 5..=8.
+        assert_eq!(duration_label_anchor_row(&block, base, 10, 34, 33), None);
+        // An evicted-prompt block has no anchor.
+        let evicted = numbered_block(50, Some(50), Some(51), Some(60));
+        assert_eq!(duration_label_anchor_row(&evicted, base, 0, 24, 23), None);
+    }
+
+    #[test]
+    fn block_rows_resolve_is_none_for_a_primary_block_on_the_alternate_screen() {
+        let block = numbered_block(105, Some(106), Some(107), Some(110));
+        assert_eq!(BlockRows::resolve(&block, RowNumber::ALTERNATE_BASE), None);
+    }
+
+    #[test]
+    fn block_rows_resolve_is_none_for_an_alternate_block_against_a_primary_base() {
+        // An alternate number against a primary base used to be a huge index.
+        let alt = RowNumber::ALTERNATE_BASE.get();
+        let block = numbered_block(alt + 5, Some(alt + 6), None, None);
+        assert_eq!(BlockRows::resolve(&block, RowNumber::new(100)), None);
+    }
+
+    #[test]
+    fn block_rows_later_field_in_the_other_namespace_is_absent_not_clamped() {
+        let alt = RowNumber::ALTERNATE_BASE.get();
+        // Primary block (base 100) whose output/end were recorded on the
+        // alternate screen: those fields resolve as absent.
+        let block = numbered_block(105, Some(106), Some(alt + 1), Some(alt + 2));
+        let rows = BlockRows::resolve(&block, RowNumber::new(100)).unwrap();
+        assert_eq!(rows.prompt_start, 5);
+        assert_eq!(rows.command_start, Some(6));
+        assert_eq!(rows.output_start, None);
+        assert_eq!(rows.end, None);
     }
 }

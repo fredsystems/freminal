@@ -528,26 +528,27 @@ impl super::FreminalGui {
 mod tests {
     use super::*;
     use freminal_common::buffer_states::command_block::CommandBlock;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     /// A block in the `Running` state that has executed (saw `C`).
     fn running_executed() -> CommandBlock {
-        let mut b = CommandBlock::new_running(0, None, "fid".to_owned());
-        b.output_start_row = Some(1);
+        let mut b = CommandBlock::new_running(RowNumber::ZERO, None, "fid".to_owned());
+        b.output_start_row = Some(RowNumber::new(1));
         b.executed_at = Some(SystemTime::now());
         b
     }
 
     /// A block that saw only `A` (prompt drawn, nothing executed).
     fn running_not_executed() -> CommandBlock {
-        CommandBlock::new_running(0, None, "fid".to_owned())
+        CommandBlock::new_running(RowNumber::ZERO, None, "fid".to_owned())
     }
 
     /// A finished, successful block.
     fn finished_success() -> CommandBlock {
-        let mut b = CommandBlock::new_running(0, None, "fid".to_owned());
-        b.output_start_row = Some(1);
+        let mut b = CommandBlock::new_running(RowNumber::ZERO, None, "fid".to_owned());
+        b.output_start_row = Some(RowNumber::new(1));
         b.executed_at = Some(SystemTime::now());
-        b.end_row = Some(2);
+        b.end_row = Some(RowNumber::new(2));
         b.exit_code = Some(0);
         b.finished_at = Some(SystemTime::now());
         b

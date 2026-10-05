@@ -7,8 +7,15 @@
 //!
 //! - [`gl_facade`] — the GL call boundary: the frozen `glow::HasContext` call
 //!   surface and (from 123.2) the `Gl` recording facade.
+//! - [`gl_init_state`] — [`GlInitState`], the init/ready/failed latch every
+//!   renderer carries so a failing `init` is not retried per frame.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
+//! - [`retire`] — deferred GL teardown (Task 125.C2): [`GlRetireQueue`] (a
+//!   window-scoped queue a dropped pane retires its [`TerminalRenderer`] into,
+//!   drained where the window's GL context is current) and
+//!   [`WindowGlTeardown`] (window-close destruction of the shared
+//!   post-processing renderer, the queue, and the toast passes).
 //! - `headless` (feature `gl-recording`) — drives [`TerminalRenderer`] and the
 //!   toast passes without a GUI event loop, for use with the GL recording
 //!   facade (Task 123); see its module docs for what it does and does not
@@ -25,14 +32,31 @@
 //!   draws toast label/icon text through the shared instanced foreground
 //!   shader (issue #433). Companion to `toast_pass`; see `toast_text_pass`
 //!   module docs.
+//! - `profiling` (feature `frame-profiling`, Task 125.4) — the live
+//!   render-work profiling foundation: [`profiling::RenderWorkClass`],
+//!   [`profiling::ChangedRowBucket`], [`profiling::UploadByteCounts`], and
+//!   [`profiling::LiveRenderProfile`]'s pane-frame-token state machine.
+//!   Not yet wired to any renderer/widget call site — see that module's
+//!   docs.
+//! - `gpu_profiling` (feature `gpu-profiling`, Task 125.8) — the per-pane
+//!   asynchronous GPU timestamp-query adapter,
+//!   [`gpu_profiling::PaneGpuTimingProfile`], built over 125.7's
+//!   `freminal_windowing::gpu_profiling::GpuQueryRing`. Wired into
+//!   [`gpu::TerminalRenderer`]'s init/draw/destroy lifecycle; see that
+//!   module's docs for the exact upload/draw timestamp boundaries.
 
 pub mod errors;
 pub mod gl_facade;
+pub mod gl_init_state;
 pub mod gpu;
+#[cfg(feature = "gpu-profiling")]
+pub mod gpu_profiling;
 #[cfg(feature = "gl-recording")]
 pub mod headless;
 #[cfg(all(test, feature = "gl-recording"))]
 mod headless_workloads;
+#[cfg(all(test, feature = "gl-recording"))]
+mod init_failure_tests;
 // Phase 2 is Linux-only, and the `target_os` gate is load-bearing rather
 // than tidiness: these modules depend on
 // `freminal_windowing::gl_context_offscreen`, which is itself
@@ -45,12 +69,17 @@ mod headless_workloads;
 pub mod pixel_golden;
 #[cfg(all(target_os = "linux", feature = "gl-pixel"))]
 pub mod pixel_harness;
+#[cfg(feature = "frame-profiling")]
+pub mod profiling;
+pub mod retire;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;
 pub mod vertex;
 
+pub use gl_init_state::GlInitState;
 pub use gpu::{TerminalRenderer, WindowPostRenderer};
+pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};
 pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 pub use vertex::{

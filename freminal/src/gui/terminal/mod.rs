@@ -16,6 +16,9 @@ pub(crate) mod pty_mouse_report;
 pub(crate) mod search_damage;
 pub(crate) mod widget;
 
+#[cfg(all(test, feature = "gl-recording"))]
+mod render_state_retire_tests;
+
 pub use widget::FreminalTerminalWidget;
 pub use widget::SplitBorderHover;
 pub use widget::{PaneRenderCache, RenderState, new_render_state};

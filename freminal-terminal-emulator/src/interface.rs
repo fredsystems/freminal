@@ -55,6 +55,7 @@ use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
 use crossbeam_channel::{Receiver, unbounded};
+use freminal_buffer::buffer::CommandBlocksGeneration;
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
 use freminal_common::buffer_states::command_block::CommandBlock;
@@ -64,6 +65,7 @@ use freminal_common::buffer_states::modes::{
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
     mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 
 use freminal_common::{args::Args, buffer_states::tchar::TChar, send_or_log};
 
@@ -197,6 +199,14 @@ pub struct TerminalEmulator {
     /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
     /// directly into the snapshot with a refcount bump — no Vec allocation.
     previous_visible_snap: VisibleSnap,
+    /// The `Arc<[CommandBlock]>` handed to the last snapshot, with the buffer's
+    /// command-block generation it was built from.
+    ///
+    /// Building the slice clones every block (heap `String`s included), which
+    /// is far costlier than the rest of a clean snapshot at the 10 000-block
+    /// cap, while the blocks change only on OSC 133 events and pruning. While
+    /// the generation is unchanged the same `Arc` is handed out again.
+    command_blocks_cache: Option<(CommandBlocksGeneration, Arc<[CommandBlock]>)>,
     /// The flatten cache for the buffer that is **not** currently active.
     ///
     /// On a primary↔alternate switch we cannot reuse the active
@@ -289,6 +299,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -320,6 +331,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -402,6 +414,7 @@ impl TerminalEmulator {
             pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -441,16 +454,17 @@ impl TerminalEmulator {
 
     /// Extract text from the full buffer for a selection range.
     ///
-    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
+    /// Rows are stable logical [`RowNumber`]s and columns are 0-indexed.
     /// When `is_block` is `true` the same `start_col`..=`end_col` column range
     /// is extracted from every row, producing a rectangular block of text.
-    /// Delegates to `Buffer::extract_text` or `Buffer::extract_block_text`.
+    /// Delegates to `Buffer::extract_text` or `Buffer::extract_block_text`,
+    /// which clamp a start row that has been evicted to the oldest retained row.
     #[must_use]
     pub fn extract_selection_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
         is_block: bool,
     ) -> String {
@@ -841,16 +855,9 @@ impl TerminalEmulator {
 
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
-        let prompt_rows = Arc::<[usize]>::from(self.internal.handler.buffer().prompt_rows());
-        let command_blocks: Arc<[CommandBlock]> = self
-            .internal
-            .handler
-            .buffer()
-            .command_blocks()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
+        let row_base = self.internal.handler.buffer().row_base();
+        let prompt_rows = Arc::<[RowNumber]>::from(self.internal.handler.buffer().prompt_rows());
+        let command_blocks = self.snapshot_command_blocks();
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
@@ -954,6 +961,7 @@ impl TerminalEmulator {
             shell_histfile,
             ftcs_state,
             last_exit_code,
+            row_base,
             prompt_rows,
             command_blocks,
             theme,
@@ -963,6 +971,27 @@ impl TerminalEmulator {
             cursor_color_override: self.internal.handler.cursor_color_override(),
             pointer_shape: self.internal.handler.pointer_shape(),
         }
+    }
+
+    /// The command blocks for a snapshot, reusing the previous slice when the
+    /// buffer's command-block generation has not moved. See
+    /// [`Self::command_blocks_cache`].
+    fn snapshot_command_blocks(&mut self) -> Arc<[CommandBlock]> {
+        let buffer = self.internal.handler.buffer();
+        let generation = buffer.command_blocks_generation();
+        if let Some((cached, blocks)) = &self.command_blocks_cache
+            && *cached == generation
+        {
+            return Arc::clone(blocks);
+        }
+        let blocks: Arc<[CommandBlock]> = buffer
+            .command_blocks()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        self.command_blocks_cache = Some((generation, Arc::clone(&blocks)));
+        blocks
     }
 
     /// Flatten the visible rows into
@@ -1137,7 +1166,7 @@ mod tests {
     fn extract_selection_text_empty_buffer() {
         let emu = make_headless();
         // An all-zero range on an empty buffer should return empty or whitespace.
-        let text = emu.extract_selection_text(0, 0, 0, 0, false);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::ZERO, 0, false);
         // We just care that it doesn't panic; the exact content depends on buffer state.
         let _ = text;
     }
@@ -1148,10 +1177,65 @@ mod tests {
         // Write "Hello" into the buffer.
         emu.handle_incoming_data(b"Hello");
         // Extract across row 0 columns 0-4.
-        let text = emu.extract_selection_text(0, 0, 0, 4, false);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::ZERO, 4, false);
         assert!(
             text.contains("Hello"),
             "expected 'Hello' in selection, got: {text:?}"
+        );
+    }
+
+    /// Task 125.17: a selection named by logical row numbers keeps copying the
+    /// same text after rows have been evicted from the front, and a start row
+    /// that has itself been evicted clamps to the oldest retained row.
+    #[test]
+    fn extract_selection_text_follows_rows_across_capacity_eviction() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        let _ = emu.set_win_size(20, 5, 8, 16);
+        for i in 0..8 {
+            emu.handle_incoming_data(format!("old {i}\r\n").as_bytes());
+        }
+        // Nothing is evicted yet; name the rows holding "old 6" and "old 7".
+        let find = |emu: &TerminalEmulator, text: &str| -> RowNumber {
+            let buf = emu.internal.handler.buffer();
+            (0..buf.rows().len())
+                .map(|i| buf.row_number_at(i))
+                .find(|&n| buf.extract_text(n, 0, n, 19) == text)
+                .unwrap_or_else(|| panic!("{text:?} is not in the buffer"))
+        };
+        let (first, last) = (find(&emu, "old 6"), find(&emu, "old 7"));
+        let before = emu.extract_selection_text(first, 0, last, 19, false);
+        assert_eq!(before, "old 6\nold 7");
+
+        // Push at capacity until the base has advanced, with the rows retained.
+        let mut evicted_base = None;
+        for i in 0..4 {
+            emu.handle_incoming_data(format!("new {i}\r\n").as_bytes());
+            let base = emu.build_snapshot().row_base;
+            if base > RowNumber::ZERO {
+                evicted_base = Some(base);
+                break;
+            }
+        }
+        let base = evicted_base.unwrap_or_else(|| {
+            for i in 4..8 {
+                emu.handle_incoming_data(format!("new {i}\r\n").as_bytes());
+            }
+            emu.build_snapshot().row_base
+        });
+        assert!(base > RowNumber::ZERO, "setup: rows must have been evicted");
+        assert!(
+            base <= first,
+            "setup: the selected rows must still be retained"
+        );
+
+        let after = emu.extract_selection_text(first, 0, last, 19, false);
+        assert_eq!(after, before, "same logical rows, same copied text");
+
+        // A start row that was evicted clamps to the oldest retained row.
+        let clamped = emu.extract_selection_text(RowNumber::ZERO, 4, last, 19, false);
+        assert!(
+            !clamped.is_empty() && clamped.ends_with("old 7"),
+            "evicted start must clamp, not drop the copy: {clamped:?}"
         );
     }
 
@@ -1161,7 +1245,7 @@ mod tests {
         // Write two lines.
         emu.handle_incoming_data(b"AB\r\nCD");
         // Block selection on column 0 only, rows 0-1.
-        let text = emu.extract_selection_text(0, 0, 1, 0, true);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::new(1), 0, true);
         // Block should give us column 0 from each row.
         let _ = text; // Content may vary; just verify no panic.
     }
@@ -2013,6 +2097,167 @@ mod tests {
             Some(0),
             "exit_code must be Some(0) — OscValue token must not be dropped"
         );
+    }
+
+    // ── logical row numbers in TerminalSnapshot (Task 125.14) ─────────────────
+
+    #[test]
+    fn build_snapshot_row_base_is_zero_before_any_eviction() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello\r\n");
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.row_base, RowNumber::ZERO);
+        assert_eq!(snap.row_number_at(0), RowNumber::ZERO);
+        assert_eq!(snap.retained_index_of(RowNumber::ZERO), Some(0));
+    }
+
+    #[test]
+    fn build_snapshot_row_base_advances_with_eviction_and_marks_stay_attached() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        // A prompt mark and block on a row that survives the later eviction.
+        for i in 0..20 {
+            emu.handle_incoming_data(format!("pad {i}\r\n").as_bytes());
+        }
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"prompt$ \r\n");
+        let first = emu.build_snapshot();
+        assert_eq!(first.row_base, RowNumber::ZERO);
+        assert_eq!(first.prompt_rows.len(), 1);
+        let mark = first.prompt_rows[0];
+        let Some(index_before) = first.retained_index_of(mark) else {
+            panic!("the mark must resolve before any eviction");
+        };
+
+        // Push past the scrollback limit so rows are evicted from the front,
+        // stopping as soon as the first few have gone (the mark's row, well
+        // below the top, must survive).
+        let evicted = (0..500).find_map(|i| {
+            emu.handle_incoming_data(format!("out {i}\r\n").as_bytes());
+            let snap = emu.build_snapshot();
+            (snap.row_base > RowNumber::ZERO).then_some(snap)
+        });
+        let Some(snap) = evicted else {
+            panic!("500 lines at a scrollback limit of 10 must evict rows");
+        };
+
+        assert!(
+            snap.row_base > RowNumber::ZERO,
+            "at capacity the snapshot's row base must advance (total_rows is frozen)"
+        );
+        assert_eq!(
+            snap.prompt_rows[0], mark,
+            "the exported number is unchanged"
+        );
+        let Some(index_after) = snap.retained_index_of(mark) else {
+            panic!("the mark's row is still retained");
+        };
+        assert!(index_after < index_before, "its retained index moved down");
+        assert_eq!(snap.command_blocks[0].prompt_start_row, mark);
+    }
+
+    #[test]
+    fn build_snapshot_evicted_mark_no_longer_resolves() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(5));
+        let before = emu.build_snapshot();
+        let first_row = before.row_number_at(0);
+        for i in 0..500 {
+            emu.handle_incoming_data(format!("line {i}\r\n").as_bytes());
+        }
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.retained_index_of(first_row), None);
+        assert!(snap.row_base > first_row);
+    }
+
+    // ── command-block slice reuse (Task 125 review B2) ──────────────────────
+
+    /// Drive one `A -> B -> C -> D` cycle with the given correlation id.
+    fn run_cycle(emu: &mut TerminalEmulator, fid: &str, code: i32) {
+        for marker in ["A", "B", "C"] {
+            emu.handle_incoming_data(
+                format!("\x1b]133;{marker};freminal=1;fid={fid}\x07").as_bytes(),
+            );
+        }
+        emu.handle_incoming_data(format!("\x1b]133;D;{code};freminal=1;fid={fid}\x07").as_bytes());
+    }
+
+    #[test]
+    fn unchanged_command_blocks_reuse_the_same_arc() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        let first = emu.build_snapshot();
+        // Text changes, blocks do not: the slice must not be rebuilt.
+        emu.handle_incoming_data(b"hello");
+        let second = emu.build_snapshot();
+        assert!(
+            Arc::ptr_eq(&first.command_blocks, &second.command_blocks),
+            "an unchanged block list must be shared, not re-cloned"
+        );
+        assert_eq!(second.command_blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_new_command_block_rebuilds_the_slice() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        let first = emu.build_snapshot();
+        run_cycle(&mut emu, "t2", 0);
+        let second = emu.build_snapshot();
+        assert!(!Arc::ptr_eq(&first.command_blocks, &second.command_blocks));
+        assert_eq!(second.command_blocks.len(), 2);
+    }
+
+    /// Every marker edits an existing block; the snapshot must show the edit,
+    /// not the cached copy from before it.
+    #[test]
+    fn each_marker_that_edits_a_block_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=e1\x07");
+        let after_a = emu.build_snapshot();
+        assert!(after_a.command_blocks[0].command_start_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;B;freminal=1;fid=e1\x07");
+        let after_b = emu.build_snapshot();
+        assert!(after_b.command_blocks[0].command_start_row.is_some());
+        assert!(after_b.command_blocks[0].output_start_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;C;freminal=1;fid=e1\x07");
+        let after_c = emu.build_snapshot();
+        assert!(after_c.command_blocks[0].output_start_row.is_some());
+        assert!(after_c.command_blocks[0].end_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;D;7;freminal=1;fid=e1\x07");
+        let after_d = emu.build_snapshot();
+        assert_eq!(after_d.command_blocks[0].exit_code, Some(7));
+        assert!(after_d.command_blocks[0].end_row.is_some());
+    }
+
+    #[test]
+    fn pruning_blocks_with_evicted_rows_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        let _ = emu.set_win_size(20, 5, 8, 16);
+        run_cycle(&mut emu, "old", 0);
+        let before = emu.build_snapshot();
+        assert_eq!(before.command_blocks.len(), 1);
+        // Push the block's rows out of the 10-row scrollback.
+        for _ in 0..40 {
+            emu.handle_incoming_data(b"filler\r\n");
+        }
+        let after = emu.build_snapshot();
+        assert!(after.row_base > before.row_base, "setup: rows were evicted");
+        assert!(
+            after.command_blocks.is_empty(),
+            "the evicted block must not linger in a cached slice"
+        );
+    }
+
+    #[test]
+    fn clearing_the_screen_over_a_block_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        assert_eq!(emu.build_snapshot().command_blocks.len(), 1);
+        // ED 2 drops blocks anchored on the visible screen.
+        emu.handle_incoming_data(b"\x1b[2J");
+        assert!(emu.build_snapshot().command_blocks.is_empty());
     }
 
     #[test]

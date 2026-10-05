@@ -27,10 +27,9 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
-use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::geometry::{Point, Rect, point};
 use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
 use super::pty::CommandFinishedEvent;
@@ -144,9 +143,10 @@ pub struct Pane {
     ///
     /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
     /// concatenates scrollback + visible `TChar` data and sends it here.
-    /// The first element of the tuple is `total_rows` at the time the buffer
-    /// was captured, used by the GUI to detect stale responses.
-    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
+    /// The reply carries the buffer extent (row base + row count) at the time
+    /// the corpus was captured, used by the GUI to detect stale responses and
+    /// to number matches.
+    pub search_buffer_rx: Receiver<SearchCorpus>,
 
     /// Signals that this pane's PTY process has exited.
     ///
@@ -1587,6 +1587,7 @@ pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: Point) -> Option<PaneId> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ── should_focus_pane tests (Task 110) ───────────────────────────
 
@@ -1730,8 +1731,7 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) =
-            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
         let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 
@@ -1783,7 +1783,7 @@ mod tests {
         assert_eq!(pane.id, PaneId(5));
         assert_eq!(pane.title, "my pane");
         assert!(!pane.bell_active);
-        assert!(pane.title_stack.is_empty());
+        assert_eq!(pane.title_stack, [] as [String; 0]);
         assert_eq!(pane.view_state.scroll_offset, 0);
         assert!(!pane.echo_off.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -1804,7 +1804,11 @@ mod tests {
     fn push_recent_command_below_cap_appends_in_order() {
         let mut pane = dummy_pane(PaneId(0), "p");
         for _ in 0..5 {
-            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+            pane.push_recent_command(CommandBlock::new_running(
+                RowNumber::ZERO,
+                None,
+                String::new(),
+            ));
         }
         assert_eq!(pane.recent_commands.len(), 5);
     }
@@ -1816,7 +1820,7 @@ mod tests {
         let total = RECENT_COMMANDS_CAP + 10;
         let mut ids = Vec::with_capacity(total);
         for _ in 0..total {
-            let block = CommandBlock::new_running(0, None, String::new());
+            let block = CommandBlock::new_running(RowNumber::ZERO, None, String::new());
             ids.push(block.id);
             pane.push_recent_command(block);
         }
@@ -1843,11 +1847,19 @@ mod tests {
     fn push_recent_command_at_exact_cap_does_not_evict() {
         let mut pane = dummy_pane(PaneId(0), "p");
         for _ in 0..RECENT_COMMANDS_CAP {
-            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+            pane.push_recent_command(CommandBlock::new_running(
+                RowNumber::ZERO,
+                None,
+                String::new(),
+            ));
         }
         assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
         // The next push must evict exactly one entry.
-        pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        pane.push_recent_command(CommandBlock::new_running(
+            RowNumber::ZERO,
+            None,
+            String::new(),
+        ));
         assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
     }
 

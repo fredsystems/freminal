@@ -135,7 +135,7 @@ mod tests {
         let mut out = Vec::new();
         let result = ansi_parser_inner_csi_finished_decslrm(b"abc", &mut out);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 
     #[test]
@@ -143,6 +143,6 @@ mod tests {
         let mut out = Vec::new();
         let result = ansi_parser_inner_csi_finished_decslrm(b"1;2;3", &mut out);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 }

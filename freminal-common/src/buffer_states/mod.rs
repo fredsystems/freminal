@@ -39,6 +39,8 @@ pub mod osc;
 pub mod osc_notify_99;
 /// `PointerShape` — typed cursor shape set by OSC 22.
 pub mod pointer_shape;
+/// `RowNumber` — a stable logical row identifier that survives scrollback eviction.
+pub mod row_number;
 /// Sixel graphics types.
 pub mod sixel;
 /// `TChar` — a single terminal character with optional wide-character metadata.

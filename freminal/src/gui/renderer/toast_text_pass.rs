@@ -66,6 +66,7 @@ use super::super::atlas::{GlyphAtlas, GlyphKey};
 use super::super::font_manager::{FontManager, GlyphStyle};
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
 use super::gl_facade::Gl;
+use super::gl_init_state::GlInitState;
 use super::gpu::{
     compile_program, gl_f32_i32, gl_i32, setup_fg_inst_attribs, sync_atlas_to_texture, upload_verts,
 };
@@ -164,8 +165,8 @@ impl ToastTextMetrics {
 /// text runs, and [`Self::upload_and_draw`] from the **GL callback** with
 /// the returned instance buffer.
 pub struct ToastTextRenderer {
-    /// Whether GPU resources have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
     /// Compiled + linked foreground shader program (shared source with the
     /// terminal grid's foreground pass; see `fg.vert` / `fg.frag`).
     program: Option<glow::Program>,
@@ -202,7 +203,7 @@ impl ToastTextRenderer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             program: None,
             vao: None,
             unit_quad_vbo: None,
@@ -215,23 +216,61 @@ impl ToastTextRenderer {
         }
     }
 
-    /// Return whether GPU resources have been created.
+    /// Return whether `init` succeeded and the pass can draw.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller should attempt [`Self::init`] now: `false` after
+    /// a failed `init`, which is latched rather than retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this pass currently owns any GL object.
+    #[must_use]
+    pub const fn holds_gl_objects(&self) -> bool {
+        self.program.is_some()
+            || self.vao.is_some()
+            || self.unit_quad_vbo.is_some()
+            || self.inst_vbo[0].is_some()
+            || self.inst_vbo[1].is_some()
+            || self.atlas_texture.is_some()
     }
 
     /// Create all GPU resources for the toast text pass.
     ///
-    /// Must be called exactly once, from within a `glow` context (e.g.
-    /// inside a `PaintCallback`).
+    /// Must be called from within a `glow` context (e.g. inside a
+    /// `PaintCallback`). A failure releases everything this attempt created
+    /// and is latched ([`GlInitState::Failed`]); see
+    /// [`Self::should_attempt_init`].
     ///
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if
     /// any GL object creation fails.
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_objects(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Create the program, VAO, VBOs and atlas texture, storing each handle as
+    /// it is created so a failure can be cleaned up.
+    fn init_objects(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "toast_text")?;
+        self.program = Some(program);
 
         let u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         let u_atlas = unsafe { gl.get_uniform_location(program, "u_atlas") };
@@ -240,18 +279,22 @@ impl ToastTextRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("toast_text VAO", e))?
         };
+        self.vao = Some(vao);
         let unit_quad_vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("toast_text unit-quad VBO", e))?
         };
+        self.unit_quad_vbo = Some(unit_quad_vbo);
         let inst_vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("toast_text instance VBO 0", e))?
         };
+        self.inst_vbo[0] = Some(inst_vbo0);
         let inst_vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("toast_text instance VBO 1", e))?
         };
+        self.inst_vbo[1] = Some(inst_vbo1);
 
         // Upload the static unit quad (never changes).
         let unit_quad_bytes = unsafe {
@@ -281,6 +324,7 @@ impl ToastTextRenderer {
                     message: e,
                 })?
         };
+        self.atlas_texture = Some(atlas_texture);
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(atlas_texture));
             gl.tex_parameter_i32(
@@ -306,14 +350,8 @@ impl ToastTextRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
 
-        self.program = Some(program);
-        self.vao = Some(vao);
-        self.unit_quad_vbo = Some(unit_quad_vbo);
-        self.inst_vbo = [Some(inst_vbo0), Some(inst_vbo1)];
-        self.atlas_texture = Some(atlas_texture);
         self.u_viewport = u_viewport;
         self.u_atlas = u_atlas;
-        self.initialized = true;
 
         Ok(())
     }
@@ -536,7 +574,7 @@ impl ToastTextRenderer {
         viewport_w: i32,
         viewport_h: i32,
     ) {
-        if !self.initialized {
+        if !self.init_state.is_ready() {
             error!("ToastTextRenderer::upload_and_draw() called before init()");
             return;
         }
@@ -589,13 +627,18 @@ impl ToastTextRenderer {
 
     /// Free all GPU resources.
     ///
-    /// Should be called when the widget/renderer is destroyed. Mirrors
-    /// [`super::gpu::TerminalRenderer::destroy`]'s shape.
+    /// Called at window teardown by [`super::retire::WindowGlTeardown::run`]
+    /// (the window's GL context current); the pass lives exactly as long as
+    /// its window. Mirrors [`super::gpu::TerminalRenderer::destroy`]'s shape.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
-        if !self.initialized {
-            return;
-        }
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
 
+    /// Delete every GL object this pass owns, whatever its init state, so a
+    /// partially failed `init` is cleaned up too (Task 125.C16). Idempotent:
+    /// every handle is `take()`n, so a clean pass issues no GL call.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
@@ -615,8 +658,6 @@ impl ToastTextRenderer {
                 gl.delete_texture(t);
             }
         }
-
-        self.initialized = false;
     }
 }
 
@@ -729,7 +770,7 @@ mod tests {
     fn build_instances_empty_run_slice_produces_no_instances() {
         let mut renderer = ToastTextRenderer::new();
         let mut fm = test_font_manager();
-        assert!(renderer.build_instances(&[], &mut fm).is_empty());
+        assert_eq!(renderer.build_instances(&[], &mut fm), []);
     }
 
     #[test]
@@ -737,7 +778,7 @@ mod tests {
         let mut renderer = ToastTextRenderer::new();
         let mut fm = test_font_manager();
         let instances = renderer.build_instances(&[sample_run("")], &mut fm);
-        assert!(instances.is_empty());
+        assert_eq!(instances, []);
     }
 
     #[test]

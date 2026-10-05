@@ -483,6 +483,7 @@ mod tests {
     use crate::gui::pty::CommandFinishedEvent;
     use crate::gui::tabs::{Tab, TabId, TabManager};
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
     use freminal_terminal_emulator::io::WindowCommand;
@@ -599,10 +600,10 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 0,
-            command_start_row: Some(0),
-            output_start_row: Some(0),
-            end_row: Some(1),
+            prompt_start_row: RowNumber::ZERO,
+            command_start_row: Some(RowNumber::new(0)),
+            output_start_row: Some(RowNumber::new(0)),
+            end_row: Some(RowNumber::new(1)),
             exit_code,
             cwd: None,
             started_at: executed,

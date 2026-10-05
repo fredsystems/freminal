@@ -12,20 +12,23 @@ use crate::gui::{
     mouse::PreviousMouseState,
     published_frame_state::PanePointerReportInputs,
     shaping::ShapedLine,
-    view_state::{CellCoord, ViewState},
+    view_state::{LogicalCell, ViewState},
 };
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{
-        command_block::CommandStatus, pointer_shape::PointerShape, tchar::TChar, url::Url,
+        command_block::CommandStatus, pointer_shape::PointerShape, row_number::RowNumber,
+        tchar::TChar, url::Url,
     },
     config::Config,
     send_or_log,
     themes::ThemePalette,
 };
 use freminal_terminal_emulator::{
-    InlineImage, LineWidth, io::InputEvent, snapshot::TerminalSnapshot,
+    InlineImage, LineWidth,
+    io::{InputEvent, SearchCorpus},
+    snapshot::TerminalSnapshot,
 };
 
 use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
@@ -35,8 +38,8 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
-            TerminalRenderer, WindowPostRenderer, build_background_instances,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, GlRetireQueue, ImageDrawEntry,
+            MatchHighlight, TerminalRenderer, WindowPostRenderer, build_background_instances,
             build_cursor_verts_only, build_foreground_instances, build_image_verts, gl_facade::Gl,
         },
         search::{
@@ -58,6 +61,19 @@ use super::{
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 use egui_glow::CallbackFn;
 use std::sync::{Arc, Mutex};
+
+// Task 125.5: live render-work profiling is entirely absent from a default
+// build -- no field, no branch -- see `RenderState::live_profile` and its
+// call sites below, all gated on the same feature.
+#[cfg(feature = "frame-profiling")]
+use super::super::renderer::profiling::{
+    LiveRenderProfile, PaneFrameToken, RawRebuildDecision, ReevaluatedRebuild, UploadByteCounts,
+    resolve_render_work_class,
+};
+// Task 125.8: asynchronous terminal GPU upload/draw timing is entirely
+// absent from a default build -- see `gui::renderer::gpu_profiling`'s doc.
+#[cfg(feature = "gpu-profiling")]
+use super::super::renderer::gpu_profiling::LOG_TARGET as GPU_TIMING_LOG_TARGET;
 use std::time::Duration;
 use tracing::error;
 
@@ -276,7 +292,8 @@ impl FoldLayout {
             freminal_common::buffer_states::command_block::CommandBlockId,
         >,
     ) -> Self {
-        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let raw_fold_ranges =
+            compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
         let flat_window_start =
             super::coords::visible_window_start(snap).saturating_sub(snap.window_extra_rows);
         let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
@@ -344,6 +361,7 @@ fn gutter_block_id_at_pos(
             let buffer_row = layout.flat_window_start + snap_row;
             crate::gui::command_blocks::gutter_block_for_row(
                 &snap.command_blocks,
+                snap.row_base,
                 buffer_row,
                 running_extent,
             )
@@ -428,11 +446,14 @@ pub(super) fn compute_command_block_hover_rows(
         super::coords::visible_window_start(snap) + snap.term_height.saturating_sub(1);
     let block = crate::gui::command_blocks::gutter_block_for_row(
         &snap.command_blocks,
+        snap.row_base,
         buffer_row,
         running_extent,
     )?;
-    let start = block.command_start_row?;
-    let end = block.end_row.unwrap_or(running_extent);
+    // The block stores logical row numbers; resolve them to buffer indices.
+    let block_rows = crate::gui::command_blocks::BlockRows::resolve(block, snap.row_base)?;
+    let start = block_rows.command_start?;
+    let end = block_rows.end.unwrap_or(running_extent);
     // Clip [start, end] to the flattened window, then convert each endpoint
     // into screen-row space.  If the entire block sits inside a fold or is
     // scrolled off the top, None.
@@ -589,7 +610,7 @@ pub(super) fn handle_scrollbar(
     // Position: scroll_offset 0 = bottom, max = top.
     let scrollable_track = track_height - thumb_height;
     let position_fraction = scroll_offset.approx_as::<f32>().unwrap_or(0.0) / max_f;
-    let thumb_top = track_top + scrollable_track * (1.0 - position_fraction);
+    let thumb_top = scrollable_track.mul_add(1.0 - position_fraction, track_top);
 
     let thumb_rect = Rect::from_min_max(
         Pos2::new(track_left, thumb_top),
@@ -899,8 +920,8 @@ enum ContextMenuAction {
     /// Copy the output range `[start_row, end_row]` of the command block
     /// the right-click occurred inside, full-width per row.
     CopyCommandOutput {
-        start_row: usize,
-        end_row: usize,
+        start_row: RowNumber,
+        end_row: RowNumber,
     },
 }
 
@@ -996,8 +1017,16 @@ fn render_context_menu_area(
 ) -> egui::InnerResponse<()> {
     let has_selection = view_state.selection.has_selection();
 
+    // The right-clicked cell is stored as a logical row, so it keeps pointing
+    // at the clicked text even if the menu stays open while rows are evicted.
+    // Resolve it against this frame's snapshot; a cell whose row has since
+    // been evicted resolves to nothing and offers no URL / command entries.
+    let context_cell = view_state
+        .context_menu_cell
+        .and_then(|cell| cell.resolve(snap));
+
     // Look up whether the right-clicked cell sits inside a URL span.
-    let url_under_cursor = view_state.context_menu_cell.and_then(|cell| {
+    let url_under_cursor = context_cell.and_then(|cell| {
         super::coords::url_at_cell(
             cell.row,
             cell.col,
@@ -1012,12 +1041,11 @@ fn render_context_menu_area(
     // OSC 133 command block.  Returns `(start_row, end_row)` of the
     // block's output region if the click was inside a block with a
     // captured C marker and a recorded D marker.
-    let command_output_range = view_state.context_menu_cell.and_then(|cell| {
+    let command_output_range = context_cell.and_then(|cell| {
         let block = super::input::find_block_containing_row(snap, cell.row)?;
-        match (block.output_start_row, block.end_row) {
-            (Some(start), Some(end)) if start <= end => Some((start, end)),
-            _ => None,
-        }
+        let (start, end) = super::input::block_output_range(block, snap.row_base)?;
+        // The menu action carries stable row numbers, not indices.
+        Some((snap.row_number_at(start), snap.row_number_at(end)))
     });
 
     egui::Area::new(area_id)
@@ -1170,23 +1198,7 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::SelectAll => {
             // Select from the first visible cell to the last visible cell.
-            let window_start = super::coords::visible_window_start(snap);
-            let last_row = window_start + snap.height.saturating_sub(1);
-            // Find the last column on the last visible row.
-            let last_col = crate::gui::view_state::line_boundaries(
-                &snap.visible_chars,
-                snap.height.saturating_sub(1),
-            )
-            .1;
-            view_state.selection.anchor = Some(CellCoord {
-                col: 0,
-                row: window_start,
-            });
-            view_state.selection.end = Some(CellCoord {
-                col: last_col,
-                row: last_row,
-            });
-            view_state.selection.is_selecting = false;
+            view_state.selection.select_all(snap);
         }
         ContextMenuAction::OpenUrl(url) => {
             let url_str = url;
@@ -1319,6 +1331,37 @@ pub struct RenderState {
     /// `Some(PendingGpuOp::Clear)` → clear the current image.
     /// `None` → no pending change this frame.
     pub(super) pending_bg_image: Option<PendingGpuOp<std::path::PathBuf>>,
+    /// Live, feature-gated render-work profile for this pane (Task 125.4's
+    /// state machine; Task 125.5 wires `show()` and this pane's
+    /// `PaintCallback` into it). Both need to reach the SAME instance --
+    /// `show()` computes the raw/resolved classification and starts a
+    /// fresh token every call; the paint callback finalizes it -- and
+    /// `RenderState` is already the `Arc<Mutex<...>>` both share (see
+    /// this struct's own threading-invariant doc above). Entirely absent
+    /// from a default build.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) live_profile: LiveRenderProfile,
+    /// The window's retired-renderer queue (Task 125.C2), cloned from
+    /// `window_post` at construction.
+    ///
+    /// `Drop` has no GL context, so [`Drop for RenderState`](#impl-Drop-for-RenderState)
+    /// moves `renderer` into this queue instead of destroying it; the window
+    /// drains the queue where its context is current. See
+    /// `gui::renderer::retire` for the design and invariants.
+    retire_queue: GlRetireQueue,
+}
+
+/// Retire this pane's GL objects when the pane's render state is discarded.
+///
+/// Runs when the **last** `Arc<Mutex<RenderState>>` clone is dropped. The
+/// pane's paint callback captures a clone, so a renderer an in-flight paint
+/// callback is still drawing through is never retired early; it is retired
+/// only after the frame that used it has been painted and its callbacks
+/// released. Touches no GL (see [`GlRetireQueue::retire`]).
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        self.retire_queue.retire(std::mem::take(&mut self.renderer));
+    }
 }
 
 impl RenderState {
@@ -1350,6 +1393,13 @@ impl RenderState {
 /// All panes in the same session share one instance.
 #[must_use]
 pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mutex<RenderState>> {
+    // Take the window's retire queue handle once, here, so `Drop` never has to
+    // lock `window_post` (which could be held, or the pane dropped from inside
+    // a lock scope).
+    let retire_queue = window_post
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire_queue();
     Arc::new(Mutex::new(RenderState {
         renderer: TerminalRenderer::new(),
         atlas: GlyphAtlas::default(),
@@ -1367,7 +1417,82 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
         window_post,
         pending_bg_image: None,
+        #[cfg(feature = "frame-profiling")]
+        live_profile: LiveRenderProfile::new(),
+        retire_queue,
     }))
+}
+
+/// Emit the Task 125.5/125.6 live render-work profile's periodic flush
+/// summary, if (and only if) `profile` currently has one pending.
+///
+/// Two call sites in [`FreminalTerminalWidget::show`] invoke this: right
+/// after `show()`'s own [`LiveRenderProfile::start`] call (which may have
+/// just finalized a stale, superseded token as unpainted and crossed a
+/// [`LiveRenderProfile::FLUSH_EVERY`] boundary doing so), and inside the
+/// pane's `PaintCallback` right after [`LiveRenderProfile::complete`]
+/// (the normal case, where the boundary is crossed by a painted
+/// completion). [`LiveRenderProfile::take_flush_signal`] is the single
+/// stateful, one-shot source of truth both share, so whichever call site
+/// happens to run first after a crossing consumes the signal and actually
+/// logs; the other observes nothing pending and logs nothing -- this
+/// helper exists precisely so that "check the signal, and log if it's
+/// set" is written once rather than duplicated at both call sites (and so
+/// the two can never drift into logging the same boundary twice or
+/// checking it with different field sets).
+///
+/// Task 125.6 extends the line with real upload-byte totals: the overall
+/// total, the per-buffer-category breakdown [`LiveRenderProfile::upload_totals`]
+/// owns, and the per-resolved-class byte distribution
+/// [`LiveRenderProfile::class_upload_totals`] owns -- dividing the latter
+/// by the matching `resolved_*` count above gives an average
+/// bytes-per-frame figure per class, which is the reconciliation this
+/// pair of fields exists to make possible.
+#[cfg(feature = "frame-profiling")]
+fn maybe_log_live_render_profile_flush(
+    profile: &mut LiveRenderProfile,
+    pane_id: crate::gui::panes::PaneId,
+) {
+    if !profile.take_flush_signal() {
+        return;
+    }
+    let uploads = profile.upload_totals();
+    let class_bytes = profile.class_upload_totals();
+    tracing::debug!(
+        target: LiveRenderProfile::LOG_TARGET,
+        pane_id = ?pane_id,
+        painted = profile.painted_count(),
+        unpainted = profile.unpainted_count(),
+        observations = profile.observation_count(),
+        raw_cursor_only = profile.raw_counts().cursor_only,
+        raw_bounded = profile.raw_counts().bounded,
+        raw_reevaluate_full_rebuild = profile.raw_counts().reevaluate_full_rebuild,
+        resolved_reuse = profile.class_counts().reuse,
+        resolved_cursor_only = profile.class_counts().cursor_only,
+        resolved_bounded = profile.class_counts().bounded,
+        resolved_full = profile.class_counts().full,
+        changed_row_histogram = ?profile.row_bucket_counts(),
+        upload_bytes_total = uploads.total(),
+        upload_bytes_background_instance_vbo = uploads.background_instance_vbo_bytes,
+        upload_bytes_foreground_instance_vbo = uploads.foreground_instance_vbo_bytes,
+        upload_bytes_decoration_vbo = uploads.decoration_vbo_bytes,
+        upload_bytes_image_vertex_vbo = uploads.image_vertex_vbo_bytes,
+        upload_bytes_image_texture = uploads.image_texture_bytes,
+        upload_bytes_atlas_full = uploads.atlas_full_bytes,
+        upload_bytes_atlas_subrect = uploads.atlas_subrect_bytes,
+        upload_bytes_by_class_reuse = class_bytes.reuse,
+        upload_bytes_by_class_cursor_only = class_bytes.cursor_only,
+        upload_bytes_by_class_bounded = class_bytes.bounded,
+        upload_bytes_by_class_full = class_bytes.full,
+        "live render-work profile (task 125.5/125.6): cumulative raw \
+         VertexRebuild decisions vs. resolved render-work class, the \
+         changed-row histogram, and real per-buffer-category and \
+         per-resolved-class upload-byte totals, for this pane since its \
+         RenderState was created -- flushed every \
+         LiveRenderProfile::FLUSH_EVERY finalized observations, whichever \
+         of `start`'s stale-token sweep or the paint callback's \
+         `complete` happened to cross the boundary"
+    );
 }
 
 /// Per-pane dirty-tracking cache for the terminal render pipeline.
@@ -1436,13 +1561,25 @@ pub struct PaneRenderCache {
     /// are re-resolved against the new palette.
     pub(super) previous_theme: Option<&'static ThemePalette>,
     /// The normalised selection from the last full vertex rebuild, used to
-    /// detect selection changes that require a full rebuild.
-    pub(super) previous_selection: Option<(CellCoord, CellCoord)>,
+    /// detect selection changes that require a full rebuild. Logical row
+    /// numbers (Task 125.17), so it is stable across eviction and scrolling.
+    pub(super) previous_selection: Option<(LogicalCell, LogicalCell)>,
+    /// The selection in snapshot-row space at the last full vertex rebuild:
+    /// `(start_col, start_row, end_col, end_row)` relative to the flattened
+    /// window, as `DirtyTrackingOutcome::screen_selection` reports it
+    /// (Task 125.17).
+    ///
+    /// [`Self::previous_selection`] is stable under eviction, so it cannot
+    /// notice a selection that stayed attached to its text while the window
+    /// slid beneath it and the highlight therefore moved on screen. Comparing
+    /// this window-relative form can. Updated in lockstep with
+    /// [`Self::previous_selection`] and reset everywhere it is.
+    pub(super) previous_screen_selection: Option<(usize, usize, usize, usize)>,
     /// The screen-row span (inclusive, `(min, max)`) the selection occupied
     /// at the last full vertex rebuild, in **screen**-row space, not
-    /// buffer-absolute (Task 124.14b-i).
+    /// logical-row space (Task 124.14b-i).
     ///
-    /// [`Self::previous_selection`] is buffer-absolute and
+    /// [`Self::previous_selection`] holds logical row numbers and
     /// `DirtyTrackingOutcome::screen_selection` is snapshot-row space, so a
     /// bounded-damage union built by naively comparing the two would be
     /// comparing coordinates from two different spaces. Translating the old
@@ -1494,7 +1631,7 @@ pub struct PaneRenderCache {
     /// Despite its name, this is already **screen**-row space:
     /// [`super::frame_dirty::compute_command_block_hover_rows`]'s final step
     /// calls `FoldLayout::rendered_to_screen` before returning. So unlike
-    /// selection -- whose [`Self::previous_selection`] is buffer-absolute and
+    /// selection -- whose [`Self::previous_selection`] is in logical-row space and
     /// needed a dedicated screen-space companion -- this field is unioned
     /// straight into [`build_bounded_damage`] with no conversion and no
     /// second field (Task 124.14b-ii).
@@ -1669,6 +1806,7 @@ impl PaneRenderCache {
             last_rendered_row_epochs: None,
             previous_theme: None,
             previous_selection: None,
+            previous_screen_selection: None,
             previous_selection_screen_rows: None,
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
@@ -2498,7 +2636,7 @@ impl FreminalTerminalWidget {
         cache: &mut PaneRenderCache,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
-        search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
+        search_buffer_rx: &Receiver<SearchCorpus>,
         ui_overlay_open: bool,
         border_drag_active: bool,
         bg_opacity: f32,
@@ -2918,68 +3056,40 @@ impl FreminalTerminalWidget {
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
         let search_error: Option<String> = if view_state.search_state.is_open {
-            // Detect staleness: if total_rows changed, the cached buffer is out
-            // of date and we need a fresh copy from the PTY thread.
-            let total_rows_changed =
-                snap.total_rows != view_state.search_state.last_known_total_rows;
-            if total_rows_changed
-                && view_state.search_state.buffer_request_state
-                    == crate::gui::view_state::BufferRequestState::Idle
+            // Corpus exchange. `step_corpus` accepts whatever the PTY thread
+            // has sent (matches are stable row numbers, so a slightly old
+            // corpus is correct for the rows it holds) and asks for a fresh one
+            // only when the buffer extent has moved on and the last request is
+            // old enough. At scrollback capacity the extent advances with every
+            // evicted row, so a reply that must equal the live extent is never
+            // accepted (Task 125 review S1).
+            let reply = search_buffer_rx.try_iter().last();
+            if view_state
+                .search_state
+                .step_corpus(reply, snap.extent(), time)
+                == crate::gui::view_state::CorpusRequest::Send
+                && let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer)
             {
-                view_state.search_state.cached_full_buffer = None;
-                if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                    error!("Failed to request search buffer from PTY: {e}");
-                } else {
-                    view_state.search_state.buffer_request_state =
-                        crate::gui::view_state::BufferRequestState::Pending;
-                }
-            }
-
-            // Try to receive the full buffer (non-blocking). Drain queued
-            // responses and only accept a buffer whose version matches the
-            // current snapshot — otherwise re-request a fresh copy.
-            if let Some((buffer_total_rows, buf)) = search_buffer_rx.try_iter().last() {
-                view_state.search_state.buffer_request_state =
-                    crate::gui::view_state::BufferRequestState::Idle;
-
-                if buffer_total_rows == snap.total_rows {
-                    view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
-                    view_state.search_state.last_known_total_rows = buffer_total_rows;
-                } else {
-                    // Stale response — discard and re-request.
-                    view_state.search_state.cached_full_buffer = None;
-                    if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                        error!("Failed to request search buffer from PTY: {e}");
-                    } else {
-                        view_state.search_state.buffer_request_state =
-                            crate::gui::view_state::BufferRequestState::Pending;
-                    }
-                }
+                error!("Failed to request search buffer from PTY: {e}");
+                view_state.search_state.corpus_request_failed();
             }
 
             // Run search if query/mode changed or we just got a new buffer.
             if view_state.search_state.needs_refresh() {
-                if let Some(ref buffer) = view_state.search_state.cached_full_buffer {
+                if let (Some(buffer), Some(extent)) = (
+                    view_state.search_state.cached_full_buffer.as_ref(),
+                    view_state.search_state.last_known_extent,
+                ) {
                     let query = view_state.search_state.query.clone();
                     let regex_mode = view_state.search_state.regex_mode;
                     let case_sensitive = view_state.search_state.case_sensitive;
-                    let (found, err) = run_search(&query, regex_mode, case_sensitive, buffer);
-                    view_state.search_state.matches = found;
-                    view_state.search_state.current_match = 0;
-                    view_state.search_state.mark_fresh();
+                    // Corpus row `i` is buffer row `extent.row_base + i`.
+                    let (found, err) =
+                        run_search(&query, regex_mode, case_sensitive, buffer, extent.row_base);
+                    view_state.search_state.replace_matches(found);
                     err
                 } else {
-                    // No cached buffer yet — request one if we haven't already.
-                    if view_state.search_state.buffer_request_state
-                        == crate::gui::view_state::BufferRequestState::Idle
-                    {
-                        if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                            error!("Failed to request search buffer from PTY: {e}");
-                        } else {
-                            view_state.search_state.buffer_request_state =
-                                crate::gui::view_state::BufferRequestState::Pending;
-                        }
-                    }
+                    // No corpus yet: `step_corpus` has already requested one.
                     None
                 }
             } else {
@@ -3049,6 +3159,35 @@ impl FreminalTerminalWidget {
             render_skip.hash(&mut h);
             h.finish()
         };
+
+        // Task 125.5: one live-profiling observation begins per `show()`
+        // call, once the raw/resolved rebuild outcome for THIS frame is
+        // known below. `LiveRenderProfile::start` is given that raw/resolved
+        // classification directly and retains it internally, so only the
+        // resulting token needs to be carried forward to the paint
+        // callback -- see `LiveRenderProfile::complete`'s doc for why it
+        // takes back only the token and uploads, not the classification a
+        // second time.
+        //
+        // Stays `None` on a `skip_draw` frame and permanently on a
+        // non-`frame-profiling` build. `skip_draw` is deliberately NOT
+        // classified into an observation of its own: `evaluate_frame_dirty_state`
+        // never runs on such a frame, so there is no `VertexRebuild`
+        // decision to mirror into a `RawRebuildDecision` -- the pane's
+        // `PaintCallback` (still registered unconditionally below) simply
+        // redraws whatever GPU buffers already exist, which is not CPU
+        // render work this profiler measures. This is the "explicitly
+        // justified" alternative to starting a token for every `show()`
+        // call: forcing a classification here would misrepresent a frame
+        // where no rebuild decision was made at all. Whenever a token IS
+        // started below, the very same `show()` call unconditionally
+        // registers the matching `PaintCallback` a token could complete
+        // (see the registration further down) -- so a started token is
+        // never orphaned by construction; the only way it goes unpainted
+        // is the genuine `FrameDamage::None` case `LiveRenderProfile`'s
+        // module doc describes, which this state machine already handles.
+        #[cfg(feature = "frame-profiling")]
+        let mut profiling_token: Option<PaneFrameToken> = None;
 
         if !snap.skip_draw {
             // See `evaluate_frame_dirty_state`'s doc for the full rationale
@@ -3159,6 +3298,48 @@ impl FreminalTerminalWidget {
                     }
                 }
             };
+
+            // Task 125.5: the raw `VertexRebuild` decision and its
+            // resolved render-work class are both known now -- before
+            // either candidate branch below runs -- so record them into a
+            // fresh profile token here. `ChangedRows::bounded_row_count`
+            // supplies `VertexRebuild::Bounded`'s row count (including the
+            // `ChangedRows::None` zero case); `full_rebuild`'s `Some`/`None`
+            // resolution supplies `ReevaluateFullRebuild`'s outcome.
+            // Profiling reads these already-computed decisions; it does
+            // not recompute or influence them.
+            #[cfg(feature = "frame-profiling")]
+            {
+                let raw = match dirty.rebuild {
+                    VertexRebuild::CursorOnly => RawRebuildDecision::CursorOnly,
+                    VertexRebuild::Bounded => RawRebuildDecision::Bounded {
+                        changed_row_count: dirty.changed_rows.bounded_row_count(),
+                    },
+                    VertexRebuild::ReevaluateFullRebuild => {
+                        RawRebuildDecision::ReevaluateFullRebuild {
+                            resolved: if matches!(full_rebuild, Some(FullRebuildDamage::Full)) {
+                                ReevaluatedRebuild::Full
+                            } else {
+                                ReevaluatedRebuild::Reuse
+                            },
+                        }
+                    }
+                };
+                let class = resolve_render_work_class(raw);
+                let mut guard = render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let token = guard.live_profile.start(raw, class);
+                // The stale-token sweep inside `start` above may have just
+                // finalized a PREVIOUS token as unpainted and crossed a
+                // `FLUSH_EVERY` boundary doing so -- check here, not only
+                // from the paint callback's `complete` call site below, or
+                // that boundary is lost forever (Task 125.5 regression
+                // fix; see `LiveRenderProfile::take_flush_signal`'s doc).
+                maybe_log_live_render_profile_flush(&mut guard.live_profile, pane_id);
+                drop(guard);
+                profiling_token = Some(token);
+            }
 
             if matches!(dirty.rebuild, VertexRebuild::CursorOnly) {
                 // Fast path: build just the cursor quad and stash it.
@@ -3329,11 +3510,13 @@ impl FreminalTerminalWidget {
 
                     // Build search match highlights from the current search state.
                     // Only matches within the flattened window are included, with
-                    // rows converted from buffer-absolute to snapshot-relative.
-                    let win_start = flat_window_start;
+                    // rows converted from logical row numbers to snapshot-relative.
                     let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
-                    let search_highlights_snap: Vec<MatchHighlight> =
-                        matches_to_highlights(&view_state.search_state, win_start, snap_rows);
+                    let search_highlights_snap: Vec<MatchHighlight> = matches_to_highlights(
+                        &view_state.search_state,
+                        snap.row_number_at(flat_window_start),
+                        snap_rows,
+                    );
                     // Translate from snapshot-row space to screen-row space and
                     // drop highlights inside folded ranges or scrolled off the top.
                     let search_highlights: Vec<MatchHighlight> =
@@ -3540,6 +3723,7 @@ impl FreminalTerminalWidget {
                     // advance on a frame that actually drew.
                     let previous_selection_screen_rows = cache.previous_selection_screen_rows;
                     cache.previous_selection = current_selection;
+                    cache.previous_screen_selection = screen_selection;
                     cache.previous_selection_screen_rows = current_selection_screen_rows;
                     cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                     cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
@@ -3709,10 +3893,19 @@ impl FreminalTerminalWidget {
                 let mut rs = render_state_for_cb
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !rs.renderer.initialized()
+                // A failed init is latched (`should_attempt_init` turns false):
+                // it is reported once, through the window's `last_error`
+                // channel, rather than retried and re-logged every frame.
+                if rs.renderer.should_attempt_init()
                     && let Err(e) = rs.renderer.init(gl)
                 {
                     error!("GL init failed: {e}");
+                    rs.window_post
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .last_error = Some(format!("Terminal renderer init failed: {e}"));
+                }
+                if !rs.renderer.initialized() {
                     return;
                 }
 
@@ -3793,6 +3986,16 @@ impl FreminalTerminalWidget {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+                // Task 125.6: exactly the uploads the draw call below
+                // issues, assigned exactly once inside whichever arm runs.
+                // Declared here (rather than a default-initialized `let
+                // mut`) so a future arm added without an assignment fails
+                // to compile instead of silently finalizing with a stale
+                // value. Entirely absent from a default build -- see
+                // `DrawUploadCounts`'s doc in `gui::renderer::gpu`.
+                #[cfg(feature = "frame-profiling")]
+                let frame_uploads: UploadByteCounts;
+
                 if is_cursor_only {
                     // Cursor-only fast path: bg/fg/image are unchanged and
                     // simply redrawn from the last full rebuild's slot.
@@ -3824,6 +4027,38 @@ impl FreminalTerminalWidget {
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
 
+                    // Task 125.6: the `frame-profiling` arm captures
+                    // `draw_with_cursor_only_update`'s returned upload-byte
+                    // measurement (dropping the closure body's trailing
+                    // semicolon makes it the closure's — and so
+                    // `draw_scissored_to_present_region`'s — return
+                    // value); the default arm issues the identical call
+                    // and discards its (unconditionally computed, but
+                    // here-unused) return, exactly as before this
+                    // subtask.
+                    #[cfg(feature = "frame-profiling")]
+                    {
+                        frame_uploads = draw_scissored_to_present_region(gl, region, || {
+                            renderer.draw_with_cursor_only_update(
+                                gl,
+                                atlas,
+                                deco_verts,
+                                bg_len,
+                                fg_len,
+                                img_len,
+                                draw_order,
+                                vp.width_px,
+                                vp.height_px,
+                                cw,
+                                ch,
+                                opacity,
+                                bg_image_opacity,
+                                bg_image_mode,
+                                restore_fbo,
+                            )
+                        });
+                    }
+                    #[cfg(not(feature = "frame-profiling"))]
                     draw_scissored_to_present_region(gl, region, || {
                         renderer.draw_with_cursor_only_update(
                             gl,
@@ -3855,6 +4090,33 @@ impl FreminalTerminalWidget {
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
+                    // Task 125.6: see the `is_cursor_only` arm above for
+                    // why the two cfg arms differ only in whether the
+                    // closure's return value is bound.
+                    #[cfg(feature = "frame-profiling")]
+                    {
+                        frame_uploads = draw_scissored_to_present_region(gl, region, || {
+                            renderer.draw_with_verts(
+                                gl,
+                                atlas,
+                                &rs_ref.bg_instances,
+                                &rs_ref.deco_verts,
+                                &rs_ref.fg_instances,
+                                &rs_ref.image_verts,
+                                &rs_ref.image_draw_order,
+                                &rs_ref.snap_images,
+                                vp.width_px,
+                                vp.height_px,
+                                cw,
+                                ch,
+                                opacity,
+                                bg_image_opacity,
+                                bg_image_mode,
+                                restore_fbo,
+                            )
+                        });
+                    }
+                    #[cfg(not(feature = "frame-profiling"))]
                     draw_scissored_to_present_region(gl, region, || {
                         renderer.draw_with_verts(
                             gl,
@@ -3875,6 +4137,61 @@ impl FreminalTerminalWidget {
                             restore_fbo,
                         );
                     });
+                }
+
+                // Task 125.5/125.6: finalize this frame's live-profiling
+                // observation now that the actual GL draw above has run.
+                // `complete` takes back only the token and the upload
+                // counts -- the raw/resolved classification was already
+                // recorded by `start` above, against this exact token, so
+                // it cannot be reported differently here. `frame_uploads`
+                // is exactly what the draw call issued (Task 125.6): real
+                // per-buffer/per-texture byte counts, not an estimate from
+                // any buffer's length. `profiling_token` is `None` on a
+                // `skip_draw` frame (no rebuild decision was made, so
+                // there is nothing to finalize) and permanently on a
+                // non-`frame-profiling` build; a callback that is never
+                // invoked at all (this closure's body never runs) leaves
+                // its token pending, and the NEXT `show()` call's
+                // `LiveRenderProfile::start` finalizes it as unpainted --
+                // see that type's module doc.
+                #[cfg(feature = "frame-profiling")]
+                if let Some(token) = profiling_token {
+                    rs.live_profile.complete(token, frame_uploads);
+                    // Also checked right after `start()` above -- see that
+                    // call site's comment for why a boundary crossed by
+                    // the stale-token sweep inside `start` would otherwise
+                    // never be logged. `maybe_log_live_render_profile_flush`
+                    // itself only actually logs once per crossed boundary
+                    // (`LiveRenderProfile::take_flush_signal` consumes the
+                    // signal), so calling it from both sites cannot
+                    // produce a duplicate log line.
+                    maybe_log_live_render_profile_flush(&mut rs.live_profile, pane_id);
+                }
+
+                // Task 125.8: log this pane's asynchronous GPU upload/draw
+                // timing flush, if one is due. Independent of
+                // `frame-profiling`/`profiling_token` -- GPU timing samples
+                // are issued and polled unconditionally by the draw call
+                // above whenever `gpu-profiling` is enabled, regardless of
+                // whether this frame also carried a live-render-work
+                // observation.
+                #[cfg(feature = "gpu-profiling")]
+                if let Some(report) = rs.renderer.take_gpu_timing_flush() {
+                    tracing::debug!(
+                        target: GPU_TIMING_LOG_TARGET,
+                        pane_id = ?pane_id,
+                        renderer = %report.renderer_string,
+                        capability = ?report.capability,
+                        upload_ns_total = report.upload_ns_total,
+                        upload_sample_count = report.upload_sample_count,
+                        draw_ns_total = report.draw_ns_total,
+                        draw_sample_count = report.draw_sample_count,
+                        last_latency_frames = report.last_latency_frames,
+                        dropped_sample_count = report.dropped_sample_count,
+                        unavailable_sample_count = report.unavailable_sample_count,
+                        "Task 125.8 terminal GPU timing flush"
+                    );
                 }
             })),
         });
@@ -4021,6 +4338,7 @@ impl FreminalTerminalWidget {
                             let buffer_row = win_start + snap_row;
                             crate::gui::command_blocks::gutter_status_for_row(
                                 &snap.command_blocks,
+                                snap.row_base,
                                 buffer_row,
                                 running_extent,
                             )
@@ -4107,6 +4425,7 @@ impl FreminalTerminalWidget {
                 let Some(last_visible_buffer_row) =
                     crate::gui::command_blocks::duration_label_anchor_row(
                         block,
+                        snap.row_base,
                         win_start,
                         win_end,
                         running_extent,
@@ -5176,6 +5495,9 @@ mod subtask_1_7_tests {
             bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
             window_post: Arc::new(Mutex::new(WindowPostRenderer::new())),
             pending_bg_image: None,
+            #[cfg(feature = "frame-profiling")]
+            live_profile: LiveRenderProfile::new(),
+            retire_queue: GlRetireQueue::new(),
         };
         assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
         assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");
@@ -5273,6 +5595,221 @@ mod subtask_1_7_tests {
             "a distinct allocation with identical epoch values is NOT a new \
              observation"
         );
+    }
+}
+
+/// Task 125.5: `RenderState::live_profile`'s token lifecycle through the
+/// exact `Arc<Mutex<RenderState>>` API `show()` and the pane `PaintCallback`
+/// share — a fresh, GL-context-free `RenderState` locked twice (once per
+/// side), never a real rendered frame.
+#[cfg(all(test, feature = "frame-profiling"))]
+mod live_profiling_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::gui::renderer::profiling::{PaneFrameOutcome, RenderWorkClass};
+
+    /// A freshly constructed pane's `live_profile` starts with no pending
+    /// token and zero observations — mirrors a pane's very first `show()`
+    /// call.
+    #[test]
+    fn fresh_render_state_has_no_pending_profiling_token() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.pending(), None);
+        assert_eq!(rs.live_profile.observation_count(), 0);
+        drop(rs);
+    }
+
+    /// End-to-end token lifecycle through the SAME `Arc<Mutex<RenderState>>`
+    /// `show()` and the paint callback share: `show()`'s side resolves the
+    /// raw decision into a class via [`resolve_render_work_class`] (the
+    /// same mapping the `widget.rs` call site uses) and starts a token;
+    /// the paint callback's side re-locks later and finalizes that SAME
+    /// token with all-zero uploads -- this test is exercising the token
+    /// lifecycle itself, not upload-byte attribution, so a zero
+    /// [`UploadByteCounts`] is simply the input, not a placeholder; see
+    /// `render_state_level_wiring_of_a_real_upload_byte_counts_value`
+    /// below for the Task 125.6 case that pins non-zero attribution
+    /// flowing through the same API.
+    #[test]
+    fn token_lifecycle_through_the_render_state_shared_by_show_and_the_paint_callback() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        // `show()`'s side: the raw decision and resolved class are known
+        // up front and supplied directly to `start`.
+        let raw = RawRebuildDecision::Bounded {
+            changed_row_count: 5,
+        };
+        let class = resolve_render_work_class(raw);
+        let token = render_state.lock().unwrap().live_profile.start(raw, class);
+
+        // The paint callback's side: a later, separate lock, finalizing
+        // the token `show()` started above with only the token and the
+        // upload counts -- the classification is not supplied again (it
+        // cannot disagree with what `start` already recorded).
+        let finalized = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .complete(token, UploadByteCounts::default());
+        assert!(finalized);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.pending(), None);
+        assert_eq!(rs.live_profile.painted_count(), 1);
+        assert_eq!(rs.live_profile.raw_counts().bounded, 1);
+        assert_eq!(rs.live_profile.class_counts().bounded, 1);
+        assert_eq!(rs.live_profile.row_bucket_counts().five_to_eight, 1);
+        assert_eq!(rs.live_profile.upload_totals().total(), 0);
+        drop(rs);
+    }
+
+    /// A pane whose paint callback never runs this frame (the
+    /// `FrameDamage::None` case `LiveRenderProfile`'s module doc
+    /// describes) leaves its token pending until the SAME pane's next
+    /// `show()` call starts a new one — exactly what a skipped paint
+    /// callback looks like from `RenderState`'s side, without needing an
+    /// actual skipped GL frame. The superseded token's classification
+    /// (Task 125.5 regression fix) must survive into the finalized
+    /// unpainted record and the cumulative raw/resolved totals.
+    #[test]
+    fn an_uninvoked_callback_leaves_its_token_finalized_as_unpainted_by_the_next_start() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        let raw = RawRebuildDecision::ReevaluateFullRebuild {
+            resolved: ReevaluatedRebuild::Reuse,
+        };
+        let class = RenderWorkClass::Reuse;
+        let first_token = render_state.lock().unwrap().live_profile.start(raw, class);
+        // The pane's next `show()` call begins a new observation before
+        // the first one's paint callback ever completed it.
+        let _second_token = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.unpainted_count(), 1);
+        assert_eq!(rs.live_profile.raw_counts().reevaluate_full_rebuild, 1);
+        assert_eq!(rs.live_profile.class_counts().reuse, 1);
+        assert_eq!(rs.live_profile.upload_totals().total(), 0);
+        let records: Vec<_> = rs.live_profile.records().copied().collect();
+        drop(rs);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].token, first_token);
+        assert_eq!(
+            records[0].outcome,
+            PaneFrameOutcome::Unpainted { raw, class }
+        );
+    }
+
+    /// Regression test (Task 125.5 review): the flush signal a boundary
+    /// crossing latches is observable through the SAME
+    /// `Arc<Mutex<RenderState>>` API `show()` and the paint callback
+    /// share, regardless of which side's finalization crosses it --
+    /// mirrors `maybe_log_live_render_profile_flush`'s two call sites in
+    /// `show()` without needing a real rendered frame.
+    #[test]
+    fn flush_signal_crossed_by_a_stale_token_sweep_is_observable_through_render_state() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        for _ in 0..(LiveRenderProfile::FLUSH_EVERY - 1) {
+            let token = render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+            render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .complete(token, UploadByteCounts::default());
+        }
+        assert!(
+            !render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal()
+        );
+
+        // The 120th observation is finalized by a superseding `start()`
+        // call (`show()`'s side), not by `complete()` (the paint
+        // callback's side).
+        let _stale_120th = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+        let _next_token = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+
+        assert!(
+            render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal(),
+            "the boundary crossed by the stale-token sweep inside `start` \
+             must be observable through the same RenderState the paint \
+             callback would otherwise check"
+        );
+        assert!(
+            !render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal()
+        );
+    }
+
+    /// Task 125.6: a real, non-zero, multi-category [`UploadByteCounts`]
+    /// completed through the SAME `Arc<Mutex<RenderState>>` API `show()`
+    /// and the pane's paint callback share must reach both
+    /// `upload_totals()` (the per-buffer-category breakdown) and
+    /// `class_upload_totals()` (the per-resolved-class breakdown) intact
+    /// -- proving the `RenderState`-level plumbing this subtask's
+    /// production call site (`FreminalTerminalWidget::show`'s paint
+    /// callback) relies on, independent of any real GL draw.
+    #[test]
+    fn render_state_level_wiring_of_a_real_upload_byte_counts_value() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        let raw = RawRebuildDecision::ReevaluateFullRebuild {
+            resolved: ReevaluatedRebuild::Full,
+        };
+        let class = resolve_render_work_class(raw);
+        assert_eq!(class, RenderWorkClass::Full);
+        let token = render_state.lock().unwrap().live_profile.start(raw, class);
+
+        let uploads = UploadByteCounts {
+            background_instance_vbo_bytes: 100,
+            foreground_instance_vbo_bytes: 200,
+            decoration_vbo_bytes: 24,
+            image_vertex_vbo_bytes: 96,
+            image_texture_bytes: 64,
+            atlas_full_bytes: 4096,
+            atlas_subrect_bytes: 0,
+        };
+        let finalized = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .complete(token, uploads);
+        assert!(finalized);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.upload_totals(), uploads);
+        assert_eq!(rs.live_profile.upload_totals().total(), uploads.total());
+        assert_eq!(rs.live_profile.class_upload_totals().full, uploads.total());
+        assert_eq!(rs.live_profile.class_upload_totals().reuse, 0);
+        assert_eq!(rs.live_profile.class_upload_totals().bounded, 0);
+        assert_eq!(rs.live_profile.class_upload_totals().cursor_only, 0);
+        drop(rs);
     }
 }
 
@@ -5523,6 +6060,37 @@ mod build_bounded_damage_tests {
             PaneFrameDamage::Region(vec![expected_run(2, 2), expected_run(5, 5)]),
             "damage must name both the new selection's row (2) and the old \
              selection's row (5) as two separate, non-contiguous rects"
+        );
+    }
+
+    /// Task 125.17: a selection that stays attached to its text while the
+    /// window slides beneath it (eviction at scrollback capacity) is painted
+    /// on different screen rows each frame. The bounded damage must cover
+    /// both extents -- the rows the highlight left AND the rows it moved to --
+    /// even though no row changed and the selection itself did not. Here the
+    /// highlight moves from rows 3..=4 to rows 2..=3; the union is one merged
+    /// run over rows 2..=4, so the old bottom row (4) is repainted too.
+    #[test]
+    fn a_selection_slid_by_eviction_damages_the_old_and_the_new_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                current_selection: Some((2, 3)),
+                previous_selection: Some((3, 4)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 4)]),
+            "the vacated row 4 and the newly covered row 2 must both be damaged"
         );
     }
 
@@ -6055,6 +6623,7 @@ mod gutter_hover_trigger_tests {
     //! cells does not tint a command block.
     use super::*;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::{CommandBlocksConfig, GutterPosition};
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use std::time::SystemTime;
@@ -6071,10 +6640,10 @@ mod gutter_hover_trigger_tests {
         let block = CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 1,
-            command_start_row: Some(1),
-            output_start_row: Some(2),
-            end_row: Some(3),
+            prompt_start_row: RowNumber::new(1),
+            command_start_row: Some(RowNumber::new(1)),
+            output_start_row: Some(RowNumber::new(2)),
+            end_row: Some(RowNumber::new(3)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
@@ -6655,14 +7224,21 @@ mod overlay_suppress_input_tests {
     /// drag would survive the drag ending instead of disappearing.
     #[test]
     fn border_drag_clears_phantom_selection() {
-        use crate::gui::view_state::{CellCoord, SelectionState};
+        use crate::gui::view_state::{LogicalCell, SelectionState};
+        use freminal_common::buffer_states::row_number::RowNumber;
 
         // Build a phantom in-progress selection exactly as described in
         // the root-cause diagnostic: one endpoint pinned at the mouse-down
         // anchor, the other tracking the drag, `is_selecting = true`.
         let make_phantom = || SelectionState {
-            anchor: Some(CellCoord { col: 2, row: 3 }),
-            end: Some(CellCoord { col: 9, row: 3 }),
+            anchor: Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(3),
+            }),
+            end: Some(LogicalCell {
+                col: 9,
+                row: RowNumber::new(3),
+            }),
             is_selecting: true,
             ..SelectionState::default()
         };
@@ -6677,8 +7253,20 @@ mod overlay_suppress_input_tests {
             "finalize_interrupted_drag must KEEP a real anchor != end range"
         );
         assert!(!finalized.is_selecting, "drag flag must be cleared");
-        assert_eq!(finalized.anchor, Some(CellCoord { col: 2, row: 3 }));
-        assert_eq!(finalized.end, Some(CellCoord { col: 9, row: 3 }));
+        assert_eq!(
+            finalized.anchor,
+            Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(3)
+            })
+        );
+        assert_eq!(
+            finalized.end,
+            Some(LogicalCell {
+                col: 9,
+                row: RowNumber::new(3)
+            })
+        );
 
         // Fix under test: when the suppression cause is a border drag, the
         // widget must call `clear()` instead, fully discarding the phantom

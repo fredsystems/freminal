@@ -32,11 +32,30 @@ use freminal_common::{
             rl_bracket::RlBracket,
         },
         pointer_shape::PointerShape,
+        row_number::RowNumber,
         tchar::TChar,
     },
     cursor::CursorVisualStyle,
     themes::ThemePalette,
 };
+
+/// The stretch of the active screen's buffer that a snapshot, or a search
+/// corpus cut from the same buffer, covers: which row is the oldest retained
+/// one and how many rows are retained.
+///
+/// Two extents are equal only if they describe the same retained rows.
+/// `total_rows` alone is **not** enough to tell: at scrollback capacity it
+/// freezes while `row_base` keeps advancing by one per evicted row, so a
+/// corpus fetched a moment ago has the same `total_rows` as the live buffer
+/// but is made of different rows. Comparing the pair (Task 125.17) is what
+/// lets staleness checks notice that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferExtent {
+    /// Logical number of the oldest retained row (retained index `0`).
+    pub row_base: RowNumber,
+    /// Number of retained rows (scrollback + visible).
+    pub total_rows: usize,
+}
 
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
 ///
@@ -121,9 +140,20 @@ pub struct TerminalSnapshot {
     ///
     /// The GUI uses this together with `term_height` and `scroll_offset` to
     /// compute the *visible window start* index, which is needed to convert
-    /// between screen-relative row indices and buffer-absolute row indices
-    /// used by `SelectionState`.
+    /// between screen-relative row indices and retained buffer indices.
+    /// Anything the GUI stores across frames (selection, search matches) is
+    /// numbered with logical [`RowNumber`]s instead; see [`Self::row_base`].
     pub total_rows: usize,
+
+    /// Logical row number of the oldest retained row (retained index `0`).
+    ///
+    /// Row `i` of the buffer is numbered `row_base + i`. Stable row numbers
+    /// (Task 125.14) are what `prompt_rows` and `command_blocks` carry: a
+    /// number never changes while its row lives, and falls below `row_base`
+    /// once the row has been evicted. Convert between numbers and the
+    /// retained indices the GUI's row math uses with [`Self::row_number_at`]
+    /// and [`Self::retained_index_of`].
+    pub row_base: RowNumber,
 
     /// `true` when at least one visible format tag has a non-`None` blink state.
     ///
@@ -300,12 +330,14 @@ pub struct TerminalSnapshot {
     /// The GUI can use this to display command success/failure indicators.
     pub last_exit_code: Option<i32>,
 
-    /// Absolute buffer row indices where OSC 133 prompt-start markers fired.
+    /// Logical row numbers where OSC 133 prompt-start markers fired.
     ///
     /// Used by the GUI for command-boundary jumping (Ctrl+Shift+Up/Down).
     /// Ordering is not guaranteed; consumers must not assume this list is
-    /// sorted by row index.
-    pub prompt_rows: Arc<[usize]>,
+    /// sorted. A mark whose row has been evicted can linger (eviction only
+    /// trims the leading run of such marks), so consumers must filter with
+    /// [`Self::retained_index_of`], which yields `None` for one.
+    pub prompt_rows: Arc<[RowNumber]>,
 
     /// OSC 133 command blocks captured by the buffer.
     ///
@@ -317,6 +349,8 @@ pub struct TerminalSnapshot {
     /// state (Task 72.10).
     ///
     /// Ordering: oldest-first.  Capped at the buffer's `scrollback_limit`.
+    ///
+    /// The row fields are logical [`RowNumber`]s; see [`Self::row_base`].
     pub command_blocks: Arc<[CommandBlock]>,
 
     /// The active color theme palette.
@@ -365,6 +399,35 @@ pub struct TerminalSnapshot {
 }
 
 impl TerminalSnapshot {
+    /// The extent of the buffer this snapshot was built from.
+    #[must_use]
+    pub const fn extent(&self) -> BufferExtent {
+        BufferExtent {
+            row_base: self.row_base,
+            total_rows: self.total_rows,
+        }
+    }
+
+    /// The logical row number of the buffer row at retained index
+    /// `retained_index` (`row_base + retained_index`).
+    ///
+    /// Plain arithmetic: an index at or past [`Self::total_rows`] yields the
+    /// number such a row *would* have.
+    #[must_use]
+    pub fn row_number_at(&self, retained_index: usize) -> RowNumber {
+        self.row_base.saturating_add(retained_index)
+    }
+
+    /// The retained buffer index of the row numbered `row`, or `None` if that
+    /// row is not in this snapshot's buffer: evicted (below
+    /// [`Self::row_base`]), not yet created (at or past `row_base +
+    /// total_rows`), or numbered in the other screen's namespace.
+    #[must_use]
+    pub fn retained_index_of(&self, row: RowNumber) -> Option<usize> {
+        row.rows_after(self.row_base)
+            .filter(|&index| index < self.total_rows)
+    }
+
     /// Construct a blank snapshot suitable as the initial value for an
     /// `ArcSwap<TerminalSnapshot>` before the PTY thread has produced any
     /// real data.
@@ -385,6 +448,7 @@ impl TerminalSnapshot {
             term_width: 0,
             term_height: 0,
             total_rows: 0,
+            row_base: RowNumber::ZERO,
             has_blinking_text: false,
             has_urls: false,
             row_offsets: Arc::new(Vec::new()),
@@ -468,5 +532,79 @@ mod tests {
             TerminalSnapshot::empty().pointer_shape,
             PointerShape::Default
         );
+    }
+
+    // ── logical row numbers (Task 125.14) ───────────────────────────────
+
+    /// A snapshot of `total_rows` rows whose oldest row is numbered `base`.
+    fn snap_at(base: u64, total_rows: usize, term_height: usize) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.row_base = RowNumber::new(base);
+        snap.total_rows = total_rows;
+        snap.term_height = term_height;
+        snap
+    }
+
+    #[test]
+    fn extent_pairs_row_base_with_total_rows() {
+        let snap = snap_at(100, 10, 3);
+        assert_eq!(
+            snap.extent(),
+            BufferExtent {
+                row_base: RowNumber::new(100),
+                total_rows: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn extent_differs_when_only_the_base_advances() {
+        // At scrollback capacity `total_rows` is frozen while the base
+        // advances; the two extents must still compare unequal.
+        let before = snap_at(100, 10, 3);
+        let after = snap_at(101, 10, 3);
+        assert_ne!(before.extent(), after.extent());
+    }
+
+    #[test]
+    fn empty_snapshot_has_zero_row_base() {
+        assert_eq!(TerminalSnapshot::empty().row_base, RowNumber::ZERO);
+        assert!(TerminalSnapshot::empty().prompt_rows.is_empty());
+    }
+
+    #[test]
+    fn row_number_at_is_base_plus_index() {
+        let snap = snap_at(100, 10, 4);
+        assert_eq!(snap.row_number_at(0), RowNumber::new(100));
+        assert_eq!(snap.row_number_at(7), RowNumber::new(107));
+    }
+
+    #[test]
+    fn retained_index_of_inverts_row_number_at() {
+        let snap = snap_at(100, 10, 4);
+        for i in 0..10 {
+            assert_eq!(snap.retained_index_of(snap.row_number_at(i)), Some(i));
+        }
+    }
+
+    #[test]
+    fn retained_index_of_rejects_evicted_and_not_yet_created_rows() {
+        let snap = snap_at(100, 10, 4);
+        assert_eq!(snap.retained_index_of(RowNumber::new(99)), None, "evicted");
+        assert_eq!(
+            snap.retained_index_of(RowNumber::new(110)),
+            None,
+            "past the last retained row"
+        );
+        assert_eq!(snap.retained_index_of(RowNumber::new(0)), None);
+    }
+
+    #[test]
+    fn retained_index_of_rejects_the_other_namespace() {
+        let snap = snap_at(100, 10, 4);
+        assert_eq!(snap.retained_index_of(RowNumber::ALTERNATE_BASE), None);
+        let alt = snap_at(1 << 63, 4, 4);
+        assert_eq!(alt.retained_index_of(RowNumber::new(5)), None);
+        assert_eq!(alt.retained_index_of(RowNumber::ALTERNATE_BASE), Some(0));
     }
 }

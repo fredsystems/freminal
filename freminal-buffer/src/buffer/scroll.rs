@@ -289,12 +289,29 @@ impl Buffer {
     /// Mirror of [`scroll_slice_up_confined`] for downward scrolls (SD, the
     /// primary RI path, IL/DL).
     pub(in crate::buffer) fn scroll_slice_down_confined(&mut self, first: usize, last: usize) {
-        if self.declrmm_enabled == Declrmm::Enabled {
-            let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-            self.scroll_slice_down_columns(first, last, left, right);
-        } else {
-            self.scroll_slice_down(first, last);
+        self.scroll_slice_down_confined_n(first, last, 1);
+    }
+
+    /// Scroll rows `[first, last]` DOWN by `n` lines, honouring DECLRMM.
+    ///
+    /// The moved images' stamp horizons (Task 125.15) are raised once, after
+    /// the last shift: they only have to be correct before the next eviction,
+    /// and restamping per line would rescan the region `n` times.
+    pub(in crate::buffer) fn scroll_slice_down_confined_n(
+        &mut self,
+        first: usize,
+        last: usize,
+        n: usize,
+    ) {
+        for _ in 0..n {
+            if self.declrmm_enabled == Declrmm::Enabled {
+                let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                self.scroll_slice_down_columns(first, last, left, right);
+            } else {
+                self.scroll_slice_down(first, last);
+            }
         }
+        self.restamp_image_horizons(first + 1, last);
     }
 
     /// Scroll DECSTBM region UP by 1 (primary buffer)
@@ -369,9 +386,7 @@ impl Buffer {
         // Region indices are inclusive, so region has (b - t + 1) rows.
         let region_size = b - t + 1;
         let clamped = n.min(region_size);
-        for _ in 0..clamped {
-            self.scroll_slice_down_confined(t, b);
-        }
+        self.scroll_slice_down_confined_n(t, b, clamped);
     }
 
     /// Scroll a contiguous vertical slice [first, last] UP by one line.
@@ -384,26 +399,33 @@ impl Buffer {
             return;
         }
 
+        // The shift overwrites rows[first] with a copy of rows[first + 1], so
+        // any image cells it held are lost: deduct them before they are gone.
+        if self.image_cell_count > 0 {
+            self.image_cell_count -= self.rows[first].count_image_cells();
+        }
         for row_idx in first..last {
             let next = self.rows[row_idx + 1].clone();
             self.rows[row_idx] = next;
             // Rotate the cache entry in lockstep: a moved row keeps its cached
             // flat representation (it hasn't changed content, only position).
-            self.row_cache[row_idx] = self.row_cache[row_idx + 1].take();
+            let cache = self.rows.cache_mut();
+            cache[row_idx] = cache[row_idx + 1].take();
         }
 
         // The original rows[last] was not shifted (the loop only copies
-        // rows[row_idx+1] into rows[row_idx] for row_idx in first..last).
-        // It is now replaced with a blank row; deduct any image cells it held.
-        self.image_cell_count -= self.rows[last].count_image_cells();
+        // rows[row_idx+1] into rows[row_idx] for row_idx in first..last), so
+        // its content now exists twice: once moved into rows[last - 1] and
+        // once still here. Blanking it removes the duplicate, which the image
+        // counter never counted, so no deduction is due here.
         let new_row = Row::new(self.width);
         // Scroll-created blank rows use default background (no BCE).
         // See `push_row` comment for rationale.
         self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
-        self.row_cache[last] = None;
+        self.rows.cache_mut()[last] = None;
 
-        // Task 121 Part C fix: this loop rotates already-clean `row_cache`
+        // Task 121 Part C fix: this loop rotates already-clean row-cache
         // entries between row indices (a moved row's cache moves with it)
         // without marking the moved rows dirty or nulling their cache, and
         // without changing `self.rows.len()`. Neither the visible-window
@@ -418,6 +440,9 @@ impl Buffer {
 
     /// Scroll a contiguous vertical slice [first, last] DOWN by one line.
     /// Rows outside that range are untouched. New top line is blank.
+    ///
+    /// Does **not** raise the moved images' stamp horizons (Task 125.15): go
+    /// through [`Self::scroll_slice_down_confined_n`], which does so once.
     pub(in crate::buffer) fn scroll_slice_down(&mut self, first: usize, last: usize) {
         if first >= last {
             return;
@@ -426,26 +451,33 @@ impl Buffer {
             return;
         }
 
+        // The shift overwrites rows[last] with a copy of rows[last - 1], so
+        // any image cells it held are lost: deduct them before they are gone.
+        if self.image_cell_count > 0 {
+            self.image_cell_count -= self.rows[last].count_image_cells();
+        }
         for row_idx in (first + 1..=last).rev() {
             let prev = self.rows[row_idx - 1].clone();
             self.rows[row_idx] = prev;
             // Rotate the cache entry in lockstep.
-            self.row_cache[row_idx] = self.row_cache[row_idx - 1].take();
+            let cache = self.rows.cache_mut();
+            cache[row_idx] = cache[row_idx - 1].take();
         }
 
         // The original rows[first] was not shifted (the loop only copies
-        // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last).
-        // It is now replaced with a blank row; deduct any image cells it held.
-        self.image_cell_count -= self.rows[first].count_image_cells();
+        // rows[row_idx-1] into rows[row_idx] for row_idx in first+1..=last),
+        // so its content now exists twice: once moved into rows[first + 1] and
+        // once still here. Blanking it removes the duplicate, which the image
+        // counter never counted, so no deduction is due here.
         let new_row = Row::new(self.width);
         // Scroll-created blank rows use default background (no BCE).
         // See `push_row` comment for rationale.
         self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
-        self.row_cache[first] = None;
+        self.rows.cache_mut()[first] = None;
 
         // Task 121 Part C fix: same rationale as the equivalent comment in
-        // `scroll_slice_up` — this loop rotates already-clean `row_cache`
+        // `scroll_slice_up` — this loop rotates already-clean row-cache
         // entries between row indices without dirtying the moved rows or
         // changing `self.rows.len()`, which the fingerprint + first-rebuilt
         // -row invalidation cannot observe. Null the merge cache to force a
@@ -511,12 +543,12 @@ impl Buffer {
                 }
             }
             row.mark_dirty();
-            self.row_cache[row_idx] = None;
+            self.rows.cache_mut()[row_idx] = None;
         }
         // Blank [left_col, right_col] on the last row.
         let row = &mut self.rows[last];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
-        self.row_cache[last] = None;
+        self.rows.cache_mut()[last] = None;
 
         // Adjust image_cell_count for any images lost during the shift/erase.
         if images_before > 0 {
@@ -580,12 +612,12 @@ impl Buffer {
                 }
             }
             row.mark_dirty();
-            self.row_cache[row_idx] = None;
+            self.rows.cache_mut()[row_idx] = None;
         }
         // Blank [left_col, right_col] on the first row.
         let row = &mut self.rows[first];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
-        self.row_cache[first] = None;
+        self.rows.cache_mut()[first] = None;
 
         // Adjust image_cell_count for any images lost during the shift/erase.
         if images_before > 0 {
@@ -653,20 +685,10 @@ impl Buffer {
     ///
     /// In the primary buffer the cursor row index is also decremented to follow the visible window.
     pub fn scroll_up(&mut self) {
-        // Deduct any image cells in the row about to be removed.
-        self.image_cell_count -= self.rows[0].count_image_cells();
-        // Task 119: heal any lag before removing/pushing it in lockstep
-        // with `rows`/`row_cache` below (see `row_block_map`'s field doc).
-        self.sync_row_block_map_len();
-        // remove topmost row (and its cache entry)
-        self.rows.remove(0);
-        self.row_cache.remove(0);
-        self.row_block_map.remove(0);
-        // The removed row may have been the last reference to a compressed
-        // block (this method is a whole-buffer row shift, unlike the
-        // bounded `enforce_scrollback_limit`/`erase_scrollback` drains, but
-        // the same reclaim applies).
-        self.gc_unreferenced_blocks();
+        // Remove the topmost row (and its cache entry and block reference).
+        // The eviction deducts the row's image cells and releases anything
+        // that only it kept alive: a compressed block, an image.
+        let _ = self.evict_front_rows(1);
 
         // add a new empty row at the bottom, using default background (no BCE).
         // Scrolling only moves content; it is not an explicit erase, so the
@@ -674,22 +696,11 @@ impl Buffer {
         // rationale as `push_row` and `scroll_slice_up`/`_down`.
         let new_row = Row::new(self.width);
         self.rows.push(new_row);
-        self.row_cache.push(None);
-        self.row_block_map.push(None);
 
-        // Task 121 Part C fix: `rows.remove(0)` + `rows.push(new_row)` nets
-        // to the same `self.rows.len()`, and every already-clean
-        // `row_cache` entry above index 0 shifts down by one index in
-        // lockstep with its row's content — without any of the moved rows
-        // being marked dirty or `None`. This is the same confined
-        // in-place-rotation bug class as `scroll_slice_up`/`_down` (see
-        // `Buffer::merge_cache`'s field doc, which explicitly names
-        // `scroll_up` as part of the confirmed gap): the fingerprint and
-        // first-rebuilt-row invalidation cannot observe the identity shift,
-        // so a cached incremental merge would serve stale, pre-shift row
-        // content. Null the merge cache to force a full re-merge next
-        // flatten.
-        self.merge_cache = None;
+        // No explicit `merge_cache` invalidation (Task 125.16): the eviction
+        // above advances the row store's base, so a merge cached before this
+        // call has a different first-row logical number than the window the
+        // next flatten sees. See `Buffer::merge_cache`'s field doc.
 
         // DO NOT move the cursor in alternate buffer
         if self.kind == BufferType::Primary {
@@ -710,29 +721,11 @@ impl Buffer {
 
         // Remove all scrollback rows (everything before visible window)
         if visible_start > 0 {
-            // Account for image cells in the drained scrollback rows.
-            if self.image_cell_count > 0 {
-                let drained_images: usize = self.rows[..visible_start]
-                    .iter()
-                    .map(Row::count_image_cells)
-                    .sum();
-                self.image_cell_count -= drained_images;
-            }
-            // Task 119: heal any lag *before* any of the three parallel
-            // vecs are drained (sync depends on `self.rows.len()`, so it
-            // must run while that still reflects the pre-drain length).
-            self.sync_row_block_map_len();
-            self.rows.drain(0..visible_start);
-            self.row_cache.drain(0..visible_start);
-            // Every compressed block only ever holds rows from scrollback
-            // (never the visible window), so wiping all of scrollback here
-            // always makes every block fully unreferenced — clear
-            // `self.blocks` outright rather than the general-purpose
-            // (slightly more expensive) `gc_unreferenced_blocks` scan.
-            self.row_block_map.drain(0..visible_start);
-            self.blocks.clear();
-            self.adjust_prompt_rows(visible_start);
-
+            // Each evicted compressed row releases its block's live-row count.
+            // Do not clear `self.blocks` here: a block can straddle the visible
+            // window (the window can grow over compressed rows, which are only
+            // decompressed when read), and its surviving rows still need it.
+            let _ = self.evict_front_rows(visible_start);
             // Adjust cursor
             if self.cursor.pos.y >= visible_start {
                 self.cursor.pos.y -= visible_start;
@@ -746,5 +739,84 @@ impl Buffer {
         }
 
         self.debug_assert_invariants();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_count_tests {
+    use std::sync::Arc;
+
+    use crate::{
+        image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
+        row::Row,
+    };
+
+    use super::*;
+
+    /// A 5-row, 10-column buffer with a 1x1 Kitty image on `image_row`.
+    fn buffer_with_image_on(image_row: usize) -> Buffer {
+        let mut buf = Buffer::new(10, 5);
+        while buf.rows.len() < 5 {
+            buf.rows.push(Row::new(10));
+        }
+        buf.cursor.pos.y = image_row;
+        let image = InlineImage {
+            id: next_image_id(),
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 8,
+            height_px: 16,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        };
+        let _ = buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        assert_eq!(buf.image_cell_count, 1);
+        buf
+    }
+
+    fn actual_image_cells(buf: &Buffer) -> usize {
+        buf.rows.iter().map(Row::count_image_cells).sum()
+    }
+
+    /// A shifted image cell is moved, not lost: the counter must not drop.
+    #[test]
+    fn scroll_slice_down_does_not_deduct_a_cell_that_only_moved() {
+        let mut buf = buffer_with_image_on(1);
+        buf.scroll_slice_down_confined(1, 3);
+        assert_eq!(actual_image_cells(&buf), 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn scroll_slice_up_does_not_deduct_a_cell_that_only_moved() {
+        let mut buf = buffer_with_image_on(3);
+        buf.scroll_slice_up(1, 3);
+        assert_eq!(actual_image_cells(&buf), 1);
+        assert_eq!(buf.image_cell_count, 1);
+        buf.debug_assert_invariants();
+    }
+
+    /// The row pushed off the far end of the slice loses its cells.
+    #[test]
+    fn scroll_slice_down_deducts_a_cell_pushed_off_the_bottom() {
+        let mut buf = buffer_with_image_on(3);
+        buf.scroll_slice_down_confined(1, 3);
+        assert_eq!(actual_image_cells(&buf), 0);
+        assert_eq!(buf.image_cell_count, 0);
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn scroll_slice_up_deducts_a_cell_pushed_off_the_top() {
+        let mut buf = buffer_with_image_on(1);
+        buf.scroll_slice_up(1, 3);
+        assert_eq!(actual_image_cells(&buf), 0);
+        assert_eq!(buf.image_cell_count, 0);
+        buf.debug_assert_invariants();
     }
 }

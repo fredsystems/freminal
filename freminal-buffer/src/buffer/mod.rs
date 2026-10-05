@@ -9,24 +9,33 @@ use std::sync::Arc;
 use conv2::ValueFrom;
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
-    command_block::CommandBlock,
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
+    row_number::RowNumber,
     tchar::TChar,
     url::Url,
 };
 
 use crate::{
-    compressed_block::CompressedBlock,
     image_store::ImageStore,
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
 };
 
+use command_block_log::CommandBlockLog;
+pub use command_block_log::CommandBlocksGeneration;
+use compression::BlockSlot;
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
+pub use reflow_remap::ReflowRemap;
+use row_store::RowStore;
+
+// Named only by intra-doc links on `BlockId`, `BlockRowRef` and the block
+// fields; the code itself reaches blocks through `BlockSlot::block`.
+#[cfg(doc)]
+use crate::compressed_block::CompressedBlock;
 
 #[cfg(test)]
 use crate::cell::Cell;
@@ -36,14 +45,33 @@ use freminal_common::buffer_states::{
     modes::{reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2},
 };
 
+mod command_block_log;
 mod compression;
 mod cursor;
 mod erase;
+mod eviction;
 mod flatten;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_cell_trim_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_clip_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_delete_tests;
 mod images;
 mod lifecycle;
 mod lines;
+mod reflow_remap;
 mod resize_and_alt;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod resize_and_alt_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod row_number_tests;
+mod row_store;
 mod scroll;
 mod tabs;
 
@@ -80,10 +108,9 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
 /// field's doc).
 ///
 /// The type is `pub` only so it can appear in the (also `pub`)
-/// [`SavedPrimaryState::blocks`]/[`SavedPrimaryState::row_block_map`]
-/// fields without a private-type-in-public-interface error; its field stays
-/// private, so nothing outside `crate::buffer` can construct, inspect, or
-/// match on one — it is an opaque handle everywhere else.
+/// [`SavedPrimaryState::blocks`] field without a private-type-in-public-interface
+/// error; its field stays private, so nothing outside `crate::buffer` can
+/// construct, inspect, or match on one — it is an opaque handle everywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(u32);
 
@@ -96,7 +123,7 @@ pub struct BlockId(u32);
 /// `Buffer::erase_scrollback`) for free: draining rows from the front of
 /// `self.rows` never changes any surviving row's position *within* its own
 /// block, so no index remapping is needed on drain (only the front-drain of
-/// `Buffer::row_block_map` itself, in lockstep with `rows`/`row_cache`).
+/// the block map inside `Buffer::rows`, in lockstep with the rows themselves).
 ///
 /// `pub` for the same private-type-in-public-interface reason as
 /// [`BlockId`]; both fields stay private (opaque outside `crate::buffer`).
@@ -114,16 +141,29 @@ pub struct BlockRowRef {
 /// subtracting `visible_window_start(scroll_offset)`.
 #[derive(Debug)]
 pub struct Buffer {
-    /// All rows in this buffer: scrollback + visible region.
+    /// All rows in this buffer: scrollback + visible region, together with
+    /// the two per-row side tables that must stay index-parallel with them
+    /// (Task 125.13). See [`RowStore`].
+    ///
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
     /// In the alternate buffer, this always has exactly `height` rows.
-    pub(in crate::buffer) rows: Vec<Row>,
-
-    /// Per-row flat-representation cache.  Index matches `self.rows`.
-    /// `None` = dirty (must be re-flattened on next snapshot).
-    /// `Some(entry)` = clean cached flat representation for that row, see
-    /// [`RowCacheEntry`].
-    pub(in crate::buffer) row_cache: Vec<Option<RowCacheEntry>>,
+    ///
+    /// The side tables are reached through [`RowStore::cache`] and
+    /// [`RowStore::block_map`] (and their `_mut` forms):
+    ///
+    /// - **Flatten cache** — `None` = dirty (must be re-flattened on next
+    ///   snapshot); `Some(entry)` = clean cached flat representation for that
+    ///   row, see [`RowCacheEntry`].
+    /// - **Compressed-block references** — `None` means the row is not
+    ///   currently compressed (it may be `Live` or Task-118
+    ///   [`Row::is_compact`]); `Some` means the row's real content has been
+    ///   evicted into the referenced block in `self.blocks` (see
+    ///   [`Row::is_evicted`]) and the row itself holds only a diagnostic
+    ///   placeholder.
+    ///
+    /// Every structural edit goes through a [`RowStore`] method, so all three
+    /// tables always have the same length.
+    pub(in crate::buffer) rows: RowStore,
 
     /// Task 121 Part C: incremental cache of the last **merge** (Step 2 of
     /// [`Buffer::visible_as_tchars_and_tags_extended`]) computed over the
@@ -142,68 +182,71 @@ pub struct Buffer {
     ///
     /// ## Invalidation
     ///
-    /// Three complementary mechanisms together cover every way `row_cache`'s
+    /// Three complementary mechanisms together cover every way the row cache's
     /// *content* can change out from under a cached merge:
     ///
-    /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): visible
-    ///    window bounds (`visible_start`/`visible_end`) plus
-    ///    `auto_detect_urls`. Any resize/scroll of the window itself, or a
-    ///    detection toggle, changes `fp` and forces a full merge.
+    /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): the logical
+    ///    [`RowNumber`]
+    ///    of the window's first row, the window's length, and
+    ///    `auto_detect_urls`. A row keeps its number for as long as it is
+    ///    retained, so an equal fingerprint means window position `r` holds
+    ///    the same row as when the merge was cached, whatever was evicted
+    ///    from the front in between. A resize, a scroll of the window onto
+    ///    different rows, front eviction that moves the window onto
+    ///    different rows (every line feed at scrollback capacity), or a
+    ///    detection toggle all change `fp` and force a full merge.
     /// 2. **`first_rebuilt_row`** (recomputed on every call): any row in the
     ///    window that is `dirty` or has a `None` cache entry. Catches
     ///    ordinary per-row edits.
     /// 3. **Explicit `self.merge_cache = None`**, at sites where (1) and (2)
     ///    cannot observe that cached content is stale:
-    ///    - **Wholesale `row_cache` replacement** — the new content's
+    ///    - **Wholesale row-cache replacement** — the new content's
     ///      *identity* differs from what a stale, fp-matching `MergeCache`
     ///      was built from, without marking every affected row dirty or
     ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
     ///      [`Buffer::enter_alternate`], and [`Buffer::leave_alternate`].
-    ///    - **Confined in-place row rotation**: `scroll_slice_up`,
-    ///      `scroll_slice_down`, and `scroll_up` (`scroll.rs`), and
-    ///      `enforce_scrollback_limit` (`resize_and_alt.rs`). These
-    ///      relocate already-clean, non-`None` cache entries between row
-    ///      indices (a moved row keeps its cached representation, only its
-    ///      index changes) without marking the moved rows dirty, and
-    ///      without changing `self.rows.len()`: the three `scroll.rs` sites
-    ///      net to the same length via a shift or a `remove`+`push`, and
-    ///      `enforce_scrollback_limit` nets to the same length because its
-    ///      front `drain` of `overflow` rows is paired, in the same line
-    ///      feed, with a `push_row` of one new row at the bottom once
-    ///      scrollback is at capacity — so *neither* `fp` *nor*
-    ///      `first_rebuilt_row` observes that row content moved to a
-    ///      different index. Each of these four functions contains its own
-    ///      `self.merge_cache = None;` at the point where the rotation
-    ///      happens; that line is load-bearing, **not** a redundant
-    ///      leftover safe to delete — removing it would let a cached
-    ///      incremental merge serve stale, pre-rotation content at the
-    ///      rotated indices. See [`flatten::MergeCache`]'s doc comment for
-    ///      the debug-only oracle cross-check that backstops this case, and
+    ///    - **Confined in-place row rotation**: `scroll_slice_up` and
+    ///      `scroll_slice_down` (`scroll.rs`). These relocate already-clean,
+    ///      non-`None` cache entries between row indices (a moved row keeps
+    ///      its cached representation, only its index changes) without
+    ///      marking the moved rows dirty and without renumbering anything:
+    ///      the rows keep their numbers while the content under those
+    ///      numbers rotates, so *neither* `fp` *nor* `first_rebuilt_row`
+    ///      observes it. Each contains its own `self.merge_cache = None;` at
+    ///      the point where the rotation happens; that line is
+    ///      load-bearing, **not** a redundant leftover safe to delete —
+    ///      removing it would let a cached incremental merge serve stale,
+    ///      pre-rotation content at the rotated indices. See
+    ///      [`flatten::MergeCache`]'s doc comment for the debug-only oracle
+    ///      cross-check that backstops this case, and
     ///      `incremental_merge_tests` in `flatten.rs` for the regression
-    ///      tests exercising it directly (including
-    ///      `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
-    ///      for the `enforce_scrollback_limit` site specifically).
+    ///      tests exercising it directly.
     ///
     /// The `_columns` scroll variants (`scroll_slice_up_columns`/
     /// `_down_columns`, used when DECLRMM confines a scroll horizontally)
     /// do **not** need an explicit `merge_cache = None`: unlike the
     /// row-granular rotations above, they call `row.mark_dirty()` and set
-    /// `row_cache[i] = None` on every row they touch instead of relocating
+    /// a `None` cache entry on every row they touch instead of relocating
     /// an existing cache entry to a different index, so mechanism (2)
     /// already catches them.
     ///
-    /// Deliberately NOT invalidated here (relying on `fp` instead):
-    /// `erase_scrollback`'s front drain (`scroll.rs`) and the row-append
-    /// sites in `lines.rs`. `erase_scrollback` only runs its drain when
-    /// `visible_start > 0` and always collapses `visible_start` to `0`
-    /// (everything above the live view is discarded, not rotated in
-    /// place), so the *absolute* `visible_start`/`visible_end` bounds
-    /// `visible_window_bounds` returns always change — unlike
-    /// `enforce_scrollback_limit`, there is no case where the window
-    /// bounds net out unchanged. The `lines.rs` append sites only ever grow
-    /// `self.rows.len()` with no compensating removal, which likewise
-    /// always changes the window bounds. Both cases make `fp` mismatch, so
-    /// a full merge is forced without an explicit `None`.
+    /// **Front eviction needs no explicit invalidation** (Task 125.16):
+    /// `enforce_scrollback_limit`, `scroll_up`, and `erase_scrollback` all go
+    /// through [`Buffer::evict_front_rows`], which removes rows without
+    /// renumbering the survivors and advances the store's base. At scrollback
+    /// capacity the physical window bounds are unchanged after each
+    /// push-and-evict line feed, but the window's first logical row number is
+    /// not, so mechanism (1) sees the slide. Where the eviction leaves the
+    /// window on the very same rows (`erase_scrollback` drops only rows above
+    /// the window), the fingerprint is unchanged and the cached merge is
+    /// correctly reused. The row-append sites in `lines.rs` change the window
+    /// length, which likewise changes `fp`. The one way a row number is
+    /// re-issued is `RowStore::pop` of trailing blank padding; the row pushed
+    /// at that number has a `None` cache entry, so mechanism (2) covers it.
+    ///
+    /// A stale `fp` match is a correctness hazard rather than a missed
+    /// optimisation, so every fast-path use is cross-checked against the
+    /// full-merge oracle in debug builds (see [`flatten::MergeCache`]).
     pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
     /// Task 124.10: source of the per-row **content epoch** stamps stored in
@@ -278,9 +321,26 @@ pub struct Buffer {
     /// in / returned from `enter_alternate` / `leave_alternate`.
     pub(in crate::buffer) saved_primary: Option<SavedPrimaryState>,
 
+    /// First row number of the *next* alternate-screen session (Task 125.14).
+    ///
+    /// The alternate screen's rows are numbered in their own namespace
+    /// starting at [`RowNumber::ALTERNATE_BASE`], and this counter advances
+    /// past every alternate session's rows when it ends, so an alternate row
+    /// number is never re-issued across sessions (a mark left over from an
+    /// earlier session can never alias a row of a later one).
+    pub(in crate::buffer) next_alt_base: RowNumber,
+
+    /// Row translation produced by width-changing reflows since the last
+    /// [`Buffer::take_reflow_remap`], for consumers that keep row numbers
+    /// outside the buffer (the emulator's kitty placement table).
+    pub(in crate::buffer) pending_reflow_remap: Option<ReflowRemap>,
+
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
     /// Independent of the alternate-screen save (`saved_primary`).
-    pub(in crate::buffer) saved_cursor: Option<CursorState>,
+    ///
+    /// The saved position is screen-relative (xterm's `CursorSave`), not
+    /// attached to any stored row; see [`cursor::SavedCursor`] (Task 125.C6).
+    pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
 
     /// Current format tag to apply to inserted text.
     pub(in crate::buffer) current_tag: FormatTag,
@@ -334,11 +394,15 @@ pub struct Buffer {
     /// common case).
     pub(in crate::buffer) image_cell_count: usize,
 
-    /// Buffer-relative row indices where OSC 133 `PromptStart` markers fired.
+    /// Logical row numbers where OSC 133 `PromptStart` markers fired.
     ///
-    /// Maintained atomically with row drains: when rows are removed from the
-    /// front, all indices are shifted down and entries that fell off are dropped.
-    pub(in crate::buffer) prompt_rows: Vec<usize>,
+    /// Stable [`RowNumber`]s: eviction never rewrites them. Marks are appended
+    /// in the order they fire, which is *usually* ascending but not
+    /// guaranteed (a shell can redraw a prompt above an earlier one), so
+    /// eviction pruning ([`Buffer::prune_evicted_marks`]) only trims the
+    /// leading run of evicted marks and consumers must filter any stale
+    /// out-of-order entry themselves (`RowNumber::rows_after(base)`).
+    pub(in crate::buffer) prompt_rows: Vec<RowNumber>,
 
     /// OSC 133 command blocks, stored oldest-first.
     ///
@@ -347,13 +411,15 @@ pub struct Buffer {
     /// Capped at `scrollback_limit` entries; when the cap is reached the oldest
     /// block is evicted before inserting a new one.
     ///
-    /// Row indices inside each block are buffer-relative (same coordinate space
-    /// as `prompt_rows`).  They are adjusted atomically with row drains via
-    /// [`Buffer::adjust_prompt_rows`].
-    pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
+    /// Row fields inside each block are stable [`RowNumber`]s (same coordinate
+    /// space as `prompt_rows`); eviction never rewrites them. Blocks whose
+    /// prompt row has been evicted are pruned from the front by
+    /// [`Buffer::prune_evicted_marks`].
+    pub(in crate::buffer) command_blocks: CommandBlockLog,
 
     /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
-    /// Compression), keyed by [`BlockId`].
+    /// Compression), keyed by [`BlockId`], each with the number of live rows
+    /// still referencing it (Task 125.15; see [`BlockSlot`]).
     ///
     /// Only rows below the visible window that are already Task-118
     /// [`Row::is_compact`] are ever compressed, via the explicit,
@@ -362,7 +428,7 @@ pub struct Buffer {
     /// is removed the moment any of its rows is read
     /// (`Buffer::ensure_decompressed`): a row is never both compressed and
     /// live at the same time (single residency).
-    pub(in crate::buffer) blocks: HashMap<BlockId, CompressedBlock>,
+    pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
 
     /// Monotonic counter used to mint fresh [`BlockId`]s for
     /// `Buffer::compress_scrollback_block`. Reset only by [`Buffer::new`]
@@ -372,27 +438,6 @@ pub struct Buffer {
     /// allocations in one buffer's lifetime, further compressions simply
     /// stop minting new ids rather than silently reusing one.
     pub(in crate::buffer) next_block_id: u32,
-
-    /// Per-row reference into `self.blocks`, index-parallel to `self.rows` /
-    /// `self.row_cache` (same maintained-in-lockstep invariant those two
-    /// already have). `None` means the row is not currently compressed (it
-    /// may be `Live` or Task-118 [`Row::is_compact`]); `Some` means the
-    /// row's real content has been evicted into the referenced block (see
-    /// [`Row::is_evicted`]) and `self.rows[i]` holds only a diagnostic
-    /// placeholder.
-    ///
-    /// May transiently lag *shorter* than `self.rows` immediately after a
-    /// row is appended by a code path outside the compression subsystem
-    /// (namely three direct `self.rows.push` sites in `lines.rs`, and two
-    /// test-only ones in `lifecycle.rs`, none of which know about this
-    /// field). Every such append is always a fresh, never-compressed `Live`
-    /// row, so padding the gap with `None` on next access
-    /// (`Buffer::sync_row_block_map_len`) is exactly the correct value —
-    /// not a workaround for missing data. It can never lag *longer* than
-    /// `self.rows`: nothing removes rows without this module's involvement
-    /// (`erase.rs`/`cursor.rs`/`tabs.rs`/`images.rs` only mutate existing
-    /// rows' content in place, never the row count).
-    pub(in crate::buffer) row_block_map: Vec<Option<BlockRowRef>>,
 
     /// Reusable scratch buffer for [`CompressedBlock::decompress_into`],
     /// avoiding a fresh allocation on every block decompression inside
@@ -406,43 +451,46 @@ pub struct Buffer {
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
 ///
 /// Restored verbatim by [`Buffer::leave_alternate`].
+///
+/// Every field is crate-private: nothing outside `freminal-buffer` reads or
+/// builds one (verified across the workspace for Task 125.13); it is `pub`
+/// only because it names the type of the `pub(in crate::buffer)`
+/// `Buffer::saved_primary` field.
 #[derive(Debug, Clone)]
 pub struct SavedPrimaryState {
-    /// All primary-buffer rows (scrollback + visible region) at the time of the switch.
-    pub rows: Vec<Row>,
-    /// Per-row flat-representation cache saved alongside `rows`.
-    pub row_cache: Vec<Option<RowCacheEntry>>,
+    /// All primary-buffer rows (scrollback + visible region) at the time of the
+    /// switch, with their flat-representation cache entries and
+    /// compressed-block references. The alternate screen never accumulates
+    /// scrollback and so never compresses anything; the block references here
+    /// are restored verbatim on `leave_alternate`.
+    pub(in crate::buffer) rows: RowStore,
     /// Cursor state (position, attributes) at the time of the switch.
-    pub cursor: CursorState,
+    pub(in crate::buffer) cursor: CursorState,
     /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
-    pub scroll_offset: usize,
+    pub(in crate::buffer) scroll_offset: usize,
     /// Visible height of the terminal grid at the time of the switch.
-    pub height: usize,
+    pub(in crate::buffer) height: usize,
     /// Top of the DECSTBM scroll region at the time of the switch.
-    pub scroll_region_top: usize,
+    pub(in crate::buffer) scroll_region_top: usize,
     /// Bottom of the DECSTBM scroll region at the time of the switch.
-    pub scroll_region_bottom: usize,
+    pub(in crate::buffer) scroll_region_bottom: usize,
     /// Left margin (DECSLRM) at the time of the switch.
-    pub scroll_region_left: usize,
+    pub(in crate::buffer) scroll_region_left: usize,
     /// Right margin (DECSLRM) at the time of the switch.
-    pub scroll_region_right: usize,
+    pub(in crate::buffer) scroll_region_right: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
-    pub saved_cursor: Option<CursorState>,
+    pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
     /// Saved image store from the primary buffer.
-    pub image_store: ImageStore,
+    pub(in crate::buffer) image_store: ImageStore,
     /// Saved image cell count from the primary buffer.
-    pub image_cell_count: usize,
+    pub(in crate::buffer) image_cell_count: usize,
     /// Saved compressed scrollback blocks from the primary buffer (Task
     /// 119). The alternate screen never accumulates scrollback and so never
     /// compresses anything; this is empty for as long as the alternate
     /// screen is active and is restored verbatim on `leave_alternate`.
-    pub blocks: HashMap<BlockId, CompressedBlock>,
+    pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
     /// Saved [`Buffer::next_block_id`] counter from the primary buffer.
-    pub next_block_id: u32,
-    /// Saved per-row compressed-block references from the primary buffer,
-    /// index-parallel to `rows`/`row_cache` above (see
-    /// `Buffer::row_block_map`).
-    pub row_block_map: Vec<Option<BlockRowRef>>,
+    pub(in crate::buffer) next_block_id: u32,
 }
 
 /// Heap-inclusive memory breakdown for a [`Buffer`]'s row storage, row-flatten
@@ -471,9 +519,9 @@ pub struct BufferHeapBreakdown {
     /// counted separately, once per distinct `Arc`, in [`Self::url_bytes`].
     pub rows_bytes: usize,
 
-    /// Heap bytes held by `self.row_cache`.
+    /// Heap bytes held by the per-row flatten cache (`Buffer::rows`' cache table).
     ///
-    /// Computed as the outer `self.row_cache.capacity() *
+    /// Computed as the outer cache-table `capacity() *
     /// size_of::<Option<RowCacheEntry>>()` allocation, plus, for each
     /// populated (`Some`) entry, the capacities of its `chars`, `tags`,
     /// `bytes`, `byte_to_char`, and `auto_urls` backing allocations.
@@ -575,7 +623,7 @@ impl Buffer {
             return;
         }
         self.auto_detect_urls = enabled;
-        self.row_cache.fill(None);
+        self.rows.cache_mut().fill(None);
         for row in &mut self.rows {
             row.mark_dirty();
         }
@@ -583,8 +631,8 @@ impl Buffer {
 
     /// Returns a reference to all rows in this buffer (scrollback + visible region).
     #[must_use]
-    pub const fn rows(&self) -> &Vec<Row> {
-        &self.rows
+    pub const fn rows(&self) -> &[Row] {
+        self.rows.as_slice()
     }
 
     /// Compact up to `budget` not-yet-compacted scrollback rows into the
@@ -604,10 +652,12 @@ impl Buffer {
     /// `budget` counts rows actually compacted, not rows scanned: a row
     /// that cannot be compacted (e.g. an image row — see [`Row::compact`])
     /// does not consume budget, so a screenful of images never starves
-    /// later, genuinely compactable rows of their turn. The scan is a
-    /// simple forward walk over `0..visible_start` that skips rows already
-    /// reported `is_compact()`; this is `O(visible_start)` worst case per
-    /// call, but that cost is paid on the idle path, not a hot one.
+    /// later, genuinely compactable rows of their turn. Rows already evicted
+    /// to a compressed block ([`Row::is_evicted`]) are skipped untouched
+    /// (Task 125.C10). The scan is a simple forward walk over
+    /// `0..visible_start` that skips rows already reported `is_compact()`;
+    /// this is `O(visible_start)` worst case per call, but that cost is paid
+    /// on the idle path, not a hot one.
     #[must_use]
     pub fn compact_idle_scrollback(&mut self, budget: usize) -> usize {
         if self.kind == BufferType::Alternate {
@@ -615,12 +665,21 @@ impl Buffer {
         }
         let visible_start = self.visible_window_start(0);
         let mut compacted = 0usize;
-        for (row, cache_entry) in self.rows[..visible_start]
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, cache_entry) in rows[..visible_start]
             .iter_mut()
-            .zip(self.row_cache[..visible_start].iter_mut())
+            .zip(cache[..visible_start].iter_mut())
         {
             if compacted >= budget {
                 break;
+            }
+            if row.is_evicted() {
+                // The row's content already lives in a compressed block and
+                // the row is an inert placeholder (Task 119). It is neither
+                // compactable nor in need of cache release (eviction took
+                // both with it), and touching its storage would trip
+                // `Row::cells_ref`'s eviction assertion (Task 125.C10).
+                continue;
             }
             if row.is_compact() {
                 // Already compact. Its cache entry and decompaction memo are
@@ -697,9 +756,9 @@ impl Buffer {
         }
 
         let option_row_cache_entry_size = core::mem::size_of::<Option<RowCacheEntry>>();
-        let mut row_cache_bytes = self.row_cache.capacity() * option_row_cache_entry_size;
+        let mut row_cache_bytes = self.rows.cache_capacity() * option_row_cache_entry_size;
 
-        for entry in self.row_cache.iter().flatten() {
+        for entry in self.rows.cache().iter().flatten() {
             row_cache_bytes += entry.chars.capacity() * core::mem::size_of::<TChar>();
             row_cache_bytes += entry.tags.capacity() * core::mem::size_of::<FormatTag>();
             row_cache_bytes += entry.bytes.capacity();
@@ -707,7 +766,11 @@ impl Buffer {
             row_cache_bytes += entry.auto_urls.capacity() * core::mem::size_of::<AutoUrlRange>();
         }
 
-        let blocks_bytes: usize = self.blocks.values().map(CompressedBlock::heap_bytes).sum();
+        let blocks_bytes: usize = self
+            .blocks
+            .values()
+            .map(|slot| slot.block.heap_bytes())
+            .sum();
 
         BufferHeapBreakdown {
             rows_bytes,
@@ -748,7 +811,7 @@ impl Buffer {
         // Metadata changed: `join`/`origin` feed wrapped-URL grouping, so the
         // cached flat representation of this row must be rebuilt even though
         // the cells themselves are untouched.
-        self.row_cache[row_idx] = None;
+        self.rows.cache_mut()[row_idx] = None;
     }
 
     /// Insert `text` at the current cursor position, soft-wrapping as needed.
@@ -853,8 +916,6 @@ impl Buffer {
 
                 self.rows
                     .push(Row::new_with_origin(self.width, origin, join));
-                self.row_cache.push(None);
-                self.row_block_map.push(None);
             }
 
             // clone tag here to avoid long-lived borrows of &self
@@ -2595,7 +2656,6 @@ mod tests_gui_scroll {
         let mut b = Buffer::new(width, height);
         b.scrollback_limit = scrollback;
         b.rows = (0..n).map(|_| make_row(width)).collect();
-        b.row_cache = vec![None; b.rows.len()];
 
         // Put cursor at last row to begin
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
@@ -2743,7 +2803,6 @@ mod tests_gui_resize {
         b.rows = (0..n)
             .map(|_| Row::new_with_origin(width, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
-        b.row_cache = vec![None; b.rows.len()];
 
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
         b.cursor.pos.x = 0;
@@ -3688,6 +3747,81 @@ mod image_tests {
         }
     }
 
+    /// Task 125 review: a `d=q` clear that leaves a cell-owned (Sixel) image
+    /// with no cell must free its pixels; a Kitty image keeps its data.
+    #[test]
+    fn clear_placement_with_z_frees_a_cell_owned_image_but_keeps_kitty_data() {
+        let mut buf = Buffer::new(20, 10);
+        let sixel = make_image(3, 1);
+        let sixel_id = sixel.id;
+        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 3;
+        let kitty = make_image(3, 1);
+        let kitty_id = kitty.id;
+        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+        assert!(buf.image_store().contains(sixel_id));
+        assert!(buf.image_store().contains(kitty_id));
+
+        assert_eq!(
+            buf.clear_image_placements_at_cell_with_z(0, 0, 0),
+            Some(sixel_id)
+        );
+        assert_eq!(count_image_cells(&buf, sixel_id), 0);
+        assert!(
+            !buf.image_store().contains(sixel_id),
+            "the cell-owned image has no cell left and must be freed"
+        );
+
+        assert_eq!(
+            buf.clear_image_placements_at_cell_with_z(3, 0, 0),
+            Some(kitty_id)
+        );
+        assert!(
+            buf.image_store().contains(kitty_id),
+            "Kitty data outlives its cells; only d=Q frees it"
+        );
+        buf.debug_assert_invariants();
+    }
+
+    /// `d=q` only matches the z-index it was given.
+    #[test]
+    fn clear_placement_with_z_ignores_a_cell_with_another_z_index() {
+        let mut buf = Buffer::new(20, 10);
+        let img = make_image(3, 1);
+        let id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 7, None, 1, None);
+
+        assert_eq!(buf.clear_image_placements_at_cell_with_z(0, 0, 0), None);
+        assert_eq!(count_image_cells(&buf, id), 3);
+        assert!(buf.image_store().contains(id));
+    }
+
+    /// Task 125 review: `d=a` must free the cell-owned images it left
+    /// without a cell, and only those it cleared.
+    #[test]
+    fn clear_visible_placements_frees_cell_owned_images() {
+        let mut buf = Buffer::new(20, 10);
+        let sixel = make_image(3, 1);
+        let sixel_id = sixel.id;
+        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 3;
+        let kitty = make_image(3, 1);
+        let kitty_id = kitty.id;
+        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+
+        let mut ids = buf.clear_image_placements_visible(0);
+        ids.sort_unstable();
+        let mut expected = vec![sixel_id, kitty_id];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+        assert_eq!(buf.image_cell_count, 0);
+        assert!(!buf.image_store().contains(sixel_id));
+        assert!(buf.image_store().contains(kitty_id));
+        buf.debug_assert_invariants();
+    }
+
     #[test]
     fn place_image_moves_cursor_below_image() {
         let mut buf = Buffer::new(20, 10);
@@ -4117,7 +4251,7 @@ mod image_tests {
     #[test]
     fn set_image_cell_extends_row_if_needed() {
         let mut row = Row::new(10);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         let placement = ImagePlacement {
             image_id: 42,
@@ -4157,7 +4291,7 @@ mod image_tests {
         };
         // Column 10 is beyond width 5 — should be a no-op.
         row.set_image_cell(10, placement, FormatTag::default());
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── Cell image accessors ─────────────────────────────────────────
@@ -4743,7 +4877,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "hello");
         // Row 0 contains "hello" (plus trailing spaces to width 10).
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(result, "hello");
     }
 
@@ -4752,7 +4886,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcdefghij");
         // Extract columns 2..=5 → "cdef"
-        let result = buf.extract_text(0, 2, 0, 5);
+        let result = buf.extract_text(RowNumber::new(0), 2, RowNumber::new(0), 5);
         assert_eq!(result, "cdef");
     }
 
@@ -4764,7 +4898,7 @@ mod extract_text_tests {
         push_line(&mut buf, "line three");
 
         // Extract from row 0, col 0 to row 2, col 9 (full lines).
-        let result = buf.extract_text(0, 0, 2, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(2), 9);
         assert_eq!(result, "line one\nline two\nline three");
     }
 
@@ -4772,7 +4906,7 @@ mod extract_text_tests {
     fn start_row_beyond_buffer() {
         let buf = Buffer::new(10, 5);
         // Only 5 rows in a new buffer; asking for row 100 returns empty.
-        let result = buf.extract_text(100, 0, 100, 5);
+        let result = buf.extract_text(RowNumber::new(100), 0, RowNumber::new(100), 5);
         assert_eq!(result, "");
     }
 
@@ -4781,7 +4915,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "only");
         // end_row far beyond buffer → clamped to last row.
-        let result = buf.extract_text(0, 0, 999, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(999), 9);
         // Should extract all rows without panicking.
         assert!(result.contains("only"));
     }
@@ -4789,7 +4923,7 @@ mod extract_text_tests {
     #[test]
     fn empty_buffer() {
         let buf = Buffer::new(10, 3);
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         // A fresh buffer has rows of spaces; trailing spaces are trimmed.
         assert_eq!(result, "");
     }
@@ -4799,7 +4933,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(20, 5);
         push_line(&mut buf, "abc");
         // Row has "abc" + 17 spaces; extract_text trims trailing spaces.
-        let result = buf.extract_text(0, 0, 0, 19);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 19);
         assert_eq!(result, "abc");
     }
 
@@ -4808,7 +4942,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(5, 3);
         push_line(&mut buf, "hi");
         // start_col beyond the actual content should still not panic.
-        let result = buf.extract_text(0, 100, 0, 100);
+        let result = buf.extract_text(RowNumber::new(0), 100, RowNumber::new(0), 100);
         assert_eq!(result, "");
     }
 
@@ -4821,8 +4955,147 @@ mod extract_text_tests {
         let chars = vec![wide_char, ascii('x')];
         buf.insert_text(&chars);
 
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(result, "Ｗx");
+    }
+
+    // ── Task 125.17: logical row numbers across eviction ─────────────
+
+    /// A 3-row screen with 5 rows of scrollback (8 retained rows at most) that
+    /// has evicted exactly the leading `evicted` rows of the scripted lines
+    /// `line0`, `line1`, ...: the buffer holds the lines in order, and the
+    /// numbers recorded for them stay valid.
+    ///
+    /// Returns the buffer and the logical number of each line written, in
+    /// order, for the first `lines` lines.
+    fn small_buffer_with_lines(lines: usize) -> (Buffer, Vec<RowNumber>) {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(5);
+        let mut numbers = Vec::new();
+        for i in 0..lines {
+            numbers.push(buf.cursor_row_number());
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        (buf, numbers)
+    }
+
+    #[test]
+    fn extract_text_follows_the_same_rows_across_eviction() {
+        // 5 lines: nothing evicted yet (6 rows incl. the cursor row <= 8).
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        assert_eq!(buf.row_base(), RowNumber::ZERO, "setup: no eviction yet");
+        let before = buf.extract_text(numbers[2], 0, numbers[3], 9);
+        assert_eq!(before, "line2\nline3");
+
+        // Push enough further lines to evict the first rows but keep 2 and 3.
+        push_line(&mut buf, "line5");
+        push_line(&mut buf, "line6");
+        push_line(&mut buf, "line7");
+        assert!(buf.row_base() > RowNumber::ZERO, "setup must evict rows");
+        assert!(
+            buf.row_base() <= numbers[2],
+            "setup must keep the selected rows retained"
+        );
+
+        let after = buf.extract_text(numbers[2], 0, numbers[3], 9);
+        assert_eq!(
+            after, before,
+            "the same logical rows must copy the same text"
+        );
+    }
+
+    #[test]
+    fn extract_text_start_evicted_clamps_to_oldest_row_column_zero() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        let base = buf.row_base();
+        assert!(base > numbers[1], "setup: rows 0 and 1 must be evicted");
+
+        // A start column that belonged to the vanished text must not apply to
+        // the clamped row: the clamp starts the oldest row at column 0.
+        let end = buf.row_number_at(1);
+        let clamped = buf.extract_text(numbers[0], 3, end, 9);
+        let expected = buf.extract_text(base, 0, end, 9);
+        assert_eq!(clamped, expected);
+        assert!(clamped.starts_with("line"), "got {clamped:?}");
+    }
+
+    #[test]
+    fn extract_text_range_wholly_evicted_is_empty() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        assert!(buf.row_base() > numbers[1], "setup: rows 0 and 1 evicted");
+        assert_eq!(buf.extract_text(numbers[0], 0, numbers[1], 9), "");
+    }
+
+    #[test]
+    fn extract_text_end_beyond_buffer_clamps_to_last_row() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        let text = buf.extract_text(numbers[1], 0, far, 9);
+        assert!(text.starts_with("line1\nline2"), "got {text:?}");
+    }
+
+    /// A linear selection whose end lies past the last row (Select All in a
+    /// young terminal) must run to the end of the last row, whatever column
+    /// the phantom end cell carried.
+    #[test]
+    fn extract_text_end_beyond_buffer_runs_to_the_end_of_the_last_row() {
+        // Text on the *last* retained row (no trailing empty cursor row).
+        let mut buf = Buffer::new(10, 3);
+        buf.insert_text(&"abc".chars().map(ascii).collect::<Vec<_>>());
+        assert_eq!(buf.rows().len(), 1, "setup: one retained row");
+        let far = RowNumber::new(10_000);
+        // The phantom end cell carries column 0; it must not cut the row.
+        let text = buf.extract_text(RowNumber::new(0), 0, far, 0);
+        assert_eq!(text, "abc");
+    }
+
+    /// A block keeps its own columns when its end row is clamped.
+    #[test]
+    fn extract_block_text_end_beyond_buffer_keeps_its_columns() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        let text = buf.extract_block_text(numbers[1], 1, far, 2);
+        assert!(text.starts_with("in\nin"), "got {text:?}");
+    }
+
+    #[test]
+    fn extract_text_start_beyond_buffer_is_empty() {
+        let (buf, _) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        assert_eq!(buf.extract_text(far, 0, far, 9), "");
+    }
+
+    #[test]
+    fn extract_text_other_namespace_rows_are_empty() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let alt = RowNumber::ALTERNATE_BASE;
+        assert_eq!(buf.extract_text(alt, 0, alt, 9), "");
+        assert_eq!(buf.extract_text(numbers[0], 0, alt, 9), "");
+        assert_eq!(buf.extract_block_text(alt, 0, alt, 9), "");
+    }
+
+    #[test]
+    fn extract_block_text_follows_rows_and_keeps_columns_when_start_evicted() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        let before = buf.extract_block_text(numbers[2], 2, numbers[3], 3);
+        assert_eq!(before, "ne\nne");
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        let base = buf.row_base();
+        assert!(base > numbers[1], "setup: rows 0 and 1 evicted");
+
+        // A block keeps its column range when its start row is clamped.
+        let end = buf.row_number_at(1);
+        let clamped = buf.extract_block_text(numbers[0], 2, end, 3);
+        let oldest_and_next = buf.extract_block_text(base, 2, end, 3);
+        assert_eq!(clamped, oldest_and_next);
+        assert!(clamped.starts_with("ne"), "got {clamped:?}");
     }
 }
 
@@ -4852,7 +5125,7 @@ mod extract_block_text_tests {
         // Single-row block selection: same as a normal extract over that row.
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "hello");
-        let result = buf.extract_block_text(0, 0, 0, 4);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(0), 4);
         assert_eq!(result, "hello");
     }
 
@@ -4861,7 +5134,7 @@ mod extract_block_text_tests {
         // Extract only columns 1..=3 of "abcde" → "bcd".
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcde");
-        let result = buf.extract_block_text(0, 1, 0, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 1, RowNumber::new(0), 3);
         assert_eq!(result, "bcd");
     }
 
@@ -4875,7 +5148,7 @@ mod extract_block_text_tests {
         push_line(&mut buf, "abcdefghij");
         push_line(&mut buf, "efghijklmn");
         push_line(&mut buf, "ijklmnopqr");
-        let result = buf.extract_block_text(0, 0, 2, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(2), 3);
         assert_eq!(
             result,
             "abcd
@@ -4890,7 +5163,7 @@ ijkl"
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcdefghij");
         // Passing end_col=1, start_col=3 → should extract cols 1..=3 = "bcd".
-        let result = buf.extract_block_text(0, 3, 0, 1);
+        let result = buf.extract_block_text(RowNumber::new(0), 3, RowNumber::new(0), 1);
         assert_eq!(result, "bcd");
     }
 
@@ -4901,7 +5174,7 @@ ijkl"
         push_line(&mut buf, "ab"); // row 0: "ab" + 8 spaces
         push_line(&mut buf, "cde"); // row 1: "cde" + 7 spaces
         // Extract cols 0..=9 (full width): trailing spaces must be stripped.
-        let result = buf.extract_block_text(0, 0, 1, 9);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(1), 9);
         assert_eq!(
             result,
             "ab
@@ -4912,7 +5185,7 @@ cde"
     #[test]
     fn start_row_beyond_buffer() {
         let buf = Buffer::new(10, 5);
-        let result = buf.extract_block_text(100, 0, 105, 9);
+        let result = buf.extract_block_text(RowNumber::new(100), 0, RowNumber::new(105), 9);
         assert_eq!(result, "");
     }
 
@@ -4921,7 +5194,7 @@ cde"
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "only");
         // end_row far beyond buffer → clamped, must not panic.
-        let result = buf.extract_block_text(0, 0, 999, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(999), 3);
         assert!(result.contains("only"));
     }
 
@@ -4930,7 +5203,7 @@ cde"
         // Columns beyond the actual row width produce no characters (no panic).
         let mut buf = Buffer::new(5, 3);
         push_line(&mut buf, "hi");
-        let result = buf.extract_block_text(0, 10, 0, 20);
+        let result = buf.extract_block_text(RowNumber::new(0), 10, RowNumber::new(0), 20);
         assert_eq!(result, "");
     }
 
@@ -4943,7 +5216,7 @@ cde"
         push_line(&mut buf, "abcdefghij");
         push_line(&mut buf, "ABCDEFGHIJ");
         // Extract cols 3..=5 → "345", "def", "DEF".
-        let result = buf.extract_block_text(0, 3, 2, 5);
+        let result = buf.extract_block_text(RowNumber::new(0), 3, RowNumber::new(2), 5);
         assert_eq!(
             result,
             "345
@@ -6026,8 +6299,7 @@ mod reflow_to_width_tests {
         let mut buf = Buffer::new(10, 5);
         // don't insert any text, but buffer has default rows
         // Clear all rows to make it truly empty
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         buf.cursor.pos.y = 0;
         buf.cursor.pos.x = 0;
 
@@ -7462,8 +7734,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn visible_rows_empty_buffer() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(buf.visible_rows(0).is_empty());
     }
 
@@ -7490,8 +7761,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn any_visible_dirty_empty() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(!buf.any_visible_dirty(0));
     }
 
@@ -7508,10 +7778,9 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn visible_image_placements_empty_buffer() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         let placements = buf.visible_image_placements(0);
-        assert!(placements.is_empty());
+        assert_eq!(placements, []);
     }
 
     // ── has_visible_images ──
@@ -7526,8 +7795,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn has_visible_images_empty() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(!buf.has_visible_images(0));
     }
 
@@ -7750,7 +8018,6 @@ mod resize_and_insert_tests {
         buf.rows = (0..18)
             .map(|_| Row::new_with_origin(10, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
-        buf.row_cache = vec![None; buf.rows.len()];
         buf.cursor.pos.y = buf.rows.len() - 1;
         assert_eq!(buf.rows.len(), 18);
 
@@ -7786,8 +8053,7 @@ mod resize_and_insert_tests {
         buf.cursor.pos.x = 5;
         buf.cursor.pos.y = 3;
         // Drain all rows to make it empty.
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         buf.clamp_cursor_after_resize();
         assert_eq!(buf.cursor.pos.x, 0);
         assert_eq!(buf.cursor.pos.y, 0);
@@ -7917,7 +8183,7 @@ mod resize_and_insert_tests {
         );
 
         // Tags should cover the full range.
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
         // Row offsets should have 3 entries.
         assert_eq!(row_offsets.len(), 3);
     }
@@ -7941,7 +8207,7 @@ mod resize_and_insert_tests {
     #[test]
     fn extract_text_start_row_out_of_bounds() {
         let buf = Buffer::new(10, 3);
-        let text = buf.extract_text(100, 0, 200, 5);
+        let text = buf.extract_text(RowNumber::new(100), 0, RowNumber::new(200), 5);
         assert_eq!(text, "");
     }
 
@@ -7955,7 +8221,7 @@ mod resize_and_insert_tests {
         // Manually overwrite cell 2 with NewLine.
         buf.rows[0].cells_mut()[2] = Cell::new(TChar::NewLine, FormatTag::default());
 
-        let text = buf.extract_text(0, 0, 0, 9);
+        let text = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(text, "AB", "extraction should stop at NewLine");
     }
 
@@ -7964,7 +8230,7 @@ mod resize_and_insert_tests {
     #[test]
     fn extract_block_text_start_row_out_of_bounds() {
         let buf = Buffer::new(10, 3);
-        let text = buf.extract_block_text(100, 0, 200, 5);
+        let text = buf.extract_block_text(RowNumber::new(100), 0, RowNumber::new(200), 5);
         assert_eq!(text, "");
     }
 
@@ -7976,9 +8242,9 @@ mod resize_and_insert_tests {
         buf.insert_text(&t("ABC"));
 
         // Extract block from col 10 to 15 — beyond width.
-        let text = buf.extract_block_text(0, 10, 0, 15);
+        let text = buf.extract_block_text(RowNumber::new(0), 10, RowNumber::new(0), 15);
         // Should be empty or just whitespace since cols are out of range.
-        assert!(text.trim().is_empty());
+        assert_eq!(text.trim(), "");
     }
 }
 
@@ -8273,34 +8539,6 @@ mod image_clearing_tests {
         buf.set_image_cell_at(0, 0, make_placement(1, None, 0), FormatTag::default());
         assert_eq!(buf.image_cell_count, 1);
         buf.clear_image_placements_by_z_index(999);
-        assert_eq!(buf.image_cell_count, 1);
-    }
-
-    // ── `clear_image_placements_at_cursor` ──
-
-    #[test]
-    fn clear_at_cursor_clears_cursor_row() {
-        let mut buf = alt_buf(10, 5);
-        place(&mut buf, 2, 0, 1);
-        place(&mut buf, 2, 3, 2);
-        place(&mut buf, 3, 0, 3); // different row
-        buf.cursor.pos.y = 2;
-        assert_eq!(buf.image_cell_count, 3);
-
-        buf.clear_image_placements_at_cursor();
-        assert_eq!(buf.image_cell_count, 1);
-        assert!(!buf.rows[2].cells()[0].has_image());
-        assert!(!buf.rows[2].cells()[3].has_image());
-        assert!(buf.rows[3].cells()[0].has_image());
-    }
-
-    #[test]
-    fn clear_at_cursor_out_of_bounds_is_noop() {
-        let mut buf = alt_buf(10, 5);
-        place(&mut buf, 0, 0, 1);
-        buf.cursor.pos.y = 100;
-        assert_eq!(buf.image_cell_count, 1);
-        buf.clear_image_placements_at_cursor();
         assert_eq!(buf.image_cell_count, 1);
     }
 
@@ -8835,7 +9073,7 @@ mod coverage_gap_tests {
             "expected at least 2 newlines between 3 rows, got {newline_count}"
         );
         // Tags should cover all positions
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
     }
 
     // -----------------------------------------------------------------------
@@ -8902,7 +9140,7 @@ mod coverage_gap_tests {
         // Insert a wide char followed by narrow
         buf.insert_text(&[TChar::from('あ'), TChar::Ascii(b'B')]);
 
-        let text = buf.extract_text(0, 0, 0, 4);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(0), 4);
         // Should contain the wide char and 'B', no duplicates from continuation
         assert!(text.contains('B'));
     }
@@ -8963,7 +9201,7 @@ mod coverage_gap_tests {
             newlines.len()
         );
         // All chars should be covered by tags
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
     }
 
     #[test]
@@ -8983,7 +9221,7 @@ mod coverage_gap_tests {
         // the continuation cell (line 3166-3167).
         let mut buf = alt_buf(10, 3);
         buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'A')]);
-        let text = buf.extract_text(0, 0, 0, 5);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(0), 5);
         assert!(text.contains('中'), "Should contain the wide char");
         assert!(text.contains('A'), "Should contain the ASCII char");
         // Should NOT contain any placeholder for the continuation
@@ -8998,7 +9236,7 @@ mod coverage_gap_tests {
         buf.handle_lf();
         buf.handle_cr();
         buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
-        let text = buf.extract_text(0, 0, 1, 5);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(1), 5);
         assert!(text.contains("AB"), "First row should have AB");
         assert!(text.contains("CD"), "Second row should have CD");
         assert!(text.contains('\n'), "Should have newline between rows");
@@ -9011,7 +9249,7 @@ mod coverage_gap_tests {
         // extract_block_text with a wide char should skip continuation (line 3224-3225).
         let mut buf = alt_buf(10, 3);
         buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'X')]);
-        let text = buf.extract_block_text(0, 0, 0, 5);
+        let text = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(0), 5);
         assert!(text.contains('中'));
         assert!(text.contains('X'));
     }
@@ -9023,7 +9261,7 @@ mod coverage_gap_tests {
         buf.handle_lf();
         buf.handle_cr();
         buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
-        let text = buf.extract_block_text(0, 0, 1, 3);
+        let text = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(1), 3);
         assert!(text.contains("AB"), "First row should have AB: {text:?}");
         assert!(text.contains("CD"), "Second row should have CD: {text:?}");
     }
@@ -9209,7 +9447,7 @@ mod task_113_smoke {
         let last_content_row_before = buf.rows.len() - 1;
         assert_eq!(
             buf.command_blocks()[0].end_row,
-            Some(last_content_row_before),
+            Some(buf.row_number_at(last_content_row_before)),
             "precondition: end_row points at the last content row"
         );
 
@@ -9220,7 +9458,7 @@ mod task_113_smoke {
         let last_content_row_after = buf.rows.len() - 1;
         assert_eq!(
             buf.command_blocks()[0].end_row,
-            Some(last_content_row_after),
+            Some(buf.row_number_at(last_content_row_after)),
             "reflow must remap command_block end_row to the new layout \
              (block points at {:?}, last content row is {last_content_row_after})",
             buf.command_blocks()[0].end_row,
@@ -9250,19 +9488,22 @@ mod task_113_smoke {
     // output region [output_start_row, end_row] is a valid ascending span
     // inside the buffer, and all indices are in range.
     fn assert_block_rows_sane(buf: &Buffer) {
-        let len = buf.rows.len();
+        // Every stored number must resolve to a retained row.
+        let idx = |n: RowNumber| {
+            buf.row_index_of(n)
+                .unwrap_or_else(|| panic!("row number {n} does not resolve to a retained row"))
+        };
         for b in buf.command_blocks() {
-            assert!(b.prompt_start_row < len, "prompt_start_row in range");
+            let prompt = idx(b.prompt_start_row);
             if let Some(c) = b.command_start_row {
-                assert!(c < len, "command_start_row in range");
+                let _ = idx(c);
             }
             if let (Some(o), Some(e)) = (b.output_start_row, b.end_row) {
-                assert!(o < len && e < len, "output region in range");
+                let (o, e) = (idx(o), idx(e));
                 assert!(o <= e, "output_start_row {o} must be <= end_row {e}");
                 assert!(
-                    b.prompt_start_row <= o,
-                    "prompt_start_row {} must be <= output_start_row {o}",
-                    b.prompt_start_row
+                    prompt <= o,
+                    "prompt_start_row {prompt} must be <= output_start_row {o}",
                 );
             }
         }
@@ -9430,7 +9671,7 @@ mod scrollback_compaction_tests {
             row.ensure_live();
             row.mark_dirty();
         }
-        buf.row_cache.fill(None);
+        buf.rows.cache_mut().fill(None);
 
         let (live_vis_chars, live_vis_tags, ..) = buf.visible_as_tchars_and_tags(0);
         let (live_sb_chars, live_sb_tags, ..) = buf.scrollback_as_tchars_and_tags(0);
@@ -9490,7 +9731,7 @@ mod scrollback_compaction_tests {
         );
 
         // Rows 0 and 1 are within scrollback (compacted); extract across them.
-        let extracted = buf.extract_text(0, 0, 1, 14);
+        let extracted = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(1), 14);
         assert!(
             extracted.contains("line0000content"),
             "extract_text over compacted scrollback missing row 0: {extracted:?}"
@@ -9500,7 +9741,7 @@ mod scrollback_compaction_tests {
             "extract_text over compacted scrollback missing row 1: {extracted:?}"
         );
 
-        let block = buf.extract_block_text(0, 0, 1, 6);
+        let block = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(1), 6);
         assert!(
             block.contains("line000"),
             "extract_block_text over compacted scrollback missing row 0: {block:?}"
@@ -9545,24 +9786,24 @@ mod scrollback_compaction_tests {
             "scrollback limit must still be enforced with compaction active"
         );
 
-        // Every surviving prompt-row / command-block index must be in range
-        // and internally ordered — i.e. compaction did not corrupt the
-        // drain-and-shift bookkeeping in `adjust_prompt_rows`.
+        // Every surviving prompt-row / command-block number must resolve to a
+        // retained row and be internally ordered — i.e. compaction did not
+        // corrupt the eviction bookkeeping (`prune_evicted_marks`).
         for &row in buf.prompt_rows() {
             assert!(
-                row < buf.rows.len(),
-                "prompt row {row} out of bounds after drain (rows.len()={})",
+                buf.row_index_of(row).is_some(),
+                "prompt row {row} does not resolve after drain (rows.len()={})",
                 buf.rows.len()
             );
         }
         for block in buf.command_blocks() {
-            assert!(block.prompt_start_row < buf.rows.len());
+            assert!(buf.row_index_of(block.prompt_start_row).is_some());
             if let Some(cmd_start) = block.command_start_row {
                 assert!(block.prompt_start_row <= cmd_start);
-                assert!(cmd_start < buf.rows.len());
+                assert!(buf.row_index_of(cmd_start).is_some());
             }
             if let Some(end) = block.end_row {
-                assert!(end < buf.rows.len());
+                assert!(buf.row_index_of(end).is_some());
             }
         }
     }
@@ -9634,7 +9875,7 @@ mod scrollback_compaction_tests {
         let _ = buf.visible_as_tchars_and_tags(0);
         let _ = buf.scrollback_as_tchars_and_tags(0);
         assert!(
-            buf.row_cache.iter().all(Option::is_some),
+            buf.rows.cache().iter().all(Option::is_some),
             "precondition: every row cache entry warmed"
         );
 
@@ -9652,7 +9893,7 @@ mod scrollback_compaction_tests {
         // (rebuilt for the new height on next flatten).
         let new_visible_start = buf.rows.len().saturating_sub(new_height);
         assert!(
-            buf.row_cache[new_visible_start..]
+            buf.rows.cache()[new_visible_start..]
                 .iter()
                 .all(Option::is_none),
             "new visible window rows must have their cache invalidated on height grow"
@@ -9661,7 +9902,9 @@ mod scrollback_compaction_tests {
         // Cold scrollback rows at the top must NOT have been invalidated — this
         // is the 118.7 fix (the old `0..old_height` range wrongly cleared them).
         assert!(
-            buf.row_cache[..top_scrollback].iter().all(Option::is_some),
+            buf.rows.cache()[..top_scrollback]
+                .iter()
+                .all(Option::is_some),
             "top-of-scrollback cache entries must be retained across a height grow"
         );
     }

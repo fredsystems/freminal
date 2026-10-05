@@ -21,6 +21,8 @@ use tracing::error;
 use super::super::atlas::GlyphAtlas;
 use super::errors::{BufferAllocError, GpuInitError, ShaderCompileError, TextureUploadError};
 use super::gl_facade::Gl;
+use super::gl_init_state::GlInitState;
+use super::retire::GlRetireQueue;
 use super::shaders::{
     BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
     DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC, IMG_FRAG_SRC, IMG_VERT_SRC, POST_PASSTHROUGH_FRAG_SRC,
@@ -31,6 +33,37 @@ use super::vertex::{
     VERTS_PER_QUAD, extract_atlas_rect,
 };
 use freminal_terminal_emulator::InlineImage;
+
+// Task 125.6: real per-buffer upload-byte attribution, feature-gated the
+// same way `gui::renderer::profiling` itself is -- see `DrawUploadCounts`'s
+// doc for why the draw methods' return type is aliased rather than
+// unconditionally naming `UploadByteCounts`.
+#[cfg(feature = "frame-profiling")]
+use super::profiling::UploadByteCounts;
+
+// Task 125.8: the per-pane asynchronous GPU timing adapter, feature-gated
+// the same way `gui::renderer::gpu_profiling` itself is.
+#[cfg(feature = "gpu-profiling")]
+use super::gpu_profiling::{GpuTimingReport, PaneGpuTimingProfile};
+
+/// The per-callback upload-byte measurement [`TerminalRenderer::draw_with_verts`]
+/// and [`TerminalRenderer::draw_with_cursor_only_update`] return (Task
+/// 125.6).
+///
+/// Aliased to `()` in a default build so neither draw method's signature,
+/// nor any call site, ever names a type from the `frame-profiling`-only
+/// `profiling` module when the feature is disabled -- matching Task
+/// 125.4's "entirely absent from a default build" invariant for
+/// everything `renderer::profiling` defines. The two draw methods share a
+/// single function body regardless of this alias (no cfg'd duplicate
+/// definitions): every statement that produces a byte count too is itself
+/// `#[cfg(feature = "frame-profiling")]`-gated at the call site, mirroring
+/// the `not(feature = "frame-profiling")` arm that simply discards it, so
+/// default builds compute nothing extra and bind no unused bindings.
+#[cfg(feature = "frame-profiling")]
+type DrawUploadCounts = UploadByteCounts;
+#[cfg(not(feature = "frame-profiling"))]
+type DrawUploadCounts = ();
 
 // ---------------------------------------------------------------------------
 //  GL numeric conversion helpers
@@ -124,8 +157,8 @@ struct ImageTexture {
 /// invocation) to create shaders, VAOs, VBOs, and the atlas texture.  Then call
 /// [`TerminalRenderer::draw_with_verts`] every frame.
 pub struct TerminalRenderer {
-    /// Whether GPU resources have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
 
     // ---- instanced background pass ----
     bg_inst_program: Option<glow::Program>,
@@ -214,6 +247,17 @@ pub struct TerminalRenderer {
     /// capacity against a fresh buffer would skip an orphan the new,
     /// zero-sized storage genuinely needs.
     deco_vbo_allocated_bytes: [usize; 2],
+
+    /// Task 125.8: this pane's asynchronous GPU upload/draw timing
+    /// adapter. Capability is detected once per GL-resource lifetime, in
+    /// [`Self::init`] (which runs lazily inside the first paint callback,
+    /// so the context is current); the ring is drained and every pending
+    /// handle destroyed once, in [`Self::destroy`]. Entirely inert (no GL
+    /// call issued) unless capability detection resolves
+    /// `freminal_windowing::gpu_profiling::GpuTimerCapability::Available` --
+    /// see [`PaneGpuTimingProfile`]'s doc.
+    #[cfg(feature = "gpu-profiling")]
+    gpu_profile: PaneGpuTimingProfile,
 }
 
 impl Default for TerminalRenderer {
@@ -229,7 +273,7 @@ impl TerminalRenderer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             // instanced background
             bg_inst_program: None,
             bg_inst_vao: None,
@@ -271,25 +315,85 @@ impl TerminalRenderer {
             vbo_index: 0,
             deco_vbo_index: 0,
             deco_vbo_allocated_bytes: [0, 0],
+            #[cfg(feature = "gpu-profiling")]
+            gpu_profile: PaneGpuTimingProfile::new(),
         }
     }
 
-    /// Return whether GPU resources have been created.
+    /// Return whether `init` succeeded and the renderer can draw.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller (the paint callback) should attempt [`Self::init`]
+    /// now. `false` after a failed `init`: the failure is latched rather than
+    /// retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this renderer currently owns any GL object.
+    ///
+    /// Distinct from [`Self::initialized`]: a renderer whose `init` failed
+    /// midway released what it created, and one that is mid-`init` holds
+    /// objects without being ready. What the retire queue must delete is
+    /// exactly what this reports.
+    #[must_use]
+    pub fn holds_gl_objects(&self) -> bool {
+        self.bg_inst_program.is_some()
+            || self.bg_inst_vao.is_some()
+            || self.bg_unit_quad_vbo.is_some()
+            || self.bg_inst_vbo.iter().any(Option::is_some)
+            || self.deco_program.is_some()
+            || self.deco_vao.is_some()
+            || self.deco_vbo.iter().any(Option::is_some)
+            || self.fg_program.is_some()
+            || self.fg_vao.is_some()
+            || self.fg_vbo.iter().any(Option::is_some)
+            || self.atlas_texture.is_some()
+            || self.img_program.is_some()
+            || self.img_vao.is_some()
+            || self.img_vbo.iter().any(Option::is_some)
+            || !self.image_textures.is_empty()
+            || self.bg_img_program.is_some()
+            || self.bg_img_vao.is_some()
+            || self.bg_img_vbo.is_some()
+            || self.bg_img_texture.is_some()
     }
 
     /// Create all GPU resources.
     ///
-    /// Must be called exactly once, from within a `glow` context (e.g. inside a
-    /// `PaintCallback` or `CreationContext::gl`).
+    /// Must be called from within a `glow` context (e.g. inside a
+    /// `PaintCallback` or `CreationContext::gl`). Any objects a previous
+    /// partial attempt left behind are released first, and a failure
+    /// releases everything this attempt created before returning, so a failed
+    /// `init` never leaks GL objects and a retry starts clean. A failure is
+    /// latched ([`GlInitState::Failed`]); see [`Self::should_attempt_init`].
     ///
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
     /// GL object creation fails.
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_passes(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Run every pass's initialisation. Each pass stores its handles as it
+    /// creates them, so on error the caller can release the partial set.
+    fn init_passes(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         self.init_bg_inst_pass(gl)?;
         self.init_deco_pass(gl)?;
         self.init_fg_pass(gl)?;
@@ -297,7 +401,12 @@ impl TerminalRenderer {
         self.init_image_pass(gl)?;
         self.init_bg_image_pass(gl)?;
 
-        self.initialized = true;
+        // Task 125.8: detect GPU timer capability once, from the real
+        // context this pane will draw through for the rest of its
+        // lifetime.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.detect_capability(gl);
+
         Ok(())
     }
 
@@ -305,6 +414,10 @@ impl TerminalRenderer {
     /// double-buffered instance VBOs).
     fn init_bg_inst_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
+        // Every handle is stored the moment it exists: a later failure in
+        // this pass (or a later pass) is then cleaned up by
+        // `release_gl_objects` instead of leaking it (Task 125.C16).
+        self.bg_inst_program = Some(program);
 
         self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.bg_inst_u_cell_width = unsafe { gl.get_uniform_location(program, "u_cell_width") };
@@ -315,18 +428,22 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("bg_inst VAO", e))?
         };
+        self.bg_inst_vao = Some(vao);
         let unit_quad_vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg unit-quad VBO", e))?
         };
+        self.bg_unit_quad_vbo = Some(unit_quad_vbo);
         let inst_vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg instance VBO 0", e))?
         };
+        self.bg_inst_vbo[0] = Some(inst_vbo0);
         let inst_vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg instance VBO 1", e))?
         };
+        self.bg_inst_vbo[1] = Some(inst_vbo1);
 
         // Upload the static unit quad (never changes).
         let unit_quad_bytes = unsafe {
@@ -347,17 +464,13 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.bg_inst_program = Some(program);
-        self.bg_inst_vao = Some(vao);
-        self.bg_unit_quad_vbo = Some(unit_quad_vbo);
-        self.bg_inst_vbo = [Some(inst_vbo0), Some(inst_vbo1)];
-
         Ok(())
     }
 
     /// Initialise the decoration pass (shader, VAO, double-buffered VBOs).
     fn init_deco_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, DECO_VERT_SRC, DECO_FRAG_SRC, "decoration")?;
+        self.deco_program = Some(program);
 
         self.deco_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
 
@@ -365,14 +478,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("deco VAO", e))?
         };
+        self.deco_vao = Some(vao);
         let vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("deco VBO 0", e))?
         };
+        self.deco_vbo[0] = Some(vbo0);
         let vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("deco VBO 1", e))?
         };
+        self.deco_vbo[1] = Some(vbo1);
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
@@ -381,9 +497,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.deco_program = Some(program);
-        self.deco_vao = Some(vao);
-        self.deco_vbo = [Some(vbo0), Some(vbo1)];
         // Fresh, zero-sized storage: the next upload into either slot must
         // orphan to size it, whatever the payload (subtask 124.7).
         self.deco_vbo_allocated_bytes = [0, 0];
@@ -397,6 +510,7 @@ impl TerminalRenderer {
     /// (must be initialised first via [`init_bg_inst_pass`]).
     fn init_fg_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
+        self.fg_program = Some(program);
 
         self.fg_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.fg_u_atlas = unsafe { gl.get_uniform_location(program, "u_atlas") };
@@ -405,14 +519,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("foreground VAO", e))?
         };
+        self.fg_vao = Some(vao);
         let vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("foreground instance VBO 0", e))?
         };
+        self.fg_vbo[0] = Some(vbo0);
         let vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("foreground instance VBO 1", e))?
         };
+        self.fg_vbo[1] = Some(vbo1);
 
         // The unit-quad VBO must already exist (created by init_bg_inst_pass).
         let unit_quad_vbo = self.bg_unit_quad_vbo.ok_or_else(|| {
@@ -428,10 +545,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.fg_program = Some(program);
-        self.fg_vao = Some(vao);
-        self.fg_vbo = [Some(vbo0), Some(vbo1)];
-
         Ok(())
     }
 
@@ -444,6 +557,7 @@ impl TerminalRenderer {
                     message: e,
                 })?
         };
+        self.atlas_texture = Some(texture);
 
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -470,14 +584,13 @@ impl TerminalRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
 
-        self.atlas_texture = Some(texture);
-
         Ok(())
     }
 
     /// Initialise the image-pass GL resources (shader, VAO, double-buffered VBOs).
     fn init_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let img_program = compile_program(gl, IMG_VERT_SRC, IMG_FRAG_SRC, "image")?;
+        self.img_program = Some(img_program);
 
         let img_u_viewport = unsafe { gl.get_uniform_location(img_program, "u_viewport_size") };
         let img_u_image = unsafe { gl.get_uniform_location(img_program, "u_image") };
@@ -486,14 +599,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("image VAO", e))?
         };
+        self.img_vao = Some(img_vao);
         let img_vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("image VBO 0", e))?
         };
+        self.img_vbo[0] = Some(img_vbo0);
         let img_vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("image VBO 1", e))?
         };
+        self.img_vbo[1] = Some(img_vbo1);
 
         unsafe {
             gl.bind_vertex_array(Some(img_vao));
@@ -502,9 +618,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.img_program = Some(img_program);
-        self.img_vao = Some(img_vao);
-        self.img_vbo = [Some(img_vbo0), Some(img_vbo1)];
         self.img_u_viewport = img_u_viewport;
         self.img_u_image = img_u_image;
 
@@ -517,6 +630,7 @@ impl TerminalRenderer {
     /// [`Self::update_background_image`].
     fn init_bg_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_IMG_VERT_SRC, BG_IMG_FRAG_SRC, "bg_image")?;
+        self.bg_img_program = Some(program);
 
         self.bg_img_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.bg_img_u_image = unsafe { gl.get_uniform_location(program, "u_bg_image") };
@@ -526,10 +640,12 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("bg_image VAO", e))?
         };
+        self.bg_img_vao = Some(vao);
         let vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg_image VBO", e))?
         };
+        self.bg_img_vbo = Some(vbo);
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
@@ -537,10 +653,6 @@ impl TerminalRenderer {
             setup_img_attribs(gl);
             gl.bind_vertex_array(None);
         }
-
-        self.bg_img_program = Some(program);
-        self.bg_img_vao = Some(vao);
-        self.bg_img_vbo = Some(vbo);
 
         Ok(())
     }
@@ -577,16 +689,43 @@ impl TerminalRenderer {
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
-    ) {
-        if !self.initialized {
+    ) -> DrawUploadCounts {
+        if !self.init_state.is_ready() {
             error!("TerminalRenderer::draw_with_verts() called before init()");
+            #[cfg(feature = "frame-profiling")]
+            return UploadByteCounts::default();
+            #[cfg(not(feature = "frame-profiling"))]
             return;
         }
 
+        // Task 125.8: poll last frame's GPU timing samples and issue this
+        // frame's upload-phase start timestamp, strictly before the first
+        // upload GL command below -- see `PaneGpuTimingProfile`'s doc for
+        // the mandated call sequence.
+        #[cfg(feature = "gpu-profiling")]
+        let gpu_timing_frame = self.gpu_profile.begin_frame(gl);
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.begin_upload(gl);
+
         // 1. Sync atlas texture to the GPU.
+        //
+        // Task 125.6: `sync_atlas` reports exactly the bytes its own
+        // `tex_image_2d`/`tex_sub_image_2d` calls transferred, as a
+        // `(full_bytes, subrect_bytes)` pair -- never both nonzero for the
+        // same call (see `sync_atlas_to_texture`'s doc). Bound to a
+        // `let` only under `frame-profiling`; the `not(...)` arm below
+        // issues the identical call and discards its (unconditionally
+        // computed, but here-unused) return, exactly as before this
+        // subtask.
+        #[cfg(feature = "frame-profiling")]
+        let (atlas_full_bytes, atlas_subrect_bytes) = self.sync_atlas(gl, atlas);
+        #[cfg(not(feature = "frame-profiling"))]
         self.sync_atlas(gl, atlas);
 
         // 1b. Sync image textures (upload new, evict stale).
+        #[cfg(feature = "frame-profiling")]
+        let image_texture_bytes = self.sync_image_textures(gl, snap_images);
+        #[cfg(not(feature = "frame-profiling"))]
         self.sync_image_textures(gl, snap_images);
 
         // 2. Upload pre-built vertex data using orphan-then-write.
@@ -600,10 +739,30 @@ impl TerminalRenderer {
         // `draw_with_cursor_only_update`, issue #432).
         let buf_idx = self.vbo_index;
         let deco_buf_idx = self.deco_vbo_index;
+        #[cfg(feature = "frame-profiling")]
+        let bg_bytes = self.upload_bg_instances(gl, bg_instances, buf_idx);
+        #[cfg(not(feature = "frame-profiling"))]
         self.upload_bg_instances(gl, bg_instances, buf_idx);
+        #[cfg(feature = "frame-profiling")]
+        let deco_bytes = self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
+        #[cfg(not(feature = "frame-profiling"))]
         self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
+        #[cfg(feature = "frame-profiling")]
+        let fg_bytes = self.upload_fg_instances(gl, fg_instances, buf_idx);
+        #[cfg(not(feature = "frame-profiling"))]
         self.upload_fg_instances(gl, fg_instances, buf_idx);
+        #[cfg(feature = "frame-profiling")]
+        let img_bytes = self.upload_img_verts(gl, image_verts, buf_idx);
+        #[cfg(not(feature = "frame-profiling"))]
         self.upload_img_verts(gl, image_verts, buf_idx);
+
+        // Task 125.8: the upload phase ends here -- every upload GL command
+        // above has been issued and no draw GL command has been issued yet.
+        // Issues the upload phase's end timestamp and the draw phase's
+        // start timestamp back to back, so "upload excludes draw" and "draw
+        // begins after uploads" hold by construction.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_upload_begin_draw(gl, gpu_timing_frame);
 
         // 3. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
@@ -627,6 +786,13 @@ impl TerminalRenderer {
         self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), image_draw_order, vp_w, vp_h, buf_idx);
 
+        // Task 125.8: the draw phase ends here -- every terminal draw GL
+        // command above has been issued. The framebuffer-restore bind
+        // below is bookkeeping, not a terminal draw command, so it is
+        // deliberately excluded from the timed span.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_draw(gl, gpu_timing_frame);
+
         // 4. Restore egui's framebuffer binding.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
@@ -635,6 +801,21 @@ impl TerminalRenderer {
         // Advance double-buffer indices.
         self.vbo_index = 1 - self.vbo_index;
         self.deco_vbo_index = 1 - self.deco_vbo_index;
+
+        // Task 125.6: exactly the bytes the upload calls above actually
+        // issued -- never inferred from `bg_instances.len()` or any other
+        // buffer already sliced for a different purpose. Elided entirely
+        // in a default build (see `DrawUploadCounts`'s doc).
+        #[cfg(feature = "frame-profiling")]
+        UploadByteCounts {
+            background_instance_vbo_bytes: bg_bytes,
+            foreground_instance_vbo_bytes: fg_bytes,
+            decoration_vbo_bytes: deco_bytes,
+            image_vertex_vbo_bytes: img_bytes,
+            image_texture_bytes,
+            atlas_full_bytes,
+            atlas_subrect_bytes,
+        }
     }
 
     /// Render a cursor-only update.
@@ -686,19 +867,36 @@ impl TerminalRenderer {
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
-    ) {
-        if !self.initialized {
+    ) -> DrawUploadCounts {
+        if !self.init_state.is_ready() {
             error!("TerminalRenderer::draw_with_cursor_only_update() called before init()");
+            #[cfg(feature = "frame-profiling")]
+            return UploadByteCounts::default();
+            #[cfg(not(feature = "frame-profiling"))]
             return;
         }
 
+        // Task 125.8: see `draw_with_verts` for the mandated call sequence
+        // and why this call ordering makes the upload/draw phase boundary
+        // hold by construction.
+        #[cfg(feature = "gpu-profiling")]
+        let gpu_timing_frame = self.gpu_profile.begin_frame(gl);
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.begin_upload(gl);
+
         // 1. Sync atlas (may have new glyphs from a previous frame).
+        #[cfg(feature = "frame-profiling")]
+        let (atlas_full_bytes, atlas_subrect_bytes) = self.sync_atlas(gl, atlas);
+        #[cfg(not(feature = "frame-profiling"))]
         self.sync_atlas(gl, atlas);
 
         // bg/fg/image are unchanged since the last full rebuild: reuse the
         // slot that was last fully written by `draw_with_verts` (which
         // advances `vbo_index` to the *next* slot after writing, so the
-        // valid data sits at `1 - vbo_index`).
+        // valid data sits at `1 - vbo_index`). No upload happens for them
+        // on this path, so they contribute zero bytes (Task 125.6) --
+        // `UploadByteCounts::default()`'s zero fields for these three
+        // categories are the correct value below, not a placeholder.
         let buf_idx = 1 - self.vbo_index;
 
         // deco_vbo DOES change this frame (the cursor moved/blinked), so it
@@ -706,7 +904,14 @@ impl TerminalRenderer {
         // independent slot, never the one a pending draw might still be
         // reading.
         let deco_buf_idx = self.deco_vbo_index;
+        #[cfg(feature = "frame-profiling")]
+        let deco_bytes = self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
+        #[cfg(not(feature = "frame-profiling"))]
         self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
+
+        // Task 125.8: upload phase ends here -- see `draw_with_verts`.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_upload_begin_draw(gl, gpu_timing_frame);
 
         // 2. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
@@ -734,6 +939,10 @@ impl TerminalRenderer {
             buf_idx,
         );
 
+        // Task 125.8: draw phase ends here -- see `draw_with_verts`.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_draw(gl, gpu_timing_frame);
+
         // 3. Restore egui's framebuffer binding.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
@@ -744,17 +953,38 @@ impl TerminalRenderer {
         // we just orphan-wrote a fresh slot for deco and must not reuse it
         // for the next write without the GPU having had a chance to read it.
         self.deco_vbo_index = 1 - self.deco_vbo_index;
+
+        // Task 125.6: bg/fg/image are genuinely zero here -- this path
+        // issues no upload for them at all, so `UploadByteCounts::default`'s
+        // zero fields for those three categories are correct, not merely
+        // unmeasured.
+        #[cfg(feature = "frame-profiling")]
+        UploadByteCounts {
+            decoration_vbo_bytes: deco_bytes,
+            atlas_full_bytes,
+            atlas_subrect_bytes,
+            ..UploadByteCounts::default()
+        }
     }
 
     /// Synchronise the atlas CPU data to this renderer's GPU texture.
     ///
     /// A thin wrapper supplying `atlas_texture`; all the logic lives in
     /// [`sync_atlas_to_texture`], which the toast text pass shares.
-    fn sync_atlas(&self, gl: &Gl<'_>, atlas: &mut GlyphAtlas) {
+    ///
+    /// Returns the exact `(full_bytes, subrect_bytes)` [`sync_atlas_to_texture`]
+    /// transferred, unconditionally (Task 125.6) -- see that function's doc
+    /// for why the pair, not a single total, and why this is safe to
+    /// compute in every build (the actual [`UploadByteCounts`] attribution
+    /// this return feeds stays `frame-profiling`-gated at the call site).
+    /// `(0, 0)` when this renderer has no atlas texture at all (never
+    /// initialized), matching the early return below: no GL call, no
+    /// bytes transferred.
+    fn sync_atlas(&self, gl: &Gl<'_>, atlas: &mut GlyphAtlas) -> (u64, u64) {
         let Some(tex) = self.atlas_texture else {
-            return;
+            return (0, 0);
         };
-        sync_atlas_to_texture(gl, tex, atlas);
+        sync_atlas_to_texture(gl, tex, atlas)
     }
 
     /// Upload decoration vertex data, orphaning only when the payload is not
@@ -783,43 +1013,62 @@ impl TerminalRenderer {
     /// in the tail. Nothing reads them: `draw_decorations` is passed
     /// `deco_verts.len()` and derives its vertex count from it, so the draw
     /// never reaches past the bytes just written.
-    fn upload_deco_verts(&mut self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
+    ///
+    /// Returns the exact bytes transferred by whichever upload path ran
+    /// (Task 125.6) -- `0` only when `verts` was empty or this slot's VBO
+    /// does not exist, both of which issue no GL call at all. Both the
+    /// orphaning and non-orphaning paths perform a real
+    /// `buffer_sub_data_u8_slice` transfer of `verts`, so both return the
+    /// same value for the same payload; the orphan itself
+    /// (`buffer_data_size`, a zero-payload allocation call) is never
+    /// folded into this count -- see [`upload_verts`]'s doc.
+    fn upload_deco_verts(&mut self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.deco_vbo[buf_idx] else {
-            return;
+            return 0;
         };
         let bytes = std::mem::size_of_val(verts);
         if bytes <= SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES
             && bytes <= self.deco_vbo_allocated_bytes[buf_idx]
         {
-            upload_verts_into_existing_allocation(gl, vbo, verts);
+            upload_verts_into_existing_allocation(gl, vbo, verts)
         } else {
-            upload_verts(gl, vbo, verts);
+            let uploaded = upload_verts(gl, vbo, verts);
             self.deco_vbo_allocated_bytes[buf_idx] = bytes;
+            uploaded
         }
     }
 
     /// Upload instanced background instance data via orphan-then-write.
-    fn upload_bg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) {
+    ///
+    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// slot's VBO does not exist or `instances` was empty.
+    fn upload_bg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.bg_inst_vbo[buf_idx] else {
-            return;
+            return 0;
         };
-        upload_verts(gl, vbo, instances);
+        upload_verts(gl, vbo, instances)
     }
 
     /// Upload foreground instance data via orphan-then-write.
-    fn upload_fg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) {
+    ///
+    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// slot's VBO does not exist or `instances` was empty.
+    fn upload_fg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.fg_vbo[buf_idx] else {
-            return;
+            return 0;
         };
-        upload_verts(gl, vbo, instances);
+        upload_verts(gl, vbo, instances)
     }
 
     /// Upload image vertex data via orphan-then-write.
-    fn upload_img_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
+    ///
+    /// Returns the exact bytes transferred (Task 125.6), `0` if this
+    /// slot's VBO does not exist or `verts` was empty.
+    fn upload_img_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) -> u64 {
         let Some(vbo) = self.img_vbo[buf_idx] else {
-            return;
+            return 0;
         };
-        upload_verts(gl, vbo, verts);
+        upload_verts(gl, vbo, verts)
     }
 
     /// Synchronise the set of image GL textures with the current snapshot's
@@ -833,11 +1082,18 @@ impl TerminalRenderer {
     ///   via `tex_sub_image_2d` when the frame's dimensions are unchanged
     ///   (the common case — animation frames share the root frame's size),
     ///   or by deleting and recreating the texture when dimensions differ.
+    ///
+    /// Returns the total bytes transferred to image textures this call
+    /// (Task 125.6) -- the sum of every [`Self::reupload_image_texture`]
+    /// and [`Self::create_image_texture`] invoked, `0` if every image was
+    /// already up to date or `snap_images` was empty. Deleting a stale
+    /// texture (the `retain` above) transfers no bytes and is never
+    /// counted.
     fn sync_image_textures(
         &mut self,
         gl: &Gl<'_>,
         snap_images: &std::collections::HashMap<u64, InlineImage>,
-    ) {
+    ) -> u64 {
         // Delete textures for images no longer in the visible snapshot.
         self.image_textures.retain(|id, tex| {
             if snap_images.contains_key(id) {
@@ -848,6 +1104,7 @@ impl TerminalRenderer {
             }
         });
 
+        let mut bytes: u64 = 0;
         for (id, img) in snap_images {
             // Pointer identity of the currently-selected frame's pixel
             // buffer. Used only for equality comparison — never
@@ -867,48 +1124,71 @@ impl TerminalRenderer {
                 existing.width_px == img.width_px && existing.height_px == img.height_px
             });
 
-            if dims_match {
+            bytes = bytes.saturating_add(if dims_match {
                 // Same id, same dimensions, different pixel `Arc`: this is an
                 // animation frame swap. Re-upload in place via a sub-image
                 // update instead of recreating the texture.
-                self.reupload_image_texture(gl, *id, img, cur_ptr);
+                self.reupload_image_texture(gl, *id, img, cur_ptr)
             } else {
                 // No existing texture, or dimensions changed: delete any stale
                 // texture and create a fresh one.
-                self.create_image_texture(gl, *id, img, cur_ptr);
-            }
+                self.create_image_texture(gl, *id, img, cur_ptr)
+            });
         }
+        bytes
     }
 
     /// Re-upload a changed frame's pixels into an existing, same-dimensioned
     /// texture via `tex_sub_image_2d` (animation frame swap — Task 100.2c).
-    fn reupload_image_texture(&mut self, gl: &Gl<'_>, id: u64, img: &InlineImage, cur_ptr: usize) {
+    ///
+    /// Returns the exact bytes transferred (Task 125.6): `img.pixels.len()`,
+    /// the slice actually handed to `tex_sub_image_2d`, or `0` if `id` no
+    /// longer has an existing texture to re-upload into.
+    fn reupload_image_texture(
+        &mut self,
+        gl: &Gl<'_>,
+        id: u64,
+        img: &InlineImage,
+        cur_ptr: usize,
+    ) -> u64 {
         let w = gl_i32_u32(img.width_px);
         let h = gl_i32_u32(img.height_px);
-        if let Some(existing) = self.image_textures.get_mut(&id) {
-            unsafe {
-                gl.bind_texture(glow::TEXTURE_2D, Some(existing.texture));
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.tex_sub_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    w,
-                    h,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&img.pixels)),
-                );
-                gl.bind_texture(glow::TEXTURE_2D, None);
-            }
-            existing.uploaded_pixels_ptr = cur_ptr;
+        let Some(existing) = self.image_textures.get_mut(&id) else {
+            return 0;
+        };
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(existing.texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                w,
+                h,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&img.pixels)),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
         }
+        existing.uploaded_pixels_ptr = cur_ptr;
+        img.pixels.len().value_as::<u64>().unwrap_or(0)
     }
 
     /// Delete any stale texture for `id`, then create and upload a fresh GL
     /// texture for `img`, recording its pixel-`Arc` identity and dimensions.
-    fn create_image_texture(&mut self, gl: &Gl<'_>, id: u64, img: &InlineImage, cur_ptr: usize) {
+    ///
+    /// Returns the exact bytes transferred (Task 125.6): `img.pixels.len()`,
+    /// the slice actually handed to `tex_image_2d`, or `0` if texture
+    /// creation itself failed (no upload was ever issued).
+    fn create_image_texture(
+        &mut self,
+        gl: &Gl<'_>,
+        id: u64,
+        img: &InlineImage,
+        cur_ptr: usize,
+    ) -> u64 {
         let w = gl_i32_u32(img.width_px);
         let h = gl_i32_u32(img.height_px);
 
@@ -921,7 +1201,7 @@ impl TerminalRenderer {
                 Ok(t) => t,
                 Err(e) => {
                     error!("create image texture {id}: {e}");
-                    return;
+                    return 0;
                 }
             }
         };
@@ -972,6 +1252,8 @@ impl TerminalRenderer {
                 height_px: img.height_px,
             },
         );
+
+        img.pixels.len().value_as::<u64>().unwrap_or(0)
     }
 
     /// Execute the image draw call.
@@ -1367,12 +1649,26 @@ impl TerminalRenderer {
 
     /// Free all GPU resources.
     ///
-    /// Should be called when the widget is destroyed.
+    /// Requires the owning window's GL context to be current. Production code
+    /// does not call this directly: a pane's `RenderState` retires its
+    /// renderer into the window's [`GlRetireQueue`] when dropped, and the
+    /// queue's `drain` (top of `App::update`, or window teardown) calls this
+    /// with the context current. See [`super::retire`]. Idempotent, and
+    /// resets the renderer to [`GlInitState::Uninitialized`] (clearing a
+    /// latched failure).
     pub fn destroy(&mut self, gl: &Gl<'_>) {
-        if !self.initialized {
-            return;
-        }
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
 
+    /// Delete every GL object this renderer owns, whatever its init state.
+    ///
+    /// Deliberately **not** guarded by the init state: a renderer whose
+    /// `init` failed partway owns the objects its passes had already created,
+    /// and those must be deleted too (Task 125.C16). Idempotent -- every
+    /// handle is `take()`n -- so it is safe to run on a clean renderer, where
+    /// it issues no GL call. Needs the owning context current.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             // Instanced background resources.
             if let Some(p) = self.bg_inst_program.take() {
@@ -1446,8 +1742,33 @@ impl TerminalRenderer {
                 gl.delete_texture(t);
             }
         }
+        // The texture is gone; a stale size would make the next background
+        // image load believe it can reuse it.
+        self.bg_img_size = None;
 
-        self.initialized = false;
+        // Task 125.8: destroy every still-pending GPU timing query handle
+        // (including a half-issued in-flight pair) before this pane's GL
+        // resources are torn down. Idempotent: `shutdown` takes the handles.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.shutdown(gl);
+    }
+
+    /// Take this pane's GPU timing flush report, if one is due (Task
+    /// 125.8).
+    ///
+    /// Callers (`gui::terminal::widget`) call this right after invoking
+    /// [`Self::draw_with_verts`] or [`Self::draw_with_cursor_only_update`],
+    /// exactly mirroring how `LiveRenderProfile::take_flush_signal` is
+    /// consumed right after that draw call finishes. `None` means no flush
+    /// is due this call (the common case); `Some` hands back a snapshot
+    /// the caller logs with its own pane id, since `TerminalRenderer` has
+    /// no pane id of its own to attach.
+    #[cfg(feature = "gpu-profiling")]
+    #[must_use]
+    pub fn take_gpu_timing_flush(&mut self) -> Option<GpuTimingReport> {
+        self.gpu_profile
+            .take_flush_signal()
+            .then(|| self.gpu_profile.report())
     }
 }
 
@@ -1595,11 +1916,23 @@ pub(super) fn compile_program(
 ) -> Result<glow::Program, ShaderCompileError> {
     unsafe {
         let vert = compile_shader(gl, glow::VERTEX_SHADER, vert_src, label)?;
-        let frag = compile_shader(gl, glow::FRAGMENT_SHADER, frag_src, label)?;
+        let frag = match compile_shader(gl, glow::FRAGMENT_SHADER, frag_src, label) {
+            Ok(frag) => frag,
+            Err(e) => {
+                // The vertex shader exists; nothing else will delete it.
+                gl.delete_shader(vert);
+                return Err(e);
+            }
+        };
 
-        let program = gl
-            .create_program()
-            .map_err(|e| ShaderCompileError::CreateProgram { label, message: e })?;
+        let program = match gl.create_program() {
+            Ok(program) => program,
+            Err(message) => {
+                gl.delete_shader(vert);
+                gl.delete_shader(frag);
+                return Err(ShaderCompileError::CreateProgram { label, message });
+            }
+        };
         gl.attach_shader(program, vert);
         gl.attach_shader(program, frag);
         gl.link_program(program);
@@ -1668,14 +2001,32 @@ unsafe fn compile_shader(
 ///   124.9 defect, which made the *next* frame re-upload each of those
 ///   glyphs individually.
 /// - **Delta**, one `tex_sub_image_2d` per queued dirty rect.
-pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: &mut GlyphAtlas) {
+///
+/// Returns `(full_bytes, subrect_bytes)` (Task 125.6): the exact size of
+/// the slice handed to `tex_image_2d` in the full-upload arm, or the sum
+/// of every `extract_atlas_rect` slice handed to `tex_sub_image_2d` in the
+/// delta arm. Exactly one of the pair is nonzero for any given call --
+/// the two arms are mutually exclusive -- except when `atlas.pixels()` or
+/// every queued rect happens to be empty, in which case both are `0`.
+/// Computed unconditionally (not `frame-profiling`-gated): both counts are
+/// already-materialized slice lengths this function needs no extra work
+/// to observe, and this is also the single implementation the toast text
+/// pass shares (see this function's own doc above) -- that caller simply
+/// discards the return, exactly as it discarded `()` before this subtask.
+pub(super) fn sync_atlas_to_texture(
+    gl: &Gl<'_>,
+    texture: glow::Texture,
+    atlas: &mut GlyphAtlas,
+) -> (u64, u64) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
     }
 
     let size = gl_i32_u32(atlas.size());
 
-    if atlas.needs_full_reupload() {
+    let (full_bytes, subrect_bytes) = if atlas.needs_full_reupload() {
+        let pixels = atlas.pixels();
+        let full_bytes = pixels.len().value_as::<u64>().unwrap_or(0);
         unsafe {
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -1686,13 +2037,15 @@ pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: 
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(atlas.pixels())),
+                glow::PixelUnpackData::Slice(Some(pixels)),
             );
         }
 
         // Redundant by construction: see this function's doc comment (124.9).
         drop(atlas.take_dirty_rects());
+        (full_bytes, 0)
     } else {
+        let mut subrect_bytes: u64 = 0;
         for rect in atlas.take_dirty_rects() {
             let rx = gl_i32_u32(rect.x);
             let ry = gl_i32_u32(rect.y);
@@ -1700,6 +2053,8 @@ pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: 
             let rh = gl_i32_u32(rect.height);
 
             let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
+            subrect_bytes =
+                subrect_bytes.saturating_add(sub_pixels.len().value_as::<u64>().unwrap_or(0));
 
             unsafe {
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
@@ -1716,11 +2071,14 @@ pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: 
                 );
             }
         }
-    }
+        (0, subrect_bytes)
+    };
 
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
+
+    (full_bytes, subrect_bytes)
 }
 
 /// Subtask 124.7: the payload size at or below which
@@ -1746,9 +2104,20 @@ pub(super) const SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES: usize = 4096;
 ///
 /// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
 /// can reuse the same orphan-then-write upload instead of duplicating it.
-pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
+///
+/// Returns the exact bytes handed to `buffer_sub_data_u8_slice` (Task
+/// 125.6) -- `verts`'s own byte length, `0` if `verts` was empty (no GL
+/// call at all). The preceding `buffer_data_size` orphan call transfers no
+/// payload of its own (it only sizes the store) and is deliberately never
+/// added to this return -- doing so would double-count one real transfer
+/// as two. Computed unconditionally, not `frame-profiling`-gated: this is
+/// the shared upload primitive every VBO category funnels through
+/// (including the toast passes, which discard the return exactly as they
+/// discarded `()` before this subtask), so gating it would require two
+/// diverging copies of this function's body instead of one.
+pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64 {
     if verts.is_empty() {
-        return;
+        return 0;
     }
 
     let bytes = verts_as_bytes(verts);
@@ -1760,6 +2129,8 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
+
+    bytes.len().value_as::<u64>().unwrap_or(0)
 }
 
 /// Subtask 124.7: write `verts` into a VBO **without** orphaning it first.
@@ -1769,9 +2140,14 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
 /// GL error. Today the only caller is
 /// [`TerminalRenderer::upload_deco_verts`], whose doc comment carries the
 /// full safety argument for why dropping the orphan is sound here.
-fn upload_verts_into_existing_allocation(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
+///
+/// Returns the exact bytes handed to `buffer_sub_data_u8_slice` (Task
+/// 125.6), `0` if `verts` was empty. There is no orphan call on this path
+/// to worry about double-counting -- see [`upload_verts`]'s doc for the
+/// general rule.
+fn upload_verts_into_existing_allocation(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) -> u64 {
     if verts.is_empty() {
-        return;
+        return 0;
     }
 
     let bytes = verts_as_bytes(verts);
@@ -1781,6 +2157,8 @@ fn upload_verts_into_existing_allocation(gl: &Gl<'_>, vbo: glow::Buffer, verts: 
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
+
+    bytes.len().value_as::<u64>().unwrap_or(0)
 }
 
 /// Reinterpret a `&[f32]` vertex slice as the `&[u8]` the GL calls take.
@@ -1921,8 +2299,8 @@ fn compute_bg_uvs(
 /// When no shader is configured the window FBO is `None` and panes render
 /// directly to egui's framebuffer (unchanged behaviour).
 pub struct WindowPostRenderer {
-    /// Whether GPU resources (program, VAO, VBO) have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
 
     // ---- post-processing shader + fullscreen quad ----
     /// Passthrough-or-user post-processing program.
@@ -1961,6 +2339,17 @@ pub struct WindowPostRenderer {
     /// `FreminalGui` directly) and read once per frame on the main thread.
     /// Cleared by the reader after consumption.
     pub last_error: Option<String>,
+
+    /// Retired pane renderers awaiting GL destruction (Task 125.C2).
+    ///
+    /// Every pane of this window holds a clone of this queue (via its
+    /// `RenderState`) and pushes its [`TerminalRenderer`] here when it is
+    /// dropped. `WindowPostRenderer` is the carrier because it is the one
+    /// per-window, GL-context-scoped object every pane already shares; the
+    /// queue itself is its own leaf-locked handle ([`GlRetireQueue`]), so a
+    /// push from `Drop` never touches this struct's own mutex. See
+    /// [`super::retire`] for the full design.
+    retired: GlRetireQueue,
 }
 
 impl Default for WindowPostRenderer {
@@ -1974,9 +2363,9 @@ impl WindowPostRenderer {
     ///
     /// GPU resources are created lazily on the first call to [`Self::init`].
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             program: None,
             vao: None,
             vbo: None,
@@ -1989,13 +2378,76 @@ impl WindowPostRenderer {
             time: 0.0,
             pending_shader: None,
             last_error: None,
+            retired: GlRetireQueue::new(),
         }
     }
 
-    /// Return `true` if GPU resources have been created.
+    /// A handle to this window's retired-renderer queue.
+    ///
+    /// Panes clone this at construction so their `RenderState` can retire its
+    /// [`TerminalRenderer`] on drop without needing this renderer's lock.
+    #[must_use]
+    pub fn retire_queue(&self) -> GlRetireQueue {
+        self.retired.clone()
+    }
+
+    /// Wake this window's event loop whenever one of its panes retires a
+    /// renderer, so a frame runs to drain the queue even if the retirement
+    /// happens after `App::update` returned (see [`super::retire`], "Waking
+    /// the window"). `handle` is the window's repaint handle; it may still be
+    /// unpopulated here and is read lazily at wake time.
+    pub fn wake_window_on_retire(
+        &self,
+        handle: std::sync::Arc<
+            std::sync::OnceLock<(
+                freminal_windowing::RepaintProxy,
+                freminal_windowing::WindowId,
+            )>,
+        >,
+    ) {
+        self.retired.wake_window_on_retire(handle);
+    }
+
+    /// Destroy every pane renderer retired into this window's queue.
+    ///
+    /// Call with this window's GL context current (e.g. at the top of
+    /// `App::update`). Returns how many renderers were destroyed; `0` (and no
+    /// GL calls) when nothing was retired, which is the steady state.
+    #[must_use]
+    pub fn drain_retired(&self, gl: &Gl<'_>) -> usize {
+        self.retired.drain(gl)
+    }
+
+    /// Whether any pane renderer is waiting in the retire queue for a frame to
+    /// destroy it.
+    #[must_use]
+    pub fn has_pending_retirees(&self) -> bool {
+        !self.retired.is_empty()
+    }
+
+    /// Return `true` if `init` succeeded.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller should attempt [`Self::init`] now: `false` after
+    /// a failed `init`, which is latched rather than retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this renderer currently owns any GL object (program, VAO, VBO,
+    /// or the window FBO and its texture). Excludes the pane-renderer retire
+    /// queue, which owns other renderers' objects, not this one's.
+    #[must_use]
+    pub const fn holds_gl_objects(&self) -> bool {
+        self.program.is_some()
+            || self.vao.is_some()
+            || self.vbo.is_some()
+            || self.fbo.is_some()
+            || self.fbo_texture.is_some()
     }
 
     /// Return `true` if a user shader is active (the window FBO is in use).
@@ -2018,13 +2470,33 @@ impl WindowPostRenderer {
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation or any GL object creation fails.
+    /// A failure releases everything this attempt created and is latched
+    /// ([`GlInitState::Failed`]); see [`Self::should_attempt_init`].
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_objects(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Create the passthrough program and fullscreen quad, storing each
+    /// handle as it is created so a failure can be cleaned up.
+    fn init_objects(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(
             gl,
             POST_VERT_SRC,
             POST_PASSTHROUGH_FRAG_SRC,
             "wpr_passthrough",
         )?;
+        self.program = Some(program);
 
         self.u_terminal = unsafe { gl.get_uniform_location(program, "u_terminal") };
         self.u_resolution = unsafe { gl.get_uniform_location(program, "u_resolution") };
@@ -2034,10 +2506,12 @@ impl WindowPostRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("wpr VAO", e))?
         };
+        self.vao = Some(vao);
         let vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("wpr VBO", e))?
         };
+        self.vbo = Some(vbo);
 
         // Fullscreen NDC quad: two triangles covering [-1,1]².
         // Vertex layout: vec2 pos (NDC), vec2 uv.
@@ -2062,10 +2536,6 @@ impl WindowPostRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.program = Some(program);
-        self.vao = Some(vao);
-        self.vbo = Some(vbo);
-        self.initialized = true;
         Ok(())
     }
 
@@ -2280,11 +2750,24 @@ impl WindowPostRenderer {
         }
     }
 
-    /// Free all GPU resources.
+    /// Free all GPU resources, including every pane renderer still waiting in
+    /// this window's retire queue.
     ///
-    /// Should be called when the application exits or when the GL context is
-    /// destroyed.
+    /// Called from the window-close path (`WindowGlTeardown::run`), with the
+    /// window's GL context current.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
+        self.retired.drain(gl);
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
+
+    /// Delete this renderer's own GL objects (not the retire queue's),
+    /// whatever its init state, so a partially failed `init` is cleaned up
+    /// too (Task 125.C16). Idempotent: every handle is `take()`n. Also
+    /// forgets the cached FBO size, so a later `ensure_fbo` for the same
+    /// dimensions recreates the FBO this deleted rather than trusting the
+    /// stale cache.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
@@ -2302,9 +2785,12 @@ impl WindowPostRenderer {
                 gl.delete_texture(t);
             }
         }
-        self.initialized = false;
+        self.fbo_size = None;
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "gl-pixel"))]
+mod destroy_gl_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2502,5 +2988,388 @@ mod tests {
             result.is_ok(),
             "should not panic with zero-size image in tile mode"
         );
+    }
+}
+
+/// Task 125.6: real per-buffer upload-byte attribution, exercised end to
+/// end against the Task 123 recording GL facade so every assertion below
+/// is driven by [`TerminalRenderer::draw_with_verts`] actually issuing
+/// (fabricated, but call-for-call faithful) GL calls -- never a hand
+/// computation that merely mirrors the production formula.
+///
+/// Requires both `frame-profiling` (the [`UploadByteCounts`] this module
+/// attributes into) and `gl-recording` (the [`Gl::recording`] facade these
+/// tests drive `TerminalRenderer` through) -- both are on together under
+/// `--all-features`, and neither exists in a default build.
+#[cfg(all(test, feature = "frame-profiling", feature = "gl-recording"))]
+mod upload_byte_attribution_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{GlyphAtlas, ImageDrawEntry, InlineImage, TerminalRenderer};
+    use crate::gui::renderer::gl_facade::Gl;
+    use crate::gui::renderer::gl_facade::recording::GlCallPayload;
+    use conv2::ConvUtil;
+    use freminal_common::config::BackgroundImageMode;
+    use freminal_terminal_emulator::{AnimationControl, ImageSizeMode};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Construct an initialized [`TerminalRenderer`] against a fresh
+    /// [`Gl::recording`] facade, with `init()`'s own call log drained so
+    /// each test's assertions start from a clean slate.
+    fn init_renderer() -> (Gl<'static>, TerminalRenderer) {
+        let gl = Gl::recording();
+        let mut renderer = TerminalRenderer::new();
+        renderer
+            .init(&gl)
+            .expect("headless init succeeds against the recording facade");
+        if let Some(state) = gl.recorded() {
+            state.clear();
+        }
+        (gl, renderer)
+    }
+
+    /// A still `InlineImage` whose pixel buffer is exactly
+    /// `width_px * height_px * 4` bytes (real RGBA payload size), not an
+    /// arbitrary stand-in length -- so `image_texture_bytes` assertions
+    /// below are checking a byte count that would be wrong if the
+    /// attribution used anything other than `img.pixels.len()`.
+    fn make_test_image(id: u64, width_px: u32, height_px: u32) -> InlineImage {
+        let byte_len = usize::try_from(width_px)
+            .unwrap_or(0)
+            .saturating_mul(usize::try_from(height_px).unwrap_or(0))
+            .saturating_mul(4);
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; byte_len]),
+            width_px,
+            height_px,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        }
+    }
+
+    /// All the fixed, non-attribution-relevant `draw_with_verts`
+    /// arguments this module's tests share, so each test only has to
+    /// spell out the inputs it actually varies.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        renderer: &mut TerminalRenderer,
+        gl: &Gl<'_>,
+        atlas: &mut GlyphAtlas,
+        bg_instances: &[f32],
+        deco_verts: &[f32],
+        fg_instances: &[f32],
+        image_verts: &[f32],
+        image_draw_order: &[ImageDrawEntry],
+        snap_images: &HashMap<u64, InlineImage>,
+    ) -> super::UploadByteCounts {
+        renderer.draw_with_verts(
+            gl,
+            atlas,
+            bg_instances,
+            deco_verts,
+            fg_instances,
+            image_verts,
+            image_draw_order,
+            snap_images,
+            800,
+            600,
+            10.0,
+            20.0,
+            1.0,
+            1.0,
+            BackgroundImageMode::default(),
+            None,
+        )
+    }
+
+    #[test]
+    fn every_terminal_upload_category_is_counted_exactly_once_on_first_full_atlas_reupload() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        // `GlyphAtlas::new` leaves `full_reupload = true`, so this first
+        // call's atlas sync takes the full-upload arm.
+        let expected_atlas_bytes = u64::from(atlas.size())
+            .saturating_mul(u64::from(atlas.size()))
+            .saturating_mul(4);
+
+        let bg_instances = vec![1.0_f32; 8]; // 32 bytes
+        let deco_verts = vec![2.0_f32; 6]; // 24 bytes
+        let fg_instances = vec![3.0_f32; 4]; // 16 bytes
+        let image_verts: Vec<f32> = Vec::new();
+        let image_draw_order: Vec<ImageDrawEntry> = Vec::new();
+        let snap_images: HashMap<u64, InlineImage> = HashMap::new();
+
+        let uploads = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &bg_instances,
+            &deco_verts,
+            &fg_instances,
+            &image_verts,
+            &image_draw_order,
+            &snap_images,
+        );
+
+        assert_eq!(uploads.background_instance_vbo_bytes, 32);
+        assert_eq!(uploads.foreground_instance_vbo_bytes, 16);
+        assert_eq!(uploads.decoration_vbo_bytes, 24);
+        assert_eq!(uploads.image_vertex_vbo_bytes, 0);
+        assert_eq!(uploads.image_texture_bytes, 0);
+        assert_eq!(uploads.atlas_full_bytes, expected_atlas_bytes);
+        assert_eq!(uploads.atlas_subrect_bytes, 0);
+        assert_eq!(
+            uploads.total(),
+            32 + 16 + 24 + expected_atlas_bytes,
+            "every category must sum to the total exactly once -- no \
+             category double-counted, none silently dropped"
+        );
+    }
+
+    #[test]
+    fn image_vertex_and_texture_bytes_are_attributed_from_their_own_exact_payloads() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        let empty: Vec<f32> = Vec::new();
+
+        let image_verts = vec![9.0_f32; 24]; // 96 bytes -- one textured quad
+        let image_draw_order = vec![ImageDrawEntry {
+            instance_id: 0,
+            image_id: 7,
+        }];
+        let mut snap_images: HashMap<u64, InlineImage> = HashMap::new();
+        let img = make_test_image(7, 4, 4); // 4*4*4 = 64 bytes
+        let expected_image_texture_bytes = img.pixels.len().value_as::<u64>().unwrap_or(0);
+        snap_images.insert(7, img);
+
+        let uploads = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &empty,
+            &empty,
+            &empty,
+            &image_verts,
+            &image_draw_order,
+            &snap_images,
+        );
+
+        assert_eq!(uploads.image_vertex_vbo_bytes, 96);
+        assert_eq!(uploads.image_texture_bytes, expected_image_texture_bytes);
+        assert_eq!(uploads.image_texture_bytes, 64);
+        // Background/foreground/decoration were never uploaded this call.
+        assert_eq!(uploads.background_instance_vbo_bytes, 0);
+        assert_eq!(uploads.foreground_instance_vbo_bytes, 0);
+        assert_eq!(uploads.decoration_vbo_bytes, 0);
+    }
+
+    #[test]
+    fn a_second_call_reuses_the_atlas_and_a_dirty_procedural_glyph_takes_the_exact_subrect_path() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(64, 256);
+        let empty: Vec<f32> = Vec::new();
+        let image_draw_order: Vec<ImageDrawEntry> = Vec::new();
+        let snap_images: HashMap<u64, InlineImage> = HashMap::new();
+
+        // First call consumes the atlas's initial `full_reupload` flag.
+        let first = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &image_draw_order,
+            &snap_images,
+        );
+        assert!(
+            first.atlas_full_bytes > 0,
+            "the first sync against a fresh atlas must be a full reupload"
+        );
+        assert_eq!(first.atlas_subrect_bytes, 0);
+
+        // A procedural box-drawing glyph needs no `FontManager` and pushes
+        // exactly one dirty rect covering its own declared width/height.
+        atlas
+            .get_or_insert_procedural('\u{2500}', 8, 16, 0)
+            .expect("a box-drawing glyph packs into a fresh 64x64 atlas");
+
+        let second = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &image_draw_order,
+            &snap_images,
+        );
+
+        assert_eq!(
+            second.atlas_full_bytes, 0,
+            "a steady-state sync with no growth must not re-flag a full reupload"
+        );
+        assert_eq!(
+            second.atlas_subrect_bytes,
+            8 * 16 * 4,
+            "the subrect byte count must equal the exact glyph rect's RGBA payload"
+        );
+
+        // A third call with no new glyphs uploads nothing at all -- the
+        // zero-byte reuse case Task 125.6 must also represent correctly.
+        let third = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &image_draw_order,
+            &snap_images,
+        );
+        assert_eq!(third.total(), 0);
+    }
+
+    #[test]
+    fn the_orphan_allocation_call_is_never_folded_into_the_reported_transfer() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        let empty: Vec<f32> = Vec::new();
+        let image_draw_order: Vec<ImageDrawEntry> = Vec::new();
+        let snap_images: HashMap<u64, InlineImage> = HashMap::new();
+
+        // Consume the atlas's full-reupload flag first so this test's own
+        // recorded calls are exclusively the background VBO's.
+        draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &image_draw_order,
+            &snap_images,
+        );
+        if let Some(state) = gl.recorded() {
+            state.clear();
+        }
+
+        let bg_instances = vec![1.0_f32; 16]; // 64 bytes -- well above the
+        // deco-only small-upload-orphan threshold, so this is unambiguously
+        // the bulk orphan-then-write path in `upload_verts`.
+        let uploads = draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &bg_instances,
+            &empty,
+            &empty,
+            &empty,
+            &image_draw_order,
+            &snap_images,
+        );
+        assert_eq!(uploads.background_instance_vbo_bytes, 64);
+
+        let calls = gl.recorded().expect("recording facade").calls();
+        let bytes_of = |method: &str| -> u64 {
+            calls
+                .iter()
+                .filter(|call| call.method == method)
+                .filter_map(|call| match call.payload {
+                    GlCallPayload::Upload { bytes } => Some(bytes),
+                    GlCallPayload::None | GlCallPayload::Draw { .. } => None,
+                })
+                .sum()
+        };
+        let orphan_bytes = bytes_of("buffer_data_size");
+        let transfer_bytes = bytes_of("buffer_sub_data_u8_slice");
+
+        // Sanity: the orphan really happened, and (being a same-size
+        // allocation) reports the same size as the real transfer -- this
+        // is exactly the trap: the raw GL log's own "uploads" total counts
+        // this one logical transfer twice.
+        assert_eq!(orphan_bytes, 64);
+        assert_eq!(transfer_bytes, 64);
+        let raw_log_upload_total: u64 = calls
+            .iter()
+            .filter_map(|call| match call.payload {
+                GlCallPayload::Upload { bytes } => Some(bytes),
+                GlCallPayload::None | GlCallPayload::Draw { .. } => None,
+            })
+            .sum();
+        assert_eq!(
+            raw_log_upload_total, 128,
+            "sanity: the raw recording log double-counts orphan + transfer"
+        );
+
+        // Our attribution reports only the one real transfer, not the sum.
+        assert_eq!(uploads.background_instance_vbo_bytes, transfer_bytes);
+        assert_ne!(uploads.background_instance_vbo_bytes, raw_log_upload_total);
+    }
+
+    #[test]
+    fn draw_with_cursor_only_update_uploads_only_decorations_and_atlas() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        let empty: Vec<f32> = Vec::new();
+        let image_draw_order: Vec<ImageDrawEntry> = Vec::new();
+
+        // A full draw must run first: the cursor-only path reuses buffers
+        // a prior full rebuild uploaded.
+        draw(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            &[1.0_f32; 8],
+            &empty,
+            &[1.0_f32; 4],
+            &empty,
+            &image_draw_order,
+            &HashMap::new(),
+        );
+
+        let deco_verts = vec![4.0_f32; 6]; // 24 bytes
+        let uploads = renderer.draw_with_cursor_only_update(
+            &gl,
+            &mut atlas,
+            &deco_verts,
+            8,
+            4,
+            0,
+            &image_draw_order,
+            800,
+            600,
+            10.0,
+            20.0,
+            1.0,
+            1.0,
+            BackgroundImageMode::default(),
+            None,
+        );
+
+        assert_eq!(uploads.decoration_vbo_bytes, 24);
+        assert_eq!(
+            uploads.background_instance_vbo_bytes, 0,
+            "the cursor-only path reuses bg/fg/image buffers -- it must \
+             never report an upload for them"
+        );
+        assert_eq!(uploads.foreground_instance_vbo_bytes, 0);
+        assert_eq!(uploads.image_vertex_vbo_bytes, 0);
+        assert_eq!(uploads.image_texture_bytes, 0);
+        // The atlas had already fully synced during the priming full
+        // draw and nothing new was inserted, so this call's atlas sync
+        // must be the zero-byte reuse case too.
+        assert_eq!(uploads.atlas_full_bytes, 0);
+        assert_eq!(uploads.atlas_subrect_bytes, 0);
     }
 }

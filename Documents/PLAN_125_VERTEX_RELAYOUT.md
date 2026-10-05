@@ -1,18 +1,13 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: ENRICHED STUB — broadened after activation recon, deliberately
-> not decomposed.** The 2026-08-26 recon established that fixed-stride vertex
-> relayout cannot affect the observed idle CPU floor and that Task 124 did not
-> collect the live changed-row, upload-byte, or GPU-time measurements needed
-> to justify it for active workloads. Task 125 therefore starts with a
-> measurement phase. Remediation subtasks are decomposed only after those
-> measurements identify the remaining cost, per `plan-decomposition`'s
-> just-in-time rule.
+> **STATUS: PENDING MERGE — measurement (125.1–125.10) and remediation
+> (125.11–125.18) complete 2026-10-04; see "Closure".** Measurement selected
+> the stable-row-number `RowStore` remediation; fixed-stride relayout was
+> refuted (see "Gate verdicts").
 >
-> **Version: unassigned.** Task 124 is complete and merged. Task 125 is
-> deliberately **not** placed in v0.12.0. Its roadmap position remains a
-> maintainer decision, informed by the measurement phase rather than assumed
-> from the former relayout proposal.
+> **Version: v0.12.0.** Task 124 is complete and merged. The maintainer assigned
+> Task 125 to v0.12.0 on 2026-08-26; the release now gates on the measurement
+> findings and whichever remediation branches those findings select.
 
 ---
 
@@ -226,140 +221,1376 @@ do not redo it.
 
 ---
 
-## Open questions for activation
+## Activation decisions
 
-- What exact Freminal configuration and competitor versions produce the
-  reported 0.1% versus 0.0% observation? Cursor blink, dimensions, font,
-  opacity, shell, tabs, panes, and workload must match.
-- Is the residual CPU work, GPU work, driver blocking, compositor/present
-  cost, or wake frequency? Existing wall-clock phase timers cannot answer all
-  five.
-- How often does each `VertexRebuild` outcome occur in real workloads, and
-  what is the changed-row-count distribution within `Bounded` frames?
-- What are live per-buffer upload bytes per frame, rather than synthetic
-  workload totals?
-- Does the fixed-stride candidate's active-workload benefit justify it? Closing
-  that branch is a legitimate result, not a failure.
-- What is the padding's measured cost on a full rebuild, and at what ratio of
-  partial-to-full frames does the relayout break even?
-- Is `fg_instances` relayoutable in practice, given that glyph count per cell
-  is not one — ligature clusters emit fewer, and wide characters and
-  fallback-font runs complicate the mapping? A per-cell stride may need a
-  maximum-glyphs-per-cell bound, and that bound needs justifying against real
-  content rather than assumed.
-- Does the instanced draw call need changing, or only the upload? 123 found
-  **GL call count is independent of grid size** — an 8x2 and an 80x24 grid
-  record byte-identical call sequences, only instance counts and byte volume
-  scale — so a relayout that changed the call structure would be a
-  regression against a property that is now pinned by
-  `call_count_is_independent_of_grid_size`.
-- Which version carries this task.
+The maintainer resolved the workload and parity semantics on 2026-08-26:
 
-## Measurement-first activation scope
+- **Authority machine:** the current AMD/Hyprland workstation is authoritative.
+  The slower laptop is a conditional confirmation target only if the
+  workstation does not reproduce the reported gap or a selected lever is
+  driver/presentation-sensitive.
+- **Peer binaries:** use the installed binaries and record both their displayed
+  versions and immutable Nix store paths: WezTerm
+  `0-unstable-2026-09-17` at
+  `/nix/store/mmvpz8sgpp4gg1lwsjv68knvkzqmsdwk-wezterm-0-unstable-2026-09-17/bin/wezterm`
+  and Ghostty `1.3.1` at
+  `/nix/store/i5zqr903i6yb642h9amwh5174n5bmfc4-ghostty-1.3.1/bin/ghostty`.
+  Record the Freminal commit and active GL renderer with every capture.
+  Re-pinned by maintainer decision on 2026-10-04, before any screening
+  capture: the originally pinned WezTerm `0-unstable-2026-08-12`
+  (`fjd3yyncgw5w…`) and Ghostty `1.3.1` (`ij9fvnhfj710…`) store paths had been
+  garbage-collected after a system update.
+- **CPU parity:** use a staged protocol. Screen every non-pointer workload with
+  three 20-second steady samples after a 5-second warm-up, interleaving terminal
+  order; run pointer screening separately with explicit maintainer interaction.
+  Then run seven 60-second samples after a 10-second warm-up only for workloads
+  whose screen shows a meaningful/noisy gap or whose result controls a
+  remediation gate. A confirmation gap is material only when the deterministic
+  10,000-resample bootstrap 95% confidence interval for the median paired
+  task-clock delta excludes zero **and** the median delta is at least 0.5 ms
+  task-clock per wall-second (0.05% of one core). Smaller statistically
+  separable residuals must still be explained.
+- **GPU parity:** use cumulative per-process AMD DRM fdinfo engine time for
+  matched cross-terminal comparison, with `amdgpu_top` for device/process
+  discovery and asynchronous OpenGL timestamp queries inside Freminal for
+  attribution. If the fdinfo fields are absent or too coarse to distinguish
+  the workloads, the cross-terminal GPU verdict is `INCONCLUSIVE`, never
+  inferred from llvmpipe or CPU time.
+- **Controlled geometry/config:** the same stable Hyprland tiled allocation,
+  with each actual PTY grid recorded, CaskaydiaCove Nerd Font at 12 pt, opaque
+  background, no background image, no user shader, no cursor trail, the same
+  clean interactive shell/prompt, and isolated config/state directories.
+  Backend integer-pixel font metrics prevent an exact common grid without
+  unequal font sizes; synthetic workloads stay within the common 124x31 region,
+  while `btop` is explicitly product-level. Ligatures stay enabled for all
+  three terminals.
+- **Chrome topology:** four tabs, with the active tab containing a 2x2 pane
+  layout. The other tabs and all inactive panes are idle.
+- **Pointer workload:** a timed physical-device capture, because compositor
+  synthetic motion is known not to produce application `CursorMoved` events
+  on this host. Report the observed Freminal event rate with the result; do not
+  present unmatched hand motion as exact input equivalence.
+- **Cursor default:** both visible blinking and steady cursor idle are measured.
+  Changing the product default to steady is not a remediation and cannot close
+  the blinking-cursor gate.
+- **Version assignment:** v0.12.0, by maintainer decision on 2026-08-26.
 
-The activation session decomposes these in order. Remediation subtasks are not
-invented until the findings gate closes.
+## Current-code map
 
-### 1. Controlled parity protocol
+- `freminal/src/gui/terminal/frame_dirty.rs` owns
+  `VertexRebuild::{CursorOnly, Bounded, ReevaluateFullRebuild}` and
+  `ChangedRows::{None, Rows, All}`. `Bounded` still means a full CPU rebuild
+  with bounded presentation damage.
+- `freminal/src/gui/terminal/widget.rs` resolves
+  `ReevaluateFullRebuild` into a real rebuild or buffer reuse, constructs all
+  four CPU vertex buffers, and registers the pane paint callback. It is the
+  only point that can pair the raw decision, resolved work, and changed-row
+  count without recomputing them.
+- `freminal/src/gui/renderer/gpu.rs` owns every terminal VBO and texture upload.
+  `upload_verts` still orphan-writes whole buffers; cursor-only frames upload
+  decorations only. Atlas and image-texture uploads also occur here.
+- `freminal/src/gui/renderer/gl_facade/` freezes the production renderer's 49
+  GL methods. Timer-query calls are new measurement calls and must extend that
+  facade rather than bypass it from renderer code.
+- `freminal-windowing/src/frame_paint.rs` owns the head/band/tail paint split.
+  Head and tail are chrome; the band contains terminal callbacks. This is the
+  only existing seam that can time chrome and whole-frame GPU work without
+  guessing from CPU wall time.
+- `freminal/src/gui/window.rs` and
+  `freminal-windowing/src/egui_integration.rs` own the existing feature-gated
+  CPU frame accumulators and 120-frame log cadence. New measurement state gets
+  its own cohesive modules rather than adding unrelated fields to either
+  already-wide accumulator.
+- `freminal/benches/render_loop_bench.rs` recreates a fresh foreground glyph
+  atlas inside each timed partial-dirty iteration. Its one-row result therefore
+  measures atlas creation/rasterisation more than row vertex construction.
+- `freminal/benches/chrome_cost_bench.rs` is a representative headless chrome
+  stand-in, not literal production chrome. Live external and frame/GPU
+  profiling remain authoritative for product parity.
 
-Define reproducible Freminal, WezTerm, and Ghostty runs with matched window
-dimensions, font, shell, cursor mode, opacity, tab/pane topology, and workload.
-Record exact binary versions and renderer strings. Capture both blinking and
-steady cursor cases rather than comparing unlike defaults.
+## Execution model
 
-The workload matrix must include:
+```text
+tooling and protocol:
+  125.1 -> STOP for nix develop -> 125.2
 
-- true idle with a visible blinking cursor;
-- true idle with a steady cursor;
-- scripted typing and a single-row update;
-- a hidden-cursor TUI such as `btop`;
-- scrollback scrolling;
-- continuous PTY output;
-- pointer motion over inert terminal content; and
-- multiple tabs and panes with representative chrome.
+independent CPU measurement work after 125.2:
+  125.3
+  125.4 -> 125.5 -> 125.6
 
-Use an external process-level instrument such as `perf stat` for comparable
-task-clock, user/system time, cycles, instructions, context switches, and
-wakeups. `btop` remains a product-level smoke indicator, not the attribution
-instrument. Always report frame rate and per-frame cost together.
+GPU timing spine after 125.4:
+  125.7 -> 125.8 -> 125.9
 
-### 2. Live rebuild and upload attribution
+measurement and gate:
+  125.2 + 125.3 + 125.6 + 125.9 -> 125.10 -> maintainer review
+```
 
-Extend the feature-gated profiling path to report:
+125.3 may run in parallel with 125.4. The profiling foundation in 125.4 lands
+before either live CPU/upload wiring or GPU integration adds shared types.
+125.5, 125.6, 125.8 and 125.9 each edit renderer/frame-path state and therefore
+land sequentially with one active editor. No remediation work starts from the
+same branch or session as 125.10's findings.
 
-- `VertexRebuild::{CursorOnly, Bounded, ReevaluateFullRebuild}` counts;
-- the count of frames that reuse all prior vertex buffers;
-- a changed-row-count histogram for `Bounded` frames;
-- bytes uploaded per frame and per background, foreground, decoration,
-  image, and atlas buffer; and
-- frame outcome alongside upload volume, so `None`, cursor-only, sparse
-  bounded, dense bounded, and full work cannot be conflated.
+## Measurement-phase subtasks
 
-Default builds must retain zero instrumentation overhead. The counters observe
-already-computed values and do not alter damage or rendering decisions.
+### 125.1 — Add reproducible measurement tools to the default dev shell
 
-### 3. CPU benchmark repair
+Scope: `flake.nix` only.
 
-Replace the current foreground all-rows-versus-one-row comparison with a
-steady-state measurement whose glyph atlas is already populated, and measure
-atlas rasterisation separately. Add background corpora that quantify sparse,
-dense, and default-background-heavy emission so fixed-stride padding cost is
-visible. Preserve the existing benchmark IDs where their meaning remains
-accurate; use new IDs where it does not.
+What: add Linux-only `pkgs.wtype` and `pkgs.amdgpu_top` to
+`devOnlyTools`. `wtype` drives deterministic keyboard input under Wayland;
+`amdgpu_top --json --process --no-pc` supplies AMD fdinfo/process samples
+without enabling GRBM performance-counter polling that can itself change GPU
+power behavior. `perf` already exists and must not be duplicated.
 
-### 4. Asynchronous GPU timing
+Deliverable: both tools declared in the default shell, with no tool added to
+the `ci` or `gl-pixel` shells.
 
-Add real-hardware GPU timing that separates, at minimum, buffer upload,
-terminal draw, chrome draw, and total GPU execution. OpenGL timer-query results
-must be polled on later frames; reading a query in the frame that issued it
-would introduce the stall being measured. Unsupported contexts report the
-capability as unavailable rather than changing behavior or carrying a second
-renderer path.
+Verification: `nixfmt flake.nix`; `statix check`; `deadnix --fail`; `nix eval
+.#devShells.x86_64-linux.default.drvPath`.
 
-The Task 123 recording harness continues to own deterministic call and byte
-accounting. The pixel harness continues to own output correctness. Neither is
-a substitute for real-GPU timing.
+Prohibitions: do not install either tool out of band; do not add GPU tools for
+hardware not present on the authority machine; do not edit Rust or scripts.
 
-### 5. Findings and remediation gate
+Stop: per `flake-dev-shell-discipline`, stop after the flake edit and ask the
+maintainer to run `nix develop` or reload direnv. Do not proceed to 125.2 until
+both commands are confirmed on `PATH`.
 
-Record the parity matrix and attribute each material gap. For every candidate,
-report expected benefit, measured ceiling, implementation complexity,
-correctness risk, portability limits, and verification method. Then choose and
-decompose only the supported remediation branches.
+### 125.2 — Matched parity fixtures, workload driver, and capture preflight
 
-Candidates explicitly on the table include:
+Scope: new files under `assets/profiling/task125/` only:
+`freminal.toml`, `wezterm.lua`, `ghostty.conf`, `btop.conf`, `shell.rc`,
+`workloads.sh`, `run-matrix.sh`, and `summarize.py`; plus
+`Documents/PROFILING.md`.
 
-- bypassing most of the egui/chrome frame path for cursor-only redraws;
-- caching retained chrome output while preserving current-frame hit testing;
-- decoupling cursor blink rendering from full UI reconstruction;
+What: encode the activation decisions above as isolated competitor configs and
+one driver. The driver records binary/store versions, Freminal commit, CPU/GPU,
+kernel, compositor, display refresh, terminal grid, and renderer string before
+each run; rejects software renderers; supports the three-repeat/20-second
+screening pass and selective seven-repeat/60-second confirmation pass described
+above; and writes machine-readable raw output outside the repository. It must
+print the expected window count/duration and interaction requirements before
+spawning anything. `perf stat` must collect `task-clock`,
+`task-clock:u`, `task-clock:k`, `cycles`, `instructions`,
+`context-switches`, and exact wakeups. This host already has
+`sched:sched_wakeup`; tracefs is mounted `root:root` mode `0700`, so the driver
+must run only the system-wide, terminal-thread-filtered scheduler tracepoint collector via
+`sudo` after an explicit `sudo -v` preflight. Do not remount tracefs or weaken
+its permissions. Count `sched:sched_wakeup` events whose target TID belongs
+to the mapped terminal GUI process, and keep the ordinary per-process
+`perf stat` counters unprivileged. In parallel, use
+`amdgpu_top --json --process --no-pc` to identify the discrete Navi 31 device
+and the measured GUI process's DRM clients, then difference cumulative
+`drm-engine-gfx` time from that process's `/proc/<pid>/fdinfo/*` records over
+the same steady interval. Record a monitor-only control to quantify collector
+overhead. `summarize.py` performs the deterministic bootstrap rule above with
+seed 125 and 10,000 resamples.
+
+The exact workload matrix is:
+
+1. visible blinking-cursor idle;
+2. visible steady-cursor idle;
+3. scripted typing at a clean prompt, using `wtype` to type and erase a fixed
+   ASCII payload without executing it;
+4. sparse one-row PTY updates using a fixed carriage-return/erase-line script
+   at 20 updates/s;
+5. hidden-cursor `btop` with the repository fixture config and 1,000 ms update
+   interval;
+6. scrollback scrolling after preloading 10,000 numbered lines, alternating
+   PageUp/PageDown through `wtype` at a fixed cadence;
+7. sustained PTY output using the Task-124 control
+   `while :; do seq 1 200; sleep 0.02; done`;
+8. physical pointer motion over inert terminal content, timed for 20 seconds in
+   screening and 60 seconds in confirmation, run separately from unattended
+   workloads and reported with Freminal's observed event rate;
+9. four-tab/2x2-pane idle chrome, once with the active cursor blinking and once
+   steady; and
+10. scrolling streaming output (added by 125.C4): one new line every 20 ms, so
+    each line scrolls the view by exactly one row. The typed command is:
+
+    ```sh
+    n=0; while :; do printf 'Task125 stream line %08d\n' "$((++n))"; sleep 0.02; done
+    ```
+
+Deliverable: hermetic configs, runnable scripts, deterministic summary output,
+and an updated `PROFILING.md` command/reference section. A dry run must prove
+all three terminals report valid grids in the same tiled bounds and use the
+intended discrete GPU;
+that wakeups are counted for all terminal GUI threads, excluding workload
+descendants; and that each
+terminal exposes cumulative GFX engine time through DRM fdinfo. If fdinfo is
+absent or remains below its measurable resolution under the active control,
+the preflight records cross-terminal GPU parity as unavailable rather than
+substituting device-wide utilization.
+
+Verification: run `bash -n` on `workloads.sh` and `run-matrix.sh`; run
+`python3 -m py_compile
+assets/profiling/task125/summarize.py`; run each driver's preflight and one
+10-second smoke sample per terminal; `cargo test --all`; `cargo clippy
+--all-targets --all-features -- -D warnings`; `cargo machete`; markdownlint
+on `Documents/PROFILING.md`.
+
+Prohibitions: do not read the user's normal terminal or `btop` config; do not
+compare unlike cursor defaults; do not treat `btop`'s CPU display as a metric;
+do not treat llvmpipe as performance evidence; do not silently substitute a
+wakeup proxy; do not remount or chmod tracefs; do not attribute device-wide GPU
+utilization to one terminal process; do not commit raw machine captures.
+
+Stop: report preflight/smoke results and any host prerequisite. Do not start
+screening or confirmation yet.
+
+**Complete.** The fixtures use the NixOS system `bash-interactive` under an
+isolated HOME/XDG environment, pre-seed only Freminal's onboarding-complete
+state, and track mapped GUI and separately-reparented shell PIDs by PID plus
+start time. No pattern-based process cleanup remains. Hyprland's stable tiled
+slot is the geometry control; observed smoke grids were Freminal 124x31,
+WezTerm 138x31, and Ghostty 140x33. Exact common-grid calibration was rejected
+because Ghostty's integer-pixel steps skip the target and unequal font sizes
+would be a worse confound. Synthetic workloads stay within 124x31; `btop` is
+product-level.
+
+The staged protocol replaces the original four-hour exhaustive matrix: a
+roughly 34-minute non-pointer screen (roughly 38 minutes after 125.C4 added a
+tenth workload), a separate roughly four-minute physical-pointer screen, then
+seven 60-second confirmations only for selected workloads.
+Scheduler wakeups use the existing root-only `sched:sched_wakeup` tracepoint
+with a terminal-thread filter; workload descendants are excluded from terminal
+CPU accounting. Per-process AMD DRM fdinfo was available for all three smoke
+runs. Ten-second collector controls recorded complete perf, wakeup, CPU tick,
+GPU engine-time, and grid rows for Freminal, WezTerm, and Ghostty. These smoke
+numbers validate plumbing only and are not parity findings.
+
+### 125.C1 — Capture isolated feature-gated profiling logs
+
+Scope: `assets/profiling/task125/run-matrix.sh` and `Documents/PROFILING.md`.
+
+Surface point: discovered during the 125.6 live smoke after commit `06d1118f`.
+The fixture's `env -i` launch discarded `RUST_LOG`, while its config fixed file
+logging at `info`, so the required `debug`-level Task-125 profile summaries
+could neither be emitted nor associated with an individual raw sample.
+
+What: pass a narrow Freminal-only `RUST_LOG` filter inside the isolated launch,
+redirect Freminal stdout/stderr into each external sample directory, and add a
+one-window sustained-output smoke that forces a 120-observation summary.
+WezTerm and Ghostty retain their existing clean environments. Verify with
+ShellCheck and the smoke's checks for the real AMD renderer plus at least one
+Task-125 live-render summary. No raw capture is committed.
+
+**Complete.** The runner now captures Task 121 frame summaries and Task 125
+live-render summaries in each Freminal sample's external raw directory without
+enabling Rust logging for either peer terminal. `profile-smoke` uses the
+existing sustained-output fixture and validates renderer and summary identity.
+
+### 125.C2 — TerminalRenderer GL resources are never destroyed
+
+Scope: `freminal/src/gui/renderer/gpu.rs` (`TerminalRenderer::destroy`) and
+wherever a pane's `RenderState` is dropped across the GUI binary; the exact
+fix scope is not yet determined and must be investigated, not assumed.
+
+Surface point: found during the 125.8 review, pre-existing and predating
+Task 125.
+
+What: `TerminalRenderer::destroy` has no production caller -- a repo-wide
+search finds no `.destroy(` call reaching it; the only production
+`.destroy()` call in the GL-facing code is `egui_integration.rs`'s own
+painter teardown. Closing a pane, tab, or window therefore never deletes
+that pane's programs, VAOs, VBOs, atlas/image textures, or (under
+`gpu-profiling`) pending GPU timer queries; every one of those GL objects is
+reclaimed only when the whole GL context tears down. `toast_pass` and
+`toast_text_pass` may share the same gap and must be checked, not assumed
+clear.
+
+Impact: a GL object leak proportional to the number of panes opened over a
+session. It also makes 125.8's `PaneGpuTimingProfile::shutdown` path
+unreachable in a live run -- the cleanup it performs (destroying pending
+query handles before GL teardown) currently only runs in this module's own
+tests, never in production.
+
+Scope of fix: wherever a pane's `RenderState` is dropped needs a
+GL-context-current destroy path scheduled for it. `Drop` itself has no GL
+context available, so this likely needs a deferred-destroy queue drained
+from inside a paint callback rather than a direct call from `Drop`. Whether
+an existing teardown pattern can be reused is unverified.
+
+Scheduling: not part of the Task 125 measurement phase; must not block
+125.9 or 125.10.
+
+**Complete.** `impl Drop for RenderState` moves an initialized renderer into a
+window-scoped `GlRetireQueue` (`renderer/retire.rs`), drained at the start of
+the window's next `update` with its context current; the paint callback's
+`Arc` clone guarantees no renderer is retired mid-frame. A new
+`App::on_window_destroying(window_id, &glow::Context)` hook in
+`freminal-windowing`, run with the context current before the egui painter is
+destroyed, tears down the queue, the shared post renderer, and both toast
+passes. Recording tests match every create with a delete; offscreen tests prove
+the names are invalid after destroy. Partial-`init` failure is 125.C16.
+
+### 125.C3 — Capture the 125.8 GPU timing log target
+
+Scope: `assets/profiling/task125/run-matrix.sh` and
+`Documents/PROFILING.md`.
+
+Surface point: found during 125.8 smoke preparation, following the same
+class of gap 125.C1 fixed for the task 125.5/125.6 summary.
+
+What: the runner's `TASK125_FREMINAL_RUST_LOG` filter starts from `none`
+and allowlists only specific targets; it omitted
+`freminal::task_125::gpu_timing`, so the task 125.8 GPU timing flush this
+subtask's log line is emitted under could never reach `freminal.stdout.log`
+even with `gpu-profiling` enabled. `profile-smoke` also did not assert the
+flush's presence, so the gap was silent. Fixed by adding
+`freminal::task_125::gpu_timing=debug` to the filter, adding a third
+`profile-smoke` assertion for the literal text `Task 125.8 terminal GPU
+timing flush`, and noting in both the preflight failure message and
+`profile-smoke`'s own pre-run notice that `FREMINAL_BIN` must be built with
+`--features frame-profiling,gpu-profiling` for these checks to pass.
+
+**Complete.** The 125.8 real-AMD `profile-smoke` run on 2026-10-04 validated
+all three assertions (renderer identity, 125.5/125.6 summary, 125.8 GPU
+timing flush).
+
+### 125.C4 — Add a scrolling streaming-output workload
+
+Scope: `assets/profiling/task125/workloads.sh`,
+`assets/profiling/task125/run-matrix.sh`, `Documents/PROFILING.md`, and this
+document.
+
+Surface point: maintainer review of the 125.8 smoke on 2026-10-04 observed that
+`sustained-output` prints each 200-line burst at once, so every burst replaces
+the whole 31-row view.
+
+What: workload 7 (`sustained-output`) is a dense full-redraw throughput test,
+and workload 4 (`sparse-row`) updates one row in place without scrolling.
+Neither covers the most common real-world pattern: one new line at a time
+scrolling the view by one row (`tail -f`, `cargo build`, `journalctl -f`).
+A one-line scroll changes the content of every visible row although only one
+line is new, so this workload tests whether Freminal's damage model treats a
+one-line scroll as all-rows-changed -- an expected but unverified hypothesis;
+measurement decides -- and gates a possible scroll-aware row-reuse remediation
+(shifting or reusing existing row vertex data, or a GPU region copy, instead of
+a full rebuild). The change adds a `streaming-output` workload to
+`workloads.sh` (one fixed-width ASCII line every 20 ms with a monotonically
+increasing counter, narrower than the common 124-column grid), classifies it in
+`run-matrix.sh` as a non-pointer unattended workload started before warm-up
+beside `sustained-output`, includes it in the non-pointer `screen`, and
+documents it and the new screen duration (90 windows, roughly 38 minutes) in
+`PROFILING.md`. No raw capture is committed.
+
+**Complete.** A 15-second real-AMD smoke on 2026-10-04 ran the exact command
+directly in an isolated, onboarding-seeded Freminal with `frame-profiling` and
+`gpu-profiling`. It rendered cleanly and produced live profile and GPU timing
+flushes. Smoke indication only, not a finding: of 840 observations, all 317
+`Bounded` frames fell in the 17-32 changed-row bucket and none in the one-row
+bucket, and 435 resolved `Full`, consistent with the all-rows-changed
+hypothesis. 125.10 decides it under the matched protocol.
+
+### 125.C5 — Allow thread exits during a capture
+
+Scope: `assets/profiling/task125/run-matrix.sh`.
+
+Surface point: the first 125.10 screen on 2026-10-04 aborted on Ghostty's first
+sample: 29 startup worker threads exited during capture and none were created,
+and the runner rejected any thread-set change.
+
+What: exited threads were in the wakeup filter from the start and their CPU
+time folds into the process, so exits no longer invalidate a sample; the exit
+count is written to `exited-tids`. A thread created during capture would be
+missing from the filter and remains a hard failure.
+
+**Complete.** ShellCheck clean; validated by the restarted screen.
+
+### 125.C6 — Verify DECSC saved-cursor semantics
+
+Surface point: 125.11 design. Freminal's DECSC saves a buffer position, so a
+restore is content-attached; xterm may store a screen-relative position. Not
+verified against a reference. 125.14 preserves today's semantics (clamped
+`RowNumber`). Fix scope: look up the xterm/DEC behaviour, then either keep or
+change it with a regression test and the escape-sequence docs.
+
+**Complete.** xterm `cursor.c` (`CursorSave2` stores `screen->cur_row`; restore goes through `CursorSet`, clamping to the screen) and the VT510 DECSC page establish a screen-relative save. `SavedCursor` now stores a screen position and restores clamped to the screen; the content-attached tests were replaced by nine reference-behaviour tests and the escape-sequence docs updated. Remaining xterm divergences (per-screen save slots, DECRC with nothing saved, DECOM re-clamp) are pre-existing and unchanged.
+
+### 125.C7 — Image placement cursor save/restore uses physical rows
+
+Surface point: 125.11 design. `graphics_kitty.rs:776-827`, `:1546`,
+`graphics_iterm2.rs:125-157`, and `graphics_sixel.rs:114-143` save a physical
+cursor row around `place_image` and restore it after an eviction may have
+occurred; kitty and iTerm2 pass it to a screen-relative setter. Fix: capture
+`cursor_screen_pos()` instead, with an eviction regression test.
+
+**Complete.** Restore uses the stable `RowNumber` returned by `place_image` (`Buffer::restore_cursor_to_image_origin`), not a screen position: a placement that scrolls without evicting would otherwise move the cursor off the image origin, which kitty `C=1` forbids. Covers kitty `a=p`/`a=T`, iTerm2, and sixel DECSDM, and drops an accidental DECOM application; tested at capacity. An origin above the live window (tall image or evicted) clamps to the window top, never into scrollback.
+
+### 125.C8 — Kitty delete-by-cell `y=` treated as a physical row
+
+Surface point: 125.11 design. `graphics_kitty.rs:2542-2570` interprets `d=p` /
+`d=q` `y=` as a physical buffer row rather than a screen row. Fix scope: map
+through the visible window per the kitty spec, with a test at nonzero
+scrollback.
+
+**Complete.** Per the kitty spec ("x=1, y=1 is the top left cell"), `d=p`/`d=q` resolve 1-based screen cells through the live window; `0` or off-screen is a no-op. Tested at nonzero scrollback.
+
+### 125.C9 — `scroll_slice_*` deducted image cells from the wrong row
+
+Surface point: 125.15. `scroll_slice_up` / `_down` deducted `image_cell_count`
+for the moved row instead of the overwritten one, so the count could reach zero
+while an image cell still existed. **Complete** in 125.15, with four
+regression tests.
+
+### 125.C10 — Idle compaction re-compacts compressed rows
+
+Surface point: 125.15. `compact_idle_scrollback` calls `row.compact()` on rows
+already evicted to a compressed block, tripping the `cells_ref` debug assertion;
+no release impact. Fix: skip `evicted_to_block` rows, with a debug-build test.
+
+**Complete.** `compact_idle_scrollback` skips rows evicted to a block; a debug test that previously tripped the assertion now passes.
+
+### 125.C11 — `Row::erase_cells_at` trims image cells uncounted
+
+Surface point: 125.15. Trailing default-tag blank trimming also removes image
+cells (default-tag spaces) without decrementing `image_cell_count`, so the
+count over-states (the safe direction for horizons) and a cell-owned image may
+not be freed. Fix: account image cells before trimming, with a test.
+
+**Complete.** The `erase_cells_at` trailing trim stops at image cells; generalised to every trim loop by 125.C13.
+
+### 125.C12 — Copy-command-output-at-cursor mixes coordinate spaces
+
+Surface point: 125.17. `CopyCommandOutputAtCursor` compares the screen-relative
+`cursor_pos.y` with buffer rows in `find_block_containing_row`, so it selects
+the wrong block whenever scrollback exists. Fix: resolve the cursor to a
+`RowNumber` through the snapshot first, with a test at nonzero scrollback.
+
+**Complete.** The cursor resolves through the live window (`cursor_buffer_row`), independent of GUI scroll offset; `find_fold_target` had the same bug and is fixed too. Tested at nonzero scrollback.
+
+### 125.C13 — Row trim loops delete image cells uncounted
+
+Surface point: 125.C11. The trailing-blank trims in `insert_spaces_at*`,
+`clear_from`, and `delete_cells_at*` had the same defect as `erase_cells_at`.
+
+**Complete.** One `trim_trailing_blanks` helper in `row.rs` stops at image
+cells and replaces all six loops; 14 tests in `image_cell_trim_tests.rs` assert
+the counter against real cells after ICH, DCH, EL, ED, and ECH.
+
+### 125.C14 — Kitty `d=x` / `d=y` / `d=c` coordinates
+
+Surface point: 125.C8. `d=x`/`d=y` used 0-based physical coordinates and `d=c`
+cleared the whole cursor row.
+
+**Complete.** All three follow the spec and kitty `graphics.c`: 1-based screen
+cells through the live window, `d=c` intersecting only the cursor cell.
+Clearing now keys on `(image_id, placement_instance)`, so other placements of
+the same image survive, as kitty's "placements that intersect" requires; the
+row-wide `clear_image_placements_at_cursor` was removed.
+
+### 125.C15 — Alternate-screen width clip drops image cells uncounted
+
+Surface point: 125.C13. `Row::truncate_cells_to_width` clipped image cells with
+no accounting.
+
+**Complete.** `Buffer::clip_rows_to_width` decrements the counter and frees
+cell-owned images left with no cell; Kitty data is retained. Seven tests.
+
+### 125.C16 — Partially failed renderer init leaks GL objects
+
+Surface point: 125.C2. If `TerminalRenderer::init` fails midway, `initialized`
+stays false, so neither `destroy` nor the retire queue deletes the objects
+already created. Fix: release created objects on the init error path, with a
+recording-facade test that fails a mid-init step.
+
+**Complete.** `compile_program` deletes shaders on every error path; every renderer stores handles as it creates them and gains `release_gl_objects` / `holds_gl_objects`; `init` releases leftovers before and after a failure; a `GlInitState` latch stops per-frame retries; the retire queue keys on `holds_gl_objects`. A recording-facade fault-injection knob sweeps every fallible init call for all four renderers, asserting no net leak.
+
+### 125.3 — Repair the incremental vertex-construction benchmarks
+
+Scope: `freminal/benches/render_loop_bench.rs` and
+`.opencode/skills/freminal-bench-table/SKILL.md` only.
+
+What: keep the existing `instanced_bg_partial_dirty` and
+`instanced_fg_partial_dirty` group IDs, but make their timed regions isolate
+CPU vertex construction. Prepopulate one persistent foreground atlas before
+timing both all-row and one-row cases; add a separate
+`instanced_fg_atlas_rasterization` group for cold-atlas rasterisation. Expand
+the background group with three named corpora at 200x50: all-default
+background, 10% sparse colored backgrounds, and 100% dense colored
+backgrounds. For each corpus measure all 50 rows and one middle row with
+preallocated output vectors. Preserve the existing all-row/one-row benchmark
+names only where their meaning remains accurate; suffix new corpus cases
+explicitly. These remain headroom measurements, not a claim that an
+incremental production builder exists.
+
+Deliverable: steady-state foreground construction, separately measured atlas
+rasterisation, background padding-cost corpora, and corrected benchmark-catalog
+descriptions.
+
+Verification: capture a Criterion baseline before editing; run
+`cargo bench --bench render_loop_bench instanced_bg_partial_dirty -- --baseline
+before_125_3`, `cargo bench --bench render_loop_bench
+instanced_fg_partial_dirty -- --baseline before_125_3`, and the new atlas
+group; `cargo bench --no-run --all`; `cargo test --all`;
+`cargo clippy --all-targets --all-features -- -D warnings`; `cargo machete`.
+
+Prohibitions: do not implement incremental production vertices; do not include
+fresh atlas allocation/rasterisation in the steady-state foreground timed
+region; do not use these synthetic numbers as live upload evidence.
+
+Stop: report before/after tables and measured one-row/all-row ceilings; await
+review before 125.10 consumes them.
+
+**Complete.** The steady-state foreground benchmark now reuses a prewarmed
+atlas and measures 151.90 us for all 50 rows against 3.0308 us for one middle
+row, a 50.1x construction ceiling. The separated cold-atlas group measures
+977.31 us for the same full-screen corpus. Background construction measures
+134.86 ns / 14.239 ns for all-default, 6.6333 us / 141.26 ns for 10%-sparse,
+and 18.239 us / 361.78 ns for dense all-row / one-row cases. The preserved
+all-default baselines changed by +0.25% and +1.46%, within Criterion's noise
+threshold; the foreground changes of -83.13% and -99.59% are the intended
+removal of cold-atlas work rather than production speedups.
+
+### 125.4 — Feature-gated live render-work profiling foundation
+
+Scope: new `freminal/src/gui/renderer/profiling.rs`;
+`freminal/src/gui/renderer/mod.rs`; and `freminal/Cargo.toml` only.
+
+What: add the cohesive profiling types used by 125.5, 125.6 and 125.8 behind
+the existing `frame-profiling` feature: `RenderWorkClass::{Reuse, CursorOnly,
+Bounded, Full}`, `ChangedRowBucket::{Zero, One, TwoToFour, FiveToEight,
+NineToSixteen, SeventeenToThirtyTwo, ThirtyThreeToSixtyFour, MoreThanSixtyFour}`,
+`UploadByteCounts`, and `LiveRenderProfile`. `LiveRenderProfile` owns a
+monotonic pane-frame token, a bounded queue of per-frame records, cumulative
+class/histogram/upload totals, and the 120-observation flush cadence. Starting
+a new token finalizes an older unpainted token as zero-upload; a later paint
+callback may finalize only its matching token. This explicitly handles
+`FrameDamage::None`, where egui never invokes the registered callback.
+
+Deliverable: pure state transitions and exhaustive unit tests for painted,
+unpainted, late, duplicate, and out-of-order token completion. Default builds
+contain none of these fields or increments.
+
+Verification: `cargo test --all --all-features`; `cargo test --all`;
+`cargo clippy --all-targets --all-features -- -D warnings`; `cargo machete`.
+
+Prohibitions: do not wire renderer/widget call sites; do not add fields to
+`FrameStats` or `FrameProfile`; do not transport profiling state across the
+PTY/snapshot boundary; do not alter damage decisions.
+
+Stop: report the tested state-machine API; await review before 125.5.
+
+**Complete.** Added the feature-gated `LiveRenderProfile` state machine with
+monotonic pane-frame tokens, a bounded 120-record queue, cumulative resolved-
+class, changed-row-bucket, and upload-byte totals, and the shared 120-
+observation flush cadence. Tests cover painted and superseded-unpainted frames
+plus late, duplicate, out-of-order, queue-eviction, and bucket-boundary cases.
+The module remains entirely absent from default-feature builds and has no live
+renderer or widget wiring yet.
+
+### 125.5 — Live rebuild outcomes and changed-row histogram
+
+Scope: `freminal/src/gui/renderer/profiling.rs`,
+`freminal/src/gui/terminal/frame_dirty.rs`, and
+`freminal/src/gui/terminal/widget.rs` only.
+
+What: record both the raw `VertexRebuild` decision and its resolved work:
+`CursorOnly`; `Bounded` with the `ChangedRows::Rows` count bucket;
+`ReevaluateFullRebuild` resolving to `Full`; and
+`ReevaluateFullRebuild` resolving to `Reuse`. Begin one profile token per pane
+`show()` call and capture that token in the pane's paint callback. Log raw and
+resolved counts, changed-row histogram, and pane id every 120 observations.
+The profiling reads the already-computed `dirty.rebuild`, `changed_rows`, and
+`full_rebuild`; it must not recalculate or influence them.
+
+Deliverable: live counts that distinguish reuse, cursor-only, sparse bounded,
+dense bounded and full rebuilds, with tests pinning every mapping and proving
+feature-disabled builds retain no profiling branch.
+
+Verification: targeted renderer/frame-dirty/widget tests with and without
+`frame-profiling`; `cargo test --all`; `cargo clippy --all-targets
+--all-features -- -D warnings`; `cargo machete`.
+
+Prohibitions: do not change `VertexRebuild`, `ChangedRows`,
+`PaneFrameDamage`, or `FrameDamage` semantics; do not call the profiler from
+the PTY thread; do not infer upload bytes yet.
+
+Stop: report a synthetic log covering all resolved classes; await review
+before 125.6.
+
+**Complete.** The raw `VertexRebuild` decision and resolved reuse, cursor-only,
+bounded, or full class are captured once per renderable pane `show()` and
+finalized by the matching paint callback. Pending observations retain their
+classification, so a callback suppressed by `FrameDamage::None` is finalized
+on the next token as zero-upload while still contributing to raw/resolved
+counts and the changed-row histogram. A one-shot flush signal preserves every
+120-observation boundary whether completion occurs in `start()` or the paint
+callback. Feature-gated tests cover every mapping, bounded zero-row handling,
+painted/unpainted token flow, and the superseded-token flush boundary.
+
+### 125.6 — Actual live per-buffer upload-byte attribution
+
+Scope: `freminal/src/gui/renderer/profiling.rs`,
+`freminal/src/gui/renderer/gpu.rs`,
+`freminal/src/gui/terminal/widget.rs`, and
+`freminal/src/gui/atlas.rs` only.
+
+What: count bytes at the actual GL upload call sites, not from synthetic
+buffer lengths elsewhere. Attribute background-instance VBO, foreground-
+instance VBO, decoration VBO, image-vertex VBO, image textures, full atlas
+uploads, and atlas sub-rectangle uploads separately. The pane paint callback
+finalizes its 125.5 token with exactly the uploads issued for that callback;
+an uninvoked callback remains zero-upload. Log totals and per-class byte
+distributions, including zero-byte reuse/`None` observations. Counter updates
+remain feature-gated and observe existing slice/rectangle sizes only.
+
+Deliverable: live upload-byte totals paired with resolved render-work class,
+plus recording-facade and unit tests proving every upload category counts the
+exact payload once and orphaning's zero-byte allocation call is not double-
+counted as transferred bytes.
+
+Verification: `cargo test --all --all-features`; Task 123 recording workload
+tests; `cargo clippy --all-targets --all-features -- -D warnings`; `cargo
+machete`; `cargo xtask check-windows`.
+
+Prohibitions: do not change upload offsets, orphaning policy, VBO layout,
+damage, or draw order; do not count `buffer_data_size` allocation bytes as a
+second transfer; do not include toast buffers in terminal-buffer categories.
+
+Stop: report synthetic exact-byte checks and one live smoke log; await review.
+
+**Complete.** Actual GL upload sites now return only transferred payload bytes,
+excluding orphan-allocation calls, and the pane callback attributes background,
+foreground, decoration, image-vertex, image-texture, full-atlas, and atlas-
+subrectangle bytes to its matching resolved work class. Recording-facade tests
+pin every category, skip/error paths, cursor-only behavior, and the orphaning
+double-count trap. The 125.C1 real-AMD sustained-output smoke produced periodic
+reconcilable logs; at 840 observations it reported 7,438,540 total bytes:
+3,183,596 foreground, 51,408 decoration, 4,194,304 full-atlas, and 9,232 atlas-
+subrectangle bytes, with all other categories zero for that corpus.
+
+### 125.7 — Asynchronous GPU timestamp-query foundation
+
+Scope: new `freminal-windowing/src/gpu_profiling.rs`;
+`freminal-windowing/src/lib.rs`; `freminal-windowing/Cargo.toml`; and
+`freminal/Cargo.toml` only.
+
+What: add a separate `gpu-profiling` feature and a reusable, bounded
+`GpuQueryRing<Q>` lifecycle state machine. A query sample contains start/end
+timestamp handles, issue frame, and a named phase supplied by its owner.
+Polling is forbidden on the issue frame; later frames first test
+`QUERY_RESULT_AVAILABLE` and read results only when ready. If the bounded ring
+is full, drop the new sample and count the drop rather than block. Capability
+is available only for desktop OpenGL 3.3+ or `GL_ARB_timer_query`; GLES and
+unsupported contexts report `Unavailable`. Query destruction is explicit.
+
+Deliverable: the pure ring/state machine with fake-handle tests for delayed
+availability, wraparound, dropped samples, unsupported capability, and cleanup;
+the `freminal` feature forwards to `freminal-windowing/gpu-profiling`.
+
+Verification: `cargo test --all --all-features`; `cargo test --all`;
+`cargo clippy --all-targets --all-features -- -D warnings`; `cargo machete`;
+`cargo xtask check-windows`.
+
+Prohibitions: do not integrate any paint path; do not call `glFinish`,
+`glFlush`, or blocking `QUERY_RESULT`; do not claim llvmpipe timing as
+performance evidence; do not add a second renderer path.
+
+Stop: report the lifecycle API and zero same-frame-read tests; await review.
+
+**Complete.** Added the feature-gated, GL-independent `GpuQueryRing<Q>` with
+pure desktop/GLES capability detection, bounded asynchronous issue/poll
+transitions, delayed availability checks, explicit pending-handle destruction,
+and saturating drop accounting. Same-frame polls never consult the query
+source, results are read only after end-query availability succeeds, and a
+full-ring rejection returns both query handles to the caller for destruction.
+Twenty-two fake-handle tests cover capability parsing, delayed completion,
+slot reuse, drops, rejected ownership, and cleanup; default and Windows builds
+remain clean.
+
+### 125.8 — Terminal upload and draw GPU timing
+
+Scope: new `freminal/src/gui/renderer/gpu_profiling.rs`;
+`freminal/src/gui/renderer/mod.rs`;
+`freminal/src/gui/renderer/gl_facade/{facade.rs,recording.rs,recording_tests.rs,surface.rs}`;
+`freminal/src/gui/renderer/gpu.rs`;
+`freminal/src/gui/terminal/widget.rs`;
+`Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md`; and this document.
+
+What: extend the GL facade with query creation/deletion, timestamp issue,
+availability, and 64-bit result reads; update the frozen call surface and its
+recording tests. Build a renderer-side adapter over 125.7's ring. Issue
+non-overlapping timestamp pairs around actual terminal upload commands and
+terminal draw commands, aggregate all panes, and poll only on later callbacks.
+Report upload GPU time, terminal draw GPU time excluding upload, unavailable/
+dropped sample counts, pane id, renderer string, and query latency in frames.
+
+Deliverable: asynchronous terminal GPU attribution on real GL, deterministic
+recording behavior for the expanded facade, and corrected Task-123 references
+to the former 49-method surface.
+
+Verification: `cargo test --all --all-features`; Task 123 recording tests;
+`cargo clippy --all-targets --all-features -- -D warnings`; `cargo machete`;
+`cargo xtask check-windows`; one llvmpipe/offscreen correctness smoke that
+claims no performance result; one real-AMD smoke proving results arrive on a
+later frame with no same-frame query read; markdownlint on both plan documents.
+
+Prohibitions: do not alter production call order or payloads; do not nest
+`TIME_ELAPSED` queries; do not read a result until availability succeeds; do
+not weaken the raw-GL guard to hide new renderer calls.
+
+Stop: report query latency/drop counts and real-GPU smoke timing; await review.
+
+**Complete.** The GL facade grew from 49 to 56 methods (query create/delete,
+`query_counter` with `GL_TIMESTAMP`, availability and 64-bit result reads,
+and `GL_VERSION`/extension capability probes), with recording-arm support
+and tests, and `PLAN_123` updated to the 56-entry surface.
+`PaneGpuTimingProfile` (`freminal/src/gui/renderer/gpu_profiling.rs`) adapts
+125.7's ring per pane: timestamp pairs bracket the upload commands and the
+draw commands in both `draw_with_verts` and `draw_with_cursor_only_update`,
+with the upload-end and draw-start timestamps issued back to back at the
+boundary; no `TIME_ELAPSED`, no same-frame or blocking read. Capability is
+detected once per GL-resource lifetime in `TerminalRenderer::init`; under
+`gpu-profiling` that adds one `GL_VERSION` read, so
+`headless_workloads::init_dominates_a_single_frame` pins 262 calls with the
+feature and 261 without. Interpretation recorded: "aggregate all panes" is
+met by profiling every pane uniformly under one log target with `pane_id`
+attached, aggregated post hoc, because 125.7's phase type cannot carry a
+pane id. Query latency is counted in that pane's own drawn frames, not
+window frames, and must not be compared across panes. Smokes on 2026-10-04
+(both release builds with `frame-profiling,gpu-profiling`): real AMD
+(Radeon RX 7900 XTX, radeonsi) via `run-matrix.sh profile-smoke`: 12
+flushes, 720 upload and 720 draw samples, `last_latency_frames=1`
+throughout, zero dropped samples, alongside a 125.5/125.6 summary; llvmpipe
+(LLVM 21.1.8) under the `gl-pixel` shell, with the runner's isolated config
+and seeded onboarding state: capability `Available`, 15 flushes, latency 1,
+zero drops — a correctness check only, no performance claim. `TerminalRenderer::destroy` (and therefore the profile's `shutdown`)
+has no production caller; recorded as 125.C2. The runner log-target gap is
+125.C3.
+
+### 125.9 — Chrome and total-frame GPU timing
+
+Scope: `freminal-windowing/src/gpu_profiling.rs`,
+`freminal-windowing/src/frame_paint.rs`,
+`freminal-windowing/src/egui_integration.rs`, and
+`Documents/PROFILING.md` only.
+
+What: use asynchronous timestamp pairs around head chrome paint, terminal-band
+paint, tail chrome paint, and the total clear/textures/paint interval. Poll on
+later frames through 125.7's ring and log chrome draw (head + tail), terminal
+band, total GPU work, query latency, dropped samples, capability, window id,
+and renderer. Keep terminal renderer upload/draw timings from 125.8 separate;
+the band value is a cross-check, not a subtraction-based substitute. A
+`FrameDamage::None` frame issues no GPU sample because it submits no GPU work.
+
+Deliverable: real-hardware asynchronous chrome/terminal/total GPU attribution
+documented in `PROFILING.md`, with phase-boundary tests and an unsupported-
+context path that changes no rendering behavior.
+
+Verification: `cargo test --all --all-features`; frame-paint harness; Task 123
+pixel harness for unchanged pixels; `cargo clippy --all-targets --all-features
+-- -D warnings`; `cargo machete`; `cargo xtask check-windows`; real-AMD smoke
+with no same-frame read or query-ring drops at the protocol workload rate;
+markdownlint on `Documents/PROFILING.md`.
+
+Prohibitions: do not move, merge, or reorder head/band/tail painting; do not
+time swap/compositor latency as GPU execution; do not make unsupported query
+capability fatal to normal rendering; do not use llvmpipe numbers in findings.
+
+Stop: report phase timings and capability; await review before 125.10.
+
+**Complete.** `freminal-windowing/src/gpu_profiling.rs` gains a GL-free
+`FrameGpuTiming<Q>` state machine (ring capacity 64, four samples per painted
+frame: `chrome_head`, `terminal_band`, `chrome_tail`, `frame_total`), a
+`GpuTimestampSource` trait, a named `FramePhaseBoundary` enum, and a thin
+`glow` source; one instance per `EguiState`, capability detected once in
+`EguiState::new`, and pending queries destroyed in `destroy_painter`, which has
+a real production caller on every window close. `paint_frame_impl` takes a
+feature-gated boundary marker; `paint_frame` keeps its signature for the
+frame-paint harness. Boundaries are issued only when the frame paints:
+`TotalStart` before the clear, `HeadStart` after texture uploads, back-to-back
+pairs between head/band and band/tail, `TailEnd`, and `TotalEnd` after the
+texture frees, so the swap is untimed and `FrameDamage::None` issues and polls
+nothing. No paint, clear, or texture call moved; `run_ui_pass` was extracted
+only to keep `paint_frame_impl` under the line limit. Flushes log under
+`freminal_windowing::task_125::gpu_timing` every 60 completed total samples;
+`run-matrix.sh` allowlists that target and `profile-smoke` asserts it. Scope
+was widened by the orchestrator to the runner, the stale `lib.rs` module doc,
+and the `gpu-profiling` comment in `freminal-windowing/Cargo.toml`. Fourteen
+pure and four offscreen tests cover order, delayed availability, drops,
+unavailable capability, shutdown, and painted/None sequences; the windowing
+offscreen suite (144) and the Task 123 pixel harness (11) pass unchanged on
+llvmpipe as correctness only. The 2026-10-04 real-AMD `profile-smoke` produced
+12 flushes each from 125.8 and 125.9 over 720 painted frames, latency 1, zero
+drops, capability `Available`; the band interval (1.11 ms total) sits just
+above 125.8's terminal upload plus draw (1.01 ms), as a cross-check expects.
+
+### 125.10 — Execute the parity matrix and close the remediation gate
+
+Scope: `Documents/PLAN_125_VERTEX_RELAYOUT.md` only. Raw captures remain
+outside the repository.
+
+What: run the three-repeat/20-second screening matrix from 125.2 against the
+three pinned binaries, with terminal order interleaved. Run pointer screening
+as a separate maintainer-interactive session. Select confirmation workloads
+from the screen, record why each was selected or closed, then run seven
+60-second samples only for the selected workloads. For Freminal run both
+`frame-profiling` and `gpu-profiling`; verify the active
+renderer is the discrete Navi 31 and `LIBGL_ALWAYS_SOFTWARE` is unset. Record
+external task-clock, user/kernel time, cycles, instructions, context switches,
+wakeups, external per-process GPU samples, frame rate plus CPU cost/frame,
+live render-work outcomes, changed-row histogram, upload bytes by buffer and
+work class, and asynchronous GPU upload/terminal/chrome/total timings.
+
+Append a Findings section with raw-version/environment identity, per-workload
+median and confidence interval tables, and a `CONFIRMED`, `REFUTED`, or
+`INCONCLUSIVE` verdict for every candidate below. For every credible
+remediation report measured ceiling, expected benefit, complexity, correctness
+risk, portability cost, and required verification. Then stop for maintainer
+selection; remediation subtasks are written in a later activation session.
+
+Deliverable: the complete matched parity matrix and explicit gates for:
+
+- idle/chrome bypass or cursor-blink decoupling;
+- retained chrome output that preserves current-frame hit testing;
 - fixed-stride per-row uploads;
-- CPU-side incremental row vertex construction;
-- mapped or persistent GPU buffers with capability-based fallbacks;
-- further scheduling and unnecessary-wakeup elimination; and
-- presentation/compositor changes where the platform APIs expose a real lever.
+- scroll-aware row reuse (shift/reuse existing row vertex data or GPU region
+  copy on one-line scrolls);
+- incremental CPU row vertex construction;
+- mapped/persistent GPU buffers with capability fallback;
+- scheduling and unnecessary-wakeup elimination;
+- presentation/compositor changes; and
+- accepting an explained residual.
 
-Changing the default cursor from blinking to steady may alter the headline
-idle number, but it is a product-default decision, not a performance
-remediation, and may not be used to conceal blinking-cursor cost.
+Verification: the runner's preflight and statistical checks; all metric totals
+reconcile to their class/frame counts; frame rate and per-frame cost are paired;
+the full repository suite (`cargo fmt --all -- --check`, `cargo test --all`,
+`cargo clippy --all-targets --all-features -- -D warnings`, `cargo machete`,
+`cargo bench --no-run --all`, `cargo xtask check-windows`); markdownlint on
+this document.
 
-## Decision gates
+Prohibitions: do not implement or decompose a remediation; do not average away
+terminal/order effects; do not report rounded `btop` CPU as evidence; do not
+claim cross-terminal GPU parity if external process counters are unavailable;
+do not use difficulty or low expected ROI to omit a credible hard option; do
+not accept a residual that is unmeasured or unexplained.
 
-- **Idle/chrome branch:** proceed only if matched blinking-cursor captures
-  attribute a material competitor gap to Freminal's UI pass or presentation
-  path.
-- **Fixed-stride branch:** proceed only if live sparse `Bounded` frames are
-  common enough that saved CPU work and upload bytes exceed the measured
-  padding cost on dense/full rebuilds.
-- **Persistent-buffer branch:** proceed only if GPU timing attributes material
-  cost to upload/driver synchronization and a safe capability fallback is
-  available on supported platforms.
-- **Accept residual:** allowed only when the gap is measured, explained, and
-  either shared by peers under matched conditions or smaller than every safe
-  remediation's demonstrated cost/risk.
+Stop: present findings and remaining maintainer choices. Await explicit review
+before any remediation activation.
+
+**Complete.** See "Findings (125.10)"; the maintainer selected the RowStore
+remediation (125.11-125.18).
+
+## Findings gates
+
+- **Idle/chrome:** open when blinking-cursor idle has a material paired CPU
+  gap and Freminal's frame/UI/presentation measurements account for it. Steady
+  idle is the control and must remain no-frame/no-wake after settling.
+- **Fixed stride:** open only when live sparse `Bounded` frames are frequent
+  enough that measured saved upload bytes exceed dense/full padding bytes at
+  the observed class distribution, and the predicted CPU or GPU saving reaches
+  the material floor. Preserve `DefaultBackground` no-fragment semantics and
+  the cursor-last decoration invariant.
+- **Scroll reuse:** open when `streaming-output` shows a material paired CPU
+  or GPU gap and the live render-work profile shows one-line scrolls resolving
+  to full rebuilds or whole-buffer uploads. Preserve the `DefaultBackground`
+  no-fragment and cursor-last decoration invariants.
+- **Incremental CPU construction:** open when repaired row benchmarks and live
+  changed-row histograms predict a material task-clock saving independent of
+  upload bandwidth. It may open even if fixed stride does not.
+- **Persistent buffers:** open when asynchronous timing attributes material
+  time to upload/driver synchronization after accounting for byte volume, and
+  supported platforms have a safe capability fallback. Difficulty and
+  portability cost affect the decision, not whether the option is reported.
+- **Scheduling:** open when Freminal's wakeup or frame rate exceeds the slower
+  peer materially while cost per frame is already comparable. The proposed
+  lever must name the wake source; a generic longer timeout is not a fix.
+- **Presentation:** open when user/kernel time, swap wall time, external GPU
+  data, and internal GPU completion show a material gap after draw work is
+  accounted for, and a real platform API lever exists.
+- **Accept residual:** allowed only when every material gap is either shared by
+  the slower peer, attributed to an unavoidable platform difference, or below
+  every safe remediation's measured ceiling. Every smaller statistically
+  separable residual remains documented even when it does not force code.
+
+## Findings (125.10, 2026-10-04)
+
+Identity: Freminal `d704366e` release build with `frame-profiling` and
+`gpu-profiling`; WezTerm `0-unstable-2026-09-17` and Ghostty `1.3.1` at the
+re-pinned store paths; AMD Radeon RX 7900 XTX (radeonsi, navi31); Hyprland
+0.56.2; control grids Freminal 124x31, WezTerm 138x31, Ghostty 140x33 (chrome
+panes 61-69x14-15). Raw captures are under `/tmp/opencode/t125-screen/` and
+`/tmp/opencode/t125-confirm/`, not committed.
+
+### Screen (3 x 20 s, all 90 samples valid)
+
+Medians per wall-second: CPU task-clock ms, AMD fdinfo GFX ms, wakeups.
+
+| Workload         | Freminal           | WezTerm            | Ghostty            |
+| ---------------- | ------------------ | ------------------ | ------------------ |
+| idle-blink       | 1.1 / 0.35 / 26    | 4.0 / 3.20 / 139   | 1.5 / 0.35 / 33    |
+| idle-steady      | 0.1 / 0.00 / 2     | 0.1 / 0.00 / 2     | 1.5 / 0.35 / 32    |
+| typing           | 20.2 / 11.0 / 1014 | 30.0 / 16.5 / 1028 | 27.7 / 9.1 / 894   |
+| sparse-row       | 10.5 / 5.9 / 430   | 12.2 / 6.7 / 355   | 13.1 / 4.3 / 310   |
+| btop             | 2.6 / 0.45 / 35    | 10.5 / 7.0 / 164   | 3.7 / 1.05 / 89    |
+| scrollback       | 6.7 / 0.32 / 93    | 34.1 / 4.3 / 215   | 9.4 / 1.85 / 119   |
+| sustained-output | 433 / 11.2 / 810   | 19.7 / 13.2 / 649  | 37.5 / 18.7 / 1136 |
+| streaming-output | 18.2 / 11.8 / 812  | 27.2 / 15.8 / 639  | 34.5 / 14.3 / 772  |
+| chrome-blink     | 1.3 / 0.32 / 26    | 5.3 / 3.4 / 141    | 1.5 / 0.34 / 31    |
+| chrome-steady    | 0.1 / 0.00 / 2     | 0.1 / 0.00 / 2     | 1.4 / 0.35 / 32    |
+
+Only `sustained-output` screened material against the slower peer; every other
+workload's paired delta was negative (Freminal cheaper) with a confidence
+interval excluding zero, so none was selected for confirmation.
+
+### Confirmation: sustained-output (7 x 60 s, all 21 samples valid)
+
+Freminal 428.9 ms/s (425.7 user, 2.8 kernel), IPC 1.14; WezTerm 19.9; Ghostty
+37.1. Paired delta against Ghostty +390.4 ms/s, bootstrap 95% CI
+[381.8, 405.6]: **material**. GPU time is the lowest of the three (11.3 ms/s).
+
+Attribution: windowing and app frame profiles put the GUI thread at about
+180 us per frame (run_ui 72, tessellate 7, paint 32, swap about 65), roughly
+11 ms/s at 60 fps. A 15-second `perf record` attributes 97.7% of samples to the
+`freminal-pty-consumer` thread and 96.5% of all samples to `memmove`, under
+`Vec::drain` of `Row` and `Option<RowCacheEntry>` in
+`Buffer::enforce_scrollback_limit` (`freminal-buffer/src/buffer/resize_and_alt.rs`).
+Once scrollback is full, every line feed drains the overflow row from the front
+of `rows`, `row_cache`, and the row-block map, shifting about 20,000 entries (the fixture's `scrollback.limit`) per
+line. At about 10,000 lines/s this is the whole gap. It is a buffer
+data-structure cost, not rendering.
+
+### Gate verdicts
+
+Post-review corrections (2026-10-04): the `scrollback` workload sent unshifted
+PageUp/PageDown, which every terminal forwarded to the shell, so its row
+measures readline input rather than scrollback scrolling and supports no
+verdict (fixed for future runs in `workloads.sh`). The fixed-stride,
+incremental-construction, and persistent-buffer gates were decided on matched
+CPU and GPU parity alone, not on their own histogram, upload-byte, and GPU
+phase criteria; with Freminal at or below both peers on every relevant
+workload no remediation could reach the material floor, but the per-gate data
+in each sample's `freminal.stdout.log` was not tabulated. Screen intervals with
+three pairs are ranges, not 95% intervals. Freminal ran with both profiling
+features, which inflates its numbers, so the verdicts are conservative.
+
+- **Idle/chrome bypass, cursor-blink decoupling:** REFUTED. Blinking idle and
+  four-tab chrome are at or below both peers.
+- **Retained chrome output:** REFUTED, same evidence.
+- **Fixed-stride per-row uploads:** REFUTED. No workload shows a GPU or upload
+  gap; Freminal's GPU time is lowest or within the peer range everywhere.
+- **Incremental CPU row construction:** REFUTED. GUI-thread cost is about
+  11 ms/s even under sustained output, and typing/sparse/streaming are cheaper
+  than both peers.
+- **Persistent GPU buffers:** REFUTED, no GPU or driver gap.
+- **Scheduling / wakeups:** REFUTED. Freminal's wakeups exceed both peers on
+  `sparse-row` (430 vs 355/310) and `streaming-output` (812 vs 772/639), but
+  in both cases with lower CPU than both peers, so the excess carries no
+  material cost.
+- **Presentation/compositor:** REFUTED, no kernel-time or GPU gap.
+- **Scroll-aware row reuse (125.C4):** REFUTED. `streaming-output` is the
+  cheapest of the three despite one-line scrolls resolving to dense rebuilds.
+- **Scrollback eviction (new, outside the original list):** CONFIRMED. The
+  sole material gap. Candidate remediations: (a) evict in batches, letting
+  scrollback overshoot by a fixed chunk before one drain, which amortises the
+  shift by the chunk size and is a small change with a bounded memory cost;
+  (b) make `rows` and its parallel structures ring buffers (`VecDeque` or an
+  offset index), removing the shift entirely at the cost of touching every
+  row-index consumer. Both need buffer tests for row-index, prompt/block, and
+  image accounting across eviction, the `buffer_benches` scrollback-push
+  benchmark, and a matched `sustained-output` re-capture.
+- **Pointer workload:** INCONCLUSIVE. The maintainer-interactive pointer screen
+  has not been run.
+- **Accept residual:** not applicable while the eviction gap is open.
+
+Maintainer decisions (2026-10-04): the pointer screen is skipped and the
+pointer gate stays `INCONCLUSIVE`; remediation (b) is selected, in its full
+form below. Batched eviction (a) is rejected as a partial fix: it keeps
+eviction O(retained) per chunk, loosens the exact scrollback limit, and leaves
+the absolute-index drift bugs in place.
+
+## Remediation phase: stable-row-number `RowStore`
+
+Goal: Freminal's `sustained-output` CPU at or below WezTerm's under the matched
+protocol, with eviction cost proportional to rows evicted rather than rows
+retained, and no row index anywhere that silently drifts on eviction.
+
+The defect is structural. Rows are addressed by physical position in three
+manually synchronised `Vec`s (`rows`, `row_cache`, `row_block_map`), so a
+front eviction shifts the storage and forces every holder of a row index to be
+rewritten (`adjust_prompt_rows`) or, where nobody rewrites it, to drift: GUI
+selection (`frame_dirty.rs` documents it), DECSC saved cursor, and kitty
+`RealPlacement.origin_row`. Per-eviction scans compound it:
+`gc_unreferenced_blocks` (whole-map `HashSet`), `image_store.retain_referenced`
+(all live cells), and `merge_cache = None` (full window re-merge).
+
+### Fixed design direction
+
+1. **One `RowStore`** owns rows, flatten cache entries, and block references
+   together; the three parallel `Vec`s cease to exist as separately mutable
+   fields.
+2. **Stable logical row numbers.** Each row has a number that never changes for
+   its lifetime: physical position plus a monotonic evicted-row base. Stored
+   row references (prompts, command blocks, saved cursor, image placements,
+   selection) hold logical numbers and are never rewritten on eviction.
+3. **Eviction is O(evicted).** No whole-store shift, no whole-store scan.
+   Compressed-block reclamation and image reachability become incremental
+   counts maintained on push and evict.
+4. **The scrollback limit stays exact.** No overshoot visible to any caller,
+   snapshot, or test.
+5. **Contiguous range access is preserved** for the flatten hot path, or its
+   replacement is proven no slower by benchmark.
+6. Task 120 (windowed reflow) builds on `RowStore`; this phase does not
+   implement Task 120 but must not foreclose it.
+
+### Remediation execution model
+
+```text
+125.11 design -> 125.12 benchmarks/baseline -> 125.13 RowStore (no behaviour
+change) -> 125.14 logical row numbers -> 125.15 O(evicted) eviction ->
+125.16 merge cache across eviction -> 125.17 snapshot + GUI coordinates ->
+125.18 matched re-capture and closure
+```
+
+Strictly sequential, one active editor. Each subtask leaves `cargo test --all`
+green and runs the buffer and snapshot benchmarks named in 125.12 before and
+after.
+
+### 125.11 — `RowStore` design
+
+Scope: this document only (a design section appended to this subtask).
+
+What: settle, against the current code: the storage mechanism (moving-head
+contiguous store with half-capacity compaction versus `VecDeque` with
+two-slice handling) with its flatten implications; the logical row-number type
+and its name; which coordinates become logical (cursor and scroll offset are
+screen-relative and may stay physical; decide and justify each); how
+`BlockRowRef`, compression, decompression, alternate-screen save/restore,
+resize reflow, `erase_scrollback`, and height-shrink drains map onto it; how
+reflow renumbers or preserves logical rows and what that does to stored
+references; the incremental block live-row count and image reference count
+designs; the snapshot contract for logical numbers; and the public API
+(`rows()`, `visible_rows()`, `SavedPrimaryState`) replacements. Enumerate every
+stored row index found in the workspace and its disposition.
+
+Deliverable: a decision record precise enough that 125.13-125.17 need no
+further design choices. Any choice that changes user-visible behaviour is
+flagged for the maintainer.
+
+**Complete (decision record, 2026-10-04).** Drafted against the code by a
+read-only pass and ruled on by the orchestrator. File references are as of
+`f5578e9e`.
+
+1. **Storage: moving-head contiguous `RowStore`** (new
+   `freminal-buffer/src/buffer/row_store.rs`): three parallel `Vec`s (`rows`,
+   `cache`, `blocks`) sharing one `head`, plus `base: RowNumber`. Logical
+   length is `rows.len() - head`; `Index<usize>` maps to `head + i`. Pushes go
+   to all three, so the "block map may lag" invariant and
+   `sync_row_block_map_len` are deleted. `evict_front(n)` replaces each evicted
+   slot with a zero-width placeholder row, `None`, `None` (freeing payloads at
+   once), then advances `head` and `base`. Compaction drains `..head` when
+   `head >= max(live / 2, 64)`; the constant is named and 125.15 may tune it in
+   `live/4..live` against 125.12. `VecDeque` is rejected: flatten needs single
+   `&mut [Row]` / `&mut [Option<RowCacheEntry>]` windows (`flatten.rs:604`,
+   `:682`, `:1220`; `mod.rs:618`), and `rows()` / `visible_rows()` can then stay
+   `&[Row]` for every emulator and GUI caller. Alternate-screen entry becomes an
+   O(1) `mem::replace` of the store (today a discarded deep clone).
+2. **`RowNumber(u64)`** in new `freminal-common/src/buffer_states/row_number.rs`
+   (common because `CommandBlock` is shared with the GUI). Explicit arithmetic
+   only (`new`, `get`, `checked_add`, `saturating_add`, `rows_after(base) ->
+Option<usize>`, saturating `offset(i64)`, `is_alternate`); no operator
+   impls, no raw casts. A row's number is `base + i`; numbers are never reused
+   after front eviction (a trailing blank-padding `pop` may re-issue). RIS and
+   ED 3 advance `base` rather than reset it. Alternate-screen rows use a
+   separate `1 << 63` namespace with its own monotonic counter; alt-era marks
+   and placements are dropped on `leave_alternate`. Width-changing reflow
+   installs rows at `base = old.next_number()` and returns a `ReflowRemap`
+   (built from the existing `old_row_meta` / `line_new_starts` /
+   `map_start_row` data) applied to prompts, command blocks, saved cursor, image
+   extents, and, via `Buffer::take_reflow_remap()`, kitty placements. Anything
+   not remapped falls below `base` and is detectably invalid instead of aliasing
+   another row. `resize_saved_primary` must return its remap. Task 120's banded
+   reflow becomes `RowStore::replace_range -> ReflowRemap`; nothing here
+   forecloses it.
+3. **Cursor and scroll offset stay physical.** `cursor.pos.y` is a retained
+   index used by every write and is shifted by one scalar at eviction;
+   `scroll_offset` is bottom-relative and resets on output. Window-relative
+   state (`MergeCache` per-row vectors, snapshot `row_offsets` / `row_epochs` /
+   `cursor_pos` / `visible_image_placements`, scroll margins, `ViewState`
+   cursor animation, `frame_dirty` epochs) stays as is.
+4. **Become logical:** `prompt_rows`; all four `CommandBlock` row fields;
+   DECSC `saved_cursor` (as designed here: content-attached; superseded by
+   125.C6, which made it screen-relative per xterm); `PlaceImageResult.origin_row` (its hand-coded
+   drain compensation is deleted); kitty `RealPlacement.origin_row`; the merge
+   fingerprint's window start; GUI selection anchor/end, `last_click_pos`,
+   `context_menu_cell`, search matches and staleness key;
+   `InputEvent::ExtractSelection` / `CopyCommandOutput` rows. `folded_blocks`
+   is id-keyed and unchanged.
+5. **Compression:** `BlockRowRef` is unchanged. `blocks` becomes
+   `HashMap<BlockId, BlockSlot { block, live_rows: u32 }>`; compression sets
+   `live_rows`, `evict_front` decrements per evicted ref and frees at zero, and
+   `gc_unreferenced_blocks` leaves the eviction path. `ensure_decompressed` keeps
+   its cold whole-buffer walk and removes the slot; recompression mints a new id.
+   Debug invariant: the sum of `live_rows` equals the count of `Some` refs.
+   Capacity-sized correctness tests use small limits in debug builds because
+   `debug_assert_invariants` is O(rows x cols); capacity behaviour belongs to the
+   release benchmarks.
+6. **Images: per-image stamp horizon.** `ImageStore` keeps each image's
+   greatest stamped logical row and an index ordered by it. Hooks: the three
+   stamp sites in `images.rs`; four widening sites where image cells can move
+   down in the window (`scroll_slice_up`/`_down` and their `_columns`
+   variants), guarded by `image_cell_count > 0`; and reflow. `evict_front` pops
+   images whose horizon is below the new base and drops non-retained ones. Cost
+   is O(evicted + dropped). The one-line fallback (scan when an image row is
+   evicted) is rejected because it is not O(evicted). Debug invariant: every
+   image cell lies at or below its image's horizon or inside the visible window.
+7. **Merge cache:** the fingerprint's start becomes a `RowNumber`, which removes
+   the `merge_cache = None` special case in eviction. A slid window already
+   misses the cache today, so **this subtask yields no CPU win**; its
+   acceptance is oracle tests, the Task 123 pixel harness, and no regression.
+   The nulls in the confined `scroll_slice_*` rotations stay.
+8. **Snapshot:** `TerminalSnapshot` gains `row_base: RowNumber`; `prompt_rows`
+   becomes `Arc<[RowNumber]>`; `command_blocks` carry `RowNumber` fields; helper
+   methods convert between numbers and retained indices at each GUI seam. The
+   search corpus reply carries `row_base`, and staleness keys on
+   `row_base + total_rows`, which advances at capacity where `total_rows`
+   freezes.
+9. **API:** `Buffer::rows()` returns `&[Row]`. `RowStore` provides
+   `Deref/DerefMut<Target = [Row]>`, iteration, `FromIterator<Row>`,
+   `cache()/cache_mut()/block_map()`, `split_mut()` for the disjoint flatten
+   borrows, `push/pop/evict_front/replace_all/clear_all`, and the number
+   conversions. `SavedPrimaryState` holds a `RowStore` with crate-private
+   fields. `heap_bytes` reports capacity including dead slots.
+10. **Migration (125.13):** call sites indexing, slicing, or iterating
+    `self.rows` compile through `Deref` (about 266 production and 278 test
+    lines); about 125 `row_cache` and 69 `row_block_map` production sites move
+    to accessors; tests assigning `b.rows = ...` keep working via
+    `FromIterator` and drop their `row_cache` lines.
+
+Accepted user-visible changes, all fixes or bounded: selections stay on their
+text during eviction; search refreshes at capacity; ED 2 on the alternate
+screen no longer drops primary command blocks; alt-screen resize remaps primary
+marks; kitty placements follow reflow; an image whose cells were all cleared may
+persist until its rows evict (bounded by scrollback and the quota); at capacity
+the epoch comparison may report fewer changed rows; `heap_bytes` includes dead
+slots.
+
+Scope corrections to the subtasks below: 125.14 also covers
+`freminal-common` (`row_number.rs`, `command_block.rs`) and the GUI and
+emulator readers of exported rows (`gui/command_blocks.rs`, `folding.rs`,
+`terminal/input.rs`, `terminal/widget.rs`, `command_history.rs`, `search.rs`,
+`interface.rs`), plus `ReflowRemap` and the alt namespace. 125.15 covers
+`row_store.rs`, `resize_and_alt.rs`, `compression.rs`, `lifecycle.rs`,
+`images.rs`, `image_store.rs`, and `scroll.rs`; marks are pruned from the front
+while below `base`, and consumers filter by `rows_after`. 125.17 covers the GUI
+stored state listed in item 4, `extract_text` / `extract_block_text`
+signatures, and the search corpus reply; the only drift "workaround" is the
+comment at `frame_dirty.rs:524-531`.
+
+### 125.12 — Capacity benchmarks and baseline
+
+Scope: `freminal-buffer/benches/buffer_row_bench.rs`,
+`freminal-terminal-emulator/benches/buffer_benches.rs`,
+`.opencode/skills/freminal-bench-table/SKILL.md`.
+
+What: benchmarks that run at the real 10,000-row capacity: line-feed eviction
+steady state with (i) plain rows, (ii) compressed blocks present, (iii) OSC 133
+prompts and command blocks present, and (iv) an inline image present; plus an
+emulator-level sustained-output ingest benchmark (`seq 1 200` bursts through
+`handle_incoming_data` at capacity). Correct the stale 4,000/4,100 comments.
+Capture a named Criterion baseline `before_125_rowstore`.
+
+**Complete.** Added `bench_lf_eviction_at_capacity/{plain,compressed,prompts,image}`
+and `bench_lf_eviction_scaling/plain/{1000,10000,50000}` in
+`buffer_row_bench.rs` (124x31, 200-line bursts, fresh at-capacity buffer per
+iteration so each scenario keeps its state), and
+`bench_sustained_output_at_capacity/seq_200_burst` in the emulator's
+`buffer_benches.rs`. Baseline `before_125_rowstore` (per 200-line burst): plain
+4.595 ms, compressed 17.08 ms, prompts 4.783 ms, image 368.8 ms; scaling
+0.485 / 4.497 / 20.05 ms at 1k / 10k / 50k retained rows (about 2 ns per
+retained row per line feed, linear); emulator burst 4.390 ms. Eviction is the
+whole ingest cost, and one image in scrollback makes it 80 times slower, which
+makes 125.15's incremental image accounting load-bearing.
+
+### 125.13 — Introduce `RowStore` with identical behaviour
+
+Scope: `freminal-buffer` only.
+
+What: move `rows`, `row_cache`, and `row_block_map` behind `RowStore` with the
+API decided in 125.11, still Vec-backed and still front-draining, so every
+existing test and benchmark is unchanged in behaviour. Mechanical call-site
+migration; no semantic change.
+
+**Complete.** `freminal-buffer/src/buffer/row_store.rs` owns rows, cache
+entries, and block refs in lockstep; `Buffer::rows()` returns `&[Row]`;
+`sync_row_block_map_len` and the lagging-map invariant are gone (the debug
+invariant now asserts equal lengths). `enter_alternate` moves the store instead
+of cloning it. Additions to the design: `take_rows()` for reflow; a test-only
+`clear_all()`; `EvictionReport` carries only `rows` until 125.15 needs more.
+No other crate changed. Benchmarks against `before_125_rowstore` are within
+noise (plain -0.4%, compressed +1.1%, prompts +2.3%, emulator burst +0.9%;
+image showed +4-7% against the stored baseline but an interleaved HEAD/new A/B
+measured 380/378/382 ms against 374/379/377 ms, i.e. machine drift).
+
+### 125.14 — Logical row numbers
+
+Scope: `freminal-buffer`, and the emulator call sites that pass row indices.
+
+What: introduce the logical base and convert stored row references inside the
+buffer and emulator (prompts, command blocks, saved cursor, image placements)
+to logical numbers; delete the eviction-time rewrite in `adjust_prompt_rows`.
+Regression tests prove each previously drifting reference stays attached to
+its row across eviction.
+
+**Complete.** `RowNumber` lives in `freminal-common`; `RowStore` carries
+`base`; prompts, command blocks, DECSC, image origins, and kitty placements hold
+numbers; `adjust_prompt_rows` is replaced by leading-run pruning; reflow returns
+a staged `ReflowRemap` consumed by the handler on every resize and DECCOLM path;
+the alternate screen has its own namespace; `rows_after` returns `None` across
+namespaces; the snapshot exports `row_base` and numbered marks, and the GUI
+resolves blocks through `BlockRows::resolve`. A code review found no blockers;
+its four fixes are applied. Additional accepted behaviour changes: DECRC
+restored to its content row while inside the visible window (since superseded
+by 125.C6: DECSC is screen-relative); command-block gutters, folds,
+and palette entries for primary blocks resolve to nothing while the alternate
+screen is up (previously primary indices were misapplied to alt rows); a kitty
+relative child whose origin is no longer retained is registered but not
+stamped. Benchmarks against `before_125_rowstore`: plain -0.8%, compressed
++0.6%, prompts -6.7%, image -1.7%, emulator burst -1.7%; snapshot benches
+unchanged.
+
+### 125.15 — O(evicted) eviction
+
+Scope: `freminal-buffer`.
+
+What: switch `RowStore` eviction to the 125.11 mechanism; replace
+`gc_unreferenced_blocks` and `image_store.retain_referenced` on the eviction
+path with incremental counts. Benchmarks from 125.12 must show eviction cost
+independent of retained-row count.
+
+**Complete.** `RowStore` evicts by advancing a moving head (placeholder
+slots, payloads freed at once) and compacts at `max(live / 2, 64)` dead slots;
+a 1/2/4/8 divisor sweep over 1M line feeds was flat within 3%, so the default
+stands. Compressed blocks carry `live_rows` released per evicted run, and
+`gc_unreferenced_blocks` is gone. Images use the stamp horizon with restamps on
+every downward cell move (one restamp per multi-line IL/SD, skipped unless a
+horizon lies in range); `scroll_slice_up` needs none because cells only move to
+lower numbers. A focused review found no path that drops a referenced image;
+its fixes are applied: cell-owned images are freed when all their cells are
+cleared (in-place sixel/iTerm2 animation no longer accumulates), ED 3 no longer
+clears blocks still referenced by straddling rows, and the horizon debug
+invariant exempts protocol-retained Kitty images. Shared bookkeeping lives in
+new `buffer/eviction.rs`. Per 200-line burst against `before_125_rowstore`:
+plain 4.595 ms to 232 us, compressed 17.08 ms to 177 us, prompts 4.783 ms to
+233 us, image 368.8 ms to 261 us; scaling 170 / 246 / 262 us at 1k / 10k / 50k
+retained rows (previously 0.485 / 4.497 / 20.05 ms); emulator burst 4.390 ms to
+118 us. Cleanups: 125.C9 (fixed here), 125.C10, 125.C11.
+
+### 125.16 — Merge cache across eviction
+
+Scope: `freminal-buffer/src/buffer/flatten.rs` and its tests.
+
+What: key the visible-window merge cache by logical row so eviction no longer
+forces a full re-merge; oracle tests at capacity rotation must still match.
+
+**Complete.** `MergeWindowFp` is keyed by the window's first `RowNumber`
+plus length; the eviction-path nulls in `enforce_scrollback_limit` and the
+test-only `scroll_up` are gone, while the confined `scroll_slice_*` rotation
+nulls remain. New oracle tests cover identical-content rows at capacity and an
+ED 3 that leaves the window unchanged (now a cache hit); a mutation keying the
+start physically fails four tests. Pixel harness 11/11 (not claimed to cover
+the change). As predicted, no CPU change: eviction and emulator benchmarks are
+within run-to-run noise of 125.15.
+
+### 125.17 — Snapshot and GUI coordinates
+
+Scope: `freminal-terminal-emulator` snapshot, `freminal` GUI selection and fold
+state.
+
+What: export logical numbers plus base in `TerminalSnapshot`; move GUI
+selection and fold ranges to logical numbers; remove the documented selection
+drift workaround. Windows cross-check required.
+
+**Complete.** GUI selection, last click, context-menu cell, and search
+matches are stored as `RowNumber`s and resolved at the seam;
+`ExtractSelection` and `Buffer::extract_*` take row numbers and clamp below the
+base. The search corpus carries a `BufferExtent { row_base, total_rows }`, and
+staleness keys on the pair (a sum would not change across ED 3). Selection
+damage also compares the window-relative selection, so a selection sliding
+over identical-epoch rows is repainted (mutation-checked). Additional accepted
+behaviour: a selection in the other screen's namespace is cleared. Files
+outside the listed scope changed only mechanically for the new types
+(`gui/actions.rs`, `gui/panes/mod.rs`, a `gui/tabs.rs` test helper,
+`benches/pane_resolution_bench.rs`). Cleanup 125.C12 recorded.
+
+### 125.18 — Matched re-capture and closure
+
+Scope: this document, `assets/profiling/task125/` (one new workload).
+
+What: add a `sustained-output` variant with shell integration prompts active
+and an idle gap that engages compression; run the seven-repeat confirmation for
+`sustained-output` and the new variant against both peers; record verdicts.
+Task 125 closes only if Freminal is at or below WezTerm on `sustained-output`
+with a CI excluding a regression, and no screened workload regressed.
+
+## Closure (125.18, 2026-10-04)
+
+Identity: Freminal at `be0e8d1e` plus the `sustained-output-varying` workload;
+peers, GPU, compositor, and control grids as in the 125.10 Findings. All 156
+external samples valid; every Freminal sample on 124x31 (chrome panes as
+before).
+
+Protocol deviation, recorded: the re-screen and the first confirmation ran a
+`target/release/freminal` that had been rebuilt with default features between
+the featured build and the run (cause not identified; no hook builds release),
+so those Freminal numbers are the product build without profiling overhead and
+carry no live profile. The `sustained-output-varying` confirmation used a
+separately built featured binary
+(`CARGO_TARGET_DIR=/tmp/opencode/t125-profiled`) and therefore includes
+profiling overhead.
+
+### Re-screen (3 x 20 s, 99 samples)
+
+Every workload's paired delta against the slower peer is negative (Freminal
+cheaper) with a confidence interval excluding zero, except `sparse-row`
+(delta -1.43 ms/s, CI [-5.18, 0.06], not material). No workload regressed
+against the 125.10 screen. Freminal medians (CPU ms/s): idle-blink 1.0,
+idle-steady 0.1, typing 16.3, sparse-row 10.6, btop 2.4, scrollback 6.4,
+streaming-output 17.9, chrome-blink 1.3, chrome-steady 0.1.
+
+### Confirmation (7 x 60 s)
+
+| Workload                 | Freminal CPU / GPU | WezTerm     | Ghostty     |
+| ------------------------ | ------------------ | ----------- | ----------- |
+| sustained-output         | 8.9 / 0.43         | 19.2 / 13.1 | 37.5 / 18.6 |
+| sustained-output-marked  | 17.4 / 8.95 (a)    | 17.7 / 11.0 | 39.3 / 18.5 |
+| sustained-output-varying | 24.3 / 11.1        | 32.0 / 13.5 | 41.3 / 20.0 |
+
+(Median ms per wall-second.) (a) The marked workload's OSC 133 marks lacked
+Freminal's `freminal=1;fid=` parameters, so Freminal recorded no prompts or
+blocks in this capture; only its idle-gap compression ran. After the fix, a
+Freminal-only 20-second check with real blocks measured 17.8 ms/s (snapshot
+command blocks are now generation-cached), level with WezTerm, which per its
+source does not record a parameterised `B`. Paired deltas against Ghostty: -28.6, -22.2, and
+-16.7 ms/s, each CI excluding zero. Before the remediation `sustained-output`
+was 428.9 ms/s.
+
+`sustained-output` repeats `seq 1 200`, so the visible screen is identical
+after every burst; with the 125.14-125.16 changes Freminal recognises this
+(757 of 840 frames `FrameDamage::None` in a profiled check) and draws almost
+nothing, which flatters it relative to peers that redraw. The
+`sustained-output-varying` workload (`seq n n+199`, advancing each burst) was
+added to remove that effect: Freminal painted 3,800 of 4,200 frames (1,716
+bounded and 2,066 full rebuilds) and still used the least CPU and GPU of the
+three, with profiling overhead included. That is the decisive dense-throughput
+result.
+
+### Verdict
+
+**CONFIRMED and remediated.** The scrollback-eviction gap is closed: Freminal
+is below WezTerm and Ghostty on every sustained-output variant and on every
+screened workload except `sparse-row`, where it is statistically level with
+the slower peer. Buffer-level, a 200-line burst at capacity fell from 4.39 ms
+to about 118 us, and eviction no longer scales with retained rows. All
+numbered cleanups (125.C1-C16) are complete, and three adversarial reviews
+(harness, remediation, cleanups) were addressed in follow-up commits.
 
 ---
 
-## Verification, when activated
+## Verification for the measurement phase
 
 Standard, per `agents.md`:
 
@@ -378,7 +1609,7 @@ Additionally mandatory for this task specifically:
   `freminal-bench-table`, reported in **bytes** as well as calls, per Task
   123's correction to the cost model.
 - Matched external process-level captures for Freminal, WezTerm, and Ghostty
-  on the target laptop for every remediation claiming parity benefit.
+  on the authority machine for every remediation claiming parity benefit.
 - Real-GPU timing on supported hardware for changes justified by GPU or driver
   cost. llvmpipe remains a correctness harness and must not be reported as
   hardware performance evidence.

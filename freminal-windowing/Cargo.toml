@@ -38,6 +38,19 @@ frame-profiling = []
 # `target_os = "linux"`-gated at the module, so enabling it elsewhere is a
 # no-op rather than a compile error.
 gl-offscreen = []
+# Asynchronous GPU timestamp-query timing. Task 125.7 is the foundation: a
+# bounded `GpuQueryRing<Q>` lifecycle state machine plus pure capability
+# detection (desktop OpenGL 3.3+ or `GL_ARB_timer_query`; GLES/unsupported
+# report `Unavailable`), driven entirely through the `GpuQuerySource` trait.
+# Task 125.9 builds on it: each window measures chrome, terminal-band and
+# total-frame GPU time per painted frame (tracing target
+# `freminal_windowing::task_125::gpu_timing`) through a thin `glow` timestamp
+# source whose GL calls are the feature's only `unsafe` code. The `freminal`
+# crate's `gpu-profiling` feature forwards here and adds the per-pane
+# terminal upload/draw timing (Task 125.8). NOT enabled by default -- it is
+# measurement infrastructure with no default-build presence, mirroring
+# `frame-profiling`'s rationale. No new dependency.
+gpu-profiling = []
 
 [[example]]
 name = "hello"

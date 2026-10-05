@@ -321,8 +321,7 @@ impl TabManager {
     }
 
     /// Return an iterator over all tabs (in display order).
-    #[must_use]
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Tab> + ExactSizeIterator {
+    pub fn iter(&self) -> std::slice::Iter<'_, Tab> {
         self.tabs.iter()
     }
 
@@ -484,13 +483,22 @@ impl TabManager {
     }
 }
 
+impl<'a> IntoIterator for &'a TabManager {
+    type Item = &'a Tab;
+    type IntoIter = std::slice::Iter<'a, Tab>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::gui::view_state::ViewState;
     use arc_swap::ArcSwap;
-    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_terminal_emulator::io::SearchCorpus;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -504,8 +512,7 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) =
-            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
         let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 

@@ -1136,6 +1136,7 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
 
     fn osc_req(body: &str) -> NotificationRequest {
@@ -1554,10 +1555,10 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 0,
-            command_start_row: Some(0),
-            output_start_row: Some(0),
-            end_row: Some(1),
+            prompt_start_row: RowNumber::ZERO,
+            command_start_row: Some(RowNumber::new(0)),
+            output_start_row: Some(RowNumber::new(0)),
+            end_row: Some(RowNumber::new(1)),
             exit_code,
             cwd: None,
             started_at: executed,
@@ -1604,9 +1605,9 @@ mod tests {
         let running = CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 0,
-            command_start_row: Some(0),
-            output_start_row: Some(0),
+            prompt_start_row: RowNumber::ZERO,
+            command_start_row: Some(RowNumber::new(0)),
+            output_start_row: Some(RowNumber::new(0)),
             end_row: None,
             exit_code: None,
             cwd: None,
@@ -1631,11 +1632,11 @@ mod tests {
         let ctrl_c = CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 0,
-            command_start_row: Some(0),
+            prompt_start_row: RowNumber::ZERO,
+            command_start_row: Some(RowNumber::new(0)),
             // No C marker: the user aborted before any command ran.
             output_start_row: None,
-            end_row: Some(0),
+            end_row: Some(RowNumber::new(0)),
             exit_code: Some(130),
             cwd: None,
             // User idled 30s at the prompt before Ctrl-C.
@@ -1704,10 +1705,10 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 0,
-            command_start_row: Some(0),
-            output_start_row: Some(0),
-            end_row: Some(1),
+            prompt_start_row: RowNumber::ZERO,
+            command_start_row: Some(RowNumber::new(0)),
+            output_start_row: Some(RowNumber::new(0)),
+            end_row: Some(RowNumber::new(1)),
             exit_code,
             cwd: cwd.map(str::to_owned),
             started_at: executed,

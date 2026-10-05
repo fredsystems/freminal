@@ -10,8 +10,9 @@
 //! (`get_cursor_screen_pos`, `cursor_screen_y`), and DECSC/DECRC save/restore.
 
 use freminal_common::buffer_states::{
-    cursor::CursorPos,
+    cursor::{CursorPos, CursorState},
     modes::{declrmm::Declrmm, decom::Decom},
+    row_number::RowNumber,
 };
 
 use crate::row::{RowJoin, RowOrigin};
@@ -19,7 +20,65 @@ use crate::row::{RowJoin, RowOrigin};
 use super::clamped_offset;
 use crate::buffer::Buffer;
 
+/// A DECSC-saved cursor.
+///
+/// DECSC saves the cursor's *screen* position, not a place in the content
+/// (Task 125.C6): xterm stores `screen->cur_row`, a row relative to the top of
+/// the screen, and DECRC restores it through `CursorSet`, which clamps it to
+/// the screen. The VT510 manual defines the saved item only as "cursor
+/// position" on a terminal that has no scrollback.
+///
+/// `cursor.pos` is therefore in **screen coordinates** (row 0 is the top of
+/// the visible window), unlike the live cursor, whose `pos.y` indexes the
+/// retained rows. Because the saved row never names a stored row, scrolling,
+/// eviction, reflow and a switch between the primary and alternate screens
+/// cannot invalidate it; a resize only matters through the clamp on restore.
+#[derive(Debug, Clone)]
+pub(in crate::buffer) struct SavedCursor {
+    /// The cursor state at the time of the save, with `pos` in screen
+    /// coordinates.
+    pub(in crate::buffer) cursor: CursorState,
+}
+
 impl Buffer {
+    /// Logical number of the oldest retained row of the active screen.
+    ///
+    /// Row `i` of [`Self::rows`] is numbered `row_base() + i`. Advances when
+    /// rows are evicted from the front; never moves backwards.
+    #[must_use]
+    pub const fn row_base(&self) -> RowNumber {
+        self.rows.base()
+    }
+
+    /// Logical number the next row appended to the active screen will get:
+    /// `row_base() + rows().len()`.
+    #[must_use]
+    pub fn next_row_number(&self) -> RowNumber {
+        self.rows.next_number()
+    }
+
+    /// Logical number of the row at retained index `index` of the active screen.
+    ///
+    /// Plain arithmetic: it does not check that `index` is in range.
+    #[must_use]
+    pub fn row_number_at(&self, index: usize) -> RowNumber {
+        self.rows.number_of(index)
+    }
+
+    /// Retained index of the row numbered `number`, or `None` if it is no
+    /// longer (or not yet) stored on the active screen: evicted, past the end,
+    /// or numbered in the other screen's namespace.
+    #[must_use]
+    pub fn row_index_of(&self, number: RowNumber) -> Option<usize> {
+        self.rows.index_of(number)
+    }
+
+    /// Logical number of the row the cursor is on.
+    #[must_use]
+    pub fn cursor_row_number(&self) -> RowNumber {
+        self.rows.number_of(self.cursor.pos.y)
+    }
+
     /// Set the cursor to an absolute buffer position without any DECOM or
     /// screen-relative translation.
     ///
@@ -64,6 +123,24 @@ impl Buffer {
             x: self.cursor.pos.x,
             y: screen_y,
         }
+    }
+
+    /// Retained index of the row at 0-based screen row `screen_row` of the live
+    /// window (the one the PTY thread operates on), or `None` when that screen
+    /// row does not exist: it is at or past the screen height, or the buffer has
+    /// not grown a row there yet.
+    ///
+    /// The inverse of the subtraction in [`Self::cursor_screen_pos`]. Use it to
+    /// resolve a protocol coordinate that names a screen cell (kitty graphics
+    /// `d=p`/`d=q`) to a row of [`Self::rows`], rather than treating the screen
+    /// coordinate as a buffer index, which is wrong whenever scrollback exists.
+    #[must_use]
+    pub fn screen_row_index(&self, screen_row: usize) -> Option<usize> {
+        if screen_row >= self.height {
+            return None;
+        }
+        let index = self.visible_window_start(0) + screen_row;
+        (index < self.rows.len()).then_some(index)
     }
 
     /// Move cursor to absolute position (CUP, HVP).
@@ -154,26 +231,45 @@ impl Buffer {
 
     /// Implements DECSC – Save Cursor.
     ///
-    /// Saves the current cursor position (and associated `CursorState`).
+    /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
+    /// with its associated `CursorState`.
     pub fn save_cursor(&mut self) {
-        self.saved_cursor = Some(self.cursor.clone());
+        let mut cursor = self.cursor.clone();
+        cursor.pos = self.cursor_screen_pos();
+        self.saved_cursor = Some(SavedCursor { cursor });
     }
 
     /// Implements DECRC – Restore Cursor.
     ///
-    /// Restores the previously saved cursor position.  If no cursor has been
-    /// saved, this is a no-op.  The restored position is clamped to the
-    /// current buffer dimensions so a resize between save and restore never
-    /// produces an out-of-bounds cursor.
+    /// Restores the previously saved cursor. If no cursor has been saved, this
+    /// is a no-op.
+    ///
+    /// The saved position is screen-relative, so the cursor returns to the
+    /// same screen row and column however much output has scrolled, evicted
+    /// or reflowed the content in between (xterm `CursorRestore`). The
+    /// position is clamped to the current screen dimensions, so a resize
+    /// between save and restore never produces an out-of-bounds cursor, and
+    /// the cursor is never placed in off-screen scrollback.
+    ///
+    /// The same screen position is used on whichever screen is active when
+    /// DECRC runs, so a save made on one screen restores sensibly on the
+    /// other.
     pub fn restore_cursor(&mut self) {
         if let Some(saved) = self.saved_cursor.clone() {
-            self.cursor = saved;
+            let screen_y = saved.cursor.pos.y.min(self.height.saturating_sub(1));
+            let buffer_y = self.visible_window_start(0) + screen_y;
+
+            // Ensure rows exist up to the target position, as CUP does.
+            while buffer_y >= self.rows.len() {
+                self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
+            }
+
+            self.cursor = saved.cursor;
             // Clamp to current dimensions after restore.
             if self.width > 0 {
                 self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
             }
-            let max_row = self.rows.len().saturating_sub(1);
-            self.cursor.pos.y = self.cursor.pos.y.min(max_row);
+            self.cursor.pos.y = buffer_y;
             self.debug_assert_invariants();
         }
         // No saved cursor → silent no-op.

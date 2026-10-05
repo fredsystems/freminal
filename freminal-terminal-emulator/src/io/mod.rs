@@ -10,8 +10,11 @@ pub use pty::{FreminalPtyInputOutput, PtySpawnConfig};
 // can use the same definitions without creating a circular dependency.
 pub use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 
+use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 use freminal_common::config::ThemeMode;
 use freminal_common::themes::ThemePalette;
+
+use crate::snapshot::BufferExtent;
 
 pub struct PtyRead {
     pub buf: Vec<u8>,
@@ -69,11 +72,6 @@ pub enum InputEvent {
     /// search buffer response channel.  The GUI caches this and runs search
     /// across the complete history rather than just the visible window.
     RequestSearchBuffer,
-    /// Request text extraction from the full buffer for clipboard copy.
-    ///
-    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
-    /// The PTY thread extracts the text and sends it back through a dedicated
-    /// clipboard response channel.
     /// Enable or disable auto-detection of plain URLs in terminal output.
     ///
     /// Sent by the Settings Modal when the user toggles `auto_detect_urls`
@@ -81,10 +79,18 @@ pub enum InputEvent {
     /// `Buffer::set_auto_detect_urls`, which invalidates the row flatten
     /// cache so subsequent snapshots carry the updated detection state.
     AutoDetectUrls(bool),
+    /// Request text extraction from the full buffer for clipboard copy.
+    ///
+    /// Rows are stable logical [`RowNumber`]s (Task 125.17) and columns are
+    /// 0-indexed, so the request names the same text however many rows were
+    /// evicted between the GUI forming it and the PTY thread serving it. The
+    /// PTY thread resolves the rows against its buffer (a start row that has
+    /// been evicted clamps to the oldest retained row) and sends the extracted
+    /// text back through a dedicated clipboard response channel.
     ExtractSelection {
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
         /// When `true` the selection is a rectangular block: every row from
         /// `start_row` to `end_row` is extracted between `start_col` and
@@ -108,6 +114,24 @@ pub enum InputEvent {
     /// overwrite: a program's own subsequent DECSCUSR / `XTCBlink` request
     /// still takes over normally afterward.
     CursorConfigChange(freminal_common::cursor::CursorVisualStyle),
+}
+
+/// The full buffer as one `TChar` corpus, tagged with the rows it was cut from.
+///
+/// The PTY thread's reply to [`InputEvent::RequestSearchBuffer`].
+///
+/// Corpus row `i` (the `i`th `NewLine`-separated row) is buffer row
+/// `extent.row_base + i`. The GUI uses that to store matches as stable
+/// logical row numbers, and compares `extent` with the live snapshot's
+/// [`crate::snapshot::TerminalSnapshot::extent`] to tell a stale reply from a
+/// current one.
+#[derive(Debug, Clone)]
+pub struct SearchCorpus {
+    /// The buffer rows this corpus covers.
+    pub extent: BufferExtent,
+    /// Scrollback followed by the visible window, rows separated by
+    /// [`TChar::NewLine`].
+    pub chars: Vec<TChar>,
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.

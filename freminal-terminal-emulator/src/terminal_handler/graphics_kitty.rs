@@ -26,6 +26,7 @@ use conv2::ValueFrom;
 use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 
 use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
@@ -40,6 +41,42 @@ use super::TerminalHandler;
 /// `z=` is absent or `0`. The root frame's default gap remains `0`
 /// (tracked separately via `InlineImage::root_gap_ms`).
 const DEFAULT_ANIMATION_FRAME_GAP_MS: u32 = 40;
+
+/// What a Kitty delete (`a=d`) does with the image *data* once the placements
+/// are gone.
+///
+/// The protocol spells this as the case of the `d=` key: lowercase
+/// (`d=a`, `d=i`, ...) removes placements only, uppercase (`d=A`, `d=I`, ...)
+/// also frees the stored image data when nothing else references it. The parser
+/// surfaces that as `KittyControlData::delete_free_data`, a protocol-format
+/// flag; everything below the dispatch takes this enum instead of a bare
+/// `bool`, so a call site reads `Keep` or `Free` rather than `true`/`false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDataDisposition {
+    /// Remove the placements; keep the image data (lowercase `d=`).
+    Keep,
+    /// Also free the image data when nothing else references it (uppercase
+    /// `d=`).
+    Free,
+}
+
+impl ImageDataDisposition {
+    /// Whether the image data is to be freed.
+    const fn frees_data(self) -> bool {
+        matches!(self, Self::Free)
+    }
+}
+
+impl From<bool> for ImageDataDisposition {
+    /// The protocol boundary: `KittyControlData::delete_free_data`.
+    fn from(delete_free_data: bool) -> Self {
+        if delete_free_data {
+            Self::Free
+        } else {
+            Self::Keep
+        }
+    }
+}
 
 /// Maximum relative-placement chain depth (Task 100.4a, `ETOODEEP`).
 ///
@@ -605,7 +642,7 @@ impl TerminalHandler {
         &mut self,
         image_id: u64,
         placement_id: u32,
-        origin_row: usize,
+        origin_row: RowNumber,
         origin_col: usize,
         display_cols: usize,
         display_rows: usize,
@@ -640,7 +677,7 @@ impl TerminalHandler {
         &mut self,
         image_id: u64,
         placement_id: u32,
-        origin_row: usize,
+        origin_row: RowNumber,
         origin_col: usize,
         display_cols: usize,
         display_rows: usize,
@@ -652,7 +689,7 @@ impl TerminalHandler {
     ) {
         self.real_placements.insert(
             (image_id, placement_id),
-            RealPlacement {
+            crate::terminal_handler::RealPlacement {
                 image_id,
                 placement_id,
                 origin_row,
@@ -772,13 +809,6 @@ impl TerminalHandler {
         display_cols: usize,
         display_rows: usize,
     ) {
-        // Save cursor position if `C=1` (no cursor movement).
-        let saved_cursor = if cmd.control.no_cursor_movement {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         let cursor = self.buffer.cursor().pos;
         tracing::debug!(
             "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
@@ -821,9 +851,11 @@ impl TerminalHandler {
             subcell_offset,
         );
 
-        // Restore cursor if `C=1`.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        // `C=1` (no cursor movement): put the cursor back on the image origin,
+        // located by row number so scrollback eviction during placement cannot
+        // displace it (Task 125.C7).
+        if cmd.control.no_cursor_movement {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
@@ -1538,17 +1570,6 @@ impl TerminalHandler {
         let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
         let subcell_offset = self.resolve_subcell_offset(control);
 
-        // Save cursor position if `C=1` (no cursor movement) — mirrors
-        // `stamp_kitty_put`'s handling of the same flag on `a=p` (Task
-        // 100.16). Without this, `a=T`/Put ignored `C=1` entirely:
-        // `place_image` (Task 100.15) now always moves the cursor below
-        // the image, so `C=1` must explicitly restore it here.
-        let saved_cursor = if control.no_cursor_movement {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         // Kitty spec REPLACE semantics (Task 100.18): a second `a=T`
         // with the SAME non-zero `p=` replaces that one placement;
         // `p=0`/unspecified means multiple, independently-coexisting
@@ -1577,9 +1598,13 @@ impl TerminalHandler {
             subcell_offset,
         );
 
-        // Restore cursor if `C=1`.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        // `C=1` (no cursor movement) — mirrors `stamp_kitty_put`'s handling of
+        // the same flag on `a=p` (Task 100.16). `place_image` (Task 100.15)
+        // always moves the cursor below the image, so `C=1` must explicitly
+        // put it back on the image origin, located by row number so scrollback
+        // eviction during placement cannot displace it (Task 125.C7).
+        if control.no_cursor_movement {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
@@ -1756,13 +1781,33 @@ impl TerminalHandler {
         v_offset: i32,
         z_index: i32,
     ) {
-        let origin_row = signed_cell_offset(parent_real.origin_row, v_offset);
+        // The parent's origin is a stable row number, so it still names the
+        // parent's row however far the buffer has scrolled since the parent
+        // was placed (Task 125.14).
+        //
+        // A `V=` that would carry the child above the first row of the
+        // parent's screen has no row to land on. It is a checked offset on
+        // purpose: saturating would plant the child on row 0 (or on a row of
+        // the other screen), a row the application never addressed.
+        let Some(origin_row) = parent_real.origin_row.checked_offset(i64::from(v_offset)) else {
+            tracing::debug!(
+                "Kitty graphics: relative placement child (image_id={child_image_id}, \
+                 placement_id={child_pid}) falls outside its screen (parent row {}, V={v_offset}); \
+                 accepted but neither stamped nor registered",
+                parent_real.origin_row,
+            );
+            // Nothing of this placement exists on screen, so a stale entry
+            // left by an earlier placement under the same key must not survive
+            // to name rows this one does not occupy.
+            self.real_placements.remove(&(child_image_id, child_pid));
+            return;
+        };
         let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
 
         tracing::debug!(
             "Kitty graphics: relative placement child (image_id={child_image_id}, \
-             placement_id={child_pid}) stamped at ({origin_row},{origin_col}) \
-             (parent origin ({},{}) + H={h_offset},V={v_offset})",
+             placement_id={child_pid}) stamped at (row {origin_row},col {origin_col}) \
+             (parent origin (row {},col {}) + H={h_offset},V={v_offset})",
             parent_real.origin_row,
             parent_real.origin_col,
         );
@@ -1783,20 +1828,26 @@ impl TerminalHandler {
         // though it shares the parent's origin plus an offset.
         let placement_instance = next_placement_instance_id();
 
-        self.buffer.place_image_at(
-            child_image_id,
-            origin_row,
-            origin_col,
-            display_cols,
-            display_rows,
-            ImageProtocol::Kitty,
-            control.image_number,
-            control.placement_id,
-            z_index,
-            source_crop,
-            placement_instance,
-            subcell_offset,
-        );
+        // A child whose origin row is no longer retained (the parent was
+        // evicted, or a negative `V=` points above the oldest row) has
+        // nothing visible to stamp; it is still registered below so it can be
+        // cascade-deleted with its parent.
+        if let Some(origin_row_index) = self.buffer.row_index_of(origin_row) {
+            self.buffer.place_image_at(
+                child_image_id,
+                origin_row_index,
+                origin_col,
+                display_cols,
+                display_rows,
+                ImageProtocol::Kitty,
+                control.image_number,
+                control.placement_id,
+                z_index,
+                source_crop,
+                placement_instance,
+                subcell_offset,
+            );
+        }
 
         self.insert_real_placement(
             child_image_id,
@@ -1850,7 +1901,9 @@ impl TerminalHandler {
         self.insert_real_placement(
             child_image_id,
             child_pid,
-            0,
+            // Placeholder origin: nothing is stamped for a virtual-parent
+            // child, so its row is never read.
+            RowNumber::ZERO,
             0,
             display_cols,
             display_rows,
@@ -1946,6 +1999,99 @@ impl TerminalHandler {
             self.buffer.clear_image_placements_by_id(key.0);
             self.real_placements.remove(key);
         }
+    }
+
+    /// Translate the row numbers in `real_placements` through any reflow the
+    /// buffer has just performed (a resize, DECCOLM).
+    ///
+    /// Reflow renumbers every row, so an untranslated placement origin would
+    /// fall below the buffer's row base and stop resolving to its row. A
+    /// placement whose origin row the remap cannot translate (its row was
+    /// already evicted) is left as is -- it is already below the base and
+    /// resolves to nothing -- and is then pruned by
+    /// [`Self::prune_evicted_real_placements`].
+    pub(super) fn apply_buffer_reflow_remap(&mut self) {
+        if let Some(remap) = self.buffer.take_reflow_remap() {
+            for placement in self.real_placements.values_mut() {
+                if let Some(row) = remap.map_start(placement.origin_row) {
+                    placement.origin_row = row;
+                }
+            }
+        }
+        // Whether or not a reflow happened, a resize can have removed rows
+        // from the tail.
+        self.prune_unissued_real_placements();
+        // A reflow installs its rows at a new base, so placements the remap
+        // could not translate now sit below it.
+        self.prune_evicted_real_placements();
+    }
+
+    /// Drop `real_placements` entries whose origin row has been evicted.
+    ///
+    /// An entry below the buffer's row base resolves to nothing -- its cells
+    /// are gone -- but nothing else removes it, so a long session of image
+    /// placements under scrollback eviction would grow the map without bound.
+    ///
+    /// **Cost and trigger.** Pruning is `O(placements)`, and it runs only when
+    /// the buffer's row base has moved since the last prune and the map is not
+    /// empty: at most once per input batch (and once per reflow), never per
+    /// line feed, and for a terminal that shows no images it is a single
+    /// comparison. The map holds only live placements plus those evicted
+    /// during one batch, so the cost is bounded by the number of placements
+    /// currently on screen or in scrollback. An ordering-based `O(pruned)`
+    /// scheme was rejected: entries are keyed by `(image_id, placement_id)`,
+    /// are overwritten in place, are renumbered by reflow, and relative
+    /// children sit at parent origin plus an offset, so insertion order is
+    /// not row order and there is no sorted prefix to pop.
+    ///
+    /// Only entries in the active screen's row namespace are judged (the other
+    /// namespace's base is not the one that just moved). An entry registered
+    /// against a virtual (Unicode placeholder) parent carries a placeholder
+    /// origin that is never read, so it is kept: it is positioned from the
+    /// parent's live placeholder cells instead. Children of a pruned entry
+    /// keep their own rows; their dangling `parent` link already ends the
+    /// ancestor walk.
+    pub(super) fn prune_evicted_real_placements(&mut self) {
+        let base = self.buffer.row_base();
+        if base == self.placement_prune_base {
+            return;
+        }
+        self.placement_prune_base = base;
+        self.retain_real_placements(|origin| {
+            !(origin.is_alternate() == base.is_alternate() && origin < base)
+        });
+    }
+
+    /// Drop `real_placements` entries whose origin row does not exist yet:
+    /// at or past the number the buffer will issue next.
+    ///
+    /// Shrinking the buffer's tail (a height grow reclaims blank padding rows)
+    /// removes rows whose numbers are then issued again to unrelated new rows,
+    /// so a placement recorded against a removed row would name whatever is
+    /// written there next. Runs after every resize; resizes are rare, so it is
+    /// not gated.
+    pub(super) fn prune_unissued_real_placements(&mut self) {
+        let next = self.buffer.next_row_number();
+        self.retain_real_placements(|origin| {
+            !(origin.is_alternate() == next.is_alternate() && origin >= next)
+        });
+    }
+
+    /// Keep the `real_placements` entries whose origin row satisfies `keep`,
+    /// except that an entry registered against a virtual (Unicode placeholder)
+    /// parent is always kept: its origin is a placeholder that is never read
+    /// (see [`Self::register_relative_placement_against_virtual_parent`]).
+    fn retain_real_placements(&mut self, keep: impl Fn(RowNumber) -> bool) {
+        if self.real_placements.is_empty() {
+            return;
+        }
+        let virtual_placements = &self.virtual_placements;
+        self.real_placements.retain(|_, placement| {
+            placement
+                .parent
+                .is_some_and(|parent| virtual_placements.contains_key(&parent))
+                || keep(placement.origin_row)
+        });
     }
 
     /// Convenience wrapper: cascade-delete every `real_placements` entry for
@@ -2401,7 +2547,7 @@ impl TerminalHandler {
         use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
 
         let target = cmd.control.delete_target.unwrap_or(KittyDeleteTarget::All);
-        let free_data = cmd.control.delete_free_data;
+        let free_data = ImageDataDisposition::from(cmd.control.delete_free_data);
 
         match target {
             KittyDeleteTarget::All => self.handle_kitty_delete_all(free_data),
@@ -2421,10 +2567,10 @@ impl TerminalHandler {
     }
 
     /// `d=a`/`d=A` — delete all placements VISIBLE ON SCREEN.
-    fn handle_kitty_delete_all(&mut self, free_data: bool) {
+    fn handle_kitty_delete_all(&mut self, free_data: ImageDataDisposition) {
         let ids = self.buffer.clear_image_placements_visible(0);
         tracing::debug!(
-            "Kitty graphics: deleting {} VISIBLE placement(s) (free_data={free_data})",
+            "Kitty graphics: deleting {} VISIBLE placement(s) (free_data={free_data:?})",
             ids.len(),
         );
         // Virtual (Unicode placeholder) and real-placement bookkeeping is
@@ -2433,7 +2579,7 @@ impl TerminalHandler {
         // spec.
         self.virtual_placements.clear();
         self.real_placements.clear();
-        if free_data {
+        if free_data.frees_data() {
             for id in ids {
                 self.free_image_if_unreferenced(id);
             }
@@ -2442,7 +2588,11 @@ impl TerminalHandler {
 
     /// `d=i`/`d=I` — delete placements for image id `i=`, optionally
     /// narrowed to a single placement id `p=` (Task 100.20).
-    fn handle_kitty_delete_by_id(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+    fn handle_kitty_delete_by_id(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
         let Some(image_id) = cmd.control.image_id else {
             return;
         };
@@ -2451,32 +2601,36 @@ impl TerminalHandler {
             Some(pid) if pid != 0 => {
                 tracing::debug!(
                     "Kitty graphics: deleting placement id={pid} of image id={id} \
-                     (free_data={free_data})"
+                     (free_data={free_data:?})"
                 );
                 self.buffer.clear_image_placements_by_placement(id, pid);
             }
             _ => {
                 tracing::debug!(
                     "Kitty graphics: deleting all placements for image id={id} \
-                     (free_data={free_data})"
+                     (free_data={free_data:?})"
                 );
                 self.buffer.clear_image_placements_by_id(id);
             }
         }
         self.virtual_placements
             .retain(|&(img_id, _), _| img_id != id);
-        if free_data {
+        if free_data.frees_data() {
             self.free_image_if_unreferenced(id);
         }
     }
 
     /// `d=n`/`d=N` — delete placements for the newest image with number `I=`.
-    fn handle_kitty_delete_by_number(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+    fn handle_kitty_delete_by_number(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
         let Some(number) = cmd.control.image_number else {
             return;
         };
         tracing::debug!(
-            "Kitty graphics: deleting placements for image number={number} (free_data={free_data})"
+            "Kitty graphics: deleting placements for image number={number} (free_data={free_data:?})"
         );
         self.buffer.clear_image_placements_by_number(number);
         // `clear_image_placements_by_number` only clears cell placements,
@@ -2484,29 +2638,39 @@ impl TerminalHandler {
         if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
             self.virtual_placements
                 .retain(|&(img_id, _), _| img_id != id);
-            if free_data {
+            if free_data.frees_data() {
                 self.free_image_if_unreferenced(id);
             }
         }
     }
 
     /// `d=c`/`d=C` — delete placements intersecting the cursor cell.
-    fn handle_kitty_delete_at_cursor(&mut self, free_data: bool) {
-        let cursor_row = self.buffer.cursor().pos.y;
-        let ids = self.image_ids_in_row(cursor_row);
+    ///
+    /// Kitty graphics spec, "Deleting images": `c` or `C` is "Delete all
+    /// placements that intersect with the current cursor position." kitty's
+    /// `graphics.c` does the same with a point filter on the cursor cell
+    /// (`d.x_offset = c->x + 1; d.y_offset = c->y + 1;`), so only placements
+    /// that cover that one cell go, not everything on its row. Only the
+    /// placement under the cursor is removed, so a second placement of the
+    /// same image elsewhere survives.
+    fn handle_kitty_delete_at_cursor(&mut self, free_data: ImageDataDisposition) {
+        // `cursor().pos` indexes `Buffer::rows()` directly, as the cell
+        // lookups below do.
+        let cursor = self.buffer.cursor().pos;
         tracing::debug!(
-            "Kitty graphics: deleting placements at cursor row {cursor_row} (free_data={free_data})"
+            "Kitty graphics: deleting placements at cursor cell ({},{}) (free_data={free_data:?})",
+            cursor.y,
+            cursor.x,
         );
-        self.buffer.clear_image_placements_at_cursor();
-        if free_data {
-            for id in ids {
-                self.free_image_if_unreferenced(id);
-            }
-        }
+        self.delete_placements_at_cell(cursor.y, cursor.x, free_data);
     }
 
     /// `d=f`/`d=F` — delete animation frames for the `i=`/`I=` image.
-    fn handle_kitty_delete_frames(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+    fn handle_kitty_delete_frames(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
         let Some(id) = self.resolve_kitty_image_id(&cmd.control) else {
             tracing::debug!("Kitty graphics: d=f/d=F with no resolvable image id; ignoring");
             return;
@@ -2515,71 +2679,135 @@ impl TerminalHandler {
             return;
         };
         tracing::debug!(
-            "Kitty graphics: clearing animation frames for image id={id} (free_data={free_data})"
+            "Kitty graphics: clearing animation frames for image id={id} (free_data={free_data:?})"
         );
         stored_image.frames.clear();
         stored_image.animation = AnimationControl::default();
         self.buffer
             .image_store_mut()
             .insert_protocol_retained(stored_image);
-        if free_data {
+        if free_data.frees_data() {
+            self.free_image_if_unreferenced(id);
+        }
+    }
+
+    /// Resolve the `x=` key of a delete command to a 0-based column.
+    ///
+    /// Kitty graphics spec, "Deleting images": "The values of the x and y keys
+    /// are the same as cursor positions (i.e. x=1, y=1 is the top left cell)."
+    /// They are therefore 1-based coordinates of the SCREEN. A key of `0` names
+    /// no column (kitty compares `start_column <= x - 1`, which `0` never
+    /// satisfies), so it returns `None`. An absent key falls back to the
+    /// cursor's column (freminal behaviour kept from before Task 125.C8; the
+    /// spec is silent).
+    fn resolve_delete_column(&self, cmd: &KittyGraphicsCommand) -> Option<usize> {
+        match cmd.control.src_x {
+            Some(x) => usize::value_from(x).ok()?.checked_sub(1),
+            None => Some(self.buffer.cursor_screen_pos().x),
+        }
+    }
+
+    /// Resolve the `y=` key of a delete command to an index of
+    /// `Buffer::rows()`.
+    ///
+    /// `y` is a 1-based SCREEN row (see [`Self::resolve_delete_column`]), so it
+    /// is mapped through the visible window rather than used as a buffer index
+    /// (which is only the same thing while there is no scrollback). `0` and a
+    /// row below the screen name no row and return `None`; an absent key falls
+    /// back to the cursor's row.
+    fn resolve_delete_row(&self, cmd: &KittyGraphicsCommand) -> Option<usize> {
+        let screen_row = match cmd.control.src_y {
+            Some(y) => usize::value_from(y).ok()?.checked_sub(1)?,
+            None => self.buffer.cursor_screen_pos().y,
+        };
+        self.buffer.screen_row_index(screen_row)
+    }
+
+    /// Resolve the `x=`/`y=` keys of `d=p`/`d=P`/`d=q`/`d=Q` to a cell of the
+    /// buffer, as `(row_index, col)` where `row_index` indexes
+    /// `Buffer::rows()`. `None` when either coordinate names no cell.
+    fn resolve_delete_cell(&self, cmd: &KittyGraphicsCommand) -> Option<(usize, usize)> {
+        Some((
+            self.resolve_delete_row(cmd)?,
+            self.resolve_delete_column(cmd)?,
+        ))
+    }
+
+    /// Delete the placement covering buffer cell `(row, col)`, freeing the
+    /// image data afterwards when `free_data` and nothing else references it.
+    fn delete_placements_at_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        free_data: ImageDataDisposition,
+    ) {
+        let id = self.image_id_at_cell(row, col);
+        self.buffer.clear_image_placements_at_cell(row, col);
+        if free_data.frees_data()
+            && let Some(id) = id
+        {
             self.free_image_if_unreferenced(id);
         }
     }
 
     /// `d=p`/`d=P` — delete placements intersecting cell `x=`,`y=`.
-    fn handle_kitty_delete_at_cell(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        // Per Kitty spec, x/y default to cursor position if not specified.
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
-        let id = self.image_id_at_cell(row, col);
+    fn handle_kitty_delete_at_cell(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
+        let Some((row, col)) = self.resolve_delete_cell(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=p/d=P cell (x={:?}, y={:?}) is not on screen; ignoring",
+                cmd.control.src_x,
+                cmd.control.src_y,
+            );
+            return;
+        };
         tracing::debug!(
-            "Kitty graphics: deleting placements at cell ({row},{col}) (free_data={free_data})"
+            "Kitty graphics: deleting placements at cell ({row},{col}) (free_data={free_data:?})"
         );
-        self.buffer.clear_image_placements_at_cell(row, col);
-        if free_data && let Some(id) = id {
-            self.free_image_if_unreferenced(id);
-        }
+        self.delete_placements_at_cell(row, col, free_data);
     }
 
     /// `d=q`/`d=Q` — delete placements intersecting cell `x=`,`y=` with
     /// z-index `z=`.
-    fn handle_kitty_delete_at_cell_z_index(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+    fn handle_kitty_delete_at_cell_z_index(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
+        let Some((row, col)) = self.resolve_delete_cell(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=q/d=Q cell (x={:?}, y={:?}) is not on screen; ignoring",
+                cmd.control.src_x,
+                cmd.control.src_y,
+            );
+            return;
+        };
         let z = cmd.control.z_index.unwrap_or(0);
         tracing::debug!(
-            "Kitty graphics: deleting placements at cell ({row},{col}) z={z} (free_data={free_data})"
+            "Kitty graphics: deleting placements at cell ({row},{col}) z={z} (free_data={free_data:?})"
         );
         if let Some(id) = self
             .buffer
             .clear_image_placements_at_cell_with_z(row, col, z)
-            && free_data
+            && free_data.frees_data()
         {
             self.free_image_if_unreferenced(id);
         }
     }
 
     /// `d=r`/`d=R` — delete images with id in `[x=, y=]`.
-    fn handle_kitty_delete_id_range(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+    fn handle_kitty_delete_id_range(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
         let low = u64::from(cmd.control.src_x.unwrap_or(0));
         let high = u64::from(cmd.control.src_y.unwrap_or(0));
         tracing::debug!(
-            "Kitty graphics: deleting images with id in [{low},{high}] (free_data={free_data})"
+            "Kitty graphics: deleting images with id in [{low},{high}] (free_data={free_data:?})"
         );
         let ids: Vec<u64> = self
             .buffer
@@ -2592,25 +2820,37 @@ impl TerminalHandler {
             self.buffer.clear_image_placements_by_id(id);
             self.virtual_placements
                 .retain(|&(img_id, _), _| img_id != id);
-            if free_data {
+            if free_data.frees_data() {
                 self.free_image_if_unreferenced(id);
             }
         }
     }
 
     /// `d=x`/`d=X` — delete placements intersecting column `x=`.
-    fn handle_kitty_delete_in_column(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+    ///
+    /// Kitty graphics spec: "Delete all placements that intersect the
+    /// specified column, specified using the x key." `x=` is 1-based (see
+    /// [`Self::resolve_delete_column`]); kitty's `x_filter_func` tests
+    /// `start_column <= x - 1 < start_column + effective_num_cols` on every
+    /// placement, with no row restriction.
+    fn handle_kitty_delete_in_column(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
+        let Some(col) = self.resolve_delete_column(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=x/d=X column x={:?} names no column; ignoring",
+                cmd.control.src_x,
+            );
+            return;
+        };
         let ids = self.image_ids_in_column(col);
         tracing::debug!(
-            "Kitty graphics: deleting placements in column {col} (free_data={free_data})"
+            "Kitty graphics: deleting placements in column {col} (free_data={free_data:?})"
         );
         self.buffer.clear_image_placements_in_column(col);
-        if free_data {
+        if free_data.frees_data() {
             for id in ids {
                 self.free_image_if_unreferenced(id);
             }
@@ -2618,16 +2858,29 @@ impl TerminalHandler {
     }
 
     /// `d=y`/`d=Y` — delete placements intersecting row `y=`.
-    fn handle_kitty_delete_in_row(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+    ///
+    /// Kitty graphics spec: "Delete all placements that intersect the
+    /// specified row, specified using the y key." `y=` is a 1-based screen row
+    /// (see [`Self::resolve_delete_row`]); kitty's `y_filter_func` tests
+    /// `start_row <= y - 1 < start_row + effective_num_rows`.
+    fn handle_kitty_delete_in_row(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
+        let Some(row) = self.resolve_delete_row(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=y/d=Y row y={:?} is not on screen; ignoring",
+                cmd.control.src_y,
+            );
+            return;
+        };
         let ids = self.image_ids_in_row(row);
-        tracing::debug!("Kitty graphics: deleting placements in row {row} (free_data={free_data})");
+        tracing::debug!(
+            "Kitty graphics: deleting placements in row {row} (free_data={free_data:?})"
+        );
         self.buffer.clear_image_placements_in_row(row);
-        if free_data {
+        if free_data.frees_data() {
             for id in ids {
                 self.free_image_if_unreferenced(id);
             }
@@ -2635,14 +2888,18 @@ impl TerminalHandler {
     }
 
     /// `d=z`/`d=Z` — delete placements with z-index `z=`.
-    fn handle_kitty_delete_at_z_index(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+    fn handle_kitty_delete_at_z_index(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        free_data: ImageDataDisposition,
+    ) {
         let z = cmd.control.z_index.unwrap_or(0);
         let ids = self.image_ids_by_z_index(z);
         tracing::debug!(
-            "Kitty graphics: deleting placements at z-index {z} (free_data={free_data})"
+            "Kitty graphics: deleting placements at z-index {z} (free_data={free_data:?})"
         );
         self.buffer.clear_image_placements_by_z_index(z);
-        if free_data {
+        if free_data.frees_data() {
             for id in ids {
                 self.free_image_if_unreferenced(id);
             }
@@ -2659,7 +2916,7 @@ impl TerminalHandler {
     /// delete targets.
     fn free_image_if_unreferenced(&mut self, id: u64) {
         let still_referenced = self.buffer.rows().iter().any(|row| {
-            row.cells()
+            row.cells_for_image_scan()
                 .iter()
                 .any(|c| c.image_placement().is_some_and(|p| p.image_id == id))
         });
@@ -2679,7 +2936,7 @@ impl TerminalHandler {
         self.buffer
             .rows()
             .get(row)?
-            .cells()
+            .cells_for_image_scan()
             .get(col)?
             .image_placement()
             .map(|p| p.image_id)
@@ -2692,7 +2949,7 @@ impl TerminalHandler {
             return Vec::new();
         };
         let mut ids = Vec::new();
-        for cell in row.cells() {
+        for cell in row.cells_for_image_scan() {
             if let Some(p) = cell.image_placement()
                 && !ids.contains(&p.image_id)
             {
@@ -2707,7 +2964,7 @@ impl TerminalHandler {
     fn image_ids_in_column(&self, col: usize) -> Vec<u64> {
         let mut ids = Vec::new();
         for row in self.buffer.rows() {
-            if let Some(cell) = row.cells().get(col)
+            if let Some(cell) = row.cells_for_image_scan().get(col)
                 && let Some(p) = cell.image_placement()
                 && !ids.contains(&p.image_id)
             {
@@ -3040,6 +3297,7 @@ mod tests {
         pty_write::PtyWrite,
     };
 
+    use super::ImageDataDisposition;
     use super::ImageSizeMode;
     use super::SourceCrop;
 
@@ -3047,6 +3305,7 @@ mod tests {
     use freminal_buffer::row::Row;
 
     use super::super::TerminalHandler;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ------------------------------------------------------------------
     // Kitty graphics direct transfer tests
@@ -4506,7 +4765,7 @@ mod tests {
             .copied()
             .expect("expected a RealPlacement for (42, 0)");
         assert_eq!(placement.image_id, 42);
-        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_row, RowNumber::new(5));
         assert_eq!(placement.origin_col, 3);
         assert_eq!(placement.parent, None);
     }
@@ -4618,7 +4877,7 @@ mod tests {
             .get(&(42, 5))
             .copied()
             .expect("expected a RealPlacement for (42, 5)");
-        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_row, RowNumber::new(5));
         assert_eq!(placement.origin_col, 3);
     }
 
@@ -4672,11 +4931,15 @@ mod tests {
             .copied()
             .expect("child B registered in real_placements");
         assert_eq!(child.parent, Some((42, 0)));
-        assert_eq!(child.origin_row, parent.origin_row + 1);
+        assert_eq!(child.origin_row, parent.origin_row.offset(1));
         assert_eq!(child.origin_col, parent.origin_col + 2);
 
         // The child's image cells are actually stamped at that offset.
-        let cell = &handler.buffer().rows()[child.origin_row].cells()[child.origin_col];
+        let child_row = handler
+            .buffer()
+            .row_index_of(child.origin_row)
+            .expect("child origin row is retained");
+        let cell = &handler.buffer().rows()[child_row].cells()[child.origin_col];
         assert!(cell.has_image(), "expected an image cell at child origin");
         assert_eq!(
             cell.image_placement().map(|p| p.image_id),
@@ -4769,9 +5032,19 @@ mod tests {
             "test setup must actually force a drain, or it can't distinguish \
              the fix from the bug"
         );
+        // Task 125.14: the recorded origin is a stable row NUMBER. It was
+        // taken at the pre-drain cursor row (row 19, base 0) and, being
+        // stable, still names the image's top row; that row's retained index
+        // after the drains is what the pre-125.14 test compared directly.
         assert_eq!(
-            placement.origin_row, expected_origin_row,
-            "100.14: origin_row must reflect the post-drain stamped row, not \
+            placement.origin_row,
+            RowNumber::new(19),
+            "origin_row must be the number of the row the image was stamped on"
+        );
+        assert_eq!(
+            handler.buffer().row_index_of(placement.origin_row),
+            Some(expected_origin_row),
+            "100.14: origin_row must resolve to the post-drain stamped row, not \
              the stale pre-call cursor row"
         );
         assert_eq!(
@@ -4784,7 +5057,11 @@ mod tests {
 
         // Ground truth: the image's cells are actually stamped at the
         // recorded origin.
-        let cell = &handler.buffer().rows()[placement.origin_row].cells()[placement.origin_col];
+        let origin_index = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("origin row is retained");
+        let cell = &handler.buffer().rows()[origin_index].cells()[placement.origin_col];
         assert!(
             cell.has_image(),
             "expected an image cell at the recorded origin_row/origin_col"
@@ -4793,6 +5070,530 @@ mod tests {
             cell.image_placement().map(|p| p.image_id),
             Some(77),
             "expected the stamped cell to reference image id 77"
+        );
+    }
+
+    /// Task 125.14: a recorded placement origin is a stable row NUMBER, so it
+    /// keeps naming the image's row when LATER output evicts rows above it
+    /// (the old physical origin drifted onto a different row).
+    #[test]
+    fn kitty_real_placement_stays_attached_to_its_row_across_eviction() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        grow_buffer_rows(&mut handler, 10);
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(61);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+        let placement = handler
+            .real_placements
+            .get(&(61, 0))
+            .copied()
+            .expect("expected a RealPlacement for (61, 0)");
+        let index_at_placement = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("origin row is retained at placement time");
+
+        // Later output evicts rows above the image (max 27 rows retained).
+        grow_buffer_rows(&mut handler, 20);
+        assert!(
+            handler.buffer().row_base() > RowNumber::ZERO,
+            "setup must evict rows"
+        );
+
+        let placement_after = handler
+            .real_placements
+            .get(&(61, 0))
+            .copied()
+            .expect("placement still recorded");
+        assert_eq!(
+            placement_after.origin_row, placement.origin_row,
+            "eviction must not rewrite the recorded origin"
+        );
+        let index_now = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("the image's row is still retained");
+        assert!(index_now < index_at_placement, "eviction shifted the index");
+        assert!(
+            handler.buffer().rows()[index_now].cells()[placement.origin_col].has_image(),
+            "the recorded origin must still name the row holding the image"
+        );
+    }
+
+    /// Task 125.14: a relative placement made AFTER eviction resolves its
+    /// parent's row through the stable number, not through a drifted index.
+    #[test]
+    fn kitty_relative_child_lands_below_its_parent_after_eviction() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        grow_buffer_rows(&mut handler, 10);
+        let mut cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd_a.control.image_id = Some(62);
+        cmd_a.control.display_cols = Some(2);
+        cmd_a.control.display_rows = Some(3);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx);
+        let parent = handler
+            .real_placements
+            .get(&(62, 0))
+            .copied()
+            .expect("parent registered");
+
+        grow_buffer_rows(&mut handler, 20);
+        assert!(
+            handler.buffer().row_base() > RowNumber::ZERO,
+            "setup must evict rows"
+        );
+
+        transmit_only(&mut handler, 63);
+        let _ = recv_response(&rx);
+        handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
+            image_id: Some(63),
+            parent_image_id: Some(62),
+            h_offset: Some(0),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        }));
+        let _ = recv_response(&rx);
+
+        let child = handler
+            .real_placements
+            .get(&(63, 0))
+            .copied()
+            .expect("child registered");
+        assert_eq!(child.origin_row, parent.origin_row.offset(1));
+        let child_index = handler
+            .buffer()
+            .row_index_of(child.origin_row)
+            .expect("child's row is retained");
+        let parent_index = handler
+            .buffer()
+            .row_index_of(parent.origin_row)
+            .expect("parent's row is retained");
+        assert_eq!(child_index, parent_index + 1);
+        assert_eq!(
+            handler.buffer().rows()[child_index].cells()[child.origin_col]
+                .image_placement()
+                .map(|p| p.image_id),
+            Some(63),
+            "the child's cells are stamped one row below the parent's origin"
+        );
+    }
+
+    #[test]
+    fn image_data_disposition_follows_the_protocol_flag() {
+        assert_eq!(
+            ImageDataDisposition::from(false),
+            ImageDataDisposition::Keep
+        );
+        assert_eq!(ImageDataDisposition::from(true), ImageDataDisposition::Free);
+        assert!(!ImageDataDisposition::Keep.frees_data());
+        assert!(ImageDataDisposition::Free.frees_data());
+    }
+
+    /// Place a 1x1 image with `image_id` at the cursor and return the
+    /// response-draining receiver the handler is wired to.
+    fn place_at_cursor(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+        image_id: u32,
+    ) {
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(image_id);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+        let _ = recv_response(rx);
+    }
+
+    /// Place a relative child of `parent` at vertical offset `v` and return
+    /// the APC response.
+    fn place_relative_child(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+        child: u32,
+        parent: u32,
+        v: i32,
+    ) -> String {
+        transmit_only(handler, child);
+        let _ = recv_response(rx);
+        handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
+            image_id: Some(child),
+            parent_image_id: Some(parent),
+            h_offset: Some(0),
+            v_offset: Some(v),
+            ..KittyControlData::default()
+        }));
+        recv_response(rx)
+    }
+
+    fn any_cell_shows_image(handler: &TerminalHandler, image_id: u64) -> bool {
+        handler.buffer().rows().iter().any(|row| {
+            row.cells().iter().any(|cell| {
+                cell.image_placement()
+                    .is_some_and(|p| p.image_id == image_id)
+            })
+        })
+    }
+
+    /// Review NIT: a negative `V=` that carries the child above row 0 used to
+    /// saturate onto row 0. It has no row to land on: accepted, but neither
+    /// stamped nor registered.
+    #[test]
+    fn kitty_relative_child_above_row_zero_is_not_clamped_onto_row_zero() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+
+        // Parent on the very first row of a fresh primary buffer (number 0).
+        place_at_cursor(&mut handler, &rx, 70);
+        let parent = handler.real_placements[&(70, 0)];
+        assert_eq!(parent.origin_row, RowNumber::ZERO, "setup: parent on row 0");
+
+        let response = place_relative_child(&mut handler, &rx, 71, 70, -1);
+        assert!(
+            response.contains("OK"),
+            "the placement is accepted, got {response:?}"
+        );
+        assert!(
+            !handler.real_placements.contains_key(&(71, 0)),
+            "no row exists above row 0, so nothing is registered"
+        );
+        assert!(
+            !any_cell_shows_image(&handler, 71),
+            "and nothing is stamped on row 0 (or anywhere)"
+        );
+    }
+
+    /// The boundary: `V=-1` from row 1 lands exactly on row 0.
+    #[test]
+    fn kitty_relative_child_landing_exactly_on_row_zero_is_stamped() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        place_at_cursor(&mut handler, &rx, 72);
+        assert_eq!(
+            handler.real_placements[&(72, 0)].origin_row,
+            RowNumber::new(1)
+        );
+
+        let _ = place_relative_child(&mut handler, &rx, 73, 72, -1);
+        let child = handler.real_placements[&(73, 0)];
+        assert_eq!(child.origin_row, RowNumber::ZERO);
+        assert!(handler.buffer().rows()[0].cells()[0].has_image());
+    }
+
+    /// The alternate screen's rows are numbered from `1 << 63`; an offset past
+    /// the first alternate row must not saturate into (or across to) the
+    /// primary namespace.
+    #[test]
+    fn kitty_relative_child_above_the_first_alternate_row_is_not_registered() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+
+        handler.handle_enter_alternate();
+        place_at_cursor(&mut handler, &rx, 74);
+        let parent = handler.real_placements[&(74, 0)];
+        assert_eq!(parent.origin_row, RowNumber::ALTERNATE_BASE);
+
+        let response = place_relative_child(&mut handler, &rx, 75, 74, -1);
+        assert!(response.contains("OK"), "accepted, got {response:?}");
+        assert!(
+            !handler.real_placements.contains_key(&(75, 0)),
+            "an entry saturated to the last primary number would alias a primary row"
+        );
+        assert!(!any_cell_shows_image(&handler, 75));
+    }
+
+    /// A stale entry under the child's key must not outlive a placement that
+    /// no longer occupies any row.
+    #[test]
+    fn kitty_unrepresentable_relative_placement_replaces_a_stale_entry() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        place_at_cursor(&mut handler, &rx, 76);
+        let _ = place_relative_child(&mut handler, &rx, 77, 76, 0);
+        assert!(handler.real_placements.contains_key(&(77, 0)));
+
+        handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
+            image_id: Some(77),
+            parent_image_id: Some(76),
+            v_offset: Some(-5),
+            ..KittyControlData::default()
+        }));
+        let _ = recv_response(&rx);
+        assert!(!handler.real_placements.contains_key(&(77, 0)));
+    }
+
+    // ── Pruning placements whose origin was evicted (review NIT) ────────────
+
+    /// Drive `lines` newline outputs through the batch entry point, the way a
+    /// PTY read does.
+    fn push_newlines(handler: &mut TerminalHandler, lines: usize) {
+        let outputs =
+            vec![freminal_common::buffer_states::terminal_output::TerminalOutput::Newline; lines];
+        handler.process_outputs(&outputs);
+    }
+
+    #[test]
+    fn real_placements_with_evicted_origins_are_pruned_per_batch() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        place_at_cursor(&mut handler, &rx, 80);
+        let origin = handler.real_placements[&(80, 0)].origin_row;
+
+        // A batch that scrolls but does not reach the origin keeps the entry.
+        push_newlines(&mut handler, 3);
+        assert!(
+            handler.buffer().row_base() <= origin,
+            "setup: origin still retained"
+        );
+        assert!(handler.real_placements.contains_key(&(80, 0)));
+
+        // Enough further output evicts the origin row.
+        push_newlines(&mut handler, 20);
+        assert!(
+            handler.buffer().row_base() > origin,
+            "setup: origin evicted"
+        );
+        assert!(
+            !handler.real_placements.contains_key(&(80, 0)),
+            "an evicted origin must not stay in the map forever"
+        );
+    }
+
+    #[test]
+    fn eviction_pruning_keeps_placements_that_are_still_retained() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        place_at_cursor(&mut handler, &rx, 81);
+        push_newlines(&mut handler, 20);
+        // Placed late: its origin is inside the retained window.
+        place_at_cursor(&mut handler, &rx, 82);
+        push_newlines(&mut handler, 1);
+        let late = handler.real_placements[&(82, 0)].origin_row;
+        assert!(handler.buffer().row_base() <= late);
+
+        assert!(!handler.real_placements.contains_key(&(81, 0)));
+        assert!(handler.real_placements.contains_key(&(82, 0)));
+    }
+
+    /// A child of a virtual parent carries a placeholder origin of row 0 that
+    /// is never read; judging it by that origin would delete it as soon as any
+    /// row is evicted.
+    #[test]
+    fn eviction_pruning_keeps_children_of_virtual_parents() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        // A virtual parent, then a relative child against it.
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(90);
+        cmd.control.placement_id = Some(1);
+        cmd.control.unicode_placeholder = true;
+        cmd.control.display_cols = Some(2);
+        cmd.control.display_rows = Some(2);
+        handler.handle_kitty_graphics(cmd);
+        let _ = recv_response(&rx);
+        assert!(handler.virtual_placements.contains_key(&(90, 1)));
+        transmit_only(&mut handler, 91);
+        let _ = recv_response(&rx);
+        handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
+            image_id: Some(91),
+            parent_image_id: Some(90),
+            parent_placement_id: Some(1),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        }));
+        let _ = recv_response(&rx);
+        let child = handler.real_placements[&(91, 0)];
+        assert_eq!(
+            child.origin_row,
+            RowNumber::ZERO,
+            "setup: placeholder origin"
+        );
+
+        push_newlines(&mut handler, 30);
+        assert!(handler.buffer().row_base() > RowNumber::ZERO);
+        assert!(
+            handler.real_placements.contains_key(&(91, 0)),
+            "a virtual-parent child must survive eviction of row 0"
+        );
+    }
+
+    /// Growing the window reclaims blank padding rows, whose numbers are then
+    /// issued again to unrelated rows; a placement recorded against one must
+    /// not survive to name them.
+    #[test]
+    fn real_placements_on_reclaimed_padding_rows_are_pruned_after_a_resize() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 5);
+        handler.set_write_tx(tx);
+
+        place_at_cursor(&mut handler, &rx, 85);
+        let kept = handler.real_placements[&(85, 0)];
+        // A placement recorded on a padding row three rows down (no cells: the
+        // padding row must stay pristine for the grow to pop it).
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(3));
+        let padding_row = handler.buffer().cursor_row_number();
+        handler.real_placements.insert(
+            (86, 0),
+            crate::terminal_handler::RealPlacement {
+                image_id: 86,
+                origin_row: padding_row,
+                ..kept
+            },
+        );
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        assert_eq!(
+            handler.buffer().rows().len(),
+            4,
+            "setup: padding rows exist"
+        );
+
+        handler.handle_resize(80, 8, 0, 0);
+
+        assert!(
+            handler.buffer().row_index_of(padding_row).is_none(),
+            "setup: the padding row was popped"
+        );
+        assert!(
+            !handler.real_placements.contains_key(&(86, 0)),
+            "a placement on a popped row would alias the row issued next"
+        );
+        assert!(
+            handler.real_placements.contains_key(&(85, 0)),
+            "a placement on a surviving row stays"
+        );
+    }
+
+    #[test]
+    fn pruning_does_nothing_without_a_base_change() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+        place_at_cursor(&mut handler, &rx, 83);
+        // Tamper: an entry below the base that pruning WOULD remove; with the
+        // base unchanged since the last prune it must be left alone (the
+        // gate is what keeps the per-batch cost at one comparison).
+        handler.real_placements.insert(
+            (84, 0),
+            crate::terminal_handler::RealPlacement {
+                origin_row: RowNumber::ZERO,
+                ..handler.real_placements[&(83, 0)]
+            },
+        );
+        handler.placement_prune_base = handler.buffer().row_base();
+        push_newlines(&mut handler, 1);
+        assert!(handler.real_placements.contains_key(&(84, 0)));
+        assert!(handler.real_placements.contains_key(&(83, 0)));
+    }
+
+    /// Task 125.14: a width-changing reflow renumbers every row; the handler
+    /// carries its placement origins through the buffer's `ReflowRemap`.
+    #[test]
+    fn kitty_real_placement_follows_its_image_through_reflow() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(40, 6);
+        handler.set_write_tx(tx);
+
+        // A long line that re-wraps at the new width, so the rows below it
+        // change index.
+        handler.handle_data(&[b'x'; 70]);
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(64);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+        let before = handler
+            .real_placements
+            .get(&(64, 0))
+            .copied()
+            .expect("placement recorded");
+
+        handler.handle_resize(20, 6, 0, 0);
+
+        assert!(
+            handler.buffer().row_index_of(before.origin_row).is_none(),
+            "reflow renumbers rows, so the old number no longer resolves"
+        );
+        let after = handler
+            .real_placements
+            .get(&(64, 0))
+            .copied()
+            .expect("placement still recorded");
+        assert_ne!(after.origin_row, before.origin_row, "origin was remapped");
+        let index = handler
+            .buffer()
+            .row_index_of(after.origin_row)
+            .expect("the remapped origin resolves to a retained row");
+        assert!(
+            handler.buffer().rows()[index].cells()[after.origin_col].has_image(),
+            "the remapped origin must name the row now holding the image"
+        );
+        assert!(
+            handler.buffer_mut().take_reflow_remap().is_none(),
+            "the handler consumed the buffer's pending remap"
+        );
+    }
+
+    /// Task 125.14: placements recorded against the alternate screen are
+    /// dropped when it is left; primary-screen placements survive.
+    #[test]
+    fn leaving_the_alternate_screen_drops_alt_placements_only() {
+        let (mut handler, _rx) = kitty_handler();
+
+        let mut primary = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        primary.control.image_id = Some(65);
+        primary.control.display_cols = Some(1);
+        primary.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(primary);
+        assert!(handler.real_placements.contains_key(&(65, 0)));
+
+        handler.handle_enter_alternate();
+        let mut alt = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        alt.control.image_id = Some(66);
+        alt.control.display_cols = Some(1);
+        alt.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(alt);
+        let alt_placement = handler
+            .real_placements
+            .get(&(66, 0))
+            .copied()
+            .expect("alt placement recorded");
+        assert!(alt_placement.origin_row.is_alternate());
+
+        handler.handle_leave_alternate();
+
+        assert!(
+            !handler.real_placements.contains_key(&(66, 0)),
+            "the alternate screen's placement must be dropped on leave"
+        );
+        assert!(
+            handler.real_placements.contains_key(&(65, 0)),
+            "the primary screen's placement must survive"
         );
     }
 
@@ -5189,7 +5990,7 @@ mod tests {
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child (99, 0), a single cell, registered with H=1, V=1.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5220,7 +6021,7 @@ mod tests {
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child with H=0, V=0.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 0, 0, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 0, 0, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5251,7 +6052,7 @@ mod tests {
                 placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5272,13 +6073,13 @@ mod tests {
         grow_buffer_rows(&mut handler, 3);
 
         // Real (non-virtual) parent placement (42, 0).
-        handler.insert_real_placement(42, 0, 0, 0, 1, 1, None, 0, 0, 0, 1);
+        handler.insert_real_placement(42, 0, RowNumber::new(0), 0, 1, 1, None, 0, 0, 0, 1);
 
         // Child (99, 0) already stamped at (1, 0) — as 100.4a would have
         // done via `place_image_at` — with parent = (42, 0), h=1, v=1
         // (irrelevant here since the parent is real, not virtual).
         stamp_parent_placeholder_block(&mut handler, 99, 0, 1, 0, 1, 1);
-        handler.insert_real_placement(99, 0, 1, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(1), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5316,7 +6117,7 @@ mod tests {
                 placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 0, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 0, 1);
 
         // First position: parent placeholder at (2, 5).
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 1, 1);
@@ -6418,6 +7219,121 @@ mod tests {
         );
     }
 
+    /// Regression (Task 125.C7): at scrollback capacity, placing an image
+    /// evicts rows DURING the placement. `C=1` must still leave the cursor on
+    /// the image's origin cell, not on whatever row now holds the stale index.
+    #[test]
+    fn kitty_put_c1_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.handle_kitty_graphics(kitty_rgba_2x2_cmd(KittyAction::Transmit));
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        handler.handle_data(b"ab");
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+        let x_before = handler.buffer().cursor().pos.x;
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(2),
+                display_rows: Some(2),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        assert_eq!(pos.x, x_before, "C=1 leaves the column alone");
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
+    }
+
+    /// Task 125 review: an image taller than the screen scrolls its own origin
+    /// into scrollback. `C=1` must not park the cursor there, where the next
+    /// write would be invisible: it clamps to the top of the live window.
+    #[test]
+    fn kitty_put_c1_with_an_image_taller_than_the_screen_keeps_the_cursor_on_screen() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let mut handler = TerminalHandler::new(80, 4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.handle_kitty_graphics(kitty_rgba_2x2_cmd(KittyAction::Transmit));
+        handler.handle_data(b"ab");
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(2),
+                display_rows: Some(9),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let screen = handler.buffer().cursor_screen_pos();
+        assert_eq!(screen.y, 0, "clamped to the top of the live window");
+        assert!(
+            handler.buffer().rows().len() > 4,
+            "setup: the image scrolled rows into scrollback"
+        );
+    }
+
+    /// Same regression for `a=T` (transmit-and-display) with `C=1`.
+    #[test]
+    fn kitty_transmit_and_display_c1_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.display_cols = Some(2);
+        cmd.control.display_rows = Some(2);
+        cmd.control.no_cursor_movement = true;
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
+    }
+
     #[test]
     fn kitty_put_nonexistent_image_sends_error() {
         use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
@@ -6925,13 +7841,438 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::AtCell),
-                src_x: Some(0),
-                src_y: Some(0),
+                src_x: Some(1),
+                src_y: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(delete_cmd);
+    }
+
+    /// A 80x4 handler with scrollback, scrolled so the live window starts well
+    /// below buffer row 0 (Task 125.C8): screen row `n` is buffer row `n + start`.
+    fn kitty_handler_with_scrollback() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(20);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        for _ in 0..10 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        assert!(
+            handler.buffer().rows().len() > 4 + 3,
+            "setup: the live window must start below buffer row 3"
+        );
+        (handler, rx)
+    }
+
+    /// Display a 1x1-cell image (id 42, `z`) with its top-left at screen
+    /// cell `(col, row)`, with `C=1` so the cursor stays there.
+    fn place_kitty_image_at_screen(handler: &mut TerminalHandler, col: usize, row: usize, z: i32) {
+        place_kitty_image_sized(handler, col, row, 1, z);
+    }
+
+    /// As [`place_kitty_image_at_screen`], but `cols` cells wide (one row).
+    fn place_kitty_image_sized(
+        handler: &mut TerminalHandler,
+        col: usize,
+        row: usize,
+        cols: u32,
+        z: i32,
+    ) {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        handler.buffer_mut().set_cursor_pos(Some(col), Some(row));
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.display_cols = Some(cols);
+        cmd.control.display_rows = Some(1);
+        cmd.control.no_cursor_movement = true;
+        cmd.control.z_index = Some(z);
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.buffer().has_any_image_cell(), "setup: image placed");
+    }
+
+    fn kitty_delete_cmd(
+        target: freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget,
+        x: Option<u32>,
+        y: Option<u32>,
+        z: Option<i32>,
+        free_data: ImageDataDisposition,
+    ) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(target),
+                src_x: x,
+                src_y: y,
+                z_index: z,
+                delete_free_data: free_data.frees_data(),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        }
+    }
+
+    /// Kitty spec, "Deleting images": "The values of the x and y keys are the
+    /// same as cursor positions (i.e. x=1, y=1 is the top left cell)." With
+    /// scrollback, screen row `y-1` is not buffer row `y-1`.
+    #[test]
+    fn kitty_delete_at_cell_maps_one_based_screen_coordinates_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // Screen cell (col 3, row 2) -> 1-based x=4, y=3.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // The old physical-row reading would have matched buffer row 3 (or
+        // 2); neither is the image. Neighbouring cells must not match.
+        for (x, y) in [(3, 3), (4, 2), (4, 4), (3, 2), (1, 1)] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(
+                AtCell,
+                Some(x),
+                Some(y),
+                None,
+                ImageDataDisposition::Keep,
+            ));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "x={x},y={y} is not the image's cell"
+            );
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCell,
+            Some(4),
+            Some(3),
+            None,
+            ImageDataDisposition::Keep,
+        ));
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "x=4,y=3 is screen cell (3,2), where the image is"
+        );
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "lowercase d=p keeps the image data"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_uppercase_frees_data_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCell,
+            Some(4),
+            Some(3),
+            None,
+            ImageDataDisposition::Free,
+        ));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_zero_or_off_screen_coordinates_match_nothing() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 0, 0, 0);
+
+        // x=0 / y=0 name no cell (1-based); y=5 is below the 4-row screen.
+        for (x, y) in [(0, 1), (1, 0), (1, 5), (0, 0)] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(
+                AtCell,
+                Some(x),
+                Some(y),
+                None,
+                ImageDataDisposition::Keep,
+            ));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "x={x},y={y} must delete nothing"
+            );
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCell,
+            Some(1),
+            Some(1),
+            None,
+            ImageDataDisposition::Keep,
+        ));
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "x=1,y=1 is top-left"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_defaults_to_the_cursor_screen_cell_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // C=1 leaves the cursor on the image's cell.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCell,
+            None,
+            None,
+            None,
+            ImageDataDisposition::Keep,
+        ));
+
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_z_index_maps_screen_coordinates_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCellZIndex;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 5);
+
+        // Right cell, wrong z: nothing. Wrong cell, right z: nothing.
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(4),
+            Some(3),
+            Some(0),
+            ImageDataDisposition::Keep,
+        ));
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(3),
+            Some(2),
+            Some(5),
+            ImageDataDisposition::Keep,
+        ));
+        assert!(handler.buffer().has_any_image_cell());
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(4),
+            Some(3),
+            Some(5),
+            ImageDataDisposition::Keep,
+        ));
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    /// Kitty graphics spec, "Deleting images": `x` or `X` is "Delete all
+    /// placements that intersect the specified column, specified using the x
+    /// key", and x is 1-based like a cursor position.
+    #[test]
+    fn kitty_delete_in_column_uses_a_one_based_column() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InColumn;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // Column index 3 is x=4; the neighbours and the invalid x=0 miss.
+        for x in [3, 5, 1, 0] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(
+                InColumn,
+                Some(x),
+                None,
+                None,
+                ImageDataDisposition::Keep,
+            ));
+            assert!(handler.buffer().has_any_image_cell(), "x={x} misses");
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            InColumn,
+            Some(4),
+            None,
+            None,
+            ImageDataDisposition::Keep,
+        ));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_in_column_uppercase_frees_data() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InColumn;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            InColumn,
+            Some(4),
+            None,
+            None,
+            ImageDataDisposition::Free,
+        ));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    /// Kitty graphics spec: `y` or `Y` is "Delete all placements that
+    /// intersect the specified row, specified using the y key". y is a
+    /// 1-based SCREEN row, so with scrollback it is not a buffer index.
+    #[test]
+    fn kitty_delete_in_row_maps_a_one_based_screen_row_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // Screen row 2 is y=3. Neighbouring rows, y=0 and a row below the
+        // 4-row screen all miss.
+        for y in [2, 4, 1, 0, 5] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(
+                InRow,
+                None,
+                Some(y),
+                None,
+                ImageDataDisposition::Keep,
+            ));
+            assert!(handler.buffer().has_any_image_cell(), "y={y} misses");
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            InRow,
+            None,
+            Some(3),
+            None,
+            ImageDataDisposition::Keep,
+        ));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_in_row_uppercase_frees_data_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            InRow,
+            None,
+            Some(3),
+            None,
+            ImageDataDisposition::Free,
+        ));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    #[test]
+    fn kitty_delete_in_row_defaults_to_the_cursor_screen_row_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // C=1 leaves the cursor on screen row 2.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            InRow,
+            None,
+            None,
+            None,
+            ImageDataDisposition::Keep,
+        ));
+
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    /// Kitty graphics spec: `c` or `C` is "Delete all placements that
+    /// intersect with the current cursor position" -- the cursor CELL, not
+    /// its row. kitty's `graphics.c` uses a point filter on
+    /// `(c->x + 1, c->y + 1)`.
+    #[test]
+    fn kitty_delete_at_cursor_clears_only_a_placement_covering_the_cursor_cell() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCursor;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // A 3-cell-wide image at screen columns 2..=4 of row 2.
+        place_kitty_image_sized(&mut handler, 2, 2, 3, 0);
+
+        // Same row, but outside the image: nothing intersects the cursor cell.
+        for (col, row) in [(1, 2), (5, 2), (3, 1), (3, 3)] {
+            handler.buffer_mut().set_cursor_pos(Some(col), Some(row));
+            handler.handle_kitty_graphics(kitty_delete_cmd(
+                AtCursor,
+                None,
+                None,
+                None,
+                ImageDataDisposition::Keep,
+            ));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "cursor at ({col},{row}) is not on the image"
+            );
+        }
+
+        // A cell in the middle of the image deletes the whole placement.
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(2));
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCursor,
+            None,
+            None,
+            None,
+            ImageDataDisposition::Keep,
+        ));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_ignores_other_images_on_the_cursor_row() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget::AtCursor, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0); // image 42
+        // A second image (id 99) on the same screen row, away from the cursor.
+        handler.buffer_mut().set_cursor_pos(Some(8), Some(2));
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                display_cols: Some(1),
+                display_rows: Some(1),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: [0, 0, 0, 255].repeat(4),
+        });
+
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(2));
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCursor,
+            None,
+            None,
+            None,
+            ImageDataDisposition::Free,
+        ));
+
+        assert!(handler.buffer().image_store().get(42).is_none());
+        assert!(
+            handler.buffer().image_store().get(99).is_some(),
+            "image 99 does not cover the cursor cell"
+        );
+        assert!(handler.buffer().has_any_image_cell());
     }
 
     #[test]
@@ -6966,13 +8307,14 @@ mod tests {
         handler.handle_kitty_graphics(cmd_b);
         let _ = rx.try_recv();
 
-        // Delete at cell (0,0) with z=5 — should only clear image B.
+        // Delete at cell x=1,y=1 (1-based: the top-left cell, where both
+        // images sit) with z=5 — should only clear image B.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::AtCellZIndex),
-                src_x: Some(0),
-                src_y: Some(0),
+                src_x: Some(1),
+                src_y: Some(1),
                 z_index: Some(5),
                 delete_free_data: true,
                 ..KittyControlData::default()
@@ -7006,7 +8348,7 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::InColumn),
-                src_x: Some(0),
+                src_x: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
@@ -7029,7 +8371,7 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::InRow),
-                src_y: Some(0),
+                src_y: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),

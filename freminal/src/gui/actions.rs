@@ -345,29 +345,7 @@ impl super::FreminalGui {
                     return;
                 };
                 let snap = pane.arc_swap.load();
-                // `visible_window_start` is `pub(super)` in `gui::terminal::coords`
-                // (private module); inline the same formula here.  See
-                // `gui::terminal::coords::visible_window_start` for the canonical
-                // definition and rationale.
-                let window_start = snap
-                    .total_rows
-                    .saturating_sub(snap.term_height)
-                    .saturating_sub(snap.scroll_offset);
-                let last_row = window_start + snap.height.saturating_sub(1);
-                let last_col = crate::gui::view_state::line_boundaries(
-                    &snap.visible_chars,
-                    snap.height.saturating_sub(1),
-                )
-                .1;
-                pane.view_state.selection.anchor = Some(crate::gui::view_state::CellCoord {
-                    col: 0,
-                    row: window_start,
-                });
-                pane.view_state.selection.end = Some(crate::gui::view_state::CellCoord {
-                    col: last_col,
-                    row: last_row,
-                });
-                pane.view_state.selection.is_selecting = false;
+                pane.view_state.selection.select_all(&snap);
             }
             // Everything else (OpenSearch, SaveLayout, etc.) needs full GUI
             // state — route through the existing deferred-action pipeline.
@@ -912,7 +890,7 @@ mod tests {
     use crate::gui::view_state::ViewState;
     use arc_swap::ArcSwap;
     use crossbeam_channel::Receiver;
-    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_terminal_emulator::io::SearchCorpus;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -924,8 +902,7 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) =
-            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
         let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 

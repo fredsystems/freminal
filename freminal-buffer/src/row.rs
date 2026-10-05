@@ -155,6 +155,26 @@ pub struct Row {
     evicted_to_block: bool,
 }
 
+/// Pop trailing blank cells to maintain the sparse-row invariant.
+///
+/// A cell is a trimmable blank when it is a space, `is_blank_tag` accepts its
+/// tag, **and it carries no image placement**. An image cell is a default-tag
+/// space as far as its glyph and tag are concerned, but it is content: popping
+/// it would drop an image cell without the owning `Buffer` decrementing
+/// `image_cell_count` and could strand a cell-owned image that nothing frees
+/// (Tasks 125.C11 and 125.C13). Cells that an operation intends to destroy are
+/// replaced (and accounted for) by the caller before this runs, so stopping at
+/// any remaining image cell is always correct.
+fn trim_trailing_blanks(cells: &mut Vec<Cell>, is_blank_tag: impl Fn(&FormatTag) -> bool) {
+    while let Some(last) = cells.last() {
+        if last.tchar() == &TChar::Space && is_blank_tag(last.tag()) && !last.has_image() {
+            cells.pop();
+        } else {
+            break;
+        }
+    }
+}
+
 impl Row {
     /// Create a new empty row with the given logical width, marked as a `ScrollFill` placeholder.
     #[must_use]
@@ -381,7 +401,7 @@ impl Row {
 
     /// Best-effort recovery from a corrupt/unreadable compressed block
     /// (`CompressedBlock::decompress_into` returned `None`, or the block's
-    /// row count disagreed with `Buffer::row_block_map` — both should be
+    /// row count disagreed with the row store's block map — both should be
     /// impossible per `CompressedBlock`'s own internal consistency checks).
     ///
     /// Clears [`Row::is_evicted`] without restoring any real content,
@@ -536,6 +556,11 @@ impl Row {
     /// If a wide-glyph head sits at column `new_width - 1` its continuation
     /// cell at column `new_width` would be orphaned, so the head is converted
     /// to a blank using the head's own format tag (preserving background).
+    ///
+    /// Image cells at or beyond `new_width` are dropped like any other cell; the
+    /// row cannot account for them, so the caller (`Buffer::set_size`, via
+    /// `clip_rows_to_width`) must reduce `image_cell_count` and free any
+    /// cell-owned image left without a cell (Task 125.C15).
     pub fn truncate_cells_to_width(&mut self, new_width: usize) {
         // Fast path: if we already have no more cells than the target width,
         // truncation is a no-op — do NOT decompact a compact row just to
@@ -904,13 +929,7 @@ impl Row {
         }
 
         // Maintain sparse-row invariant by trimming trailing default blanks
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        trim_trailing_blanks(cells, |t| *t == FormatTag::default());
     }
 
     /// Clear cells from `col` to the end of the row
@@ -939,13 +958,7 @@ impl Row {
         }
 
         // Trim trailing blanks to maintain sparse invariant
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        trim_trailing_blanks(cells, FormatTag::is_visually_default);
     }
 
     /// Clear cells from the beginning up to (exclusive) `col`.
@@ -1000,6 +1013,9 @@ impl Row {
     /// - Wide-glyph cleanup is applied across the entire erased range: any head or
     ///   continuation cell that falls within the range is replaced, and any wide glyph
     ///   that straddles the boundary is fully blanked so no dangling continuations remain.
+    /// - Image cells outside the erased range are left in place, including when they
+    ///   are the last cells of the row; only the erased range loses its images. The
+    ///   caller accounts for image cells inside the range (`Buffer::erase_chars`).
     pub fn erase_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
         self.ensure_live();
         if n == 0 || col >= self.width {
@@ -1040,13 +1056,10 @@ impl Row {
         }
 
         // Trim trailing default blanks to maintain the sparse-row invariant.
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        // An image cell is a default-tag space too, but it is content, not a
+        // blank: ECH only erases `[col .. erase_end)`, so an image cell outside
+        // that range must survive (see `trim_trailing_blanks`; Task 125.C11).
+        trim_trailing_blanks(cells, |t| *t == FormatTag::default());
     }
 
     /// Like `insert_spaces_at`, but shifts only within `[col, right_limit)`.
@@ -1106,13 +1119,7 @@ impl Row {
         }
 
         // Maintain sparse-row invariant.
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        trim_trailing_blanks(cells, |t| *t == FormatTag::default());
     }
 
     /// Like `delete_cells_at`, but the right boundary of the operation is
@@ -1164,13 +1171,7 @@ impl Row {
         }
 
         // Maintain sparse-row invariant.
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        trim_trailing_blanks(cells, |t| *t == FormatTag::default());
     }
 
     /// Delete `n` cells starting at `col`, shifting cells to the right of the deleted
@@ -1245,13 +1246,7 @@ impl Row {
         cells.drain(start..end);
 
         // Trim trailing visually-default blanks to maintain the sparse-row invariant.
-        while let Some(last) = cells.last() {
-            if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
-                cells.pop();
-            } else {
-                break;
-            }
-        }
+        trim_trailing_blanks(cells, FormatTag::is_visually_default);
     }
 
     /// Set a cell at the given column to an image placement.
@@ -1774,7 +1769,7 @@ mod tests {
         let tag = FormatTag::default();
         let text: Vec<TChar> = b"hello".iter().map(|&b| TChar::Ascii(b)).collect();
         row.insert_text(0, &text, &tag);
-        assert!(!row.cells().is_empty());
+        assert_ne!(row.cells(), []);
 
         row.clear_with_tag(&tag);
         // With a default tag, the sparse representation stores no cells
@@ -1847,6 +1842,76 @@ mod tests {
         assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
         assert_eq!(row.resolve_cell(1).tchar(), &TChar::Ascii(b'B'));
         assert_eq!(row.resolve_cell(4).tchar(), &TChar::Ascii(b'C'));
+    }
+
+    /// Regression (Task 125.C11): the sparse-row trim at the end of
+    /// `erase_cells_at` treated image cells (default-tag spaces) as blanks,
+    /// deleting image cells outside the erased range.
+    #[test]
+    fn erase_cells_at_does_not_trim_trailing_image_cells() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        for col in 0..2 {
+            row.set_image_cell(
+                col,
+                crate::image_store::ImagePlacement {
+                    image_id: 7,
+                    col_in_image: col,
+                    row_in_image: 0,
+                    protocol: crate::image_store::ImageProtocol::Kitty,
+                    image_number: None,
+                    placement_id: None,
+                    z_index: 0,
+                    source_crop: None,
+                    placement_instance: 1,
+                    subcell_offset: None,
+                },
+                tag.clone(),
+            );
+        }
+        assert_eq!(row.count_image_cells(), 2);
+
+        // Erase well to the right of the image: it is outside the range.
+        row.erase_cells_at(4, 3, &tag);
+
+        assert_eq!(
+            row.count_image_cells(),
+            2,
+            "image cells outside ECH survive"
+        );
+        assert!(row.cells()[0].has_image() && row.cells()[1].has_image());
+        assert_eq!(
+            row.cells().len(),
+            2,
+            "the blanks written to the right of the image are still trimmed"
+        );
+    }
+
+    #[test]
+    fn erase_cells_at_replaces_image_cells_inside_the_range() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.set_image_cell(
+            0,
+            crate::image_store::ImagePlacement {
+                image_id: 7,
+                col_in_image: 0,
+                row_in_image: 0,
+                protocol: crate::image_store::ImageProtocol::Kitty,
+                image_number: None,
+                placement_id: None,
+                z_index: 0,
+                source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
+            },
+            tag.clone(),
+        );
+
+        row.erase_cells_at(0, 1, &tag);
+
+        assert_eq!(row.count_image_cells(), 0);
+        assert!(row.cells().is_empty(), "all-blank row is trimmed to sparse");
     }
 
     #[test]
@@ -1952,7 +2017,7 @@ mod tests {
     #[test]
     fn cells_mut_push_appends_cell() {
         let mut row = Row::new(10);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         row.cells_mut_push(Cell::new(TChar::Ascii(b'X'), FormatTag::default()));
         assert_eq!(row.cells().len(), 1);
@@ -2430,7 +2495,7 @@ mod tests {
         let image_id = crate::image_store::next_image_id();
         let mut row = Row::new(5);
         row.set_image_cell(5, make_image_placement(image_id), FormatTag::default());
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     #[test]
@@ -2551,10 +2616,10 @@ mod tests {
         // But n == 0 is guarded. This line is effectively unreachable.
         // Test the existing early returns instead.
         row.insert_spaces_at(0, 0, &tag);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         row.insert_spaces_at(10, 5, &tag); // col >= width
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── erase_cells_at: continuation with no head in walk-back (line 617) ─
@@ -2708,7 +2773,7 @@ mod tests {
         let mut row = Row::new(5);
         let tag = FormatTag::default();
         row.insert_spaces_at_with_right_limit(0, 1, &tag, 0); // limit=0 → col>=limit
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── insert_text: wide chars that wrap around row boundary ────────────
@@ -2952,7 +3017,7 @@ mod tests {
         row.compact();
 
         row.clear();
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
         // `clear()` always produces `Live` storage (see its doc comment).
         assert!(!row.is_compact());
     }

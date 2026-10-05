@@ -61,7 +61,7 @@ pub use facade::Gl;
 // The behavioural verification suite (subtask 123.3) drives the
 // `Recording` arm end to end, so it only compiles where that arm exists.
 // It lives in its own file rather than inside `facade.rs` per
-// `module-cohesion`: `facade.rs` already carries 49 methods plus its own
+// `module-cohesion`: `facade.rs` already carries 56 methods plus its own
 // structural completeness test, and the behavioural suite is a distinct
 // body of work with its own handle-fabrication setup.
 #[cfg(all(test, feature = "gl-recording"))]

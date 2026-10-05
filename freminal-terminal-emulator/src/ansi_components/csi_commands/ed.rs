@@ -76,7 +76,7 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_ed(b"abc", &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]

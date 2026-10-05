@@ -2039,7 +2039,7 @@ mod tests {
         let mut map = BindingMap::default();
         let removed = map.unbind_action(KeyAction::ZoomIn);
         assert_eq!(removed.len(), 2);
-        assert!(map.all_combos_for(KeyAction::ZoomIn).is_empty());
+        assert_eq!(map.all_combos_for(KeyAction::ZoomIn), []);
     }
 
     #[test]
@@ -2058,7 +2058,7 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("copy".to_string(), "none".to_string());
         map.apply_overrides(&overrides).unwrap();
-        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+        assert_eq!(map.all_combos_for(KeyAction::Copy), []);
     }
 
     #[test]
@@ -2067,7 +2067,7 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("copy".to_string(), String::new());
         map.apply_overrides(&overrides).unwrap();
-        assert!(map.all_combos_for(KeyAction::Copy).is_empty());
+        assert_eq!(map.all_combos_for(KeyAction::Copy), []);
     }
 
     #[test]

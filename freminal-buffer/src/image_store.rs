@@ -12,12 +12,14 @@
 //! single null pointer (8 bytes).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
+
+use freminal_common::buffer_states::row_number::RowNumber;
 
 /// Global monotonic counter for generating unique image IDs.
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -370,7 +372,10 @@ pub struct ImagePlacement {
 /// Central storage for all inline images in a buffer.
 ///
 /// Images are inserted here when received from the PTY, and removed when
-/// no cell references them any longer (or when scrollback eviction occurs).
+/// no cell references them any longer. Front eviction of scrollback does not
+/// scan cells to decide that: each image carries a stamp horizon (see
+/// [`ImageStore::stamp_row`]) and [`ImageStore::evict_below`] releases the
+/// images whose horizon has been evicted.
 #[derive(Debug, Clone, Default)]
 pub struct ImageStore {
     images: HashMap<u64, InlineImage>,
@@ -389,7 +394,8 @@ pub struct ImageStore {
     seq: HashMap<u64, u64>,
 
     /// Ids known to be referenced by an on-screen placement, updated by
-    /// `retain_referenced`. Eviction prefers images NOT in this set
+    /// `retain_referenced` (the picker also treats any image with a stamp
+    /// horizon as placed). Eviction prefers images NOT in this set
     /// (placement-less first). May be slightly stale between refreshes —
     /// acceptable for a DoS-guard quota.
     placed: HashSet<u64>,
@@ -406,6 +412,24 @@ pub struct ImageStore {
     /// quota-LRU path (`enforce_quota_*`), NOT by scrollback trimming, for
     /// ids in this set.
     protocol_retained: HashSet<u64>,
+
+    /// Per-image *stamp horizon* (Task 125.15): the greatest logical
+    /// [`RowNumber`] on which a cell of the image has been stamped (or has
+    /// since been moved to). Every cell of the image lies on a row at or below
+    /// its horizon, so once front eviction has removed every row up to and
+    /// including the horizon, no cell of the image can remain. This is what
+    /// lets eviction decide image reachability without scanning the cells.
+    ///
+    /// Maintained by [`Self::stamp_row`] (the buffer calls it wherever it
+    /// stamps or moves image cells down) and consumed by
+    /// [`Self::evict_below`]. Only images present in the store carry an entry.
+    horizon: HashMap<u64, RowNumber>,
+
+    /// The same horizons ordered by `(horizon, id)`, so [`Self::evict_below`]
+    /// pops exactly the images whose horizon fell below the new base in
+    /// O(popped) without scanning the rest. Always the exact mirror of
+    /// `horizon`.
+    by_horizon: BTreeSet<(RowNumber, u64)>,
 }
 
 impl ImageStore {
@@ -419,6 +443,8 @@ impl ImageStore {
             seq: HashMap::new(),
             placed: HashSet::new(),
             protocol_retained: HashSet::new(),
+            horizon: HashMap::new(),
+            by_horizon: BTreeSet::new(),
         }
     }
 
@@ -531,6 +557,7 @@ impl ImageStore {
             self.seq.remove(&victim);
             self.placed.remove(&victim);
             self.protocol_retained.remove(&victim);
+            self.forget_horizon(victim);
             self.number_to_id.retain(|_, v| *v != victim);
         }
     }
@@ -546,7 +573,10 @@ impl ImageStore {
             .copied()
             .filter(|id| protected_id != Some(*id))
             .min_by_key(|id| {
-                let is_placed = self.placed.contains(id);
+                // `horizon` is kept current by the buffer as cells are
+                // stamped, so an image with a horizon is (or recently was)
+                // on screen; `placed` is the whole-store refresh's view.
+                let is_placed = self.placed.contains(id) || self.horizon.contains_key(id);
                 let age = self.seq.get(id).copied().unwrap_or(0);
                 (is_placed, age)
             })
@@ -570,6 +600,7 @@ impl ImageStore {
             self.seq.remove(&id);
             self.placed.remove(&id);
             self.protocol_retained.remove(&id);
+            self.forget_horizon(id);
         }
         removed
     }
@@ -611,10 +642,13 @@ impl ImageStore {
         self.images.is_empty()
     }
 
-    /// Update placement knowledge after scrollback trimming, garbage-
-    /// collecting only images whose lifetime is tied to their cells.
+    /// Update placement knowledge from a whole-store scan of the cells,
+    /// garbage-collecting only images whose lifetime is tied to their cells.
     ///
-    /// Called after scrollback eviction. For each stored image:
+    /// This is the O(all cells) reachability pass. Front eviction does **not**
+    /// use it (that is [`Self::evict_below`], O(images released)); the buffer
+    /// calls it after a reflow, which rewrites every row anyway. For each
+    /// stored image:
     /// - **Protocol-retained (Kitty)** images are KEPT even with zero cell
     ///   references. The Kitty graphics protocol keeps transmitted image data
     ///   addressable by `id`/number (for a later `a=p` put, or after a
@@ -661,6 +695,130 @@ impl ImageStore {
         self.placed.retain(|id| self.images.contains_key(id));
         self.protocol_retained
             .retain(|id| self.images.contains_key(id));
+        self.horizon.retain(|id, _| self.images.contains_key(id));
+        self.by_horizon
+            .retain(|(_, id)| self.images.contains_key(id));
+    }
+
+    /// Record that a cell of image `image_id` now sits on logical row `row`,
+    /// raising the image's stamp horizon to `row` if it is higher (Task
+    /// 125.15).
+    ///
+    /// The buffer calls this wherever it stamps an image cell or moves image
+    /// cells to a higher row. A horizon never decreases here (it is the
+    /// greatest row ever occupied, a safe upper bound on where cells can be);
+    /// [`Self::rebuild_horizons`] is the one place it is recomputed. An id with
+    /// no image in the store is ignored: there is nothing to keep alive.
+    ///
+    /// O(1) when the horizon already covers `row`, O(log images) otherwise.
+    pub fn stamp_row(&mut self, image_id: u64, row: RowNumber) {
+        if !self.images.contains_key(&image_id) {
+            return;
+        }
+        match self.horizon.get_mut(&image_id) {
+            Some(current) if *current >= row => {}
+            Some(current) => {
+                self.by_horizon.remove(&(*current, image_id));
+                *current = row;
+                self.by_horizon.insert((row, image_id));
+            }
+            None => {
+                self.horizon.insert(image_id, row);
+                self.by_horizon.insert((row, image_id));
+            }
+        }
+    }
+
+    /// `true` if image `id`'s data is protocol-retained (a Kitty image): it
+    /// outlives scrollback trimming and is freed only by an explicit delete or
+    /// quota eviction. Cell-owned (Sixel/iTerm2) images return `false`.
+    #[must_use]
+    pub fn is_protocol_retained(&self, id: u64) -> bool {
+        self.protocol_retained.contains(&id)
+    }
+
+    /// Remove image `id` if it is cell-owned (not protocol-retained), for the
+    /// caller that has just cleared every cell referencing it. A Kitty image is
+    /// left alone: its data stays addressable without any cell. Returns the
+    /// removed image, if any.
+    pub fn remove_cell_owned(&mut self, id: u64) -> Option<InlineImage> {
+        if self.protocol_retained.contains(&id) {
+            return None;
+        }
+        self.remove(id)
+    }
+
+    /// `true` if some image's stamp horizon lies in `[first, end)`.
+    ///
+    /// O(log images): answers "could a cell move above its image's horizon?"
+    /// for a shift of the rows `[first, end]`, without looking at a cell. An
+    /// image with a cell in the shifted rows has a horizon of at least `first`;
+    /// one whose horizon already reaches `end` cannot be exceeded.
+    #[must_use]
+    pub fn has_horizon_in(&self, first: RowNumber, end: RowNumber) -> bool {
+        first < end
+            && self
+                .by_horizon
+                .range((first, u64::MIN)..(end, u64::MIN))
+                .next()
+                .is_some()
+    }
+
+    /// The stamp horizon of image `id`, if it has one. See [`Self::stamp_row`].
+    #[must_use]
+    pub fn horizon_of(&self, id: u64) -> Option<RowNumber> {
+        self.horizon.get(&id).copied()
+    }
+
+    /// Replace every stamp horizon with the one implied by `stamps` (pairs of
+    /// image id and the greatest row a cell of it occupies). For use after an
+    /// operation that renumbers every row (reflow), where the old horizons no
+    /// longer describe the new numbering.
+    pub fn rebuild_horizons(&mut self, stamps: impl IntoIterator<Item = (u64, RowNumber)>) {
+        self.horizon.clear();
+        self.by_horizon.clear();
+        for (id, row) in stamps {
+            self.stamp_row(id, row);
+        }
+    }
+
+    /// Front eviction has advanced the buffer's base row number to `base`:
+    /// release every image whose stamp horizon is below it (Task 125.15).
+    ///
+    /// Such an image has no cell on any retained row. Non-retained
+    /// (Sixel/iTerm2) images are removed from the store; protocol-retained
+    /// (Kitty) images keep their data (see `protocol_retained`) and merely stop
+    /// counting as placed. Returns the number of images removed from the store.
+    ///
+    /// O(images released), independent of how many remain: the ordered
+    /// horizon index yields exactly the released ones. Does nothing (O(1))
+    /// when no image has a horizon.
+    pub fn evict_below(&mut self, base: RowNumber) -> usize {
+        let mut removed = 0usize;
+        while let Some(&(horizon, id)) = self.by_horizon.first() {
+            if horizon >= base {
+                break;
+            }
+            self.by_horizon.pop_first();
+            self.horizon.remove(&id);
+            self.placed.remove(&id);
+            if self.protocol_retained.contains(&id) {
+                continue;
+            }
+            if self.images.remove(&id).is_some() {
+                removed += 1;
+                self.number_to_id.retain(|_, v| *v != id);
+                self.seq.remove(&id);
+            }
+        }
+        removed
+    }
+
+    /// Drop `id`'s horizon entry from both indexes.
+    fn forget_horizon(&mut self, id: u64) {
+        if let Some(horizon) = self.horizon.remove(&id) {
+            self.by_horizon.remove(&(horizon, id));
+        }
     }
 
     /// Iterate over all images.
@@ -675,6 +833,8 @@ impl ImageStore {
         self.seq.clear();
         self.placed.clear();
         self.protocol_retained.clear();
+        self.horizon.clear();
+        self.by_horizon.clear();
         self.next_seq = 0;
     }
 }
@@ -1636,5 +1796,193 @@ mod tests {
             10,
             "inserts well under the real quota must not trigger eviction"
         );
+    }
+
+    // ── Stamp horizons (Task 125.15) ────────────────────────────────────
+
+    fn row(n: u64) -> RowNumber {
+        RowNumber::new(n)
+    }
+
+    /// The two horizon indexes agree exactly.
+    fn assert_horizon_indexes_agree(store: &ImageStore) {
+        assert_eq!(store.horizon.len(), store.by_horizon.len());
+        for (&id, &h) in &store.horizon {
+            assert!(store.by_horizon.contains(&(h, id)), "id {id}");
+        }
+    }
+
+    #[test]
+    fn stamp_row_records_the_greatest_row() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        assert_eq!(store.horizon_of(1), None);
+
+        store.stamp_row(1, row(5));
+        assert_eq!(store.horizon_of(1), Some(row(5)));
+        store.stamp_row(1, row(9));
+        assert_eq!(store.horizon_of(1), Some(row(9)));
+        store.stamp_row(1, row(3));
+        assert_eq!(store.horizon_of(1), Some(row(9)), "never decreases");
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn stamp_row_ignores_images_that_are_not_stored() {
+        let mut store = ImageStore::new();
+        store.stamp_row(42, row(1));
+        assert_eq!(store.horizon_of(42), None);
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn evict_below_releases_only_images_whose_horizon_is_below_the_base() {
+        let mut store = ImageStore::new();
+        for id in 1..=3 {
+            store.insert(make_test_image(id, 1, 1));
+        }
+        store.stamp_row(1, row(4));
+        store.stamp_row(2, row(10));
+        store.stamp_row(3, row(7));
+
+        // Base 5: only image 1 (horizon 4) has no row left.
+        assert_eq!(store.evict_below(row(5)), 1);
+        assert!(!store.contains(1));
+        assert!(store.contains(2) && store.contains(3));
+        assert_eq!(store.horizon_of(1), None);
+
+        // A horizon equal to the base is still retained (its row is the
+        // oldest retained one).
+        assert_eq!(store.evict_below(row(7)), 0);
+        assert!(store.contains(3));
+        assert_eq!(store.evict_below(row(8)), 1);
+        assert!(!store.contains(3));
+        assert!(store.contains(2));
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn evict_below_keeps_protocol_retained_data_but_drops_the_horizon() {
+        let mut store = ImageStore::new();
+        store.insert_protocol_retained(make_test_image(1, 1, 1));
+        store.stamp_row(1, row(2));
+        store.placed.insert(1);
+
+        assert_eq!(store.evict_below(row(10)), 0, "no image removed");
+        assert!(store.contains(1), "Kitty data survives scroll-out");
+        assert_eq!(store.horizon_of(1), None);
+        assert!(!store.placed.contains(&1), "no longer placed");
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn evict_below_cleans_every_per_image_index_for_a_removed_image() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        store.associate_number(7, 1);
+        store.stamp_row(1, row(1));
+
+        assert_eq!(store.evict_below(row(2)), 1);
+        assert!(store.number_to_id.is_empty());
+        assert!(store.seq.is_empty());
+        assert!(store.placed.is_empty());
+        assert!(store.horizon.is_empty() && store.by_horizon.is_empty());
+    }
+
+    #[test]
+    fn evict_below_with_no_horizons_is_a_no_op() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        assert_eq!(store.evict_below(row(u64::MAX)), 0);
+        assert!(store.contains(1), "an unstamped image is never released");
+    }
+
+    #[test]
+    fn evict_below_pops_in_horizon_order_and_stops_at_the_first_retained() {
+        let mut store = ImageStore::new();
+        for id in 0..100u64 {
+            store.insert(make_test_image(id, 1, 1));
+            store.stamp_row(id, row(id));
+        }
+        assert_eq!(store.evict_below(row(40)), 40);
+        assert_eq!(store.len(), 60);
+        assert_eq!(store.by_horizon.first().map(|&(h, _)| h), Some(row(40)));
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn remove_and_clear_drop_horizons() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        store.insert(make_test_image(2, 1, 1));
+        store.stamp_row(1, row(1));
+        store.stamp_row(2, row(2));
+
+        let _ = store.remove(1);
+        assert_eq!(store.horizon_of(1), None);
+        assert_eq!(store.horizon_of(2), Some(row(2)));
+        assert_horizon_indexes_agree(&store);
+
+        store.clear();
+        assert!(store.horizon.is_empty() && store.by_horizon.is_empty());
+    }
+
+    #[test]
+    fn quota_eviction_drops_the_victims_horizon() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image_with_pixel_bytes(1, 100));
+        store.insert(make_test_image_with_pixel_bytes(2, 100));
+        store.stamp_row(1, row(1));
+        store.stamp_row(2, row(2));
+        // Cap of 150 bytes: one image must go. Image 2 is protected.
+        store.enforce_quota_with_caps(150, usize::MAX, Some(2));
+        assert!(!store.contains(1));
+        assert_eq!(store.horizon_of(1), None);
+        assert_eq!(store.horizon_of(2), Some(row(2)));
+        assert_horizon_indexes_agree(&store);
+    }
+
+    #[test]
+    fn an_image_with_a_horizon_counts_as_placed_for_quota_eviction() {
+        let mut store = ImageStore::new();
+        // Image 1 is older but placed (has a horizon); image 2 is newer and
+        // unplaced, so the picker must take 2 first.
+        store.insert(make_test_image_with_pixel_bytes(1, 100));
+        store.insert(make_test_image_with_pixel_bytes(2, 100));
+        store.insert(make_test_image_with_pixel_bytes(3, 100));
+        store.stamp_row(1, row(1));
+        assert_eq!(store.pick_eviction_victim(Some(3)), Some(2));
+    }
+
+    #[test]
+    fn retain_referenced_drops_horizons_of_the_images_it_removes() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        store.insert(make_test_image(2, 1, 1));
+        store.stamp_row(1, row(1));
+        store.stamp_row(2, row(2));
+        store.retain_referenced(std::iter::empty());
+        assert_eq!(store.len(), 0);
+        assert!(store.horizon.is_empty() && store.by_horizon.is_empty());
+    }
+
+    #[test]
+    fn rebuild_horizons_replaces_every_horizon() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 1, 1));
+        store.insert(make_test_image(2, 1, 1));
+        store.stamp_row(1, row(100));
+        store.stamp_row(2, row(200));
+
+        store.rebuild_horizons([(1, row(3)), (1, row(5)), (1, row(4)), (9, row(1))]);
+
+        assert_eq!(store.horizon_of(1), Some(row(5)), "greatest stamp wins");
+        assert_eq!(
+            store.horizon_of(2),
+            None,
+            "unlisted image loses its horizon"
+        );
+        assert_eq!(store.horizon_of(9), None, "unknown image is ignored");
+        assert_horizon_indexes_agree(&store);
     }
 }

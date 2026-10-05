@@ -114,7 +114,6 @@ impl Buffer {
         // Ensure we have enough rows
         while self.rows.len() < visible_end {
             self.rows.push(crate::row::Row::new(self.width));
-            self.row_cache.push(None);
         }
 
         let default_tag = FormatTag::default();
@@ -124,9 +123,7 @@ impl Buffer {
             self.rows[i].clear();
             self.rows[i].insert_text(0, &e_chars, &default_tag);
             // Invalidate row cache
-            if i < self.row_cache.len() {
-                self.row_cache[i] = None;
-            }
+            self.rows.invalidate(i);
         }
 
         // Reset scroll region to full screen
@@ -198,7 +195,6 @@ impl Buffer {
                             RowJoin::NewLogicalLine,
                         );
                         self.rows.push(new_row);
-                        self.row_cache.push(None);
                     } else {
                         let row = &mut self.rows[self.cursor.pos.y];
                         if row.origin == RowOrigin::ScrollFill {
@@ -255,7 +251,6 @@ impl Buffer {
                             RowJoin::NewLogicalLine,
                         );
                         self.rows.push(new_row);
-                        self.row_cache.push(None);
                         self.cursor.pos.y = self.rows.len() - 1;
                     }
                 }
@@ -388,9 +383,7 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                for _ in 0..count {
-                    self.scroll_slice_down_confined(y, self.scroll_region_bottom);
-                }
+                self.scroll_slice_down_confined_n(y, self.scroll_region_bottom, count);
 
                 self.debug_assert_invariants();
             }
@@ -406,9 +399,7 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                for _ in 0..count {
-                    self.scroll_slice_down_confined(row, b);
-                }
+                self.scroll_slice_down_confined_n(row, b, count);
 
                 self.debug_assert_invariants();
             }

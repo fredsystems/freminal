@@ -153,7 +153,7 @@ mod tests {
         let tmp = TempDir::new().expect("create tempdir");
         let result = sync_to_disk(tmp.path());
         assert_eq!(result.written.len(), SCRIPTS.len());
-        assert!(result.skipped.is_empty());
+        assert_eq!(result.skipped, [] as [String; 0]);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         for (relative_path, _) in SCRIPTS {
             assert!(
@@ -184,7 +184,7 @@ mod tests {
         let second = sync_to_disk(tmp.path());
         assert!(second.written.is_empty(), "written: {:?}", second.written);
         assert_eq!(second.skipped.len(), SCRIPTS.len());
-        assert!(second.errors.is_empty());
+        assert_eq!(second.errors, []);
     }
 
     #[test]

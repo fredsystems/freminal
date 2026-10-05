@@ -14,7 +14,7 @@ use freminal_common::geometry::Rect;
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
-use freminal_windowing::WindowId;
+use freminal_windowing::{GlContextState, WindowId};
 use tracing::{debug, error, trace, warn};
 
 use super::chrome_damage;
@@ -783,6 +783,12 @@ impl freminal_windowing::App for FreminalGui {
             let _ = repaint_handle.set((proxy, window_id));
 
             let window_post = Arc::new(Mutex::new(WindowPostRenderer::new()));
+            // A pane retired after `update()` returned must still get a
+            // draining frame.
+            window_post
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .wake_window_on_retire(Arc::clone(&repaint_handle));
 
             let terminal_widget =
                 FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
@@ -1024,7 +1030,13 @@ impl freminal_windowing::App for FreminalGui {
         self.snapshot_main_window_geometry(Some(window_id));
         self.persist_window_state();
 
-        self.windows.remove(&window_id);
+        // Drop the window's state (its panes retire their GL renderers) but
+        // keep the handles to destroy the window's remaining GL state: this
+        // call has no GL context current, `on_window_destroying` will.
+        if let Some(win) = self.windows.remove(&window_id) {
+            self.closing_window_gl
+                .insert(window_id, win.into_gl_teardown());
+        }
 
         // Emit WindowClose recording event (only for known windows), and clean up the mapping.
         if let Some(rec_wid) = self.recording_window_ids.remove(&window_id)
@@ -1038,6 +1050,37 @@ impl freminal_windowing::App for FreminalGui {
         }
 
         true
+    }
+
+    /// Free this window's GL objects while its context is current (Task
+    /// 125.C2).
+    ///
+    /// For a close that went through `on_close_requested` the window's state
+    /// is already gone and its teardown handles are waiting in
+    /// `closing_window_gl`. For a window still in `self.windows` (event-loop
+    /// exit), the state is consumed here so its panes retire their renderers
+    /// first. A window with no state (the settings window) has nothing to
+    /// free.
+    fn on_window_destroying(
+        &mut self,
+        window_id: WindowId,
+        gl: &glow::Context,
+        context: GlContextState,
+    ) {
+        let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
+            self.windows
+                .remove(&window_id)
+                .map(PerWindowState::into_gl_teardown)
+        });
+        if let Some(teardown) = teardown {
+            // A window whose context could not be made current must not issue
+            // a single GL call: with unshared contexts the names it holds may
+            // belong to another window's objects. Drop the handles instead.
+            match context {
+                GlContextState::Current => teardown.run(&Gl::real(gl)),
+                GlContextState::Unavailable => teardown.abandon(),
+            }
+        }
     }
 
     /// Override the GL framebuffer clear color.
@@ -1318,7 +1361,7 @@ impl freminal_windowing::App for FreminalGui {
         &mut self,
         window_id: WindowId,
         ctx: &egui::Context,
-        _gl: &glow::Context,
+        gl: &glow::Context,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
         trace!("Starting new frame");
@@ -1496,6 +1539,13 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
+        // ── Destroy GL objects of panes closed since last frame (125.C2) ─────
+        // This window's GL context is current here. Renderers retire into the
+        // window's queue when their pane drops -- after the previous frame's
+        // paint callbacks released them -- so they are deleted at the top of
+        // the next frame.
+        win.drain_retired_gl(gl);
+
         // ── Spawn new window ─────────────────────────────────────────────────
         if win.pending_new_window {
             win.pending_new_window = false;
@@ -1565,7 +1615,7 @@ impl freminal_windowing::App for FreminalGui {
 
             // Always propagate the updated OS preference so DECRPM ?2031
             // reflects the new dark/light state, regardless of ThemeMode.
-            for tab in win.tabs.iter() {
+            for tab in &win.tabs {
                 if let Ok(panes) = tab.pane_tree.iter_panes() {
                     for pane in panes {
                         send_or_log!(
@@ -1581,7 +1631,7 @@ impl freminal_windowing::App for FreminalGui {
                 let slug = self.config.theme.active_slug(win.os_dark_mode);
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
                     // Notify every pane in every tab so all PTY threads get the new palette.
-                    for tab in win.tabs.iter() {
+                    for tab in &win.tabs {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
                                 send_or_log!(
@@ -3267,11 +3317,15 @@ impl freminal_windowing::App for FreminalGui {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                             // Lazy-init GPU resources.
-                            if !wpr.initialized()
+                            // A failed init is latched: reported once, not
+                            // retried and re-reported every frame.
+                            if wpr.should_attempt_init()
                                 && let Err(e) = wpr.init(gl)
                             {
                                 error!("WindowPostRenderer init failed: {e}");
                                 wpr.last_error = Some(format!("Renderer init failed: {e}"));
+                            }
+                            if !wpr.initialized() {
                                 return;
                             }
 
@@ -3788,6 +3842,18 @@ impl freminal_windowing::App for FreminalGui {
                 );
                 ctx.request_repaint_after(delay);
             }
+        }
+
+        // ── Retired GL objects need one more frame (125.C2 review) ──────────
+        // A pane closed during this update retired its renderer after the
+        // top-of-frame drain ran. Without a further frame the objects would
+        // linger on an idle window; ask for exactly one (its drain empties
+        // the queue, so this cannot loop). This covers retirements that
+        // already happened; one that happens after `update` returns (the
+        // paint callback still held the pane's state) is covered by the
+        // queue's own wake -- see `renderer::retire`, "Waking the window".
+        if win.has_pending_gl_retirees() {
+            ctx.request_repaint();
         }
 
         // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────
@@ -5032,7 +5098,7 @@ mod tests {
                         list.all_entries().skip(band_shape_start).cloned().collect()
                     })
             });
-            assert!(!extracted.is_empty());
+            assert_ne!(extracted, []);
         });
         full_output.textures_delta.clear();
 

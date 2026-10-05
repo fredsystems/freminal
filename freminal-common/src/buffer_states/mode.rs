@@ -411,13 +411,13 @@ mod tests {
     #[test]
     fn display_application_escape_key() {
         let s = format!("{}", Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_in_band_resize_mode() {
         let s = format!("{}", Mode::InBandResizeMode(InBandResizeMode::Reset));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
     // ── ?69 (DECLRMM) ───────────────────────────────────────────────
 
@@ -464,7 +464,7 @@ mod tests {
     fn display_declrmm() {
         use super::super::modes::declrmm::Declrmm;
         let s = format!("{}", Mode::Declrmm(Declrmm::Enabled));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     // ── ?2031 Theming parse ──────────────────────────────────────────
@@ -559,20 +559,20 @@ mod tests {
     fn display_decckm() {
         use super::super::modes::decckm::Decckm;
         let s = format!("{}", Mode::Decckm(Decckm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decawm() {
         let s = format!("{}", Mode::Decawm(Decawm::AutoWrap));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_irm() {
         use super::super::modes::irm::Irm;
         let s = format!("{}", Mode::Irm(Irm::Insert));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -589,7 +589,7 @@ mod tests {
             "{}",
             Mode::PrivateColorRegisters(PrivateColorRegisters::Private)
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -597,7 +597,7 @@ mod tests {
         use super::super::modes::unknown::{ModeNamespace, UnknownMode};
         let m = UnknownMode::new(b"99", SetMode::DecSet, ModeNamespace::Dec);
         let s = format!("{}", Mode::Unknown(m));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     // ── Delegating ReportMode arms ─────────────────────────────────
@@ -662,7 +662,7 @@ mod tests {
         use super::super::modes::allow_alt_screen::AllowAltScreen;
         let mode = Mode::AllowAltScreen(AllowAltScreen::Allow);
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -670,7 +670,7 @@ mod tests {
         use super::super::modes::allow_column_mode_switch::AllowColumnModeSwitch;
         let mode = Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch);
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -678,7 +678,7 @@ mod tests {
         use super::super::modes::alternate_scroll::AlternateScroll;
         let mode = Mode::AlternateScroll(AlternateScroll::Enabled);
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -686,7 +686,7 @@ mod tests {
         use super::super::modes::decarm::Decarm;
         let mode = Mode::Decarm(Decarm::RepeatKey);
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -694,7 +694,7 @@ mod tests {
         use super::super::modes::decckm::Decckm;
         let mode = Mode::Decckm(Decckm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -702,7 +702,7 @@ mod tests {
         use super::super::modes::decom::Decom;
         let mode = Mode::Decom(Decom::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -710,7 +710,7 @@ mod tests {
         use super::super::modes::decsdm::Decsdm;
         let mode = Mode::Decsdm(Decsdm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
         use super::super::modes::deccolm::Deccolm;
         let mode = Mode::Deccolm(Deccolm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -726,7 +726,7 @@ mod tests {
         use super::super::modes::decnkm::Decnkm;
         let mode = Mode::Decnkm(Decnkm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
         use super::super::modes::decbkm::Decbkm;
         let mode = Mode::Decbkm(Decbkm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -742,7 +742,7 @@ mod tests {
         use super::super::modes::decnrcm::Decnrcm;
         let mode = Mode::Decnrcm(Decnrcm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         use super::super::modes::decsclm::Decsclm;
         let mode = Mode::Decsclm(Decsclm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -758,7 +758,7 @@ mod tests {
         use super::super::modes::decanm::Decanm;
         let mode = Mode::Decanm(Decanm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -766,7 +766,7 @@ mod tests {
         use super::super::modes::dectcem::Dectcem;
         let mode = Mode::Dectem(Dectcem::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -774,7 +774,7 @@ mod tests {
         use super::super::modes::decscnm::Decscnm;
         let mode = Mode::Decscnm(Decscnm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
         use super::super::modes::lnm::Lnm;
         let mode = Mode::LineFeedMode(Lnm::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -790,7 +790,7 @@ mod tests {
         use super::super::modes::xtcblink::XtCBlink;
         let mode = Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -798,7 +798,7 @@ mod tests {
         use super::super::modes::xtextscrn::XtExtscrn;
         let mode = Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -806,7 +806,7 @@ mod tests {
         use super::super::modes::xtextscrn::AltScreen47;
         let mode = Mode::AltScreen47(AltScreen47::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -814,7 +814,7 @@ mod tests {
         use super::super::modes::xtextscrn::SaveCursor1048;
         let mode = Mode::SaveCursor1048(SaveCursor1048::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
         use super::super::modes::xtmsewin::XtMseWin;
         let mode = Mode::XtMseWin(XtMseWin::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -830,7 +830,7 @@ mod tests {
         use super::super::modes::rl_bracket::RlBracket;
         let mode = Mode::BracketedPaste(RlBracket::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -838,7 +838,7 @@ mod tests {
         use super::super::modes::reverse_wrap_around::ReverseWrapAround;
         let mode = Mode::ReverseWrapAround(ReverseWrapAround::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -846,7 +846,7 @@ mod tests {
         use super::super::modes::xt_rev_wrap2::XtRevWrap2;
         let mode = Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -854,7 +854,7 @@ mod tests {
         use super::super::modes::sync_updates::SynchronizedUpdates;
         let mode = Mode::SynchronizedUpdates(SynchronizedUpdates::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -862,7 +862,7 @@ mod tests {
         use super::super::modes::grapheme::GraphemeClustering;
         let mode = Mode::GraphemeClustering(GraphemeClustering::new(&SetMode::DecSet));
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -871,7 +871,7 @@ mod tests {
         let m = UnknownMode::new(b"99", SetMode::DecSet, ModeNamespace::Dec);
         let mode = Mode::Unknown(m);
         let s = mode.report(None);
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     // ── Display delegates not yet exercised ─────────────────────────
@@ -880,7 +880,7 @@ mod tests {
     fn display_allow_alt_screen() {
         use super::super::modes::allow_alt_screen::AllowAltScreen;
         let s = format!("{}", Mode::AllowAltScreen(AllowAltScreen::Allow));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -890,133 +890,133 @@ mod tests {
             "{}",
             Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch)
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_alternate_scroll() {
         use super::super::modes::alternate_scroll::AlternateScroll;
         let s = format!("{}", Mode::AlternateScroll(AlternateScroll::Enabled));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decarm() {
         use super::super::modes::decarm::Decarm;
         let s = format!("{}", Mode::Decarm(Decarm::RepeatKey));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decanm() {
         use super::super::modes::decanm::Decanm;
         let s = format!("{}", Mode::Decanm(Decanm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decom() {
         use super::super::modes::decom::Decom;
         let s = format!("{}", Mode::Decom(Decom::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decsdm() {
         use super::super::modes::decsdm::Decsdm;
         let s = format!("{}", Mode::Decsdm(Decsdm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_dectem() {
         use super::super::modes::dectcem::Dectcem;
         let s = format!("{}", Mode::Dectem(Dectcem::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decscnm() {
         use super::super::modes::decscnm::Decscnm;
         let s = format!("{}", Mode::Decscnm(Decscnm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decsclm() {
         use super::super::modes::decsclm::Decsclm;
         let s = format!("{}", Mode::Decsclm(Decsclm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_deccolm() {
         use super::super::modes::deccolm::Deccolm;
         let s = format!("{}", Mode::Deccolm(Deccolm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decnkm() {
         use super::super::modes::decnkm::Decnkm;
         let s = format!("{}", Mode::Decnkm(Decnkm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decbkm() {
         use super::super::modes::decbkm::Decbkm;
         let s = format!("{}", Mode::Decbkm(Decbkm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_decnrcm() {
         use super::super::modes::decnrcm::Decnrcm;
         let s = format!("{}", Mode::Decnrcm(Decnrcm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_line_feed_mode() {
         use super::super::modes::lnm::Lnm;
         let s = format!("{}", Mode::LineFeedMode(Lnm::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_xt_cblink() {
         use super::super::modes::xtcblink::XtCBlink;
         let s = format!("{}", Mode::XtCBlink(XtCBlink::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_mouse_mode() {
         use super::super::modes::mouse::MouseTrack;
         let s = format!("{}", Mode::MouseMode(MouseTrack::XtMseX11));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_xt_mse_win() {
         use super::super::modes::xtmsewin::XtMseWin;
         let s = format!("{}", Mode::XtMseWin(XtMseWin::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_xt_extscrn() {
         use super::super::modes::xtextscrn::XtExtscrn;
         let s = format!("{}", Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_alt_screen47() {
         use super::super::modes::xtextscrn::AltScreen47;
         let s = format!("{}", Mode::AltScreen47(AltScreen47::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -1026,14 +1026,14 @@ mod tests {
             "{}",
             Mode::SaveCursor1048(SaveCursor1048::new(&SetMode::DecSet))
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_bracketed_paste() {
         use super::super::modes::rl_bracket::RlBracket;
         let s = format!("{}", Mode::BracketedPaste(RlBracket::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -1043,14 +1043,14 @@ mod tests {
             "{}",
             Mode::ReverseWrapAround(ReverseWrapAround::new(&SetMode::DecSet))
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_xt_rev_wrap2() {
         use super::super::modes::xt_rev_wrap2::XtRevWrap2;
         let s = format!("{}", Mode::XtRevWrap2(XtRevWrap2::new(&SetMode::DecSet)));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -1060,7 +1060,7 @@ mod tests {
             "{}",
             Mode::SynchronizedUpdates(SynchronizedUpdates::new(&SetMode::DecSet))
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
@@ -1070,12 +1070,12 @@ mod tests {
             "{}",
             Mode::GraphemeClustering(GraphemeClustering::new(&SetMode::DecSet))
         );
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     #[test]
     fn display_theming() {
         let s = format!("{}", Mode::Theming(Theming::Dark));
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 }

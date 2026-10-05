@@ -415,8 +415,8 @@ mod tests {
         let state = PublishedFrameState::new();
         assert_eq!(state.cached_central_rect(), None);
         assert_eq!(state.chrome_head_rects(), None);
-        assert!(state.chrome_border_rects().is_empty());
-        assert!(state.chrome_toast_rects().is_empty());
+        assert_eq!(state.chrome_border_rects(), []);
+        assert_eq!(state.chrome_toast_rects(), []);
         assert_eq!(state.pending_chrome_signals(), ChromeSignals::default());
         assert!(state.resize_overlay().is_none());
     }
@@ -538,7 +538,7 @@ mod tests {
         state.publish_chrome_border_rects(vec![rect(0.0, 0.0)]);
 
         state.clear_chrome_border_rects();
-        assert!(state.chrome_border_rects().is_empty());
+        assert_eq!(state.chrome_border_rects(), []);
 
         let fresh = vec![rect(30.0, 30.0)];
         state.publish_chrome_border_rects(fresh.clone());
@@ -555,7 +555,7 @@ mod tests {
 
         state.clear_chrome_border_rects();
 
-        assert!(state.chrome_border_rects().is_empty());
+        assert_eq!(state.chrome_border_rects(), []);
     }
 
     /// Pin 4c: `chrome_toast_rects`'s real pre-clear-then-write pattern
@@ -569,7 +569,7 @@ mod tests {
         state.publish_chrome_toast_rects(vec![rect(0.0, 0.0)]);
 
         state.clear_chrome_toast_rects();
-        assert!(state.chrome_toast_rects().is_empty());
+        assert_eq!(state.chrome_toast_rects(), []);
 
         let fresh = vec![rect(40.0, 40.0)];
         state.publish_chrome_toast_rects(fresh.clone());
@@ -588,7 +588,7 @@ mod tests {
 
         state.clear_chrome_toast_rects();
 
-        assert!(state.chrome_toast_rects().is_empty());
+        assert_eq!(state.chrome_toast_rects(), []);
     }
 
     /// Pin 5: `chrome_head_rects`'s `None` vs `Some(vec![])` distinction is

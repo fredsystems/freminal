@@ -10,7 +10,7 @@ use crate::gui::{
         PointerButtonHold, PreviousMouseState, handle_pointer_button, handle_pointer_scroll,
         motion_position_changed, motion_track_wants_report,
     },
-    view_state::{CellCoord, PendingPaste, ViewState},
+    view_state::{LogicalCell, PendingPaste, ViewState},
 };
 
 use conv2::ConvUtil;
@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
@@ -42,8 +43,11 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
-use super::coords::{encode_egui_mouse_pos, visible_window_start, visible_window_start_for};
+use super::coords::{
+    cursor_buffer_row, encode_egui_mouse_pos, visible_window_start, visible_window_start_for,
+};
 use super::widget::hit_test_placeholder;
+use crate::gui::command_blocks::BlockRows;
 use crate::gui::folding::{compute_extra_rows, compute_fold_ranges};
 
 /// Build an [`InputEvent::ScrollOffset`] for a target raw scroll offset,
@@ -61,7 +65,7 @@ pub fn scroll_event(
     let extra_rows = if folded_blocks.is_empty() {
         0
     } else {
-        let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
         let win_start = visible_window_start_for(snap, offset);
         compute_extra_rows(&ranges, win_start, snap.term_height)
     };
@@ -85,7 +89,7 @@ pub(super) fn screen_row_to_buffer_row(
     if folded_blocks.is_empty() && snap.window_extra_rows == 0 {
         return visible_window_start(snap) + screen_row;
     }
-    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
     let flat_window_start = visible_window_start(snap).saturating_sub(snap.window_extra_rows);
     let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
     let translated = crate::gui::folding::translate_ranges_to_snapshot(&ranges, flat_window_start);
@@ -126,7 +130,7 @@ pub(super) fn scrolled_offset(
             crate::gui::folding::ScrollDir::Down => current.saturating_sub(steps),
         };
     }
-    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
     crate::gui::folding::apply_rendered_scroll(
         &ranges,
         snap.total_rows,
@@ -655,15 +659,20 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 /// Returns `None` only if no completed block exists in the snapshot at
 /// all, in which case the keybinding silently no-ops.
 fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
-    let cursor_row = snap.cursor_pos.y;
-    let is_completed = |b: &&CommandBlock| b.command_start_row.is_some() && b.end_row.is_some();
+    let cursor_row = cursor_buffer_row(snap);
+    // Block rows are logical numbers; resolve them to the snapshot's buffer
+    // indices (a block whose prompt row was evicted no longer exists).
+    let rows_of = |b: &CommandBlock| BlockRows::resolve(b, snap.row_base);
+    let is_completed = |b: &&CommandBlock| {
+        rows_of(b).is_some_and(|r| r.command_start.is_some() && r.end.is_some())
+    };
 
     // Pass 1: cursor inside a completed block's body.
     if let Some(block) = snap.command_blocks.iter().filter(is_completed).find(|b| {
-        match (b.command_start_row, b.end_row) {
+        rows_of(b).is_some_and(|r| match (r.command_start, r.end) {
             (Some(start), Some(end)) => cursor_row >= start && cursor_row <= end,
             _ => false,
-        }
+        })
     }) {
         return Some(block.id);
     }
@@ -683,8 +692,15 @@ fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
 /// Blocks without an OSC 133 `C` marker (`output_start_row == None`) or
 /// still-running blocks (`end_row == None`) cannot have their output
 /// copied and return `None`.
-const fn block_output_range(block: &CommandBlock) -> Option<(usize, usize)> {
-    match (block.output_start_row, block.end_row) {
+///
+/// The bounds are buffer indices of the snapshot whose oldest retained row is
+/// numbered `row_base` (the block stores logical row numbers).
+pub(super) fn block_output_range(
+    block: &CommandBlock,
+    row_base: RowNumber,
+) -> Option<(usize, usize)> {
+    let rows = BlockRows::resolve(block, row_base)?;
+    match (rows.output_start, rows.end) {
         (Some(start), Some(end)) if start <= end => Some((start, end)),
         _ => None,
     }
@@ -701,11 +717,19 @@ pub(super) fn find_last_copyable_block(snap: &TerminalSnapshot) -> Option<&Comma
     snap.command_blocks
         .iter()
         .rev()
-        .find(|b| block_output_range(b).is_some())
+        .find(|b| block_output_range(b, snap.row_base).is_some())
+}
+
+/// Find the completed command block the PTY cursor is inside, if any.
+///
+/// Resolves the cursor to a buffer row first ([`cursor_buffer_row`]), then
+/// defers to [`find_block_containing_row`].
+fn find_block_at_cursor(snap: &TerminalSnapshot) -> Option<&CommandBlock> {
+    find_block_containing_row(snap, cursor_buffer_row(snap))
 }
 
 /// Find the command block whose `[command_start_row, end_row]` row range
-/// contains `row`.
+/// contains `row`, where `row` is a retained buffer index of `snap`.
 ///
 /// Used by the right-click "Copy Command Output" menu entry and by
 /// `CopyCommandOutputAtCursor` to map a visible row back to a block.
@@ -717,12 +741,12 @@ pub(super) fn find_block_containing_row(
     snap: &TerminalSnapshot,
     row: usize,
 ) -> Option<&CommandBlock> {
-    snap.command_blocks
-        .iter()
-        .find(|b| match (b.command_start_row, b.end_row) {
+    snap.command_blocks.iter().find(|b| {
+        BlockRows::resolve(b, snap.row_base).is_some_and(|r| match (r.command_start, r.end) {
             (Some(start), Some(end)) => row >= start && row <= end,
             _ => false,
         })
+    })
 }
 
 /// Send an `ExtractSelection` event covering the full-width rows
@@ -742,10 +766,13 @@ fn send_extract_output_range(
     end_row: usize,
 ) -> bool {
     let end_col = snap.term_width.saturating_sub(1);
+    // `start_row` / `end_row` are retained indices of `snap`; the event
+    // carries stable row numbers so the PTY thread extracts the same rows even
+    // if it has evicted some since this snapshot.
     match input_tx.send(InputEvent::ExtractSelection {
-        start_row,
+        start_row: snap.row_number_at(start_row),
         start_col: 0,
-        end_row,
+        end_row: snap.row_number_at(end_row),
         end_col,
         is_block: false,
     }) {
@@ -918,16 +945,15 @@ pub(super) fn dispatch_binding_action(
         }
         KeyAction::CopyLastCommandOutput => {
             if let Some(block) = find_last_copyable_block(snap)
-                && let Some((start_row, end_row)) = block_output_range(block)
+                && let Some((start_row, end_row)) = block_output_range(block, snap.row_base)
                 && send_extract_output_range(input_tx, snap, start_row, end_row)
             {
                 *clipboard_pending = true;
             }
         }
         KeyAction::CopyCommandOutputAtCursor => {
-            let cursor_row = snap.cursor_pos.y;
-            if let Some(block) = find_block_containing_row(snap, cursor_row)
-                && let Some((start_row, end_row)) = block_output_range(block)
+            if let Some(block) = find_block_at_cursor(snap)
+                && let Some((start_row, end_row)) = block_output_range(block, snap.row_base)
                 && send_extract_output_range(input_tx, snap, start_row, end_row)
             {
                 *clipboard_pending = true;
@@ -1484,6 +1510,7 @@ pub(super) struct WriteInputResult {
 /// outside the terminal area entirely.
 fn finalize_selection_drag(
     view_state: &mut ViewState,
+    snap: &TerminalSnapshot,
     recording_ctx: Option<&RecordingContext<'_>>,
 ) {
     view_state.selection.is_selecting = false;
@@ -1494,19 +1521,25 @@ fn finalize_selection_drag(
         return;
     };
 
-    // Record selection event if a real selection exists.
+    // Record selection event if a real selection exists. The recording format
+    // (FREC `SelectionEvent`) carries `u32` buffer-row indices, so the stored
+    // logical rows are resolved against the current snapshot; an endpoint whose
+    // row is not retained (evicted since the last frame) has no index to
+    // record and the event is skipped.
     if let Some(ctx) = recording_ctx
         && let Some(anchor) = view_state.selection.anchor
         && anchor != end_coord
+        && let Some(anchor_at) = anchor.resolve(snap)
+        && let Some(end_at) = end_coord.resolve(snap)
     {
         // Saturating `usize -> u32` for recording
         // row/col — any realistic terminal fits in u32.
         ctx.handle.emit(EventPayload::SelectionEvent {
             pane_id: ctx.pane_id,
-            start_row: u32::try_from(anchor.row).unwrap_or(u32::MAX),
-            start_col: u32::try_from(anchor.col).unwrap_or(u32::MAX),
-            end_row: u32::try_from(end_coord.row).unwrap_or(u32::MAX),
-            end_col: u32::try_from(end_coord.col).unwrap_or(u32::MAX),
+            start_row: u32::try_from(anchor_at.row).unwrap_or(u32::MAX),
+            start_col: u32::try_from(anchor_at.col).unwrap_or(u32::MAX),
+            end_row: u32::try_from(end_at.row).unwrap_or(u32::MAX),
+            end_col: u32::try_from(end_at.col).unwrap_or(u32::MAX),
             is_block: view_state.selection.is_block,
         });
     }
@@ -2400,26 +2433,31 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                 // a report) — update text selection if a drag is in progress.
                 if view_state.selection.is_selecting {
                     let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
+                    // The selection stores stable row numbers; compare the
+                    // pointer's row with the anchor's in that space so an
+                    // anchor evicted since the last frame still orders
+                    // correctly (it is simply earlier).
+                    let end_row = snap.row_number_at(abs_row);
                     let end_col = if view_state.click_count >= 3 {
                         // Triple-click drag — snap end to line boundaries.
-                        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                        let anchor_row = view_state.selection.anchor.map_or(end_row, |a| a.row);
                         let snap_y = abs_row.saturating_sub(
                             visible_window_start(snap).saturating_sub(snap.window_extra_rows),
                         );
                         let (line_start, line_end) =
                             crate::gui::view_state::line_boundaries(&snap.visible_chars, snap_y);
-                        if abs_row >= anchor_row {
+                        if end_row >= anchor_row {
                             line_end
                         } else {
                             line_start
                         }
                     } else if view_state.click_count == 2 {
                         // Double-click drag — snap end to word boundaries.
-                        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                        let anchor_row = view_state.selection.anchor.map_or(end_row, |a| a.row);
                         let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
                         let (word_start, word_end) =
                             crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
-                        if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col)
+                        if end_row > anchor_row || (end_row == anchor_row && word_end >= anchor_col)
                         {
                             word_end
                         } else {
@@ -2429,9 +2467,9 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         // Single-click drag — track exact cell.
                         x
                     };
-                    view_state.selection.end = Some(CellCoord {
+                    view_state.selection.end = Some(LogicalCell {
                         col: end_col,
-                        row: abs_row,
+                        row: end_row,
                     });
                     // Keep block mode in sync with the current Alt state so
                     // releasing or pressing Alt mid-drag switches mode live.
@@ -2477,7 +2515,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         && !*pressed
                         && view_state.selection.is_selecting
                     {
-                        finalize_selection_drag(view_state, recording_ctx);
+                        finalize_selection_drag(view_state, snap, recording_ctx);
                         state_changed = true;
                     }
                     continue;
@@ -2560,9 +2598,9 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         // Record the right-clicked cell so the widget layer
                         // can open the context menu and detect URLs.
                         let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
-                        view_state.context_menu_cell = Some(CellCoord {
+                        view_state.context_menu_cell = Some(LogicalCell {
                             col: x,
-                            row: abs_row,
+                            row: snap.row_number_at(abs_row),
                         });
                         view_state.context_menu_pos = Some(*pos);
                     } else if *button == PointerButton::Primary {
@@ -2580,8 +2618,8 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                             }
 
                             // Start a new selection at this cell.
-                            // Use buffer-absolute row so the selection
-                            // survives scroll offset changes.
+                            // Stored by logical row number so the selection
+                            // survives scroll offset changes and eviction.
                             let abs_row =
                                 screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
                             // Snapshot-row index for `visible_chars` lookups
@@ -2590,10 +2628,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                             let snap_y = abs_row.saturating_sub(
                                 visible_window_start(snap).saturating_sub(snap.window_extra_rows),
                             );
-                            let coord = CellCoord {
-                                col: x,
-                                row: abs_row,
-                            };
+                            // Stored as a stable row number so the
+                            // selection stays on its text while scrollback
+                            // rows are evicted.
+                            let row = snap.row_number_at(abs_row);
+                            let coord = LogicalCell { col: x, row };
                             let click_count =
                                 view_state.register_click(coord, std::time::Instant::now());
 
@@ -2603,14 +2642,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                     &snap.visible_chars,
                                     snap_y,
                                 );
-                                view_state.selection.anchor = Some(CellCoord {
+                                view_state.selection.anchor = Some(LogicalCell {
                                     col: start_col,
-                                    row: abs_row,
+                                    row,
                                 });
-                                view_state.selection.end = Some(CellCoord {
-                                    col: end_col,
-                                    row: abs_row,
-                                });
+                                view_state.selection.end = Some(LogicalCell { col: end_col, row });
                             } else if click_count == 2 {
                                 // Double-click — select the word under the cursor.
                                 let (start_col, end_col) = crate::gui::view_state::word_boundaries(
@@ -2618,14 +2654,11 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                     snap_y,
                                     x,
                                 );
-                                view_state.selection.anchor = Some(CellCoord {
+                                view_state.selection.anchor = Some(LogicalCell {
                                     col: start_col,
-                                    row: abs_row,
+                                    row,
                                 });
-                                view_state.selection.end = Some(CellCoord {
-                                    col: end_col,
-                                    row: abs_row,
-                                });
+                                view_state.selection.end = Some(LogicalCell { col: end_col, row });
                             } else {
                                 // Single click — start point selection.
                                 // Alt+drag activates rectangular block selection.
@@ -2653,7 +2686,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                             // with the out-of-rect split-pane-boundary
                             // release path above (Task 116.3, defect 3) via
                             // `finalize_selection_drag`.
-                            finalize_selection_drag(view_state, recording_ctx);
+                            finalize_selection_drag(view_state, snap, recording_ctx);
                         }
                     }
                     continue;
@@ -2880,15 +2913,21 @@ mod fold_target_tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     /// Build a completed command block occupying rows `[prompt..=end]`.
     fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
-            end_row: Some(end),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
+            end_row: Some(rn(end)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
@@ -2902,9 +2941,9 @@ mod fold_target_tests {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
             end_row: None,
             exit_code: None,
             cwd: None,
@@ -2922,6 +2961,116 @@ mod fold_target_tests {
             y: cursor_row,
         };
         s
+    }
+
+    #[test]
+    fn block_lookups_resolve_rows_against_the_snapshot_row_base() {
+        // Task 125.14: the block stores logical numbers 105..=110; at a row
+        // base of 100 those are buffer indices 5..=10.
+        let mut snap = snap_with(vec![completed(1, 105, 110)], 7);
+        snap.row_base = RowNumber::new(100);
+
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+        assert_eq!(
+            find_block_containing_row(&snap, 7).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+        assert!(
+            find_block_containing_row(&snap, 105).is_none(),
+            "the NUMBER 105 is not a buffer index here"
+        );
+        let block = find_last_copyable_block(&snap).unwrap();
+        assert_eq!(block_output_range(block, snap.row_base), Some((6, 10)));
+    }
+
+    /// Task 125.C12: `cursor_pos.y` is relative to the live window, not an
+    /// index into the buffer. With scrollback the cursor's buffer row is
+    /// `total_rows - term_height + cursor_pos.y`.
+    #[test]
+    fn cursor_lookup_resolves_the_cursor_through_the_live_window() {
+        // 100 buffer rows, 24 visible: the live window starts at row 76.
+        // Block 1 (rows 5..=10) is deep in scrollback; block 2 (rows 80..=90)
+        // holds the cursor, which sits on screen row 8 -> buffer row 84.
+        let mut snap = snap_with(vec![completed(1, 5, 10), completed(2, 80, 90)], 8);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(cursor_buffer_row(&snap), 84);
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(2)),
+            "the block under the cursor, not the block at buffer row 8"
+        );
+    }
+
+    #[test]
+    fn cursor_lookup_does_not_match_a_block_at_the_raw_screen_row() {
+        // Screen row 7 would be inside block 1 (5..=10) if it were compared
+        // as a buffer index; the cursor's real buffer row (83) is in no block.
+        let mut snap = snap_with(vec![completed(1, 5, 10)], 7);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert!(find_block_at_cursor(&snap).is_none());
+    }
+
+    #[test]
+    fn cursor_lookup_ignores_the_gui_scroll_offset() {
+        // The PTY cursor stays in the live window however far the user has
+        // scrolled back, so the lookup must not move with `scroll_offset`.
+        let mut snap = snap_with(vec![completed(2, 80, 90)], 8);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+        snap.scroll_offset = 30;
+
+        assert_eq!(cursor_buffer_row(&snap), 84);
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(2))
+        );
+    }
+
+    #[test]
+    fn cursor_lookup_resolves_against_the_row_base() {
+        // Blocks store logical numbers; at base 100 the number 185 is
+        // retained index 85, which holds the cursor (76 + 9).
+        let mut snap = snap_with(vec![completed(3, 185, 190)], 9);
+        snap.row_base = RowNumber::new(100);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(3))
+        );
+    }
+
+    #[test]
+    fn fold_target_pass_one_uses_the_cursor_buffer_row() {
+        // Block 1 holds the raw screen row 7; block 2 holds the cursor's real
+        // buffer row (83); block 3 is the newest, so the pass-2 fallback would
+        // pick block 3. Only a correct pass 1 yields block 2.
+        let mut snap = snap_with(
+            vec![
+                completed(1, 5, 10),
+                completed(2, 80, 90),
+                completed(3, 95, 99),
+            ],
+            7,
+        );
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(2)));
+    }
+
+    #[test]
+    fn block_whose_prompt_was_evicted_is_not_selectable() {
+        let mut snap = snap_with(vec![completed(1, 50, 60)], 0);
+        snap.row_base = RowNumber::new(100);
+        assert_eq!(find_fold_target(&snap), None);
+        assert!(find_last_copyable_block(&snap).is_none());
+        assert!(find_block_containing_row(&snap, 0).is_none());
     }
 
     #[test]
@@ -3093,14 +3242,20 @@ mod scroll_window_tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
-            end_row: Some(end),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
+            end_row: Some(rn(end)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
@@ -3583,7 +3738,7 @@ mod raw_key_tests {
 
         drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
 
-        assert!(pending.is_empty());
+        assert_eq!(pending, []);
         assert!(rx.try_recv().is_err());
     }
 
@@ -3685,16 +3840,25 @@ mod finalize_selection_drag_tests {
         // a real (non-empty) selection must set the per-frame commit flag
         // so the content-changed auto-clear cannot wipe it this frame.
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { col: 0, row: 0 });
-        vs.selection.end = Some(CellCoord { col: 7, row: 2 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 7,
+            row: RowNumber::new(2),
+        });
         vs.selection.is_selecting = true;
         vs.selection_committed_this_frame = false;
 
-        finalize_selection_drag(&mut vs, None);
+        finalize_selection_drag(&mut vs, &TerminalSnapshot::empty(), None);
 
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 7, row: 2 }),
+            Some(LogicalCell {
+                col: 7,
+                row: RowNumber::new(2)
+            }),
             "tracked end must be unchanged — no re-derivation from a release position"
         );
         assert!(!vs.selection.is_selecting, "drag must be finished");
@@ -3711,12 +3875,18 @@ mod finalize_selection_drag_tests {
         // and must be fully cleared. The commit flag must NOT be set — it
         // exists to protect a kept selection, not a cleared one.
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { col: 4, row: 1 });
-        vs.selection.end = Some(CellCoord { col: 4, row: 1 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 4,
+            row: RowNumber::new(1),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 4,
+            row: RowNumber::new(1),
+        });
         vs.selection.is_selecting = true;
         vs.selection_committed_this_frame = false;
 
-        finalize_selection_drag(&mut vs, None);
+        finalize_selection_drag(&mut vs, &TerminalSnapshot::empty(), None);
 
         assert!(vs.selection.anchor.is_none(), "point selection must clear");
         assert!(vs.selection.end.is_none(), "point selection must clear");
@@ -3733,12 +3903,15 @@ mod finalize_selection_drag_tests {
         // there is nothing to finalize — fully clear rather than leave a
         // dangling anchor.
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { col: 1, row: 1 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 1,
+            row: RowNumber::new(1),
+        });
         vs.selection.end = None;
         vs.selection.is_selecting = true;
         vs.selection_committed_this_frame = false;
 
-        finalize_selection_drag(&mut vs, None);
+        finalize_selection_drag(&mut vs, &TerminalSnapshot::empty(), None);
 
         assert!(vs.selection.anchor.is_none());
         assert!(vs.selection.end.is_none());
@@ -3754,15 +3927,24 @@ mod finalize_selection_drag_tests {
         // cause) arriving between the last drag-move and the release. The
         // end value below is preserved verbatim from the tracked state.
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { col: 2, row: 0 });
-        vs.selection.end = Some(CellCoord { col: 9, row: 0 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 2,
+            row: RowNumber::new(0),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 9,
+            row: RowNumber::new(0),
+        });
         vs.selection.is_selecting = true;
 
-        finalize_selection_drag(&mut vs, None);
+        finalize_selection_drag(&mut vs, &TerminalSnapshot::empty(), None);
 
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 9, row: 0 }),
+            Some(LogicalCell {
+                col: 9,
+                row: RowNumber::new(0)
+            }),
             "end must be preserved verbatim regardless of any snapshot state"
         );
     }
@@ -3855,7 +4037,10 @@ mod pointer_moved_frame_path_tests {
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
         let mut view_state = ViewState::new();
         view_state.selection.is_selecting = true;
-        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
         view_state.click_count = 1;
         let mut input_state = InputState::default();
         input_state
@@ -3889,7 +4074,10 @@ mod pointer_moved_frame_path_tests {
 
         assert_eq!(
             view_state.selection.end,
-            Some(CellCoord { col: 4, row: 0 }),
+            Some(LogicalCell {
+                col: 4,
+                row: RowNumber::new(0)
+            }),
             "selection-drag extension must still run when mouse tracking is off"
         );
     }
@@ -3945,7 +4133,10 @@ mod pointer_moved_frame_path_tests {
         // Now stage a selection drag and move within the SAME cell but a
         // different pixel offset.
         view_state.selection.is_selecting = true;
-        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
         view_state.click_count = 1;
         let mut input_state = InputState::default();
         input_state
@@ -3976,6 +4167,253 @@ mod pointer_moved_frame_path_tests {
             "a pixel-granular position change under SgrPixels must be treated as \
              \"reportable\", so this arm must not fall through to extend the selection"
         );
+    }
+}
+
+/// Task 125.17: selection endpoints, the last click, the context-menu cell and
+/// the copy requests built from them are stable logical rows, converted from
+/// screen coordinates at the `snap.row_base` seam.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod logical_row_seam_tests {
+    use super::*;
+    use freminal_common::buffer_states::command_block::CommandBlock;
+    use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
+    use std::time::SystemTime;
+
+    /// A 24-row snapshot with no scrollback (`visible_window_start == 0`, so
+    /// screen row `r` is retained index `r`) whose oldest row is numbered
+    /// `row_base` -- the state of a buffer that has evicted `row_base` rows.
+    fn snapshot_at_base(row_base: u64) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.mouse_tracking = MouseTrack::NoTracking;
+        snap.mouse_encoding = MouseEncoding::Sgr;
+        snap.term_width = 80;
+        snap.term_height = 24;
+        snap.total_rows = 24;
+        snap.row_base = RowNumber::new(row_base);
+        snap
+    }
+
+    /// Cell `(col, row)` at 8x16 px cells, aimed at its centre.
+    fn cell_centre(col: u16, row: u16) -> egui::Pos2 {
+        egui::pos2(
+            f32::from(col).mul_add(8.0, 4.0),
+            f32::from(row).mul_add(16.0, 8.0),
+        )
+    }
+
+    fn drive(
+        snap: &TerminalSnapshot,
+        view_state: &mut ViewState,
+        events: Vec<Event>,
+    ) -> Vec<InputEvent> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut input_state = InputState::default();
+        input_state.raw.events.extend(events);
+        let binding_map = BindingMap::default();
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+            },
+        });
+        input_rx.try_iter().collect()
+    }
+
+    fn press(button: PointerButton, pos: egui::Pos2) -> Event {
+        Event::PointerButton {
+            pos,
+            button,
+            pressed: true,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn logical(col: usize, row: u64) -> LogicalCell {
+        LogicalCell {
+            col,
+            row: RowNumber::new(row),
+        }
+    }
+
+    #[test]
+    fn primary_press_stores_selection_and_click_as_logical_rows() {
+        // Screen row 5 of a window whose oldest row is numbered 100.
+        let snap = snapshot_at_base(100);
+        let mut vs = ViewState::new();
+        let _ = drive(
+            &snap,
+            &mut vs,
+            vec![press(PointerButton::Primary, cell_centre(3, 5))],
+        );
+
+        assert_eq!(vs.selection.anchor, Some(logical(3, 105)));
+        assert_eq!(vs.selection.end, Some(logical(3, 105)));
+        assert_eq!(vs.last_click_pos, Some(logical(3, 105)));
+        assert!(vs.selection.is_selecting);
+    }
+
+    #[test]
+    fn secondary_press_stores_the_context_menu_cell_as_a_logical_row() {
+        let snap = snapshot_at_base(250);
+        let mut vs = ViewState::new();
+        let _ = drive(
+            &snap,
+            &mut vs,
+            vec![press(PointerButton::Secondary, cell_centre(10, 7))],
+        );
+
+        assert_eq!(vs.context_menu_cell, Some(logical(10, 257)));
+    }
+
+    #[test]
+    fn drag_extends_the_selection_to_a_logical_row() {
+        let snap = snapshot_at_base(100);
+        let mut vs = ViewState::new();
+        let _ = drive(
+            &snap,
+            &mut vs,
+            vec![
+                press(PointerButton::Primary, cell_centre(2, 4)),
+                Event::PointerMoved(cell_centre(9, 8)),
+            ],
+        );
+
+        assert_eq!(vs.selection.anchor, Some(logical(2, 104)));
+        assert_eq!(vs.selection.end, Some(logical(9, 108)));
+    }
+
+    /// A click stays "the same cell" for multi-click detection however far
+    /// the window has slid between the clicks, because both are numbered in
+    /// the same stable space. Under retained indices a second click on the
+    /// same text after an eviction would land one row away -- still within
+    /// the one-cell tolerance by luck -- but two rows of eviction would not.
+    #[test]
+    fn double_click_on_the_same_text_survives_eviction_between_clicks() {
+        let mut vs = ViewState::new();
+        // First click on text at logical row 105 (window base 100).
+        let first = snapshot_at_base(100);
+        let _ = drive(
+            &first,
+            &mut vs,
+            vec![press(PointerButton::Primary, cell_centre(3, 5))],
+        );
+        assert_eq!(vs.click_count, 1);
+        // Release so the next press is not swallowed by "clear selection".
+        vs.selection.clear();
+
+        // Three rows evicted: the same text is now on screen row 2.
+        let second = snapshot_at_base(103);
+        let _ = drive(
+            &second,
+            &mut vs,
+            vec![press(PointerButton::Primary, cell_centre(3, 2))],
+        );
+        assert_eq!(
+            vs.click_count, 2,
+            "a click on the same logical cell is a double click"
+        );
+        assert_eq!(vs.last_click_pos, Some(logical(3, 105)));
+    }
+
+    /// The copy request carries logical rows, so the PTY thread extracts the
+    /// same text whichever snapshot the GUI formed it from.
+    #[test]
+    fn copy_requests_the_selection_by_logical_rows() {
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(logical(1, 105));
+        vs.selection.end = Some(logical(6, 107));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = false;
+        let mut deferred = Vec::new();
+
+        // Whatever the snapshot's base, the request is the stored numbers.
+        for base in [100, 104] {
+            dispatch_binding_action(
+                KeyAction::Copy,
+                &mut vs,
+                &tx,
+                &snapshot_at_base(base),
+                &mut pending,
+                &mut deferred,
+            );
+            let sent: Vec<InputEvent> = rx.try_iter().collect();
+            assert!(
+                matches!(
+                    sent.as_slice(),
+                    [InputEvent::ExtractSelection {
+                        start_row,
+                        start_col: 1,
+                        end_row,
+                        end_col: 6,
+                        is_block: false,
+                    }] if *start_row == RowNumber::new(105) && *end_row == RowNumber::new(107)
+                ),
+                "base {base}: unexpected request {sent:?}"
+            );
+        }
+        assert!(pending);
+    }
+
+    /// `CopyLastCommandOutput` resolves the block's boundary rows against the
+    /// snapshot and sends them as row numbers, not buffer indices.
+    #[test]
+    fn copy_command_output_requests_the_block_rows_as_numbers() {
+        let mut snap = snapshot_at_base(100);
+        snap.command_blocks = std::sync::Arc::from(vec![CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: RowNumber::new(102),
+            command_start_row: Some(RowNumber::new(102)),
+            output_start_row: Some(RowNumber::new(103)),
+            end_row: Some(RowNumber::new(106)),
+            exit_code: Some(0),
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            executed_at: Some(SystemTime::UNIX_EPOCH),
+            finished_at: Some(SystemTime::UNIX_EPOCH),
+        }]);
+        let mut vs = ViewState::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = false;
+        let mut deferred = Vec::new();
+
+        dispatch_binding_action(
+            KeyAction::CopyLastCommandOutput,
+            &mut vs,
+            &tx,
+            &snap,
+            &mut pending,
+            &mut deferred,
+        );
+
+        let sent: Vec<InputEvent> = rx.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [InputEvent::ExtractSelection { start_row, end_row, start_col: 0, .. }]
+                    if *start_row == RowNumber::new(103) && *end_row == RowNumber::new(106)
+            ),
+            "unexpected request {sent:?}"
+        );
+        assert!(pending);
     }
 }
 

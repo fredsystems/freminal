@@ -20,9 +20,9 @@ use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
 use crate::{
-    App, FrameSignals, PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent,
-    PointerMotionPositions, PointerPresenceLoss, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig,
-    WindowGeometry, WindowHandle, WindowId, WindowOp,
+    App, FrameSignals, GlContextState, PointerButton, PointerButtonAction, PointerButtonEvent,
+    PointerMotionEvent, PointerMotionPositions, PointerPresenceLoss, RawKeyEvent, RawKeyMods,
+    UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId, WindowOp,
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
@@ -410,22 +410,35 @@ struct WindowState {
 }
 
 impl WindowState {
-    /// Release the egui-glow painter's GPU resources before this window's
-    /// state is dropped.
+    /// Release this window's GPU resources before its state is dropped.
     ///
-    /// `egui_glow::Painter` owns OpenGL objects (program, textures, VBO/EBO)
-    /// that must be freed with `destroy()` while the owning GL context is
-    /// current; otherwise the painter's `Drop` impl logs a "you forgot to call
+    /// Makes the window's GL context current, runs `before_painter` (the
+    /// `App::on_window_destroying` hook, so the app can delete its own GL
+    /// objects while the context is still current and the painter's shared
+    /// `glow::Context` is still alive), then frees the egui-glow painter's
+    /// OpenGL objects (program, textures, VBO/EBO) with `destroy()`;
+    /// otherwise the painter's `Drop` impl logs a "you forgot to call
     /// `destroy()`" resource-leak warning. This runs on every window close
     /// (including the standalone settings window) and at event-loop exit.
-    fn destroy_egui(&mut self) {
-        if let Err(e) = self.gl.make_current() {
-            // If the context can't be made current we still call destroy()
-            // below — it is a no-op-safe GL teardown — but the GL calls may
-            // not take effect. Log so the cause is visible.
-            tracing::warn!("make_current failed during painter teardown: {e}");
+    ///
+    /// If the context cannot be made current, **no GL call is issued**: with
+    /// unshared contexts the names are per-context, so deleting them in
+    /// whichever context is current would destroy another window's objects.
+    /// The hook still runs, told the context is
+    /// [`GlContextState::Unavailable`], so the app can drop its handles
+    /// without GL; the painter is left undestroyed (its `Drop` logs the leak).
+    fn destroy_egui(&mut self, before_painter: impl FnOnce(&glow::Context, GlContextState)) {
+        let made_current = self.gl.make_current();
+        if let Err(e) = &made_current {
+            tracing::warn!(
+                "make_current failed during painter teardown; skipping GL teardown: {e}"
+            );
         }
-        self.egui.destroy_painter();
+        let context = GlContextState::from_make_current(&made_current);
+        before_painter(self.egui.glow(), context);
+        if context.is_current() {
+            self.egui.destroy_painter();
+        }
     }
 }
 
@@ -573,10 +586,12 @@ impl<A: App> Handler<A> {
 
     fn close_window(&mut self, winit_id: winit::window::WindowId) {
         if let Some(mut state) = self.windows.remove(&winit_id) {
-            // Free the egui-glow painter's GPU resources while this window's
-            // GL context is still current, then drop in dependency order:
+            // Let the app free its own GL objects, then free the egui-glow
+            // painter's GPU resources, all while this window's GL context is
+            // still current; then drop in dependency order:
             // egui (painter) -> gl context -> window.
-            state.destroy_egui();
+            let window_id = WindowId(winit_id);
+            state.destroy_egui(|gl, ctx| self.app.on_window_destroying(window_id, gl, ctx));
             drop(state.egui);
             drop(state.gl);
             drop(state.window);
@@ -1273,7 +1288,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         let ids: Vec<winit::window::WindowId> = self.windows.keys().copied().collect();
         for winit_id in ids {
             if let Some(state) = self.windows.get_mut(&winit_id) {
-                state.destroy_egui();
+                state.destroy_egui(|gl, ctx| {
+                    self.app.on_window_destroying(WindowId(winit_id), gl, ctx);
+                });
             }
         }
         self.windows.clear();

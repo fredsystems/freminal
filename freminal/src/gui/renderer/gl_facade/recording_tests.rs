@@ -25,7 +25,7 @@ use super::Gl;
 use super::recording::{GlCall, GlCallPayload};
 use super::surface::GL_CALL_SURFACE;
 
-/// Call every one of the 49 [`GL_CALL_SURFACE`] methods exactly once, in
+/// Call every one of the 56 [`GL_CALL_SURFACE`] methods exactly once, in
 /// the surface's own order, against a recording [`Gl`], then check the
 /// resulting log against the surface itself.
 ///
@@ -43,7 +43,7 @@ fn every_method_records_itself_under_its_own_name() {
     // already exist. This instance's own log is never inspected.
     let setup_handles = fabricate_setup_handles();
 
-    // The 49-call sequence is split across four helpers, each covering a
+    // The 56-call sequence is split across four helpers, each covering a
     // contiguous slice of `GL_CALL_SURFACE`'s alphabetical order, purely
     // to keep any one function under the line-count lint — the split
     // point carries no other significance and the overall call order
@@ -60,8 +60,8 @@ fn every_method_records_itself_under_its_own_name() {
     let calls = recording.calls();
     assert_eq!(
         calls.len(),
-        49,
-        "expected exactly 49 recorded calls (one per GL_CALL_SURFACE entry \
+        56,
+        "expected exactly 56 recorded calls (one per GL_CALL_SURFACE entry \
          — every method called exactly once), got {}",
         calls.len()
     );
@@ -86,6 +86,12 @@ struct SetupHandles {
     buffer: glow::Buffer,
     framebuffer: glow::Framebuffer,
     program: glow::Program,
+    /// Task 125.8: a pre-fabricated query handle for the
+    /// `get_query_parameter_u32` / `get_query_parameter_u64` /
+    /// `query_counter` batches below, which (like `attach_shader` needing
+    /// `program`/`shader`) sit earlier in `GL_CALL_SURFACE`'s alphabetical
+    /// order than `create_query` itself.
+    query: glow::Query,
     shader: glow::Shader,
     texture: glow::Texture,
     vertex_array: glow::VertexArray,
@@ -101,6 +107,7 @@ fn fabricate_setup_handles() -> SetupHandles {
                 .create_framebuffer()
                 .expect("recording create_framebuffer"),
             program: setup.create_program().expect("recording create_program"),
+            query: setup.create_query().expect("recording create_query"),
             shader: setup
                 .create_shader(glow::VERTEX_SHADER)
                 .expect("recording create_shader"),
@@ -131,9 +138,10 @@ unsafe fn call_active_texture_through_compile_shader(gl: &Gl<'_>, handles: &Setu
     }
 }
 
-/// `GL_CALL_SURFACE`, `create_buffer` through `delete_vertex_array` (12
-/// calls) — a self-contained second lifecycle, independent of
-/// [`SetupHandles`], so it needs no handles passed in.
+/// `GL_CALL_SURFACE`, `create_buffer` through `delete_vertex_array` (14
+/// calls, Task 125.8 added `create_query`/`delete_query`) — a
+/// self-contained second lifecycle, independent of [`SetupHandles`], so it
+/// needs no handles passed in.
 unsafe fn call_create_and_delete_lifecycle(gl: &Gl<'_>) {
     unsafe {
         let buffer = gl.create_buffer().expect("recording create_buffer");
@@ -141,6 +149,7 @@ unsafe fn call_create_and_delete_lifecycle(gl: &Gl<'_>) {
             .create_framebuffer()
             .expect("recording create_framebuffer");
         let program = gl.create_program().expect("recording create_program");
+        let query = gl.create_query().expect("recording create_query");
         let shader = gl
             .create_shader(glow::FRAGMENT_SHADER)
             .expect("recording create_shader");
@@ -151,18 +160,21 @@ unsafe fn call_create_and_delete_lifecycle(gl: &Gl<'_>) {
         gl.delete_buffer(buffer);
         gl.delete_framebuffer(framebuffer);
         gl.delete_program(program);
+        gl.delete_query(query);
         gl.delete_shader(shader);
         gl.delete_texture(texture);
         gl.delete_vertex_array(vertex_array);
     }
 }
 
-/// `GL_CALL_SURFACE`, `disable` through `link_program` (12 calls).
+/// `GL_CALL_SURFACE`, `disable` through `link_program` (15 calls, Task
+/// 125.8 added `get_parameter_string`, `get_query_parameter_u32`, and
+/// `get_query_parameter_u64`).
 ///
 /// Returns the fabricated uniform location so the next batch's
 /// `uniform_*` calls can use it — `get_uniform_location` lives in this
 /// batch, alphabetically, and must be called exactly once for the overall
-/// 49-call total to hold.
+/// 56-call total to hold.
 unsafe fn call_disable_through_link_program(
     gl: &Gl<'_>,
     handles: &SetupHandles,
@@ -180,8 +192,11 @@ unsafe fn call_disable_through_link_program(
             Some(handles.texture),
             0,
         );
+        let _ = gl.get_parameter_string(glow::VERSION);
         let _ = gl.get_program_info_log(handles.program);
         let _ = gl.get_program_link_status(handles.program);
+        let _ = gl.get_query_parameter_u32(handles.query, glow::QUERY_RESULT_AVAILABLE);
+        let _ = gl.get_query_parameter_u64(handles.query, glow::QUERY_RESULT);
         let _ = gl.get_shader_compile_status(handles.shader);
         let _ = gl.get_shader_info_log(handles.shader);
         let location = gl.get_uniform_location(handles.program, "u_dummy");
@@ -191,9 +206,10 @@ unsafe fn call_disable_through_link_program(
 }
 
 /// `GL_CALL_SURFACE`, `pixel_store_i32` through `vertex_attrib_pointer_f32`
-/// (12 calls). `location` is the one fabricated by the previous batch's
+/// (14 calls, Task 125.8 added `query_counter` and `supported_extensions`).
+/// `location` is the one fabricated by the previous batch's
 /// `get_uniform_location` call — this batch must not call
-/// `get_uniform_location` again, or the overall total would be 50, not 49.
+/// `get_uniform_location` again, or the overall total would be 57, not 56.
 unsafe fn call_pixel_store_through_vertex_attrib_pointer(
     gl: &Gl<'_>,
     handles: &SetupHandles,
@@ -201,8 +217,10 @@ unsafe fn call_pixel_store_through_vertex_attrib_pointer(
 ) {
     unsafe {
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.query_counter(handles.query, glow::TIMESTAMP);
         gl.scissor(0, 0, 10, 10);
         gl.shader_source(handles.shader, "void main() {}");
+        let _ = gl.supported_extensions();
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
@@ -664,4 +682,89 @@ fn pixel_unpack_buffer_offset_records_zero_bytes() {
 #[test]
 fn a_recording_gl_exposes_its_recording_state() {
     assert!(Gl::recording().recorded().is_some());
+}
+
+// ── Task 125.8: query lifecycle on the recording facade ─────────────────
+
+/// The query create/issue/poll/read/delete lifecycle round-trips against
+/// the recording facade without panicking, and pins the exact call order
+/// — mirroring `create_bind_delete_round_trips_without_panicking` above,
+/// but for the new query methods.
+#[test]
+fn query_lifecycle_round_trips_and_pins_call_order() {
+    let gl = Gl::recording();
+    unsafe {
+        let query = gl.create_query().expect("recording create_query");
+        gl.query_counter(query, glow::TIMESTAMP);
+        let available = gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE);
+        assert_eq!(
+            available, 0,
+            "a freshly issued query must not report available before \
+             `mark_query_available` is called for it"
+        );
+        gl.delete_query(query);
+    }
+    assert_eq!(
+        method_sequence(&gl),
+        vec![
+            "create_query",
+            "query_counter",
+            "get_query_parameter_u32",
+            "delete_query"
+        ]
+    );
+}
+
+/// [`super::recording::RecordingState::mark_query_available`] is the only
+/// thing that makes `get_query_parameter_u32`/`get_query_parameter_u64`
+/// report a query as available/ready — this is the deterministic
+/// availability control the `gpu_profiling` adapter's own tests (Task
+/// 125.8) depend on to simulate delayed availability without a real GPU.
+#[test]
+fn mark_query_available_drives_availability_and_result_deterministically() {
+    let gl = Gl::recording();
+    let query = unsafe { gl.create_query().expect("recording create_query") };
+
+    // Before marking: unavailable, and a (non-panicking) zero result.
+    unsafe {
+        assert_eq!(
+            gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE),
+            0
+        );
+        assert_eq!(gl.get_query_parameter_u64(query, glow::QUERY_RESULT), 0);
+    }
+
+    gl.recorded()
+        .expect("a recording Gl always has state")
+        .mark_query_available(query, 123_456);
+
+    // After marking: available, and the exact marked value.
+    unsafe {
+        assert_eq!(
+            gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE),
+            1
+        );
+        assert_eq!(
+            gl.get_query_parameter_u64(query, glow::QUERY_RESULT),
+            123_456
+        );
+    }
+}
+
+/// Fabricated query handles are distinct and start their own counter at
+/// `1`, independent of every other handle type — the same invariant
+/// `fabricated_handles_are_unique_within_a_type_and_start_independently`
+/// already pins for the other six handle types.
+#[test]
+fn fabricated_query_handles_are_unique_and_start_at_one() {
+    let gl = Gl::recording();
+    unsafe {
+        let q1 = gl.create_query().expect("recording create_query");
+        let q2 = gl.create_query().expect("recording create_query");
+        let q3 = gl.create_query().expect("recording create_query");
+        assert_ne!(q1, q2);
+        assert_ne!(q1, q3);
+        assert_ne!(q2, q3);
+        assert_eq!(q1.0.get(), 1);
+    }
 }

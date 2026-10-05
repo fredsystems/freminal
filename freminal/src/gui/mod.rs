@@ -218,6 +218,18 @@ struct FreminalGui {
     /// gone, so the normal auto-save-on-last-window behavior applies to it.
     quit_all_pending: std::collections::HashSet<WindowId>,
 
+    /// GL teardown handles for windows whose `PerWindowState` was already
+    /// dropped by an accepted `on_close_requested` but whose GL context has
+    /// not been torn down yet (Task 125.C2).
+    ///
+    /// `on_close_requested` runs without the window's GL context current, so
+    /// it cannot delete GL objects itself; it leaves the handles here, and
+    /// `on_window_destroying` -- which the windowing layer calls with the
+    /// context current, right before destroying it -- takes them and runs the
+    /// teardown. Entries are consumed in the same close, so the map is empty
+    /// outside that window.
+    closing_window_gl: HashMap<WindowId, renderer::WindowGlTeardown>,
+
     /// Persisted ephemeral UI window geometry for the Settings window
     /// and each main terminal window.  Loaded from `window_state.toml`
     /// at startup: the settings entry is consulted when the settings
@@ -495,6 +507,7 @@ impl FreminalGui {
             pending_settings_window: false,
             pending_focus_settings: false,
             quit_all_pending: std::collections::HashSet::new(),
+            closing_window_gl: HashMap::new(),
             window_state: freminal_common::window_state::window_state_path()
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)

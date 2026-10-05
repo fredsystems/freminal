@@ -28,6 +28,7 @@ use tracing::error;
 
 use super::errors::{BufferAllocError, GpuInitError};
 use super::gl_facade::Gl;
+use super::gl_init_state::GlInitState;
 use super::gpu::{compile_program, gl_f32_i32, gl_i32, upload_verts};
 use super::shaders::{TOAST_FRAG_SRC, TOAST_VERT_SRC};
 use super::vertex::VERTS_PER_QUAD;
@@ -91,8 +92,8 @@ pub struct ToastQuad {
 /// shader program, VAO, and double-buffered VBOs. Then call
 /// [`ToastRenderer::draw`] once per frame with the current toast list.
 pub struct ToastRenderer {
-    /// Whether GPU resources have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
     /// Compiled + linked toast shader program.
     program: Option<glow::Program>,
     /// VAO configured with the 9-attribute toast vertex layout.
@@ -118,7 +119,7 @@ impl ToastRenderer {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             program: None,
             vao: None,
             vbo: [None, None],
@@ -127,23 +128,59 @@ impl ToastRenderer {
         }
     }
 
-    /// Return whether GPU resources have been created.
+    /// Return whether `init` succeeded and the pass can draw.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller should attempt [`Self::init`] now: `false` after
+    /// a failed `init`, which is latched rather than retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this pass currently owns any GL object.
+    #[must_use]
+    pub const fn holds_gl_objects(&self) -> bool {
+        self.program.is_some()
+            || self.vao.is_some()
+            || self.vbo[0].is_some()
+            || self.vbo[1].is_some()
     }
 
     /// Create all GPU resources for the toast pass.
     ///
-    /// Must be called exactly once, from within a `glow` context (e.g. inside
-    /// a `PaintCallback`).
+    /// Must be called from within a `glow` context (e.g. inside a
+    /// `PaintCallback`). A failure releases everything this attempt created
+    /// and is latched ([`GlInitState::Failed`]); see
+    /// [`Self::should_attempt_init`].
     ///
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
     /// GL object creation fails.
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_objects(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Create the program, VAO and VBOs, storing each handle as it is created
+    /// so a failure can be cleaned up.
+    fn init_objects(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, TOAST_VERT_SRC, TOAST_FRAG_SRC, "toast")?;
+        self.program = Some(program);
 
         let u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
 
@@ -151,14 +188,17 @@ impl ToastRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("toast VAO", e))?
         };
+        self.vao = Some(vao);
         let vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("toast VBO 0", e))?
         };
+        self.vbo[0] = Some(vbo0);
         let vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("toast VBO 1", e))?
         };
+        self.vbo[1] = Some(vbo1);
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
@@ -167,11 +207,7 @@ impl ToastRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.program = Some(program);
-        self.vao = Some(vao);
-        self.vbo = [Some(vbo0), Some(vbo1)];
         self.u_viewport = u_viewport;
-        self.initialized = true;
 
         Ok(())
     }
@@ -185,7 +221,7 @@ impl ToastRenderer {
     /// No-op (with a logged error) if [`Self::init`] has not been called yet.
     /// No-op (silently) if `quads` is empty.
     pub fn draw(&mut self, gl: &Gl<'_>, quads: &[ToastQuad], viewport_w: i32, viewport_h: i32) {
-        if !self.initialized {
+        if !self.init_state.is_ready() {
             error!("ToastRenderer::draw() called before init()");
             return;
         }
@@ -226,13 +262,18 @@ impl ToastRenderer {
 
     /// Free all GPU resources.
     ///
-    /// Should be called when the widget/renderer is destroyed. Mirrors
-    /// [`super::gpu::TerminalRenderer::destroy`]'s shape.
+    /// Called at window teardown by [`super::retire::WindowGlTeardown::run`]
+    /// (the window's GL context current); the pass lives exactly as long as
+    /// its window. Mirrors [`super::gpu::TerminalRenderer::destroy`]'s shape.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
-        if !self.initialized {
-            return;
-        }
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
 
+    /// Delete every GL object this pass owns, whatever its init state, so a
+    /// partially failed `init` is cleaned up too (Task 125.C16). Idempotent:
+    /// every handle is `take()`n, so a clean pass issues no GL call.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
@@ -246,8 +287,6 @@ impl ToastRenderer {
                 }
             }
         }
-
-        self.initialized = false;
     }
 }
 
@@ -373,7 +412,7 @@ mod tests {
 
     #[test]
     fn empty_input_produces_empty_output() {
-        assert!(build_toast_verts(&[]).is_empty());
+        assert_eq!(build_toast_verts(&[]), []);
     }
 
     #[test]

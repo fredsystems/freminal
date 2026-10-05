@@ -15,8 +15,17 @@ use winit::window::Window;
 use crate::error::Error;
 #[cfg(feature = "frame-profiling")]
 use crate::frame_paint::PartialPresentDecision;
-use crate::frame_paint::{DamageHistory, FramePresentation, PaintFrameRequest, paint_frame};
+#[cfg(not(feature = "gpu-profiling"))]
+use crate::frame_paint::paint_frame;
+#[cfg(feature = "gpu-profiling")]
+use crate::frame_paint::paint_frame_impl;
+use crate::frame_paint::{DamageHistory, FramePresentation, PaintFrameRequest};
 use crate::gl_context::GlState;
+#[cfg(feature = "gpu-profiling")]
+use crate::gpu_profiling::{
+    FrameGpuTiming, FramePhaseBoundary, GlowTimestampSource, LOG_TARGET as GPU_TIMING_LOG_TARGET,
+    detect_from_glow,
+};
 use crate::modifier_tracker::ModifierTracker;
 
 /// Output from a single egui frame.
@@ -51,6 +60,12 @@ pub struct EguiState {
     /// on [`FrameProfile`] itself.
     #[cfg(feature = "frame-profiling")]
     frame_profile: FrameProfile,
+    /// Task 125.9 (feature-gated): this window's asynchronous GPU timing of
+    /// the chrome head/band/tail paint and the total frame interval. Per
+    /// window because each window owns its own GL context and therefore its
+    /// own query objects. See [`FrameGpuTiming`].
+    #[cfg(feature = "gpu-profiling")]
+    gpu_timing: FrameGpuTiming<glow::Query>,
     /// This window's record of recent frames' own declared damage, used by
     /// [`paint_frame`] to reconstruct the redraw region a stale back
     /// buffer needs (124.18). See [`DamageHistory`]'s doc.
@@ -394,6 +409,12 @@ impl EguiState {
         let painter = egui_glow::Painter::new(Arc::clone(&gl_state.glow_context), "", None, false)
             .map_err(|e| Error::GlContextCreation(format!("egui painter creation failed: {e}")))?;
 
+        // Task 125.9: detect timer-query capability once, with this window's
+        // context current (the caller guarantees that for every
+        // `EguiState::new`).
+        #[cfg(feature = "gpu-profiling")]
+        let gpu_timing = detect_from_glow(painter.gl());
+
         Ok(Self {
             ctx,
             winit_state,
@@ -401,6 +422,8 @@ impl EguiState {
             modifier_tracker: ModifierTracker::default(),
             #[cfg(feature = "frame-profiling")]
             frame_profile: FrameProfile::default(),
+            #[cfg(feature = "gpu-profiling")]
+            gpu_timing,
             damage_history: DamageHistory::new(),
         })
     }
@@ -489,19 +512,64 @@ impl EguiState {
 
         let size = window.inner_size();
 
-        let paint_output = paint_frame(
-            gl_state,
-            &self.ctx,
-            &mut self.painter,
-            PaintFrameRequest {
-                size_px: [size.width, size.height],
-                raw_input,
-                clear_color,
-                present_flag,
-                damage_history: &mut self.damage_history,
-            },
-            ui_fn,
-        );
+        let request = PaintFrameRequest {
+            size_px: [size.width, size.height],
+            raw_input,
+            clear_color,
+            present_flag,
+            damage_history: &mut self.damage_history,
+        };
+
+        // Task 125.9: with `gpu-profiling`, time the painted frame's GPU
+        // phases. The marker is called only on frames that actually paint
+        // (never on `FrameDamage::None`), so `begin_frame` -- which polls
+        // pending samples -- runs lazily on the first boundary and is
+        // likewise skipped for a frame that submits no GPU work. The swap
+        // below is deliberately outside the timed span.
+        #[cfg(feature = "gpu-profiling")]
+        let paint_output = {
+            let gl = Arc::clone(self.painter.gl());
+            let gpu_timing = &mut self.gpu_timing;
+            let mut frame = 0_u64;
+            let mut marker = |boundary: FramePhaseBoundary| {
+                let mut source = GlowTimestampSource::new(&gl);
+                if boundary == FramePhaseBoundary::TotalStart {
+                    frame = gpu_timing.begin_frame(&mut source);
+                }
+                gpu_timing.mark(boundary, frame, &mut source);
+            };
+            paint_frame_impl(
+                gl_state,
+                &self.ctx,
+                &mut self.painter,
+                request,
+                ui_fn,
+                &mut marker,
+            )
+        };
+        #[cfg(not(feature = "gpu-profiling"))]
+        let paint_output = paint_frame(gl_state, &self.ctx, &mut self.painter, request, ui_fn);
+
+        #[cfg(feature = "gpu-profiling")]
+        if self.gpu_timing.take_flush_signal() {
+            let r = self.gpu_timing.report();
+            tracing::debug!(
+                target: GPU_TIMING_LOG_TARGET,
+                window_id = ?crate::WindowId(window.id()),
+                renderer = %r.renderer_string,
+                capability = ?r.capability,
+                chrome_ns_total = r.chrome_ns_total,
+                chrome_sample_count = r.chrome_sample_count,
+                band_ns_total = r.band_ns_total,
+                band_sample_count = r.band_sample_count,
+                total_ns_total = r.total_ns_total,
+                total_sample_count = r.total_sample_count,
+                last_latency_frames = r.last_latency_frames,
+                dropped_sample_count = r.dropped_sample_count,
+                pending_sample_count = r.pending_sample_count,
+                "Task 125.9 chrome and frame GPU timing flush"
+            );
+        }
 
         self.winit_state
             .handle_platform_output(window, paint_output.platform_output);
@@ -799,12 +867,28 @@ impl EguiState {
         self.modifier_tracker.current()
     }
 
+    /// The `glow` context this window's painter draws through.
+    ///
+    /// Valid to use only while this window's GL context is current.
+    pub(crate) fn glow(&self) -> &glow::Context {
+        self.painter.gl()
+    }
+
     /// Free the painter's OpenGL resources.
     ///
     /// Must be called while this window's GL context is current and before the
     /// painter is dropped. `egui_glow::Painter::destroy` is idempotent (guarded
     /// by an internal `destroyed` flag), so calling it more than once is safe.
     pub(crate) fn destroy_painter(&mut self) {
+        // Task 125.9: destroy every outstanding timestamp query while the
+        // context is still current and the painter (which owns the shared
+        // `glow::Context` handle) is still alive. Idempotent: a second call
+        // finds nothing left to destroy.
+        #[cfg(feature = "gpu-profiling")]
+        {
+            let gl = Arc::clone(self.painter.gl());
+            self.gpu_timing.shutdown(&mut GlowTimestampSource::new(&gl));
+        }
         self.painter.destroy();
     }
 }
@@ -1229,8 +1313,8 @@ mod tests {
         let band_shapes = &shapes[start..end];
         let tail_shapes = &shapes[end..];
 
-        assert!(head_shapes.is_empty());
-        assert!(band_shapes.is_empty());
+        assert_eq!(head_shapes, []);
+        assert_eq!(band_shapes, []);
         assert_eq!(tail_shapes.len(), shapes.len());
     }
 

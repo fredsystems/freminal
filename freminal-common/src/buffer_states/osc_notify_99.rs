@@ -497,9 +497,9 @@ mod tests {
         assert!(!cmd.close_report);
         assert!(cmd.app_name.is_none());
         assert!(cmd.icon_cache_key.is_none());
-        assert!(cmd.icon_names.is_empty());
+        assert_eq!(cmd.icon_names, [] as [String; 0]);
         assert!(cmd.sound.is_none());
-        assert!(cmd.notification_type.is_empty());
+        assert_eq!(cmd.notification_type, [] as [String; 0]);
         assert!(cmd.urgency.is_none());
     }
 

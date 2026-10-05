@@ -791,8 +791,8 @@ mod tests {
 
     #[test]
     fn bash_empty_input_yields_empty_vec() {
-        assert!(parse_bash_history("").is_empty());
-        assert!(parse_bash_history("\n\n\n").is_empty());
+        assert_eq!(parse_bash_history(""), [] as [String; 0]);
+        assert_eq!(parse_bash_history("\n\n\n"), [] as [String; 0]);
     }
 
     // ---------- parse_zsh_history ----------
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn fish_empty_input_yields_empty_vec() {
-        assert!(parse_fish_history("").is_empty());
+        assert_eq!(parse_fish_history(""), [] as [String; 0]);
     }
 
     // ---------- load_for_program (end-to-end via TempDir) ----------
@@ -956,8 +956,14 @@ mod tests {
     #[test]
     fn load_for_program_returns_empty_for_other_shell() {
         let e = env(&[("HOME", "/anything")]);
-        assert!(load_for_program(Path::new("/bin/sh"), &lookup(&e)).is_empty());
-        assert!(load_for_program(Path::new("/usr/bin/python"), &lookup(&e)).is_empty());
+        assert_eq!(
+            load_for_program(Path::new("/bin/sh"), &lookup(&e)),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            load_for_program(Path::new("/usr/bin/python"), &lookup(&e)),
+            [] as [String; 0]
+        );
     }
 
     #[test]
@@ -966,7 +972,7 @@ mod tests {
         // No history file created.
         let e = env(&[("HOME", tmp.path().to_str().expect("utf8"))]);
         let v = load_for_program(Path::new("/bin/bash"), &lookup(&e));
-        assert!(v.is_empty());
+        assert_eq!(v, [] as [String; 0]);
     }
 
     #[test]
@@ -991,7 +997,10 @@ mod tests {
     #[test]
     fn load_for_program_returns_empty_when_home_unset_for_bash() {
         let e = env(&[]);
-        assert!(load_for_program(Path::new("/bin/bash"), &lookup(&e)).is_empty());
+        assert_eq!(
+            load_for_program(Path::new("/bin/bash"), &lookup(&e)),
+            [] as [String; 0]
+        );
     }
 
     #[test]

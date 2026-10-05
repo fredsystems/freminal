@@ -5,6 +5,8 @@
 
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
+use crate::io::SearchCorpus;
+use crate::snapshot::BufferExtent;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
@@ -41,6 +43,7 @@ use freminal_common::{
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
+        row_number::RowNumber,
         tchar::TChar,
         terminal_output::{TabClearMode, TerminalOutput},
         terminal_sections::TerminalSections,
@@ -139,8 +142,13 @@ pub(crate) struct RealPlacement {
     pub image_id: u64,
     /// This placement's id (`p=`; 0 if unspecified).
     pub placement_id: u32,
-    /// Screen origin: the top-left cell row where the image was stamped.
-    pub origin_row: usize,
+    /// Screen origin: the top-left cell row where the image was stamped, as a
+    /// stable logical row number (Task 125.14). It stays attached to that row
+    /// as scrollback is evicted, and is translated through a reflow by
+    /// `TerminalHandler::apply_buffer_reflow_remap`. Convert to a retained
+    /// buffer index with `Buffer::row_index_of`; `None` means the row has
+    /// been evicted.
+    pub origin_row: RowNumber,
     /// Screen origin: the top-left cell column.
     pub origin_col: usize,
     /// Display size in cells.
@@ -277,6 +285,10 @@ pub struct TerminalHandler {
     /// `placement_id`). Enables relative placements (parent link) and
     /// cascade delete (Task 100.4a).
     real_placements: HashMap<(u64, u32), RealPlacement>,
+    /// The buffer's row base when `real_placements` was last pruned of entries
+    /// whose origin row has been evicted. Pruning only runs when the base has
+    /// moved off this value; see `TerminalHandler::prune_evicted_real_placements`.
+    placement_prune_base: RowNumber,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -433,6 +445,7 @@ impl TerminalHandler {
             kitty_state: None,
             virtual_placements: HashMap::new(),
             real_placements: HashMap::new(),
+            placement_prune_base: RowNumber::ZERO,
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
@@ -517,6 +530,7 @@ impl TerminalHandler {
         self.buffer.full_reset();
         if prev_width != restore_width {
             self.buffer.set_column_mode(restore_width);
+            self.apply_buffer_reflow_remap();
             self.send_pty_resize(restore_width);
         }
         self.current_format = FormatTag::default();
@@ -966,8 +980,15 @@ impl TerminalHandler {
     /// search would therefore leave every following idle snapshot minting a
     /// new, unstable set of epochs, indefinitely, with no second search
     /// required. See that method's doc comment for the full explanation.
+    ///
+    /// ## Task 125.17: the corpus carries the rows it was cut from
+    ///
+    /// The returned [`SearchCorpus`] pairs the characters with the buffer's
+    /// [`BufferExtent`], so corpus row `i` is buffer row `extent.row_base + i`.
+    /// Both are read here, in one call on the PTY thread, so they cannot
+    /// disagree.
     #[must_use]
-    pub fn search_corpus(&mut self, scroll_offset: usize) -> Vec<TChar> {
+    pub fn search_corpus(&mut self, scroll_offset: usize) -> SearchCorpus {
         let (visible_chars, _, _, _) = self
             .buffer
             .visible_as_tchars_and_tags_full_merge(scroll_offset);
@@ -979,7 +1000,13 @@ impl TerminalHandler {
             corpus.push(TChar::NewLine);
         }
         corpus.extend(visible_chars);
-        corpus
+        SearchCorpus {
+            extent: BufferExtent {
+                row_base: self.buffer.row_base(),
+                total_rows: self.buffer.rows().len(),
+            },
+            chars: corpus,
+        }
     }
 
     /// Return the current cursor position in screen coordinates (0-indexed).
@@ -1194,6 +1221,8 @@ impl TerminalHandler {
         for output in outputs {
             self.process_output(output);
         }
+        // Once per batch, not per line feed: see the method's cost note.
+        self.prune_evicted_real_placements();
     }
 
     /// Process a single `TerminalOutput` command
@@ -1435,6 +1464,7 @@ impl TerminalHandler {
                         self.pre_deccolm_width = Some(self.buffer.terminal_width());
                     }
                     self.buffer.set_column_mode(132);
+                    self.apply_buffer_reflow_remap();
                     self.send_pty_resize(132);
                 }
                 Mode::Deccolm(Deccolm::Column80)
@@ -1446,6 +1476,7 @@ impl TerminalHandler {
                     // preceding CSI?3h).
                     let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
                     self.buffer.set_column_mode(restore_width);
+                    self.apply_buffer_reflow_remap();
                     self.send_pty_resize(restore_width);
                 }
                 Mode::Deccolm(Deccolm::Query) => {
@@ -2459,7 +2490,7 @@ mod tests {
 
         // After take, window_commands should be empty
         let cmds2 = handler.take_window_commands();
-        assert!(cmds2.is_empty());
+        assert_eq!(cmds2, []);
     }
 
     // ── Palette (OSC 4 / OSC 104) tests ─────────────────────────────────
@@ -3781,6 +3812,28 @@ mod tests {
         assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
+    /// Task 125.C6: DECSC saves a screen position (xterm `CursorSave`), so
+    /// output that scrolls the screen between DECSC and DECRC must not move the
+    /// restored cursor off its screen row.
+    #[test]
+    fn process_restore_cursor_is_screen_relative_after_scrolling_output() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.process_outputs(&[TerminalOutput::SaveCursor]);
+
+        // Scroll the screen well past the saved row, then park the cursor.
+        handler.handle_cursor_pos(Some(0), Some(23));
+        for _ in 0..60 {
+            handler.handle_data(b"scrolling output");
+            handler.handle_newline();
+        }
+        handler.handle_cursor_pos(Some(1), Some(1));
+        handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+        let pos = handler.buffer().cursor_screen_pos();
+        assert_eq!((pos.x, pos.y), (9, 4));
+    }
+
     #[test]
     fn process_reset_device() {
         let mut handler = TerminalHandler::new(80, 24);
@@ -4131,7 +4184,7 @@ mod tests {
     fn take_tmux_reparse_queue() {
         let mut handler = TerminalHandler::new(80, 24);
         let queue = handler.take_tmux_reparse_queue();
-        assert!(queue.is_empty());
+        assert_eq!(queue, [] as [Vec<u8>; 0]);
     }
 
     // ------------------------------------------------------------------
@@ -4548,7 +4601,9 @@ mod tests {
         handler.handle_data(b"A");
         handler.handle_repeat_character(3);
         // Should have written 'A' then repeated it 3 times = 4 total A's
-        let text = handler.buffer.extract_text(0, 0, 0, 3);
+        let text = handler
+            .buffer
+            .extract_text(RowNumber::new(0), 0, RowNumber::new(0), 3);
         assert_eq!(text, "AAAA");
     }
 

@@ -34,6 +34,16 @@ mod egui_integration;
 mod event_loop;
 mod frame_paint;
 mod gl_context;
+// Task 125.7: the asynchronous GPU timestamp-query foundation (bounded
+// ring lifecycle + capability detection). Feature-gated identically to
+// `frame-profiling` -- test/measurement infrastructure with no default-build
+// presence. Task 125.8 drives the ring from the terminal renderer (in the
+// `freminal` crate); Task 125.9 drives it from `paint_frame`'s head/band/tail
+// phase markers and `EguiState::run_frame`. Independent of
+// `frame-profiling`: this measures actual GPU execution time via
+// `GL_TIMESTAMP` queries, not CPU wall-clock phases.
+#[cfg(feature = "gpu-profiling")]
+pub mod gpu_profiling;
 // Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
 // builds entirely, and `target_os = "linux"` because the Mesa + Xvfb stack it
 // needs is Linux-only by design (the same precedent as `pkgs.perf` being
@@ -221,6 +231,38 @@ pub struct WindowConfig {
     pub app_id: Option<String>,
 }
 
+/// Whether a window's GL context was current when
+/// [`App::on_window_destroying`] ran.
+///
+/// Teardown is only valid in the context that created the objects. With
+/// unshared contexts GL object names are per-context, so deleting "the same
+/// name" in whichever context happens to be current destroys another
+/// window's object. The windowing layer therefore reports a failed
+/// `make_current` explicitly rather than letting teardown proceed blindly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlContextState {
+    /// The window's context is current: GL deletion is valid.
+    Current,
+    /// `make_current` failed: no GL call may be issued for this window.
+    Unavailable,
+}
+
+impl GlContextState {
+    /// Classify the outcome of a `make_current` attempt.
+    pub(crate) const fn from_make_current<E>(result: &Result<(), E>) -> Self {
+        match result {
+            Ok(()) => Self::Current,
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    /// Whether GL calls may be issued.
+    #[must_use]
+    pub const fn is_current(self) -> bool {
+        matches!(self, Self::Current)
+    }
+}
+
 /// The application trait that `freminal` implements.
 pub trait App {
     /// Called once per window per frame, only when a redraw is needed.
@@ -253,6 +295,35 @@ pub trait App {
 
     /// Called when a window close is requested. Return `false` to cancel.
     fn on_close_requested(&mut self, window_id: WindowId) -> bool;
+
+    /// Called once per window, with that window's GL context **current**,
+    /// immediately before its egui painter is destroyed and its GL context is
+    /// torn down.
+    ///
+    /// This is the only point at which the app can delete GL objects it
+    /// created for the window (renderers, textures, buffers) while the
+    /// context that owns them still exists. It fires on every path that
+    /// destroys a window: an accepted [`App::on_close_requested`], an
+    /// app-initiated [`WindowHandle::close_window`], a viewport `Close`
+    /// command, and — for any window still open — event-loop exit. By the
+    /// time it fires for a close, `on_close_requested` has already returned
+    /// `true` (when it applies), so the app may already have dropped its own
+    /// per-window state; the hook exists so it can still free what that state
+    /// owned in GL.
+    ///
+    /// `gl` is the window's `glow` context, and `context` says whether it is
+    /// actually safe to issue GL calls through it. When `context` is
+    /// [`GlContextState::Unavailable`] the window's context could not be made
+    /// current: the app must drop its handles **without** touching `gl`,
+    /// because with unshared contexts the names it holds could otherwise
+    /// delete another window's objects. The default does nothing.
+    fn on_window_destroying(
+        &mut self,
+        _window_id: WindowId,
+        _gl: &glow::Context,
+        _context: GlContextState,
+    ) {
+    }
 
     /// GL clear color for the given window (supports transparency via alpha).
     fn clear_color(&self, window_id: WindowId) -> [f32; 4];
@@ -786,6 +857,22 @@ pub(crate) enum WindowOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_make_current_allows_gl_teardown() {
+        let state = GlContextState::from_make_current::<Error>(&Ok(()));
+        assert_eq!(state, GlContextState::Current);
+        assert!(state.is_current());
+    }
+
+    #[test]
+    fn failed_make_current_forbids_gl_teardown() {
+        // Unshared contexts: a delete issued without this window's context
+        // current would hit another window's objects of the same name.
+        let state = GlContextState::from_make_current(&Err(Error::MakeCurrent("lost".to_owned())));
+        assert_eq!(state, GlContextState::Unavailable);
+        assert!(!state.is_current());
+    }
 
     #[test]
     fn window_config_defaults() {
