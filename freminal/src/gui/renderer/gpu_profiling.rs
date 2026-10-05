@@ -756,6 +756,34 @@ mod tests {
         );
     }
 
+    /// Task 125.C16: `shutdown` runs from both a failed-init release and a
+    /// later `destroy`, so it must be idempotent -- the second call finds no
+    /// handle left to destroy and issues no GL call.
+    #[test]
+    fn shutdown_is_idempotent_and_leaves_no_query_behind() {
+        let gl = Gl::recording();
+        let mut profile = PaneGpuTimingProfile::new();
+        enable_available_capability(&gl);
+        profile.detect_capability(&gl);
+
+        let frame = profile.begin_frame(&gl);
+        profile.begin_upload(&gl);
+        profile.end_upload_begin_draw(&gl, frame);
+        // Leave the draw phase half-issued: its start is still pending.
+
+        profile.shutdown(&gl);
+        let state = gl.recorded().expect("recording facade");
+        assert_eq!(
+            state.count_of("create_query"),
+            state.count_of("delete_query"),
+            "every query created was deleted"
+        );
+        let calls = state.len();
+
+        profile.shutdown(&gl);
+        assert_eq!(state.len(), calls, "a second shutdown issues no GL call");
+    }
+
     /// `record_completed` attributes upload-phase and draw-phase samples
     /// to their own distinct running totals -- proves the two named
     /// [`GpuProfilePhase`] constants this module defines are never

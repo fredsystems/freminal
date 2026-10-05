@@ -43,7 +43,9 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
-use super::coords::{encode_egui_mouse_pos, visible_window_start, visible_window_start_for};
+use super::coords::{
+    cursor_buffer_row, encode_egui_mouse_pos, visible_window_start, visible_window_start_for,
+};
 use super::widget::hit_test_placeholder;
 use crate::gui::command_blocks::BlockRows;
 use crate::gui::folding::{compute_extra_rows, compute_fold_ranges};
@@ -716,19 +718,6 @@ pub(super) fn find_last_copyable_block(snap: &TerminalSnapshot) -> Option<&Comma
         .iter()
         .rev()
         .find(|b| block_output_range(b, snap.row_base).is_some())
-}
-
-/// Retained buffer index of the row the PTY cursor is on.
-///
-/// `snap.cursor_pos.y` is relative to the top of the *live* window (the one the
-/// PTY thread operates on), not an index into the buffer, so it must be offset
-/// by that window's start before it is compared with block rows (which resolve
-/// to retained indices). With scrollback the two differ by
-/// `total_rows - term_height`; comparing them directly selects the wrong block
-/// (Task 125.C12). The live window is used regardless of the GUI's
-/// `scroll_offset`, because the PTY cursor never leaves it.
-const fn cursor_buffer_row(snap: &TerminalSnapshot) -> usize {
-    visible_window_start_for(snap, 0).saturating_add(snap.cursor_pos.y)
 }
 
 /// Find the completed command block the PTY cursor is inside, if any.

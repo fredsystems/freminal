@@ -619,7 +619,7 @@ cursor row around `place_image` and restore it after an eviction may have
 occurred; kitty and iTerm2 pass it to a screen-relative setter. Fix: capture
 `cursor_screen_pos()` instead, with an eviction regression test.
 
-**Complete.** Restore uses the stable `RowNumber` returned by `place_image` (`Buffer::restore_cursor_to_image_origin`), not a screen position: a placement that scrolls without evicting would otherwise move the cursor off the image origin, which kitty `C=1` forbids. Covers kitty `a=p`/`a=T`, iTerm2, and sixel DECSDM, and drops an accidental DECOM application; tested at capacity.
+**Complete.** Restore uses the stable `RowNumber` returned by `place_image` (`Buffer::restore_cursor_to_image_origin`), not a screen position: a placement that scrolls without evicting would otherwise move the cursor off the image origin, which kitty `C=1` forbids. Covers kitty `a=p`/`a=T`, iTerm2, and sixel DECSDM, and drops an accidental DECOM application; tested at capacity. An origin above the live window (tall image or evicted) clamps to the window top, never into scrollback.
 
 ### 125.C8 — Kitty delete-by-cell `y=` treated as a physical row
 
@@ -697,6 +697,8 @@ Surface point: 125.C2. If `TerminalRenderer::init` fails midway, `initialized`
 stays false, so neither `destroy` nor the retire queue deletes the objects
 already created. Fix: release created objects on the init error path, with a
 recording-facade test that fails a mid-init step.
+
+**Complete.** `compile_program` deletes shaders on every error path; every renderer stores handles as it creates them and gains `release_gl_objects` / `holds_gl_objects`; `init` releases leftovers before and after a failure; a `GlInitState` latch stops per-frame retries; the retire queue keys on `holds_gl_objects`. A recording-facade fault-injection knob sweeps every fallible init call for all four renderers, asserting no net leak.
 
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 

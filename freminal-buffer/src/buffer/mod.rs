@@ -3747,6 +3747,81 @@ mod image_tests {
         }
     }
 
+    /// Task 125 review: a `d=q` clear that leaves a cell-owned (Sixel) image
+    /// with no cell must free its pixels; a Kitty image keeps its data.
+    #[test]
+    fn clear_placement_with_z_frees_a_cell_owned_image_but_keeps_kitty_data() {
+        let mut buf = Buffer::new(20, 10);
+        let sixel = make_image(3, 1);
+        let sixel_id = sixel.id;
+        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 3;
+        let kitty = make_image(3, 1);
+        let kitty_id = kitty.id;
+        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+        assert!(buf.image_store().contains(sixel_id));
+        assert!(buf.image_store().contains(kitty_id));
+
+        assert_eq!(
+            buf.clear_image_placements_at_cell_with_z(0, 0, 0),
+            Some(sixel_id)
+        );
+        assert_eq!(count_image_cells(&buf, sixel_id), 0);
+        assert!(
+            !buf.image_store().contains(sixel_id),
+            "the cell-owned image has no cell left and must be freed"
+        );
+
+        assert_eq!(
+            buf.clear_image_placements_at_cell_with_z(3, 0, 0),
+            Some(kitty_id)
+        );
+        assert!(
+            buf.image_store().contains(kitty_id),
+            "Kitty data outlives its cells; only d=Q frees it"
+        );
+        buf.debug_assert_invariants();
+    }
+
+    /// `d=q` only matches the z-index it was given.
+    #[test]
+    fn clear_placement_with_z_ignores_a_cell_with_another_z_index() {
+        let mut buf = Buffer::new(20, 10);
+        let img = make_image(3, 1);
+        let id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 7, None, 1, None);
+
+        assert_eq!(buf.clear_image_placements_at_cell_with_z(0, 0, 0), None);
+        assert_eq!(count_image_cells(&buf, id), 3);
+        assert!(buf.image_store().contains(id));
+    }
+
+    /// Task 125 review: `d=a` must free the cell-owned images it left
+    /// without a cell, and only those it cleared.
+    #[test]
+    fn clear_visible_placements_frees_cell_owned_images() {
+        let mut buf = Buffer::new(20, 10);
+        let sixel = make_image(3, 1);
+        let sixel_id = sixel.id;
+        buf.place_image(sixel, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 3;
+        let kitty = make_image(3, 1);
+        let kitty_id = kitty.id;
+        buf.place_image(kitty, 0, ImageProtocol::Kitty, None, None, 0, None, 2, None);
+
+        let mut ids = buf.clear_image_placements_visible(0);
+        ids.sort_unstable();
+        let mut expected = vec![sixel_id, kitty_id];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+        assert_eq!(buf.image_cell_count, 0);
+        assert!(!buf.image_store().contains(sixel_id));
+        assert!(buf.image_store().contains(kitty_id));
+        buf.debug_assert_invariants();
+    }
+
     #[test]
     fn place_image_moves_cursor_below_image() {
         let mut buf = Buffer::new(20, 10);

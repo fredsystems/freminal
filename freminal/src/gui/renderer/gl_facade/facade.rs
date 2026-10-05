@@ -18,7 +18,7 @@
 use glow::HasContext;
 
 #[cfg(feature = "gl-recording")]
-use super::recording::{GlCall, GlCallPayload, RecordingState};
+use super::recording::{FaultOutcome, GlCall, GlCallPayload, INJECTED_FAULT, RecordingState};
 #[cfg(feature = "gl-recording")]
 use conv2::ConvUtil;
 
@@ -77,7 +77,10 @@ enum GlTarget<'a> {
     Real(&'a glow::Context),
     /// Logs every call into a [`RecordingState`] instead of issuing it.
     #[cfg(feature = "gl-recording")]
-    Recording(RecordingState),
+    // Boxed: the recording state (call log, handle counters, query results,
+    // armed faults) is far larger than a `&glow::Context`, and boxing keeps
+    // the enum -- and so every `Gl` -- small.
+    Recording(Box<RecordingState>),
 }
 
 impl<'a> Gl<'a> {
@@ -97,7 +100,7 @@ impl<'a> Gl<'a> {
     #[must_use]
     pub fn recording() -> Self {
         Self {
-            inner: GlTarget::Recording(RecordingState::new()),
+            inner: GlTarget::Recording(Box::default()),
         }
     }
 
@@ -290,13 +293,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_buffer() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_buffer",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_buffer())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_buffer") {
+                FaultOutcome::Proceed => Ok(state.next_buffer()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -304,13 +304,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_framebuffer() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_framebuffer",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_framebuffer())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_framebuffer") {
+                FaultOutcome::Proceed => Ok(state.next_framebuffer()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -318,13 +315,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_program() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_program",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_program())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_program") {
+                FaultOutcome::Proceed => Ok(state.next_program()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -338,13 +332,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_query() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_query",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_query())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_query") {
+                FaultOutcome::Proceed => Ok(state.next_query()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -352,13 +343,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_shader(shader_type) },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_shader",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_shader())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_shader") {
+                FaultOutcome::Proceed => Ok(state.next_shader()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -366,13 +354,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_texture() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_texture",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_texture())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_texture") {
+                FaultOutcome::Proceed => Ok(state.next_texture()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -380,13 +365,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_vertex_array() },
             #[cfg(feature = "gl-recording")]
-            GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "create_vertex_array",
-                    payload: GlCallPayload::None,
-                });
-                Ok(state.next_vertex_array())
-            }
+            GlTarget::Recording(state) => match state.record_fallible("create_vertex_array") {
+                FaultOutcome::Proceed => Ok(state.next_vertex_array()),
+                FaultOutcome::Fail => Err(INJECTED_FAULT.to_owned()),
+            },
         }
     }
 
@@ -627,14 +609,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_program_link_status(program) },
             #[cfg(feature = "gl-recording")]
+            // A plausible success value so a headless driver run does not
+            // take an error path, unless a test armed a fault.
             GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "get_program_link_status",
-                    payload: GlCallPayload::None,
-                });
-                // A plausible success value so a headless driver run does
-                // not take an error path.
-                true
+                state.record_fallible("get_program_link_status") == FaultOutcome::Proceed
             }
         }
     }
@@ -695,14 +673,10 @@ impl Gl<'_> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_shader_compile_status(shader) },
             #[cfg(feature = "gl-recording")]
+            // A plausible success value so a headless driver run does not
+            // take an error path, unless a test armed a fault.
             GlTarget::Recording(state) => {
-                state.record(GlCall {
-                    method: "get_shader_compile_status",
-                    payload: GlCallPayload::None,
-                });
-                // A plausible success value so a headless driver run does
-                // not take an error path.
-                true
+                state.record_fallible("get_shader_compile_status") == FaultOutcome::Proceed
             }
         }
     }
@@ -1154,7 +1128,7 @@ mod tests {
             "Gl<'_> ({gl_size} bytes) should be larger than \
              &glow::Context ({reference_size} bytes) under gl-recording — \
              GlTarget has two variants and must carry a discriminant plus \
-             the inline RecordingState payload"
+             the boxed RecordingState payload"
         );
     }
 }

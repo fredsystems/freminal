@@ -3893,10 +3893,19 @@ impl FreminalTerminalWidget {
                 let mut rs = render_state_for_cb
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !rs.renderer.initialized()
+                // A failed init is latched (`should_attempt_init` turns false):
+                // it is reported once, through the window's `last_error`
+                // channel, rather than retried and re-logged every frame.
+                if rs.renderer.should_attempt_init()
                     && let Err(e) = rs.renderer.init(gl)
                 {
                     error!("GL init failed: {e}");
+                    rs.window_post
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .last_error = Some(format!("Terminal renderer init failed: {e}"));
+                }
+                if !rs.renderer.initialized() {
                     return;
                 }
 

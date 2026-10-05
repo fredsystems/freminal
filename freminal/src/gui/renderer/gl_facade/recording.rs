@@ -57,6 +57,22 @@ pub enum GlCallPayload {
     },
 }
 
+/// What a fallible recorded call should do: succeed as the fabricated driver
+/// normally would, or fail because a test armed a fault for it.
+///
+/// Returned by [`RecordingState::record_fallible`]; see
+/// [`RecordingState::fail_nth_call`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FaultOutcome {
+    /// No fault applies: behave as the plausible-success recording default.
+    Proceed,
+    /// A fault was armed for exactly this call: report failure.
+    Fail,
+}
+
+/// The error message a fault-injected `create_*` call returns.
+pub(super) const INJECTED_FAULT: &str = "injected GL fault";
+
 /// One recorded `glow::HasContext` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlCall {
@@ -113,6 +129,14 @@ pub struct RecordingState {
     /// before Task 125.8. Only a test that explicitly opts in via
     /// [`Self::set_gl_version_string`] observes `Available` capability.
     gl_version_string: RefCell<String>,
+    /// Armed faults: `(method, absolute index among that method's recorded
+    /// calls)`. One-shot -- an entry is removed when it fires. See
+    /// [`Self::fail_nth_call`].
+    armed_faults: RefCell<Vec<(&'static str, usize)>>,
+    /// Methods whose recorded call was made to fail (one entry per injected
+    /// failure), so a test can tell the calls that created an object from
+    /// those that did not. See [`Self::succeeded_count_of`].
+    injected_failures: RefCell<Vec<&'static str>>,
 }
 
 impl Default for RecordingState {
@@ -141,6 +165,8 @@ impl RecordingState {
             next_query: Cell::new(1),
             query_results: RefCell::new(HashMap::new()),
             gl_version_string: RefCell::new(String::new()),
+            armed_faults: RefCell::new(Vec::new()),
+            injected_failures: RefCell::new(Vec::new()),
         }
     }
 
@@ -180,6 +206,58 @@ impl RecordingState {
             .iter()
             .filter(|call| call.method == method)
             .count()
+    }
+
+    /// Arm a one-shot fault: the `nth` (0-based) call to `method` made from
+    /// now on fails, as a driver that ran out of names or rejected a shader
+    /// would.
+    ///
+    /// Covers every fallible creation (`create_buffer`, `create_shader`,
+    /// `create_program`, `create_vertex_array`, `create_texture`,
+    /// `create_framebuffer`, `create_query`) and the two status queries
+    /// (`get_shader_compile_status`, `get_program_link_status`). The failing
+    /// call is still recorded -- the renderer did make it -- but creates no
+    /// object; [`Self::succeeded_count_of`] counts only the calls that did.
+    /// Any number of faults may be armed; each fires once.
+    pub fn fail_nth_call(&self, method: &'static str, nth: usize) {
+        let absolute = self.count_of(method) + nth;
+        self.armed_faults.borrow_mut().push((method, absolute));
+    }
+
+    /// Record one call to `method` and report whether an armed fault makes it
+    /// fail. Backs the fallible arms of `facade::Gl`.
+    pub(super) fn record_fallible(&self, method: &'static str) -> FaultOutcome {
+        let index = self.count_of(method);
+        self.record(GlCall {
+            method,
+            payload: GlCallPayload::None,
+        });
+        let fired = {
+            let mut faults = self.armed_faults.borrow_mut();
+            let position = faults.iter().position(|&f| f == (method, index));
+            position.map(|pos| faults.remove(pos))
+        };
+        match fired {
+            Some(_) => {
+                self.injected_failures.borrow_mut().push(method);
+                FaultOutcome::Fail
+            }
+            None => FaultOutcome::Proceed,
+        }
+    }
+
+    /// Count of recorded calls to `method` that were *not* made to fail by
+    /// [`Self::fail_nth_call`]: for a `create_*` method, the number of objects
+    /// actually created, which is what a `delete_*` count must match.
+    #[must_use]
+    pub fn succeeded_count_of(&self, method: &str) -> usize {
+        let failed = self
+            .injected_failures
+            .borrow()
+            .iter()
+            .filter(|m| **m == method)
+            .count();
+        self.count_of(method) - failed
     }
 
     /// Count of recorded calls in [`super::surface::DRAW_CALL_METHODS`].
@@ -371,7 +449,7 @@ impl RecordingState {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{GlCall, GlCallPayload, RecordingState};
+    use super::{FaultOutcome, GlCall, GlCallPayload, RecordingState};
 
     #[test]
     fn new_state_is_empty() {
@@ -456,5 +534,47 @@ mod tests {
         assert_eq!(t1.0.get(), 1);
         assert_eq!(f1.0.get(), 1);
         assert_eq!(u1.0, 1);
+    }
+
+    #[test]
+    fn fail_nth_call_fires_once_on_exactly_that_call() {
+        let state = RecordingState::new();
+        state.fail_nth_call("create_buffer", 1);
+
+        assert_eq!(
+            state.record_fallible("create_buffer"),
+            FaultOutcome::Proceed
+        );
+        assert_eq!(state.record_fallible("create_buffer"), FaultOutcome::Fail);
+        assert_eq!(
+            state.record_fallible("create_buffer"),
+            FaultOutcome::Proceed
+        );
+
+        assert_eq!(state.count_of("create_buffer"), 3, "failures are recorded");
+        assert_eq!(state.succeeded_count_of("create_buffer"), 2);
+    }
+
+    #[test]
+    fn fail_nth_call_counts_from_arming_and_per_method() {
+        let state = RecordingState::new();
+        let _ = state.record_fallible("create_buffer");
+        let _ = state.record_fallible("create_shader");
+        state.fail_nth_call("create_buffer", 0);
+        state.fail_nth_call("get_shader_compile_status", 0);
+
+        assert_eq!(
+            state.record_fallible("create_shader"),
+            FaultOutcome::Proceed
+        );
+        assert_eq!(state.record_fallible("create_buffer"), FaultOutcome::Fail);
+        assert_eq!(
+            state.record_fallible("get_shader_compile_status"),
+            FaultOutcome::Fail
+        );
+        assert_eq!(
+            state.record_fallible("get_shader_compile_status"),
+            FaultOutcome::Proceed
+        );
     }
 }

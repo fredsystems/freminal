@@ -14,7 +14,7 @@ use freminal_common::geometry::Rect;
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
-use freminal_windowing::WindowId;
+use freminal_windowing::{GlContextState, WindowId};
 use tracing::{debug, error, trace, warn};
 
 use super::chrome_damage;
@@ -1055,14 +1055,25 @@ impl freminal_windowing::App for FreminalGui {
     /// exit), the state is consumed here so its panes retire their renderers
     /// first. A window with no state (the settings window) has nothing to
     /// free.
-    fn on_window_destroying(&mut self, window_id: WindowId, gl: &glow::Context) {
+    fn on_window_destroying(
+        &mut self,
+        window_id: WindowId,
+        gl: &glow::Context,
+        context: GlContextState,
+    ) {
         let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
             self.windows
                 .remove(&window_id)
                 .map(PerWindowState::into_gl_teardown)
         });
         if let Some(teardown) = teardown {
-            teardown.run(&Gl::real(gl));
+            // A window whose context could not be made current must not issue
+            // a single GL call: with unshared contexts the names it holds may
+            // belong to another window's objects. Drop the handles instead.
+            match context {
+                GlContextState::Current => teardown.run(&Gl::real(gl)),
+                GlContextState::Unavailable => teardown.abandon(),
+            }
         }
     }
 
@@ -3300,11 +3311,15 @@ impl freminal_windowing::App for FreminalGui {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                             // Lazy-init GPU resources.
-                            if !wpr.initialized()
+                            // A failed init is latched: reported once, not
+                            // retried and re-reported every frame.
+                            if wpr.should_attempt_init()
                                 && let Err(e) = wpr.init(gl)
                             {
                                 error!("WindowPostRenderer init failed: {e}");
                                 wpr.last_error = Some(format!("Renderer init failed: {e}"));
+                            }
+                            if !wpr.initialized() {
                                 return;
                             }
 
@@ -3821,6 +3836,15 @@ impl freminal_windowing::App for FreminalGui {
                 );
                 ctx.request_repaint_after(delay);
             }
+        }
+
+        // ── Retired GL objects need one more frame (125.C2 review) ──────────
+        // A pane closed during this update retired its renderer after the
+        // top-of-frame drain ran. Without a further frame the objects would
+        // linger on an idle window; ask for exactly one (its drain empties
+        // the queue, so this cannot loop).
+        if win.has_pending_gl_retirees() {
+            ctx.request_repaint();
         }
 
         // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────

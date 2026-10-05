@@ -1,5 +1,11 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-04 — Task 125.C6 review — recorded five known
+divergences from xterm in cursor save/restore (DECSC/DECRC, `CSI s`/`CSI u`,
+`?1048`/`?1049`) and one in Sixel placement under DECSDM (`?80`); see "Buffer
+Semantics Gaps" and "DCS / Graphics Gaps" below. Documentation only: no
+behaviour changed and none of the six is scheduled.
+
 Last updated: 2026-10-04 — Task 125.C14 — kitty `d=x`/`d=y` use 1-based screen
 coordinates and `d=c` intersects only the cursor cell (see
 ESCAPE_SEQUENCE_COVERAGE.md). No gap entries added or removed.
@@ -123,7 +129,10 @@ The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
+- **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking;
+  five narrow xterm divergences in cursor save/restore (DECSC per-screen slots,
+  DECRC with nothing saved, DECOM re-clamp, saved attribute set, resize with the
+  alternate screen active) and Sixel placement under DECSDM (see below)
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
   storage, navigation, fold/copy/hover/duration all complete under Task 72)
 
@@ -156,13 +165,24 @@ the prior panel-fill-only white inversion.
 
 ## Buffer Semantics Gaps
 
-No known buffer-semantics gaps. DECDWL/DECDHL rendering, the auto-wrap
-column on double-width/height rows, and DECSLRM margin confinement
-(ECH/ICH/DCH/IL/DL, SU/SD, and margin-triggered IND/RI/LF/NEL) are all
-implemented and correct (see `ESCAPE_SEQUENCE_COVERAGE.md`). The last two
-narrower gaps in this category — the double-width/height auto-wrap column
-and SU/SD/margin-triggered IND/RI DECSLRM confinement — were closed by
-Task 117 (v0.11.1).
+DECDWL/DECDHL rendering, the auto-wrap column on double-width/height rows, and
+DECSLRM margin confinement (ECH/ICH/DCH/IL/DL, SU/SD, and margin-triggered
+IND/RI/LF/NEL) are all implemented and correct (see
+`ESCAPE_SEQUENCE_COVERAGE.md`). The remaining entries are narrow divergences
+from xterm in **cursor save/restore**, found while verifying DECSC's
+screen-relative position (Task 125.C6). They apply equally to DECSC/DECRC
+(`ESC 7` / `ESC 8`), SCOSC/SCORC (`CSI s` / `CSI u`) and `?1048`, which share
+one machinery. The saved position itself is correct (screen-relative, clamped
+to the screen on restore). Reference: xterm `cursor.c` (`CursorSave`,
+`CursorRestore`, `CursorSave2`, `AdjustSavedCursor`) and `screen.c`.
+
+| Behaviour                                | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------- | ---------- | ---- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECSC save slot per screen               | ⬜         | 🚧   | —       | xterm keeps one saved-cursor slot per screen (main and alternate) that persist independently. Freminal has one slot: entering the alternate screen leaves the primary's save visible to the alternate screen, and the slot is replaced by the primary's copy on leaving it, so a DECSC made on the alternate screen is discarded when it is left.          |
+| DECRC with nothing saved                 | ⬜         | 🚧   | —       | xterm homes the cursor and resets the saved attributes (SGR, origin mode, character sets) to their power-up values. Freminal treats it as a silent no-op.                                                                                                                                                                                                  |
+| DECRC and DECOM                          | ⬜         | 🚧   | —       | xterm saves the origin-mode flag with the cursor (`DECSC_FLAGS`) and restores it, then clamps the restored position to the scroll region when origin mode is on. Freminal neither saves nor restores DECOM and clamps to the screen only, so a position saved under a different DECOM/DECSTBM state can land outside the region it would be in xterm.      |
+| DECSC saved state                        | ⬜         | 🚧   | —       | Besides the position, xterm saves its `DECSC_FLAGS` (attribute flags, origin mode, DECSCA protection) and the pending-wrap flag (`do_wrap`). Freminal saves the position, the SGR state carried by `CursorState` (weight, decorations, colours, hyperlink) and the character set; it does not save DECOM or the pending-wrap flag (DECSCA is unsupported). |
+| Saved cursor on resize, alternate active | ⬜         | 🚧   | —       | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                    |
 
 ---
 
@@ -250,9 +270,15 @@ Fully implemented and removed from prior gap lists during v0.3.0–v0.7.0:
 
 ## DCS / Graphics Gaps
 
-None. Sixel (DCS), the Kitty graphics protocol (APC `_G`, Tasks 13, 100), and
-iTerm2 inline images (OSC 1337 `File=` / `MultipartFile=`) are all fully
-implemented. Task 100 completed the Kitty graphics surface — animation,
+One divergence, below. Sixel (DCS), the Kitty graphics protocol (APC `_G`,
+Tasks 13, 100), and iTerm2 inline images (OSC 1337 `File=` / `MultipartFile=`)
+are otherwise fully implemented.
+
+| Behaviour                    | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sixel placement under DECSDM | ⬜         | 🚧   | —       | With sixel scrolling disabled (DECSDM, `?80` set) xterm draws the image at the top-left of the screen and does not move the text cursor. Freminal draws it at the cursor position and then restores the cursor to the image origin. The text cursor does not move in either; only the image position differs. |
+
+Task 100 completed the Kitty graphics surface — animation,
 image-number references, relative placements, storage quotas + eviction,
 shared memory (`t=s`, POSIX and Windows), zlib (`o=z`), source-rect crop,
 delete-target correctness, and z-index render ordering. The APC parser
@@ -298,6 +324,8 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | ------------------------ | --------------------------------------------------- | ------- |
 | SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | —       |
 | SRM standard mode        | Extremely rare in modern terminal output            | —       |
+| DECSC/DECRC xterm parity | Five narrow divergences; see Buffer Semantics Gaps  | —       |
+| Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | —       |
 | ?1001 hilite tracking    | Obsolete mouse mode                                 | —       |
 | ?1034 interpret-meta key | Niche compatibility                                 | —       |
 | 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —       |

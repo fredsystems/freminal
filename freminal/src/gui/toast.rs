@@ -1854,16 +1854,20 @@ impl ToastStack {
                 let mut rs = render_state_cb
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !rs.pill.initialized()
+                // Failed inits are latched: logged once, not retried every
+                // frame. The error is only logged -- a toast cannot report
+                // that the toast renderer is broken.
+                if rs.pill.should_attempt_init()
                     && let Err(e) = rs.pill.init(gl)
                 {
                     tracing::error!("toast pill GL init failed: {e}");
-                    return;
                 }
-                if !rs.text.initialized()
+                if rs.text.should_attempt_init()
                     && let Err(e) = rs.text.init(gl)
                 {
                     tracing::error!("toast text GL init failed: {e}");
+                }
+                if !rs.pill.initialized() || !rs.text.initialized() {
                     return;
                 }
                 rs.pill.draw(gl, &pills, vp.width_px, vp.height_px);

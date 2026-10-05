@@ -231,6 +231,38 @@ pub struct WindowConfig {
     pub app_id: Option<String>,
 }
 
+/// Whether a window's GL context was current when
+/// [`App::on_window_destroying`] ran.
+///
+/// Teardown is only valid in the context that created the objects. With
+/// unshared contexts GL object names are per-context, so deleting "the same
+/// name" in whichever context happens to be current destroys another
+/// window's object. The windowing layer therefore reports a failed
+/// `make_current` explicitly rather than letting teardown proceed blindly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlContextState {
+    /// The window's context is current: GL deletion is valid.
+    Current,
+    /// `make_current` failed: no GL call may be issued for this window.
+    Unavailable,
+}
+
+impl GlContextState {
+    /// Classify the outcome of a `make_current` attempt.
+    pub(crate) const fn from_make_current<E>(result: &Result<(), E>) -> Self {
+        match result {
+            Ok(()) => Self::Current,
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    /// Whether GL calls may be issued.
+    #[must_use]
+    pub const fn is_current(self) -> bool {
+        matches!(self, Self::Current)
+    }
+}
+
 /// The application trait that `freminal` implements.
 pub trait App {
     /// Called once per window per frame, only when a redraw is needed.
@@ -279,8 +311,19 @@ pub trait App {
     /// per-window state; the hook exists so it can still free what that state
     /// owned in GL.
     ///
-    /// `gl` is the window's `glow` context. The default does nothing.
-    fn on_window_destroying(&mut self, _window_id: WindowId, _gl: &glow::Context) {}
+    /// `gl` is the window's `glow` context, and `context` says whether it is
+    /// actually safe to issue GL calls through it. When `context` is
+    /// [`GlContextState::Unavailable`] the window's context could not be made
+    /// current: the app must drop its handles **without** touching `gl`,
+    /// because with unshared contexts the names it holds could otherwise
+    /// delete another window's objects. The default does nothing.
+    fn on_window_destroying(
+        &mut self,
+        _window_id: WindowId,
+        _gl: &glow::Context,
+        _context: GlContextState,
+    ) {
+    }
 
     /// GL clear color for the given window (supports transparency via alpha).
     fn clear_color(&self, window_id: WindowId) -> [f32; 4];
@@ -814,6 +857,22 @@ pub(crate) enum WindowOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_make_current_allows_gl_teardown() {
+        let state = GlContextState::from_make_current::<Error>(&Ok(()));
+        assert_eq!(state, GlContextState::Current);
+        assert!(state.is_current());
+    }
+
+    #[test]
+    fn failed_make_current_forbids_gl_teardown() {
+        // Unshared contexts: a delete issued without this window's context
+        // current would hit another window's objects of the same name.
+        let state = GlContextState::from_make_current(&Err(Error::MakeCurrent("lost".to_owned())));
+        assert_eq!(state, GlContextState::Unavailable);
+        assert!(!state.is_current());
+    }
 
     #[test]
     fn window_config_defaults() {

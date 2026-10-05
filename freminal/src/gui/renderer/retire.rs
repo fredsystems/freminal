@@ -101,11 +101,14 @@ impl GlRetireQueue {
 
     /// Queue `renderer` for destruction on the next [`Self::drain`].
     ///
-    /// Touches no GL. A renderer that was never initialized owns no GL
-    /// objects, so it is simply dropped rather than queued -- this keeps the
-    /// queue empty (and `drain` free) for every pane that never painted.
+    /// Touches no GL. A renderer that owns no GL objects is simply dropped
+    /// rather than queued -- this keeps the queue empty (and `drain` free) for
+    /// every pane that never painted. The test is what the renderer *holds*,
+    /// not whether its `init` reported success: a renderer whose `init` failed
+    /// partway (or was interrupted) still owns whatever it had created
+    /// (Task 125.C16).
     pub fn retire(&self, renderer: TerminalRenderer) {
-        if !renderer.initialized() {
+        if !renderer.holds_gl_objects() {
             return;
         }
         self.pending
@@ -198,12 +201,27 @@ impl WindowGlTeardown {
     }
 }
 
+impl WindowGlTeardown {
+    /// Drop this window's GL handles **without** issuing any GL call.
+    ///
+    /// Used when the window's context could not be made current. The GL
+    /// objects are then lost along with the context; deleting their names in
+    /// whatever context happens to be current could destroy another window's
+    /// objects. Dropping the handles is safe: they hold plain GL names, with
+    /// no `Drop` that touches GL.
+    pub fn abandon(self) {
+        tracing::warn!(
+            "window GL context unavailable at teardown; abandoning its GL objects without deleting them"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn retiring_an_uninitialized_renderer_queues_nothing() {
+    fn retiring_a_renderer_with_no_gl_objects_queues_nothing() {
         let queue = GlRetireQueue::new();
         queue.retire(TerminalRenderer::new());
         assert!(queue.is_empty());
@@ -228,7 +246,7 @@ mod recording_tests {
     fn initialized_renderer(gl: &Gl<'_>) -> TerminalRenderer {
         let mut renderer = TerminalRenderer::new();
         renderer.init(gl).expect("recording init succeeds");
-        assert!(renderer.initialized());
+        assert!(renderer.holds_gl_objects());
         renderer
     }
 
@@ -263,6 +281,22 @@ mod recording_tests {
         let total_calls = gl.recorded().unwrap().calls().len();
         assert_eq!(queue.drain(&gl), 0);
         assert_eq!(gl.recorded().unwrap().calls().len(), total_calls);
+    }
+
+    #[test]
+    fn a_pending_retiree_is_reported_until_drained() {
+        let gl = Gl::recording();
+        let window_post = WindowPostRenderer::new();
+        assert!(!window_post.has_pending_retirees());
+
+        window_post.retire_queue().retire(initialized_renderer(&gl));
+        assert!(
+            window_post.has_pending_retirees(),
+            "a closed pane's renderer waits for a frame: update must ask for one"
+        );
+
+        assert_eq!(window_post.drain_retired(&gl), 1);
+        assert!(!window_post.has_pending_retirees());
     }
 
     #[test]
@@ -316,7 +350,7 @@ mod recording_tests {
         WindowGlTeardown::new(Arc::clone(&window_post), Arc::clone(&toast)).run(&gl);
 
         assert!(queue.is_empty(), "teardown drained the pane queue");
-        assert!(!window_post.lock().unwrap().initialized());
+        assert!(!window_post.lock().unwrap().holds_gl_objects());
         assert_eq!(
             count(&gl, "delete_program"),
             programs,

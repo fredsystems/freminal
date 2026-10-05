@@ -7266,6 +7266,39 @@ mod tests {
         assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
     }
 
+    /// Task 125 review: an image taller than the screen scrolls its own origin
+    /// into scrollback. `C=1` must not park the cursor there, where the next
+    /// write would be invisible: it clamps to the top of the live window.
+    #[test]
+    fn kitty_put_c1_with_an_image_taller_than_the_screen_keeps_the_cursor_on_screen() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let mut handler = TerminalHandler::new(80, 4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.handle_kitty_graphics(kitty_rgba_2x2_cmd(KittyAction::Transmit));
+        handler.handle_data(b"ab");
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(2),
+                display_rows: Some(9),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let screen = handler.buffer().cursor_screen_pos();
+        assert_eq!(screen.y, 0, "clamped to the top of the live window");
+        assert!(
+            handler.buffer().rows().len() > 4,
+            "setup: the image scrolled rows into scrollback"
+        );
+    }
+
     /// Same regression for `a=T` (transmit-and-display) with `C=1`.
     #[test]
     fn kitty_transmit_and_display_c1_at_scrollback_capacity_keeps_cursor_on_image_origin() {

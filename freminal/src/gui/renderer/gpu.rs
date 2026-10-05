@@ -21,6 +21,7 @@ use tracing::error;
 use super::super::atlas::GlyphAtlas;
 use super::errors::{BufferAllocError, GpuInitError, ShaderCompileError, TextureUploadError};
 use super::gl_facade::Gl;
+use super::gl_init_state::GlInitState;
 use super::retire::GlRetireQueue;
 use super::shaders::{
     BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
@@ -156,8 +157,8 @@ struct ImageTexture {
 /// invocation) to create shaders, VAOs, VBOs, and the atlas texture.  Then call
 /// [`TerminalRenderer::draw_with_verts`] every frame.
 pub struct TerminalRenderer {
-    /// Whether GPU resources have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
 
     // ---- instanced background pass ----
     bg_inst_program: Option<glow::Program>,
@@ -272,7 +273,7 @@ impl TerminalRenderer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             // instanced background
             bg_inst_program: None,
             bg_inst_vao: None,
@@ -319,22 +320,80 @@ impl TerminalRenderer {
         }
     }
 
-    /// Return whether GPU resources have been created.
+    /// Return whether `init` succeeded and the renderer can draw.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller (the paint callback) should attempt [`Self::init`]
+    /// now. `false` after a failed `init`: the failure is latched rather than
+    /// retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this renderer currently owns any GL object.
+    ///
+    /// Distinct from [`Self::initialized`]: a renderer whose `init` failed
+    /// midway released what it created, and one that is mid-`init` holds
+    /// objects without being ready. What the retire queue must delete is
+    /// exactly what this reports.
+    #[must_use]
+    pub fn holds_gl_objects(&self) -> bool {
+        self.bg_inst_program.is_some()
+            || self.bg_inst_vao.is_some()
+            || self.bg_unit_quad_vbo.is_some()
+            || self.bg_inst_vbo.iter().any(Option::is_some)
+            || self.deco_program.is_some()
+            || self.deco_vao.is_some()
+            || self.deco_vbo.iter().any(Option::is_some)
+            || self.fg_program.is_some()
+            || self.fg_vao.is_some()
+            || self.fg_vbo.iter().any(Option::is_some)
+            || self.atlas_texture.is_some()
+            || self.img_program.is_some()
+            || self.img_vao.is_some()
+            || self.img_vbo.iter().any(Option::is_some)
+            || !self.image_textures.is_empty()
+            || self.bg_img_program.is_some()
+            || self.bg_img_vao.is_some()
+            || self.bg_img_vbo.is_some()
+            || self.bg_img_texture.is_some()
     }
 
     /// Create all GPU resources.
     ///
-    /// Must be called exactly once, from within a `glow` context (e.g. inside a
-    /// `PaintCallback` or `CreationContext::gl`).
+    /// Must be called from within a `glow` context (e.g. inside a
+    /// `PaintCallback` or `CreationContext::gl`). Any objects a previous
+    /// partial attempt left behind are released first, and a failure
+    /// releases everything this attempt created before returning, so a failed
+    /// `init` never leaks GL objects and a retry starts clean. A failure is
+    /// latched ([`GlInitState::Failed`]); see [`Self::should_attempt_init`].
     ///
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
     /// GL object creation fails.
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_passes(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Run every pass's initialisation. Each pass stores its handles as it
+    /// creates them, so on error the caller can release the partial set.
+    fn init_passes(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         self.init_bg_inst_pass(gl)?;
         self.init_deco_pass(gl)?;
         self.init_fg_pass(gl)?;
@@ -348,7 +407,6 @@ impl TerminalRenderer {
         #[cfg(feature = "gpu-profiling")]
         self.gpu_profile.detect_capability(gl);
 
-        self.initialized = true;
         Ok(())
     }
 
@@ -356,6 +414,10 @@ impl TerminalRenderer {
     /// double-buffered instance VBOs).
     fn init_bg_inst_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
+        // Every handle is stored the moment it exists: a later failure in
+        // this pass (or a later pass) is then cleaned up by
+        // `release_gl_objects` instead of leaking it (Task 125.C16).
+        self.bg_inst_program = Some(program);
 
         self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.bg_inst_u_cell_width = unsafe { gl.get_uniform_location(program, "u_cell_width") };
@@ -366,18 +428,22 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("bg_inst VAO", e))?
         };
+        self.bg_inst_vao = Some(vao);
         let unit_quad_vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg unit-quad VBO", e))?
         };
+        self.bg_unit_quad_vbo = Some(unit_quad_vbo);
         let inst_vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg instance VBO 0", e))?
         };
+        self.bg_inst_vbo[0] = Some(inst_vbo0);
         let inst_vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg instance VBO 1", e))?
         };
+        self.bg_inst_vbo[1] = Some(inst_vbo1);
 
         // Upload the static unit quad (never changes).
         let unit_quad_bytes = unsafe {
@@ -398,17 +464,13 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.bg_inst_program = Some(program);
-        self.bg_inst_vao = Some(vao);
-        self.bg_unit_quad_vbo = Some(unit_quad_vbo);
-        self.bg_inst_vbo = [Some(inst_vbo0), Some(inst_vbo1)];
-
         Ok(())
     }
 
     /// Initialise the decoration pass (shader, VAO, double-buffered VBOs).
     fn init_deco_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, DECO_VERT_SRC, DECO_FRAG_SRC, "decoration")?;
+        self.deco_program = Some(program);
 
         self.deco_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
 
@@ -416,14 +478,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("deco VAO", e))?
         };
+        self.deco_vao = Some(vao);
         let vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("deco VBO 0", e))?
         };
+        self.deco_vbo[0] = Some(vbo0);
         let vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("deco VBO 1", e))?
         };
+        self.deco_vbo[1] = Some(vbo1);
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
@@ -432,9 +497,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.deco_program = Some(program);
-        self.deco_vao = Some(vao);
-        self.deco_vbo = [Some(vbo0), Some(vbo1)];
         // Fresh, zero-sized storage: the next upload into either slot must
         // orphan to size it, whatever the payload (subtask 124.7).
         self.deco_vbo_allocated_bytes = [0, 0];
@@ -448,6 +510,7 @@ impl TerminalRenderer {
     /// (must be initialised first via [`init_bg_inst_pass`]).
     fn init_fg_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
+        self.fg_program = Some(program);
 
         self.fg_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.fg_u_atlas = unsafe { gl.get_uniform_location(program, "u_atlas") };
@@ -456,14 +519,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("foreground VAO", e))?
         };
+        self.fg_vao = Some(vao);
         let vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("foreground instance VBO 0", e))?
         };
+        self.fg_vbo[0] = Some(vbo0);
         let vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("foreground instance VBO 1", e))?
         };
+        self.fg_vbo[1] = Some(vbo1);
 
         // The unit-quad VBO must already exist (created by init_bg_inst_pass).
         let unit_quad_vbo = self.bg_unit_quad_vbo.ok_or_else(|| {
@@ -479,10 +545,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.fg_program = Some(program);
-        self.fg_vao = Some(vao);
-        self.fg_vbo = [Some(vbo0), Some(vbo1)];
-
         Ok(())
     }
 
@@ -495,6 +557,7 @@ impl TerminalRenderer {
                     message: e,
                 })?
         };
+        self.atlas_texture = Some(texture);
 
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -521,14 +584,13 @@ impl TerminalRenderer {
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
 
-        self.atlas_texture = Some(texture);
-
         Ok(())
     }
 
     /// Initialise the image-pass GL resources (shader, VAO, double-buffered VBOs).
     fn init_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let img_program = compile_program(gl, IMG_VERT_SRC, IMG_FRAG_SRC, "image")?;
+        self.img_program = Some(img_program);
 
         let img_u_viewport = unsafe { gl.get_uniform_location(img_program, "u_viewport_size") };
         let img_u_image = unsafe { gl.get_uniform_location(img_program, "u_image") };
@@ -537,14 +599,17 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("image VAO", e))?
         };
+        self.img_vao = Some(img_vao);
         let img_vbo0 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("image VBO 0", e))?
         };
+        self.img_vbo[0] = Some(img_vbo0);
         let img_vbo1 = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("image VBO 1", e))?
         };
+        self.img_vbo[1] = Some(img_vbo1);
 
         unsafe {
             gl.bind_vertex_array(Some(img_vao));
@@ -553,9 +618,6 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.img_program = Some(img_program);
-        self.img_vao = Some(img_vao);
-        self.img_vbo = [Some(img_vbo0), Some(img_vbo1)];
         self.img_u_viewport = img_u_viewport;
         self.img_u_image = img_u_image;
 
@@ -568,6 +630,7 @@ impl TerminalRenderer {
     /// [`Self::update_background_image`].
     fn init_bg_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_IMG_VERT_SRC, BG_IMG_FRAG_SRC, "bg_image")?;
+        self.bg_img_program = Some(program);
 
         self.bg_img_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
         self.bg_img_u_image = unsafe { gl.get_uniform_location(program, "u_bg_image") };
@@ -577,10 +640,12 @@ impl TerminalRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("bg_image VAO", e))?
         };
+        self.bg_img_vao = Some(vao);
         let vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("bg_image VBO", e))?
         };
+        self.bg_img_vbo = Some(vbo);
 
         unsafe {
             gl.bind_vertex_array(Some(vao));
@@ -588,10 +653,6 @@ impl TerminalRenderer {
             setup_img_attribs(gl);
             gl.bind_vertex_array(None);
         }
-
-        self.bg_img_program = Some(program);
-        self.bg_img_vao = Some(vao);
-        self.bg_img_vbo = Some(vbo);
 
         Ok(())
     }
@@ -629,7 +690,7 @@ impl TerminalRenderer {
         bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) -> DrawUploadCounts {
-        if !self.initialized {
+        if !self.init_state.is_ready() {
             error!("TerminalRenderer::draw_with_verts() called before init()");
             #[cfg(feature = "frame-profiling")]
             return UploadByteCounts::default();
@@ -807,7 +868,7 @@ impl TerminalRenderer {
         bg_image_mode: freminal_common::config::BackgroundImageMode,
         intermediate_fbo: Option<glow::Framebuffer>,
     ) -> DrawUploadCounts {
-        if !self.initialized {
+        if !self.init_state.is_ready() {
             error!("TerminalRenderer::draw_with_cursor_only_update() called before init()");
             #[cfg(feature = "frame-profiling")]
             return UploadByteCounts::default();
@@ -1592,12 +1653,22 @@ impl TerminalRenderer {
     /// does not call this directly: a pane's `RenderState` retires its
     /// renderer into the window's [`GlRetireQueue`] when dropped, and the
     /// queue's `drain` (top of `App::update`, or window teardown) calls this
-    /// with the context current. See [`super::retire`]. Idempotent.
+    /// with the context current. See [`super::retire`]. Idempotent, and
+    /// resets the renderer to [`GlInitState::Uninitialized`] (clearing a
+    /// latched failure).
     pub fn destroy(&mut self, gl: &Gl<'_>) {
-        if !self.initialized {
-            return;
-        }
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
 
+    /// Delete every GL object this renderer owns, whatever its init state.
+    ///
+    /// Deliberately **not** guarded by the init state: a renderer whose
+    /// `init` failed partway owns the objects its passes had already created,
+    /// and those must be deleted too (Task 125.C16). Idempotent -- every
+    /// handle is `take()`n -- so it is safe to run on a clean renderer, where
+    /// it issues no GL call. Needs the owning context current.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             // Instanced background resources.
             if let Some(p) = self.bg_inst_program.take() {
@@ -1671,14 +1742,15 @@ impl TerminalRenderer {
                 gl.delete_texture(t);
             }
         }
+        // The texture is gone; a stale size would make the next background
+        // image load believe it can reuse it.
+        self.bg_img_size = None;
 
         // Task 125.8: destroy every still-pending GPU timing query handle
         // (including a half-issued in-flight pair) before this pane's GL
-        // resources are torn down.
+        // resources are torn down. Idempotent: `shutdown` takes the handles.
         #[cfg(feature = "gpu-profiling")]
         self.gpu_profile.shutdown(gl);
-
-        self.initialized = false;
     }
 
     /// Take this pane's GPU timing flush report, if one is due (Task
@@ -1844,11 +1916,23 @@ pub(super) fn compile_program(
 ) -> Result<glow::Program, ShaderCompileError> {
     unsafe {
         let vert = compile_shader(gl, glow::VERTEX_SHADER, vert_src, label)?;
-        let frag = compile_shader(gl, glow::FRAGMENT_SHADER, frag_src, label)?;
+        let frag = match compile_shader(gl, glow::FRAGMENT_SHADER, frag_src, label) {
+            Ok(frag) => frag,
+            Err(e) => {
+                // The vertex shader exists; nothing else will delete it.
+                gl.delete_shader(vert);
+                return Err(e);
+            }
+        };
 
-        let program = gl
-            .create_program()
-            .map_err(|e| ShaderCompileError::CreateProgram { label, message: e })?;
+        let program = match gl.create_program() {
+            Ok(program) => program,
+            Err(message) => {
+                gl.delete_shader(vert);
+                gl.delete_shader(frag);
+                return Err(ShaderCompileError::CreateProgram { label, message });
+            }
+        };
         gl.attach_shader(program, vert);
         gl.attach_shader(program, frag);
         gl.link_program(program);
@@ -2215,8 +2299,8 @@ fn compute_bg_uvs(
 /// When no shader is configured the window FBO is `None` and panes render
 /// directly to egui's framebuffer (unchanged behaviour).
 pub struct WindowPostRenderer {
-    /// Whether GPU resources (program, VAO, VBO) have been created.
-    initialized: bool,
+    /// Where `init` stands: not run, succeeded, or failed (latched).
+    init_state: GlInitState,
 
     // ---- post-processing shader + fullscreen quad ----
     /// Passthrough-or-user post-processing program.
@@ -2281,7 +2365,7 @@ impl WindowPostRenderer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            initialized: false,
+            init_state: GlInitState::Uninitialized,
             program: None,
             vao: None,
             vbo: None,
@@ -2317,10 +2401,36 @@ impl WindowPostRenderer {
         self.retired.drain(gl)
     }
 
-    /// Return `true` if GPU resources have been created.
+    /// Whether any pane renderer is waiting in the retire queue for a frame to
+    /// destroy it.
+    #[must_use]
+    pub fn has_pending_retirees(&self) -> bool {
+        !self.retired.is_empty()
+    }
+
+    /// Return `true` if `init` succeeded.
     #[must_use]
     pub const fn initialized(&self) -> bool {
-        self.initialized
+        self.init_state.is_ready()
+    }
+
+    /// Whether a lazy caller should attempt [`Self::init`] now: `false` after
+    /// a failed `init`, which is latched rather than retried every frame.
+    #[must_use]
+    pub const fn should_attempt_init(&self) -> bool {
+        self.init_state.should_attempt_init()
+    }
+
+    /// Whether this renderer currently owns any GL object (program, VAO, VBO,
+    /// or the window FBO and its texture). Excludes the pane-renderer retire
+    /// queue, which owns other renderers' objects, not this one's.
+    #[must_use]
+    pub const fn holds_gl_objects(&self) -> bool {
+        self.program.is_some()
+            || self.vao.is_some()
+            || self.vbo.is_some()
+            || self.fbo.is_some()
+            || self.fbo_texture.is_some()
     }
 
     /// Return `true` if a user shader is active (the window FBO is in use).
@@ -2343,13 +2453,33 @@ impl WindowPostRenderer {
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation or any GL object creation fails.
+    /// A failure releases everything this attempt created and is latched
+    /// ([`GlInitState::Failed`]); see [`Self::should_attempt_init`].
     pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
+        self.release_gl_objects(gl);
+        match self.init_objects(gl) {
+            Ok(()) => {
+                self.init_state = GlInitState::Ready;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_gl_objects(gl);
+                self.init_state = GlInitState::Failed;
+                Err(e)
+            }
+        }
+    }
+
+    /// Create the passthrough program and fullscreen quad, storing each
+    /// handle as it is created so a failure can be cleaned up.
+    fn init_objects(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(
             gl,
             POST_VERT_SRC,
             POST_PASSTHROUGH_FRAG_SRC,
             "wpr_passthrough",
         )?;
+        self.program = Some(program);
 
         self.u_terminal = unsafe { gl.get_uniform_location(program, "u_terminal") };
         self.u_resolution = unsafe { gl.get_uniform_location(program, "u_resolution") };
@@ -2359,10 +2489,12 @@ impl WindowPostRenderer {
             gl.create_vertex_array()
                 .map_err(|e| BufferAllocError::new("wpr VAO", e))?
         };
+        self.vao = Some(vao);
         let vbo = unsafe {
             gl.create_buffer()
                 .map_err(|e| BufferAllocError::new("wpr VBO", e))?
         };
+        self.vbo = Some(vbo);
 
         // Fullscreen NDC quad: two triangles covering [-1,1]².
         // Vertex layout: vec2 pos (NDC), vec2 uv.
@@ -2387,10 +2519,6 @@ impl WindowPostRenderer {
             gl.bind_vertex_array(None);
         }
 
-        self.program = Some(program);
-        self.vao = Some(vao);
-        self.vbo = Some(vbo);
-        self.initialized = true;
         Ok(())
     }
 
@@ -2612,6 +2740,17 @@ impl WindowPostRenderer {
     /// window's GL context current.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
         self.retired.drain(gl);
+        self.release_gl_objects(gl);
+        self.init_state = GlInitState::Uninitialized;
+    }
+
+    /// Delete this renderer's own GL objects (not the retire queue's),
+    /// whatever its init state, so a partially failed `init` is cleaned up
+    /// too (Task 125.C16). Idempotent: every handle is `take()`n. Also
+    /// forgets the cached FBO size, so a later `ensure_fbo` for the same
+    /// dimensions recreates the FBO this deleted rather than trusting the
+    /// stale cache.
+    pub fn release_gl_objects(&mut self, gl: &Gl<'_>) {
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
@@ -2629,7 +2768,7 @@ impl WindowPostRenderer {
                 gl.delete_texture(t);
             }
         }
-        self.initialized = false;
+        self.fbo_size = None;
     }
 }
 

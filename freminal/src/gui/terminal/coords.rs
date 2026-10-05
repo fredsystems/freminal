@@ -43,6 +43,19 @@ pub(super) const fn visible_window_start_for(
         .saturating_sub(scroll_offset)
 }
 
+/// Retained buffer index of the row the PTY cursor is on.
+///
+/// `snap.cursor_pos.y` is relative to the top of the *live* window (the one the
+/// PTY thread operates on), not an index into the buffer, so it must be offset
+/// by that window's start before it is compared with block rows (which resolve
+/// to retained indices). With scrollback the two differ by
+/// `total_rows - term_height`; comparing them directly selects the wrong block
+/// (Task 125.C12). The live window is used regardless of the GUI's
+/// `scroll_offset`, because the PTY cursor never leaves it.
+pub(super) const fn cursor_buffer_row(snap: &TerminalSnapshot) -> usize {
+    visible_window_start_for(snap, 0).saturating_add(snap.cursor_pos.y)
+}
+
 /// Buffer-absolute row at which a still-running command block's gutter color
 /// should stop (106.2b): the cursor's current row, i.e. the last line of
 /// output the running command has produced so far.
@@ -54,10 +67,11 @@ pub(super) const fn visible_window_start_for(
 /// reached partway down the screen.  Anchoring on the cursor row stops the
 /// coloring at the last output line, as the spec requires.
 ///
-/// The cursor row is screen-relative (`0..term_height`); the buffer-absolute
-/// row is `visible_window_start + cursor_pos.y`.
+/// The cursor row is relative to the live window (`0..term_height`), so the
+/// buffer-absolute row is resolved through [`cursor_buffer_row`], independent
+/// of the GUI's `scroll_offset` (Task 125.C12).
 pub(super) const fn running_block_extent(snap: &TerminalSnapshot) -> usize {
-    visible_window_start(snap) + snap.cursor_pos.y
+    cursor_buffer_row(snap)
 }
 
 /// Convert a screen-relative `(row, col)` — where `col` is a **display
@@ -323,10 +337,19 @@ mod visible_window_start_tests {
 
     #[test]
     fn running_extent_accounts_for_scrollback() {
-        // Scrolled back 10 rows: window start is 66, cursor on screen row 3.
+        // Scrolled back 10 rows: the GUI window starts at 66, but the cursor
+        // lives in the live window (starts at 76), so screen row 3 is buffer
+        // row 79 regardless of how far back the GUI has scrolled.
         let mut snap = snap_with(100, 24, 10);
         snap.cursor_pos.y = 3;
-        assert_eq!(running_block_extent(&snap), 69);
+        assert_eq!(visible_window_start(&snap), 66);
+        assert_eq!(running_block_extent(&snap), 79);
+        snap.scroll_offset = 0;
+        assert_eq!(
+            running_block_extent(&snap),
+            79,
+            "independent of the scroll offset"
+        );
     }
 }
 

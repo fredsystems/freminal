@@ -7,6 +7,8 @@
 //!
 //! - [`gl_facade`] — the GL call boundary: the frozen `glow::HasContext` call
 //!   surface and (from 123.2) the `Gl` recording facade.
+//! - [`gl_init_state`] — [`GlInitState`], the init/ready/failed latch every
+//!   renderer carries so a failing `init` is not retried per frame.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
 //! - [`retire`] — deferred GL teardown (Task 125.C2): [`GlRetireQueue`] (a
@@ -45,6 +47,7 @@
 
 pub mod errors;
 pub mod gl_facade;
+pub mod gl_init_state;
 pub mod gpu;
 #[cfg(feature = "gpu-profiling")]
 pub mod gpu_profiling;
@@ -52,6 +55,8 @@ pub mod gpu_profiling;
 pub mod headless;
 #[cfg(all(test, feature = "gl-recording"))]
 mod headless_workloads;
+#[cfg(all(test, feature = "gl-recording"))]
+mod init_failure_tests;
 // Phase 2 is Linux-only, and the `target_os` gate is load-bearing rather
 // than tidiness: these modules depend on
 // `freminal_windowing::gl_context_offscreen`, which is itself
@@ -72,6 +77,7 @@ pub mod toast_pass;
 pub mod toast_text_pass;
 pub mod vertex;
 
+pub use gl_init_state::GlInitState;
 pub use gpu::{TerminalRenderer, WindowPostRenderer};
 pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};

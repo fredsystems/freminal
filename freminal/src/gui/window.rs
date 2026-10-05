@@ -632,6 +632,21 @@ impl PerWindowState {
             .drain_retired(&Gl::real(gl))
     }
 
+    /// Whether a pane renderer has been retired but not yet destroyed.
+    ///
+    /// A pane closed during this frame's `update` drops its `RenderState`
+    /// after the top-of-frame drain has already run, so its renderer sits in
+    /// the queue until the next frame. If nothing else schedules that frame
+    /// the GL objects would linger on an otherwise idle window, so `update`
+    /// asks for one repaint when this is `true` (the next frame's drain
+    /// empties the queue, so this cannot loop).
+    pub(super) fn has_pending_gl_retirees(&self) -> bool {
+        self.window_post
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_pending_retirees()
+    }
+
     /// Consume this window's state, dropping its panes (which retire their
     /// renderers into the window's queue), and hand back the handles needed
     /// to destroy the window's remaining GL state later, once its context is

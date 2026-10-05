@@ -597,6 +597,9 @@ impl Buffer {
             }
         }
         self.image_cell_count -= cleared;
+        // Sixel/iTerm2 images own no data beyond their cells: free those left
+        // without one. Kitty data outlives its cells, so the caller decides.
+        self.release_unreferenced_cell_owned_images(ids.clone());
         ids
     }
 
@@ -607,9 +610,11 @@ impl Buffer {
     /// Clears only the specific on-screen placement instance the matched
     /// cell belongs to — not every placement sharing the same `image_id`.
     /// With coexisting placements of one image, `d=q`/`d=Q` must not delete
-    /// unrelated placements at other cells or z-indexes. Returns the cleared
-    /// image's id, if any cell matched, so the caller can free the
-    /// underlying store data when requested (`d=Q`).
+    /// unrelated placements at other cells or z-indexes. Cell-owned
+    /// (Sixel/iTerm2) images left without a cell are freed, as for every
+    /// other targeted clear. Returns the cleared image's id, if any cell
+    /// matched, so the caller can free the underlying store data when
+    /// requested (`d=Q`).
     pub fn clear_image_placements_at_cell_with_z(
         &mut self,
         row: usize,
@@ -619,38 +624,13 @@ impl Buffer {
         let placement = self
             .rows
             .get(row)?
-            .cells()
+            .cells_for_image_scan()
             .get(col)?
             .image_placement()
             .filter(|p| p.z_index == z)?;
-        let id = placement.image_id;
-        let instance = placement.placement_instance;
-
-        let mut cleared = 0usize;
-        let (rows, cache, _) = self.rows.split_mut();
-        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Task 119: skip evicted/compact rows — they hold no images.
-            if row.is_compact() || row.is_evicted() {
-                continue;
-            }
-            let mut changed = false;
-            for cell in row.cells_mut() {
-                if cell
-                    .image_placement()
-                    .is_some_and(|p| p.placement_instance == instance)
-                {
-                    cell.clear_image();
-                    cleared += 1;
-                    changed = true;
-                }
-            }
-            if changed {
-                row.dirty = true;
-                *entry = None;
-            }
-        }
-        self.image_cell_count -= cleared;
-        Some(id)
+        let key = PlacementKey::of(placement);
+        self.clear_placements(vec![key]);
+        Some(key.image_id)
     }
 
     /// Clear all image placements with the given z-index.
@@ -891,12 +871,15 @@ impl Buffer {
     /// The row is located by its stable [`RowNumber`], never by an index read
     /// before the call: placement can evict scrollback rows from the top, which
     /// shifts every retained index (Task 125.C7). An origin row that was itself
-    /// evicted clamps to the oldest retained row, as `place_image` does. The
-    /// position is buffer-absolute: DECOM and the visible window are not
-    /// consulted, so the cursor lands on the image origin even when placement
+    /// evicted, or one that scrolled above the live window (an image taller
+    /// than the space below the cursor), clamps to the top of the live
+    /// window: the cursor is never parked in off-screen scrollback, where the
+    /// next write would be invisible. DECOM is not consulted, and an origin
+    /// still inside the window is restored exactly even when placement
     /// scrolled the screen.
     pub fn restore_cursor_to_image_origin(&mut self, result: &PlaceImageResult) {
-        let y = result.origin_row.rows_after(self.rows.base()).unwrap_or(0);
+        let origin = result.origin_row.rows_after(self.rows.base()).unwrap_or(0);
+        let y = origin.max(self.visible_window_start(0));
         self.set_cursor_pos_raw(CursorPos {
             x: result.origin_col,
             y,

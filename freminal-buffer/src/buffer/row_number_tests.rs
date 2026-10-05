@@ -933,15 +933,16 @@ fn assert_cursor_on_image_origin(buf: &Buffer, x: usize) {
 #[test]
 fn restore_cursor_to_image_origin_survives_eviction_during_placement() {
     let mut buf = small_buffer(); // 3 visible + 5 scrollback = 8 rows max
-    for i in 0..6 {
+    for i in 0..7 {
         line(&mut buf, &format!("pad {i}"));
     }
     buf.set_cursor_pos(Some(4), None);
     let expected = buf.cursor_row_number();
 
-    // Stamps rows 6..9 and appends one below: two rows are evicted DURING
-    // the placement, so any index read before it is stale afterwards.
-    let result = place(&mut buf, 1, 3);
+    // Stamps rows 7..8 and appends one below: two rows are evicted DURING
+    // the placement, so any index read before it is stale afterwards. The
+    // origin stays inside the live window, so it is restored exactly.
+    let result = place(&mut buf, 1, 2);
     assert_eq!(
         buf.row_base(),
         RowNumber::new(2),
@@ -967,7 +968,7 @@ fn restore_cursor_to_image_origin_without_eviction_matches_the_pre_placement_cur
     let before = buf.cursor().pos;
     let before_number = buf.cursor_row_number();
 
-    let result = place(&mut buf, 2, 3);
+    let result = place(&mut buf, 2, 1);
     buf.restore_cursor_to_image_origin(&result);
 
     assert_eq!(buf.cursor().pos, before);
@@ -976,7 +977,7 @@ fn restore_cursor_to_image_origin_without_eviction_matches_the_pre_placement_cur
 }
 
 #[test]
-fn restore_cursor_to_image_origin_clamps_an_evicted_origin_to_the_oldest_row() {
+fn restore_cursor_to_image_origin_clamps_an_evicted_origin_to_the_window_top() {
     let mut buf = small_buffer();
     for i in 0..6 {
         line(&mut buf, &format!("pad {i}"));
@@ -991,7 +992,37 @@ fn restore_cursor_to_image_origin_clamps_an_evicted_origin_to_the_oldest_row() {
 
     buf.restore_cursor_to_image_origin(&result);
 
-    assert_eq!(buf.cursor().pos.y, 0, "clamped to the oldest retained row");
+    assert_eq!(
+        buf.cursor().pos.y,
+        buf.visible_window_start(0),
+        "clamped to the top of the live window, not off-screen scrollback"
+    );
+    assert!(buf.cursor().pos.y > 0, "setup: scrollback exists above");
+    assert_eq!(buf.cursor().pos.x, 0);
+}
+
+#[test]
+fn restore_cursor_to_image_origin_for_an_image_taller_than_the_screen_stays_on_screen() {
+    // Task 125 review: an image taller than the space below the cursor
+    // scrolls its own origin above the window without evicting it. C=1 must
+    // not park the cursor in off-screen scrollback.
+    let mut buf = Buffer::new(20, 3);
+    for i in 0..2 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+    let result = place(&mut buf, 1, 8);
+    let origin = result
+        .origin_row
+        .rows_after(buf.row_base())
+        .expect("setup: the origin row must be retained");
+    assert!(
+        origin < buf.visible_window_start(0),
+        "setup: the origin must be above the live window"
+    );
+
+    buf.restore_cursor_to_image_origin(&result);
+
+    assert_eq!(buf.cursor().pos.y, buf.visible_window_start(0));
     assert_eq!(buf.cursor().pos.x, 0);
 }
 

@@ -13,11 +13,15 @@
 //! operation, and asserts the cell survived (or was destroyed *and* counted)
 //! and that `image_cell_count` equals the real number of image cells.
 
+use std::sync::Arc;
+
 use freminal_common::buffer_states::{format_tag::FormatTag, modes::declrmm::Declrmm};
 
 use crate::{
     buffer::Buffer,
-    image_store::{ImagePlacement, ImageProtocol},
+    image_store::{
+        AnimationControl, ImagePlacement, ImageProtocol, ImageSizeMode, InlineImage, next_image_id,
+    },
     row::Row,
 };
 
@@ -236,4 +240,120 @@ fn row_clear_from_keeps_images_left_of_col() {
     row.clear_from(1, &FormatTag::default());
     assert_eq!(row.count_image_cells(), 1);
     assert!(row.cells()[0].has_image());
+}
+
+fn make_image(cols: usize, rows: usize) -> InlineImage {
+    InlineImage {
+        id: next_image_id(),
+        pixels: Arc::new(vec![0u8; cols * rows * 4]),
+        width_px: u32::try_from(cols * 8).unwrap(),
+        height_px: u32::try_from(rows * 16).unwrap(),
+        display_cols: cols,
+        display_rows: rows,
+        size_mode: ImageSizeMode::NativePixels,
+        frames: Vec::new(),
+        root_gap_ms: 0,
+        animation: AnimationControl::default(),
+    }
+}
+
+/// Place an image of `cols` x `rows` at the cursor, returning its id.
+fn place(buf: &mut Buffer, protocol: ImageProtocol, cols: usize, rows: usize) -> u64 {
+    let image = make_image(cols, rows);
+    let id = image.id;
+    let _ = buf.place_image(image, 0, protocol, None, None, 0, None, 1, None);
+    id
+}
+
+/// Number of cells across the buffer that belong to image `id`.
+fn cells_of(buf: &Buffer, id: u64) -> usize {
+    buf.rows
+        .iter()
+        .flat_map(Row::cells_for_image_scan)
+        .filter(|c| c.image_placement().is_some_and(|p| p.image_id == id))
+        .count()
+}
+
+// ── ECH and trailing image cells (Task 125.C11) ─────────────────────────
+
+/// Place a `cols` x 1 image at the start of row 0 and park the cursor at
+/// `(x, 0)`.
+fn image_at_row_start(protocol: ImageProtocol, cols: usize, x: usize) -> (Buffer, u64) {
+    let mut buf = Buffer::new(10, 3);
+    buf.cursor.pos.y = 0;
+    buf.cursor.pos.x = 0;
+    let id = place(&mut buf, protocol, cols, 1);
+    assert_eq!(cells_of(&buf, id), cols, "setup: image cells placed");
+    assert_eq!(buf.image_cell_count, cols);
+    buf.cursor.pos.y = 0;
+    buf.cursor.pos.x = x;
+    (buf, id)
+}
+
+#[test]
+fn ech_beyond_an_image_keeps_its_cells_counted_and_the_image_alive() {
+    // The erased range [4, 7) extends the row's storage with blanks, and the
+    // image cells at [0, 2) become the row's trailing "default blanks". They
+    // are content, not blanks: they must neither be trimmed nor miscounted.
+    for protocol in [ImageProtocol::Sixel, ImageProtocol::Kitty] {
+        let (mut buf, id) = image_at_row_start(protocol, 2, 4);
+
+        buf.erase_chars(3);
+
+        assert_eq!(cells_of(&buf, id), 2, "{protocol:?}: cells survive ECH");
+        assert_eq!(buf.image_cell_count, 2, "{protocol:?}: count is exact");
+        assert!(
+            buf.image_store().contains(id),
+            "{protocol:?}: image still referenced"
+        );
+        // Fails (in debug builds) if the count and the cells disagree.
+        buf.debug_assert_invariants();
+    }
+}
+
+#[test]
+fn ech_over_part_of_a_kitty_image_keeps_the_rest_counted() {
+    let (mut buf, id) = image_at_row_start(ImageProtocol::Kitty, 3, 2);
+
+    // Blank only column 2; columns 0-1 are the row's trailing cells.
+    buf.erase_chars(1);
+
+    assert_eq!(cells_of(&buf, id), 2, "columns 0-1 survive");
+    assert_eq!(buf.image_cell_count, 2, "count is exact");
+    assert!(buf.image_store().contains(id));
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn ech_over_part_of_a_sixel_image_sweeps_and_frees_the_whole_image() {
+    // Non-Kitty images are cleared as a unit when any of their cells is
+    // erased (`collect_and_clear_image_ids_in_rows`); the row trim must
+    // not disturb that accounting.
+    let (mut buf, id) = image_at_row_start(ImageProtocol::Sixel, 3, 2);
+
+    buf.erase_chars(1);
+
+    assert_eq!(cells_of(&buf, id), 0);
+    assert_eq!(buf.image_cell_count, 0);
+    assert!(!buf.image_store().contains(id));
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn ech_over_a_whole_image_clears_its_cells_and_frees_it() {
+    for protocol in [ImageProtocol::Sixel, ImageProtocol::Kitty] {
+        let (mut buf, id) = image_at_row_start(protocol, 2, 0);
+
+        buf.erase_chars(2);
+
+        assert_eq!(cells_of(&buf, id), 0, "{protocol:?}: cells erased");
+        assert_eq!(buf.image_cell_count, 0, "{protocol:?}: count is exact");
+        if protocol == ImageProtocol::Sixel {
+            assert!(
+                !buf.image_store().contains(id),
+                "an image with no cells left must be freed"
+            );
+        }
+        buf.debug_assert_invariants();
+    }
 }
