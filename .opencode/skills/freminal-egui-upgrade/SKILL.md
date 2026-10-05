@@ -10,7 +10,7 @@ re-recording / re-tessellating / re-painting chrome on frames where the
 chrome did not change. To do this it depends on a set of **undocumented,
 internal behaviours** of the egui stack (`egui`, `epaint`, `egui_glow`,
 `egui-winit`) at the exact version pinned in the workspace `Cargo.toml`
-(currently **0.36.1**) — things that are not part of any
+(currently **0.36.2**) — things that are not part of any
 crate's public API contract and can change silently across versions.
 
 The failure mode is the dangerous kind: **no compile error, no headless
