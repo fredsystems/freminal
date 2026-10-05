@@ -514,8 +514,13 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 //     between snapshots, command blocks untouched. The cursor never reaches
 //     the bottom margin, so the buffer never scrolls and no block is ever
 //     evicted: the block count is identical on every iteration, and the
-//     group asserts that after measurement. The `_0` variant is the same work
-//     with no blocks, so `text_change_<N> - text_change_0` is the block cost.
+//     group asserts that after measurement.
+//
+// Each fixture block also records one OSC 133 prompt row, and every snapshot
+// copies the `prompt_rows` slice, so `<case>_<N> - <case>_0` is the combined
+// command-block and prompt-row cost of N shell-integrated commands, not the
+// `CommandBlock` cost alone. That is the realistic quantity: real blocks always
+// come with their prompt rows.
 // ---------------------------------------------------------------
 fn bench_build_snapshot_command_blocks(c: &mut Criterion) {
     const WIDTH: usize = 124;
