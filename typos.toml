@@ -49,3 +49,15 @@ extend-ignore-identifiers-re = [  # NDK - Native  Development Kit
   "mis",
   "PNG"
 ]
+# Abbreviated git commit hashes (e.g. `c3daa1be`) cited in plan documents.
+extend-ignore-re = [
+  "\\b[0-9a-f]{7,40}\\b"
+]
+
+[default.extend-words]
+flate = "flate"             # DEFLATE / the `flate2` crate
+iy = "iy"                   # y-axis loop index (paired with `ix`)
+scrolll = "scrolll"         # Linux evdev `LED_SCROLLL` (sic, doubled L)
+hthe = "hthe"               # `\x1b[H` (CUP) immediately followed by "the" in test input
+anothers = "anothers"       # possessive inside a snake_case test name
+unparseable = "unparseable" # accepted variant spelling of "unparsable"
