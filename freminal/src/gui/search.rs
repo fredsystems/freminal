@@ -989,6 +989,11 @@ mod tests {
                 total_rows: 10,
             }),
             buffer_request_state: crate::gui::view_state::BufferRequestState::Idle,
+            searched_extent: Some(BufferExtent {
+                row_base: RowNumber::new(3),
+                total_rows: 10,
+            }),
+            last_corpus_request_at: Some(1.5),
         };
         state.close();
         assert!(!state.is_open);
@@ -999,6 +1004,8 @@ mod tests {
         assert!(!state.last_searched_case_sensitive);
         assert!(state.cached_full_buffer.is_none());
         assert_eq!(state.last_known_extent, None);
+        assert_eq!(state.searched_extent, None);
+        assert_eq!(state.last_corpus_request_at, None);
         assert_eq!(
             state.buffer_request_state,
             crate::gui::view_state::BufferRequestState::Idle

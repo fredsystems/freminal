@@ -93,6 +93,7 @@ mismatches here).
 | Data flatten for GUI (`data_and_format_data_for_gui`)                                                                              | `bench_data_and_format_for_gui`                                                                                                                                 |
 | `build_snapshot()` — dirty/clean/partial-dirty paths                                                                               | `bench_build_snapshot` (see #405 Part C table above for `build_snapshot_80x24_partial_dirty`)                                                                   |
 | `build_snapshot()` with 10k-row scrollback                                                                                         | `bench_build_snapshot_with_scrollback`                                                                                                                          |
+| `build_snapshot()` with 0 / 500 / 10,000 command blocks (clean and text-change paths; the `Arc<[CommandBlock]>` generation cache)  | `bench_build_snapshot_command_blocks`                                                                                                                           |
 | Alternate-screen transition, end-to-end (parser -> handler -> `build_snapshot`, cache-invalidation tax on `previous_visible_snap`) | `bench_alt_screen_transition_e2e`                                                                                                                               |
 | Real-world scrollback memory (bytes/line, colored corpora)                                                                         | `scrollback_memory_realworld_build_output` / `scrollback_memory_realworld_ls_color` (bare ids, no group; defining function `bench_scrollback_memory_realworld`) |
 | Sustained output at default 10,000-row capacity (`seq 1 200` burst through `handle_incoming_data`, Task 125.12)                    | `bench_sustained_output_at_capacity` (ID `seq_200_burst`)                                                                                                       |
@@ -137,14 +138,27 @@ repeated bursts. They use only public `Buffer` / emulator API and never touch
 `rows` / `row_cache` / `row_block_map`, so they compile across the refactor.
 Baseline name: `before_125_rowstore`.
 
-| Group ID                             | ID(s)                                      | What it isolates                                                                                                                              |
-| ------------------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bench_lf_eviction_at_capacity`      | `plain`                                    | Baseline eviction: front-drain of `rows` / `row_cache` / `row_block_map` and the `merge_cache` reset                                          |
-| `bench_lf_eviction_at_capacity`      | `compressed`                               | Whole scrollback compacted + LZ4-compressed first (the idle-tick entry points), so eviction hits compressed blocks (`gc_unreferenced_blocks`) |
-| `bench_lf_eviction_at_capacity`      | `prompts`                                  | OSC 133-style prompt mark + command block every 20 lines (`prune_evicted_marks` over ~500 marks)                                              |
-| `bench_lf_eviction_at_capacity`      | `image`                                    | One inline image mid-scrollback (`image_store.retain_referenced` rescans every live cell per eviction)                                        |
-| `bench_lf_eviction_scaling`          | `plain/1000`, `plain/10000`, `plain/50000` | Scrollback-limit sweep: O(retained rows) vs O(evicted rows). Flat across limits is the 125.15 acceptance criterion                            |
-| `bench_sustained_output_at_capacity` | `seq_200_burst`                            | End to end: `seq 1 200` bytes (`\r\n`) through `handle_incoming_data` on an at-capacity emulator; the Task 125.10 `sustained-output` path     |
+| Group ID                              | ID(s)                                              | What it isolates                                                                                                                                                                    |
+| ------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bench_lf_eviction_at_capacity`       | `plain`                                            | Baseline eviction: front-drain of `rows` / `row_cache` / `row_block_map` and the `merge_cache` reset                                                                                |
+| `bench_lf_eviction_at_capacity`       | `compressed`                                       | Whole scrollback compacted + LZ4-compressed first (the idle-tick entry points), so eviction hits compressed blocks (`gc_unreferenced_blocks`)                                       |
+| `bench_lf_eviction_at_capacity`       | `prompts`                                          | OSC 133-style prompt mark + command block every 20 lines (`prune_evicted_marks` over ~500 marks)                                                                                    |
+| `bench_lf_eviction_at_capacity`       | `image`                                            | One inline image mid-scrollback (`image_store.retain_referenced` rescans every live cell per eviction)                                                                              |
+| `bench_lf_eviction_scaling`           | `plain/1000`, `plain/10000`, `plain/50000`         | Scrollback-limit sweep: O(retained rows) vs O(evicted rows). Flat across limits is the 125.15 acceptance criterion                                                                  |
+| `bench_sustained_output_at_capacity`  | `seq_200_burst`                                    | End to end: `seq 1 200` bytes (`\r\n`) through `handle_incoming_data` on an at-capacity emulator; the Task 125.10 `sustained-output` path                                           |
+| `bench_lf_eviction_long_run`          | `plain/10000`                                      | One buffer across 2x the live row count of line feeds, so `RowStore` compaction (every ~5,000 evictions) is inside the measurement                                                  |
+| `bench_build_snapshot_command_blocks` | `clean/{0,500,10000}`, `text_change/{0,500,10000}` | `build_snapshot` with N OSC 133 command blocks (one per row). The `Arc<[CommandBlock]>` is cached behind a buffer generation counter: `clean` and `text_change` must stay flat in N |
+
+The at-capacity bursts never run long enough to reach `RowStore` compaction
+(`max(live / 2, 64)` dead slots, about 5,000 evictions at the default limit),
+so `bench_lf_eviction_long_run` exists to put it inside a measurement. Its
+Criterion mean is the amortised cost per line feed; compaction is a stall inside
+a single line feed, which a mean hides. Running the group therefore also prints
+one `[burst-latency limit=N]` line per limit (10,000 and 50,000) with the mean,
+median, p99 and worst 200-line burst, measured by the bench itself (a probe, not
+a test: it asserts nothing). The probe only runs when the filter is empty or
+names `long_run`. Read the worst-burst figure, not the mean, when judging a
+change to compaction or to the `RowStore` layout.
 
 Note: `bench_lf_heavy` / `bench_lf_heavy_bce` (4,100 LFs) no longer reach
 capacity since the default scrollback rose to 10,000 (Task 118); they measure

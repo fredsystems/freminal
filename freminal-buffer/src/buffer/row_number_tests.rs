@@ -1012,3 +1012,91 @@ fn restore_cursor_to_image_origin_ignores_decom() {
 
     assert_eq!(buf.cursor().pos, before, "restore is buffer-absolute");
 }
+
+// ── Popping trailing padding re-issues numbers (review NIT) ──────────────
+
+/// A 10x5 buffer with the cursor addressed down to screen row `down`, which
+/// creates pristine `ScrollFill` padding rows `1..=down` (a line feed would
+/// make them `HardBreak`, which the reclaim pass does not touch).
+fn buffer_with_padding_down_to(down: usize) -> Buffer {
+    let mut buf = Buffer::new(10, 5);
+    buf.set_cursor_pos(Some(0), Some(down));
+    buf
+}
+
+#[test]
+fn growing_the_height_forgets_marks_on_popped_padding_rows() {
+    let mut buf = buffer_with_padding_down_to(3);
+    // Mark the bottom padding row, then return to the top.
+    buf.mark_prompt_row();
+    let _ = buf.start_command_block(None, "gone".to_owned());
+    let marked = buf.cursor_row_number();
+    buf.set_cursor_pos(Some(0), Some(0));
+    assert_eq!(buf.rows().len(), 4, "setup: three padding rows below row 0");
+    assert_eq!(buf.prompt_rows(), [marked]);
+
+    // Growing the window reclaims the padding below the cursor.
+    let _ = buf.set_size(10, 8, 0);
+    assert_eq!(buf.rows().len(), 1, "setup: the padding was popped");
+    assert!(
+        buf.prompt_rows().is_empty(),
+        "a prompt mark on a popped row must not survive"
+    );
+    assert!(
+        buf.command_blocks().is_empty(),
+        "a block that started on a popped row must not survive"
+    );
+
+    // The popped numbers are issued again to new rows; no mark may name them.
+    buf.set_cursor_pos(Some(0), Some(3));
+    assert_eq!(buf.row_index_of(marked), Some(3), "the number is re-issued");
+    assert_eq!(buf.prompt_rows(), []);
+    assert!(buf.command_blocks().is_empty());
+}
+
+#[test]
+fn growing_the_height_keeps_marks_on_surviving_rows() {
+    let mut buf = Buffer::new(10, 5);
+    buf.mark_prompt_row();
+    let _ = buf.start_command_block(None, "kept".to_owned());
+    buf.mark_command_start_row("kept");
+    let kept = buf.cursor_row_number();
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.set_cursor_pos(Some(0), Some(0));
+    assert_eq!(buf.rows().len(), 4, "setup: padding below the marked row");
+
+    let _ = buf.set_size(10, 8, 0);
+
+    assert_eq!(buf.rows().len(), 1, "setup: the padding was popped");
+    assert_eq!(buf.prompt_rows(), [kept]);
+    assert_eq!(buf.command_blocks().len(), 1);
+    assert_eq!(buf.command_blocks()[0].prompt_start_row, kept);
+    assert_eq!(buf.command_blocks()[0].command_start_row, Some(kept));
+}
+
+#[test]
+fn growing_the_height_clamps_a_surviving_blocks_later_boundaries() {
+    let mut buf = Buffer::new(10, 5);
+    buf.mark_prompt_row();
+    let _ = buf.start_command_block(None, "span".to_owned());
+    let top = buf.cursor_row_number();
+    // Output and the finish land on padding rows further down.
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.mark_output_start_row("span");
+    let _ = buf.finish_command_block(Some(0), "span");
+    buf.set_cursor_pos(Some(0), Some(0));
+    assert_eq!(buf.rows().len(), 4, "setup: padding below the marked row");
+
+    let _ = buf.set_size(10, 8, 0);
+
+    assert_eq!(buf.rows().len(), 1, "setup: the padding was popped");
+    let block = &buf.command_blocks()[0];
+    assert_eq!(block.prompt_start_row, top);
+    assert_eq!(
+        block.output_start_row,
+        Some(top),
+        "clamped to the last row that still exists"
+    );
+    assert_eq!(block.end_row, Some(top));
+    assert!(buf.row_index_of(block.end_row.unwrap()).is_some());
+}

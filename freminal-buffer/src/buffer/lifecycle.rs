@@ -23,7 +23,8 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
-use crate::buffer::{Buffer, RowStore};
+use super::command_block_log::CommandBlockLog;
+use crate::buffer::{Buffer, CommandBlocksGeneration, RowStore};
 
 impl Buffer {
     /// Generate default tab stops at every 8 columns for the given width.
@@ -76,7 +77,7 @@ impl Buffer {
             image_store: ImageStore::new(),
             image_cell_count: 0,
             prompt_rows: Vec::new(),
-            command_blocks: VecDeque::new(),
+            command_blocks: CommandBlockLog::new(),
             blocks: HashMap::new(),
             next_block_id: 0,
             decompress_scratch: Vec::new(),
@@ -218,6 +219,36 @@ impl Buffer {
         {
             self.command_blocks.pop_front();
         }
+    }
+
+    /// Forget every mark at or past `next` in the active screen's namespace:
+    /// rows that no longer exist and whose numbers are about to be issued
+    /// again.
+    ///
+    /// Called after trailing blank padding rows are popped
+    /// ([`RowStore::pop`] re-issues a popped row's number). A prompt mark on a
+    /// popped row is dropped, as is a command block that started there; a
+    /// later boundary of a surviving block that fell on a popped row is
+    /// clamped to the last row that still exists, the way an erased range is
+    /// (`drop_command_blocks_in_visible_window`).
+    pub(in crate::buffer) fn prune_marks_from(&mut self, next: RowNumber) {
+        let gone = |row: RowNumber| row.is_alternate() == next.is_alternate() && row >= next;
+
+        self.prompt_rows.retain(|&row| !gone(row));
+
+        // There is always a row below `next` (padding is only popped down to
+        // the cursor row), but `base` is a safe floor regardless.
+        let last_surviving = next.offset(-1).max(self.rows.base());
+        self.command_blocks.retain_mut(|block| {
+            if gone(block.prompt_start_row) {
+                return false;
+            }
+            let clamp = |row: RowNumber| if gone(row) { last_surviving } else { row };
+            block.command_start_row = block.command_start_row.map(clamp);
+            block.output_start_row = block.output_start_row.map(clamp);
+            block.end_row = block.end_row.map(clamp);
+            true
+        });
     }
 
     /// Forget every mark that belongs to the alternate screen: the alternate
@@ -408,8 +439,17 @@ impl Buffer {
 
     /// Read-only view of all stored command blocks, oldest first.
     #[must_use]
-    pub const fn command_blocks(&self) -> &VecDeque<CommandBlock> {
+    pub fn command_blocks(&self) -> &VecDeque<CommandBlock> {
         &self.command_blocks
+    }
+
+    /// Identifies the current contents of [`Self::command_blocks`]: it changes
+    /// whenever a block is added, removed or edited, and only then. A caller
+    /// that derives something expensive from the blocks (the snapshot's
+    /// `Arc<[CommandBlock]>`) can keep it until this value moves.
+    #[must_use]
+    pub const fn command_blocks_generation(&self) -> CommandBlocksGeneration {
+        self.command_blocks.generation()
     }
 
     /// Internal consistency checks for debug builds.

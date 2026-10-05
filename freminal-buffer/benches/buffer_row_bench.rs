@@ -452,6 +452,99 @@ fn bench_lf_eviction_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+// Long-run eviction (Task 125 review S2). The at-capacity benches above time ONE
+// 200-line burst on a freshly built buffer, so the moving head never gets as
+// far as the compaction threshold (`max(live / 2, 64)` dead slots, ~5 000
+// evictions at the default limit) and `RowStore::compact` is never inside a
+// measurement. This bench times one buffer across at least TWO live-buffer
+// lengths of line feeds, so every iteration includes several compactions, and
+// the Criterion mean is the amortised cost per line feed with compaction.
+//
+// The mean hides a stall: compaction moves every live row at once, inside one
+// line feed. `report_burst_latency` is an untimed-by-Criterion probe that
+// times every 200-line burst of the same run and prints the mean, p99 and the
+// worst burst. It is a bench helper, not a test: it asserts nothing, because a
+// latency ceiling is a judgement on a particular machine.
+
+/// Line feeds per long-run iteration: two full live-buffer lengths, plus slack
+/// so the final partial burst cannot leave the second compaction out.
+fn long_run_line_feeds(limit: usize) -> usize {
+    2 * (limit + EVICTION_HEIGHT) + 2 * EVICTION_LF_BURST
+}
+
+/// Print per-burst latency over `long_run_line_feeds(limit)` line feeds,
+/// repeated `passes` times on one at-capacity buffer.
+fn report_burst_latency(limit: usize, passes: usize) {
+    let payload = eviction_payload();
+    let mut buf = build_eviction_buffer(EvictionScenario::Plain, limit);
+    let bursts_per_pass = long_run_line_feeds(limit) / EVICTION_LF_BURST;
+    let mut samples: Vec<Duration> = Vec::with_capacity(bursts_per_pass * passes);
+    for _ in 0..passes {
+        for _ in 0..bursts_per_pass {
+            let start = std::time::Instant::now();
+            eviction_burst(&mut buf, &payload);
+            samples.push(start.elapsed());
+        }
+    }
+    samples.sort_unstable();
+    let total: Duration = samples.iter().sum();
+    let count = u32::try_from(samples.len()).unwrap_or(u32::MAX).max(1);
+    let mean = total / count;
+    let at = |q: f64| {
+        let idx = ((samples.len() as f64) * q) as usize;
+        samples[idx.min(samples.len() - 1)]
+    };
+    // A burst that contains a compaction is far above the median; count the
+    // bursts more than 3x the median as compaction bursts.
+    let median = at(0.5);
+    let slow = samples.iter().filter(|d| **d > median * 3).count();
+    eprintln!(
+        "[burst-latency limit={limit}] {} bursts of {EVICTION_LF_BURST} LF: mean {mean:?}, \
+         median {median:?}, p99 {:?}, max {:?}; {slow} burst(s) > 3x median \
+         (compaction); worst-burst overhead {:?} over the median",
+        samples.len(),
+        at(0.99),
+        samples[samples.len() - 1],
+        samples[samples.len() - 1].saturating_sub(median),
+    );
+}
+
+// IDs: plain/<limit>. Times `long_run_line_feeds(limit)` line feeds (with a
+// short text insert each) on one at-capacity buffer, compactions included.
+fn bench_lf_eviction_long_run(c: &mut Criterion) {
+    let payload = eviction_payload();
+    // The probe runs at registration time, so honour a Criterion name filter
+    // (any positional argument) rather than adding it to every unrelated run.
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    if filters.is_empty() || filters.iter().any(|f| f.contains("long_run")) {
+        for limit in [EVICTION_DEFAULT_LIMIT, 50_000] {
+            report_burst_latency(limit, 3);
+        }
+    }
+
+    let mut group = c.benchmark_group("bench_lf_eviction_long_run");
+    group.measurement_time(Duration::from_secs(5));
+    let limit = EVICTION_DEFAULT_LIMIT;
+    let line_feeds = long_run_line_feeds(limit);
+    group.throughput(Throughput::Elements(line_feeds as u64));
+    assert_eviction_scenario(EvictionScenario::Plain, limit);
+    group.bench_function(BenchmarkId::new("plain", limit), |b| {
+        b.iter_batched_ref(
+            || build_eviction_buffer(EvictionScenario::Plain, limit),
+            |buf| {
+                for _ in 0..line_feeds / EVICTION_LF_BURST {
+                    eviction_burst(buf, &payload);
+                }
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.finish();
+}
+
 // ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
@@ -1472,6 +1565,7 @@ criterion_group!(
         bench_idle_compression_tick,
         bench_lf_eviction_at_capacity,
         bench_lf_eviction_scaling,
+        bench_lf_eviction_long_run,
 );
 
 criterion_main!(benches);

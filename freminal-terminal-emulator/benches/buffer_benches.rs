@@ -499,6 +499,66 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_build_snapshot_command_blocks — Task 125 review (B2)
+//
+// `build_snapshot` copies the buffer's command blocks into the snapshot's
+// `Arc<[CommandBlock]>` on every call; each `CommandBlock` owns heap `String`s
+// (`fid`, `cwd`), so the copy is O(blocks) allocations whether or not any
+// block changed. This group measures that cost with 0 / 500 / 10 000 blocks
+// (10 000 is the retained-block cap at the default scrollback limit):
+//
+//   clean_<N>
+//     Snapshot already built, nothing changed -- the repeat-snapshot path.
+//   text_change_<N>
+//     One byte of text written between snapshots, command blocks untouched --
+//     the common sustained-output case. The `_0` variant is the same work with
+//     no blocks, so `text_change_<N> - text_change_0` is the block cost.
+// ---------------------------------------------------------------
+fn bench_build_snapshot_command_blocks(c: &mut Criterion) {
+    const WIDTH: usize = 124;
+    const HEIGHT: usize = 31;
+
+    // One shell-integration cycle per line: `A`, `B`, `C`, a line of output,
+    // `D;0`. Every block therefore sits on its own row, so up to the retained
+    // row count of blocks can coexist.
+    let build = |blocks: usize| {
+        let mut emulator = TerminalEmulator::dummy_for_bench();
+        emulator.internal.set_win_size(WIDTH, HEIGHT, 8, 16);
+        for i in 0..blocks {
+            let cycle = format!(
+                "\x1b]133;A;freminal=1;fid=bench-{i}\x07$ \x1b]133;B;freminal=1;fid=bench-{i}\x07\
+                 \x1b]133;C;freminal=1;fid=bench-{i}\x07out {i}\r\n\
+                 \x1b]133;D;0;freminal=1;fid=bench-{i}\x07"
+            );
+            emulator.internal.handle_incoming_data(cycle.as_bytes());
+        }
+        let _ = emulator.build_snapshot();
+        emulator
+    };
+
+    let mut group = c.benchmark_group("bench_build_snapshot_command_blocks");
+    group.throughput(Throughput::Elements(1));
+
+    for blocks in [0usize, 500, 10_000] {
+        let mut emulator = build(blocks);
+        let held = emulator.internal.handler.buffer().command_blocks().len();
+        assert_eq!(held, blocks, "fixture must hold exactly {blocks} blocks");
+
+        group.bench_function(BenchmarkId::new("clean", blocks), |b| {
+            b.iter(|| std::hint::black_box(emulator.build_snapshot()));
+        });
+        group.bench_function(BenchmarkId::new("text_change", blocks), |b| {
+            b.iter(|| {
+                emulator.internal.handle_incoming_data(b"x");
+                std::hint::black_box(emulator.build_snapshot())
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_sustained_output_at_capacity — Task 125.12
 //
 // Task 125.10 found that sustained output (`seq`, `cat` of a large file) is
@@ -834,6 +894,7 @@ criterion_group!(
         bench_data_and_format_for_gui,
         bench_build_snapshot,
         bench_build_snapshot_with_scrollback,
+        bench_build_snapshot_command_blocks,
         bench_sustained_output_at_capacity,
         bench_alt_screen_transition_e2e,
         bench_scrollback_memory_realworld,

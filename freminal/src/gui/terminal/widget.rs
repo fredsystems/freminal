@@ -12,7 +12,7 @@ use crate::gui::{
     mouse::PreviousMouseState,
     published_frame_state::PanePointerReportInputs,
     shaping::ShapedLine,
-    view_state::{CellCoord, LogicalCell, ViewState},
+    view_state::{LogicalCell, ViewState},
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -1198,29 +1198,7 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::SelectAll => {
             // Select from the first visible cell to the last visible cell.
-            let window_start = super::coords::visible_window_start(snap);
-            let last_row = window_start + snap.height.saturating_sub(1);
-            // Find the last column on the last visible row.
-            let last_col = crate::gui::view_state::line_boundaries(
-                &snap.visible_chars,
-                snap.height.saturating_sub(1),
-            )
-            .1;
-            view_state.selection.anchor = Some(LogicalCell::at(
-                snap,
-                CellCoord {
-                    col: 0,
-                    row: window_start,
-                },
-            ));
-            view_state.selection.end = Some(LogicalCell::at(
-                snap,
-                CellCoord {
-                    col: last_col,
-                    row: last_row,
-                },
-            ));
-            view_state.selection.is_selecting = false;
+            view_state.selection.select_all(snap);
         }
         ContextMenuAction::OpenUrl(url) => {
             let url_str = url;
@@ -3078,45 +3056,22 @@ impl FreminalTerminalWidget {
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
         let search_error: Option<String> = if view_state.search_state.is_open {
-            // Detect staleness: if the buffer extent (row base + row count)
-            // changed, the cached buffer is out of date and we need a fresh
-            // copy from the PTY thread. `total_rows` alone is not enough: at
-            // scrollback capacity it freezes while `row_base` advances with
-            // every evicted row (Task 125.17).
-            let extent_changed = view_state.search_state.corpus_is_stale(snap.extent());
-            if extent_changed
-                && view_state.search_state.buffer_request_state
-                    == crate::gui::view_state::BufferRequestState::Idle
+            // Corpus exchange. `step_corpus` accepts whatever the PTY thread
+            // has sent (matches are stable row numbers, so a slightly old
+            // corpus is correct for the rows it holds) and asks for a fresh one
+            // only when the buffer extent has moved on and the last request is
+            // old enough. At scrollback capacity the extent advances with every
+            // evicted row, so a reply that must equal the live extent is never
+            // accepted (Task 125 review S1).
+            let reply = search_buffer_rx.try_iter().last();
+            if view_state
+                .search_state
+                .step_corpus(reply, snap.extent(), time)
+                == crate::gui::view_state::CorpusRequest::Send
+                && let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer)
             {
-                view_state.search_state.cached_full_buffer = None;
-                if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                    error!("Failed to request search buffer from PTY: {e}");
-                } else {
-                    view_state.search_state.buffer_request_state =
-                        crate::gui::view_state::BufferRequestState::Pending;
-                }
-            }
-
-            // Try to receive the full buffer (non-blocking). Drain queued
-            // responses and only accept a buffer whose version matches the
-            // current snapshot — otherwise re-request a fresh copy.
-            if let Some(reply) = search_buffer_rx.try_iter().last() {
-                view_state.search_state.buffer_request_state =
-                    crate::gui::view_state::BufferRequestState::Idle;
-
-                if reply.extent == snap.extent() {
-                    view_state.search_state.cached_full_buffer = Some(Arc::new(reply.chars));
-                    view_state.search_state.last_known_extent = Some(reply.extent);
-                } else {
-                    // Stale response — discard and re-request.
-                    view_state.search_state.cached_full_buffer = None;
-                    if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                        error!("Failed to request search buffer from PTY: {e}");
-                    } else {
-                        view_state.search_state.buffer_request_state =
-                            crate::gui::view_state::BufferRequestState::Pending;
-                    }
-                }
+                error!("Failed to request search buffer from PTY: {e}");
+                view_state.search_state.corpus_request_failed();
             }
 
             // Run search if query/mode changed or we just got a new buffer.
@@ -3131,22 +3086,10 @@ impl FreminalTerminalWidget {
                     // Corpus row `i` is buffer row `extent.row_base + i`.
                     let (found, err) =
                         run_search(&query, regex_mode, case_sensitive, buffer, extent.row_base);
-                    view_state.search_state.matches = found;
-                    view_state.search_state.current_match = 0;
-                    view_state.search_state.mark_fresh();
+                    view_state.search_state.replace_matches(found);
                     err
                 } else {
-                    // No cached buffer yet — request one if we haven't already.
-                    if view_state.search_state.buffer_request_state
-                        == crate::gui::view_state::BufferRequestState::Idle
-                    {
-                        if let Err(e) = input_tx.send(InputEvent::RequestSearchBuffer) {
-                            error!("Failed to request search buffer from PTY: {e}");
-                        } else {
-                            view_state.search_state.buffer_request_state =
-                                crate::gui::view_state::BufferRequestState::Pending;
-                        }
-                    }
+                    // No corpus yet: `step_corpus` has already requested one.
                     None
                 }
             } else {

@@ -10,8 +10,6 @@
 //! scrollback row limit, and switching between the primary and alternate
 //! screen buffers.
 
-use std::collections::VecDeque;
-
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
     cursor::CursorState,
@@ -22,6 +20,7 @@ use freminal_common::buffer_states::{
 
 use crate::row::{Row, RowJoin, RowOrigin};
 
+use super::command_block_log::CommandBlockLog;
 use super::reflow_remap::{OldRowMeta, ReflowRemap};
 use super::{Buffer, RowStore, SavedPrimaryState};
 
@@ -177,7 +176,8 @@ impl Buffer {
         if self.kind == BufferType::Alternate
             && let Some(saved) = self.saved_primary.take()
         {
-            let (saved, remap) = Self::resize_saved_primary(saved, new_width, new_height);
+            let (saved, remap) =
+                Self::resize_saved_primary(saved, new_width, new_height, self.scrollback_limit);
             // The primary marks held in `self` belong to the store that was
             // just reflowed / trimmed; translate them with it (primary marks
             // were otherwise left pointing at pre-resize rows, Task 125.14).
@@ -252,6 +252,7 @@ impl Buffer {
         saved: SavedPrimaryState,
         new_width: usize,
         new_height: usize,
+        scrollback_limit: usize,
     ) -> (SavedPrimaryState, Option<ReflowRemap>) {
         // Reconstruct a temporary primary Buffer from the saved state.
         let old_width = saved.rows.first().map_or(new_width, Row::max_width);
@@ -275,14 +276,11 @@ impl Buffer {
             height: old_height,
             cursor: saved.cursor,
             current_tag: FormatTag::default(),
-            // Placeholder limit for this throwaway reflow buffer, kept in sync
-            // with the compiled-in default. NOTE (pre-existing gap): the real
-            // configured limit is not carried on `SavedPrimaryState`, so an
-            // alt-screen resize reflows the saved primary against this default
-            // rather than the user's actual limit. Out of scope for Task 118;
-            // threading the true limit through `SavedPrimaryState` is a
-            // separate cleanup.
-            scrollback_limit: 10_000,
+            // The caller's configured limit, not the compiled-in default: this
+            // buffer's `enforce_scrollback_limit` evicts whatever exceeds it,
+            // so a lower default here would silently discard primary
+            // scrollback on an alt-screen resize.
+            scrollback_limit,
             auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,
@@ -302,7 +300,7 @@ impl Buffer {
             image_store: saved.image_store,
             image_cell_count: saved.image_cell_count,
             prompt_rows: Vec::new(),
-            command_blocks: VecDeque::new(),
+            command_blocks: CommandBlockLog::new(),
             // Task 119: carried through so a resize while on the alternate
             // screen (which reflows/enforces-scrollback-limit against this
             // throwaway `Buffer`, not `self`) keeps any compressed primary
@@ -865,6 +863,12 @@ impl Buffer {
             // the genuinely-newly-visible rows stale.  Invalidate the new
             // visible window instead.
             let new_visible_start = self.rows.len().saturating_sub(new_height);
+            // Re-exposing scrollback can expose rows that were compressed into
+            // a block (Task 119): they are inert placeholders until restored,
+            // and the window is writable (cursor addressing, IL/DL and scroll
+            // rotations touch its rows directly, before any flatten would
+            // decompress them). Restore them now, as the flatten path does.
+            self.ensure_decompressed(new_visible_start..self.rows.len());
             let (rows, cache, _) = self.rows.split_mut();
             for (row, entry) in rows[new_visible_start..]
                 .iter_mut()
@@ -938,6 +942,7 @@ impl Buffer {
     /// stops at the first non-pristine row from the bottom, so it never touches
     /// BCE-filled rows, content, or scrollback.
     fn reclaim_trailing_blank_padding(&mut self) {
+        let mut popped = false;
         while self.rows.len() > self.cursor.pos.y + 1 {
             // Safe: loop guard guarantees rows.len() >= 2 here.
             let Some(last) = self.rows.last() else { break };
@@ -947,9 +952,17 @@ impl Buffer {
                 // the cache entry and block reference (always `None` here,
                 // these rows are never compressed) in lockstep with the row.
                 self.rows.pop();
+                popped = true;
             } else {
                 break;
             }
+        }
+        if popped {
+            // A popped row's number is issued again to whatever is pushed
+            // next (`RowStore::pop` is the one place a number is re-issued).
+            // A mark taken on a popped row would then name that unrelated new
+            // row, so forget every mark at or past the next number to issue.
+            self.prune_marks_from(self.rows.next_number());
         }
     }
 

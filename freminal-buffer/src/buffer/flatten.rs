@@ -1904,7 +1904,11 @@ impl Buffer {
     ///   to the oldest retained row and is reported as
     ///   [`ExtractStart::ClampedToOldest`], so the caller can begin that row at
     ///   column `0` rather than at a column that belonged to vanished text.
-    /// - An `end_row` past the last retained row clamps to the last row.
+    /// - An `end_row` past the last retained row clamps to the last row and is
+    ///   reported as [`ExtractEnd::ClampedToNewest`], so a linear extraction
+    ///   runs to the end of that row rather than stopping at a column that
+    ///   belonged to a row that does not exist yet (a young terminal's window
+    ///   is taller than its text, so Select All ends past the last row).
     /// - `None` when nothing is extractable: either endpoint lies in the other
     ///   screen's row namespace, `start_row` is past the last retained row, or
     ///   `end_row` has itself been evicted (the whole range is gone).
@@ -1922,7 +1926,13 @@ impl Buffer {
         let len = self.rows.len();
         // Both rows share `base`'s namespace, so plain ordering against `base`
         // is meaningful: a row below it has been evicted.
-        let end = end_row.rows_after(base)?.min(len.checked_sub(1)?);
+        let last = len.checked_sub(1)?;
+        let end_index = end_row.rows_after(base)?;
+        let (end, end_edge) = if end_index > last {
+            (last, ExtractEnd::ClampedToNewest)
+        } else {
+            (end_index, ExtractEnd::Exact)
+        };
         let (start, start_edge) = if start_row < base {
             (0, ExtractStart::ClampedToOldest)
         } else {
@@ -1935,6 +1945,7 @@ impl Buffer {
             start,
             end,
             start_edge,
+            end_edge,
         })
     }
 
@@ -1980,7 +1991,10 @@ impl Buffer {
 
             let col_begin = if row_idx == start_row { start_col } else { 0 };
             let col_end = if row_idx == end_row {
-                end_col
+                match range.end_edge {
+                    ExtractEnd::Exact => end_col,
+                    ExtractEnd::ClampedToNewest => cells.len().saturating_sub(1),
+                }
             } else {
                 cells.len().saturating_sub(1)
             };
@@ -2090,6 +2104,15 @@ enum ExtractStart {
     ClampedToOldest,
 }
 
+/// How the end of an extraction range was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractEnd {
+    /// The end row is retained; its end column applies as given.
+    Exact,
+    /// The end row was past the last retained row and clamped to it.
+    ClampedToNewest,
+}
+
 /// A logical extraction range resolved to retained indices.
 #[derive(Debug, Clone, Copy)]
 struct ExtractRange {
@@ -2099,6 +2122,8 @@ struct ExtractRange {
     end: usize,
     /// Whether `start` is the requested row or a clamp to the oldest row.
     start_edge: ExtractStart,
+    /// Whether `end` is the requested row or a clamp to the newest row.
+    end_edge: ExtractEnd,
 }
 
 /// Convert a byte range into a character range using a `byte_to_char` map.

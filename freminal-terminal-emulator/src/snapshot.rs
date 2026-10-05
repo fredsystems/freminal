@@ -428,22 +428,6 @@ impl TerminalSnapshot {
             .filter(|&index| index < self.total_rows)
     }
 
-    /// The logical row number of the first row the snapshot flattened.
-    ///
-    /// That is the retained index `total_rows - term_height - scroll_offset -
-    /// window_extra_rows` (clamped at the oldest row), i.e. the top of the
-    /// window including any fold-support rows flattened above the visible
-    /// one.
-    #[must_use]
-    pub fn window_start_number(&self) -> RowNumber {
-        let start = self
-            .total_rows
-            .saturating_sub(self.term_height)
-            .saturating_sub(self.scroll_offset)
-            .saturating_sub(self.window_extra_rows);
-        self.row_number_at(start)
-    }
-
     /// Construct a blank snapshot suitable as the initial value for an
     /// `ArcSwap<TerminalSnapshot>` before the PTY thread has produced any
     /// real data.
@@ -622,26 +606,5 @@ mod tests {
         let alt = snap_at(1 << 63, 4, 4);
         assert_eq!(alt.retained_index_of(RowNumber::new(5)), None);
         assert_eq!(alt.retained_index_of(RowNumber::ALTERNATE_BASE), Some(0));
-    }
-
-    #[test]
-    fn window_start_number_is_the_top_of_the_flattened_window() {
-        // 10 rows, 4 visible, live bottom: window starts at index 6.
-        let mut snap = snap_at(100, 10, 4);
-        assert_eq!(snap.window_start_number(), RowNumber::new(106));
-        // Scrolled back 2 rows: window starts at index 4.
-        snap.scroll_offset = 2;
-        assert_eq!(snap.window_start_number(), RowNumber::new(104));
-        // Plus 1 fold-support row above the window: index 3.
-        snap.window_extra_rows = 1;
-        assert_eq!(snap.window_start_number(), RowNumber::new(103));
-    }
-
-    #[test]
-    fn window_start_number_clamps_at_the_oldest_row() {
-        let mut snap = snap_at(100, 3, 4);
-        assert_eq!(snap.window_start_number(), RowNumber::new(100));
-        snap.scroll_offset = 50;
-        assert_eq!(snap.window_start_number(), RowNumber::new(100));
     }
 }

@@ -109,6 +109,10 @@ impl TerminalHandler {
         // alternate-screen marks the same way).
         self.real_placements
             .retain(|_, placement| !placement.origin_row.is_alternate());
+        // A resize while the alternate screen was up may have trimmed the
+        // parked primary store's tail; judge the primary placements against
+        // the primary store now that it is active again.
+        self.prune_unissued_real_placements();
         // Restore the main-screen KKP stack.
         if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
             self.kitty_keyboard_stack = saved;

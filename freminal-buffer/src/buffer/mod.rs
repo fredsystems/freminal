@@ -9,7 +9,6 @@ use std::sync::Arc;
 use conv2::ValueFrom;
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
-    command_block::CommandBlock,
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
@@ -24,6 +23,8 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
+use command_block_log::CommandBlockLog;
+pub use command_block_log::CommandBlocksGeneration;
 use compression::BlockSlot;
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
@@ -44,6 +45,7 @@ use freminal_common::buffer_states::{
     modes::{reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2},
 };
 
+mod command_block_log;
 mod compression;
 mod cursor;
 mod erase;
@@ -63,6 +65,9 @@ mod lifecycle;
 mod lines;
 mod reflow_remap;
 mod resize_and_alt;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod resize_and_alt_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod row_number_tests;
@@ -410,7 +415,7 @@ pub struct Buffer {
     /// space as `prompt_rows`); eviction never rewrites them. Blocks whose
     /// prompt row has been evicted are pruned from the front by
     /// [`Buffer::prune_evicted_marks`].
-    pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
+    pub(in crate::buffer) command_blocks: CommandBlockLog,
 
     /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
     /// Compression), keyed by [`BlockId`], each with the number of live rows
@@ -4957,6 +4962,30 @@ mod extract_text_tests {
         let far = RowNumber::new(10_000);
         let text = buf.extract_text(numbers[1], 0, far, 9);
         assert!(text.starts_with("line1\nline2"), "got {text:?}");
+    }
+
+    /// A linear selection whose end lies past the last row (Select All in a
+    /// young terminal) must run to the end of the last row, whatever column
+    /// the phantom end cell carried.
+    #[test]
+    fn extract_text_end_beyond_buffer_runs_to_the_end_of_the_last_row() {
+        // Text on the *last* retained row (no trailing empty cursor row).
+        let mut buf = Buffer::new(10, 3);
+        buf.insert_text(&"abc".chars().map(ascii).collect::<Vec<_>>());
+        assert_eq!(buf.rows().len(), 1, "setup: one retained row");
+        let far = RowNumber::new(10_000);
+        // The phantom end cell carries column 0; it must not cut the row.
+        let text = buf.extract_text(RowNumber::new(0), 0, far, 0);
+        assert_eq!(text, "abc");
+    }
+
+    /// A block keeps its own columns when its end row is clamped.
+    #[test]
+    fn extract_block_text_end_beyond_buffer_keeps_its_columns() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        let text = buf.extract_block_text(numbers[1], 1, far, 2);
+        assert!(text.starts_with("in\nin"), "got {text:?}");
     }
 
     #[test]

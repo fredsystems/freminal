@@ -25,6 +25,7 @@ use freminal_common::buffer_states::{
 };
 use freminal_terminal_emulator::{
     AnimationRunMode, InlineImage,
+    io::SearchCorpus,
     snapshot::{BufferExtent, TerminalSnapshot},
 };
 
@@ -88,8 +89,17 @@ pub enum RowResidency {
     Retained,
     /// The row has been evicted from the front of the same screen's buffer.
     Evicted,
+    /// The row is in the same screen's namespace but lies past the last row
+    /// the buffer has created so far.
+    ///
+    /// This is a normal state, not an error: a young terminal has fewer rows
+    /// than its window is tall, so the cell grid reaches below the last
+    /// retained row. A cell there (Select All's last cell, a drag below the
+    /// text) stays attached to its row *number*, resolves clamped to the last
+    /// retained row, and becomes exact if the buffer later grows to include it.
+    PastEnd,
     /// The row cannot exist in this snapshot's buffer: it is numbered in the
-    /// other screen's namespace, or past the last row.
+    /// other screen's namespace.
     Foreign,
 }
 
@@ -103,12 +113,24 @@ impl LogicalCell {
         }
     }
 
-    /// This cell's retained-index coordinate in `snap`, or `None` if its row
-    /// is not retained there (evicted, or in the other screen's namespace).
+    /// This cell's retained-index coordinate in `snap`.
+    ///
+    /// A [`RowResidency::PastEnd`] row resolves **clamped** to the last
+    /// retained row (keeping its column); the buffer has no row there yet, but
+    /// the cell is not wrong, merely ahead of the buffer. `None` if the row is
+    /// evicted, in the other screen's namespace, or the buffer has no rows.
     #[must_use]
     pub fn resolve(self, snap: &TerminalSnapshot) -> Option<CellCoord> {
-        snap.retained_index_of(self.row)
-            .map(|row| CellCoord { col: self.col, row })
+        match self.residency(snap) {
+            RowResidency::Retained => snap
+                .retained_index_of(self.row)
+                .map(|row| CellCoord { col: self.col, row }),
+            RowResidency::PastEnd => snap
+                .total_rows
+                .checked_sub(1)
+                .map(|row| CellCoord { col: self.col, row }),
+            RowResidency::Evicted | RowResidency::Foreign => None,
+        }
     }
 
     /// Classify this cell's row against `snap`'s buffer.
@@ -116,12 +138,12 @@ impl LogicalCell {
     pub fn residency(self, snap: &TerminalSnapshot) -> RowResidency {
         if snap.retained_index_of(self.row).is_some() {
             RowResidency::Retained
-        } else if self.row.is_alternate() == snap.row_base.is_alternate()
-            && self.row < snap.row_base
-        {
+        } else if self.row.is_alternate() != snap.row_base.is_alternate() {
+            RowResidency::Foreign
+        } else if self.row < snap.row_base {
             RowResidency::Evicted
         } else {
-            RowResidency::Foreign
+            RowResidency::PastEnd
         }
     }
 
@@ -232,14 +254,63 @@ impl SelectionState {
     }
 
     /// The normalised selection as retained buffer indices of `snap`, or
-    /// `None` if there is no selection or an endpoint's row is not retained.
+    /// `None` if there is no selection or an endpoint's row is gone (evicted
+    /// or in the other screen's namespace).
+    ///
+    /// An endpoint past the last retained row (see [`RowResidency::PastEnd`])
+    /// is clamped to the last retained row. A linear selection runs to that
+    /// row's last column -- the selection reaches beyond the text, so it
+    /// covers all of the last row -- while a block keeps its own column.
     ///
     /// Call [`Self::reconcile`] first: it clamps an evicted endpoint to the
     /// oldest retained row, which this does not.
     #[must_use]
     pub fn resolved(&self, snap: &TerminalSnapshot) -> Option<(CellCoord, CellCoord)> {
         let (start, end) = self.normalised()?;
-        Some((start.resolve(snap)?, end.resolve(snap)?))
+        let place = |cell: LogicalCell| {
+            let at = cell.resolve(snap)?;
+            if !self.is_block && cell.residency(snap) == RowResidency::PastEnd {
+                Some(CellCoord {
+                    col: snap.term_width.saturating_sub(1),
+                    row: at.row,
+                })
+            } else {
+                Some(at)
+            }
+        };
+        Some((place(start)?, place(end)?))
+    }
+
+    /// Select the whole visible window of `snap` (Select All).
+    ///
+    /// Runs from the first column of the window's first row to the last
+    /// occupied column of its last row. In a young terminal (fewer rows than
+    /// the window is tall) the last cell lies past the last created row; that
+    /// is kept ([`RowResidency::PastEnd`]), not dropped.
+    pub fn select_all(&mut self, snap: &TerminalSnapshot) {
+        // Mirrors `Buffer::visible_window_start`; fold-support rows above the
+        // window are deliberately not part of the visible window.
+        let window_start = snap
+            .total_rows
+            .saturating_sub(snap.term_height)
+            .saturating_sub(snap.scroll_offset);
+        let last_row = window_start + snap.height.saturating_sub(1);
+        let (_, last_col) = line_boundaries(&snap.visible_chars, snap.height.saturating_sub(1));
+        self.anchor = Some(LogicalCell::at(
+            snap,
+            CellCoord {
+                col: 0,
+                row: window_start,
+            },
+        ));
+        self.end = Some(LogicalCell::at(
+            snap,
+            CellCoord {
+                col: last_col,
+                row: last_row,
+            },
+        ));
+        self.is_selecting = false;
     }
 
     /// Apply the eviction rules against `snap`'s buffer (Task 125.17).
@@ -252,6 +323,10 @@ impl SelectionState {
     ///   for a block (a rectangle's columns belong to no particular row);
     /// - if both endpoints have been evicted nothing of the selection remains
     ///   and it is cleared;
+    /// - an endpoint past the last retained row of the same screen is kept as
+    ///   is ([`RowResidency::PastEnd`]): a young terminal's window is taller
+    ///   than its text, so Select All and a drag below the last line end
+    ///   there legitimately, and [`Self::resolved`] clamps them for display;
     /// - an endpoint that cannot exist in this buffer at all (the other
     ///   screen's row namespace, e.g. after entering the alternate screen) can
     ///   be neither shown nor copied, so the selection is cleared rather than
@@ -386,6 +461,17 @@ pub enum BufferRequestState {
     Pending,
 }
 
+/// What [`SearchState::step_corpus`] wants the caller to do this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorpusRequest {
+    /// Nothing to send.
+    NotNeeded,
+    /// Send an `InputEvent::RequestSearchBuffer` to the PTY thread. The state
+    /// already records the request as in flight; report a failed send with
+    /// [`SearchState::corpus_request_failed`].
+    Send,
+}
+
 /// State owned by the GUI for the search-in-scrollback overlay.
 ///
 /// All fields are private-to-GUI — the PTY thread never reads them.
@@ -445,21 +531,41 @@ pub struct SearchState {
     /// Whether a `RequestSearchBuffer` has been sent and the response is
     /// still pending.  Prevents sending duplicate requests.
     pub buffer_request_state: BufferRequestState,
+    /// The corpus extent [`Self::matches`] was last computed from; `None`
+    /// until a search has run. A newly accepted corpus differs from it, which
+    /// is what makes the matches re-run when the buffer (not the query) moved.
+    pub searched_extent: Option<BufferExtent>,
+    /// Frame time (egui seconds) of the last `RequestSearchBuffer`; `None`
+    /// until one has been sent. Rate-limits refreshes, see
+    /// [`Self::CORPUS_REFRESH_INTERVAL_SECONDS`].
+    pub last_corpus_request_at: Option<f64>,
 }
 
 impl SearchState {
+    /// Shortest time between two corpus requests once one has been accepted.
+    ///
+    /// A corpus is the whole buffer (up to the scrollback limit of rows), so
+    /// fetching one is far too expensive to repeat every frame, and under
+    /// continuous output the buffer advances every frame anyway. Matches are
+    /// addressed by stable row numbers, so a corpus that is a few frames old is
+    /// still correct for every row it contains; rows evicted since simply stop
+    /// resolving.
+    pub const CORPUS_REFRESH_INTERVAL_SECONDS: f64 = 0.25;
+
     /// Returns `true` if a re-search is needed (query or mode changed since
-    /// the last search, or no cached buffer is available yet).
+    /// the last search, a different corpus has been accepted since, or no
+    /// cached buffer is available yet).
     #[must_use]
     pub fn needs_refresh(&self) -> bool {
         self.cached_full_buffer.is_none()
             || self.query != self.last_searched_query
             || self.regex_mode != self.last_searched_regex
             || self.case_sensitive != self.last_searched_case_sensitive
+            || self.searched_extent != self.last_known_extent
     }
 
     /// Whether the cached corpus no longer describes the live buffer, i.e. a
-    /// fresh [`InputEvent::RequestSearchBuffer`] is needed.
+    /// fresh [`InputEvent::RequestSearchBuffer`] would find something new.
     ///
     /// `live` is the current snapshot's [`TerminalSnapshot::extent`]. True when
     /// no corpus has been accepted yet or when its extent differs. See
@@ -473,11 +579,79 @@ impl SearchState {
         self.last_known_extent != Some(live)
     }
 
+    /// Advance the corpus exchange by one frame.
+    ///
+    /// `reply` is the newest corpus the PTY thread has sent since the last
+    /// frame, `live` the current snapshot's extent and `now` the frame time in
+    /// seconds.
+    ///
+    /// A reply is **always accepted**, whatever extent it carries: matches are
+    /// stable row numbers, so a corpus cut from a slightly older buffer is
+    /// correct for every row it contains. (Discarding replies that no longer
+    /// match the live extent, as this once did, starved the search at
+    /// scrollback capacity: the live extent advances with every evicted row, so
+    /// no reply ever matched.) A new request is made only when the live extent
+    /// has moved past the accepted one *and* the last request is at least
+    /// [`Self::CORPUS_REFRESH_INTERVAL_SECONDS`] old; the very first request is
+    /// not delayed.
+    #[must_use]
+    pub fn step_corpus(
+        &mut self,
+        reply: Option<SearchCorpus>,
+        live: BufferExtent,
+        now: f64,
+    ) -> CorpusRequest {
+        if let Some(reply) = reply {
+            self.cached_full_buffer = Some(Arc::new(reply.chars));
+            self.last_known_extent = Some(reply.extent);
+            self.buffer_request_state = BufferRequestState::Idle;
+        }
+        let due = self
+            .last_corpus_request_at
+            .is_none_or(|at| now - at >= Self::CORPUS_REFRESH_INTERVAL_SECONDS);
+        if self.buffer_request_state == BufferRequestState::Idle
+            && self.corpus_is_stale(live)
+            && due
+        {
+            self.buffer_request_state = BufferRequestState::Pending;
+            self.last_corpus_request_at = Some(now);
+            CorpusRequest::Send
+        } else {
+            CorpusRequest::NotNeeded
+        }
+    }
+
+    /// The PTY thread could not be reached: the request promised by
+    /// [`Self::step_corpus`] is not in flight after all.
+    pub const fn corpus_request_failed(&mut self) {
+        self.buffer_request_state = BufferRequestState::Idle;
+    }
+
+    /// Replace [`Self::matches`] with the result of a search and mark them
+    /// up to date.
+    ///
+    /// When only the corpus changed (same query and modes) the focused match
+    /// stays focused if it is still found -- a corpus refresh under live output
+    /// must not snap the user's navigation back to the first match. A changed
+    /// query focuses the first match.
+    pub fn replace_matches(&mut self, found: Vec<MatchSpan>) {
+        let same_search = self.query == self.last_searched_query
+            && self.regex_mode == self.last_searched_regex
+            && self.case_sensitive == self.last_searched_case_sensitive;
+        let focused = if same_search { self.current() } else { None };
+        self.matches = found;
+        self.current_match = focused
+            .and_then(|f| self.matches.iter().position(|m| *m == f))
+            .unwrap_or(0);
+        self.mark_fresh();
+    }
+
     /// Mark the current matches as up-to-date.
     pub fn mark_fresh(&mut self) {
         self.last_searched_query.clone_from(&self.query);
         self.last_searched_regex = self.regex_mode;
         self.last_searched_case_sensitive = self.case_sensitive;
+        self.searched_extent = self.last_known_extent;
     }
 
     /// A cheap fingerprint of everything that determines how the search
@@ -562,6 +736,8 @@ impl SearchState {
         self.last_searched_case_sensitive = false;
         self.cached_full_buffer = None;
         self.last_known_extent = None;
+        self.searched_extent = None;
+        self.last_corpus_request_at = None;
         self.buffer_request_state = BufferRequestState::Idle;
     }
 }
@@ -2784,7 +2960,12 @@ mod tests {
         assert_eq!(lc(0, 100).residency(&snap), RowResidency::Retained);
         assert_eq!(lc(0, 109).residency(&snap), RowResidency::Retained);
         assert_eq!(lc(0, 99).residency(&snap), RowResidency::Evicted);
-        assert_eq!(lc(0, 110).residency(&snap), RowResidency::Foreign);
+        assert_eq!(
+            lc(0, 110).residency(&snap),
+            RowResidency::PastEnd,
+            "same namespace, past the last retained row"
+        );
+        assert_eq!(lc(0, 5_000).residency(&snap), RowResidency::PastEnd);
         let alt = LogicalCell {
             col: 0,
             row: RowNumber::ALTERNATE_BASE,
@@ -2934,6 +3115,176 @@ mod tests {
         assert_eq!(sel.resolved(&snap_at_base(102, 10)), None);
     }
 
+    // ── Rows past the last retained row (young terminals) ────────────────
+
+    /// 3 rows of text in a 20x31 window: `total_rows` (3) < `term_height` (31).
+    fn young_terminal() -> (
+        freminal_terminal_emulator::interface::TerminalEmulator,
+        TerminalSnapshot,
+        crossbeam_channel::Receiver<freminal_common::pty_write::PtyWrite>,
+    ) {
+        use freminal_terminal_emulator::interface::TerminalEmulator;
+        let (mut emu, rx) = TerminalEmulator::new_headless(Some(100));
+        let _ = emu.set_win_size(20, 31, 8, 16);
+        emu.handle_incoming_data(b"alpha\r\nbeta\r\ngamma");
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.total_rows, 3, "setup: a young terminal");
+        assert_eq!(snap.term_height, 31);
+        (emu, snap, rx)
+    }
+
+    fn copy_selection(
+        emu: &freminal_terminal_emulator::interface::TerminalEmulator,
+        sel: &SelectionState,
+    ) -> String {
+        let (start, end) = sel.normalised().unwrap();
+        emu.extract_selection_text(start.row, start.col, end.row, end.col, sel.is_block)
+    }
+
+    #[test]
+    fn same_namespace_row_past_the_end_resolves_clamped_to_the_last_row() {
+        let snap = snap_at_base(100, 10);
+        assert_eq!(lc(4, 110).resolve(&snap), Some(cc(4, 9)));
+        assert_eq!(lc(4, 5_000).resolve(&snap), Some(cc(4, 9)));
+        // Not rows of the other namespace, and not evicted ones.
+        assert_eq!(lc(4, 99).resolve(&snap), None);
+        let alt = LogicalCell {
+            col: 4,
+            row: RowNumber::ALTERNATE_BASE,
+        };
+        assert_eq!(alt.resolve(&snap), None);
+        // A buffer with no rows has nothing to clamp to.
+        assert_eq!(lc(0, 100).resolve(&snap_at_base(100, 0)), None);
+    }
+
+    #[test]
+    fn reconcile_keeps_an_endpoint_past_the_last_row() {
+        let snap = snap_at_base(100, 10);
+        let mut sel = SelectionState {
+            anchor: Some(lc(2, 103)),
+            end: Some(lc(5, 130)),
+            ..SelectionState::default()
+        };
+        sel.reconcile(&snap);
+        assert_eq!(sel.anchor, Some(lc(2, 103)));
+        assert_eq!(
+            sel.end,
+            Some(lc(5, 130)),
+            "stays attached to its row number, not rewritten"
+        );
+    }
+
+    #[test]
+    fn resolved_clamps_a_linear_end_past_the_last_row_to_its_last_column() {
+        let mut snap = snap_at_base(100, 10);
+        snap.term_width = 80;
+        let sel = SelectionState {
+            anchor: Some(lc(2, 103)),
+            end: Some(lc(5, 130)),
+            ..SelectionState::default()
+        };
+        assert_eq!(sel.resolved(&snap), Some((cc(2, 3), cc(79, 9))));
+    }
+
+    #[test]
+    fn resolved_keeps_the_column_of_a_block_end_past_the_last_row() {
+        let mut snap = snap_at_base(100, 10);
+        snap.term_width = 80;
+        let sel = SelectionState {
+            anchor: Some(lc(2, 103)),
+            end: Some(lc(5, 130)),
+            is_block: true,
+            ..SelectionState::default()
+        };
+        assert_eq!(sel.resolved(&snap), Some((cc(2, 3), cc(5, 9))));
+    }
+
+    #[test]
+    fn a_selection_past_the_end_becomes_exact_once_the_buffer_grows() {
+        let sel = SelectionState {
+            anchor: Some(lc(0, 100)),
+            end: Some(lc(3, 105)),
+            ..SelectionState::default()
+        };
+        let mut young = snap_at_base(100, 3);
+        young.term_width = 80;
+        assert_eq!(sel.resolved(&young), Some((cc(0, 0), cc(79, 2))));
+        let grown = snap_at_base(100, 10);
+        assert_eq!(sel.resolved(&grown), Some((cc(0, 0), cc(3, 5))));
+    }
+
+    #[test]
+    fn select_all_survives_reconcile_in_a_young_terminal_and_copies_every_row() {
+        let (emu, snap, _rx) = young_terminal();
+        let mut sel = SelectionState::default();
+        sel.select_all(&snap);
+        let end = sel.end.unwrap();
+        assert!(
+            end.row >= snap.row_number_at(snap.total_rows),
+            "setup: the last cell is past the last retained row"
+        );
+
+        sel.reconcile(&snap);
+
+        assert!(sel.has_selection(), "Select All must not be cleared");
+        let (start, end) = sel.resolved(&snap).unwrap();
+        assert_eq!(start, cc(0, 0));
+        assert_eq!(end.row, 2, "clamped to the last retained row");
+        assert_eq!(end.col, snap.term_width - 1, "a linear end covers the row");
+        assert_eq!(copy_selection(&emu, &sel), "alpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn dragging_below_the_last_row_survives_reconcile_and_copies_the_text() {
+        let (emu, snap, _rx) = young_terminal();
+        // The press lands on "beta"; the drag ends on screen row 30, far below
+        // the last row of text. Both endpoints are formed as the input seams
+        // form them: `snap.row_number_at(buffer_row)`.
+        let mut sel = SelectionState {
+            anchor: Some(LogicalCell::at(&snap, cc(1, 1))),
+            end: Some(LogicalCell::at(&snap, cc(7, 30))),
+            is_selecting: true,
+            ..SelectionState::default()
+        };
+
+        sel.reconcile(&snap);
+
+        assert!(sel.has_selection(), "a drag past the last row is kept");
+        assert!(sel.is_selecting, "the drag is still in progress");
+        let (start, end) = sel.resolved(&snap).unwrap();
+        assert_eq!(start, cc(1, 1));
+        assert_eq!(end.row, 2);
+        assert_eq!(copy_selection(&emu, &sel), "eta\ngamma");
+    }
+
+    #[test]
+    fn dragging_upward_from_below_the_last_row_survives_reconcile() {
+        let (emu, snap, _rx) = young_terminal();
+        let mut sel = SelectionState {
+            anchor: Some(LogicalCell::at(&snap, cc(7, 30))),
+            end: Some(LogicalCell::at(&snap, cc(1, 1))),
+            ..SelectionState::default()
+        };
+        sel.reconcile(&snap);
+        assert!(sel.has_selection());
+        assert_eq!(copy_selection(&emu, &sel), "eta\ngamma");
+    }
+
+    #[test]
+    fn selection_ending_past_the_last_row_is_still_cleared_across_namespaces() {
+        let (_emu, snap, _rx) = young_terminal();
+        let mut sel = SelectionState {
+            anchor: Some(LogicalCell::at(&snap, cc(1, 1))),
+            end: Some(LogicalCell {
+                col: 3,
+                row: RowNumber::ALTERNATE_BASE.saturating_add(30),
+            }),
+            ..SelectionState::default()
+        };
+        sel.reconcile(&snap);
+        assert!(!sel.has_selection());
+    }
+
     #[test]
     fn multi_click_proximity_uses_logical_row_distance() {
         let mut vs = ViewState::new();
@@ -3012,6 +3363,196 @@ mod tests {
             row_base: RowNumber::ZERO,
             total_rows: 51,
         }));
+    }
+
+    // ── Corpus exchange (Task 125 review S1) ─────────────────────────────
+
+    fn extent(row_base: u64, total_rows: usize) -> BufferExtent {
+        BufferExtent {
+            row_base: RowNumber::new(row_base),
+            total_rows,
+        }
+    }
+
+    fn corpus(extent: BufferExtent) -> SearchCorpus {
+        SearchCorpus {
+            extent,
+            chars: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_corpus_request_is_immediate() {
+        let mut st = SearchState::default();
+        assert_eq!(
+            st.step_corpus(None, extent(0, 50), 0.0),
+            CorpusRequest::Send
+        );
+        assert_eq!(st.buffer_request_state, BufferRequestState::Pending);
+        // Nothing more while that request is in flight, however long it takes.
+        assert_eq!(
+            st.step_corpus(None, extent(0, 50), 10.0),
+            CorpusRequest::NotNeeded
+        );
+    }
+
+    /// The bug: at capacity the live extent advances while the request is in
+    /// flight, so the reply never equalled it and was discarded, forever.
+    #[test]
+    fn a_reply_older_than_the_live_extent_is_accepted() {
+        let mut st = SearchState::default();
+        assert_eq!(
+            st.step_corpus(None, extent(100, 1000), 0.0),
+            CorpusRequest::Send
+        );
+        // Three rows were evicted before the reply arrived.
+        let _ = st.step_corpus(Some(corpus(extent(100, 1000))), extent(103, 1000), 0.016);
+        assert!(st.cached_full_buffer.is_some(), "the reply must be kept");
+        assert_eq!(st.last_known_extent, Some(extent(100, 1000)));
+        assert_eq!(
+            st.buffer_request_state,
+            BufferRequestState::Idle,
+            "the exchange completed"
+        );
+        assert!(
+            st.needs_refresh(),
+            "matches must be recomputed from the new corpus even with an unchanged query"
+        );
+    }
+
+    #[test]
+    fn accepting_a_corpus_does_not_re_request_within_the_interval() {
+        let mut st = SearchState::default();
+        let _ = st.step_corpus(None, extent(100, 1000), 0.0);
+        // Reply accepted at once, but the live extent has already moved on.
+        assert_eq!(
+            st.step_corpus(Some(corpus(extent(100, 1000))), extent(101, 1000), 0.016),
+            CorpusRequest::NotNeeded,
+            "rate-limited: the last request was 16 ms ago"
+        );
+        let due = SearchState::CORPUS_REFRESH_INTERVAL_SECONDS;
+        assert_eq!(
+            st.step_corpus(None, extent(120, 1000), due - 0.001),
+            CorpusRequest::NotNeeded
+        );
+        assert_eq!(
+            st.step_corpus(None, extent(120, 1000), due),
+            CorpusRequest::Send,
+            "the interval has elapsed and the extent advanced"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_extent_is_never_re_requested() {
+        let mut st = SearchState::default();
+        let _ = st.step_corpus(None, extent(0, 50), 0.0);
+        let _ = st.step_corpus(Some(corpus(extent(0, 50))), extent(0, 50), 0.01);
+        for frame in 0..100 {
+            let now = 1.0 + f64::from(frame);
+            assert_eq!(
+                st.step_corpus(None, extent(0, 50), now),
+                CorpusRequest::NotNeeded
+            );
+        }
+    }
+
+    /// At capacity under continuous eviction -- the live extent advances every
+    /// frame -- over ten seconds at 60 fps: every reply is accepted, and the
+    /// number of requests stays near the rate limit, not near the frame count.
+    #[test]
+    fn at_capacity_under_continuous_eviction_replies_are_accepted_and_requests_rate_limited() {
+        let mut st = SearchState::default();
+        let mut requests = 0_u32;
+        let mut accepted = 0_u32;
+        // The PTY thread answers one frame after the request, with the extent
+        // it had at that moment.
+        let mut in_flight: Option<BufferExtent> = None;
+        let frames = 600_u32; // 10 s at 60 fps
+        for frame in 0..frames {
+            let now = f64::from(frame) / 60.0;
+            let live = extent(u64::from(frame), 10_000);
+            let reply = in_flight.take().map(corpus);
+            let had_reply = reply.is_some();
+            if st.step_corpus(reply, live, now) == CorpusRequest::Send {
+                requests += 1;
+                in_flight = Some(live);
+            }
+            if had_reply {
+                accepted += 1;
+                assert!(st.cached_full_buffer.is_some());
+            }
+        }
+        assert_eq!(accepted, requests - u32::from(in_flight.is_some()));
+        assert!(accepted >= 30, "replies are consumed, got {accepted}");
+        // 10 s / 0.25 s = 40 requests at most, plus the first.
+        assert!(requests <= 41, "requests must be rate-limited: {requests}");
+        assert!(requests >= 30, "but refreshed regularly: {requests}");
+    }
+
+    #[test]
+    fn a_failed_send_releases_the_pending_request() {
+        let mut st = SearchState::default();
+        assert_eq!(st.step_corpus(None, extent(0, 5), 0.0), CorpusRequest::Send);
+        st.corpus_request_failed();
+        assert_eq!(st.buffer_request_state, BufferRequestState::Idle);
+        // The failed attempt still counts against the rate limit.
+        assert_eq!(
+            st.step_corpus(None, extent(0, 5), 0.01),
+            CorpusRequest::NotNeeded
+        );
+        assert_eq!(st.step_corpus(None, extent(0, 5), 1.0), CorpusRequest::Send);
+    }
+
+    #[test]
+    fn closing_search_resets_the_corpus_exchange() {
+        let mut st = SearchState::default();
+        let _ = st.step_corpus(None, extent(0, 5), 3.0);
+        let _ = st.step_corpus(Some(corpus(extent(0, 5))), extent(0, 5), 3.1);
+        st.close();
+        assert_eq!(st.last_corpus_request_at, None);
+        assert_eq!(st.searched_extent, None);
+        assert_eq!(
+            st.step_corpus(None, extent(0, 5), 3.2),
+            CorpusRequest::Send,
+            "reopening is not delayed by the previous session's rate limit"
+        );
+    }
+
+    fn span(row: u64) -> MatchSpan {
+        MatchSpan {
+            row: RowNumber::new(row),
+            col_start: 0,
+            col_end: 1,
+        }
+    }
+
+    #[test]
+    fn a_corpus_refresh_keeps_the_focused_match_when_it_survives() {
+        let mut st = SearchState {
+            query: "x".to_owned(),
+            ..SearchState::default()
+        };
+        st.replace_matches(vec![span(10), span(20), span(30)]);
+        st.current_match = 1;
+        // Same query, a newer corpus: row 10 was evicted, row 40 is new.
+        st.replace_matches(vec![span(20), span(30), span(40)]);
+        assert_eq!(st.current(), Some(span(20)), "focus follows the row");
+        // The focused match itself vanished: back to the first.
+        st.replace_matches(vec![span(30), span(40)]);
+        assert_eq!(st.current_match, 0);
+    }
+
+    #[test]
+    fn a_changed_query_focuses_the_first_match() {
+        let mut st = SearchState {
+            query: "x".to_owned(),
+            ..SearchState::default()
+        };
+        st.replace_matches(vec![span(10), span(20)]);
+        st.current_match = 1;
+        st.query = "y".to_owned();
+        st.replace_matches(vec![span(10), span(20)]);
+        assert_eq!(st.current_match, 0);
     }
 
     // ── SelectionState::finalize_interrupted_drag tests (Task 116.3, defect 3a) ──

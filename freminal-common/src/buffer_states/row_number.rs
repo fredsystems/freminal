@@ -62,11 +62,25 @@ impl RowNumber {
         self.0 >= Self::ALTERNATE_BASE.0
     }
 
-    /// The row `rows` after this one, or `None` on `u64` overflow.
+    /// Move by a signed number of rows, or `None` if the result would not be a
+    /// row of the **same namespace**.
+    ///
+    /// Unlike [`Self::offset`] this never saturates: a move that would run
+    /// past `0` (primary), below [`Self::ALTERNATE_BASE`] (alternate), past
+    /// `u64::MAX`, or from one namespace into the other has no row to land on,
+    /// and clamping it would silently land on a different row (row `0`, or a
+    /// row of the other screen). Use it where the offset comes from outside
+    /// the buffer.
     #[must_use]
-    pub fn checked_add(self, rows: usize) -> Option<Self> {
-        let rows = u64::value_from(rows).ok()?;
-        self.0.checked_add(rows).map(Self)
+    pub fn checked_offset(self, delta: i64) -> Option<Self> {
+        let magnitude = delta.unsigned_abs();
+        let raw = if delta >= 0 {
+            self.0.checked_add(magnitude)?
+        } else {
+            self.0.checked_sub(magnitude)?
+        };
+        let moved = Self(raw);
+        (moved.is_alternate() == self.is_alternate()).then_some(moved)
     }
 
     /// The row `rows` after this one, saturating at `u64::MAX`.
@@ -173,17 +187,50 @@ mod tests {
     }
 
     #[test]
-    fn checked_add_moves_forward() {
-        assert_eq!(RowNumber::new(10).checked_add(5), Some(RowNumber::new(15)));
-        assert_eq!(RowNumber::new(10).checked_add(0), Some(RowNumber::new(10)));
+    fn checked_offset_moves_both_ways() {
+        let n = RowNumber::new(10);
+        assert_eq!(n.checked_offset(0), Some(n));
+        assert_eq!(n.checked_offset(5), Some(RowNumber::new(15)));
+        assert_eq!(n.checked_offset(-4), Some(RowNumber::new(6)));
+        assert_eq!(n.checked_offset(-10), Some(RowNumber::ZERO));
     }
 
     #[test]
-    fn checked_add_reports_overflow() {
-        assert_eq!(RowNumber::new(u64::MAX).checked_add(1), None);
-        assert_eq!(RowNumber::new(u64::MAX - 1).checked_add(2), None);
+    fn checked_offset_refuses_to_run_past_row_zero() {
+        assert_eq!(RowNumber::new(10).checked_offset(-11), None);
+        assert_eq!(RowNumber::ZERO.checked_offset(-1), None);
+        assert_eq!(RowNumber::ZERO.checked_offset(i64::MIN), None);
+    }
+
+    #[test]
+    fn checked_offset_refuses_to_leave_the_alternate_namespace() {
+        let alt = RowNumber::ALTERNATE_BASE.saturating_add(2);
         assert_eq!(
-            RowNumber::new(u64::MAX - 1).checked_add(1),
+            alt.checked_offset(-2),
+            Some(RowNumber::ALTERNATE_BASE),
+            "the first alternate row is still alternate"
+        );
+        assert_eq!(
+            alt.checked_offset(-3),
+            None,
+            "one row further would be the last primary number"
+        );
+        assert_eq!(RowNumber::ALTERNATE_BASE.checked_offset(-1), None);
+    }
+
+    #[test]
+    fn checked_offset_refuses_to_enter_the_alternate_namespace() {
+        let top_primary = RowNumber::new((1u64 << 63) - 1);
+        assert_eq!(top_primary.checked_offset(0), Some(top_primary));
+        assert_eq!(top_primary.checked_offset(1), None);
+        assert_eq!(RowNumber::new(5).checked_offset(i64::MAX), None);
+    }
+
+    #[test]
+    fn checked_offset_reports_u64_overflow() {
+        assert_eq!(RowNumber::new(u64::MAX).checked_offset(1), None);
+        assert_eq!(
+            RowNumber::new(u64::MAX - 1).checked_offset(1),
             Some(RowNumber::new(u64::MAX))
         );
     }
@@ -237,9 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn rows_after_round_trips_checked_add() {
+    fn rows_after_round_trips_saturating_add() {
         let base = RowNumber::new(42);
-        let n = base.checked_add(17).unwrap_or(base);
+        let n = base.saturating_add(17);
         assert_eq!(n.rows_after(base), Some(17));
     }
 

@@ -55,6 +55,7 @@ use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
 use crossbeam_channel::{Receiver, unbounded};
+use freminal_buffer::buffer::CommandBlocksGeneration;
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
 
 use freminal_common::buffer_states::command_block::CommandBlock;
@@ -198,6 +199,14 @@ pub struct TerminalEmulator {
     /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
     /// directly into the snapshot with a refcount bump — no Vec allocation.
     previous_visible_snap: VisibleSnap,
+    /// The `Arc<[CommandBlock]>` handed to the last snapshot, with the buffer's
+    /// command-block generation it was built from.
+    ///
+    /// Building the slice clones every block (heap `String`s included), which
+    /// is far costlier than the rest of a clean snapshot at the 10 000-block
+    /// cap, while the blocks change only on OSC 133 events and pruning. While
+    /// the generation is unchanged the same `Arc` is handed out again.
+    command_blocks_cache: Option<(CommandBlocksGeneration, Arc<[CommandBlock]>)>,
     /// The flatten cache for the buffer that is **not** currently active.
     ///
     /// On a primary↔alternate switch we cannot reuse the active
@@ -290,6 +299,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -321,6 +331,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -403,6 +414,7 @@ impl TerminalEmulator {
             pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,
+            command_blocks_cache: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             requested_scroll_offset: 0,
@@ -845,15 +857,7 @@ impl TerminalEmulator {
         let last_exit_code = self.internal.handler.last_exit_code();
         let row_base = self.internal.handler.buffer().row_base();
         let prompt_rows = Arc::<[RowNumber]>::from(self.internal.handler.buffer().prompt_rows());
-        let command_blocks: Arc<[CommandBlock]> = self
-            .internal
-            .handler
-            .buffer()
-            .command_blocks()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
+        let command_blocks = self.snapshot_command_blocks();
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
@@ -967,6 +971,27 @@ impl TerminalEmulator {
             cursor_color_override: self.internal.handler.cursor_color_override(),
             pointer_shape: self.internal.handler.pointer_shape(),
         }
+    }
+
+    /// The command blocks for a snapshot, reusing the previous slice when the
+    /// buffer's command-block generation has not moved. See
+    /// [`Self::command_blocks_cache`].
+    fn snapshot_command_blocks(&mut self) -> Arc<[CommandBlock]> {
+        let buffer = self.internal.handler.buffer();
+        let generation = buffer.command_blocks_generation();
+        if let Some((cached, blocks)) = &self.command_blocks_cache
+            && *cached == generation
+        {
+            return Arc::clone(blocks);
+        }
+        let blocks: Arc<[CommandBlock]> = buffer
+            .command_blocks()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        self.command_blocks_cache = Some((generation, Arc::clone(&blocks)));
+        blocks
     }
 
     /// Flatten the visible rows into
@@ -2141,6 +2166,98 @@ mod tests {
         let snap = emu.build_snapshot();
         assert_eq!(snap.retained_index_of(first_row), None);
         assert!(snap.row_base > first_row);
+    }
+
+    // ── command-block slice reuse (Task 125 review B2) ──────────────────────
+
+    /// Drive one `A -> B -> C -> D` cycle with the given correlation id.
+    fn run_cycle(emu: &mut TerminalEmulator, fid: &str, code: i32) {
+        for marker in ["A", "B", "C"] {
+            emu.handle_incoming_data(
+                format!("\x1b]133;{marker};freminal=1;fid={fid}\x07").as_bytes(),
+            );
+        }
+        emu.handle_incoming_data(format!("\x1b]133;D;{code};freminal=1;fid={fid}\x07").as_bytes());
+    }
+
+    #[test]
+    fn unchanged_command_blocks_reuse_the_same_arc() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        let first = emu.build_snapshot();
+        // Text changes, blocks do not: the slice must not be rebuilt.
+        emu.handle_incoming_data(b"hello");
+        let second = emu.build_snapshot();
+        assert!(
+            Arc::ptr_eq(&first.command_blocks, &second.command_blocks),
+            "an unchanged block list must be shared, not re-cloned"
+        );
+        assert_eq!(second.command_blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_new_command_block_rebuilds_the_slice() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        let first = emu.build_snapshot();
+        run_cycle(&mut emu, "t2", 0);
+        let second = emu.build_snapshot();
+        assert!(!Arc::ptr_eq(&first.command_blocks, &second.command_blocks));
+        assert_eq!(second.command_blocks.len(), 2);
+    }
+
+    /// Every marker edits an existing block; the snapshot must show the edit,
+    /// not the cached copy from before it.
+    #[test]
+    fn each_marker_that_edits_a_block_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=e1\x07");
+        let after_a = emu.build_snapshot();
+        assert!(after_a.command_blocks[0].command_start_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;B;freminal=1;fid=e1\x07");
+        let after_b = emu.build_snapshot();
+        assert!(after_b.command_blocks[0].command_start_row.is_some());
+        assert!(after_b.command_blocks[0].output_start_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;C;freminal=1;fid=e1\x07");
+        let after_c = emu.build_snapshot();
+        assert!(after_c.command_blocks[0].output_start_row.is_some());
+        assert!(after_c.command_blocks[0].end_row.is_none());
+
+        emu.handle_incoming_data(b"\x1b]133;D;7;freminal=1;fid=e1\x07");
+        let after_d = emu.build_snapshot();
+        assert_eq!(after_d.command_blocks[0].exit_code, Some(7));
+        assert!(after_d.command_blocks[0].end_row.is_some());
+    }
+
+    #[test]
+    fn pruning_blocks_with_evicted_rows_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        let _ = emu.set_win_size(20, 5, 8, 16);
+        run_cycle(&mut emu, "old", 0);
+        let before = emu.build_snapshot();
+        assert_eq!(before.command_blocks.len(), 1);
+        // Push the block's rows out of the 10-row scrollback.
+        for _ in 0..40 {
+            emu.handle_incoming_data(b"filler\r\n");
+        }
+        let after = emu.build_snapshot();
+        assert!(after.row_base > before.row_base, "setup: rows were evicted");
+        assert!(
+            after.command_blocks.is_empty(),
+            "the evicted block must not linger in a cached slice"
+        );
+    }
+
+    #[test]
+    fn clearing_the_screen_over_a_block_is_visible_in_the_next_snapshot() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        run_cycle(&mut emu, "t1", 0);
+        assert_eq!(emu.build_snapshot().command_blocks.len(), 1);
+        // ED 2 drops blocks anchored on the visible screen.
+        emu.handle_incoming_data(b"\x1b[2J");
+        assert!(emu.build_snapshot().command_blocks.is_empty());
     }
 
     #[test]

@@ -345,30 +345,7 @@ impl super::FreminalGui {
                     return;
                 };
                 let snap = pane.arc_swap.load();
-                // `visible_window_start` is `pub(super)` in `gui::terminal::coords`
-                // (private module); inline the same formula here.  See
-                // `gui::terminal::coords::visible_window_start` for the canonical
-                // definition and rationale.
-                let window_start = snap
-                    .total_rows
-                    .saturating_sub(snap.term_height)
-                    .saturating_sub(snap.scroll_offset);
-                let last_row = window_start + snap.height.saturating_sub(1);
-                let last_col = crate::gui::view_state::line_boundaries(
-                    &snap.visible_chars,
-                    snap.height.saturating_sub(1),
-                )
-                .1;
-                // Selection endpoints are stored as stable logical rows.
-                pane.view_state.selection.anchor = Some(crate::gui::view_state::LogicalCell {
-                    col: 0,
-                    row: snap.row_number_at(window_start),
-                });
-                pane.view_state.selection.end = Some(crate::gui::view_state::LogicalCell {
-                    col: last_col,
-                    row: snap.row_number_at(last_row),
-                });
-                pane.view_state.selection.is_selecting = false;
+                pane.view_state.selection.select_all(&snap);
             }
             // Everything else (OpenSearch, SaveLayout, etc.) needs full GUI
             // state — route through the existing deferred-action pipeline.

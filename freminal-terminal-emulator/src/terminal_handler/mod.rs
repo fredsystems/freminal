@@ -285,6 +285,10 @@ pub struct TerminalHandler {
     /// `placement_id`). Enables relative placements (parent link) and
     /// cascade delete (Task 100.4a).
     real_placements: HashMap<(u64, u32), RealPlacement>,
+    /// The buffer's row base when `real_placements` was last pruned of entries
+    /// whose origin row has been evicted. Pruning only runs when the base has
+    /// moved off this value; see `TerminalHandler::prune_evicted_real_placements`.
+    placement_prune_base: RowNumber,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -441,6 +445,7 @@ impl TerminalHandler {
             kitty_state: None,
             virtual_placements: HashMap::new(),
             real_placements: HashMap::new(),
+            placement_prune_base: RowNumber::ZERO,
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
@@ -1216,6 +1221,8 @@ impl TerminalHandler {
         for output in outputs {
             self.process_output(output);
         }
+        // Once per batch, not per line feed: see the method's cost note.
+        self.prune_evicted_real_placements();
     }
 
     /// Process a single `TerminalOutput` command

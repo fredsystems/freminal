@@ -1212,9 +1212,14 @@ mod tests {
     }
 
     /// ED 3 must not discard a block that still has rows in the visible
-    /// window. Growing the window upward over compressed rows leaves them
-    /// compressed until something reads them, so the block straddles the
-    /// scrollback boundary when `erase_scrollback` evicts everything above it.
+    /// window. If the window reaches up over compressed rows, the block
+    /// straddles the scrollback boundary when `erase_scrollback` evicts
+    /// everything above it.
+    ///
+    /// A height grow no longer produces that state (it restores the blocks it
+    /// re-exposes, Task 125 review), so the window is widened directly here:
+    /// the guard in `erase_scrollback` is defence in depth for any path that
+    /// leaves a compressed row inside the window, and must keep working.
     #[test]
     fn erase_scrollback_keeps_a_block_that_straddles_the_visible_window() {
         let mut buf = buffer_with_compact_scrollback(14);
@@ -1223,8 +1228,8 @@ mod tests {
         assert!(buf.compress_scrollback_block(0, visible_start));
         let id = only_block_id(&buf);
 
-        // Grow the window over the last compressed rows.
-        let _ = buf.set_size(20, 3 + 4, 0);
+        // Widen the window over the last compressed rows (see above).
+        buf.height = 3 + 4;
         let new_start = buf.visible_window_start(0);
         assert!(
             new_start > 0 && new_start < visible_start,
