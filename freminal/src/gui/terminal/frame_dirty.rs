@@ -191,21 +191,30 @@ impl ChangedRows {
     /// `RenderWorkClass::Reuse` precisely because it still took the
     /// bounded path).
     ///
-    /// [`Self::All`] never reaches this call site in practice —
-    /// `evaluate_frame_dirty_state`'s `bounded_change` provably excludes
-    /// it before [`VertexRebuild::Bounded`] is ever selected — but the
-    /// fallback here is `0` rather than a panic: a wrong profiling count
-    /// is a cosmetic defect in a `#[cfg(feature = "frame-profiling")]`
-    /// diagnostic, not a rendering correctness bug, so it does not
-    /// warrant treating an unreachable-in-practice shape as a hard error.
+    /// [`Self::All`] means "treat the whole pane as changed", so it must
+    /// never be bucketed as the *zero* changed-row bucket -- that would
+    /// record the largest possible rebuild as the smallest. It never reaches
+    /// this call site in practice (`evaluate_frame_dirty_state`'s
+    /// `bounded_change` provably excludes it before [`VertexRebuild::Bounded`]
+    /// is ever selected), so debug builds assert that; release builds map it
+    /// to `usize::MAX`, which lands in the largest histogram bucket
+    /// (`ChangedRowBucket::MoreThanSixtyFour`) instead of corrupting the
+    /// zero bucket. A wrong profiling count is a cosmetic defect in a
+    /// `#[cfg(feature = "frame-profiling")]` diagnostic, not a rendering
+    /// correctness bug, so release does not panic.
     ///
     /// Feature-gated (its only caller, `widget.rs`'s live-profiling call
     /// site, is) rather than left compiled-but-unused in a default build.
     #[cfg(feature = "frame-profiling")]
     pub(super) const fn bounded_row_count(&self) -> usize {
+        debug_assert!(
+            !matches!(self, Self::All),
+            "ChangedRows::All must not reach a Bounded rebuild"
+        );
         match self {
             Self::Rows(rows) => rows.len(),
-            Self::None | Self::All => 0,
+            Self::None => 0,
+            Self::All => usize::MAX,
         }
     }
 }
@@ -1250,11 +1259,26 @@ mod evaluate_frame_dirty_state_tests {
     }
 
     /// `ChangedRows::All` never reaches this call site in practice (see
-    /// the method's doc), but the fallback must still be `0`, not a panic.
-    #[cfg(feature = "frame-profiling")]
+    /// the method's doc). Debug builds assert that.
+    #[cfg(all(feature = "frame-profiling", debug_assertions))]
     #[test]
-    fn bounded_row_count_of_all_is_zero() {
-        assert_eq!(ChangedRows::All.bounded_row_count(), 0);
+    #[should_panic(expected = "ChangedRows::All must not reach a Bounded rebuild")]
+    fn bounded_row_count_of_all_asserts_in_debug() {
+        let _ = ChangedRows::All.bounded_row_count();
+    }
+
+    /// Release builds must not panic, and must never report the whole-pane
+    /// case as the zero bucket: it maps to the largest bucket.
+    #[cfg(all(feature = "frame-profiling", not(debug_assertions)))]
+    #[test]
+    fn bounded_row_count_of_all_is_the_largest_bucket_in_release() {
+        use crate::gui::renderer::profiling::ChangedRowBucket;
+        let count = ChangedRows::All.bounded_row_count();
+        assert_eq!(count, usize::MAX);
+        assert_eq!(
+            ChangedRowBucket::from_count(count),
+            ChangedRowBucket::MoreThanSixtyFour
+        );
     }
 
     /// The justification for deleting `last_rendered_line_widths` (Task

@@ -400,6 +400,40 @@ prompts and command blocks, and every 25th burst idles for 0.15 s instead of
 compaction and compression engage. All three terminals receive identical
 bytes; the shell, not `wtype`, expands the `\033` and `\007` escapes.
 
+Freminal only honours an OSC 133 `A`/`B`/`C`/`D` marker tagged
+`freminal=1;fid=<id>` (`parse_ftcs_params`), so the workload emits
+`133;A;freminal=1;fid=$n`, `133;B;freminal=1;fid=$n`,
+`133;C;freminal=1;fid=$n` and `133;D;0;freminal=1;fid=$n`, with `$n` the burst
+counter. An earlier revision emitted bare `133;A` and friends, which Freminal
+silently ignored: it recorded no prompt row and no command block, so the
+"marked" samples were plain `sustained-output` under another name. The printf
+formats live in `workloads.sh` (`TASK125_MARKED_PROMPT_FORMAT` and
+`TASK125_MARKED_FINISH_FORMAT`); the integration test
+`freminal-terminal-emulator/tests/task125_marked_workload.rs` reads that file,
+expands exactly those formats, replays the bytes through a headless emulator
+and asserts that every burst yields a prompt row and a finished command block
+with exit code 0, so the workload cannot regress to untagged marks without
+failing `cargo test`. The peers tolerate the extra options: Ghostty's OSC 133
+parser reads options by key and ignores unknown or malformed ones; WezTerm
+ignores unknown `key=value` options on `A`, `C` and `D`, but treats a `B`
+that carries any parameter as an unrecognised sequence (it is dropped without
+a log line under the default `log_unknown_escape_sequences = false`), so
+WezTerm records the prompt and output marks but not the command-start mark.
+That is one byte-trivial sequence per burst; it is recorded here so a
+Freminal-vs-WezTerm `sustained-output-marked` gap is read with it in mind.
+This was checked against the upstream `main` sources of both projects, not the
+pinned builds.
+
+The `scrollback` workload preloads `seq 1 10000` and then alternates
+**Shift+PageUp** and **Shift+PageDown** (`wtype -M shift -k Page_Up -m shift`).
+Plain PageUp/PageDown is forwarded to the shell by all three terminals and
+leaves the viewport at the bottom, which measures an idle prompt. Shift+PageUp
+and Shift+PageDown are scrollback in Freminal (default `scroll_page_up` /
+`scroll_page_down` bindings), WezTerm (`ScrollByPage`) and Ghostty
+(`scroll_page_up` / `scroll_page_down`); the fixtures bind only F6-F9, which
+`wezterm show-keys` and `ghostty +list-keybinds` confirm against the rendered
+fixtures.
+
 Do not run seven 60-second captures for every workload.
 
 1. `screen` runs three 20-second samples after a five-second warm-up for every
@@ -431,10 +465,59 @@ attribution without reading the operator's normal logging configuration or
 mixing sequential runs.
 
 Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
-summary uses seed 125 and 10,000 bootstrap resamples. Screening selects work; a
+summary uses seed 125 and 10,000 bootstrap resamples (`summarize.py`, covered
+by `test_summarize.py`: `python3 -m unittest
+assets/profiling/task125/test_summarize.py`). Screening selects work; a
 material final gap is declared only from confirmation when the paired median
 task-clock delta is at least 0.5 ms per wall-second and its bootstrap 95%
-confidence interval excludes zero.
+confidence interval excludes zero. A bootstrap percentile interval over fewer
+than five paired samples is only the spread of the resampled values, so
+screening output (three repeats) labels it `range=[low,high]` and flags a
+material screen result as "screen only"; only samples of five or more print
+`ci95=[low,high]`. The machine-readable result keeps its `ci95_low` and
+`ci95_high` field names and adds `n_pairs` and `interval_kind` (`range` or
+`ci95`).
+
+### Sample integrity checks
+
+The driver fails a sample, rather than recording a number that does not mean
+what its label says:
+
+- **Workload liveness.** Shell-driven workloads (`sparse-row`, `btop`,
+  `sustained-output*`, `streaming-output`) must have a live child of the
+  fixture shell both before the interval and at its end. The typing and
+  scrollback input loops must still be running half a second after they start
+  and must reach their deadline.
+- **Focus.** Synthetic input is sent only to the window this run spawned. Every
+  input-loop iteration (and the pre-warm-up typing) first checks that the
+  Hyprland active window is that window, and the loop stops, failing the
+  sample, if focus has left it. The loop PID is recorded for cleanup, and the
+  loops start only after every counter is armed and every discovery call has
+  finished, so the interval contains the whole workload and none of the setup.
+- **Renderer identity.** Each Freminal sample's `Active OpenGL renderer` line is
+  parsed from `freminal.stdout.log` and saved as `gl-renderer`. A software
+  rasteriser (`llvmpipe`, `softpipe`, `swrast`) or a renderer that does not
+  contain `TASK125_EXPECTED_RENDERER` (default `AMD Radeon RX 7900 XTX`) fails
+  the sample.
+- **GPU fdinfo.** A terminal process that exposes no `drm-engine-gfx` fdinfo on
+  the expected render node fails the sample. Set
+  `TASK125_ALLOW_GPU_UNAVAILABLE=1` to record it anyway; `gpu_gfx_ns` is then
+  blank, never zero, and `gpu_status` says `unavailable`.
+- **Counter sanity.** A `drm-engine-gfx` counter that goes backwards, or a
+  terminal GUI thread created during the interval, invalidates the sample.
+
+The sample CSV therefore ends with `gpu_status` and `exited_tids` columns after
+`grid_cols`; `summarize.py` reads only the columns it needs and ignores the
+rest. `environment.txt` records the resolved path and SHA-256 of the Freminal,
+WezTerm and Ghostty binaries, the Freminal `RUST_LOG` filter, and the expected
+renderer string.
+
+Cleanup runs on every exit path: INT and TERM now exit after cleanup (they
+previously resumed the series), one failed kill does not stop the rest, and the
+background `sudo perf` collectors and input loops are stopped along with the
+terminal process trees. Every launched terminal is owned by its PID and start
+time from the instant it is spawned, so an abort while waiting for its window
+still tears it down.
 
 ### Scheduler and GPU counters
 
@@ -455,11 +538,14 @@ through `sudo`. It never remounts or changes tracefs permissions, and never
 relables context switches as wakeups.
 
 The wakeup filter and integrity baseline are built from the same thread-list
-snapshot after warm-up. A different thread list at interval end invalidates the
-sample. A thread created and destroyed entirely inside the interval cannot be
-detected by endpoint comparison; this is a residual limitation of aggregate
-`perf stat` filtering and must be considered if later profiles show dynamic
-thread creation.
+snapshot after warm-up. Only a thread **created** during the interval
+invalidates the sample, because its wakeups were not in the filter. A thread
+that exits during the interval was in the filter from the start and its CPU
+time folds into the process, so exits do not invalidate the sample; they are
+counted in the `exited_tids` CSV column instead. A thread created and
+destroyed entirely inside the interval cannot be detected by endpoint
+comparison; this is a residual limitation of aggregate `perf stat` filtering
+and must be considered if later profiles show dynamic thread creation.
 
 For external GPU comparison, `amdgpu_top --json --process --no-pc` discovers
 the discrete Navi 31 device and process DRM clients without enabling GRBM

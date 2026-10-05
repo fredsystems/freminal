@@ -267,9 +267,13 @@ pub struct CompletedSample {
 impl CompletedSample {
     /// How many frames elapsed between issue and availability -- the
     /// "query latency in frames" the plan calls for reporting.
+    ///
+    /// Saturating: [`GpuQueryRing::poll`] never completes a sample before its
+    /// issue frame, but this reporting-only accessor must not panic (debug) or
+    /// wrap to a huge latency (release) if a caller constructs one that did.
     #[must_use]
     pub const fn latency_frames(&self) -> u64 {
-        self.completed_frame - self.issue_frame
+        self.completed_frame.saturating_sub(self.issue_frame)
     }
 
     /// The measured GPU duration in nanoseconds (`end_ns - start_ns`).
@@ -1086,6 +1090,20 @@ mod tests {
         assert_eq!(sample.latency_frames(), 3);
         assert_eq!(sample.duration_ns(), 400);
         assert!(ring.is_empty());
+    }
+
+    /// A sample that claims completion before issue must report zero latency,
+    /// not panic in debug or wrap to a huge value in release.
+    #[test]
+    fn latency_frames_saturates_when_completed_before_issued() {
+        let sample = CompletedSample {
+            phase: PHASE,
+            issue_frame: 10,
+            completed_frame: 7,
+            start_ns: 0,
+            end_ns: 0,
+        };
+        assert_eq!(sample.latency_frames(), 0);
     }
 
     // ── GpuQueryRing: no same-frame availability/read calls ──────────────

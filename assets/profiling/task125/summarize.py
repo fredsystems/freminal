@@ -14,6 +14,10 @@ from pathlib import Path
 BOOTSTRAP_SEED = 125
 BOOTSTRAP_RESAMPLES = 10_000
 MATERIAL_FLOOR_MS_PER_SECOND = 0.5
+# A bootstrap percentile interval over fewer paired samples than this is only
+# the spread of the resampled values, not a meaningful 95% confidence interval.
+# Screening (3 repeats) therefore reports a "range"; confirmation (7) a "ci95".
+MIN_PAIRS_FOR_CI95 = 5
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,12 @@ class Sample:
 
 
 def read_samples(path: Path) -> list[Sample]:
+    """Read the columns this summary needs.
+
+    The capture CSV also carries cycles, wakeups, GPU time, grid size,
+    ``gpu_status`` and ``exited_tids``; ``DictReader`` ignores every column not
+    named below, so adding capture columns never breaks the summary.
+    """
     with path.open(newline="", encoding="utf-8") as handle:
         rows = csv.DictReader(handle)
         return [
@@ -99,16 +109,34 @@ def summarize(samples: list[Sample], expected_repeats: int) -> list[dict[str, ob
             {
                 "workload": workload,
                 "peer": peer,
+                "n_pairs": len(deltas),
                 "median_delta_ms_per_second": median_delta,
+                # The field names stay `ci95_*` for stability; `interval_kind`
+                # says whether the bounds are a real interval or just a range.
+                "interval_kind": "ci95"
+                if len(deltas) >= MIN_PAIRS_FOR_CI95
+                else "range",
                 "ci95_low": low,
                 "ci95_high": high,
                 # This remediation gate is intentionally one-sided: Freminal
                 # being materially faster does not require a fix.
-                "material": low > 0.0
-                and median_delta >= MATERIAL_FLOOR_MS_PER_SECOND,
+                "material": low > 0.0 and median_delta >= MATERIAL_FLOOR_MS_PER_SECOND,
             }
         )
     return results
+
+
+def format_result(result: dict[str, object]) -> str:
+    return (
+        "{workload}: peer={peer} n={n_pairs} delta={median_delta_ms_per_second:.6f} "
+        "ms/s {interval_kind}=[{ci95_low:.6f},{ci95_high:.6f}] "
+        "material={material}".format(**result)
+        + (
+            " (screen only: confirm before claiming)"
+            if result["interval_kind"] == "range" and result["material"]
+            else ""
+        )
+    )
 
 
 def main() -> None:
@@ -117,12 +145,7 @@ def main() -> None:
     parser.add_argument("--expected-repeats", type=int, required=True)
     args = parser.parse_args()
     for result in summarize(read_samples(args.csv_path), args.expected_repeats):
-        print(
-            "{workload}: peer={peer} delta={median_delta_ms_per_second:.6f} "
-            "ms/s ci95=[{ci95_low:.6f},{ci95_high:.6f}] material={material}".format(
-                **result
-            )
-        )
+        print(format_result(result))
 
 
 if __name__ == "__main__":

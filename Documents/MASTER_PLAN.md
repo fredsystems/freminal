@@ -570,7 +570,7 @@ by two new damage states, `PaneFrameDamage::Region` (124.14) and `FrameDamage::N
 The maintainer's governing instruction at activation: do the structural fix, not a band-aid
 that improves the number while leaving the shape wrong.
 
-**Task 125 (v0.12.0, measurement phase activated):** close or explain Freminal's remaining
+**Task 125 (v0.12.0, complete, pending merge):** measurement found one material gap, scrollback eviction under sustained output, remediated by the stable-row-number `RowStore` (125.11–125.18); Freminal is now at or below WezTerm and Ghostty on every matched workload. Original activation text: close or explain Freminal's remaining
 CPU/GPU gap against matched WezTerm and Ghostty workloads. The old fixed-stride proposal is now
 one conditional branch, not the goal: recon established that it cannot improve idle, while
 Task 124's live captures did not record changed-row distributions, live upload bytes, or actual
@@ -812,7 +812,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–124 complete, 125 planned)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–124 complete, 125 pending merge)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)

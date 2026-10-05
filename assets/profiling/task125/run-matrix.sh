@@ -17,6 +17,13 @@ readonly CONFIRM_WARMUP=10
 readonly CONFIRM_DURATION=60
 readonly CONFIRM_REPEATS=7
 readonly AMDGPU_PCI="0000:03:00.0"
+# Substring the Freminal `Active OpenGL renderer` line must contain. Override
+# only when measuring on different hardware.
+readonly TASK125_EXPECTED_RENDERER="${TASK125_EXPECTED_RENDERER:-AMD Radeon RX 7900 XTX}"
+# Set TASK125_ALLOW_GPU_UNAVAILABLE=1 to record (rather than reject) a sample
+# whose process exposes no DRM fdinfo; gpu_gfx_ns is then blank, never zero.
+readonly TASK125_ALLOW_GPU_UNAVAILABLE="${TASK125_ALLOW_GPU_UNAVAILABLE:-0}"
+readonly SAMPLE_CSV_HEADER='repeat,workload,terminal,wall_seconds,task_clock_ms,user_task_clock_ms,kernel_task_clock_ms,cycles,instructions,context_switches,wakeups,gpu_gfx_ns,grid_rows,grid_cols,gpu_status,exited_tids'
 readonly TASK125_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::task_125::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info,freminal::task_125::gpu_timing=debug,freminal_windowing::task_125::gpu_timing=debug'
 SAMPLE_WARMUP=${SCREEN_WARMUP}
 SAMPLE_DURATION=${SCREEN_DURATION}
@@ -26,6 +33,11 @@ GEOMETRY_BASELINE_INITIALIZED=false
 
 declare -a OWNED_PIDS=()
 declare -A OWNED_START_TIMES=()
+# Background privileged collectors (`sudo perf stat`) and synthetic-input loops
+# that cleanup must stop if a run aborts mid-sample.
+declare -a COLLECTOR_PIDS=()
+declare -A COLLECTOR_START_TIMES=()
+INPUT_LOOP_PID=
 ASSUME_READY=false
 LAUNCHED_PID=
 LAUNCHED_SHELL_PID=
@@ -95,6 +107,12 @@ task125_drm_gfx_ns() {
 			total=$((total + gfx))
 		fi
 	done
+	# No DRM client with a readable engine counter means the metric does not
+	# exist for this process; report that instead of a misleading zero.
+	if ((${#seen[@]} == 0)); then
+		printf 'no drm-engine-gfx fdinfo for PID %s on %s\n' "${root}" "${expected}" >&2
+		return 1
+	fi
 	printf '%s\n' "${total}"
 }
 
@@ -114,7 +132,7 @@ task125_tree_cpu_ticks() {
 
 task125_expected_render_node() {
 	local node
-	for node in "/sys/bus/pci/devices/${AMDGPU_PCI}/drm"/renderD*; do
+	for node in "/sys/bus/pci/devices/${AMDGPU_PCI}/drm"/render*; do
 		[[ -e ${node} ]] && printf '/dev/dri/%s\n' "${node##*/}" && return 0
 	done
 	printf 'no DRM render node for %s\n' "${AMDGPU_PCI}" >&2
@@ -136,12 +154,20 @@ task125_verify_process_gpu() {
 
 record_metadata() {
 	local output_dir=$1
+	local freminal_bin=${FREMINAL_BIN:-${PWD}/target/release/freminal}
 	{
 		printf 'captured_at=%s\n' "$(date --iso-8601=seconds)"
 		printf 'git_commit=%s\n' "$(git rev-parse HEAD)"
-		printf 'wezterm_bin=%s\n' "${WEZTERM_BIN}"
+		printf 'freminal_bin=%s\n' "$(realpath -m "${freminal_bin}")"
+		printf 'freminal_bin_sha256=%s\n' "$(sha256sum "${freminal_bin}" | cut -d' ' -f1)"
+		printf 'freminal_rust_log=%s\n' "${TASK125_FREMINAL_RUST_LOG}"
+		printf 'expected_renderer=%s\n' "${TASK125_EXPECTED_RENDERER}"
+		printf 'allow_gpu_unavailable=%s\n' "${TASK125_ALLOW_GPU_UNAVAILABLE}"
+		printf 'wezterm_bin=%s\n' "$(realpath -m "${WEZTERM_BIN}")"
+		printf 'wezterm_bin_sha256=%s\n' "$(sha256sum "${WEZTERM_BIN}" | cut -d' ' -f1)"
 		"${WEZTERM_BIN}" --version
-		printf 'ghostty_bin=%s\n' "${GHOSTTY_BIN}"
+		printf 'ghostty_bin=%s\n' "$(realpath -m "${GHOSTTY_BIN}")"
+		printf 'ghostty_bin_sha256=%s\n' "$(sha256sum "${GHOSTTY_BIN}" | cut -d' ' -f1)"
 		"${GHOSTTY_BIN}" --version
 		uname -a
 		hyprctl version
@@ -170,8 +196,8 @@ collector_overhead_control() {
 }
 
 capture_collectors() {
-	local root=$1 duration=$2 run_dir=$3
-	local pids filter gpu_before gpu_after cpu_before cpu_after perf_pid wake_pid context_pid
+	local root=$1 duration=$2 run_dir=$3 workload=$4
+	local pids filter gpu_before='' gpu_after='' gpu_status cpu_before cpu_after perf_pid wake_pid context_pid
 	local user_before system_before user_after system_after
 	printf 'process-tree\n' >"${run_dir}/collector-stage"
 	pids=$(task125_pid_csv "${root}")
@@ -184,7 +210,13 @@ capture_collectors() {
 	printf 'gpu-discovery\n' >"${run_dir}/collector-stage"
 	amdgpu_top --json --process --no-pc --pci "${AMDGPU_PCI}" -n 1 \
 		>"${run_dir}/amdgpu-processes.json"
-	gpu_before=$(task125_drm_gfx_ns "${root}")
+	gpu_status=$(<"${run_dir}/gpu-process-status")
+	if [[ ${gpu_status} == available ]]; then
+		gpu_before=$(task125_drm_gfx_ns "${root}") || {
+			printf 'GPU fdinfo vanished for PID %s before the interval\n' "${root}" >&2
+			return 1
+		}
+	fi
 	cpu_before=$(task125_tree_cpu_ticks "${root}")
 	printf 'counters\n' >"${run_dir}/collector-stage"
 
@@ -192,15 +224,26 @@ capture_collectors() {
 		-e task-clock,cycles,instructions \
 		-p "${pids}" --timeout "$((duration * 1000))" &
 	perf_pid=$!
+	task125_register_collector "${perf_pid}"
 	sudo perf stat -x, -p "${root}" -e context-switches \
 		--timeout "$((duration * 1000))" 2>"${run_dir}/context-switches.csv" &
 	context_pid=$!
+	task125_register_collector "${context_pid}"
 	sudo perf stat -x, -a -e sched:sched_wakeup --filter "${filter}" \
 		--timeout "$((duration * 1000))" 2>"${run_dir}/wakeups.csv" &
 	wake_pid=$!
+	task125_register_collector "${wake_pid}"
+
+	# Synthetic input starts only now that every counter is armed and every
+	# discovery call has finished, so the interval contains the whole workload
+	# and none of the setup.
+	start_input_loop "${workload}"
 	wait "${perf_pid}"
 	wait "${context_pid}"
 	wait "${wake_pid}"
+	COLLECTOR_PIDS=()
+	COLLECTOR_START_TIMES=()
+	finish_input_loop
 	task125_tree_tids "${root}" >"${run_dir}/tids-after"
 	# Threads that exit mid-capture were in the wakeup filter from the start,
 	# and their CPU time folds into the process, so exits are recorded but do
@@ -213,8 +256,21 @@ capture_collectors() {
 	comm -23 <(sort "${run_dir}/tids-before") <(sort "${run_dir}/tids-after") | wc -l \
 		>"${run_dir}/exited-tids"
 	cpu_after=$(task125_tree_cpu_ticks "${root}")
-	gpu_after=$(task125_drm_gfx_ns "${root}")
-	printf '%s\n' "$((gpu_after - gpu_before))" >"${run_dir}/gpu-gfx-ns"
+	if [[ ${gpu_status} == available ]]; then
+		gpu_after=$(task125_drm_gfx_ns "${root}") || {
+			printf 'GPU fdinfo vanished for PID %s during the interval\n' "${root}" >&2
+			return 1
+		}
+		if ((gpu_after < gpu_before)); then
+			printf 'drm-engine-gfx counter went backwards (%s -> %s); sample is invalid\n' \
+				"${gpu_before}" "${gpu_after}" >&2
+			return 1
+		fi
+		printf '%s\n' "$((gpu_after - gpu_before))" >"${run_dir}/gpu-gfx-ns"
+	else
+		# Never a silent zero: an unavailable metric is a blank cell.
+		: >"${run_dir}/gpu-gfx-ns"
+	fi
 	read -r user_before system_before <<<"${cpu_before}"
 	read -r user_after system_after <<<"${cpu_after}"
 	printf '%s %s\n' "$((user_after - user_before))" "$((system_after - system_before))" \
@@ -225,7 +281,7 @@ capture_collectors() {
 append_sample_csv() {
 	local csv=$1 repeat=$2 workload=$3 terminal=$4 run_dir=$5
 	local task_clock user_ticks system_ticks user_clock kernel_clock cycles instructions switches wakeups gpu clock_tick
-	local grid_rows grid_cols
+	local grid_rows grid_cols gpu_status exited_tids
 	task_clock=$(task125_perf_value "${run_dir}/perf.csv" task-clock)
 	read -r user_ticks system_ticks <"${run_dir}/cpu-ticks"
 	clock_tick=$(getconf CLK_TCK)
@@ -237,21 +293,56 @@ append_sample_csv() {
 	wakeups=$(task125_perf_value "${run_dir}/wakeups.csv" sched:sched_wakeup)
 	gpu=$(<"${run_dir}/gpu-gfx-ns")
 	read -r grid_rows grid_cols <"${run_dir}/grid"
-	printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+	gpu_status=$(<"${run_dir}/gpu-process-status")
+	exited_tids=$(tr -d '[:space:]' <"${run_dir}/exited-tids")
+	printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
 		"${repeat}" "${workload}" "${terminal}" "${SAMPLE_DURATION}" \
 		"${task_clock}" "${user_clock}" "${kernel_clock}" "${cycles}" \
 		"${instructions}" "${switches}" "${wakeups}" "${gpu}" \
-		"${grid_rows}" "${grid_cols}" >>"${csv}"
+		"${grid_rows}" "${grid_cols}" "${gpu_status}" "${exited_tids}" >>"${csv}"
 }
 
+task125_register_collector() {
+	local pid=$1 start
+	start=$(task125_process_start_time "${pid}") || return 0
+	COLLECTOR_PIDS+=("${pid}")
+	COLLECTOR_START_TIMES[${pid}]=${start}
+}
+
+# Stop a background collector this script started. `sudo perf` jobs run as
+# root, so an unprivileged TERM can be refused; fall back to a non-interactive
+# `sudo kill` (credentials were cached by collector_preflight). PID reuse is
+# guarded by the recorded start time.
+task125_stop_collector() {
+	local pid=$1 expected_start=$2 current_start
+	[[ -r "/proc/${pid}/stat" ]] || return 0
+	current_start=$(task125_process_start_time "${pid}") || return 0
+	[[ ${current_start} == "${expected_start}" ]] || return 0
+	kill -TERM "${pid}" 2>/dev/null ||
+		sudo -n kill -TERM "${pid}" 2>/dev/null || true
+}
+
+# Runs on every exit path. It must never abort part-way: one failed kill must
+# not leave later terminals, loops or collectors running.
 cleanup() {
 	local pid start
+	set +e
+	for pid in "${COLLECTOR_PIDS[@]}"; do
+		task125_stop_collector "${pid}" "${COLLECTOR_START_TIMES[${pid}]:-}"
+	done
 	for pid in "${OWNED_PIDS[@]}"; do
 		start=${OWNED_START_TIMES[${pid}]:-}
-		[[ -n ${start} ]] && task125_terminate_tree "${pid}" "${start}"
+		if [[ -n ${start} ]]; then
+			task125_terminate_tree "${pid}" "${start}" || true
+		fi
 	done
+	return 0
 }
-trap cleanup EXIT INT TERM
+# INT/TERM must end the script, not merely run cleanup and resume the sample
+# loop; `exit` fires the EXIT trap, which performs the single cleanup.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_command() {
 	command -v "$1" >/dev/null || {
@@ -264,7 +355,7 @@ preflight() {
 	local command
 	task125_require_system_bash
 	for command in perf wtype amdgpu_top hyprctl python3 jq install stat tac \
-		paste awk tee realpath date lspci readlink getconf grep cmp tr; do
+		paste awk tee realpath date lspci readlink getconf grep cmp tr sha256sum cut sudo; do
 		require_command "${command}"
 	done
 	[[ -x "${WEZTERM_BIN}" ]] || {
@@ -340,6 +431,7 @@ launch_terminal() {
 	local terminal=$1 cursor=$2 marker=$3 run_dir=$4
 	local freminal_bin=${FREMINAL_BIN:-${PWD}/target/release/freminal}
 	local pty pid start shell_pid shell_start expected_class expected_exe_root mapped_exe
+	local launcher_pid launcher_start
 	mkdir -p "${run_dir}"/{home,config,cache,state,data}
 	hyprctl clients -j | jq -r '.[].address' >"${run_dir}/preexisting-windows"
 	task125_render_fixtures "${SCRIPT_DIR}" "${run_dir}" "${terminal}" "${cursor}" "${marker}"
@@ -374,6 +466,14 @@ launch_terminal() {
 		return 2
 		;;
 	esac
+	# Own the launched process before anything that can fail or be
+	# interrupted (window wait, readiness wait): an abort in that gap must
+	# still tear it down. `$!` here is the background job started above.
+	launcher_pid=$!
+	if launcher_start=$(task125_process_start_time "${launcher_pid}" 2>/dev/null); then
+		OWNED_PIDS+=("${launcher_pid}")
+		OWNED_START_TIMES[${launcher_pid}]=${launcher_start}
+	fi
 	task125_wait_new_window \
 		"${run_dir}/preexisting-windows" "${expected_class}" "${run_dir}/config"
 	pid=${TASK125_NEW_WINDOW_PID}
@@ -389,7 +489,9 @@ launch_terminal() {
 		return 1
 	fi
 	start=$(task125_process_start_time "${pid}")
-	OWNED_PIDS+=("${pid}")
+	if [[ -z ${OWNED_START_TIMES[${pid}]:-} ]]; then
+		OWNED_PIDS+=("${pid}")
+	fi
 	OWNED_START_TIMES[${pid}]=${start}
 	task125_wait_ready "${run_dir}/ready" "${pid}"
 	shell_pid=$(<"${run_dir}/shell-pid")
@@ -485,10 +587,7 @@ profile_smoke() {
 	verify_grid "${run_dir}"
 	task125_verify_process_gpu "${pid}"
 	output=$(<"${run_dir}/freminal.stdout.log")
-	[[ ${output} == *'Active OpenGL renderer: AMD Radeon RX 7900 XTX'* ]] || {
-		printf 'profile smoke did not record the expected Navi 31 renderer\n' >&2
-		return 1
-	}
+	verify_freminal_renderer "${run_dir}"
 	[[ ${output} == *'live render-work profile (task 125.5/125.6)'* ]] || {
 		printf 'profile smoke did not record a Task 125 live-render summary\n' >&2
 		return 1
@@ -509,6 +608,134 @@ profile_smoke() {
 	fi
 }
 
+# Record whether the terminal process exposes DRM fdinfo, and refuse the sample
+# when it does not unless TASK125_ALLOW_GPU_UNAVAILABLE=1 explicitly accepts a
+# blank GPU cell. A silently-zero GPU column would read as "GPU idle".
+record_gpu_status() {
+	local pid=$1 run_dir=$2
+	if task125_verify_process_gpu "${pid}" &&
+		task125_drm_gfx_ns "${pid}" >/dev/null; then
+		printf 'available\n' >"${run_dir}/gpu-process-status"
+		return 0
+	fi
+	printf 'unavailable\n' >"${run_dir}/gpu-process-status"
+	if [[ ${TASK125_ALLOW_GPU_UNAVAILABLE} == 1 ]]; then
+		printf 'GPU fdinfo unavailable for PID %s; accepted by TASK125_ALLOW_GPU_UNAVAILABLE=1\n' "${pid}" >&2
+		return 0
+	fi
+	printf 'GPU fdinfo unavailable for PID %s; refusing the sample (set TASK125_ALLOW_GPU_UNAVAILABLE=1 to record a blank GPU cell)\n' "${pid}" >&2
+	return 1
+}
+
+# Parse the `Active OpenGL renderer` line Freminal logs at context creation
+# (ANSI colour codes stripped), reject software rasterisers and any renderer
+# other than the expected discrete GPU, and keep the string with the sample.
+verify_freminal_renderer() {
+	local run_dir=$1 renderer
+	renderer=$(awk -F'Active OpenGL renderer: ' \
+		'NF > 1 { gsub(/\033\[[0-9;]*m/, "", $2); print $2; exit }' \
+		"${run_dir}/freminal.stdout.log")
+	if [[ -z ${renderer} ]]; then
+		printf 'freminal.stdout.log has no "Active OpenGL renderer" line; cannot prove the GPU\n' >&2
+		return 1
+	fi
+	printf '%s\n' "${renderer}" >"${run_dir}/gl-renderer"
+	case "${renderer,,}" in
+	*llvmpipe* | *softpipe* | *swrast* | *software*)
+		printf 'Freminal is using a software renderer (%s); sample is invalid\n' "${renderer}" >&2
+		return 1
+		;;
+	esac
+	if [[ ${renderer} != *"${TASK125_EXPECTED_RENDERER}"* ]]; then
+		printf 'Freminal renderer %q does not match expected %q\n' \
+			"${renderer}" "${TASK125_EXPECTED_RENDERER}" >&2
+		return 1
+	fi
+}
+
+# True when the shell has had a live child (the workload's `btop`, `seq`, or
+# `sleep`) within about two seconds. Shell-driven loops spend nearly all their
+# time in `sleep`, so a window this wide cannot miss one by timing alone.
+task125_shell_has_child() {
+	local shell_pid=$1 file i
+	local -a children=()
+	file="/proc/${shell_pid}/task/${shell_pid}/children"
+	for ((i = 0; i < 40; i++)); do
+		if [[ -r ${file} ]]; then
+			read -ra children <"${file}" || true
+			if ((${#children[@]} > 0)); then
+				return 0
+			fi
+		fi
+		sleep 0.05
+	done
+	return 1
+}
+
+# Fail the sample when a shell-driven workload is not actually running. A
+# window left at an idle prompt would otherwise be recorded as a "result" for
+# the workload (typing into a not-yet-ready shell, a crashed btop, a loop that
+# was never entered).
+assert_workload_live() {
+	local workload=$1 shell_pid=$2 phase=$3
+	case "${workload}" in
+	sparse-row | btop | sustained-output | sustained-output-varying | sustained-output-marked | streaming-output)
+		task125_shell_has_child "${shell_pid}" || {
+			printf 'workload %s is not running %s (shell %s has no live child); sample is invalid\n' \
+				"${workload}" "${phase}" "${shell_pid}" >&2
+			return 1
+		}
+		;;
+	esac
+}
+
+# Start the synthetic-input loops. Called after the collectors are armed (see
+# capture_collectors). The loop PID is recorded for cleanup, and the loop
+# itself stops when focus leaves the spawned window.
+start_input_loop() {
+	local workload=$1 start
+	INPUT_LOOP_PID=
+	case "${workload}" in
+	typing)
+		task125_type_loop "${SAMPLE_DURATION}" &
+		;;
+	scrollback)
+		task125_scroll_loop "${SAMPLE_DURATION}" &
+		;;
+	*)
+		return 0
+		;;
+	esac
+	INPUT_LOOP_PID=$!
+	if start=$(task125_process_start_time "${INPUT_LOOP_PID}" 2>/dev/null); then
+		OWNED_PIDS+=("${INPUT_LOOP_PID}")
+		OWNED_START_TIMES[${INPUT_LOOP_PID}]=${start}
+	fi
+	# The loop must still be alive and focused shortly after it starts;
+	# otherwise the interval would be recorded with no input at all.
+	sleep 0.5
+	kill -0 "${INPUT_LOOP_PID}" 2>/dev/null || {
+		printf 'input loop for %s exited immediately; sample is invalid\n' "${workload}" >&2
+		finish_input_loop || true
+		return 1
+	}
+}
+
+# Wait for the input loop and fail the sample if it stopped for any reason
+# other than reaching its deadline (focus lost, wtype failure).
+finish_input_loop() {
+	local pid=${INPUT_LOOP_PID} status=0
+	[[ -n ${pid} ]] || return 0
+	INPUT_LOOP_PID=
+	wait "${pid}" || status=$?
+	unset 'OWNED_START_TIMES[${pid}]'
+	if ((status != 0)); then
+		printf 'synthetic input loop %s ended abnormally (status %s); sample is invalid\n' \
+			"${pid}" "${status}" >&2
+		return 1
+	fi
+}
+
 cursor_for_workload() {
 	case "$1" in
 	idle-steady | chrome-steady) printf 'steady\n' ;;
@@ -518,6 +745,11 @@ cursor_for_workload() {
 
 prepare_workload_before_warmup() {
 	local workload=$1 run_dir=$2
+	# Everything below types into the spawned window; never into another one.
+	case "${workload}" in
+	idle-blink | idle-steady | pointer) ;;
+	*) task125_focus_guard ;;
+	esac
 	case "${workload}" in
 	chrome-blink | chrome-steady)
 		task125_setup_chrome_topology
@@ -534,12 +766,6 @@ prepare_workload_before_warmup() {
 start_workload_after_warmup() {
 	local workload=$1 run_dir=$2
 	case "${workload}" in
-	typing)
-		task125_type_loop "${SAMPLE_DURATION}" &
-		;;
-	scrollback)
-		task125_scroll_loop "${SAMPLE_DURATION}" &
-		;;
 	pointer)
 		printf '%s\n' \
 			'Pointer capture is ready.' \
@@ -562,13 +788,14 @@ capture_one() {
 	prepare_workload_before_warmup "${workload}" "${run_dir}"
 	sleep "${SAMPLE_WARMUP}"
 	verify_grid "${run_dir}"
-	if task125_verify_process_gpu "${pid}"; then
-		printf 'available\n' >"${run_dir}/gpu-process-status"
-	else
-		printf 'unavailable\n' >"${run_dir}/gpu-process-status"
+	record_gpu_status "${pid}" "${run_dir}"
+	if [[ ${terminal} == freminal ]]; then
+		verify_freminal_renderer "${run_dir}"
 	fi
+	assert_workload_live "${workload}" "${LAUNCHED_SHELL_PID}" "before the capture interval"
 	start_workload_after_warmup "${workload}" "${run_dir}"
-	capture_collectors "${pid}" "${SAMPLE_DURATION}" "${run_dir}"
+	capture_collectors "${pid}" "${SAMPLE_DURATION}" "${run_dir}" "${workload}"
+	assert_workload_live "${workload}" "${LAUNCHED_SHELL_PID}" "at the end of the capture interval"
 	append_sample_csv "${csv}" "${repeat}" "${workload}" "${terminal}" "${run_dir}"
 	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
 	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
@@ -594,11 +821,17 @@ run_series() {
 	local -a workloads=("$@")
 	local csv repeat workload terminal offset index window_count seconds
 	ensure_external_output "${output_dir}"
+	for workload in "${workloads[@]}"; do
+		# Fail before any window spawns rather than mid-series.
+		if [[ ${workload} == btop ]]; then
+			task125_btop_bin >/dev/null
+		fi
+	done
 	mkdir -p "${output_dir}/raw"
 	GEOMETRY_BASELINE_FILE="${output_dir}/${label}-hyprland-geometry.tsv"
 	GEOMETRY_BASELINE_INITIALIZED=false
 	csv="${output_dir}/${label}-samples.csv"
-	printf '%s\n' 'repeat,workload,terminal,wall_seconds,task_clock_ms,user_task_clock_ms,kernel_task_clock_ms,cycles,instructions,context_switches,wakeups,gpu_gfx_ns,grid_rows,grid_cols' >"${csv}"
+	printf '%s\n' "${SAMPLE_CSV_HEADER}" >"${csv}"
 
 	window_count=$((SAMPLE_REPEATS * ${#workloads[@]} * 3))
 	seconds=$((window_count * (SAMPLE_WARMUP + SAMPLE_DURATION)))
@@ -668,7 +901,7 @@ run_collector_smoke_one() {
 	GEOMETRY_BASELINE_FILE="${output_dir}/collector-smoke-one-hyprland-geometry.tsv"
 	GEOMETRY_BASELINE_INITIALIZED=false
 	csv="${output_dir}/collector-smoke-one-samples.csv"
-	printf '%s\n' 'repeat,workload,terminal,wall_seconds,task_clock_ms,user_task_clock_ms,kernel_task_clock_ms,cycles,instructions,context_switches,wakeups,gpu_gfx_ns,grid_rows,grid_cols' >"${csv}"
+	printf '%s\n' "${SAMPLE_CSV_HEADER}" >"${csv}"
 	SAMPLE_WARMUP=5
 	SAMPLE_DURATION=10
 	SAMPLE_REPEATS=1

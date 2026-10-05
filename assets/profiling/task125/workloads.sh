@@ -4,10 +4,29 @@
 set -euo pipefail
 
 readonly TASK125_SYSTEM_BASH="/run/current-system/sw/bin/bash"
-TASK125_BTOP_BIN=$(command -v btop)
-readonly TASK125_BTOP_BIN
 declare -gx TASK125_NEW_WINDOW_ADDRESS=''
 declare -gx TASK125_NEW_WINDOW_PID=''
+
+# OSC 133 byte sequences for the sustained-output-marked workload. Freminal
+# only records a prompt row and command block for markers tagged
+# `freminal=1;fid=<id>` (freminal-common `parse_ftcs_params`); WezTerm and
+# Ghostty ignore the extra key=value options. These printf formats are the
+# single source of truth: a unit test in freminal-terminal-emulator reads this
+# file and replays exactly these bytes, so changing them here without updating
+# that test fails `cargo test`. `%d` is the per-burst command id.
+readonly TASK125_MARKED_PROMPT_FORMAT='\033]133;A;freminal=1;fid=%d\007Task125 prompt>\033]133;B;freminal=1;fid=%d\007\033]133;C;freminal=1;fid=%d\007'
+readonly TASK125_MARKED_FINISH_FORMAT='\033]133;D;0;freminal=1;fid=%d\007'
+
+# Resolve btop only when the btop workload actually runs, so sourcing this file
+# never fails on a host without it.
+task125_btop_bin() {
+	local bin
+	bin=$(command -v btop) || {
+		printf 'btop workload requires btop on PATH\n' >&2
+		return 1
+	}
+	printf '%s\n' "${bin}"
+}
 
 task125_require_system_bash() {
 	if [[ ! -x "${TASK125_SYSTEM_BASH}" ]]; then
@@ -119,22 +138,47 @@ task125_wait_new_window() {
 	return 1
 }
 
+# Synthetic input must only ever reach the window this run spawned. Called at
+# the top of every input-loop iteration: if focus moved (the operator clicked
+# away, an abort left the loop running, a notification stole focus) the loop
+# stops rather than typing into the user's desktop.
+task125_focus_guard() {
+	local active
+	[[ -n ${TASK125_NEW_WINDOW_ADDRESS} ]] || {
+		printf 'no spawned window address recorded; refusing synthetic input\n' >&2
+		return 1
+	}
+	active=$(hyprctl activewindow -j | jq -r '.address') || return 1
+	[[ ${active} == "${TASK125_NEW_WINDOW_ADDRESS}" ]] || {
+		printf 'focus left spawned window %s (now %s); stopping synthetic input\n' \
+			"${TASK125_NEW_WINDOW_ADDRESS}" "${active}" >&2
+		return 1
+	}
+}
+
 task125_type_loop() {
 	local seconds=$1
 	local end=$((SECONDS + seconds))
 	while ((SECONDS < end)); do
-		wtype -d 25 'task125 scripted typing payload' -M ctrl -k u -m ctrl
+		task125_focus_guard || return 1
+		wtype -d 25 'task125 scripted typing payload' -M ctrl -k u -m ctrl || return 1
 		sleep 0.2
 	done
 }
 
+# Scrollback is Shift+PageUp / Shift+PageDown in all three terminals (Freminal
+# default binding, WezTerm and Ghostty defaults; the fixtures bind only
+# F6-F9). Plain PageUp/PageDown is forwarded to the shell, which would leave
+# the viewport at the bottom and measure nothing.
 task125_scroll_loop() {
 	local seconds=$1
 	local end=$((SECONDS + seconds))
 	while ((SECONDS < end)); do
-		wtype -k Page_Up
+		task125_focus_guard || return 1
+		wtype -M shift -k Page_Up -m shift || return 1
 		sleep 0.25
-		wtype -k Page_Down
+		task125_focus_guard || return 1
+		wtype -M shift -k Page_Down -m shift || return 1
 		sleep 0.25
 	done
 }
@@ -144,6 +188,15 @@ task125_setup_chrome_topology() {
 	wtype -k F6 -s 200 -k F6 -s 200 -k F6
 	sleep 0.5
 	wtype -k F7 -s 200 -k F8 -s 200 -k F9 -s 200 -k F8
+}
+
+# The shell line typed for sustained-output-marked. The shell, not wtype, turns
+# the octal escapes into OSC 133 marks (\033 = ESC, \007 = BEL). Every 25th
+# burst idles 0.15 s, longer than Freminal's 100 ms idle tick, so scrollback
+# compression engages. The command id is the burst counter, so each burst opens
+# and closes its own command block.
+task125_marked_command() {
+	printf '%s' "n=0; while :; do n=\$((n + 1)); printf '${TASK125_MARKED_PROMPT_FORMAT}' \"\$n\" \"\$n\" \"\$n\"; seq 1 200; printf '${TASK125_MARKED_FINISH_FORMAT}' \"\$n\"; if ((n % 25)); then sleep 0.02; else sleep 0.15; fi; done"
 }
 
 task125_start_workload() {
@@ -159,16 +212,19 @@ task125_start_workload() {
 		wtype "n=0; while :; do printf '\\rTask125 sparse row %08d\\033[K' \"\$((++n))\"; sleep 0.05; done" -k Return
 		;;
 	btop)
-		wtype "'${TASK125_BTOP_BIN}' --config '${run_dir}/btop.conf' --force-utf --update 1000" -k Return
+		local btop_bin btop_command
+		btop_bin=$(task125_btop_bin) || return 1
+		# %q quotes for the interactive bash that receives the typed text, so
+		# a run directory containing quotes or spaces cannot break the line.
+		printf -v btop_command '%q --config %q --force-utf --update 1000' \
+			"${btop_bin}" "${run_dir}/btop.conf"
+		wtype "${btop_command}" -k Return
 		;;
 	sustained-output)
 		wtype "while :; do seq 1 200; sleep 0.02; done" -k Return
 		;;
 	sustained-output-marked)
-		# The shell, not wtype, turns the octal escapes into OSC 133 marks
-		# (\033 = ESC, \007 = BEL). Every 25th burst idles 0.15 s, longer than
-		# Freminal's 100 ms idle tick, so scrollback compression engages.
-		wtype "n=0; while :; do printf '\\033]133;A\\007Task125 prompt>\\033]133;B\\007\\033]133;C\\007'; seq 1 200; printf '\\033]133;D;0\\007'; if ((++n % 25)); then sleep 0.02; else sleep 0.15; fi; done" -k Return
+		wtype "$(task125_marked_command)" -k Return
 		;;
 	sustained-output-varying)
 		wtype "n=1; while :; do seq \$n \$((n + 199)); n=\$((n + 200)); sleep 0.02; done" -k Return

@@ -1073,6 +1073,9 @@ not accept a residual that is unmeasured or unexplained.
 Stop: present findings and remaining maintainer choices. Await explicit review
 before any remediation activation.
 
+**Complete.** See "Findings (125.10)"; the maintainer selected the RowStore
+remediation (125.11-125.18).
+
 ## Findings gates
 
 - **Idle/chrome:** open when blinking-cursor idle has a material paired CPU
@@ -1148,11 +1151,23 @@ Attribution: windowing and app frame profiles put the GUI thread at about
 `Vec::drain` of `Row` and `Option<RowCacheEntry>` in
 `Buffer::enforce_scrollback_limit` (`freminal-buffer/src/buffer/resize_and_alt.rs`).
 Once scrollback is full, every line feed drains the overflow row from the front
-of `rows`, `row_cache`, and the row-block map, shifting about 10,000 entries per
+of `rows`, `row_cache`, and the row-block map, shifting about 20,000 entries (the fixture's `scrollback.limit`) per
 line. At about 10,000 lines/s this is the whole gap. It is a buffer
 data-structure cost, not rendering.
 
 ### Gate verdicts
+
+Post-review corrections (2026-10-04): the `scrollback` workload sent unshifted
+PageUp/PageDown, which every terminal forwarded to the shell, so its row
+measures readline input rather than scrollback scrolling and supports no
+verdict (fixed for future runs in `workloads.sh`). The fixed-stride,
+incremental-construction, and persistent-buffer gates were decided on matched
+CPU and GPU parity alone, not on their own histogram, upload-byte, and GPU
+phase criteria; with Freminal at or below both peers on every relevant
+workload no remediation could reach the material floor, but the per-gate data
+in each sample's `freminal.stdout.log` was not tabulated. Screen intervals with
+three pairs are ranges, not 95% intervals. Freminal ran with both profiling
+features, which inflates its numbers, so the verdicts are conservative.
 
 - **Idle/chrome bypass, cursor-blink decoupling:** REFUTED. Blinking idle and
   four-tab chrome are at or below both peers.
@@ -1163,8 +1178,10 @@ data-structure cost, not rendering.
   11 ms/s even under sustained output, and typing/sparse/streaming are cheaper
   than both peers.
 - **Persistent GPU buffers:** REFUTED, no GPU or driver gap.
-- **Scheduling / wakeups:** REFUTED. Wakeups are within the peer range; the
-  sparse-row excess (430 vs 355/310) carries lower CPU than both peers.
+- **Scheduling / wakeups:** REFUTED. Freminal's wakeups exceed both peers on
+  `sparse-row` (430 vs 355/310) and `streaming-output` (812 vs 772/639), but
+  in both cases with lower CPU than both peers, so the excess carries no
+  material cost.
 - **Presentation/compositor:** REFUTED, no kernel-time or GPU gap.
 - **Scroll-aware row reuse (125.C4):** REFUTED. `streaming-output` is the
   cheapest of the three despite one-line scrolls resolving to dense rebuilds.
@@ -1297,8 +1314,8 @@ Option<usize>`, saturating `offset(i64)`, `is_alternate`); no operator
    `cursor_pos` / `visible_image_placements`, scroll margins, `ViewState`
    cursor animation, `frame_dirty` epochs) stays as is.
 4. **Become logical:** `prompt_rows`; all four `CommandBlock` row fields;
-   DECSC `saved_cursor` (content-attached, clamped on restore, preserving
-   today's intent without drift); `PlaceImageResult.origin_row` (its hand-coded
+   DECSC `saved_cursor` (as designed here: content-attached; superseded by
+   125.C6, which made it screen-relative per xterm); `PlaceImageResult.origin_row` (its hand-coded
    drain compensation is deleted); kitty `RealPlacement.origin_row`; the merge
    fingerprint's window start; GUI selection anchor/end, `last_click_pos`,
    `context_menu_cell`, search matches and staleness key;
@@ -1428,9 +1445,8 @@ the alternate screen has its own namespace; `rows_after` returns `None` across
 namespaces; the snapshot exports `row_base` and numbered marks, and the GUI
 resolves blocks through `BlockRows::resolve`. A code review found no blockers;
 its four fixes are applied. Additional accepted behaviour changes: DECRC
-restores to its content row only while that row is inside the visible window,
-otherwise it clamps to the window's top or bottom (never into off-screen
-scrollback; the xterm question remains 125.C6); command-block gutters, folds,
+restored to its content row while inside the visible window (since superseded
+by 125.C6: DECSC is screen-relative); command-block gutters, folds,
 and palette entries for primary blocks resolve to nothing while the alternate
 screen is up (previously primary indices were misapplied to alt rows); a kitty
 relative child whose origin is no longer retained is registered but not
@@ -1542,10 +1558,15 @@ streaming-output 17.9, chrome-blink 1.3, chrome-steady 0.1.
 | Workload                 | Freminal CPU / GPU | WezTerm     | Ghostty     |
 | ------------------------ | ------------------ | ----------- | ----------- |
 | sustained-output         | 8.9 / 0.43         | 19.2 / 13.1 | 37.5 / 18.6 |
-| sustained-output-marked  | 17.4 / 8.95        | 17.7 / 11.0 | 39.3 / 18.5 |
+| sustained-output-marked  | 17.4 / 8.95 (a)    | 17.7 / 11.0 | 39.3 / 18.5 |
 | sustained-output-varying | 24.3 / 11.1        | 32.0 / 13.5 | 41.3 / 20.0 |
 
-(Median ms per wall-second.) Paired deltas against Ghostty: -28.6, -22.2, and
+(Median ms per wall-second.) (a) The marked workload's OSC 133 marks lacked
+Freminal's `freminal=1;fid=` parameters, so Freminal recorded no prompts or
+blocks in this capture; only its idle-gap compression ran. After the fix, a
+Freminal-only 20-second check with real blocks measured 17.8 ms/s (snapshot
+command blocks are now generation-cached), level with WezTerm, which per its
+source does not record a parameterised `B`. Paired deltas against Ghostty: -28.6, -22.2, and
 -16.7 ms/s, each CI excluding zero. Before the remediation `sustained-output`
 was 428.9 ms/s.
 
@@ -1566,7 +1587,8 @@ is below WezTerm and Ghostty on every sustained-output variant and on every
 screened workload except `sparse-row`, where it is statistically level with
 the slower peer. Buffer-level, a 200-line burst at capacity fell from 4.39 ms
 to about 118 us, and eviction no longer scales with retained rows. All
-numbered cleanups (125.C1-C15) are complete.
+numbered cleanups (125.C1-C16) are complete, and three adversarial reviews
+(harness, remediation, cleanups) were addressed in follow-up commits.
 
 ---
 
