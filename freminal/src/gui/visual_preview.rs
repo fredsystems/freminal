@@ -119,6 +119,30 @@ impl FontPreview {
             line_height: config.font.line_height,
         }
     }
+
+    /// Write this preview's family, size and line height into `font`, the
+    /// inverse of [`Self::from_config`].
+    ///
+    /// A font preview that reaches the font manager must also be the value
+    /// in `FreminalGui::config.font`. Every terminal frame re-applies
+    /// `config.font.size` (plus the active pane's zoom delta) to the font
+    /// manager, so a size preview held only in the font manager is undone
+    /// on the next frame.
+    ///
+    /// Returns `true` when the family or size changed. Those two fields
+    /// also drive the egui chrome fonts (`flush_egui_fonts_if_dirty`), and
+    /// the caller must mark them dirty: Apply compares the old and new
+    /// `config.font` to decide whether to refresh the chrome fonts, and
+    /// after this write it sees no change. Line height does not affect the
+    /// chrome fonts.
+    pub(super) fn write_into(&self, font: &mut freminal_common::config::FontConfig) -> bool {
+        let chrome_changed =
+            font.family != self.family || (font.size - self.size).abs() > f32::EPSILON;
+        font.family.clone_from(&self.family);
+        font.size = self.size;
+        font.line_height = self.line_height;
+        chrome_changed
+    }
 }
 
 /// The new logical font-family value reported by [`VisualPreviewDiff::font_family`]
@@ -258,6 +282,11 @@ pub struct VisualPreview {
     /// Tab bar position (`TabsConfig::position`). Applied immediately (issue
     /// #452 phase D), chrome layout only, same shape as [`Self::hide_menu_bar`].
     pub(super) tab_bar_position: TabBarPosition,
+
+    /// Whether the per-pane OSC 9;4 progress bar is drawn
+    /// (`ProgressConfig::enabled`, issue #507). Applied immediately: a
+    /// per-window widget toggle `show()` reads each frame, display only.
+    pub(super) progress_enabled: bool,
 }
 
 impl PartialEq for VisualPreview {
@@ -281,6 +310,7 @@ impl PartialEq for VisualPreview {
             && self.shader_path == other.shader_path
             && self.gutter == other.gutter
             && self.tab_bar_position == other.tab_bar_position
+            && self.progress_enabled == other.progress_enabled
     }
 }
 
@@ -307,6 +337,7 @@ impl VisualPreview {
             shader_path: config.shader.path.clone(),
             gutter: config.command_blocks.gutter,
             tab_bar_position: config.tabs.position,
+            progress_enabled: config.progress.enabled,
         }
     }
 
@@ -360,6 +391,8 @@ impl VisualPreview {
             gutter: (self.gutter != previous.gutter).then_some(self.gutter),
             tab_bar_position: (self.tab_bar_position != previous.tab_bar_position)
                 .then_some(self.tab_bar_position),
+            progress_enabled: (self.progress_enabled != previous.progress_enabled)
+                .then_some(self.progress_enabled),
         }
     }
 }
@@ -405,6 +438,8 @@ pub(super) struct VisualPreviewDiff {
     pub(super) gutter: Option<GutterPosition>,
     /// `Some(new_position)` if the tab bar position changed.
     pub(super) tab_bar_position: Option<TabBarPosition>,
+    /// `Some(new_enabled)` if the progress-bar display toggle changed.
+    pub(super) progress_enabled: Option<bool>,
 }
 
 /// Distinguishes why a [`SettingsAction::Preview`](super::settings::SettingsAction::Preview)
@@ -467,8 +502,8 @@ pub(super) enum ShaderErrorRoute {
     /// this route could otherwise get permanently *stuck* here -- the
     /// window closing before a further edit or genuine revert corrects it
     /// -- is covered unconditionally by [`shader_error_route_on_settings_close`]
-    /// at the `app_impl.rs` close site, independent of whatever value this
-    /// route held beforehand (issue #452 post-review Blocker 2).
+    /// in `FreminalGui::end_settings_session`, independent of whatever value
+    /// this route held beforehand (issue #452 post-review Blocker 2).
     SettingsStatus,
 }
 
@@ -501,11 +536,12 @@ pub(super) const fn shader_error_route_for(trigger: PreviewTrigger) -> ShaderErr
 /// `PreviewTrigger::Edit` route left [`ShaderErrorRoute::SettingsStatus`]
 /// permanently stuck with the window closed and no visible surface to
 /// correct it, silently dropping a later genuine shader hot-reload compile
-/// error (issue #452 post-review Blocker 2). Calling this at the
-/// `app_impl.rs` settings-window cleanup site -- unconditionally, on every
-/// close path (Apply, Cancel, X, Discard) -- makes that impossible: the
-/// route can never outlive the session that could have needed the
-/// in-window status surface.
+/// error (issue #452 post-review Blocker 2). Calling this from
+/// `FreminalGui::end_settings_session` (`settings_dispatch.rs`) --
+/// unconditionally, on every close path: Apply/OK, Cancel, the Settings
+/// window's own close button, closing the owning terminal window, and that
+/// window's Discard prompt -- makes that impossible: the route can never
+/// outlive the session that could have needed the in-window status surface.
 pub(super) const fn shader_error_route_on_settings_close() -> ShaderErrorRoute {
     ShaderErrorRoute::Toast
 }
@@ -719,9 +755,9 @@ impl<T: Clone + PartialEq> DebouncedPreview<T> {
 mod tests {
     use super::{
         BackgroundImagePathChange, DebounceDecision, DebouncedPreview, FontFamilyChange,
-        PATH_PREVIEW_DEBOUNCE, PreviewTrigger, ShaderErrorRoute, ShaderPathChange, StyleProfile,
-        VisualPreview, debounce_decision, debounced_revert_needs_push, shader_error_route_for,
-        shader_error_route_on_settings_close,
+        FontPreview, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, ShaderErrorRoute, ShaderPathChange,
+        StyleProfile, VisualPreview, debounce_decision, debounced_revert_needs_push,
+        shader_error_route_for, shader_error_route_on_settings_close,
     };
     use freminal_common::config::{
         BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition, ThemeMode,
@@ -828,6 +864,7 @@ mod tests {
         cfg.shader.path = Some(PathBuf::from("/tmp/shader.glsl"));
         cfg.command_blocks.gutter = GutterPosition::Off;
         cfg.tabs.position = TabBarPosition::Bottom;
+        cfg.progress.enabled = false;
 
         let preview = VisualPreview::from_config(&cfg, false);
         assert_eq!(
@@ -837,6 +874,59 @@ mod tests {
         assert_eq!(preview.shader_path, Some(PathBuf::from("/tmp/shader.glsl")));
         assert_eq!(preview.gutter, GutterPosition::Off);
         assert_eq!(preview.tab_bar_position, TabBarPosition::Bottom);
+        assert!(!preview.progress_enabled);
+    }
+
+    #[test]
+    fn font_write_into_copies_all_three_fields() {
+        let mut cfg = Config::default();
+        let preview = FontPreview {
+            family: Some("Fira Code".to_string()),
+            size: 18.0,
+            line_height: 1.3,
+        };
+        preview.write_into(&mut cfg.font);
+        assert_eq!(cfg.font.family.as_deref(), Some("Fira Code"));
+        assert!((cfg.font.size - 18.0).abs() < f32::EPSILON);
+        assert!((cfg.font.line_height - 1.3).abs() < f32::EPSILON);
+        assert_eq!(FontPreview::from_config(&cfg), preview);
+    }
+
+    #[test]
+    fn font_write_into_reports_chrome_change_for_family_or_size_only() {
+        let base = Config::default();
+        let unchanged = FontPreview::from_config(&base);
+
+        let mut cfg = base.clone();
+        assert!(
+            !unchanged.write_into(&mut cfg.font),
+            "writing the same font must not report a chrome change"
+        );
+
+        let mut size_only = unchanged.clone();
+        size_only.size += 2.0;
+        let mut cfg = base.clone();
+        assert!(
+            size_only.write_into(&mut cfg.font),
+            "size drives chrome fonts"
+        );
+
+        let mut family_only = unchanged.clone();
+        family_only.family = Some("Fira Code".to_string());
+        let mut cfg = base.clone();
+        assert!(
+            family_only.write_into(&mut cfg.font),
+            "family drives chrome fonts"
+        );
+
+        let mut line_height_only = unchanged;
+        line_height_only.line_height += 0.2;
+        let mut cfg = base;
+        assert!(
+            !line_height_only.write_into(&mut cfg.font),
+            "line height does not affect chrome fonts"
+        );
+        assert!((cfg.font.line_height - line_height_only.line_height).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -905,6 +995,7 @@ mod tests {
         assert_eq!(diff.shader_path, None);
         assert_eq!(diff.gutter, None);
         assert_eq!(diff.tab_bar_position, None);
+        assert_eq!(diff.progress_enabled, None);
     }
 
     /// Each phase B field must be reported independently -- changing one
@@ -1009,6 +1100,7 @@ mod tests {
         assert_eq!(diff.shader_path, None);
         assert_eq!(diff.gutter, None);
         assert_eq!(diff.tab_bar_position, None);
+        assert_eq!(diff.progress_enabled, None);
     }
 
     /// Phase D fields must each be reported independently too, and must not
@@ -1022,6 +1114,7 @@ mod tests {
         after.shader_path = Some(PathBuf::from("/tmp/shader.glsl"));
         after.gutter = GutterPosition::Off;
         after.tab_bar_position = TabBarPosition::Bottom;
+        after.progress_enabled = !before.progress_enabled;
 
         let diff = after.diff_from(&before);
         assert_eq!(
@@ -1036,6 +1129,7 @@ mod tests {
         );
         assert_eq!(diff.gutter, Some(GutterPosition::Off));
         assert_eq!(diff.tab_bar_position, Some(TabBarPosition::Bottom));
+        assert_eq!(diff.progress_enabled, Some(after.progress_enabled));
         // Untouched fields must stay unreported.
         assert_eq!(diff.theme_slug, None);
         assert_eq!(diff.hide_menu_bar, None);

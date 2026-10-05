@@ -5066,6 +5066,31 @@ impl FreminalTerminalWidget {
         true
     }
 
+    /// Schedule the egui chrome fonts to be rebuilt from the GUI's config
+    /// on this window's next frame (see [`Self::flush_egui_fonts_if_dirty`]).
+    ///
+    /// Used by the Settings font preview, which writes the previewed font
+    /// into the GUI's config directly; without this the chrome would keep
+    /// the old font, and a later Apply would see no font change to refresh.
+    pub const fn mark_egui_fonts_dirty(&mut self) {
+        self.egui_fonts_dirty = true;
+    }
+
+    /// Live-preview the OSC 9;4 progress-bar display toggle (issue #507).
+    ///
+    /// Only flips the cached toggle `show()` reads each frame. No atlas
+    /// invalidation is needed: the bar is a plain painter overlay, and
+    /// flipping the toggle while a bar is active changes the bar's damage
+    /// fingerprint, so `show()` reports a bounded damage region for it on
+    /// the next frame. Returns `true` when the value actually changed.
+    pub const fn set_progress_enabled_preview(&mut self, enabled: bool) -> bool {
+        if self.toggles.progress_enabled == enabled {
+            return false;
+        }
+        self.toggles.progress_enabled = enabled;
+        true
+    }
+
     /// Live-preview the cursor trail toggle and its duration (issue #452
     /// phase B).
     ///
@@ -5119,6 +5144,27 @@ mod visual_preview_tests {
             "setting to a different value must report a change"
         );
         assert!(!widget.toggles.ligatures);
+    }
+
+    #[test]
+    fn set_progress_enabled_preview_updates_toggle_and_reports_change() {
+        let mut widget = widget();
+        assert!(
+            widget.toggles.progress_enabled,
+            "default config enables the progress bar"
+        );
+
+        assert!(
+            !widget.set_progress_enabled_preview(true),
+            "setting to the already-active value must report no change"
+        );
+        assert!(widget.toggles.progress_enabled);
+
+        assert!(
+            widget.set_progress_enabled_preview(false),
+            "setting to a different value must report a change"
+        );
+        assert!(!widget.toggles.progress_enabled);
     }
 
     #[test]

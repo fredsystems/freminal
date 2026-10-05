@@ -377,6 +377,7 @@ impl FreminalGui {
         self.apply_preview_hide_menu_bar(&diff, handle);
         self.apply_preview_gutter(&diff, handle);
         self.apply_preview_tab_bar_position(&diff, handle);
+        self.apply_preview_progress_enabled(&diff, handle);
 
         match trigger {
             PreviewTrigger::Edit => {
@@ -392,6 +393,42 @@ impl FreminalGui {
         }
 
         self.applied_preview = next.clone();
+    }
+
+    /// End a Settings session: put every live preview back to the committed
+    /// config and drop the session-scoped preview state.
+    ///
+    /// Every close path must run this, whichever way the session ended:
+    /// Apply/OK, Cancel, the Settings window's own close button, closing the
+    /// terminal window that owns Settings, and that window's Discard
+    /// prompt. Several of those paths never render another Settings frame,
+    /// so the revert `SettingsAction::Preview` that `show_standalone` emits
+    /// on Cancel is not enough on its own. Without this, a Discard left the
+    /// discarded previews written into `self.config` (opacity, gutter, tab
+    /// bar position and so on), where the next Settings session would load
+    /// them into its draft and a later Apply would save them.
+    ///
+    /// Reverting unconditionally is safe and cheap. After Apply the
+    /// committed preview is what was just applied, and after Cancel the
+    /// revert has already run; either way `apply_visual_preview` finds
+    /// nothing left to change, and the debounced fields compare against
+    /// their own baselines (see `debounced_revert_needs_push`).
+    pub(super) fn end_settings_session(&mut self, handle: &freminal_windowing::WindowHandle<'_>) {
+        let committed = self.settings_modal.committed_preview().clone();
+        self.apply_visual_preview(&committed, PreviewTrigger::Revert, handle);
+        // Drop the live chrome preview override. After Apply the committed
+        // theme flows via the snapshot; after a revert the broadcast above
+        // restored it. Clearing also re-enables per-window Auto-mode
+        // theming, which a pinned global override cannot represent.
+        self.preview_theme = None;
+        // Reset the shader-error route unconditionally. The shader revert
+        // can legitimately skip the push that would reset it (its early
+        // return when the debounce baseline already matches the committed
+        // path), which used to leave `SettingsStatus` stuck with the window
+        // gone, silently dropping a later hot-reload compile error (issue
+        // #452 post-review Blocker 2). See
+        // `shader_error_route_on_settings_close`.
+        self.shader_error_route = visual_preview::shader_error_route_on_settings_close();
     }
 
     /// Request an immediate repaint plus a short follow-up on every window.
@@ -629,6 +666,22 @@ impl FreminalGui {
         self.request_repaint_all_windows(handle);
     }
 
+    /// Preview the OSC 9;4 progress-bar display toggle (GUI-side only, a
+    /// per-window widget toggle `show()` reads each frame) -- issue #507.
+    fn apply_preview_progress_enabled(
+        &mut self,
+        diff: &VisualPreviewDiff,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        let Some(enabled) = diff.progress_enabled else {
+            return;
+        };
+        for win in self.windows.values_mut() {
+            win.terminal_widget.set_progress_enabled_preview(enabled);
+        }
+        self.request_repaint_all_windows(handle);
+    }
+
     /// Preview the tab bar position (GUI-side chrome layout only, read
     /// directly from `self.config` at render time) -- issue #452 phase D.
     fn apply_preview_tab_bar_position(
@@ -735,6 +788,11 @@ impl FreminalGui {
         next: &VisualPreview,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
+        // Restore the committed font in `self.config` before the early
+        // return below: the per-frame zoom sync reads `config.font.size`, so
+        // the config must hold the committed value even when nothing needs
+        // pushing to the font manager.
+        self.write_font_preview_into_config(&next.font);
         let previous_applied = self.font_preview_debounce.applied().clone();
         let had_pending = self.font_preview_debounce.is_pending();
         self.font_preview_debounce
@@ -765,6 +823,21 @@ impl FreminalGui {
         self.request_repaint_all_windows(handle);
     }
 
+    /// Make a font preview the value in `self.config.font`, and refresh
+    /// every window's egui chrome fonts when the family or size changed.
+    ///
+    /// The per-frame font zoom sync in `app_impl.rs` re-applies
+    /// `config.font.size` to each window's font manager, so a preview held
+    /// only in the font manager would be undone on the next terminal frame.
+    /// See [`FontPreview::write_into`] for why the chrome refresh is needed.
+    fn write_font_preview_into_config(&mut self, font: &FontPreview) {
+        if font.write_into(&mut self.config.font) {
+            for win in self.windows.values_mut() {
+                win.terminal_widget.mark_egui_fonts_dirty();
+            }
+        }
+    }
+
     /// Apply a settled font-preview value to every window's `FontManager`,
     /// choosing the cheaper `set_font_size` path when only the size changed
     /// and reserving the full `rebuild` for a family or line-height change
@@ -775,6 +848,7 @@ impl FreminalGui {
         settled: &FontPreview,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
+        self.write_font_preview_into_config(settled);
         let needs_rebuild = settled.family != previous.family
             || (settled.line_height - previous.line_height).abs() > f32::EPSILON;
         for win in self.windows.values_mut() {

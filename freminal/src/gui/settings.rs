@@ -387,6 +387,16 @@ impl SettingsModal {
         self.is_open && self.read_only_reason.is_none() && self.is_dirty()
     }
 
+    /// The [`VisualPreview`] matching the currently committed config.
+    ///
+    /// Used when a Settings session ends through a path that never renders
+    /// another Settings frame (the OS close button, or the owning window's
+    /// Discard), so the GUI can still revert every live preview to it.
+    #[must_use]
+    pub(super) const fn committed_preview(&self) -> &VisualPreview {
+        &self.committed_preview
+    }
+
     /// Request to close the modal, consulting the dirty state.
     ///
     /// Returns `true` if the modal may close immediately (no pending edits),

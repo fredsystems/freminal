@@ -35,7 +35,7 @@ use super::rendering;
 use super::tabs::{Tab, TabManager};
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
-use super::visual_preview::{self, ShaderErrorRoute};
+use super::visual_preview::ShaderErrorRoute;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
 
@@ -924,6 +924,20 @@ impl freminal_windowing::App for FreminalGui {
                 return false;
             }
             self.settings_modal.is_open = false;
+            // Veto the OS close and let the Settings window's own next
+            // `update()` close it through the self-close branch, the same
+            // route the owning window's `CloseNow` takes below. That branch
+            // has the `WindowHandle` this function lacks, and runs
+            // `end_settings_session`: with a clean draft a debounced value
+            // can still differ from the committed config on screen (commit
+            // A, let B settle, retype A, close), and that has to be
+            // reverted.
+            if let Some((proxy, _)) = self.windows.values().find_map(|w| w.repaint_handle.get()) {
+                proxy.request_repaint(window_id);
+                return false;
+            }
+            // No terminal window is left to wake the Settings window from.
+            // Nothing remains on screen to revert, so close it directly.
             self.settings_window_id = None;
             self.settings_owner = None;
             self.persist_window_state();
@@ -1451,30 +1465,13 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // If the modal closed (Cancel or Apply), close the OS window.
+            // If the modal closed, close the OS window. Every way a
+            // Settings session ends is routed through here (or, for the
+            // owning window's Discard, calls the same helper), so the
+            // session cleanup lives in one place: see
+            // `end_settings_session`.
             if !self.settings_modal.is_open {
-                // Drop the live chrome preview override: the session is over.
-                // On Apply the committed theme now flows via the snapshot; on
-                // Cancel the `SettingsAction::Preview(committed_config)`
-                // broadcast restored it. Clearing also re-enables per-window
-                // Auto-mode theming, which a pinned global override cannot
-                // represent. The follow-up repaints scheduled by the
-                // Apply / preview dispatch cover the snapshot catch-up.
-                self.preview_theme = None;
-                // Reset the shader-error route unconditionally, regardless of
-                // what it held immediately beforehand. `apply_new_config`
-                // (the Apply path) already resets this, but Cancel/X/Discard
-                // do not otherwise pass through it, and
-                // `apply_preview_shader_path_immediate`'s own revert can
-                // legitimately skip resetting it (its early return when the
-                // debounce baseline already matches the committed value).
-                // Without this, a settle that last routed to
-                // `ShaderErrorRoute::SettingsStatus` could stay stuck there
-                // with the window closed, silently dropping a later genuine
-                // shader hot-reload compile error into an invisible status
-                // message (issue #452 post-review Blocker 2). See
-                // `shader_error_route_on_settings_close`'s doc.
-                self.shader_error_route = visual_preview::shader_error_route_on_settings_close();
+                self.end_settings_session(handle);
                 self.persist_window_state();
                 self.settings_window_id = None;
                 self.settings_owner = None;
@@ -2232,6 +2229,11 @@ impl freminal_windowing::App for FreminalGui {
                             // guard without re-prompting (issue #401).
                             self.settings_modal.is_open = false;
                             self.settings_owner = None;
+                            // The Settings window is closed directly here,
+                            // so its self-close branch never runs: end the
+                            // session now, or the discarded previews stay
+                            // live and written into `self.config`.
+                            self.end_settings_session(handle);
                             if let Some(sid) = self.settings_window_id.take() {
                                 handle.close_window(sid);
                             }

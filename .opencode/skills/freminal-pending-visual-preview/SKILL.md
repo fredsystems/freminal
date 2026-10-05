@@ -157,17 +157,32 @@ to be re-broken:
   actually last pushed to the running app) against the committed value --
   **not** against the draft or against `applied_preview`. Those two sources
   can disagree, and comparing against the draft is exactly Blocker 1.
-- Any push-metadata flag (`shader_error_route`) is reset unconditionally at
-  window teardown in `app_impl.rs` (`shader_error_route_on_settings_close`),
-  not inside any diff-dependent or early-return branch. An
-  `apply_preview_shader_path_immediate` early return (nothing to push) does
-  **not** reset the route itself -- the teardown site is the single place
-  that guarantees the reset regardless of which branch got there.
+- Any push-metadata flag (`shader_error_route`) is reset unconditionally in
+  `end_settings_session` (`settings_dispatch.rs`, via
+  `shader_error_route_on_settings_close`), not inside any diff-dependent or
+  early-return branch. An `apply_preview_shader_path_immediate` early return
+  (nothing to push) does **not** reset the route itself -- the session-end
+  helper is the single place that guarantees the reset regardless of which
+  branch got there.
+- **Every way a Settings session ends must call `end_settings_session`.**
+  Not every close path renders another Settings frame, so the revert that
+  `show_standalone` emits on Cancel does not cover them all. Today: the
+  Settings window's self-close branch in `app_impl.rs` (reached by Apply/OK,
+  Cancel, the window's own close button, and the owning terminal window's
+  `CloseNow`), plus the owning window's Discard prompt, which closes the
+  Settings window directly. `on_close_requested` has no `WindowHandle`, so
+  the Settings window's own close button vetoes the OS close and repaints
+  the window to reach the self-close branch rather than closing it in place.
+  A close path that skipped the helper once left discarded previews written
+  into `self.config`, where the next session's draft picked them up and a
+  later Apply saved them. If you add a new way to close Settings, route it
+  through the self-close branch or call the helper.
 
 If you add a new debounced or metadata-carrying preview field, replicate
 this shape: unconditional close-path revert, baseline-vs-committed
 comparison (not draft-vs-committed) for whether to push, and any
-push-metadata reset at teardown rather than inside the push helper.
+push-metadata reset in `end_settings_session` rather than inside the push
+helper.
 
 ## Cell-size and layout changes: do not hand-roll a resize
 
