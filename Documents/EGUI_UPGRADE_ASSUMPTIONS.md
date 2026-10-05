@@ -11,7 +11,7 @@ re-tessellating, and re-painting the "chrome" (menu bar, tab bar, borders,
 overlays) on frames where the chrome provably did not change, while always
 freshly rebuilding the terminal band. To do this correctly it relies on a
 number of **undocumented, internal behaviours** of the egui stack
-(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.36.1**.
+(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.36.2**.
 
 These behaviours are not part of any crate's public API contract. A version
 bump — even a patch bump — could silently change one of them. The failure mode
@@ -21,7 +21,7 @@ runtime.
 
 To contain that risk:
 
-- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.36.1`) in the
+- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.36.2`) in the
   workspace `Cargo.toml`, as a matched set. This is deliberate — do not "clean
   it up" to a caret range.
 - `glow` is separately held at **0.17** (a caret range, not an exact pin)
@@ -46,14 +46,15 @@ must be adapted (and this file updated) before the bump can land.
 
 ## How to use this on a bump
 
-1. Read the new version's source for each `Upstream (0.36.1)` location below
+1. Read the new version's source for each `Upstream (0.36.2)` location below
    and confirm the behaviour still holds. Line numbers will drift between
    versions; find the equivalent code, do not trust the line number blindly.
 
-   The fastest reliable method, used for the 0.35.0 → 0.36.1 walk: fetch the
-   new crates, extract them, and `diff -u` each file named below against the
-   copy already in `~/.cargo/registry/src/*/`. A zero-line diff discharges
-   every assumption resting on that file at once; anything else you read.
+   The fastest reliable method, used for the 0.35.0 → 0.36.1 and
+   0.36.1 → 0.36.2 walks: fetch the new crates, extract them, and `diff -u`
+   each file named below against the copy already in
+   `~/.cargo/registry/src/*/`. A zero-line diff discharges every assumption
+   resting on that file at once; anything else you read.
 2. For any assumption that changed, fix the corresponding `Our code` site and
    update this table.
 3. Run `cargo test --all` (catches the headless-verifiable subset — callback
@@ -69,7 +70,7 @@ must be adapted (and this file updated) before the bump can land.
 ## The assumptions
 
 Each row: what we rely on, where our code depends on it, the upstream source
-that proves it in 0.36.1, and what breaks (visibly) if a bump invalidates it.
+that proves it in 0.36.2, and what breaks (visibly) if a bump invalidates it.
 
 ### A1 — `paint_primitives` fully re-establishes GL state per call (except FBO)
 
@@ -83,7 +84,7 @@ for restoring that.
 
 - **Our code:** `freminal-windowing/src/egui_integration.rs` (the three
   `paint_primitives` calls in `run_frame`, head/band/tail).
-- **Upstream (0.36.1):** `egui_glow/src/painter.rs` — `prepare_painting`
+- **Upstream (0.36.2):** `egui_glow/src/painter.rs` — `prepare_painting`
   (`~300-349`), called at `paint_primitives` entry (`~405`) and after each
   callback (`~450`). No `bind_framebuffer` anywhere in `prepare_painting`.
 - **Symptom if broken:** garbled / mis-clipped / wrongly-blended chrome or
@@ -129,7 +130,7 @@ Two sub-assumptions, both load-bearing:
   `run_ui` in the test/bench suites defuses the drop-bomb explicitly —
   `freminal/src/gui/app_impl.rs`, `freminal/src/gui/frame_drain.rs`,
   `freminal/benches/render_loop_bench.rs`, and this file's own test module.
-- **Upstream (0.36.1):** `egui_glow/src/painter.rs` —
+- **Upstream (0.36.2):** `egui_glow/src/painter.rs` —
   `paint_and_update_textures` (`~356-378`, note the `drain()` on both halves
   and the nested loop over each texture's deltas); `epaint/src/textures.rs` —
   `TexturesDelta` (`~283-345`, the new collection types, `push`, and the `Drop`
@@ -154,7 +155,7 @@ by egui).
 - **Our code:** `freminal/src/gui/app_impl.rs` (`band_shape_start` /
   `band_shape_end` capture); `freminal-windowing/src/egui_integration.rs`
   (the head/band/tail slice of `full_output.shapes`).
-- **Upstream (0.36.1):** `egui/src/layers.rs` — `enum Order` (`Background`
+- **Upstream (0.36.2):** `egui/src/layers.rs` — `enum Order` (`Background`
   first), `Order::ALL`, `GraphicLayers::drain` (`~213-260`, iterates
   `Order::ALL`, appends into one `Vec`).
 - **Symptom if broken:** the band paints at the wrong z-position (under chrome,
@@ -175,7 +176,7 @@ dependency pulls a `rayon` we never build against).
   callbacks), `freminal/src/gui/terminal/widget.rs` (per-pane callback); test
   `band_gl_callbacks_stay_contiguous_and_ordered_across_the_split` in
   `freminal-windowing/src/egui_integration.rs`.
-- **Upstream (0.36.1):** `epaint/src/tessellator.rs` —
+- **Upstream (0.36.2):** `epaint/src/tessellator.rs` —
   `tessellate_clipped_shape` callback branch (`~1375-1394`), the
   `Primitive::Callback(_) => true` merge-break, the sequential
   `tessellate_shapes` loop (`~2230`), and the rayon `should_parallelize`
@@ -194,7 +195,7 @@ the atlas-resize self-heal (A6).
 - **Our code:** `freminal-windowing/src/egui_integration.rs` (the REPLAY
   atlas-grow self-heal re-tessellating cached chrome shapes); test
   `atlas_growth_invalidates_cached_text_uvs_and_retessellation_fixes_it`.
-- **Upstream (0.36.1):** `egui/src/context.rs` — `tessellate` (`~2757-2795`,
+- **Upstream (0.36.2):** `egui/src/context.rs` — `tessellate` (`~2757-2795`,
   reads `texture_atlas.size()` fresh, builds a new `Tessellator`);
   `epaint/src/tessellator.rs` — `tessellate_text` UV normalization by
   `font_tex_size` (`~2029-2030`).
@@ -224,7 +225,7 @@ negative twin.
 
 - **Our code:** `freminal-windowing/src/egui_integration.rs` — the
   `atlas_grew` helper.
-- **Upstream (0.36.1):** `epaint/src/texture_atlas.rs` — `allocate`
+- **Upstream (0.36.2):** `epaint/src/texture_atlas.rs` — `allocate`
   (`~220-263`, forward-only cursor, never repositions), `resize_to_min_height`
   (sets `dirty = Rectu::EVERYTHING`), `take_delta` (turns `EVERYTHING` into
   `ImageDelta::full`); `epaint/src/image.rs` — `ImageDelta::is_whole`
@@ -240,7 +241,7 @@ negative twin.
 first and stable for the whole `Context` lifetime. A6's detector keys on it.
 
 - **Our code:** `freminal-windowing/src/egui_integration.rs` — `atlas_grew`.
-- **Upstream (0.36.1):** `egui/src/context.rs` —
+- **Upstream (0.36.2):** `egui/src/context.rs` —
   `WrappedTextureManager::default` (`~73-91`, allocates the font texture first
   with an `assert_eq!(font_id, TextureId::default())`);
   `epaint/src/textures.rs` — `TextureManager::alloc` doc (`~24-28`).
@@ -256,7 +257,7 @@ closure) to bracket the band range. This works because `ctx.graphics()` /
 
 - **Our code:** `freminal/src/gui/app_impl.rs` — `band_shape_start` /
   `band_shape_end` captures via `ctx.graphics(...)`.
-- **Upstream (0.36.1):** `egui/src/context.rs` — `graphics` / `graphics_mut`
+- **Upstream (0.36.2):** `egui/src/context.rs` — `graphics` / `graphics_mut`
   (`~971-981`), and `end_pass` draining `viewport.graphics` (`~2617-2619`).
 - **Symptom if broken:** the band range is captured against the wrong or an
   empty layer set — the band is mis-sliced (blank terminal or duplicated
@@ -272,7 +273,7 @@ overridden.
 
 - **Our code:** `freminal/src/gui/app_impl.rs` — the root Ui construction and
   the REPLAY `band_ui` construction (explicit `.layer_id(background())`).
-- **Upstream (0.36.1):** `egui/src/ui.rs` — `Ui::new`
+- **Upstream (0.36.2):** `egui/src/ui.rs` — `Ui::new`
   (`layer_id.unwrap_or_else(LayerId::background)`, `~124`), `Ui::new_child`
   (`~224-231`, clones parent painter, only overrides layer if the builder
   supplies one).
@@ -293,7 +294,7 @@ our own blink/content scheduling wants an earlier wake."
   `chrome_repaint_settled`; `freminal/src/gui/app_impl.rs` —
   `shortest_repaint_delay` / `request_repaint_after` /
   `take_terminal_requested_delay`.
-- **Upstream (0.36.1):** `egui/src/context.rs` — `request_repaint_after`
+- **Upstream (0.36.2):** `egui/src/context.rs` — `request_repaint_after`
   effect writes `viewport.repaint.repaint_delay` (`~158-159`); the same field
   is read into `ViewportOutput.repaint_delay` (`~2719`); egui-internal
   scheduling writes it too (`~111`, `~113`).
@@ -315,7 +316,7 @@ hide the gutter-hover / interaction widgets.
   approach (band stays in background layer); regression tests
   `same_layer_widget_is_not_hidden_by_containing_widget` and
   `dedicated_background_layer_hides_contained_widget_cross_layer`.
-- **Upstream (0.36.1):** `egui/src/hit_test.rs` — the hidden-rule loop
+- **Upstream (0.36.2):** `egui/src/hit_test.rs` — the hidden-rule loop
   (`~143-151`: `contains_rect(...) && current.layer_id != next.layer_id =>
   hidden.insert(...)`). Note that 0.36 added a filter _upstream of_ this loop
   (`egui/src/context.rs`, `begin_pass`: layers are now collected through
@@ -381,7 +382,7 @@ this by setting `Options::zoom_with_keyboard = false` and never calling
 - **Our code:** `freminal-windowing/src/event_loop.rs` —
   `physical_to_logical_pos` (divides by `window.scale_factor()`);
   `freminal/src/gui/rendering.rs` — `options.zoom_with_keyboard = false`.
-- **Upstream (0.36.1):** `egui-winit/src/lib.rs` — `pixels_per_point(ctx,
+- **Upstream (0.36.2):** `egui-winit/src/lib.rs` — `pixels_per_point(ctx,
   window) = window.scale_factor() * ctx.zoom_factor()`; egui zoom is driven
   only by `egui::gui_zoom::zoom_with_keyboard` (gated on the option) or an
   explicit `set_zoom_factor`.
@@ -403,6 +404,49 @@ checklist. This file is only for the silent, undocumented, internal behaviours.
 
 One entry per bump. Record what was checked and how, so the next bump can tell
 a genuine re-verification from a rubber stamp.
+
+### 0.36.1 → 0.36.2
+
+Method: `cargo update` fetched the 0.36.2 `egui`, `epaint`, `egui_glow` and
+`egui-winit` crates into `~/.cargo/registry/src/*/` alongside the 0.36.1
+copies; every file named in the table above was `diff -u`'d between the two.
+Most of the release is a mechanical `std::` → `core::` path rewrite, which
+changes no behaviour.
+
+| File | Diff | Assumptions discharged |
+| --- | --- | --- |
+| `egui/src/layers.rs` | `std` → `core` paths only | A3 |
+| `epaint/src/texture_atlas.rs` | `std` → `core` paths only | A6 (upstream half) |
+| `epaint/src/image.rs` | `std` → `core` paths only | A6 (delta half) |
+| `egui/src/ui.rs` | `std` → `core` paths only | A9 |
+| `epaint/src/tessellator.rs` | rect fast path now requires `angle == 0.0` | A4, A5 |
+| `egui/src/hit_test.rs` | NaN-rect hardening; hidden-rule loop untouched | A11 |
+| `egui_glow/src/painter.rs` | `std` → `core` paths only | A1, A2 |
+| `egui/src/context.rs` | paths, plus a NaN widget-rect `debug_assert!` | A5, A7, A8, A10 |
+| `epaint/src/textures.rs` | `std` → `core` paths only | A2 |
+| `egui/src/data/output.rs` | `std` → `core` paths only | A2 |
+| `egui-winit/src/lib.rs` | window creation split; Windows fullscreen shadow | A13 |
+
+Outcome: **all twelve live assumptions held unchanged** (A12 stays retired).
+None of the non-path changes touch a load-bearing behaviour:
+
+- The tessellator change only affects rotated rects (it stops the
+  axis-aligned fast path from dropping the rotation); callback handling and
+  UV normalization are untouched.
+- `hit_test.rs` now drops widgets whose `rect` (not just `interact_rect`) is
+  NaN and looks up click/drag indices by id. The cross-layer hidden rule A11
+  rests on is unchanged.
+- `context.rs` gains `debug_assert!(!w.rect.any_nan())` when a widget is
+  registered. This is a new debug-build panic for NaN widget rects, but no
+  assumption depends on it.
+- `egui-winit` factors `create_window` into a new public
+  `apply_monitor_to_window_attributes` and suppresses the undecorated drop
+  shadow in fullscreen on Windows. freminal builds its own
+  `WindowAttributes` in `freminal-windowing/src/event_loop.rs` and never
+  calls egui-winit's window creation, so neither change reaches us.
+  `pixels_per_point` (A13) is unchanged.
+
+`glow` stays at 0.17: `egui_glow` 0.36.2 still declares `glow = "^0.17.0"`.
 
 ### 0.35.0 → 0.36.1
 
