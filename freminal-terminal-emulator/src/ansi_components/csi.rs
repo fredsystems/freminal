@@ -348,8 +348,10 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_decslpp(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'p') => {
-                if self.intermediates.contains(&b'!') {
-                    // DECSTR — Soft Terminal Reset (`CSI ! p`)
+                if self.intermediates.as_slice() == b"!" {
+                    // DECSTR — Soft Terminal Reset (`CSI ! p`). Exactly one
+                    // `!` intermediate: `CSI !! p` or `CSI $ ! p` is not
+                    // DECSTR and must not trigger a soft reset.
                     ansi_parser_inner_csi_finished_decstr(&self.params, output)
                 } else {
                     ansi_parser_inner_csi_finished_decrqm(

@@ -79,6 +79,27 @@ mod tests {
     }
 
     #[test]
+    fn csi_double_bang_p_is_not_decstr() {
+        // DECSTR has exactly one `!` intermediate. A doubled intermediate is
+        // malformed and must not soft-reset the terminal.
+        let output = parse_csi_sequence(b"!!p");
+        assert!(
+            !output.contains(&TerminalOutput::SoftReset),
+            "got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn csi_dollar_bang_p_is_not_decstr() {
+        // `!` alongside another intermediate is not DECSTR either.
+        let output = parse_csi_sequence(b"$!p");
+        assert!(
+            !output.contains(&TerminalOutput::SoftReset),
+            "got: {output:?}"
+        );
+    }
+
+    #[test]
     fn csi_dollar_p_still_reaches_decrqm_unchanged() {
         // Regression guard: `CSI $ p` (DECSLPP-adjacent DECRQM query without a
         // DEC private prefix) must still route to DECRQM, not DECSTR, since

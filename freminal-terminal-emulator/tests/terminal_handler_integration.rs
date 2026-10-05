@@ -2720,12 +2720,11 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
 
     let mut handler = TerminalHandler::new(40, 10);
 
-    // Move away from every default: bold SGR, origin mode on, hidden cursor,
-    // a non-default scroll region. DECAWM is already `AutoWrap` (the
-    // default), which would not distinguish "reset" from "untouched"; set it
-    // to `NoAutoWrap` — DECSTR must still land on `NoAutoWrap`, so instead
-    // flip it via NoAutoWrap and confirm DECSTR does not silently revert it
-    // to the enum's `Default` (`AutoWrap`).
+    // Move SGR, DECOM, DECTCEM and the scroll region away from their
+    // defaults. DECAWM is deliberately left at `AutoWrap`, the enum's
+    // `Default`: DECSTR resets it to `NoAutoWrap`, so the assertion below
+    // can only pass if DECSTR actually changed it, not if it was left alone
+    // or reset to `Default`.
     handler.process_outputs(&[
         TerminalOutput::Sgr(freminal_common::sgr::SelectGraphicRendition::Bold),
         TerminalOutput::Mode(Mode::Decom(Decom::OriginMode)),
@@ -2931,6 +2930,32 @@ fn test_decrc_after_decstr_restores_home_with_default_attributes() {
         *handler.current_format(),
         FormatTag::default(),
         "attributes must be default after DECSTR + DECRC"
+    );
+}
+
+#[test]
+fn test_decrc_after_decstr_restores_default_character_set() {
+    // DECSTR records a complete saved cursor, including the default G0
+    // character set. Designating DEC Special Graphics afterwards and then
+    // issuing DECRC without a new DECSC must restore the default set.
+    use freminal_common::buffer_states::{line_draw::DecSpecialGraphics, tchar::TChar};
+
+    let mut handler = TerminalHandler::new(40, 10);
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::Replace,
+    )]);
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+    handler.handle_data(&[0x6a]);
+
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell = visible_rows[0]
+        .char_at(0)
+        .expect("cell 0 must exist after writing");
+    assert_eq!(
+        cell.tchar(),
+        &TChar::from('j'),
+        "DECRC after DECSTR must restore the default (ASCII) character set"
     );
 }
 

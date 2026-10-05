@@ -704,17 +704,17 @@ impl TerminalHandler {
     /// freminal-private state with no VT510 representation at all, cleared
     /// because issue #507 requires it, not because Table 5-9 mandates it.
     ///
-    /// ## Known hole: `saved_character_replace` caveat
-    /// This sets `saved_character_replace` to `None` — meaning "no DECSC
-    /// has been recorded" — rather than to `Some(default charset)`. As a
-    /// result, if a program designates G0 as DEC Special Graphics and then
-    /// issues DECRC (`ESC 8`) without an intervening DECSC (`ESC 7`),
-    /// `handle_restore_cursor`'s `if let Some(saved) =
-    /// &self.saved_character_replace` branch is skipped and the graphics
-    /// charset survives the DECRC instead of being reset to default. This
-    /// is inherited, unchanged, from [`Self::full_reset`] (RIS), which sets
-    /// the same field to `None` for the same reason — DECSTR intentionally
-    /// matches that existing precedent rather than diverging from it.
+    /// ## Saved character set
+    /// Table 5-9 resets the DECSC state to home position with default
+    /// attributes, so the saved cursor this produces is a real, complete
+    /// save. The saved G0 character set is therefore recorded as the
+    /// default (`Some(DecSpecialGraphics::default())`), not left as `None`
+    /// ("nothing saved"). Otherwise a program that designated DEC Special
+    /// Graphics after DECSTR and then issued DECRC without its own DECSC
+    /// would keep the graphics set. RIS ([`Self::full_reset`]) still uses
+    /// `None`: it records no save at all, and xterm's behaviour for DECRC
+    /// with nothing saved is tracked separately in
+    /// `Documents/ESCAPE_SEQUENCE_GAPS.md`.
     pub fn soft_reset(&mut self) {
         self.show_cursor = Dectcem::Show;
         self.insert_mode = Irm::Replace;
@@ -734,7 +734,7 @@ impl TerminalHandler {
         // this codebase mutates them outside a save/restore round trip).
         self.buffer.set_decom(Decom::NormalCursor);
         self.buffer.save_cursor();
-        self.saved_character_replace = None;
+        self.saved_character_replace = Some(DecSpecialGraphics::default());
 
         // DECSTBM -> top = 1, bottom = page length. Also homes the cursor;
         // restored below along with DECOM's homing.

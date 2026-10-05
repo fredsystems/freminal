@@ -255,6 +255,24 @@ impl TerminalState {
                 self.parser.s8c1t_mode = S8c1t::SevenBit;
                 self.handler.set_s8c1t_mode(S8c1t::SevenBit);
             }
+            // DECSTR (CSI ! p) — soft terminal reset. The handler applies
+            // its own subset of Table 5-9 of the VT510 Programmer Reference.
+            // Of the `TerminalState`-owned mode fields only DECCKM (cursor
+            // keys) and DECNKM (keypad) are on that table, so only those two
+            // are reset here. Mouse tracking, bracketed paste, focus
+            // reporting, synchronized updates, DECSCNM and the rest of
+            // `TerminalModes` are deliberately left alone: none are in
+            // Table 5-9.
+            //
+            // This must run here, in event order, rather than as a scan over
+            // the whole chunk afterwards: `CSI ! p` followed by `CSI ? 1 h`
+            // in one write must leave DECCKM in application mode. Handling
+            // it here also covers DECSTR arriving through the tmux
+            // passthrough reparse path, which calls this same function.
+            TerminalOutput::SoftReset => {
+                self.modes.cursor_key = Decckm::Ansi;
+                self.modes.keypad_mode = KeypadMode::Numeric;
+            }
             _ => {}
         }
     }
@@ -617,23 +635,6 @@ impl TerminalState {
             self.leftover_data = None;
             self.cursor_visual_style = CursorVisualStyle::default();
             self.window_commands.clear();
-        }
-
-        // ── DECSTR (CSI ! p) — soft terminal reset ─────────────────────
-        //
-        // The handler has already applied its subset of Table 5-9 of the
-        // VT510 Programmer Reference. Of the `TerminalState`-owned mode
-        // fields, only DECCKM (cursor keys) and DECNKM (keypad) are on that
-        // table, so only those two are reset here. Unlike the RIS block
-        // above, this deliberately does NOT reset mouse tracking, bracketed
-        // paste, focus reporting, synchronized updates, DECSCNM, or any
-        // other mode in `TerminalModes` — none of those are in Table 5-9.
-        if parsed
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::SoftReset))
-        {
-            self.modes.cursor_key = Decckm::Ansi;
-            self.modes.keypad_mode = KeypadMode::Numeric;
         }
 
         // Drain window commands queued by the new handler into the shared vec
@@ -1111,5 +1112,39 @@ mod tests {
             remaining.is_empty(),
             "tmux reparse queue should be drained after handle_incoming_data"
         );
+    }
+
+    // ── DECSTR (CSI ! p) mode reset ordering ────────────────────────────────
+
+    #[test]
+    fn decstr_followed_by_mode_setup_in_one_write_keeps_the_later_modes() {
+        // Applications commonly send a soft reset and then their own mode
+        // setup in a single write. The reset must apply in wire order, so the
+        // modes set after it survive.
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[!p\x1b[?1h\x1b=");
+        assert_eq!(state.modes.cursor_key, Decckm::Application);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+    }
+
+    #[test]
+    fn mode_setup_followed_by_decstr_in_one_write_resets_the_modes() {
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[?1h\x1b=\x1b[!p");
+        assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+    }
+
+    #[test]
+    fn decstr_through_tmux_passthrough_resets_cursor_keys_and_keypad() {
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[?1h\x1b=");
+        // DCS tmux ; ESC ESC [ ! p ST -- tmux doubles the inner ESC.
+        state.handle_incoming_data(b"\x1bPtmux;\x1b\x1b[!p\x1b\\");
+        assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
     }
 }
