@@ -97,13 +97,32 @@ pub(super) fn handle_osc_notify_9(
     }));
 }
 
-/// Parse the ConEmu/Windows Terminal progress sub-protocol
+/// Parse the `ConEmu` / Windows Terminal progress sub-protocol
 /// `4;<state>[;<value>]` into a typed [`ProgressUpdate`].
 ///
+/// An **omitted** value field (`4;<state>`) and a **present-but-empty**
+/// value field (`4;<state>;`) are treated identically: both mean "no value
+/// supplied", resolved through each state's omitted-value rule (see the
+/// `match` below).
+///
+/// The empty-field spelling is a deliberate leniency, not a spec
+/// requirement. The ghostty reference documents only `4;<s>` and
+/// `4;<s>;<v>`; Windows Terminal documents `4;<state>;<progress>` and says
+/// state 3 ignores `<progress>`. Neither describes an empty value field.
+/// It is accepted because the alternative, which the narrower #502 rule
+/// produced, is to show the raw text `4;1;` as an OSC 9 desktop
+/// notification, and that is never what a sender writing a `4;<state>`
+/// prefix meant. The widening is intentional: do not restore the #502
+/// rejection on the assumption that this is a regression.
+///
+/// Leniency stops at the value field. An empty *state* field (`4;`) is
+/// still rejected, so the set of bodies taken away from notification text
+/// stays limited to ones that begin with a valid state digit.
+///
 /// Returns `None` when the payload does not match the progress-report wire
-/// form — including a state outside `0..=4`, a trailing field beyond
-/// `s;v`, an explicit-but-empty value field, or a value outside `0..=100` —
-/// in which case the caller must treat the entire body as ordinary OSC 9
+/// form — including an empty or out-of-range state field, a trailing field
+/// beyond `s;v`, a non-numeric value, or a value outside `0..=100` — in
+/// which case the caller must treat the entire body as ordinary OSC 9
 /// notification text rather than silently dropping it.
 fn parse_conemu_progress_report(payload: &[u8]) -> Option<ProgressUpdate> {
     let mut fields = payload.split(|&byte| byte == b';');
@@ -120,11 +139,11 @@ fn parse_conemu_progress_report(payload: &[u8]) -> Option<ProgressUpdate> {
     }
 
     let value: Option<u8> = match value_field {
-        None => None,
+        // Omitted (`4;<state>`) and present-but-empty (`4;<state>;`) are
+        // both "no value supplied". See the leniency note in this
+        // function's doc comment.
+        None | Some([]) => None,
         Some(raw) => {
-            if raw.is_empty() {
-                return None;
-            }
             let parsed = std::str::from_utf8(raw).ok()?.parse::<u8>().ok()?;
             if parsed > 100 {
                 return None;
@@ -432,6 +451,67 @@ mod tests {
         assert_eq!(expect_progress(&output), ProgressUpdate::Paused(None));
     }
 
+    // ── Empty value field spelling (deliberate leniency) ─────────────────
+    //
+    // Neither the ghostty reference nor the Windows Terminal docs describe
+    // an empty value field (`9;4;<state>;`). We accept it rather than show
+    // it as notification text; see the doc comment on
+    // `parse_conemu_progress_report`. Each test below pairs with the
+    // omitted-value test for the same state above, showing both spellings
+    // resolve identically.
+
+    #[test]
+    fn osc9_progress_clear_empty_value_field() {
+        let output = feed_osc(b"9;4;0;\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Clear);
+    }
+
+    #[test]
+    fn osc9_progress_in_progress_empty_value_field() {
+        let output = feed_osc(b"9;4;1;\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(0));
+    }
+
+    #[test]
+    fn osc9_progress_error_empty_value_field() {
+        let output = feed_osc(b"9;4;2;\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Error(None));
+    }
+
+    #[test]
+    fn osc9_progress_indeterminate_empty_value_field() {
+        let output = feed_osc(b"9;4;3;\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Indeterminate);
+    }
+
+    #[test]
+    fn osc9_progress_paused_empty_value_field() {
+        let output = feed_osc(b"9;4;4;\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Paused(None));
+    }
+
+    #[test]
+    fn osc9_progress_retention_survives_empty_value_field_spelling() {
+        // The retention semantics (`ProgressReport::apply`) must hold up
+        // when the "no value supplied" state arrives via the empty-field
+        // spelling, not just the omitted spelling: 50% in progress, then
+        // `9;4;2;` (empty value field) must land on Error with the
+        // percentage still 50, not reset.
+        use freminal_common::buffer_states::progress::{ProgressReport, ProgressState};
+
+        let mut report = ProgressReport::default();
+
+        let in_progress = feed_osc(b"9;4;1;50\x1b\\");
+        report.apply(expect_progress(&in_progress));
+        assert_eq!(report.state(), ProgressState::InProgress);
+        assert_eq!(report.percent(), 50);
+
+        let error_empty_value = feed_osc(b"9;4;2;\x1b\\");
+        report.apply(expect_progress(&error_empty_value));
+        assert_eq!(report.state(), ProgressState::Error);
+        assert_eq!(report.percent(), 50);
+    }
+
     #[test]
     fn osc9_invalid_progress_form_remains_notification_text() {
         let output = feed_osc(b"9;4;build finished\x07");
@@ -460,12 +540,13 @@ mod tests {
     }
 
     #[test]
-    fn osc9_progress_empty_value_field_remains_notification_text() {
+    fn osc9_progress_empty_value_field_is_accepted_as_progress() {
+        // `9;4;1;` — a present-but-empty value field is treated the same as
+        // an omitted one (deliberate leniency; see the doc comment on
+        // `parse_conemu_progress_report`), NOT rejected as it was under the
+        // narrower #502 rule.
         let output = feed_osc(b"9;4;1;\x07");
-        let (source, title, body) = expect_notify(&output);
-        assert_eq!(source, OscNotifySource::Osc9);
-        assert_eq!(*title, None);
-        assert_eq!(body, "4;1;");
+        assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(0));
     }
 
     #[test]
@@ -475,6 +556,18 @@ mod tests {
         assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "4;1;50;extra");
+    }
+
+    #[test]
+    fn osc9_progress_numeric_extra_field_remains_notification_text() {
+        // `9;4;1;50;7` — a third, purely numeric field is still one field
+        // too many (`s;v` is the maximum), so it must fall through exactly
+        // like the non-numeric-extra-field case above.
+        let output = feed_osc(b"9;4;1;50;7\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;50;7");
     }
 
     #[test]
@@ -502,11 +595,14 @@ mod tests {
 
     #[test]
     fn osc9_progress_empty_state_field_remains_notification_text() {
-        // `9;4;` — the state field is present but empty. Unlike the
-        // omitted-VALUE cases above (`9;4;1;`), `parse_conemu_progress_report`
-        // requires `state` to match `[b'0'..=b'4']`, exactly one byte in
-        // range; an empty slice never matches, so this falls through to
-        // notification text with the full `"4;"` body preserved.
+        // `9;4;` — the STATE field is present but empty. The empty-field
+        // leniency only applies to the *value* field (e.g. `9;4;1;`,
+        // which is now accepted — see
+        // `osc9_progress_empty_value_field_is_accepted_as_progress`).
+        // `parse_conemu_progress_report` still requires `state` to match
+        // `[b'0'..=b'4']`, exactly one byte in range; an empty slice never
+        // matches, so this falls through to notification text with the
+        // full `"4;"` body preserved.
         let output = feed_osc(b"9;4;\x07");
         let (source, title, body) = expect_notify(&output);
         assert_eq!(source, OscNotifySource::Osc9);
