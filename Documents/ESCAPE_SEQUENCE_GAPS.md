@@ -1,5 +1,11 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-05 — PR #527 review — recorded the ANSI-mode DECRQM
+(`CSI Pa $ p`) defects under "CSI Standard Mode Gaps" below: replies use the
+DEC-private form, and an IRM query clears insert mode (issue #528). The same
+review made DECRQM ignore malformed intermediates and queries with no mode
+number (see ESCAPE_SEQUENCE_COVERAGE.md).
+
 Last updated: 2026-10-05 — issue #507 — the "OSC 9;4 ConEmu progress UI"
 gap is closed. Per-pane OSC 9;4 progress state is now resolved into a typed
 `ProgressReport`, transported on `TerminalSnapshot`, and rendered as a bar
@@ -156,6 +162,8 @@ The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
+- **DECRQM for ANSI modes:** `CSI Pa $ p` replies use the DEC-private form,
+  and an IRM query clears insert mode (issue #528)
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
   hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
   five narrow xterm divergences in cursor save/restore (DECSC per-screen slots,
@@ -288,6 +296,17 @@ G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work corr
 
 LNM (mode 20) and IRM (mode 4) are implemented.
 
+### DECRQM for ANSI modes (`CSI Pa $ p`)
+
+The ANSI-mode form of DECRQM is handled incorrectly (issue #528). It should
+be answered `CSI Pa ; Ps $ y`, without the `?` that the DEC-private form
+(`CSI ? Pd ; Ps $ y`) carries.
+
+| Behaviour                    | Importance | Type | Planned | Notes                                                                                                                                                                                       |
+| ---------------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IRM query (`CSI 4 $ p`)      | 🟨         | 🚧   | —       | No reply, and the query is stored as the live insert mode, so it switches insert mode off. `TerminalHandler` assigns `Mode::Irm(irm)` directly, including `Irm::Query` (issue #528).       |
+| ANSI-form reply prefix       | ⬜         | 🚧   | —       | Replies to ANSI-mode queries carry `?`: LNM answers `CSI ? 20 ; Ps $ y` via `Lnm::report`, and unknown modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. |
+
 ---
 
 ## DEC Private Mode Gaps
@@ -351,6 +370,7 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | Item                           | Rationale                                                                                                                                                                    | Planned    |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | An IRM query silently clears insert mode, and replies use the DEC-private form. See "CSI Standard Mode Gaps"                                                                | issue #528 |
 
 ### Priority 3 — Low priority / optional
 

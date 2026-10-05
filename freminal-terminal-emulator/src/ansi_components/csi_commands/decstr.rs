@@ -101,10 +101,10 @@ mod tests {
 
     #[test]
     fn csi_dollar_p_still_reaches_decrqm_unchanged() {
-        // Regression guard: `CSI $ p` (DECSLPP-adjacent DECRQM query without a
-        // DEC private prefix) must still route to DECRQM, not DECSTR, since
-        // the two share the final byte `p`.
-        let output = parse_csi_sequence(b"$p");
+        // Regression guard: `CSI 4 $ p` (ANSI-form DECRQM query, no DEC
+        // private prefix) must still route to DECRQM, not DECSTR, since the
+        // two share the final byte `p`.
+        let output = parse_csi_sequence(b"4$p");
         assert_ne!(output.as_slice(), []);
         assert!(matches!(output[0], TerminalOutput::Mode(_)));
     }

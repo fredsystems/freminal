@@ -47,16 +47,35 @@ fn decrqm_malformed_graceful() {
         let outs = push_seq(s);
         println!("DECRQM malformed {:?} -> {:?}", s, outs);
 
-        // parser must not panic and should produce either an empty result (truncated)
-        // or some placeholder variant like Mode(UnknownQuery([])) or Data(...)
+        // parser must not panic and should produce either an empty result
+        // (truncated), an `Invalid` marker, or plain data.
         assert!(
             outs.is_empty()
-                || outs
-                    .iter()
-                    .any(|o| matches!(o, TerminalOutput::Mode { .. } | TerminalOutput::Data(_))),
+                || outs.iter().any(|o| matches!(
+                    o,
+                    TerminalOutput::Mode { .. } | TerminalOutput::Data(_) | TerminalOutput::Invalid
+                )),
             "Unexpected output for malformed {:?}: {:?}",
             s,
             outs
+        );
+    }
+}
+
+#[test]
+fn decrqm_without_mode_number_produces_no_mode_query() {
+    // A query that names no mode must not become a mode query: the handler
+    // would answer it with a reply carrying no mode number, injected into
+    // the application's input unasked.
+    for s in ["\x1b[$p", "\x1b[?$p"] {
+        let outs = push_seq(s);
+        assert!(
+            !outs.iter().any(|o| matches!(o, TerminalOutput::Mode(_))),
+            "{s:?} produced a mode query: {outs:?}"
+        );
+        assert!(
+            outs.contains(&TerminalOutput::Invalid),
+            "{s:?} should be reported invalid: {outs:?}"
         );
     }
 }

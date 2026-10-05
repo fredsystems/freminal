@@ -1147,4 +1147,48 @@ mod tests {
         assert_eq!(state.modes.cursor_key, Decckm::Ansi);
         assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
     }
+
+    // ── DECRQM replies: only well-formed queries are answered ───────────────
+
+    /// Everything the terminal wrote back to the application while
+    /// processing `bytes`.
+    fn pty_replies(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut state = TerminalState::new(tx, None);
+        state.handle_incoming_data(bytes);
+        rx.try_iter()
+            .filter_map(|msg| match msg {
+                PtyWrite::Write(bytes) => Some(bytes),
+                PtyWrite::Resize(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decrqm_well_formed_private_query_is_answered() {
+        assert_eq!(pty_replies(b"\x1b[?1$p"), vec![b"\x1b[?1;2$y".to_vec()]);
+    }
+
+    #[test]
+    fn decrqm_malformed_queries_are_not_answered() {
+        // Extra or misplaced intermediates make these unrecognised
+        // sequences, and a query with no mode number names nothing. None of
+        // them may inject a reply into the application's input.
+        for seq in [
+            &b"\x1b[?1$!p"[..],
+            b"\x1b[?1$$p",
+            b"\x1b[?1 $p",
+            b"\x1b[$!p",
+            b"\x1b[!$p",
+            b"\x1b[$p",
+            b"\x1b[?$p",
+        ] {
+            assert_eq!(
+                pty_replies(seq),
+                Vec::<Vec<u8>>::new(),
+                "{:?} must not be answered",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
 }
