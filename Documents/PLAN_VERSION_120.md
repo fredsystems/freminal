@@ -17,7 +17,7 @@ hot, so it ships together):
   layered on the Task-118 compact form — block-granular LZ4 compression of idle scrollback,
   decompress-on-scroll with an LRU block cache, driven by the same idle tick Task 118
   established. LZ4-only (no zstd tier).
-- **Task 120 — Resize Coalescing and Reflow Cost** (pending merge; re-scoped 2026-10-08 from
+- **Task 120 — Resize Coalescing and Reflow Cost** (complete, merged 2026-10-08 via PR #532; re-scoped 2026-10-08 from
   "Compression-Aware Windowed Reflow"): measurement showed a single full-scrollback reflow
   is a ~100–190 ms hitch at the 10k default, that compression is not the bottleneck, and
   that the real defect is uncoalesced drag resizes — every intermediate size is reflowed in
@@ -92,7 +92,7 @@ until its 2026-10-08 re-scope, which decomposed it against the code as it then e
 | --- | ------------------------------------------- | ------ | ------------- | -------------- |
 | 118 | Compact Cell Representation                 | Medium | Complete      | None           |
 | 119 | Scrollback Compression (LZ4)                | Large  | Complete      | Task 118       |
-| 120 | Resize Coalescing and Reflow Cost           | Medium | Pending merge | Tasks 118, 119 |
+| 120 | Resize Coalescing and Reflow Cost           | Medium | Complete      | Tasks 118, 119 |
 | 121 | Performance Remediation                     | Large  | Complete      | None           |
 | 122 | Orchestration Extraction                    | Large  | Complete      | None           |
 | 123 | GL Pipeline Measurement Harness             | Large  | Complete      | Task 122       |
@@ -788,10 +788,10 @@ Stop: report results.
 
 ## Task 120 — Resize Coalescing and Reflow Cost
 
-> **STATUS: PENDING MERGE (re-scoped 2026-10-08; 120.1–120.4 done 2026-10-08 on
-> `task-120/resize-coalescing`).** This task was previously the enriched stub "Compression-Aware Windowed Reflow". A measurement on 2026-10-08 refuted that stub's premise
-> at the default scrollback depth and located the real defect elsewhere; the task was re-scoped
-> to that defect by maintainer decision. The windowed/lazy reflow design is **not** discarded:
+> **STATUS: COMPLETE (re-scoped 2026-10-08; merged 2026-10-08 via PR #532).** This task
+> was previously the enriched stub "Compression-Aware Windowed Reflow". A measurement on
+> 2026-10-08 refuted that stub's premise at the default scrollback depth and located the real
+> defect elsewhere; the task was re-scoped to that defect by maintainer decision. The windowed/lazy reflow design is **not** discarded:
 > it moved, unchanged in substance, to `FUTURE_PLANS.md` B.10, to be revisited only if the
 > measurements below still show an unacceptable single-resize latency after this task lands.
 
