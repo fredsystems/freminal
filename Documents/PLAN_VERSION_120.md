@@ -17,11 +17,12 @@ hot, so it ships together):
   layered on the Task-118 compact form — block-granular LZ4 compression of idle scrollback,
   decompress-on-scroll with an LRU block cache, driven by the same idle tick Task 118
   established. LZ4-only (no zstd tier).
-- **Task 120 — Compression-Aware Windowed Reflow** (enriched stub): once a very large
-  scrollback is affordable, synchronous full-scrollback reflow becomes the new latency wall.
-  This absorbs the former 118.10 lazy-reflow stub and the reflow half of the old Task 119,
-  because band-decompression and lazy reflow are one control flow. Decomposed at its own
-  activation session, not now.
+- **Task 120 — Resize Coalescing and Reflow Cost** (planned; re-scoped 2026-10-08 from
+  "Compression-Aware Windowed Reflow"): measurement showed a single full-scrollback reflow
+  is a ~100–190 ms hitch at the 10k default, that compression is not the bottleneck, and
+  that the real defect is uncoalesced drag resizes — every intermediate size is reflowed in
+  full, in order, on the PTY thread. The task coalesces queued resizes and removes avoidable
+  cell copies from reflow. The windowed/lazy reflow design moved to `FUTURE_PLANS.md` B.10.
 
 **Theme 2 — CPU performance remediation:**
 
@@ -80,9 +81,8 @@ content moved unchanged.
 
 Depends on the existing lock-free architecture.
 
-**Decomposed** per the `freminal-version-activation` skill, except Task 120, which stays an
-enriched stub per the just-in-time planning policy. Re-confirm the seams at activation
-before executing.
+**Decomposed** per the `freminal-version-activation` skill. Task 120 was an enriched stub
+until its 2026-10-08 re-scope, which decomposed it against the code as it then existed.
 
 ---
 
@@ -92,7 +92,7 @@ before executing.
 | --- | ------------------------------------------- | ------ | ------------- | -------------- |
 | 118 | Compact Cell Representation                 | Medium | Complete      | None           |
 | 119 | Scrollback Compression (LZ4)                | Large  | Complete      | Task 118       |
-| 120 | Compression-Aware Windowed Reflow           | Large  | Stub          | Tasks 118, 119 |
+| 120 | Resize Coalescing and Reflow Cost           | Medium | Planned       | Tasks 118, 119 |
 | 121 | Performance Remediation                     | Large  | Complete      | None           |
 | 122 | Orchestration Extraction                    | Large  | Complete      | None           |
 | 123 | GL Pipeline Measurement Harness             | Large  | Complete      | Task 122       |
@@ -118,6 +118,8 @@ before executing.
 - **Task 120 is an enriched stub; 119 is fully decomposed.** Per `freminal-version-activation`,
   the large, subtle reflow task is decomposed at its own activation, not now; the compression
   core (119) is decomposed because its prerequisites (Task 118) are already merged.
+  **Superseded 2026-10-08:** Task 120 was re-scoped to resize coalescing and reflow cost
+  after measurement refuted the windowed-reflow premise at the default depth; see its section.
 - **Task 121 was an umbrella, not a single deliverable, and was closed as one.** Its
   subtasks were scheduled individually; the survivors migrated to Tasks 123 and 124 on
   2026-08-20 rather than outliving the version inside a tracker that no longer worked.
@@ -511,6 +513,8 @@ of the original Task 119, because band-decompression-on-reflow and lazy reflow a
 control flow (the band you decompress is the band you reflow, and the async tail is shared).
 Building them separately would mean constructing the lazy-reflow band machinery twice. The
 durable design principle it captured is preserved in the Task 120 section; nothing is lost.
+(2026-10-08: Task 120 was re-scoped; the windowed-reflow principle now lives in
+`FUTURE_PLANS.md` B.10.)
 
 ### 118 Open questions (resolve at activation)
 
@@ -782,71 +786,156 @@ Stop: report results.
 
 ---
 
-## Task 120 — Compression-Aware Windowed Reflow
+## Task 120 — Resize Coalescing and Reflow Cost
 
-> **STATUS: ENRICHED STUB.** Durable design decisions are captured below; per-subtask
-> decomposition happens at activation in a dedicated session, against the code as it then
-> exists (see the `freminal-version-activation` skill). Do not invent subtasks early.
+> **STATUS: PLANNED (re-scoped 2026-10-08).** This task was previously the enriched stub
+> "Compression-Aware Windowed Reflow". A measurement on 2026-10-08 refuted that stub's premise
+> at the default scrollback depth and located the real defect elsewhere; the task was re-scoped
+> to that defect by maintainer decision. The windowed/lazy reflow design is **not** discarded:
+> it moved, unchanged in substance, to `FUTURE_PLANS.md` B.10, to be revisited only if the
+> measurements below still show an unacceptable single-resize latency after this task lands.
 
 ### 120 Summary
 
-Make width-resize reflow of a very large scrollback affordable. Once Task 118 (compact) and
-Task 119 (LZ4 compression) make tens-of-thousands-to-100k-line scrollback the norm,
-**synchronous full-scrollback reflow becomes the new latency wall** — and Task 119
-deliberately left the existing reflow correct-but-slow (it decompresses everything it needs).
-This task fixes reflow speed with the same recency-first, eventually-consistent philosophy the
-memory tasks apply to compaction and compression.
+Make interactive resizing of a pane with deep scrollback responsive, by fixing the two things
+that actually cost time: **every intermediate resize of a drag is reflowed in full, in order**,
+and **each reflow spends most of its time copying cells it could move**.
 
-This task **absorbs two previously-separate pieces** that turned out to be one control flow:
+### 120 Why the task was re-scoped (measured 2026-10-08)
 
-1. The former **118.10** lazy/windowed-reflow stub.
-2. The **reflow half of the original Task 119** (band-decompression on resize).
+The old stub assumed that once Tasks 118/119 made deep scrollback affordable, a single
+synchronous full-scrollback reflow — especially one that must decompress LZ4 blocks — would
+become a latency wall that only a visible-region-first, lazily-completed reflow could fix.
 
-They are unified because _the band you decompress is the band you reflow, and the async tail
-that finishes decompression is the async tail that finishes reflow._ Building them separately
-would construct the lazy-reflow band machinery twice.
+A throwaway probe (release build, public `Buffer` API, synthetic coloured ~70-char lines with
+~15% wrapping, full scrollback plus a 40-row screen; not a committed benchmark — 120.1 makes
+it one) timed `set_size` width changes:
 
-### 120 Design principle (durable)
+| Scrollback | Live rows | Compacted | LZ4-compressed |
+| ---------- | --------- | --------- | -------------- |
+| 10k        | ~100 ms   | ~140 ms   | ~160–190 ms    |
+| 100k       | ~1.0 s    | ~1.4 s    | ~1.5 s         |
 
-On a width resize:
+Four findings:
 
-1. Reflow only the **visible region plus a small scroll-headroom margin** synchronously —
-   band-decompressing only the blocks that band needs — producing a correct snapshot for the
-   current viewport essentially instantly.
-2. **Publish that snapshot immediately**; the user sees the resized view with no perceptible
-   delay.
-3. Reflow (and re-decompress as needed) the remaining scrollback **lazily/incrementally in the
-   background** — reusing the Task-118/119 idle-tick driver — and/or **on-demand as the user
-   scrolls up** into not-yet-reflowed history. Recompaction and recompression of reflowed rows
-   then follow the normal deferred path.
+1. **At the 10k default a single reflow is a hitch, not a wall.** ~100–190 ms, once.
+2. **Compression is not the bottleneck.** It adds ~25–50% over live rows; the reflow core
+   dominates. The stub's band-decompression premise does not hold.
+3. **Cost is proportional to scrollback depth, not to the width delta.** A 1-column change
+   costs the same as 80→200.
+4. **Drags are not coalesced, and that is the real defect.** The GUI sends one
+   `InputEvent::Resize` per frame in which the cell grid changes (the only "debounce",
+   `app_impl.rs` `last_sent_size`, suppresses exact repeats). The PTY consumer thread handles
+   one input event per `select!` iteration (`freminal/src/gui/pty.rs`), so every queued
+   intermediate size is reflowed in full, in order, and the thread processes no PTY output and
+   publishes no snapshot meanwhile. A simulated 60-column drag queued ~3.8 s of reflow at 10k
+   and ~46 s at 100k. The final size becomes visible only after the backlog drains.
 
-Reflow cost becomes proportional to what is _visible_, not to total scrollback depth.
+A `perf` profile of the 10k reflow attributes roughly 70% of its time to `Cell` clone/drop
+(`Option<Arc<Url>>` refcounts, `Option<Box<ImagePlacement>>` drop glue) and per-row
+`count_image_cells` — constant-factor overhead in `reflow_to_width`
+(`freminal-buffer/src/buffer/resize_and_alt.rs`), which clones cells at several sites where
+the source row is about to be discarded anyway.
 
-### 120 Why this is a stub, not decomposed now
+Every other trigger of a width change reflows too: font zoom, gutter toggle, pane split,
+zoom/unzoom, pane close (every surviving sibling), window snap/maximise, and the Settings
+preview. Height-only changes (tab bar appearing) do not reflow.
 
-Lazy, compression-aware reflow is substantially larger and subtler than the 118/119 memory
-work. It touches logical-line reconstruction, cursor remapping, band-decompression, and — the
-hard part — the **`command_blocks` / `prompt_rows` absolute-index remapping** (Task 113 "Bug
-R") across a buffer that is only _partially_ reflowed to the current width **and** partially
-compressed. The buffer must track which scrollback regions are reflowed-to-current-width vs
-stale, handle a scroll into a stale and/or compressed region (reflow-and-decompress-on-read),
-and keep the absolute-index remaps correct while regions carry mixed widths and mixed
-compression states.
+### 120 Design decisions
 
-Open design questions to resolve at activation:
+- **Coalesce on the PTY thread, not (only) in the GUI.** The PTY thread is where the cost is
+  paid and where the backlog forms, and it sees the queue directly. On receiving a `Resize`,
+  drain any further `Resize` events already queued and apply only the latest. A GUI-side
+  time-based debounce was considered and rejected as the primary fix: it adds latency to every
+  resize, including the single ones that are already fast, and does not help a backlog that
+  forms while a long reflow runs.
+- **Input order is preserved.** Coalescing may only skip `Resize` events that are superseded
+  by a later `Resize`. If the drain encounters a non-`Resize` event, the coalesced resize is
+  applied first and that event is then processed exactly as it would have been, in order. No
+  key, paste, or mouse report may be reordered across a resize.
+- **The child sees only the applied size.** Skipped intermediate sizes are never sent to the
+  PTY (`TIOCSWINSZ` / `SIGWINCH`). This matches what the child would observe from a fast
+  window manager and is the point of the change.
+- **Recordings record what the emulator applied.** FREC `PaneResize` is emitted for the
+  coalesced size only, so a recording replays the emulator's real input. This is a visible
+  change to recordings made during drags and is called out in the PR.
+- **Reflow optimisation is a pure constant-factor change.** No change to reflow semantics,
+  logical-line reconstruction, cursor remapping, or the `command_blocks` / `prompt_rows` /
+  placement remap. The existing reflow tests are the correctness oracle and must pass
+  unchanged.
+- **No windowed/lazy reflow in this task.** See `FUTURE_PLANS.md` B.10.
 
-- How to represent "target width" per row/region, and whether stale regions store their
-  pre-resize width for on-read reflow.
-- How scroll-offset maps onto a mixed-width, mixed-compression buffer.
-- How `visible_window_start` and snapshot bounds behave mid-reflow.
-- How the single idle driver sequences three kinds of deferred work — compaction (118),
-  compression (119), and reflow-tail (120): shared budget? strict ordering? priority?
-- Which thread performs the deferred full reflow, and how a partially-reflowed snapshot is
-  represented without violating the lock-free snapshot model (`freminal-architecture`).
+### 120 Subtasks
 
-Depends on Task 118 (compact representation + idle driver) and Task 119 (block compression +
-band-decompression primitive). Decompose in a dedicated session against the code as it then
-exists, per `freminal-version-activation`.
+#### 120.1 — Benchmark: full-depth width-change reflow
+
+Scope: `freminal-buffer/benches/buffer_row_bench.rs`; `freminal-bench-table` skill catalog
+entry for the new IDs.
+
+What: add a benchmark group that fills a buffer to 10k scrollback rows with realistic coloured
+content (the probe's shape: ~70-char lines, a few colour runs per line, ~15% wrapping), brings
+it to a stated storage state (live / compacted / compressed via the public idle APIs), and
+times a single `set_size` width change (narrow→wide, wide→narrow, 1-column). The existing
+`buffer_resize` and `softwrap_heavy` benches use small buffers and do not show this cost.
+Record a baseline. A 100k variant may be added if its runtime is acceptable under Criterion;
+otherwise record it once manually.
+
+Deliverable: the bench + baseline numbers recorded in this section.
+
+Verification: `cargo bench --no-run --all`; the new group runs; clippy.
+
+Prohibitions: do NOT change production code.
+
+#### 120.2 — Coalesce queued resizes on the PTY thread
+
+Scope: `freminal/src/gui/pty.rs` (the `recv(input_rx)` arm and `handle_input`); tests there.
+
+What: implement the coalescing and ordering rules in the design decisions. Keep the change
+local to the PTY loop; `InputEvent`, the GUI send path, and the emulator are unchanged. Tests
+must prove: N queued resizes apply only the last; a non-resize event queued between or after
+resizes is processed after the coalesced resize and in its original order; a lone resize is
+unaffected; recording emits one `PaneResize` for the applied size.
+
+Deliverable: the change + tests.
+
+Verification: `cargo test --all`; clippy; `cargo xtask check-windows` (PTY thread, crossbeam
+select). Manual QA: drag-resize a pane with a full 10k scrollback; the view should track the
+pointer rather than catching up after release.
+
+Prohibitions: do NOT add a timer or thread; do NOT add a GUI-side debounce in this subtask;
+do NOT reorder any non-resize event.
+
+#### 120.3 — Remove avoidable cell copies from `reflow_to_width`
+
+Scope: `freminal-buffer/src/buffer/resize_and_alt.rs` (`reflow_to_width` and its helpers);
+`freminal-buffer/src/row.rs` only if a move-out accessor is needed.
+
+What: move cells out of rows that are about to be discarded instead of cloning them, and stop
+recounting image cells per row where the count is already known or can be accumulated once.
+Behaviour must be identical.
+
+Deliverable: the change + before/after numbers from 120.1 (and the `buffer_resize` /
+`softwrap_heavy` benches) per `performance-benchmarks`.
+
+Verification: `cargo test --all` with existing reflow tests passing unchanged; clippy; benches
+show no regression >15% anywhere and a recorded improvement on 120.1.
+
+Prohibitions: do NOT change reflow semantics or any remap; do NOT add new reflow modes.
+
+#### 120.4 — Close-out measurement and B.10 decision input
+
+Scope: verification only; this section; `FUTURE_PLANS.md` B.10.
+
+What: re-run 120.1 at 10k and 100k, record the post-task single-resize latency, and state
+plainly whether B.10 (windowed reflow) is still warranted and at which scrollback depth. Run
+the full verification suite.
+
+Deliverable: numbers + a one-paragraph recommendation for the maintainer.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`;
+`cargo machete`; `cargo fmt --all -- --check`; `cargo xtask check-windows`.
+
+Prohibitions: do NOT start B.10.
 
 ---
 

@@ -180,6 +180,78 @@ and `freminal/src/io/`.
 
 ---
 
+### B.10 — Windowed / Lazy Scrollback Reflow
+
+**Severity: Low** | **Reference: internal (former Task 120 design, deferred 2026-10-08)**
+
+Make width-resize reflow cost proportional to what is visible rather than to total
+scrollback depth. This was Task 120 ("Compression-Aware Windowed Reflow") until a
+2026-10-08 measurement showed a single full reflow costs ~100–190 ms at the 10k default and
+~1–1.5 s at the 100k maximum, with LZ4 decompression adding only ~25–50%. Task 120 was
+re-scoped to the cheaper fixes (resize coalescing and reflow constant-factor work); this
+entry preserves the windowed design in case the post-Task-120 numbers still show an
+unacceptable single-resize latency, most likely only at very large configured scrollback.
+
+**Design principle (from the former Task 120):** on a width resize,
+
+1. reflow only the visible region plus a small scroll-headroom margin synchronously,
+   decompressing only the blocks that band needs;
+2. publish that snapshot immediately;
+3. reflow the remaining scrollback lazily on the existing PTY idle tick and/or on demand as
+   the user scrolls into not-yet-reflowed history, then let normal deferred
+   compaction/compression follow.
+
+**Why it is hard:** the buffer must track which regions are reflowed to the current width
+and which are stale, handle scrolling into a stale and/or compressed region, and keep the
+`command_blocks` / `prompt_rows` / placement remaps correct across a buffer with mixed
+widths and mixed compression states.
+
+**Open questions:** per-row or per-region target width; scroll-offset mapping over a
+mixed-width buffer; `visible_window_start` and snapshot bounds mid-reflow; how the single idle
+driver orders compaction, compression and reflow-tail work; and how a partially-reflowed
+snapshot is represented without violating the lock-free snapshot model.
+
+**Trigger to revisit:** Task 120.4's close-out numbers.
+
+**Scope:** Large.
+
+---
+
+### B.11 — Render Residuals After Task 124
+
+**Severity: Low** | **Reference: Task 124 post-merge triage (2026-10-08)**
+
+Three residual render costs left after Task 124's damage-model work. Each is small in
+absolute terms; they are recorded so they are not lost, and each must be measured before it
+is fixed (the Task 121 Group D lesson: four of six candidates were refuted by their own
+verification step).
+
+1. **No-change frames cost a full egui run.** Under btop with mouse reporting, the
+   maintainer observes ~0.1% (0.2% on a slower laptop) CPU where WezTerm shows none. The
+   mouse path itself is already efficient (reports only on cell change; 99.9% of motion
+   events schedule no frame). The likely cost, inferred from 124.3's capture, is PTY wakes
+   where the TUI rewrote identical cells: 110 of 240 frames ran the full UI (~491 µs) and
+   presented `FrameDamage::None`. Candidate fix: when a wake carries no input and the new
+   snapshot's row epochs are unchanged, skip the egui run entirely. **First step:** a
+   matched btop capture with and without mouse motion to confirm the attribution. This
+   applies to every TUI that redraws identical content, not just btop.
+2. **`tab_title_changed` forces the whole window `Full`.** A title spinner or progress title
+   can fire this at ~10 Hz indefinitely. Bound it to the tab-bar rect. Saves present
+   bandwidth more than CPU (the UI still runs).
+3. **`text_blink_changed` forces the whole pane `Full`** on every ~167 ms blink tick while
+   any blinking text is on screen, including ticks where only the phase that is not on
+   screen changed. Cheapest step: report a change only when a phase actually present on
+   screen flips; fuller step: bound damage to the rows carrying blinking text (needs a
+   per-row signal; today `has_blinking_text` is one whole-snapshot bool).
+
+**Not included, deliberately:** the other BOUNDABLE-WITH-WORK triggers in 124.21 (bell,
+kitty animation, scrollbar transitions, overlays, layout, focus) are one-shot, rare, or
+interactive-only, and remain `Full`.
+
+**Scope:** Small to Medium, per item.
+
+---
+
 ### A.2 — Split Panes
 
 **Status: Subsumed by Task 58 (Built-in Multiplexer) in v0.5.0.**

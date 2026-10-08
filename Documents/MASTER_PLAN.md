@@ -69,14 +69,17 @@ another measured residual deserves implementation. Tasks 102 (Kitty File Transfe
 v0.12.0 and **moved to v0.13.0** when it was redefined; their plan content moved unchanged.
 See `PLAN_VERSION_120.md`.
 
-**Task 120 is the one open stub below Tasks 123 and 124, and that is a deliberate, recorded
+**Task 120 is the one open task below Tasks 123–125, and that is a deliberate, recorded
 deviation.** The shared `plan-sequencing-discipline` skill holds that the completed set must
 be a contiguous prefix and that a plan may merge only when every lower-numbered plan is
 complete. freminal has never operated that invariant globally — task numbers here are
 **allocation order, not execution order** (Task 73 is a stub below completed 74–77; Tasks 18
 and 19 are pending below everything). Versions, not numbers, carry execution order. Tasks 123
-and 124 are therefore **not** blocked behind Task 120. Whether v0.12.0 ships before Task 120
-is built is an open maintainer decision, noted here so it is not mistaken for an oversight.
+and 124 are therefore **not** blocked behind Task 120. On 2026-10-08 Task 120 was re-scoped
+from "Compression-Aware Windowed Reflow" to "Resize Coalescing and Reflow Cost" after
+measurement refuted the windowed-reflow premise at the default scrollback depth; the
+windowed design moved to `FUTURE_PLANS.md` B.10. The re-scoped task is small and lands in
+v0.12.0.
 
 **Full kitty protocol coverage (v0.11.0 and v0.13.0 + deferred DnD).** Freminal already ships
 the kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These two versions
@@ -210,7 +213,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness   | `PLAN_VERSION_111.md` (Task 117)              | Complete      | None                   |
 | 118 | Compact Cell Representation                 | `PLAN_VERSION_120.md` (Task 118)              | Complete      | None                   |
 | 119 | Scrollback Compression (LZ4)                | `PLAN_VERSION_120.md` (Task 119)              | Complete      | Task 118               |
-| 120 | Compression-Aware Windowed Reflow           | `PLAN_VERSION_120.md` (Task 120)              | Stub          | Tasks 118, 119         |
+| 120 | Resize Coalescing and Reflow Cost           | `PLAN_VERSION_120.md` (Task 120)              | Planned       | Tasks 118, 119         |
 | 121 | Performance Remediation                     | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete      | None                   |
 | 122 | Orchestration Extraction                    | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete      | None                   |
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete      | Task 122               |
@@ -483,11 +486,12 @@ Task 118 (compact representation, **complete** on `task-118/compact-cell-repr`) 
 infrastructure the other two reuse: the flat pointer-free `CompactRow`, the PTY-thread
 idle-tick driver, the decompact-on-read accessor seam, and the `malloc_trim` RSS-reclaim
 discipline. Task 119 (LZ4 block compression) is the incremental multiplier layered on that
-compact form, driven by the same idle tick — LZ4-only, no zstd tier. Task 120
-(compression-aware windowed reflow) **absorbs the former 118.10 lazy-reflow stub and the
-reflow half of the original Task 119**, because band-decompression and lazy reflow are one
-control flow; it stays an enriched stub (decomposed at its own activation) while 118–119 are
-decomposed. The memory tasks share no seams with Task 121 (they live in `freminal-buffer`;
+compact form, driven by the same idle tick — LZ4-only, no zstd tier. Task 120 was the
+compression-aware windowed reflow stub; on 2026-10-08 measurement showed a full reflow is a
+~100–190 ms hitch at the 10k default with compression adding only ~25–50%, and that the real
+defect is uncoalesced drag resizes. It was re-scoped to **resize coalescing and reflow
+constant-factor work** and decomposed (120.1–120.4); the windowed design is deferred as
+`FUTURE_PLANS.md` B.10. The memory tasks share no seams with Task 121 (they live in `freminal-buffer`;
 Task 121 lives in the GUI and windowing frame path) and are fully parallelizable.
 
 **Task 121 (v0.12.0, performance remediation):** the umbrella for all CPU work arising from
@@ -810,7 +814,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–125 complete)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 planned (re-scoped), 121 closed, 122–125 complete)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
