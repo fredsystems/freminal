@@ -326,13 +326,14 @@ impl PublishedFrameState {
     /// `geometry_interop::point_from_egui` — the crate's sanctioned
     /// egui-to-toolkit-neutral crossing point.
     ///
-    /// TODO(121.17): no production code calls this getter yet, so it has
-    /// no caller outside the round-trip tests below until subtask 121.17
-    /// (124.3b) wires its cell-granular suppression check through it. It
-    /// is real, finished, production-shaped API (not a throwaway), so the
-    /// `allow` below is temporary rather than permanent; remove it when
-    /// 121.17/124.3b adds its first production call site.
-    #[allow(dead_code)]
+    /// Test-only: Task 124.3b landed its cell-granular suppression check by
+    /// reading [`Self::pane_pointer_report_inputs`] directly, so this getter
+    /// never gained a production caller. It is kept, compiled for tests
+    /// only, because the round-trip tests below and in `terminal/widget.rs`
+    /// use it to pin that the published `terminal_rect.min` is the pane's
+    /// terminal origin. If a production reader ever needs the origin alone,
+    /// drop the `cfg(test)` rather than adding a parallel accessor.
+    #[cfg(test)]
     pub(super) fn pane_terminal_origin(
         &self,
         pane_id: PaneId,
