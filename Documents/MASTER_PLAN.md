@@ -23,7 +23,7 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete    |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete    |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete    |
-| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–125          | In progress |
+| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–125          | Complete    |
 | v0.13.0 | Kitty: Transfer, Cursors & Text | `PLAN_VERSION_130.md`                                                 | 102–104          | Planned     |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub        |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub        |
@@ -69,7 +69,7 @@ another measured residual deserves implementation. Tasks 102 (Kitty File Transfe
 v0.12.0 and **moved to v0.13.0** when it was redefined; their plan content moved unchanged.
 See `PLAN_VERSION_120.md`.
 
-**Task 120 is the one open task below Tasks 123–125, and that is a deliberate, recorded
+**Task 120 completed after Tasks 123–125, and that is a deliberate, recorded
 deviation.** The shared `plan-sequencing-discipline` skill holds that the completed set must
 be a contiguous prefix and that a plan may merge only when every lower-numbered plan is
 complete. freminal has never operated that invariant globally — task numbers here are
@@ -78,8 +78,8 @@ and 19 are pending below everything). Versions, not numbers, carry execution ord
 and 124 are therefore **not** blocked behind Task 120. On 2026-10-08 Task 120 was re-scoped
 from "Compression-Aware Windowed Reflow" to "Resize Coalescing and Reflow Cost" after
 measurement refuted the windowed-reflow premise at the default scrollback depth; the
-windowed design moved to `FUTURE_PLANS.md` B.10. The re-scoped task is small and lands in
-v0.12.0.
+windowed design moved to `FUTURE_PLANS.md` B.10. The re-scoped task landed in v0.12.0
+(merged 2026-10-08 via PR #532), completing the version.
 
 **Full kitty protocol coverage (v0.11.0 and v0.13.0 + deferred DnD).** Freminal already ships
 the kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These two versions
@@ -213,7 +213,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness   | `PLAN_VERSION_111.md` (Task 117)              | Complete      | None                   |
 | 118 | Compact Cell Representation                 | `PLAN_VERSION_120.md` (Task 118)              | Complete      | None                   |
 | 119 | Scrollback Compression (LZ4)                | `PLAN_VERSION_120.md` (Task 119)              | Complete      | Task 118               |
-| 120 | Resize Coalescing and Reflow Cost           | `PLAN_VERSION_120.md` (Task 120)              | Pending merge | Tasks 118, 119         |
+| 120 | Resize Coalescing and Reflow Cost           | `PLAN_VERSION_120.md` (Task 120)              | Complete      | Tasks 118, 119         |
 | 121 | Performance Remediation                     | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete      | None                   |
 | 122 | Orchestration Extraction                    | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete      | None                   |
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete      | Task 122               |
@@ -491,7 +491,7 @@ compression-aware windowed reflow stub; on 2026-10-08 measurement showed a full 
 ~100–190 ms hitch at the 10k default with compression adding only ~25–50%, and that the real
 defect is uncoalesced drag resizes. It was re-scoped to **resize coalescing and reflow
 constant-factor work** and decomposed (120.1–120.4); the windowed design is deferred as
-`FUTURE_PLANS.md` B.10. The memory tasks share no seams with Task 121 (they live in `freminal-buffer`;
+`FUTURE_PLANS.md` B.10. Task 120 merged 2026-10-08 (PR #532). The memory tasks share no seams with Task 121 (they live in `freminal-buffer`;
 Task 121 lives in the GUI and windowing frame path) and are fully parallelizable.
 
 **Task 121 (v0.12.0, performance remediation):** the umbrella for all CPU work arising from
@@ -799,7 +799,7 @@ Update this section as tasks complete:
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged        |
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
 | 125  | 2026-08-26 | 2026-10-05 | All subtasks + C1-C16; eviction remediated; merged via PR #526 (`5a3e1a48`)      |
-| 120  | 2026-10-08 |            | 120.1-120.4 done on task-120/resize-coalescing; PR pending merge                 |
+| 120  | 2026-10-08 | 2026-10-08 | 120.1-120.4 complete; merged via PR #532 (`a17d8df0`)                            |
 
 ---
 
@@ -815,7 +815,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 pending merge, 121 closed, 122–125 complete)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; complete — 121 closed as an umbrella)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
