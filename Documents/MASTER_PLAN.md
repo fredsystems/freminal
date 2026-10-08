@@ -213,7 +213,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness   | `PLAN_VERSION_111.md` (Task 117)              | Complete      | None                   |
 | 118 | Compact Cell Representation                 | `PLAN_VERSION_120.md` (Task 118)              | Complete      | None                   |
 | 119 | Scrollback Compression (LZ4)                | `PLAN_VERSION_120.md` (Task 119)              | Complete      | Task 118               |
-| 120 | Resize Coalescing and Reflow Cost           | `PLAN_VERSION_120.md` (Task 120)              | Planned       | Tasks 118, 119         |
+| 120 | Resize Coalescing and Reflow Cost           | `PLAN_VERSION_120.md` (Task 120)              | In progress   | Tasks 118, 119         |
 | 121 | Performance Remediation                     | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete      | None                   |
 | 122 | Orchestration Extraction                    | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete      | None                   |
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete      | Task 122               |
@@ -799,6 +799,7 @@ Update this section as tasks complete:
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged        |
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
 | 125  | 2026-08-26 | 2026-10-05 | All subtasks + C1-C16; eviction remediated; merged via PR #526 (`5a3e1a48`)      |
+| 120  | 2026-10-08 |            | Re-scoped 2026-10-08; on task-120/resize-coalescing                              |
 
 ---
 
