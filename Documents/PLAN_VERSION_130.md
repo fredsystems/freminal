@@ -459,6 +459,40 @@ Prohibitions: do NOT touch code; do NOT expand the reference document's protocol
 
 Stop: report files changed; await review.
 
+**Status: Complete (2026-10-08).** Graphics, OSC 99, kitty keyboard and OSC 10/11 set are
+downgraded to 🚧 with task pointers. Every listed row was added to COVERAGE, and the gap
+rows went into GAPS (a new "CSI Gaps" table holds the CSI extensions). OSC 66 was corrected
+in all three docs. The GAPS "fully implemented" and "substantially compliant" claims were
+replaced. The `KITTY_PROTOCOL_REFERENCE.md` roadmap table was renumbered, a superseded-audit
+note added, and its stub pointers corrected. Each doc got a 2026-10-08 "Last updated" entry,
+which also records the 126.1–126.3 behaviour changes. The three files are markdownlint and
+prettier clean. `cargo xtask lint-markdown` still exits non-zero for reasons outside this
+subtask; see 126.C1.
+
+### 126 Cleanup entries
+
+#### 126.C1 — `cargo xtask lint-markdown` fails on the whole tree
+
+- **Surfaced:** 126.4 verification on `task-126/safety-gate` (2026-10-08).
+- **Impact:** `cargo xtask lint-markdown` runs `markdownlint-cli2 "**/*.md" "!target"
+  "!**/target"` and exits 1, so the command cannot serve as a pass/fail gate. It reports
+  about 14,200 errors before this branch, and that count is unchanged by it. About 13,600
+  come from `.direnv/flake-inputs/*/` copies of the repo (the glob does not exclude
+  `.direnv`). The rest (about 550) are existing lint debt in other `Documents/*.md` files,
+  mostly MD060 table alignment and MD033 inline HTML in `PLAN_122_*.md` and
+  `PLAN_VERSION_090.md`. The pre-commit markdownlint hook only checks staged files, so it
+  passes. The three 126.4 docs went from 15 errors to 0.
+- **Scope of fix:** `xtask/src/main.rs` (`lint_markdown`) and/or `.markdownlint-cli2.yaml`
+  (add `.direnv` to the ignores), plus a lint-debt pass over the remaining `Documents/`
+  files, or a deliberate decision to scope the command.
+- **Suggested approach:** first exclude `.direnv/**` (the smallest change, and it removes
+  ~96% of the noise). Then either fix the remaining files (prettier realignment fixes most
+  MD060) or narrow the glob.
+- **Verification:** `cargo xtask lint-markdown` exits 0 on a clean checkout with a
+  populated `.direnv`.
+- **Scheduling:** independent of all v0.13.x tasks. Can land any time; it does not block
+  Task 127 or 128.
+
 ---
 
 ## Task 127 — Unfocused / Inactive-Pane Cursor (GitHub #531)
