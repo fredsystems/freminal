@@ -638,6 +638,35 @@ impl Row {
         self.cells_ref()
     }
 
+    /// Consume the row and return its cells by value, without cloning them.
+    ///
+    /// A `Live` row hands over its backing vector; a `Compact` row hands over
+    /// its memoized decompaction if a prior read warmed it, or decompacts
+    /// once otherwise. Used by `Buffer::reflow_to_width`, which owns every
+    /// old row and discards it right after reading its cells, so moving the
+    /// cells out avoids a clone and a drop per cell (Task 120.3).
+    ///
+    /// Like [`Row::cells`], this must not be called on a row whose content is
+    /// evicted to a compressed block; call `Buffer::ensure_decompressed`
+    /// first.
+    #[must_use]
+    pub fn into_cells(self) -> Vec<Cell> {
+        debug_assert!(
+            !self.evicted_to_block,
+            "move out of a row whose content is evicted to a compressed block; \
+             call Buffer::ensure_decompressed first"
+        );
+        match self.storage {
+            RowStorage::Live(cells) => cells,
+            RowStorage::Compact {
+                compact,
+                decompacted,
+            } => decompacted
+                .into_inner()
+                .unwrap_or_else(|| Self::take_cells(compact.to_row())),
+        }
+    }
+
     /// Returns the cells in this row as a slice.
     #[must_use]
     pub fn cells(&self) -> &[Cell] {
@@ -2866,6 +2895,41 @@ mod tests {
         // A read-only decompaction must not flip the storage representation
         // back to `Live` — it stays compact, just memoized.
         assert!(row.is_compact());
+    }
+
+    #[test]
+    fn into_cells_returns_live_cells_unchanged() {
+        let mut row = Row::new(20);
+        let text: Vec<TChar> = b"live row".iter().map(|&b| TChar::Ascii(b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+        let expected: Vec<_> = row.cells().to_vec();
+
+        assert_eq!(row.into_cells(), expected);
+    }
+
+    #[test]
+    fn into_cells_decompacts_a_cold_compact_row() {
+        let mut row = Row::new(20);
+        let text: Vec<TChar> = b"cold compact".iter().map(|&b| TChar::Ascii(b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+        let expected: Vec<_> = row.cells().to_vec();
+        assert!(row.compact());
+
+        assert_eq!(row.into_cells(), expected);
+    }
+
+    #[test]
+    fn into_cells_reuses_a_warm_compact_row_memo() {
+        let mut row = Row::new(20);
+        let text: Vec<TChar> = b"warm compact".iter().map(|&b| TChar::Ascii(b)).collect();
+        row.insert_text(0, &text, &FormatTag::default());
+        let expected: Vec<_> = row.cells().to_vec();
+        assert!(row.compact());
+        // Warm the memoized decompaction.
+        assert_eq!(row.cells(), expected.as_slice());
+        assert!(row.is_compact());
+
+        assert_eq!(row.into_cells(), expected);
     }
 
     #[test]

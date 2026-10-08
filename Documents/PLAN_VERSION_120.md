@@ -958,6 +958,38 @@ show no regression >15% anywhere and a recorded improvement on 120.1.
 
 Prohibitions: do NOT change reflow semantics or any remap; do NOT add new reflow modes.
 
+**Complete (2026-10-08).** New `Row::into_cells(self)` (hands over a `Live` row's vector, a
+warm compact memo, or decompacts once) with three unit tests. `reflow_to_width` now moves
+cells everywhere it used to clone: the flatten step consumes the line's rows (a single-row
+line hands over its vector untouched), the re-wrap loop consumes the flattened line by value
+(`Peekable::next_if` for continuations, same stop conditions as the old index loop), and the
+image-line path moves each row's cells. The per-line `count_image_cells` scan and the
+post-reflow full recount are skipped when the buffer's `image_cell_count` is zero (an exact,
+debug-asserted invariant already relied on by `clip_rows_to_width`; reflow never creates
+image cells). No remap, cursor or output logic changed; no existing test was modified.
+
+Against baseline `before_120` (Criterion means):
+
+| Benchmark                                   | Before   | After    | Change |
+| ------------------------------------------- | -------- | -------- | ------ |
+| `reflow_full_depth/live/widen`              | 44.8 ms  | 25.9 ms  | −41.8% |
+| `reflow_full_depth/live/narrow`             | 48.9 ms  | 31.3 ms  | −35.6% |
+| `reflow_full_depth/live/one_col`            | 44.7 ms  | 25.6 ms  | −42.2% |
+| `reflow_full_depth/compacted/widen`         | 69.6 ms  | 51.5 ms  | −26.0% |
+| `reflow_full_depth/compacted/narrow`        | 73.1 ms  | 55.5 ms  | −24.2% |
+| `reflow_full_depth/compacted/one_col`       | 70.3 ms  | 52.6 ms  | −25.4% |
+| `reflow_full_depth/compressed/widen`        | 83.5 ms  | 63.4 ms  | −23.6% |
+| `reflow_full_depth/compressed/narrow`       | 86.7 ms  | 67.2 ms  | −22.4% |
+| `reflow_full_depth/compressed/one_col`      | 82.7 ms  | 63.7 ms  | −22.8% |
+| `buffer_resize/reflow_width/40`             | 78.8 ms  | 47.4 ms  | −39.9% |
+| `buffer_resize/shrink_height/20`            | 6.30 ms  | 6.57 ms  | noise  |
+| `buffer_resize/grow_height/200`             | 6.42 ms  | 6.68 ms  | noise  |
+| `softwrap_heavy/wrap_long_line_to_width_10` | 626 µs   | 498 µs   | −20.0% |
+
+The height-only rows do not reflow and Criterion reports no significant change (p > 0.5).
+What remains in the compacted and compressed cases is decompaction (and LZ4 decompression)
+plus building and dropping the row vectors.
+
 #### 120.4 — Close-out measurement and B.10 decision input
 
 Scope: verification only; this section; `FUTURE_PLANS.md` B.10.
