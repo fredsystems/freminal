@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError, unbounded};
 use freminal_common::args::Args;
 use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
@@ -235,6 +235,77 @@ where
         match rx.try_recv() {
             Ok(read) => sink(read),
             Err(_) => break,
+        }
+    }
+}
+
+/// The outcome of [`coalesce_queued_resizes`]: the input to process now, and
+/// the event (if any) that ended the run of queued resizes and must be
+/// processed immediately after it.
+struct CoalescedInput {
+    /// The input to process now: the LAST of a run of queued resizes, or the
+    /// received message unchanged when it was not a resize.
+    now: Result<InputEvent, RecvError>,
+    /// The message the drain took off the channel that was not a resize: a
+    /// non-resize event, or `Err` when the drain found the channel closed.
+    /// `None` when the drain stopped on an empty queue (or never ran).
+    next: Option<Result<InputEvent, RecvError>>,
+}
+
+/// Collapse a run of queued `InputEvent::Resize`s into its last member
+/// (Task 120.2).
+///
+/// The GUI sends one `Resize` per frame in which a pane's cell grid changes,
+/// so a drag queues one per frame. A width change reflows the whole
+/// scrollback (tens of milliseconds at the default depth), and before this
+/// every queued size was reflowed in full, in order, with no snapshot
+/// published in between: the view caught up with the pointer only after the
+/// backlog drained. Only the last size of a run matters, so when `first` is a
+/// `Resize` this drains any further queued input non-blockingly (`try_recv`)
+/// and keeps only the latest `Resize`.
+///
+/// Ordering rule: a `Resize` is dropped only when a LATER `Resize` supersedes
+/// it. The first non-resize message ends the drain and is returned in
+/// [`CoalescedInput::next`] for the caller to process right after the
+/// coalesced resize, so no key, paste, mouse report, focus change or any
+/// other event is ever reordered across a resize. A non-`Resize` `first` is
+/// returned untouched without touching the channel.
+///
+/// The skipped sizes never reach the emulator, the child process
+/// (`TIOCSWINSZ`) or a FREC recording.
+fn coalesce_queued_resizes(
+    first: Result<InputEvent, RecvError>,
+    rx: &Receiver<InputEvent>,
+) -> CoalescedInput {
+    if !matches!(first, Ok(InputEvent::Resize(..))) {
+        return CoalescedInput {
+            now: first,
+            next: None,
+        };
+    }
+
+    let mut latest = first;
+    loop {
+        match rx.try_recv() {
+            Ok(resize @ InputEvent::Resize(..)) => latest = Ok(resize),
+            Ok(other) => {
+                return CoalescedInput {
+                    now: latest,
+                    next: Some(Ok(other)),
+                };
+            }
+            Err(TryRecvError::Empty) => {
+                return CoalescedInput {
+                    now: latest,
+                    next: None,
+                };
+            }
+            Err(TryRecvError::Disconnected) => {
+                return CoalescedInput {
+                    now: latest,
+                    next: Some(Err(RecvError)),
+                };
+            }
         }
     }
 }
@@ -726,6 +797,9 @@ fn spawn_pty_consumer_thread(
 
                     match event {
                         InputEvent::Resize(w, h, pw, ph) => {
+                            // Only ever the last of a run of queued resizes
+                            // (`coalesce_queued_resizes`, Task 120.2), so the
+                            // recording holds the size the emulator applied.
                             if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PaneResize {
                                     pane_id: recording_pane_id,
@@ -844,50 +918,81 @@ fn spawn_pty_consumer_thread(
             // trivial re-arm that did nothing.
             let mut work_since_trim = false;
 
+            // An input event the resize-coalescing drain (Task 120.2) had to
+            // take off `input_rx` to find the end of a run of queued
+            // resizes. It is processed at the top of the next iteration,
+            // before `select!` is consulted again, so it keeps its place in
+            // the input order: directly after the coalesced resize. `Err`
+            // means the drain found the channel closed.
+            let mut carried_input: Option<Result<InputEvent, RecvError>> = None;
+
             // Primary loop: service PTY reads, GUI input events, child-exit
             // signals, and the idle scrollback-compaction tick.
             loop {
-                crossbeam_channel::select! {
-                    recv(pty_read_rx) -> msg => {
-                        if let Ok(read) = msg {
-                            // Batch-drain (issue #439): a single visual redraw
-                            // from a full-screen TUI (btop, htop, vim, less)
-                            // exceeds the 4096-byte reader buffer, so one
-                            // redraw arrives as N `PtyRead` chunks. Feed the
-                            // blocking-recv'd chunk AND every chunk already
-                            // queued behind it into the emulator, then fall
-                            // through to a SINGLE `post_event` (build_snapshot
-                            // + arc_swap.store + repaint) at the bottom of the
-                            // loop. Without this drain, N chunks became N full
-                            // vertex rebuilds + N repaint requests — a ~20-40x
-                            // over-draw for a screen that changes ~2x/sec.
-                            //
-                            // This mirrors the write-side drain idiom in
-                            // `io/pty.rs` (`while let Ok(..) = try_recv()`) and
-                            // the `child_exit` drain arm below. It is
-                            // architecturally clean: this consumer thread owns
-                            // the emulator exclusively, and `handle_incoming_data`
-                            // never itself builds a snapshot or requests a
-                            // repaint — it only mutates emulator state and sets
-                            // per-row dirty flags that the single trailing
-                            // `build_snapshot` consults once.
-                            //
-                            // Recording fidelity is preserved: every chunk is
-                            // still emitted to the recorder individually, in
-                            // arrival order, exactly as before.
-                            drain_pty_reads(read, &pty_read_rx, |read: PtyRead| {
-                                let data = &read.buf[0..read.read_amount];
-                                if let Some(rec) = recording_swap.load_full() {
-                                    rec.emit(EventPayload::PtyOutput {
-                                        pane_id: recording_pane_id,
-                                        data: data.to_vec(),
-                                    });
+                let input_msg = if let Some(carried) = carried_input.take() {
+                    Some(carried)
+                } else {
+                    crossbeam_channel::select! {
+                        recv(pty_read_rx) -> msg => {
+                            if let Ok(read) = msg {
+                                // Batch-drain (issue #439): a single visual redraw
+                                // from a full-screen TUI (btop, htop, vim, less)
+                                // exceeds the 4096-byte reader buffer, so one
+                                // redraw arrives as N `PtyRead` chunks. Feed the
+                                // blocking-recv'd chunk AND every chunk already
+                                // queued behind it into the emulator, then fall
+                                // through to a SINGLE `post_event` (build_snapshot
+                                // + arc_swap.store + repaint) at the bottom of the
+                                // loop. Without this drain, N chunks became N full
+                                // vertex rebuilds + N repaint requests — a ~20-40x
+                                // over-draw for a screen that changes ~2x/sec.
+                                //
+                                // This mirrors the write-side drain idiom in
+                                // `io/pty.rs` (`while let Ok(..) = try_recv()`) and
+                                // the `child_exit` drain arm below. It is
+                                // architecturally clean: this consumer thread owns
+                                // the emulator exclusively, and `handle_incoming_data`
+                                // never itself builds a snapshot or requests a
+                                // repaint — it only mutates emulator state and sets
+                                // per-row dirty flags that the single trailing
+                                // `build_snapshot` consults once.
+                                //
+                                // Recording fidelity is preserved: every chunk is
+                                // still emitted to the recorder individually, in
+                                // arrival order, exactly as before.
+                                drain_pty_reads(read, &pty_read_rx, |read: PtyRead| {
+                                    let data = &read.buf[0..read.read_amount];
+                                    if let Some(rec) = recording_swap.load_full() {
+                                        rec.emit(EventPayload::PtyOutput {
+                                            pane_id: recording_pane_id,
+                                            data: data.to_vec(),
+                                        });
+                                    }
+                                    emulator.handle_incoming_data(data);
+                                });
+                                idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                                None
+                            } else {
+                                info!("PTY read channel closed; signaling tab death");
+                                post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle, true);
+                                let _ = pty_dead_tx.send(());
+                                if let Some((proxy, wid)) = repaint_handle.get() {
+                                    proxy.request_repaint(*wid);
                                 }
-                                emulator.handle_incoming_data(data);
-                            });
-                            idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
-                        } else {
-                            info!("PTY read channel closed; signaling tab death");
+                                return;
+                            }
+                        }
+                        recv(input_rx) -> msg => Some(msg),
+                        recv(child_exit) -> _ => {
+                            info!("Child process exited; draining remaining PTY output");
+                            let drain_deadline = std::time::Duration::from_millis(200);
+                            while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
+                                emulator.handle_incoming_data(
+                                    &read.buf[0..read.read_amount],
+                                );
+                            }
+
+                            info!("PTY drain complete; signaling tab death");
                             post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle, true);
                             let _ = pty_dead_tx.send(());
                             if let Some((proxy, wid)) = repaint_handle.get() {
@@ -895,177 +1000,169 @@ fn spawn_pty_consumer_thread(
                             }
                             return;
                         }
-                    }
-                    recv(input_rx) -> msg => {
-                        match handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
-                            InputOutcome::Closed => {
-                                // The GUI dropped the pane's input channel — the
-                                // pane/tab/window is being torn down while the
-                                // child shell may still be alive. Signal the PTY
-                                // reader thread so a subsequent failed `send` (the
-                                // receiver we own is about to drop) is treated as
-                                // an expected teardown, not an error.
-                                reader_shutdown.store(true, Ordering::Release);
-                                return;
+                        recv(idle_deadline) -> _ => {
+                            // Snapshot content is byte-identical after compaction
+                            // or compression (both only change the internal
+                            // storage representation), so THAT part of this arm
+                            // must never call `post_event` on its own — doing so
+                            // would be a spurious GUI wake and defeat the
+                            // idle/battery goal. `continue` at the bottom still
+                            // skips the trailing unconditional `post_event` call.
+                            //
+                            // Issue #507 phase B2 added a second, independent
+                            // reason for this arm to fire: OSC 9;4 progress
+                            // staleness expiry (below), which — unlike
+                            // compaction/compression — CAN change what the GUI
+                            // renders (the progress bar disappearing), so it is
+                            // allowed its own conditional `post_event` call
+                            // further down, gated on `progress_became_inactive`
+                            // so a tick that finds nothing stale stays silent.
+                            //
+                            // Compact first, compress second: a row must be
+                            // Task-118-compacted before it is a Task-119
+                            // compression candidate, so only spend the
+                            // compression budget once this tick's compaction
+                            // pass reports nothing left to compact — otherwise
+                            // compression would scan a scrollback full of `Live`
+                            // rows and correctly find nothing, wasting the tick.
+                            let buffer = emulator.internal.handler.buffer_mut();
+                            let compacted = buffer.compact_idle_scrollback(IDLE_COMPACTION_BUDGET);
+                            let compressed = if compacted == 0 {
+                                buffer.compress_idle_scrollback(IDLE_COMPRESSION_BUDGET)
+                            } else {
+                                0
+                            };
+
+                            // OSC 9;4 staleness (issue #507): `expire_stale_progress`
+                            // (15s timeout) previously only ran from
+                            // `build_snapshot()`, i.e. only in response to real
+                            // PTY/GUI activity — so a program that died mid-progress
+                            // with no further activity left the bar on screen
+                            // forever, the exact failure the timeout exists to
+                            // prevent. Checked every tick regardless of the
+                            // compaction/compression outcome above.
+                            let was_progress_active = emulator.internal.handler.progress().is_active();
+                            emulator.internal.handler.expire_stale_progress();
+                            let progress_became_inactive = was_progress_active
+                                && !emulator.internal.handler.progress().is_active();
+
+                            // Exact remaining time until the (possibly
+                            // just-expired) progress report goes stale, or
+                            // `None` when no progress is active. `None` here
+                            // means "no progress deadline to race against" —
+                            // NOT "arm immediately" — so it must never be
+                            // treated as a zero duration below.
+                            let progress_deadline =
+                                emulator.internal.handler.time_until_progress_stale();
+
+                            if compacted > 0 || compressed > 0 {
+                                // More may remain — keep draining on the next
+                                // tick. If an active progress deadline falls
+                                // sooner than the next compaction slice, arm for
+                                // that instead so staleness expiry is not
+                                // delayed behind an ongoing drain; otherwise
+                                // (the common case, no active progress or a
+                                // deadline farther out than the next slice) arm
+                                // at the compaction cadence exactly as before.
+                                work_since_trim = true;
+                                idle_deadline = match progress_deadline {
+                                    Some(remaining) if remaining < IDLE_COMPACTION_INTERVAL => {
+                                        crossbeam_channel::after(remaining)
+                                    }
+                                    _ => crossbeam_channel::after(IDLE_COMPACTION_INTERVAL),
+                                };
+                            } else {
+                                // Both backlogs fully drained. If we actually did
+                                // work since the last trim, release the freed
+                                // pages back to the OS now: the transient
+                                // allocation churn is over, so the freed heap is
+                                // stable and worth returning. Doing this once per
+                                // settle (rather than per slice) avoids repeatedly
+                                // munmap-ing pages the allocator would re-fault
+                                // during an ongoing drain. See `release_freed_heap`.
+                                if work_since_trim {
+                                    release_freed_heap();
+                                    work_since_trim = false;
+                                }
+                                // Stay armed at the EXACT progress staleness
+                                // deadline while progress is still active —
+                                // `never()` would permanently disarm this arm
+                                // and a stale progress report on a truly idle
+                                // pane (no further compaction/compression work,
+                                // no PTY/GUI activity) would never be
+                                // re-checked, let alone expire. Once progress is
+                                // inactive (here or already, e.g. a normal
+                                // `s=0` clear), fall back to `never()` exactly
+                                // as before phase B2.
+                                idle_deadline = progress_deadline.map_or_else(
+                                    crossbeam_channel::never,
+                                    crossbeam_channel::after,
+                                );
                             }
-                            InputOutcome::NoRepaint => {
-                                // Nothing visible changed (e.g. a key/mouse-report
-                                // byte written to the child fd). Still fall through
-                                // to `post_event` so any window-command/command-event
-                                // drains and the snapshot store run — but tell it NOT
-                                // to request a GUI wake (#459). `request_repaint =
-                                // false` below.
-                                idle_deadline =
-                                    crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+
+                            if progress_became_inactive {
+                                // The one case this arm publishes: staleness
+                                // expiry actually changed what the GUI would
+                                // render, so unlike the byte-identical
+                                // compaction/compression case this needs a real
+                                // snapshot + repaint, not a silent tick.
                                 post_event(
                                     &mut emulator,
                                     &window_cmd_tx,
                                     &arc_swap,
                                     &repaint_handle,
-                                    false,
+                                    true,
                                 );
-                                continue;
                             }
-                            InputOutcome::Repaint => {
-                                idle_deadline =
-                                    crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
-                                // Fall through to the trailing `post_event` (with
-                                // `request_repaint = true`).
-                            }
+                            continue;
                         }
                     }
-                    recv(child_exit) -> _ => {
-                        info!("Child process exited; draining remaining PTY output");
-                        let drain_deadline = std::time::Duration::from_millis(200);
-                        while let Ok(read) = pty_read_rx.recv_timeout(drain_deadline) {
-                            emulator.handle_incoming_data(
-                                &read.buf[0..read.read_amount],
-                            );
+                };
+
+                if let Some(msg) = input_msg {
+                    // Task 120.2: a resize superseded by a LATER queued resize
+                    // is never applied — only the last of a run reaches the
+                    // emulator, the child (`TIOCSWINSZ`) and the recording.
+                    // A non-resize event that ends the run is carried to the
+                    // next iteration so it is processed after the coalesced
+                    // resize, in its original order, through this same path.
+                    let CoalescedInput { now, next } = coalesce_queued_resizes(msg, &input_rx);
+                    carried_input = next;
+                    match handle_input(&mut emulator, now, &clipboard_tx, &search_buffer_tx) {
+                        InputOutcome::Closed => {
+                            // The GUI dropped the pane's input channel — the
+                            // pane/tab/window is being torn down while the
+                            // child shell may still be alive. Signal the PTY
+                            // reader thread so a subsequent failed `send` (the
+                            // receiver we own is about to drop) is treated as
+                            // an expected teardown, not an error.
+                            reader_shutdown.store(true, Ordering::Release);
+                            return;
                         }
-
-                        info!("PTY drain complete; signaling tab death");
-                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle, true);
-                        let _ = pty_dead_tx.send(());
-                        if let Some((proxy, wid)) = repaint_handle.get() {
-                            proxy.request_repaint(*wid);
-                        }
-                        return;
-                    }
-                    recv(idle_deadline) -> _ => {
-                        // Snapshot content is byte-identical after compaction
-                        // or compression (both only change the internal
-                        // storage representation), so THAT part of this arm
-                        // must never call `post_event` on its own — doing so
-                        // would be a spurious GUI wake and defeat the
-                        // idle/battery goal. `continue` at the bottom still
-                        // skips the trailing unconditional `post_event` call.
-                        //
-                        // Issue #507 phase B2 added a second, independent
-                        // reason for this arm to fire: OSC 9;4 progress
-                        // staleness expiry (below), which — unlike
-                        // compaction/compression — CAN change what the GUI
-                        // renders (the progress bar disappearing), so it is
-                        // allowed its own conditional `post_event` call
-                        // further down, gated on `progress_became_inactive`
-                        // so a tick that finds nothing stale stays silent.
-                        //
-                        // Compact first, compress second: a row must be
-                        // Task-118-compacted before it is a Task-119
-                        // compression candidate, so only spend the
-                        // compression budget once this tick's compaction
-                        // pass reports nothing left to compact — otherwise
-                        // compression would scan a scrollback full of `Live`
-                        // rows and correctly find nothing, wasting the tick.
-                        let buffer = emulator.internal.handler.buffer_mut();
-                        let compacted = buffer.compact_idle_scrollback(IDLE_COMPACTION_BUDGET);
-                        let compressed = if compacted == 0 {
-                            buffer.compress_idle_scrollback(IDLE_COMPRESSION_BUDGET)
-                        } else {
-                            0
-                        };
-
-                        // OSC 9;4 staleness (issue #507): `expire_stale_progress`
-                        // (15s timeout) previously only ran from
-                        // `build_snapshot()`, i.e. only in response to real
-                        // PTY/GUI activity — so a program that died mid-progress
-                        // with no further activity left the bar on screen
-                        // forever, the exact failure the timeout exists to
-                        // prevent. Checked every tick regardless of the
-                        // compaction/compression outcome above.
-                        let was_progress_active = emulator.internal.handler.progress().is_active();
-                        emulator.internal.handler.expire_stale_progress();
-                        let progress_became_inactive = was_progress_active
-                            && !emulator.internal.handler.progress().is_active();
-
-                        // Exact remaining time until the (possibly
-                        // just-expired) progress report goes stale, or
-                        // `None` when no progress is active. `None` here
-                        // means "no progress deadline to race against" —
-                        // NOT "arm immediately" — so it must never be
-                        // treated as a zero duration below.
-                        let progress_deadline =
-                            emulator.internal.handler.time_until_progress_stale();
-
-                        if compacted > 0 || compressed > 0 {
-                            // More may remain — keep draining on the next
-                            // tick. If an active progress deadline falls
-                            // sooner than the next compaction slice, arm for
-                            // that instead so staleness expiry is not
-                            // delayed behind an ongoing drain; otherwise
-                            // (the common case, no active progress or a
-                            // deadline farther out than the next slice) arm
-                            // at the compaction cadence exactly as before.
-                            work_since_trim = true;
-                            idle_deadline = match progress_deadline {
-                                Some(remaining) if remaining < IDLE_COMPACTION_INTERVAL => {
-                                    crossbeam_channel::after(remaining)
-                                }
-                                _ => crossbeam_channel::after(IDLE_COMPACTION_INTERVAL),
-                            };
-                        } else {
-                            // Both backlogs fully drained. If we actually did
-                            // work since the last trim, release the freed
-                            // pages back to the OS now: the transient
-                            // allocation churn is over, so the freed heap is
-                            // stable and worth returning. Doing this once per
-                            // settle (rather than per slice) avoids repeatedly
-                            // munmap-ing pages the allocator would re-fault
-                            // during an ongoing drain. See `release_freed_heap`.
-                            if work_since_trim {
-                                release_freed_heap();
-                                work_since_trim = false;
-                            }
-                            // Stay armed at the EXACT progress staleness
-                            // deadline while progress is still active —
-                            // `never()` would permanently disarm this arm
-                            // and a stale progress report on a truly idle
-                            // pane (no further compaction/compression work,
-                            // no PTY/GUI activity) would never be
-                            // re-checked, let alone expire. Once progress is
-                            // inactive (here or already, e.g. a normal
-                            // `s=0` clear), fall back to `never()` exactly
-                            // as before phase B2.
-                            idle_deadline = progress_deadline.map_or_else(
-                                crossbeam_channel::never,
-                                crossbeam_channel::after,
-                            );
-                        }
-
-                        if progress_became_inactive {
-                            // The one case this arm publishes: staleness
-                            // expiry actually changed what the GUI would
-                            // render, so unlike the byte-identical
-                            // compaction/compression case this needs a real
-                            // snapshot + repaint, not a silent tick.
+                        InputOutcome::NoRepaint => {
+                            // Nothing visible changed (e.g. a key/mouse-report
+                            // byte written to the child fd). Still fall through
+                            // to `post_event` so any window-command/command-event
+                            // drains and the snapshot store run — but tell it NOT
+                            // to request a GUI wake (#459). `request_repaint =
+                            // false` below.
+                            idle_deadline =
+                                crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                             post_event(
                                 &mut emulator,
                                 &window_cmd_tx,
                                 &arc_swap,
                                 &repaint_handle,
-                                true,
+                                false,
                             );
+                            continue;
                         }
-                        continue;
+                        InputOutcome::Repaint => {
+                            idle_deadline =
+                                crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                            // Fall through to the trailing `post_event` (with
+                            // `request_repaint = true`).
+                        }
                     }
                 }
 
@@ -1355,5 +1452,272 @@ mod tests {
         assert!(input_event_needs_repaint(&InputEvent::CursorConfigChange(
             CursorVisualStyle::VerticalLineCursorBlink,
         )));
+    }
+
+    // ---------------------------------------------------------------
+    // Task 120.2: resize coalescing.
+    // ---------------------------------------------------------------
+
+    /// `(cols, rows)` of a `Resize`, or `None` for any other message.
+    fn resize_dims(msg: &Result<InputEvent, RecvError>) -> Option<(usize, usize)> {
+        match msg {
+            Ok(InputEvent::Resize(w, h, _, _)) => Some((*w, *h)),
+            _ => None,
+        }
+    }
+
+    fn resize(cols: usize) -> InputEvent {
+        InputEvent::Resize(cols, 24, 8, 16)
+    }
+
+    #[test]
+    fn coalesce_applies_only_the_last_of_n_queued_resizes() {
+        let (tx, rx) = unbounded::<InputEvent>();
+        for cols in [81, 82, 83, 84] {
+            tx.send(resize(cols)).unwrap();
+        }
+
+        let out = coalesce_queued_resizes(Ok(resize(80)), &rx);
+
+        assert_eq!(resize_dims(&out.now), Some((84, 24)));
+        assert!(out.next.is_none(), "drain stopped on an empty queue");
+        assert!(rx.try_recv().is_err(), "every queued resize was consumed");
+    }
+
+    #[test]
+    fn coalesce_lone_resize_is_returned_unchanged() {
+        let (_tx, rx) = unbounded::<InputEvent>();
+
+        let out = coalesce_queued_resizes(Ok(InputEvent::Resize(100, 30, 9, 18)), &rx);
+
+        assert!(matches!(out.now, Ok(InputEvent::Resize(100, 30, 9, 18))));
+        assert!(out.next.is_none());
+    }
+
+    #[test]
+    fn coalesce_stops_at_a_non_resize_and_preserves_order() {
+        // resize1, key, resize2 must be processed as exactly that sequence:
+        // the key is never moved across either resize.
+        let (tx, rx) = unbounded::<InputEvent>();
+        tx.send(InputEvent::Key(b"k".to_vec())).unwrap();
+        tx.send(resize(90)).unwrap();
+
+        let first = coalesce_queued_resizes(Ok(resize(80)), &rx);
+        assert_eq!(resize_dims(&first.now), Some((80, 24)));
+        let Some(Ok(InputEvent::Key(bytes))) = first.next else {
+            panic!("the key must end the drain and be carried");
+        };
+        assert_eq!(bytes, b"k");
+
+        // The carried key passes through untouched and leaves the queue
+        // alone, so the later resize is still waiting behind it.
+        let second = coalesce_queued_resizes(Ok(InputEvent::Key(bytes)), &rx);
+        assert!(matches!(second.now, Ok(InputEvent::Key(_))));
+        assert!(second.next.is_none());
+
+        let third = coalesce_queued_resizes(Ok(rx.try_recv().unwrap()), &rx);
+        assert_eq!(resize_dims(&third.now), Some((90, 24)));
+        assert!(third.next.is_none());
+    }
+
+    #[test]
+    fn coalesce_keeps_resizes_queued_after_a_non_resize() {
+        // Only resizes BEFORE the first non-resize are coalesced; a resize
+        // queued after it is a separate run.
+        let (tx, rx) = unbounded::<InputEvent>();
+        tx.send(resize(81)).unwrap();
+        tx.send(InputEvent::FocusChange(true)).unwrap();
+        tx.send(resize(82)).unwrap();
+        tx.send(resize(83)).unwrap();
+
+        let out = coalesce_queued_resizes(Ok(resize(80)), &rx);
+
+        assert_eq!(resize_dims(&out.now), Some((81, 24)));
+        assert!(matches!(out.next, Some(Ok(InputEvent::FocusChange(true)))));
+        assert_eq!(resize_dims(&Ok(rx.try_recv().unwrap())), Some((82, 24)));
+        assert_eq!(resize_dims(&Ok(rx.try_recv().unwrap())), Some((83, 24)));
+    }
+
+    #[test]
+    fn coalesce_non_resize_first_does_not_touch_the_queue() {
+        let (tx, rx) = unbounded::<InputEvent>();
+        tx.send(resize(81)).unwrap();
+
+        let out = coalesce_queued_resizes(Ok(InputEvent::ClearScrollback), &rx);
+
+        assert!(matches!(out.now, Ok(InputEvent::ClearScrollback)));
+        assert!(out.next.is_none());
+        assert_eq!(resize_dims(&Ok(rx.try_recv().unwrap())), Some((81, 24)));
+    }
+
+    #[test]
+    fn coalesce_reports_a_channel_closed_mid_drain() {
+        let (tx, rx) = unbounded::<InputEvent>();
+        tx.send(resize(81)).unwrap();
+        drop(tx);
+
+        let out = coalesce_queued_resizes(Ok(resize(80)), &rx);
+
+        // The latest resize still applies; the close is carried so the loop
+        // tears down right after it, exactly as a later `recv` would have.
+        assert_eq!(resize_dims(&out.now), Some((81, 24)));
+        assert!(matches!(out.next, Some(Err(RecvError))));
+    }
+
+    #[test]
+    fn coalesce_closed_first_message_passes_through() {
+        let (_tx, rx) = unbounded::<InputEvent>();
+
+        let out = coalesce_queued_resizes(Err(RecvError), &rx);
+
+        assert!(matches!(out.now, Err(RecvError)));
+        assert!(out.next.is_none());
+    }
+
+    /// What the child process observes: the sequence of `PtyWrite`s the
+    /// consumer thread produced, as `Resize(cols)` / `Write(bytes)`.
+    #[derive(Debug, PartialEq, Eq)]
+    enum ChildSaw {
+        Resize(usize),
+        Write(Vec<u8>),
+    }
+
+    /// Queue `events` on a fresh headless pane's input channel, THEN start
+    /// its real PTY consumer thread (so the whole backlog is already queued
+    /// when the loop first wakes, as during a drag behind a long reflow),
+    /// close the channel, and return what the child saw once the thread has
+    /// exited.
+    fn run_consumer_over(events: Vec<InputEvent>, recording_swap: RecordingSwap) -> Vec<ChildSaw> {
+        let (terminal, write_rx) = TerminalEmulator::new_headless(None);
+        let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
+        let (input_tx, input_rx) = unbounded::<InputEvent>();
+        let (window_cmd_tx, _window_cmd_rx) = unbounded::<WindowCommand>();
+        let (clipboard_tx, _clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+        let (search_buffer_tx, _search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (pty_dead_tx, _pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+        let (command_event_tx, _command_event_rx) = unbounded::<CommandFinishedEvent>();
+
+        for event in events {
+            input_tx.send(event).unwrap();
+        }
+        drop(input_tx);
+
+        spawn_pty_consumer_thread(
+            terminal,
+            pty_read_rx,
+            input_rx,
+            window_cmd_tx,
+            clipboard_tx,
+            search_buffer_tx,
+            None,
+            Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
+            Arc::new(OnceLock::new()),
+            pty_dead_tx,
+            recording_swap,
+            7,
+            command_event_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // The emulator owns every sender of `write_rx`, so the channel
+        // disconnects exactly when the consumer thread has exited.
+        let mut saw = Vec::new();
+        loop {
+            match write_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(PtyWrite::Resize(size)) => saw.push(ChildSaw::Resize(size.width)),
+                Ok(PtyWrite::Write(bytes)) => saw.push(ChildSaw::Write(bytes)),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    panic!("consumer thread did not exit after the input channel closed")
+                }
+            }
+        }
+        drop(pty_read_tx);
+        saw
+    }
+
+    #[test]
+    fn consumer_thread_applies_only_the_last_queued_resize() {
+        let saw = run_consumer_over(
+            vec![resize(70), resize(71), resize(72), resize(73)],
+            freminal_terminal_emulator::recording::empty_recording_swap(),
+        );
+        assert_eq!(saw, vec![ChildSaw::Resize(73)]);
+    }
+
+    #[test]
+    fn consumer_thread_never_reorders_input_across_a_resize() {
+        let saw = run_consumer_over(
+            vec![
+                resize(70),
+                resize(71),
+                InputEvent::Key(b"a".to_vec()),
+                resize(72),
+                resize(73),
+                InputEvent::Key(b"b".to_vec()),
+                InputEvent::Key(b"c".to_vec()),
+                resize(74),
+            ],
+            freminal_terminal_emulator::recording::empty_recording_swap(),
+        );
+        assert_eq!(
+            saw,
+            vec![
+                ChildSaw::Resize(71),
+                ChildSaw::Write(b"a".to_vec()),
+                ChildSaw::Resize(73),
+                ChildSaw::Write(b"b".to_vec()),
+                ChildSaw::Write(b"c".to_vec()),
+                ChildSaw::Resize(74),
+            ]
+        );
+    }
+
+    #[test]
+    fn consumer_thread_records_one_pane_resize_for_the_applied_size() {
+        use freminal_terminal_emulator::recording::{
+            RecordingMetadata, TopologySnapshot, parse_recording, start_recording,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coalesce.frec");
+        let metadata = RecordingMetadata {
+            freminal_version: "test".to_string(),
+            created_at: 0,
+            term: "xterm-256color".to_string(),
+            initial_topology: TopologySnapshot { windows: vec![] },
+            scrollback_limit: 10_000,
+        };
+        let (handle, mut join) = start_recording(&path, metadata, 64).unwrap();
+        let swap = freminal_terminal_emulator::recording::empty_recording_swap();
+        swap.store(Some(Arc::new(handle)));
+
+        let saw = run_consumer_over(
+            vec![
+                InputEvent::Resize(70, 20, 8, 16),
+                InputEvent::Resize(71, 21, 8, 16),
+                InputEvent::Resize(72, 22, 8, 16),
+            ],
+            Arc::clone(&swap),
+        );
+        assert_eq!(saw, vec![ChildSaw::Resize(72)]);
+
+        swap.store(None);
+        join.join();
+
+        let resizes: Vec<_> = parse_recording(&path)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::PaneResize {
+                    pane_id,
+                    cols,
+                    rows,
+                } => Some((pane_id, cols, rows)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resizes, vec![(7, 72, 22)]);
     }
 }

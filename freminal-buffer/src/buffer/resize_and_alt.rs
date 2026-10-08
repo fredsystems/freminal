@@ -44,9 +44,9 @@ impl Buffer {
         // `grow_height`): those never read cell content at all, so the
         // decompact-all-then-recompact-all round trip was pure waste. No
         // explicit decompaction pass is needed here:
-        //   - A width change reflows via `reflow_to_width`, which reads every
-        //     row's cells through `.characters()` — an auto-decompacting
-        //     accessor — and then replaces `self.rows` wholesale with fresh
+        //   - A width change reflows via `reflow_to_width`, which takes every
+        //     row's cells by value through `Row::into_cells` — which decompacts
+        //     a compact row — and then replaces `self.rows` wholesale with fresh
         //     `Live` rows built by `Row::from_cells`. Scrollback ends up
         //     all-`Live` as a side effect of reflow, not an explicit pass.
         //   - A height-only resize never reads cell content: it only touches
@@ -376,21 +376,28 @@ impl Buffer {
         // reflow algorithm below reads any cell. This is deliberately the
         // slow-but-correct decompress-everything path — the existing
         // synchronous reflow must keep working correctly with compressed
-        // scrollback present; making this fast (only decompressing the
-        // bands reflow actually needs) is Task 120's job, not this one's.
+        // scrollback present; only decompressing the bands reflow actually
+        // needs is the deferred windowed-reflow design (`FUTURE_PLANS.md`
+        // B.10), not done here.
         self.ensure_decompressed(0..self.rows.len());
 
         let old_cursor_y = self.cursor.pos.y;
         let old_cursor_x = self.cursor.pos.x;
         let old_base = self.rows.base();
 
+        // `image_cell_count` is exact (asserted by `debug_assert_invariants`),
+        // so when it is zero no row holds an image cell: the per-line image
+        // scan below and the recount after the reflow can both be skipped.
+        // Reflow never creates image cells, so the count stays zero.
+        let had_image_cells = self.image_cell_count > 0;
+
         // Take ownership of the old rows
         let old_rows = self.rows.take_rows();
         let old_rows_len = old_rows.len();
 
-        // Note: reflow reads each row's cells exactly once via the flatten
-        // loop below (`row.characters()`), which decompacts lazily on that
-        // single read, so no up-front `ensure_live` pass is needed. Every
+        // Note: reflow takes each row's cells exactly once, by value, via
+        // `Row::into_cells` below, which decompacts a compact row on that
+        // single move, so no up-front `ensure_live` pass is needed. Every
         // row is now guaranteed to be `Live` or Task-118 `Compact` (never
         // evicted) thanks to the `ensure_decompressed` call above.
 
@@ -491,10 +498,13 @@ impl Buffer {
             // Instead, emit this logical line's physical rows verbatim
             // (clamped to the new width) so every image row's cells stay
             // contiguous on one new physical row at their original columns.
-            let line_has_image = line.iter().any(|r| r.count_image_cells() > 0);
+            let line_has_image = had_image_cells && line.iter().any(|r| r.count_image_cells() > 0);
             if line_has_image {
-                for (row_pos, old_row) in line.iter().enumerate() {
-                    let mut cells: Vec<crate::cell::Cell> = old_row.characters().clone();
+                for (row_pos, old_row) in line.into_iter().enumerate() {
+                    let old_origin = old_row.origin;
+                    // The old row is discarded here, so move its cells out
+                    // rather than cloning them (Task 120.3).
+                    let mut cells: Vec<crate::cell::Cell> = old_row.into_cells();
                     if cells.len() > new_width {
                         // An image wider than the new terminal width is
                         // clipped, not fragmented — per the kitty spec, only
@@ -508,7 +518,7 @@ impl Buffer {
                     let (origin, join) = if row_pos == 0 {
                         (first_origin, RowJoin::NewLogicalLine)
                     } else {
-                        (old_row.origin, RowJoin::ContinueLogicalLine)
+                        (old_origin, RowJoin::ContinueLogicalLine)
                     };
                     // This line is emitted verbatim, so old row `row_pos` is
                     // exactly new row `line_start_idx + row_pos`. Its clipped
@@ -553,10 +563,16 @@ impl Buffer {
                 continue;
             }
 
-            // Flatten all rows in this logical line into a single Vec<Cell>
-            let mut flat_cells: Vec<crate::cell::Cell> = Vec::new();
-            for row in &line {
-                flat_cells.extend(row.characters().iter().cloned());
+            // Flatten all rows in this logical line into a single Vec<Cell>.
+            // The old rows are discarded here, so their cells are moved, not
+            // cloned (Task 120.3); a single-row line hands over its vector.
+            let mut old_rows_of_line = line.into_iter();
+            let mut flat_cells: Vec<crate::cell::Cell> = old_rows_of_line
+                .next()
+                .map(Row::into_cells)
+                .unwrap_or_default();
+            for row in old_rows_of_line {
+                flat_cells.extend(row.into_cells());
             }
 
             if flat_cells.is_empty() {
@@ -573,14 +589,14 @@ impl Buffer {
                 continue;
             }
 
-            let mut idx = 0;
             let mut col = 0;
             let mut cur_cells: Vec<crate::cell::Cell> = Vec::new();
             let mut is_first_row_for_line = true;
 
-            while idx < flat_cells.len() {
-                let cell = &flat_cells[idx];
-
+            // Consume the flattened line by value so every cell is moved
+            // into its new row rather than cloned (Task 120.3).
+            let mut flat_iter = flat_cells.into_iter().peekable();
+            while let Some(cell) = flat_iter.next() {
                 if cell.is_head() {
                     let w = cell.display_width().max(1);
 
@@ -606,16 +622,16 @@ impl Buffer {
                     }
 
                     // Now place this glyph (head + continuations) onto the row.
-                    cur_cells.push(cell.clone());
-                    idx += 1;
+                    cur_cells.push(cell);
 
                     let mut consumed = 1;
-                    while consumed < w
-                        && idx < flat_cells.len()
-                        && flat_cells[idx].is_continuation()
-                    {
-                        cur_cells.push(flat_cells[idx].clone());
-                        idx += 1;
+                    while consumed < w {
+                        let Some(continuation) =
+                            flat_iter.next_if(crate::cell::Cell::is_continuation)
+                        else {
+                            break;
+                        };
+                        cur_cells.push(continuation);
                         consumed += 1;
                     }
 
@@ -641,8 +657,7 @@ impl Buffer {
                         is_first_row_for_line = false;
                     }
 
-                    cur_cells.push(cell.clone());
-                    idx += 1;
+                    cur_cells.push(cell);
                     col += 1;
                 }
             }
@@ -715,8 +730,11 @@ impl Buffer {
         self.width = new_width;
         // Reflow rebuilds all rows from scratch; recount image cells so the
         // counter stays accurate regardless of how reflow may have clipped or
-        // merged cells.
-        self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
+        // merged cells. With no image cells before the reflow there are none
+        // after it (see `had_image_cells`), and the count is already zero.
+        if had_image_cells {
+            self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
+        }
         // The rows were renumbered, so every image's stamp horizon (Task
         // 125.15) named a pre-reflow row: recompute them from the new cells.
         self.rebuild_image_horizons();

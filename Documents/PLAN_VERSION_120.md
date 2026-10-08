@@ -17,7 +17,7 @@ hot, so it ships together):
   layered on the Task-118 compact form — block-granular LZ4 compression of idle scrollback,
   decompress-on-scroll with an LRU block cache, driven by the same idle tick Task 118
   established. LZ4-only (no zstd tier).
-- **Task 120 — Resize Coalescing and Reflow Cost** (planned; re-scoped 2026-10-08 from
+- **Task 120 — Resize Coalescing and Reflow Cost** (pending merge; re-scoped 2026-10-08 from
   "Compression-Aware Windowed Reflow"): measurement showed a single full-scrollback reflow
   is a ~100–190 ms hitch at the 10k default, that compression is not the bottleneck, and
   that the real defect is uncoalesced drag resizes — every intermediate size is reflowed in
@@ -92,7 +92,7 @@ until its 2026-10-08 re-scope, which decomposed it against the code as it then e
 | --- | ------------------------------------------- | ------ | ------------- | -------------- |
 | 118 | Compact Cell Representation                 | Medium | Complete      | None           |
 | 119 | Scrollback Compression (LZ4)                | Large  | Complete      | Task 118       |
-| 120 | Resize Coalescing and Reflow Cost           | Medium | Planned       | Tasks 118, 119 |
+| 120 | Resize Coalescing and Reflow Cost           | Medium | Pending merge | Tasks 118, 119 |
 | 121 | Performance Remediation                     | Large  | Complete      | None           |
 | 122 | Orchestration Extraction                    | Large  | Complete      | None           |
 | 123 | GL Pipeline Measurement Harness             | Large  | Complete      | Task 122       |
@@ -788,8 +788,8 @@ Stop: report results.
 
 ## Task 120 — Resize Coalescing and Reflow Cost
 
-> **STATUS: PLANNED (re-scoped 2026-10-08).** This task was previously the enriched stub
-> "Compression-Aware Windowed Reflow". A measurement on 2026-10-08 refuted that stub's premise
+> **STATUS: PENDING MERGE (re-scoped 2026-10-08; 120.1–120.4 done 2026-10-08 on
+> `task-120/resize-coalescing`).** This task was previously the enriched stub "Compression-Aware Windowed Reflow". A measurement on 2026-10-08 refuted that stub's premise
 > at the default scrollback depth and located the real defect elsewhere; the task was re-scoped
 > to that defect by maintainer decision. The windowed/lazy reflow design is **not** discarded:
 > it moved, unchanged in substance, to `FUTURE_PLANS.md` B.10, to be revisited only if the
@@ -886,6 +886,26 @@ Verification: `cargo bench --no-run --all`; the new group runs; clippy.
 
 Prohibitions: do NOT change production code.
 
+**Complete (2026-10-08).** Groups `reflow_full_depth` (10k, all nine IDs) and
+`reflow_full_depth_100k` (`one_col` per state; opt-in, runs only when the Criterion filter
+names `100k`) in `buffer_row_bench.rs`, catalogued in `freminal-bench-table`. Content: 100x40
+grid, alternating default/coloured runs, 60–80-char lines with every 7th line 130–169 chars
+(soft-wraps), filled to capacity; storage state set with `compact_idle_scrollback` /
+`compress_idle_scrollback` run to completion and asserted once before timing. Named Criterion
+baseline `before_120` (also covers `buffer_resize` and `softwrap_heavy`). A no-op rerun
+against the baseline moved by at most 5.3%.
+
+| Scrollback | Change    | Live     | Compacted | Compressed |
+| ---------- | --------- | -------- | --------- | ---------- |
+| 10k        | `widen`   | 44.8 ms  | 69.6 ms   | 83.5 ms    |
+| 10k        | `narrow`  | 48.9 ms  | 73.1 ms   | 86.7 ms    |
+| 10k        | `one_col` | 44.7 ms  | 70.3 ms   | 82.7 ms    |
+| 100k       | `one_col` | 449 ms   | 788 ms    | 1.02 s     |
+
+These are roughly half the 2026-10-08 probe's figures (different machine load and content
+shape), but the shape agrees: cost is flat in the width delta, linear in depth, and storage
+state adds ~55% (compacted) to ~85% (compressed) over live rows.
+
 #### 120.2 — Coalesce queued resizes on the PTY thread
 
 Scope: `freminal/src/gui/pty.rs` (the `recv(input_rx)` arm and `handle_input`); tests there.
@@ -905,6 +925,22 @@ pointer rather than catching up after release.
 Prohibitions: do NOT add a timer or thread; do NOT add a GUI-side debounce in this subtask;
 do NOT reorder any non-resize event.
 
+**Complete (2026-10-08).** New pure helper `coalesce_queued_resizes` in
+`freminal/src/gui/pty.rs`: given a received `Resize`, it drains the input channel with
+`try_recv` and keeps only the latest `Resize`; the first non-resize message (or a channel
+close) ends the drain and is returned for processing next. The loop holds that message in a
+`carried_input` slot and processes it at the top of the next iteration, before `select!`,
+through the unchanged `handle_input` + `InputOutcome` path, so the coalesced resize gets its
+own `post_event` and the following event is handled exactly as before. The input arm's
+outcome handling moved below the `select!` verbatim; `InputEvent`, the GUI send path and the
+emulator are untouched. Tests: seven unit tests over the helper (N resizes, lone resize,
+resize/key/resize order, resizes after a non-resize stay queued, non-resize first leaves the
+queue alone, close mid-drain, closed first message) and three that run the real consumer
+thread on a headless emulator with the backlog pre-queued, asserting on the `PtyWrite`
+sequence the child sees (`Resize(71), Write(a), Resize(73), Write(b), Write(c), Resize(74)`
+for an eight-event mix) and on a real FREC file holding exactly one `PaneResize`. All three
+thread tests fail with coalescing disabled. `cargo xtask check-windows` is clean.
+
 #### 120.3 — Remove avoidable cell copies from `reflow_to_width`
 
 Scope: `freminal-buffer/src/buffer/resize_and_alt.rs` (`reflow_to_width` and its helpers);
@@ -922,6 +958,38 @@ show no regression >15% anywhere and a recorded improvement on 120.1.
 
 Prohibitions: do NOT change reflow semantics or any remap; do NOT add new reflow modes.
 
+**Complete (2026-10-08).** New `Row::into_cells(self)` (hands over a `Live` row's vector, a
+warm compact memo, or decompacts once) with three unit tests. `reflow_to_width` now moves
+cells everywhere it used to clone: the flatten step consumes the line's rows (a single-row
+line hands over its vector untouched), the re-wrap loop consumes the flattened line by value
+(`Peekable::next_if` for continuations, same stop conditions as the old index loop), and the
+image-line path moves each row's cells. The per-line `count_image_cells` scan and the
+post-reflow full recount are skipped when the buffer's `image_cell_count` is zero (an exact,
+debug-asserted invariant already relied on by `clip_rows_to_width`; reflow never creates
+image cells). No remap, cursor or output logic changed; no existing test was modified.
+
+Against baseline `before_120` (Criterion means):
+
+| Benchmark                                   | Before   | After    | Change |
+| ------------------------------------------- | -------- | -------- | ------ |
+| `reflow_full_depth/live/widen`              | 44.8 ms  | 25.9 ms  | −41.8% |
+| `reflow_full_depth/live/narrow`             | 48.9 ms  | 31.3 ms  | −35.6% |
+| `reflow_full_depth/live/one_col`            | 44.7 ms  | 25.6 ms  | −42.2% |
+| `reflow_full_depth/compacted/widen`         | 69.6 ms  | 51.5 ms  | −26.0% |
+| `reflow_full_depth/compacted/narrow`        | 73.1 ms  | 55.5 ms  | −24.2% |
+| `reflow_full_depth/compacted/one_col`       | 70.3 ms  | 52.6 ms  | −25.4% |
+| `reflow_full_depth/compressed/widen`        | 83.5 ms  | 63.4 ms  | −23.6% |
+| `reflow_full_depth/compressed/narrow`       | 86.7 ms  | 67.2 ms  | −22.4% |
+| `reflow_full_depth/compressed/one_col`      | 82.7 ms  | 63.7 ms  | −22.8% |
+| `buffer_resize/reflow_width/40`             | 78.8 ms  | 47.4 ms  | −39.9% |
+| `buffer_resize/shrink_height/20`            | 6.30 ms  | 6.57 ms  | noise  |
+| `buffer_resize/grow_height/200`             | 6.42 ms  | 6.68 ms  | noise  |
+| `softwrap_heavy/wrap_long_line_to_width_10` | 626 µs   | 498 µs   | −20.0% |
+
+The height-only rows do not reflow and Criterion reports no significant change (p > 0.5).
+What remains in the compacted and compressed cases is decompaction (and LZ4 decompression)
+plus building and dropping the row vectors.
+
 #### 120.4 — Close-out measurement and B.10 decision input
 
 Scope: verification only; this section; `FUTURE_PLANS.md` B.10.
@@ -936,6 +1004,34 @@ Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- 
 `cargo machete`; `cargo fmt --all -- --check`; `cargo xtask check-windows`.
 
 Prohibitions: do NOT start B.10.
+
+**Complete (2026-10-08).** Post-task single-resize latency (Criterion means, same harness and
+machine as the 120.1 baseline):
+
+| Scrollback | Change    | Live              | Compacted         | Compressed        |
+| ---------- | --------- | ----------------- | ----------------- | ----------------- |
+| 10k        | `widen`   | 25.9 ms (−41.8%)  | 51.5 ms (−26.0%)  | 63.4 ms (−23.6%)  |
+| 10k        | `narrow`  | 31.3 ms (−35.6%)  | 55.5 ms (−24.2%)  | 67.2 ms (−22.4%)  |
+| 10k        | `one_col` | 25.6 ms (−42.2%)  | 52.6 ms (−25.4%)  | 63.7 ms (−22.8%)  |
+| 100k       | `one_col` | 277 ms (−38.3%)   | 636 ms (−19.3%)   | 885 ms (−13.3%)   |
+
+With 120.2 in place a drag no longer queues work: the PTY thread applies one size, then jumps
+to the newest queued one, so the view refreshes about once per reflow and settles at most
+about two reflows after the pointer stops (the one in flight plus the final size), instead
+of after the whole backlog (formerly ~3.8 s for a 60-column drag at 10k, ~46 s at 100k).
+
+**Recommendation on B.10.** Not warranted at the default depth. At 10k a single reflow is
+26–67 ms depending on storage state, about one to four frames, and with coalescing a drag
+tracks the pointer at roughly 15–40 updates per second; a windowed reflow would buy little
+there and costs the large mixed-width/mixed-compression complexity B.10 describes. The
+residual problem is confined to very deep configured scrollback: at 100k a single resize
+still costs ~0.3 s (live) to ~0.9 s (compressed), which is visible on a drag and on one-shot
+resizes such as a pane split. Even there, the remaining cost is now dominated by
+decompaction and LZ4 decompression of cold rows rather than by the reflow core, so the next
+lever, if a user reports it, is reflowing straight from the compact run representation
+without materialising `Vec<Cell>`, which is far smaller than B.10. Keep B.10 deferred at Low
+severity, revisit only on a user report of resize latency at 50k+ scrollback, and try the
+compact-path lever first.
 
 ---
 

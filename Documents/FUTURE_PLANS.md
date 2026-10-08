@@ -211,7 +211,16 @@ mixed-width buffer; `visible_window_start` and snapshot bounds mid-reflow; how t
 driver orders compaction, compression and reflow-tail work; and how a partially-reflowed
 snapshot is represented without violating the lock-free snapshot model.
 
-**Trigger to revisit:** Task 120.4's close-out numbers.
+**Post-Task-120 numbers (120.4, 2026-10-08):** after resize coalescing (120.2) and the
+reflow constant-factor work (120.3), one width change costs 26–67 ms at 10k (live to
+compressed) and ~0.28 s / ~0.64 s / ~0.88 s at 100k (live / compacted / compressed). A drag
+no longer queues a backlog; it refreshes about once per reflow. The 120.4 recommendation is
+that this design is not warranted at the default depth, and that at very deep scrollback the
+dominant remaining cost is decompaction and LZ4 decompression, so reflowing directly from the
+compact run representation should be tried first.
+
+**Trigger to revisit:** a user report of resize latency at 50k+ configured scrollback, and
+only after the compact-path lever above has been measured.
 
 **Scope:** Large.
 
