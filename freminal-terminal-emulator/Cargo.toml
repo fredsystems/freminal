@@ -38,7 +38,7 @@ tracing.workspace = true
 vergen.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["mman", "term"] }
+nix = { workspace = true, features = ["fs", "mman", "term"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { workspace = true, features = ["handleapi", "memoryapi", "winnt"] }

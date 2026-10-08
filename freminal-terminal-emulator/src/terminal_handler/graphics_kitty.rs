@@ -84,6 +84,143 @@ impl From<bool> for ImageDataDisposition {
 /// least 8; a 9th link is rejected.
 const MAX_RELATIVE_PLACEMENT_DEPTH: usize = 8;
 
+/// Maximum number of bytes read from a `t=f` / `t=t` file transmission.
+///
+/// Matches kitty's own `MAX_DATA_SZ` (400 MiB). A file larger than this is
+/// rejected outright rather than truncated.
+const MAX_KITTY_FILE_BYTES: u64 = 400 * 1024 * 1024;
+
+/// The single error response sent for every file-transmission failure.
+///
+/// Deliberately uniform so the response does not reveal whether a path
+/// exists, is readable, or is a special file.
+const KITTY_FILE_ERROR_RESPONSE: &str = "EBADF:Failed to read image file";
+
+/// Substring a `t=t` file's path must contain before freminal will delete it.
+const KITTY_TEMP_FILE_MARKER: &str = "tty-graphics-protocol";
+
+/// Why a Kitty file transmission (`t=f` / `t=t`) was refused.
+///
+/// Never sent to the client (see [`KITTY_FILE_ERROR_RESPONSE`]); it exists
+/// for the debug log.
+#[derive(Debug, thiserror::Error)]
+enum KittyFileError {
+    #[error("path is not valid UTF-8")]
+    NotUtf8,
+    #[error("path is not absolute")]
+    NotAbsolute,
+    #[error("failed to canonicalise path: {0}")]
+    Canonicalize(std::io::Error),
+    #[error("path is under a refused prefix (/proc, /sys, /dev)")]
+    RefusedPrefix,
+    #[error("failed to open file: {0}")]
+    Open(std::io::Error),
+    #[error("not a regular file")]
+    NotRegularFile,
+    #[error("failed to read file: {0}")]
+    Read(std::io::Error),
+    #[error("file exceeds the {MAX_KITTY_FILE_BYTES}-byte limit")]
+    TooLarge,
+}
+
+/// Whether `canonical` lies under a prefix that must never be read.
+///
+/// `/proc`, `/sys` and `/dev` expose live kernel state and device nodes
+/// (`/dev/zero`, `/proc/self/mem`, ...). `/dev/shm` is the one exception:
+/// it is an ordinary tmpfs that kitty clients legitimately use. The test is
+/// component-wise, so `/procfoo` is not matched.
+fn is_refused_kitty_path(canonical: &std::path::Path) -> bool {
+    use std::path::Path;
+
+    if canonical.starts_with("/dev/shm") {
+        return false;
+    }
+    ["/proc", "/sys", "/dev"]
+        .iter()
+        .any(|prefix| canonical.starts_with(Path::new(prefix)))
+}
+
+/// Open `canonical` read-only and confirm the handle is a regular file.
+///
+/// On unix the file is opened `O_NONBLOCK` so that opening a FIFO cannot
+/// block the PTY thread; the type check is done on the opened handle
+/// (`fstat`), not on the path, so it cannot be raced.
+fn open_regular_kitty_file(canonical: &std::path::Path) -> Result<std::fs::File, KittyFileError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+
+    let file = options.open(canonical).map_err(KittyFileError::Open)?;
+    let metadata = file.metadata().map_err(KittyFileError::Open)?;
+    if metadata.is_file() {
+        Ok(file)
+    } else {
+        Err(KittyFileError::NotRegularFile)
+    }
+}
+
+/// Read at most `cap` bytes from `reader`; exceeding the cap is an error.
+fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, KittyFileError> {
+    use std::io::Read;
+
+    let mut data = Vec::new();
+    // One byte past the cap lets us tell "exactly cap" from "more than cap".
+    reader
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(KittyFileError::Read)?;
+    match u64::value_from(data.len()) {
+        Ok(len) if len <= cap => Ok(data),
+        _ => Err(KittyFileError::TooLarge),
+    }
+}
+
+/// Validate, open and read the file named by a `t=f` / `t=t` payload.
+///
+/// Returns the canonical path (so a `t=t` deletion targets exactly what was
+/// read) together with the file contents.
+fn load_kitty_file(payload: &[u8]) -> Result<(std::path::PathBuf, Vec<u8>), KittyFileError> {
+    let path_str = std::str::from_utf8(payload).map_err(|_| KittyFileError::NotUtf8)?;
+    let path = std::path::Path::new(path_str);
+    if !path.is_absolute() {
+        return Err(KittyFileError::NotAbsolute);
+    }
+
+    let canonical = std::fs::canonicalize(path).map_err(KittyFileError::Canonicalize)?;
+    if is_refused_kitty_path(&canonical) {
+        return Err(KittyFileError::RefusedPrefix);
+    }
+
+    let file = open_regular_kitty_file(&canonical)?;
+    let data = read_capped(file, MAX_KITTY_FILE_BYTES)?;
+    Ok((canonical, data))
+}
+
+/// Whether a `t=t` file at `canonical` may be deleted after reading.
+///
+/// Requires both that the file lives inside a known temporary directory
+/// (`temp_dir()`, `/tmp` or `/dev/shm`, each canonicalised) and that its path
+/// contains `tty-graphics-protocol`, so a client cannot use `t=t` to delete
+/// arbitrary readable files.
+fn may_delete_kitty_temp_file(canonical: &std::path::Path) -> bool {
+    if !canonical.to_string_lossy().contains(KITTY_TEMP_FILE_MARKER) {
+        return false;
+    }
+    [
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/dev/shm"),
+    ]
+    .iter()
+    .filter_map(|dir| std::fs::canonicalize(dir).ok())
+    .any(|dir| canonical.starts_with(dir))
+}
+
 /// Apply a signed cell offset (`H=`/`V=`) to a `usize` origin coordinate.
 ///
 /// Clamps to `0` on underflow and to `usize::MAX` on overflow — both are
@@ -1054,10 +1191,18 @@ impl TerminalHandler {
         }
     }
 
-    /// Read a Kitty graphics file from disk.
+    /// Read a Kitty graphics file from disk (`t=f` / `t=t`).
     ///
-    /// The payload bytes are interpreted as a UTF-8 file path. If `delete_after`
-    /// is true, the file is removed after reading (for `t=t` temp file mode).
+    /// The payload bytes are interpreted as a UTF-8 absolute file path, which
+    /// is canonicalised and vetted by [`load_kitty_file`]. If `delete_after`
+    /// is true (`t=t`), the file is removed after reading, but only when it
+    /// lives in a known temporary directory and carries the
+    /// `tty-graphics-protocol` marker (see [`may_delete_kitty_temp_file`]).
+    ///
+    /// Every failure is answered with the single response
+    /// `EBADF:Failed to read image file`, so the client cannot use the
+    /// response to probe which paths exist or are readable. The detailed
+    /// reason is only logged at debug level.
     fn read_kitty_file(
         &self,
         payload: &[u8],
@@ -1066,60 +1211,41 @@ impl TerminalHandler {
         quiet: u8,
         delete_after: bool,
     ) -> Option<Vec<u8>> {
-        let path_str = match std::str::from_utf8(payload) {
-            Ok(s) => s,
+        let (canonical, data) = match load_kitty_file(payload) {
+            Ok(loaded) => loaded,
             Err(e) => {
-                tracing::warn!("Kitty graphics file path is not valid UTF-8: {e}");
+                tracing::debug!("Kitty graphics: refusing file transmission: {e}");
                 self.send_kitty_error(
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
-                    "EINVAL:invalid file path encoding",
-                );
-                return None;
-            }
-        };
-
-        let path = std::path::Path::new(path_str);
-
-        // Security: reject non-absolute paths to prevent relative path traversal.
-        if !path.is_absolute() {
-            tracing::warn!("Kitty graphics: rejecting non-absolute file path: {path_str:?}");
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EPERM:file path must be absolute",
-            );
-            return None;
-        }
-
-        tracing::debug!(
-            "Kitty graphics: reading image from file: {path_str} (delete_after={delete_after})"
-        );
-
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("Kitty graphics: failed to read file {path_str:?}: {e}");
-                self.send_kitty_error(
-                    kitty_id_no_number(image_id_hint, placement_id),
-                    quiet,
-                    &format!("EIO:failed to read file: {e}"),
+                    KITTY_FILE_ERROR_RESPONSE,
                 );
                 return None;
             }
         };
 
         tracing::debug!(
-            "Kitty graphics: read {} bytes from file: {path_str}",
+            "Kitty graphics: read {} bytes from file: {} (delete_after={delete_after})",
             data.len(),
+            canonical.display(),
         );
 
         if delete_after {
-            if let Err(e) = std::fs::remove_file(path) {
-                // Not fatal — we still have the data. Log the failure.
-                tracing::warn!("Kitty graphics: failed to delete temp file {path_str:?}: {e}");
+            if may_delete_kitty_temp_file(&canonical) {
+                if let Err(e) = std::fs::remove_file(&canonical) {
+                    // Not fatal -- we still have the data.
+                    tracing::debug!(
+                        "Kitty graphics: failed to delete temp file {}: {e}",
+                        canonical.display()
+                    );
+                } else {
+                    tracing::debug!("Kitty graphics: deleted temp file {}", canonical.display());
+                }
             } else {
-                tracing::debug!("Kitty graphics: deleted temp file {path_str}");
+                tracing::debug!(
+                    "Kitty graphics: not deleting {}: not a tty-graphics-protocol file in a temporary directory",
+                    canonical.display()
+                );
             }
         }
 
@@ -3288,6 +3414,7 @@ fn extract_rect(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::{KittyFileError, is_refused_kitty_path, read_capped};
     use freminal_common::{
         buffer_states::{
             format_tag::FormatTag,
@@ -6197,50 +6324,194 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Write a 1x1 PNG to a uniquely-named file in `temp_dir()` whose name
+    /// carries `prefix`, returning its path. The caller removes it.
+    fn write_unique_png(prefix: &str) -> std::path::PathBuf {
+        let file = tempfile::Builder::new()
+            .prefix(prefix)
+            .suffix(".png")
+            .tempfile_in(std::env::temp_dir())
+            .expect("failed to create temp file");
+        let (_, path) = file.keep().expect("failed to persist temp file");
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        img.save(&path).expect("failed to write test PNG");
+        path
+    }
+
+    /// Send a `t=f` / `t=t` transmission for `payload` as image `id`.
+    fn transmit_kitty_file(
+        handler: &mut TerminalHandler,
+        transmission: freminal_common::buffer_states::kitty_graphics::KittyTransmission,
+        id: u32,
+        payload: Vec<u8>,
+    ) {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(transmission),
+                image_id: Some(id),
+                ..KittyControlData::default()
+            },
+            payload,
+        });
+    }
+
+    /// Drain `rx` and return every PTY write as text.
+    fn drain_pty_text(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                out.push(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+        out
+    }
+
+    /// Assert a file transmission was refused with exactly the uniform
+    /// `EBADF:Failed to read image file` response and stored no image.
+    fn assert_file_refused(
+        handler: &TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+        id: u32,
+    ) {
+        assert!(
+            handler.buffer().image_store().get(u64::from(id)).is_none(),
+            "no image should be stored for a refused file"
+        );
+        let responses = drain_pty_text(rx);
+        assert_eq!(responses.len(), 1, "expected exactly one response");
+        assert!(
+            responses[0].contains("EBADF:Failed to read image file"),
+            "unexpected response: {:?}",
+            responses[0]
+        );
+    }
+
     #[test]
     fn kitty_temp_file_transmission_reads_and_deletes() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
         let (mut handler, _rx) = kitty_handler();
 
-        // Write a minimal valid 1x1 PNG to a temp file.
-        let dir = std::env::temp_dir();
-        let path = dir.join("freminal_test_kitty_tempfile.png");
-        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
-        img.save(&path).expect("failed to write test PNG");
-
-        let path_bytes = path
+        let path = write_unique_png("tty-graphics-protocol-");
+        let payload = path
             .to_str()
             .expect("non-UTF-8 temp path")
             .as_bytes()
             .to_vec();
 
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Png),
-                transmission: Some(KittyTransmission::TempFile),
-                image_id: Some(998),
-                ..KittyControlData::default()
-            },
-            payload: path_bytes,
-        };
+        transmit_kitty_file(&mut handler, KittyTransmission::TempFile, 998, payload);
 
-        handler.handle_kitty_graphics(cmd);
-
-        // Image should be in the store.
         assert!(
             handler.buffer().image_store().get(998).is_some(),
             "Expected image id=998 in the store after t=t transmission"
         );
-
-        // The temp file should have been deleted.
         assert!(
             !path.exists(),
-            "Temp file should be deleted after t=t transmission"
+            "tty-graphics-protocol temp file should be deleted after t=t transmission"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn kitty_temp_file_without_marker_is_read_but_not_deleted() {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let path = write_unique_png("freminal_unmarked_");
+        let payload = path
+            .to_str()
+            .expect("non-UTF-8 temp path")
+            .as_bytes()
+            .to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::TempFile, 990, payload);
+
+        let stored = handler.buffer().image_store().get(990).is_some();
+        let survived = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(stored, "file should still be read for t=t");
+        assert!(survived, "t=t must not delete a file lacking the marker");
+    }
+
+    #[test]
+    fn kitty_file_directory_path_refused() {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        let (mut handler, rx) = kitty_handler();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let payload = dir.path().to_str().expect("utf-8").as_bytes().to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 989, payload);
+
+        assert_file_refused(&handler, &rx, 989);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_file_fifo_refused_without_blocking() {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        let (mut handler, rx) = kitty_handler();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+        let payload = fifo.to_str().expect("utf-8").as_bytes().to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 988, payload);
+
+        assert_file_refused(&handler, &rx, 988);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn kitty_file_proc_path_refused() {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        let (mut handler, rx) = kitty_handler();
+
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::File,
+            987,
+            b"/proc/self/status".to_vec(),
+        );
+
+        assert_file_refused(&handler, &rx, 987);
+    }
+
+    #[test]
+    fn kitty_file_refused_prefix_is_component_wise() {
+        use std::path::Path;
+
+        assert!(is_refused_kitty_path(Path::new("/proc/self/status")));
+        assert!(is_refused_kitty_path(Path::new("/sys/kernel")));
+        assert!(is_refused_kitty_path(Path::new("/dev/zero")));
+        assert!(!is_refused_kitty_path(Path::new("/dev/shm/img")));
+        assert!(!is_refused_kitty_path(Path::new("/procfoo/img")));
+        assert!(!is_refused_kitty_path(Path::new("/devices/img")));
+        assert!(!is_refused_kitty_path(Path::new("/tmp/img")));
+    }
+
+    #[test]
+    fn kitty_read_capped_accepts_exactly_cap_and_rejects_more() {
+        let exact = read_capped(&[7u8; 8][..], 8).expect("exactly cap is allowed");
+        assert_eq!(exact.len(), 8);
+
+        let under = read_capped(&[7u8; 3][..], 8).expect("under cap is allowed");
+        assert_eq!(under.len(), 3);
+
+        assert!(matches!(
+            read_capped(&[7u8; 9][..], 8),
+            Err(KittyFileError::TooLarge)
+        ));
     }
 
     #[test]
@@ -6254,9 +6525,9 @@ mod tests {
         // Build a platform-appropriate *absolute* path that does not exist.
         // A hardcoded `/tmp/...` string is not absolute on Windows (no drive
         // letter), so `read_kitty_file`'s absolute-path guard would reject it
-        // with EPERM before ever attempting the read — deriving from
-        // `temp_dir()` yields a real absolute path on every platform, so the
-        // read is attempted and fails with EIO as intended.
+        // before ever attempting the read — deriving from `temp_dir()` yields
+        // a real absolute path on every platform, so the open is attempted
+        // and fails as intended.
         let missing = std::env::temp_dir().join("freminal_this_file_does_not_exist_12345.png");
         let payload = missing
             .to_str()
@@ -6288,14 +6559,14 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             if let PtyWrite::Write(bytes) = msg {
                 let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EIO") {
+                if text.contains("EBADF:Failed to read image file") {
                     found_error = true;
                 }
             }
         }
         assert!(
             found_error,
-            "Expected an EIO error response for missing file"
+            "Expected an EBADF error response for missing file"
         );
     }
 
@@ -6326,19 +6597,19 @@ mod tests {
             "No image should be stored for a relative path"
         );
 
-        // An EPERM error response should have been sent.
+        // The uniform EBADF error response should have been sent.
         let mut found_error = false;
         while let Ok(msg) = rx.try_recv() {
             if let PtyWrite::Write(bytes) = msg {
                 let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EPERM") {
+                if text.contains("EBADF:Failed to read image file") {
                     found_error = true;
                 }
             }
         }
         assert!(
             found_error,
-            "Expected an EPERM error response for relative path"
+            "Expected an EBADF error response for relative path"
         );
     }
 
@@ -7095,14 +7366,14 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             if let PtyWrite::Write(bytes) = msg {
                 let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EINVAL") {
+                if text.contains("EBADF:Failed to read image file") {
                     found_error = true;
                 }
             }
         }
         assert!(
             found_error,
-            "Expected an EINVAL error response for invalid UTF-8 path"
+            "Expected an EBADF error response for invalid UTF-8 path"
         );
     }
 

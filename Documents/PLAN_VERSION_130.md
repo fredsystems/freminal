@@ -39,33 +39,33 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status  | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------- | ---------------------------------- |
+| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
 | 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | In progress | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Planned | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Planned | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | M     | Planned | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | M     | Planned | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | M     | Planned | None                               |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Planned | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Planned | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned | None                               |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned | 102, 133; windowing DnD capability |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Planned     | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Planned     | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | M     | Planned     | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | M     | Planned     | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | M     | Planned     | None                               |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Planned     | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Planned     | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned     | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned     | None                               |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -323,6 +323,16 @@ Implement the spec's file-safety rules:
 
    Otherwise read the file but leave it in place.
 
+**Maintainer decisions at execution (2026-10-08), amending rules 1, 2 and 5 above to match
+kitty's reference (`kitty/utils.py` `is_ok_to_read_image_path` / `is_ok_to_read_image_file`):**
+
+- **`/dev/shm` is exempt from the `/dev` refusal.** Paths under `/dev/shm/` may be read.
+  Without this exemption rule 5's `/dev/shm` clause could never apply.
+- **Check before opening.** Canonicalise the path and refuse a forbidden prefix _before_
+  opening it, then open the canonical path (with `O_NONBLOCK` on unix) and require that the
+  opened handle `is_file()`. Opening a device node can have side effects, and a failed open
+  reveals whether the file exists.
+
 Deliverable:
 
 - the hardening;
@@ -348,6 +358,17 @@ Prohibitions:
 - do NOT proceed to 126.3.
 
 Stop: report files changed and verification results; await review.
+
+**Status: Complete (2026-10-08).** `load_kitty_file` validates the path (UTF-8, absolute),
+canonicalises it and refuses `/proc`, `/sys` and `/dev` (except `/dev/shm`) before opening.
+It then opens with `O_NONBLOCK`, requires that the opened handle `is_file()`, and reads
+through `read_capped` (`MAX_KITTY_FILE_BYTES`). Every failure is answered with
+`EBADF:Failed to read image file`, and the reason goes to a debug-level log via the private
+`KittyFileError`. `t=t` deletion is gated by `may_delete_kitty_temp_file`. New tests cover
+FIFO, directory, `/proc`, a component-wise prefix check, the cap boundary, and deletion with
+and without the marker. `kitty_temp_file_transmission_reads_and_deletes` was rewritten. Three
+legacy tests asserted the old per-failure codes (`EIO`, `EPERM`, `EINVAL`) and now expect the
+uniform `EBADF`. `check-windows` is clean.
 
 #### 126.3 — Stop `CSI > … SP q` from triggering XTVERSION
 
@@ -488,6 +509,7 @@ focused window, **or** any pane in an unfocused window.
 
   Under `Unchanged`, a non-focused pane resolves to `Solid` with the **steady** variant of
   the style: `BlockCursorBlink` maps to `BlockCursorSteady`, and so on.
+
 - `PaneFocus` (`terminal/input.rs:1395`) and `WindowFocus` (`frame_drain.rs:70`) already
   exist and are reused. No new `bool` is introduced anywhere
   (`freminal-state-representation`).
@@ -581,6 +603,7 @@ What:
    `build_cursor_verts_only`'s parameter list with a single `cursor: CursorDrawParams`. This
    also drops `build_cursor_verts_only` below clippy's argument limit, so remove its
    `too_many_arguments` allow if it becomes unnecessary.
+
 2. Extract `fn push_cursor_quads(params: &CursorDrawParams, cell_width: u32, cell_height: u32, out: &mut Vec<f32>)`.
    It replaces both duplicated geometry `match`es (`vertex.rs:619-646` and `:677-701`):
    - `Hidden` emits nothing;
@@ -1093,6 +1116,7 @@ protocol re-implements today.
 
   Their integer and base64 helpers are private duplicates. OSC 5113, 5522, 66, 21 and 72
   would each add another.
+
 - **The single base64 module is lenient.** `freminal-common/src/base64.rs` has optional
   padding, no whitespace handling, no streaming and no length cap, and it reserves `len*3/4`
   up front. OSC 5522 requires strict padded input and rejection of invalid input. OSC 5113's
