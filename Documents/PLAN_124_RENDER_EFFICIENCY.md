@@ -845,7 +845,11 @@ forcing behavior introduced by this capture.
   That residual is recorded here as outstanding performance evidence, not
   as an in-scope fix or a cleanup task for this subtask — any further
   attribution of that residual must be separately scoped after Task 124
-  rather than silently expanding 124.3.
+  rather than silently expanding 124.3. (2026-10-08: scoped as
+  `FUTURE_PLANS.md` B.11 item 1. Reading the capture, 110 of 240 frames
+  presented `FrameDamage::None` at ~491 µs each — a full egui run for zero
+  changed pixels — which by itself is ~0.1% of a core; a hypothesis, not yet
+  measured against a no-mouse btop control.)
 - No visual corruption was explicitly recorded for this capture; absence
   of a report is not itself a claim of a checked, corruption-free status.
 
@@ -2985,6 +2989,17 @@ full-surface cost.
   `foreground_overlay_open`, `dismissible_presence_transitioned`,
   `DamageHistory::MAX_DEPTH` overflow.
 
+**Post-merge triage (2026-10-08).** 124.14 bounded rows, selection, hover and
+(124.14d) search. Of the remaining BOUNDABLE-WITH-WORK triggers, only two fire
+continuously in realistic use: `tab_title_changed` (a title spinner or progress
+title can force the whole window `Full` at ~10 Hz indefinitely) and
+`text_blink_changed` (whole-pane `Full` on every ~167 ms blink tick while any
+blinking text is on screen). Those two, plus the no-change-frame cost observed
+under btop, are tracked as `FUTURE_PLANS.md` B.11. The rest are one-shot,
+interactive-only, or rare (bell, kitty animation, scrollbar transitions,
+overlays, layout, focus) and are accepted as `Full` until evidence says
+otherwise.
+
 #### Findings that are not merely classification
 
 1. **`changed_rows` is already computed, tested, and deliberately unread.**
@@ -3011,6 +3026,20 @@ full-surface cost.
 5. **`unresolved_pane` reachability is UNKNOWN.** Not proven dead; the audit
    named the experiment (a counter plus a stress session with concurrent
    tab-close/split) rather than guessing.
+
+   **Resolved by reading (2026-10-08): reachable, rare, and correct.** The
+   pane tree is GUI-thread-owned and the PTY thread never mutates it, so the
+   proposed concurrency stress test was the wrong experiment. The real path is
+   in-frame: `pane_layout` is computed early in `central_body`, the
+   close-guard dialog's Force Close then calls `close_focused_pane` /
+   `close_tab` in the same closure, and `stage_frame_damage` runs afterwards
+   over the now-stale layout. The closed pane is not found, `unresolved_pane`
+   is set, and that one frame is `Full` — the correct answer for a frame in
+   which a pane disappeared. It fires once per confirmed force-close; no
+   counter is needed and no change is warranted. Finding 4 is likewise
+   confirmed for production: `RequestedWithNoRects` has no production
+   constructor, but `FrameDamage` is a public `freminal-windowing` enum, so
+   the arm is kept as a defensive case (pinned by `frame_paint.rs` tests).
 6. **Chrome has 15 independently-sufficient signals**, each pinned by
    `chrome_damage.rs::each_signal_field_alone_forces_changed`. Any one alone
    forces the whole window `Full`.
