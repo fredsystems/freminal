@@ -363,8 +363,19 @@ impl AnsiCsiParser {
                 }
             }
             AnsiCsiParserState::Finished(b'q') => {
-                if self.params.is_empty() || self.params.first().unwrap_or(&b'0') != &b'>' {
+                if self.params.first() != Some(&b'>') {
                     return ansi_parser_inner_csi_finished_decscusr(&self.params, output);
+                }
+                if !self.intermediates.is_empty() {
+                    // `CSI > ... <intermediate> q` (e.g. kitty multiple-cursors
+                    // `CSI > Ps ; ... SP q`) is valid grammar but is not
+                    // XTVERSION. Recognised and unimplemented until Task 103:
+                    // emit nothing rather than a bogus XTVERSION reply.
+                    tracing::warn!(
+                        "Unhandled CSI final byte (valid grammar, no dispatch): {}",
+                        self.format_raw_csi()
+                    );
+                    return push_result;
                 }
                 ansi_parser_inner_csi_finished_xtversion(&self.params, output)
             }
@@ -731,6 +742,56 @@ mod tests {
         // ESC[1;2x → has_extra_params=true → Invalid
         let output = parse_csi_sequence(b"1;2x");
         assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    // ── CSI > ... q: XTVERSION vs. `>`-prefixed sequences with intermediates ─
+
+    #[test]
+    fn xtversion_bare_gt_q_through_parser() {
+        let output = parse_csi_sequence(b">q");
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceNameAndVersion]);
+    }
+
+    #[test]
+    fn xtversion_gt0_q_through_parser() {
+        let output = parse_csi_sequence(b">0q");
+        assert_eq!(output, vec![TerminalOutput::RequestDeviceNameAndVersion]);
+    }
+
+    #[test]
+    fn gt_prefix_with_intermediate_q_emits_nothing() {
+        // `>`-prefixed + intermediate is not XTVERSION and not DECSCUSR; it is
+        // recognised (kitty multiple-cursors, Task 103) but unimplemented, so
+        // the parser must emit no output at all.
+        for seq in [&b">0;4 q"[..], b"> q", b">100 q", b">1;2:3:4 q", b">0;4$q"] {
+            let mut parser = AnsiCsiParser::new();
+            let mut output = Vec::new();
+            let mut last = ParserOutcome::Continue;
+            for &b in seq {
+                last = parser.ansiparser_inner_csi(b, &mut output);
+            }
+            assert_eq!(last, ParserOutcome::Finished, "seq {seq:?}");
+            assert_eq!(output, [], "seq {seq:?} must emit nothing");
+        }
+    }
+
+    #[test]
+    fn gt_prefix_without_intermediate_non_xtversion_params_is_rejected() {
+        // `CSI > 0;4 q` (no space) is not XTVERSION; xtversion rejects it, so
+        // no RequestDeviceNameAndVersion is emitted.
+        let output = parse_csi_sequence(b">0;4q");
+        assert!(
+            !output.contains(&TerminalOutput::RequestDeviceNameAndVersion),
+            "got {output:?}"
+        );
+    }
+
+    #[test]
+    fn decscusr_with_intermediate_still_dispatches() {
+        // Unchanged path: no `>` prefix, `CSI 2 SP q` is DECSCUSR.
+        let output = parse_csi_sequence(b"2 q");
+        assert_eq!(output.len(), 1);
+        assert!(matches!(output[0], TerminalOutput::CursorVisualStyle(_)));
     }
 
     // ── Unrecognized CSI final byte ──────────────────────────────────────────

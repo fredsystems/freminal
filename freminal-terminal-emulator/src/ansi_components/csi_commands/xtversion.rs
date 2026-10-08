@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi::ParserOutcome;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -11,25 +11,22 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// Respond with `DCS > | version_string ST` containing the terminal name
 /// and version. The leading `>` in params distinguishes this from DECSCUSR.
+///
+/// The whole parameter string is validated: only exactly `>` or `>0` is
+/// XTVERSION. Anything else (e.g. `>0;4`, `>1`, `>00`) is rejected so that
+/// `>`-prefixed sequences that merely share the final byte do not trigger a
+/// version reply.
 pub fn ansi_parser_inner_csi_finished_xtversion(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
-    let Ok(param) = parse_param_as::<usize>(&[*params.get(1).unwrap_or(&b'0')]) else {
-        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledXTVERSIONCommand(
-            String::from_utf8_lossy(params).to_string(),
-        ));
-    };
-
-    let request = param.unwrap_or(0);
-
-    if request == 0 {
-        output.push(TerminalOutput::RequestDeviceNameAndVersion);
-    } else {
+    if params != b">" && params != b">0" {
         return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledXTVERSIONCommand(
             String::from_utf8_lossy(params).to_string(),
         ));
     }
+
+    output.push(TerminalOutput::RequestDeviceNameAndVersion);
 
     ParserOutcome::Finished
 }
@@ -41,10 +38,7 @@ mod tests {
 
     #[test]
     fn xtversion_bare_gt_q_emits_request_device_name_and_version() {
-        // params = b">q": first byte is `>`, second is `q` → param index 1 is b'q'
-        // parse_param_as on b'q' fails → but wait, the function reads params[1].
-        // When called via the CSI dispatcher, params = b">" (the `q` is the terminator).
-        // Simulate the params slice the dispatcher passes: just `b">"`.
+        // The dispatcher passes params without the `q` terminator: just `b">"`.
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_xtversion(b">", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
@@ -53,7 +47,6 @@ mod tests {
 
     #[test]
     fn xtversion_gt0_emits_request_device_name_and_version() {
-        // params = b">0": second byte is b'0' → parse_param_as(b"0") = Ok(Some(0)) → request
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_xtversion(b">0", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
@@ -62,10 +55,27 @@ mod tests {
 
     #[test]
     fn xtversion_gt1_is_invalid() {
-        // params = b">1": second byte is b'1' → parse_param_as(b"1") = Ok(Some(1)) → invalid
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_xtversion(b">1", &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
         assert_eq!(output, []);
+    }
+
+    #[test]
+    fn xtversion_rejects_non_exact_params() {
+        for params in [&b">0;4"[..], b">00", b">1;2:3:4", b">100", b">0;", b">;"] {
+            let mut output = Vec::new();
+            let result = ansi_parser_inner_csi_finished_xtversion(params, &mut output);
+            assert!(
+                matches!(
+                    result,
+                    ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledXTVERSIONCommand(
+                        _
+                    ))
+                ),
+                "params {params:?} should be rejected"
+            );
+            assert_eq!(output, []);
+        }
     }
 }

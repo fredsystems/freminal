@@ -410,6 +410,12 @@ Prohibitions: do NOT implement multiple cursors; do NOT restructure the dispatch
 
 Stop: report files changed and verification results; await review.
 
+**Status: Complete (2026-10-08).** In the `q` arm, a `>` prefix with any intermediate now
+warn-logs via `format_raw_csi()` and emits nothing. `xtversion.rs` accepts exactly `>` or `>0`
+and rejects everything else, including `>0;4`, `>00` and `>1`. The no-prefix DECSCUSR path is
+unchanged. New parser-level tests cover the two XTVERSION forms, the four kitty-style
+`SP q` forms plus `>0;4$q` (no output), `>0;4q` (rejected) and `2 SP q` (still DECSCUSR).
+
 #### 126.4 — Coverage-doc truth reset
 
 Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
