@@ -51,7 +51,8 @@ hot, so it ships together):
   pointer suppression, the chrome-cache decision, the shaping levers, GPU orphaning, the
   bool-to-struct fix and the `sync_atlas` defect — are independent leaves. Broken down in
   `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
-- **Task 125 — Performance Parity and Residual Remediation** (complete, pending merge):
+- **Task 125 — Performance Parity and Residual Remediation** (complete, merged 2026-10-05
+  via PR #526):
   explain and close Freminal's remaining CPU/GPU gap against matched
   WezTerm and Ghostty workloads. The former fixed-stride relayout is one conditional branch,
   not the governing goal: it cannot improve idle, and Task 124 did not capture the live
@@ -96,7 +97,7 @@ before executing.
 | 122 | Orchestration Extraction                    | Large  | Complete      | None           |
 | 123 | GL Pipeline Measurement Harness             | Large  | Complete      | Task 122       |
 | 124 | Damage Model Remediation                    | Large  | Complete      | Task 123       |
-| 125 | Performance Parity and Residual Remediation | Large  | Pending merge | Task 124       |
+| 125 | Performance Parity and Residual Remediation | Large  | Complete      | Task 124       |
 
 ---
 
@@ -289,16 +290,19 @@ Vec<Option<RowCacheEntry>>` (`buffer/mod.rs:84`) holds a _second_, fully-flatten
   window is invalidated and top-of-scrollback cache entries are retained. Impact was benign
   (over-invalidation, not corruption), consistent with the original assessment.
 - **118.11 — `resize_saved_primary` reflows the saved primary against the compiled-in default
-  scrollback limit, not the user's configured limit. OPEN (pre-existing, out of scope for 118).**
+  scrollback limit, not the user's configured limit. RESOLVED (pre-existing, fixed after 118).**
   `Buffer::resize_saved_primary` (`buffer/resize_and_alt.rs:229`) reconstructs a throwaway
   primary `Buffer` to reuse the resize/reflow logic, but `SavedPrimaryState` does not carry the
-  real configured `scrollback_limit`, so the temp buffer hardcodes `10_000` (previously `4000`;
-  bumped with the 118.5 default raise). For any pane whose configured limit differs from the
-  default, an alt-screen resize therefore enforces the wrong scrollback limit on the saved
-  primary. This is a pre-existing gap (the value was already hardcoded before Task 118 — only the
+  real configured `scrollback_limit`, so the temp buffer hardcoded `10_000` (previously `4000`;
+  bumped with the 118.5 default raise). For any pane whose configured limit differed from the
+  default, an alt-screen resize therefore enforced the wrong scrollback limit on the saved
+  primary. This was a pre-existing gap (the value was already hardcoded before Task 118 — only the
   constant changed) and is disclosed in an in-code `NOTE`. The fix is to thread the true limit
   through `SavedPrimaryState` and use it here instead of the constant; deferred as a standalone
   cleanup so this PR does not alter alt-screen resize behavior.
+  **RESOLVED (noted 2026-10-08).** `resize_saved_primary` now takes the caller's configured
+  `scrollback_limit` as a parameter and uses it for the temporary buffer
+  (`buffer/resize_and_alt.rs`); the hardcoded constant is gone.
 
 ### 118 Current-state map (from recon)
 

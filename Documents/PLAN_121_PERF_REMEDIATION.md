@@ -160,26 +160,31 @@ creates — see that subtask.
 
 ## Subtask summary
 
-| Group                                   | Subtasks      | Status        |
-| --------------------------------------- | ------------- | ------------- |
-| A — Completed work (merged to `main`)   | 121.1–121.11  | Complete      |
-| B — Bugs found and fixed                | 121.12–121.14 | Complete      |
-| B — Bug blocked behind Task 122         | 121.15        | Unblocked     |
-| B — Withdrawn                           | 121.16        | Withdrawn     |
-| C — Unifying improvement                | 121.17        | Not started   |
-| D — Reconned, premise does not hold     | 121.18, 121.19, 121.21, 121.22 | Closed — not as framed |
-| D — Reconned, needs a maintainer gate   | 121.20        | Blocked on 121.28 or a QA gate |
-| D — Measured and refuted                | 121.24        | Complete      |
-| D — Profiling methodology               | 121.23        | Complete      |
-| E — Measurement debt                    | 121.27–121.28 | Not started   |
-| E — Measurement debt (partly captured)  | 121.25        | In progress   |
-| E — Blink-off comparison                | 121.26        | Complete      |
-| F — Surfaced by the Group B work        | 121.29–121.31 | Not started   |
-| G — beta.7 interaction regression       | 121.32        | Complete      |
-| G — Surfaced by 121.32                  | 121.33        | Not started   |
-| G — Chrome-cache decision gate          | 121.34        | Not started   |
-| G — Chrome-cache waste while disabled   | 121.35        | Deferred      |
-| G — Confine Replay to non-chrome        | 121.36        | Conditional   |
+| Group                                  | Subtasks                       | Status                                  |
+| -------------------------------------- | ------------------------------ | --------------------------------------- |
+| A — Completed work (merged to `main`)  | 121.1–121.11                   | Complete                                |
+| B — Bugs found and fixed               | 121.12–121.14                  | Complete (121.13 reverted; see 121.32)  |
+| B — Bug blocked behind Task 122        | 121.15                         | Migrated → 124.3 (Complete)             |
+| B — Withdrawn                          | 121.16                         | Withdrawn                               |
+| C — Unifying improvement               | 121.17                         | Migrated → 124.3 (Complete)             |
+| D — Reconned, premise does not hold    | 121.18, 121.19, 121.21, 121.22 | Closed — not as framed (see map)        |
+| D — Reconned, needs a maintainer gate  | 121.20                         | Migrated → 124.7 (Complete)             |
+| D — Measured and refuted               | 121.24                         | Complete                                |
+| D — Profiling methodology              | 121.23                         | Complete                                |
+| E — Measurement debt                   | 121.27–121.28                  | Migrated → 124.8, 123 Ph. 2 (Complete)  |
+| E — Measurement debt (partly captured) | 121.25                         | Absorbed by 123.14 (Complete)           |
+| E — Blink-off comparison               | 121.26                         | Complete                                |
+| F — Surfaced by the Group B work       | 121.29–121.31                  | Migrated → 124.4/124.5/124.2 (Complete) |
+| G — beta.7 interaction regression      | 121.32                         | Complete                                |
+| G — Surfaced by 121.32                 | 121.33                         | Folded into 124.5 (Complete)            |
+| G — Chrome-cache decision gate         | 121.34                         | Migrated → 124.5 (Complete; deleted)    |
+| G — Chrome-cache waste while disabled  | 121.35                         | Folded into 124.5 (Complete)            |
+| G — Confine Replay to non-chrome       | 121.36                         | Folded into 124.5 (Complete)            |
+
+Statuses above updated 2026-10-08 to record each subtask's final disposition; see the
+migration map at the top of this document (121.18 → 124.1 and 121.19 → 124.6, both
+Complete; 121.30 was likewise folded into 124.5; 121.31's diagnosis went to the Task 123
+findings and its fix to 124.2).
 
 Subtask numbers are stable once assigned. A withdrawn or dissolved subtask keeps its
 number and records why (the convention Task 118 used for 118.10), so the decision is

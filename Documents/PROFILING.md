@@ -23,7 +23,7 @@ always the right starting point and Tier 2 is held in reserve.
 | --- | --- |
 | How many frames are we drawing, and why? | Tier 1 harness |
 | Where does a frame's wall-clock time go? | Tier 1 harness |
-| Is the chrome cache (`ChromeMode::Replay`) actually engaging? | Tier 1 harness |
+| Is the chrome cache (`ChromeMode::Replay`) actually engaging? | N/A — cache removed in Task 124.5 |
 | Which suppression veto is firing, and how often? | Tier 1 harness |
 | Which *function* is hot, including inside dependencies? | Tier 2 `perf` |
 | Did this change make a specific operation slower? | Tier 3 Criterion |
@@ -82,12 +82,15 @@ The phase nesting is `run_frame` wraps `run_ui` wraps `App::update` wraps
 | `phase_total_*` | whole `run_frame` |
 | `run_ui_*` | egui's `run_ui`, which contains `App::update` |
 | `tessellate_*`, `paint_*`, `swap_*` | tessellation, GL paint, buffer swap |
-| `chrome_mode_full` / `chrome_mode_replay` | chrome-cache duty cycle |
-| `chrome_replay_duty_cycle_pct` | the same as a percentage |
-| `gate_blocked_*` | which of the four gate predicates denied `Replay` (non-exclusive) |
-| `settle_*` | the delay values behind a `repaint_settled` failure |
+| `present_frame_damage_none`, `present_partial_*`, `buffer_age_histogram` | present-path attribution (Task 124.17/124.2): why a frame skipped the clear, or took or was denied a partial present |
 | `repaint_cause_top8` | egui's own `RepaintCause` list, most frequent first |
 | `pointer_frames_scheduled` / `pointer_frames_suppressed` | pointer-motion suppression rate |
+
+The chrome-cache counters (`chrome_mode_full` / `chrome_mode_replay`,
+`chrome_replay_duty_cycle_pct`, `gate_blocked_*` and `settle_*`) were removed
+together with the chrome cache in Task 124.5 (commit `ed81dcc9`); they no
+longer appear in the flush output. Older plan text that cites them is
+historical.
 
 **`freminal::frame_profiling`** — the app-owned split:
 
@@ -97,7 +100,7 @@ The phase nesting is `run_frame` wraps `run_ui` wraps `App::update` wraps
 | `phase_panes_*` | summed per-pane `show()` |
 | `phase_orchestration_*` | `central_body` minus `phase_panes` |
 | `frame_damage_full` / `frame_damage_partial` | final, post-composition damage |
-| `zero_change_presented` | frames presented with no pixel change |
+| `frame_damage_none_precomposition` / `frame_damage_none` | frames whose damage was `FrameDamage::None` before / after chrome composition (Task 124.2; replaces `zero_change_presented`) |
 | `chrome_signals_fired` | which chrome-damage signals fired |
 | `pointer_repaint_conditions_fired` | **which condition FORCED a repaint** (Task 124.3b, ten counters: `first_motion`, `focus_change_pending`, `chrome_interactive`, `overlay_open`, `pointer_pane_unresolved`, `unknown_geometry`, `url_forced`, `gutter_forced`, `scrollbar_forced`, `selection_forced` — each counted only when it actually forced, not merely when the underlying observation was true) |
 

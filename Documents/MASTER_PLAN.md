@@ -215,7 +215,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 122 | Orchestration Extraction                    | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete      | None                   |
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete      | Task 122               |
 | 124 | Damage Model Remediation                    | `PLAN_124_RENDER_EFFICIENCY.md`               | Complete      | Task 123               |
-| 125 | Performance Parity and Residual Remediation | `PLAN_125_VERTEX_RELAYOUT.md`                 | Pending merge | Task 124               |
+| 125 | Performance Parity and Residual Remediation | `PLAN_125_VERTEX_RELAYOUT.md`                 | Complete      | Task 124               |
 
 ---
 
@@ -570,7 +570,7 @@ by two new damage states, `PaneFrameDamage::Region` (124.14) and `FrameDamage::N
 The maintainer's governing instruction at activation: do the structural fix, not a band-aid
 that improves the number while leaving the shape wrong.
 
-**Task 125 (v0.12.0, complete, pending merge):** close or explain Freminal's remaining CPU/GPU
+**Task 125 (v0.12.0, complete, merged 2026-10-05 via PR #526):** close or explain Freminal's remaining CPU/GPU
 gap against matched WezTerm and Ghostty workloads. The measurement phase (125.1–125.10) built a
 matched parity runner, live render-work and upload-byte profiling, and asynchronous GPU timing,
 and found one material gap: scrollback eviction under sustained output (429 ms/s against 20 and
@@ -794,7 +794,7 @@ Update this section as tasks complete:
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged        |
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
-| 125  | 2026-08-26 |            | v0.12.0; all subtasks done; eviction remediated; PR pending                      |
+| 125  | 2026-08-26 | 2026-10-05 | All subtasks + C1-C16; eviction remediated; merged via PR #526 (`5a3e1a48`)      |
 
 ---
 
@@ -810,12 +810,12 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–124 complete, 125 pending merge)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–125 complete)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
-- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, pending merge)
+- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)

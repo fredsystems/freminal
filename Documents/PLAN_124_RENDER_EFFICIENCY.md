@@ -416,6 +416,11 @@ The Task 122 seam exists: 122.15 publishes `pane_terminal_origin(pane_id)`,
 and the reader currently carries an `#[allow(dead_code)]` with a TODO naming
 this work. **Remove that allow when landing.**
 
+**Correction (2026-10-08):** the `#[allow(dead_code)]` on the
+`pane_terminal_origin` accessor survived the merge of this task. It was
+resolved on 2026-10-08 by gating the accessor `#[cfg(test)]`, since only test
+callers exist; the allow is gone.
+
 123 sharpened the case rather than weakening it: a whole pointer-motion
 decision costs 33–423 ns, so **the predicate's own cost is irrelevant** and
 what costs money is whether the event causes a repaint at all — roughly five
@@ -692,6 +697,11 @@ not exercise this path; it is superseded, not deleted.
 **124.3b — implementation complete, commit `8f518987`; instrumentation
 wording fix `e9b33ec0`. Live measurement pending.**
 
+*Correction (2026-10-08): "Live measurement pending" was true when this note
+was written and is superseded — the live physical-pointer measurement was
+captured on 2026-08-25 (see the 124.3 status paragraph above and "Post-124.3
+physical-pointer measurement (2026-08-25), AUTHORITATIVE" below).*
+
 - Added previous/current pointer history at the `App` repaint-decision
   boundary while preserving the unconditional report-hook ordering and the
   existing scheduling edge latch.
@@ -896,6 +906,14 @@ If deleted, the following go with it: `ChromeCache`, `ChromeGatePredicates`,
 resolve as moot. 121.35's live waste is the case for urgency: while
 disabled, the `Full` arm still populates the cache every frame — six vector
 clones per frame to fill a cache nothing reads.
+
+**Outcome (2026-10-08 note):** deleted, on 124.15's findings (the cache's
+ceiling is a genuine 8% of a frame, but the shipped design cannot be made
+correct without becoming a different design). Landed in commit `ed81dcc9`,
+which removed `ChromeCache`, `ChromeGatePredicates`, `evaluate_chrome_gate`
+and the `gate_blocked_*` counters; 121.30, 121.33, 121.35 and 121.36 resolved
+as moot. The recommendation text above is retained as the record of what was
+proposed.
 
 ### 124.6 — Shaping-path levers
 
@@ -2637,6 +2655,13 @@ insufficient, the defensible alternative is to leave partial present off.**
 It has never once worked in a shipped build, so disabling it deliberately
 costs nothing that is currently being had, and would be an honest outcome
 rather than a defeat.
+
+**Correction (2026-10-08):** the age wording in "The verification problem"
+above is self-contradictory — the Phase 2 harness runs against an offscreen
+pbuffer, which reports age `0`, not llvmpipe's `1`. 124.19 corrects this: the
+llvmpipe `age == 1` observation came from an interactive freminal run, not
+from the pbuffer harness, and the harness could not verify defect (b) at all
+(see 124.19 below).
 
 #### Scope for 124.18
 

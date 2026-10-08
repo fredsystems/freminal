@@ -1,7 +1,8 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: PENDING MERGE — measurement (125.1–125.10) and remediation
-> (125.11–125.18) complete 2026-10-04; see "Closure".** Measurement selected
+> **STATUS: COMPLETE — measurement (125.1–125.10) and remediation
+> (125.11–125.18) complete 2026-10-04; merged to `main` 2026-10-05 via PR #526
+> (`5a3e1a48`); see "Closure".** Measurement selected
 > the stable-row-number `RowStore` remediation; fixed-stride relayout was
 > refuted (see "Gate verdicts").
 >
