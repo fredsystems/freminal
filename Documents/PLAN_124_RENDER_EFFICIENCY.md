@@ -416,6 +416,11 @@ The Task 122 seam exists: 122.15 publishes `pane_terminal_origin(pane_id)`,
 and the reader currently carries an `#[allow(dead_code)]` with a TODO naming
 this work. **Remove that allow when landing.**
 
+**Correction (2026-10-08):** the `#[allow(dead_code)]` on the
+`pane_terminal_origin` accessor survived the merge of this task. It was
+resolved on 2026-10-08 by gating the accessor `#[cfg(test)]`, since only test
+callers exist; the allow is gone.
+
 123 sharpened the case rather than weakening it: a whole pointer-motion
 decision costs 33–423 ns, so **the predicate's own cost is irrelevant** and
 what costs money is whether the event causes a repaint at all — roughly five
@@ -692,6 +697,11 @@ not exercise this path; it is superseded, not deleted.
 **124.3b — implementation complete, commit `8f518987`; instrumentation
 wording fix `e9b33ec0`. Live measurement pending.**
 
+*Correction (2026-10-08): "Live measurement pending" was true when this note
+was written and is superseded — the live physical-pointer measurement was
+captured on 2026-08-25 (see the 124.3 status paragraph above and "Post-124.3
+physical-pointer measurement (2026-08-25), AUTHORITATIVE" below).*
+
 - Added previous/current pointer history at the `App` repaint-decision
   boundary while preserving the unconditional report-hook ordering and the
   existing scheduling edge latch.
@@ -835,7 +845,11 @@ forcing behavior introduced by this capture.
   That residual is recorded here as outstanding performance evidence, not
   as an in-scope fix or a cleanup task for this subtask — any further
   attribution of that residual must be separately scoped after Task 124
-  rather than silently expanding 124.3.
+  rather than silently expanding 124.3. (2026-10-08: scoped as
+  `FUTURE_PLANS.md` B.11 item 1. Reading the capture, 110 of 240 frames
+  presented `FrameDamage::None` at ~491 µs each — a full egui run for zero
+  changed pixels — which by itself is ~0.1% of a core; a hypothesis, not yet
+  measured against a no-mouse btop control.)
 - No visual corruption was explicitly recorded for this capture; absence
   of a report is not itself a claim of a checked, corruption-free status.
 
@@ -896,6 +910,14 @@ If deleted, the following go with it: `ChromeCache`, `ChromeGatePredicates`,
 resolve as moot. 121.35's live waste is the case for urgency: while
 disabled, the `Full` arm still populates the cache every frame — six vector
 clones per frame to fill a cache nothing reads.
+
+**Outcome (2026-10-08 note):** deleted, on 124.15's findings (the cache's
+ceiling is a genuine 8% of a frame, but the shipped design cannot be made
+correct without becoming a different design). Landed in commit `ed81dcc9`,
+which removed `ChromeCache`, `ChromeGatePredicates`, `evaluate_chrome_gate`
+and the `gate_blocked_*` counters; 121.30, 121.33, 121.35 and 121.36 resolved
+as moot. The recommendation text above is retained as the record of what was
+proposed.
 
 ### 124.6 — Shaping-path levers
 
@@ -2638,6 +2660,13 @@ It has never once worked in a shipped build, so disabling it deliberately
 costs nothing that is currently being had, and would be an honest outcome
 rather than a defeat.
 
+**Correction (2026-10-08):** the age wording in "The verification problem"
+above is self-contradictory — the Phase 2 harness runs against an offscreen
+pbuffer, which reports age `0`, not llvmpipe's `1`. 124.19 corrects this: the
+llvmpipe `age == 1` observation came from an interactive freminal run, not
+from the pbuffer harness, and the harness could not verify defect (b) at all
+(see 124.19 below).
+
 #### Scope for 124.18
 
 `freminal-windowing/src/egui_integration.rs` (the gate, the history, the clip
@@ -2960,6 +2989,17 @@ full-surface cost.
   `foreground_overlay_open`, `dismissible_presence_transitioned`,
   `DamageHistory::MAX_DEPTH` overflow.
 
+**Post-merge triage (2026-10-08).** 124.14 bounded rows, selection, hover and
+(124.14d) search. Of the remaining BOUNDABLE-WITH-WORK triggers, only two fire
+continuously in realistic use: `tab_title_changed` (a title spinner or progress
+title can force the whole window `Full` at ~10 Hz indefinitely) and
+`text_blink_changed` (whole-pane `Full` on every ~167 ms blink tick while any
+blinking text is on screen). Those two, plus the no-change-frame cost observed
+under btop, are tracked as `FUTURE_PLANS.md` B.11. The rest are one-shot,
+interactive-only, or rare (bell, kitty animation, scrollbar transitions,
+overlays, layout, focus) and are accepted as `Full` until evidence says
+otherwise.
+
 #### Findings that are not merely classification
 
 1. **`changed_rows` is already computed, tested, and deliberately unread.**
@@ -2986,6 +3026,20 @@ full-surface cost.
 5. **`unresolved_pane` reachability is UNKNOWN.** Not proven dead; the audit
    named the experiment (a counter plus a stress session with concurrent
    tab-close/split) rather than guessing.
+
+   **Resolved by reading (2026-10-08): reachable, rare, and correct.** The
+   pane tree is GUI-thread-owned and the PTY thread never mutates it, so the
+   proposed concurrency stress test was the wrong experiment. The real path is
+   in-frame: `pane_layout` is computed early in `central_body`, the
+   close-guard dialog's Force Close then calls `close_focused_pane` /
+   `close_tab` in the same closure, and `stage_frame_damage` runs afterwards
+   over the now-stale layout. The closed pane is not found, `unresolved_pane`
+   is set, and that one frame is `Full` — the correct answer for a frame in
+   which a pane disappeared. It fires once per confirmed force-close; no
+   counter is needed and no change is warranted. Finding 4 is likewise
+   confirmed for production: `RequestedWithNoRects` has no production
+   constructor, but `FrameDamage` is a public `freminal-windowing` enum, so
+   the arm is kept as a defensive case (pinned by `frame_paint.rs` tests).
 6. **Chrome has 15 independently-sufficient signals**, each pinned by
    `chrome_damage.rs::each_signal_field_alone_forces_changed`. Any one alone
    forces the whole window `Full`.

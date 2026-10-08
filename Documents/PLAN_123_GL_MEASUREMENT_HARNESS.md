@@ -1,7 +1,8 @@
 # PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
 
 > **STATUS: COMPLETE.** All subtasks (123.1-123.14, including 123.6b) are
-> implemented and committed on `task-123/gl-measurement-harness`. Both
+> implemented and committed on `task-123/gl-measurement-harness`, which
+> merged to `main` via PR #497 on 2026-08-23. Both
 > phases are built and both diagnostic obligations are discharged; the
 > Findings section below is the task's product and the input to Task 124's
 > activation.
@@ -836,8 +837,9 @@ connection glutin still needs to enumerate configs on Linux) and the
 llvmpipe software rasterizer from 123.10.
 
 Deliverable: a function that returns a working GL context and an offscreen
-framebuffer of a given pixel size, runnable under `xvfb-run` in the `default`
-Nix dev shell.
+framebuffer of a given pixel size, runnable under `xvfb-run` in the `gl-pixel`
+Nix dev shell. (As originally written this said `default`; 123.C2, commit
+`f32d859e`, moved the env to `gl-pixel` only. Corrected 2026-10-08.)
 
 Verification: a manual smoke test (clear to a known color, read back,
 assert the color) run locally under `nix develop` with `xvfb-run`. This
@@ -897,7 +899,8 @@ both options rather than picking silently, since this is a new recurring CI
 cost.
 
 What: wire 123.10 through 123.12 into a job that runs under `xvfb-run`
-inside the Nix `default` (or a new `gl-pixel`) dev shell, on the
+inside the Nix `gl-pixel` dev shell (originally written "`default` or a new
+`gl-pixel`"; `gl-pixel` is what was built, see 123.C2), on the
 `nightly`/manual-dispatch cadence that `bench.yml` already established for
 similarly noise-sensitive checks, **not** on every push or PR.
 
@@ -1350,7 +1353,8 @@ guess.
 - **Cleanup 123.C1 (new).** `decide_frame_damage`'s doc comment still
   describes a `force_full` term (`pointer_moving`) removed by #459 item 9.
   It states precisely the hypothesis Obligation 2 was testing, so a reader
-  checking the docs would get a false confirmation.
+  checking the docs would get a false confirmation. (Resolved as 124.C1,
+  commit `47aa93a2`.)
 - **Cleanup 123.C2 (added 2026-08-23, already fixed).** 123.10 put
   `glPixelEnv` in the `default` dev shell, so every interactively-run
   freminal inherited `LIBGL_ALWAYS_SOFTWARE=1` and rendered on llvmpipe —
@@ -1370,10 +1374,12 @@ guess.
   where the money is.
 - **124.4** — unchanged; confirmed to have no expected performance effect.
 - **124.9** — new, measured, one-line fix, not gated on further work.
-- **123.C1** — new, documentation only.
+- **123.C1** — new, documentation only. Resolved in Task 124 as 124.C1,
+  commit `47aa93a2`.
 - **123.C2** — new, `flake.nix`; found and fixed 2026-08-23. Invalidates any
   CPU measurement taken inside `nix develop` before that date, **including
-  124.17's**, which must be re-taken on the GPU.
+  124.17's**, which must be re-taken on the GPU. (Done: 124.17 was re-taken on
+  the GPU and is Complete; note added 2026-10-08.)
 - **Open question for the maintainer** — whether to extend the `Gl` facade
   across the `freminal-windowing` boundary so the two per-full-frame
   `clear`/`clear_color` calls are recorded too. Not a Task 124 subtask
@@ -1514,6 +1520,8 @@ real behaviour.
 Not fixed in Task 123 because Task 123 changes no behaviour and touches no
 file it is not measuring; this is a one-line docs correction better carried
 with Task 124's `frame_damage.rs` work (124.2/124.4 both touch this area).
+
+**Resolved (2026-10-08 note):** fixed in Task 124 as 124.C1, commit `47aa93a2`.
 
 ### 123.C2 — `glPixelEnv` in the `default` shell forced every interactive freminal onto llvmpipe
 
