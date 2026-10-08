@@ -925,6 +925,22 @@ pointer rather than catching up after release.
 Prohibitions: do NOT add a timer or thread; do NOT add a GUI-side debounce in this subtask;
 do NOT reorder any non-resize event.
 
+**Complete (2026-10-08).** New pure helper `coalesce_queued_resizes` in
+`freminal/src/gui/pty.rs`: given a received `Resize`, it drains the input channel with
+`try_recv` and keeps only the latest `Resize`; the first non-resize message (or a channel
+close) ends the drain and is returned for processing next. The loop holds that message in a
+`carried_input` slot and processes it at the top of the next iteration, before `select!`,
+through the unchanged `handle_input` + `InputOutcome` path, so the coalesced resize gets its
+own `post_event` and the following event is handled exactly as before. The input arm's
+outcome handling moved below the `select!` verbatim; `InputEvent`, the GUI send path and the
+emulator are untouched. Tests: seven unit tests over the helper (N resizes, lone resize,
+resize/key/resize order, resizes after a non-resize stay queued, non-resize first leaves the
+queue alone, close mid-drain, closed first message) and three that run the real consumer
+thread on a headless emulator with the backlog pre-queued, asserting on the `PtyWrite`
+sequence the child sees (`Resize(71), Write(a), Resize(73), Write(b), Write(c), Resize(74)`
+for an eight-event mix) and on a real FREC file holding exactly one `PaneResize`. All three
+thread tests fail with coalescing disabled. `cargo xtask check-windows` is clean.
+
 #### 120.3 — Remove avoidable cell copies from `reflow_to_width`
 
 Scope: `freminal-buffer/src/buffer/resize_and_alt.rs` (`reflow_to_width` and its helpers);
