@@ -41,7 +41,7 @@ enriched stubs again and get re-decomposed at activation.
 
 | #   | Task                                        | Milestone | Scope | Status  | Depends on                         |
 | --- | ------------------------------------------- | --------- | ----- | ------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Planned | None                               |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | In progress | None                               |
 | 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Planned | 126 (schedule only)                |
 | 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Planned | 126.3                              |
 | 129 | Kitty Wire Infrastructure                   | v0.13.0   | M     | Planned | None                               |
@@ -277,6 +277,12 @@ Prohibitions: do NOT change accepted formats or the expansion rule; do NOT touch
 dispatch; do NOT proceed to 126.2.
 
 Stop: report files changed and verification results; await review.
+
+**Status: Complete (2026-10-08).** ASCII-hex-digit check added ahead of all slicing in both
+branches; unit tests for 3/6/12-byte non-ASCII `#` inputs and multi-byte `rgb:` channels;
+three never-panics proptests. Side effect of the check: sign-prefixed channels such as
+`#+a+a+a` and `rgb:+f/00/00`, which `from_str_radix` used to accept, now return `None`. No
+documented format is affected.
 
 #### 126.2 — Harden kitty graphics file transmission (`t=f`, `t=t`)
 

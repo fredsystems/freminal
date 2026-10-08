@@ -226,7 +226,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete  | Task 122                      |
 | 124 | Damage Model Remediation                    | `PLAN_124_RENDER_EFFICIENCY.md`               | Complete  | Task 123                      |
 | 125 | Performance Parity and Residual Remediation | `PLAN_125_VERTEX_RELAYOUT.md`                 | Complete  | Task 124                      |
-| 126 | Pre-existing Safety Gate                    | `PLAN_VERSION_130.md` (Task 126)              | Planned   | None                          |
+| 126 | Pre-existing Safety Gate                    | `PLAN_VERSION_130.md` (Task 126)              | In progress | None                          |
 | 127 | Unfocused / Inactive-Pane Cursor (#531)     | `PLAN_VERSION_130.md` (Task 127)              | Planned   | None                          |
 | 128 | Prefix/Intermediate-Aware CSI Dispatch      | `PLAN_VERSION_130.md` (Task 128)              | Planned   | Task 126                      |
 | 129 | Kitty Wire Infrastructure                   | `PLAN_VERSION_130.md` (Task 129)              | Planned   | None                          |
@@ -816,6 +816,7 @@ Update this section as tasks complete:
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
 | 125  | 2026-08-26 | 2026-10-05 | All subtasks + C1-C16; eviction remediated; merged via PR #526 (`5a3e1a48`)      |
 | 120  | 2026-10-08 | 2026-10-08 | 120.1-120.4 complete; merged via PR #532 (`a17d8df0`)                            |
+| 126  | 2026-10-08 |            | In progress on task-126/safety-gate                                              |
 
 ---
 
