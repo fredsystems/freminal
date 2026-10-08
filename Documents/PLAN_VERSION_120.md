@@ -1005,6 +1005,34 @@ Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- 
 
 Prohibitions: do NOT start B.10.
 
+**Complete (2026-10-08).** Post-task single-resize latency (Criterion means, same harness and
+machine as the 120.1 baseline):
+
+| Scrollback | Change    | Live              | Compacted         | Compressed        |
+| ---------- | --------- | ----------------- | ----------------- | ----------------- |
+| 10k        | `widen`   | 25.9 ms (−41.8%)  | 51.5 ms (−26.0%)  | 63.4 ms (−23.6%)  |
+| 10k        | `narrow`  | 31.3 ms (−35.6%)  | 55.5 ms (−24.2%)  | 67.2 ms (−22.4%)  |
+| 10k        | `one_col` | 25.6 ms (−42.2%)  | 52.6 ms (−25.4%)  | 63.7 ms (−22.8%)  |
+| 100k       | `one_col` | 277 ms (−38.3%)   | 636 ms (−19.3%)   | 885 ms (−13.3%)   |
+
+With 120.2 in place a drag no longer queues work: the PTY thread applies one size, then jumps
+to the newest queued one, so the view refreshes about once per reflow and settles at most
+about two reflows after the pointer stops (the one in flight plus the final size), instead
+of after the whole backlog (formerly ~3.8 s for a 60-column drag at 10k, ~46 s at 100k).
+
+**Recommendation on B.10.** Not warranted at the default depth. At 10k a single reflow is
+26–67 ms depending on storage state, about one to four frames, and with coalescing a drag
+tracks the pointer at roughly 15–40 updates per second; a windowed reflow would buy little
+there and costs the large mixed-width/mixed-compression complexity B.10 describes. The
+residual problem is confined to very deep configured scrollback: at 100k a single resize
+still costs ~0.3 s (live) to ~0.9 s (compressed), which is visible on a drag and on one-shot
+resizes such as a pane split. Even there, the remaining cost is now dominated by
+decompaction and LZ4 decompression of cold rows rather than by the reflow core, so the next
+lever, if a user reports it, is reflowing straight from the compact run representation
+without materialising `Vec<Cell>`, which is far smaller than B.10. Keep B.10 deferred at Low
+severity, revisit only on a user report of resize latency at 50k+ scrollback, and try the
+compact-path lever first.
+
 ---
 
 ## Task 121 — Performance Remediation
