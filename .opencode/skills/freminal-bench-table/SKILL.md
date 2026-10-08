@@ -77,6 +77,8 @@ unconditionally: there is no per-row incremental vertex path today.
 | Idle-tick scrollback compression (Task 119)                                                                                           | `bench_idle_compression_tick`                     | `bench_idle_compression_tick`         |
 | LF eviction at default 10,000-row capacity: `plain` / `compressed` / `prompts` / `image` IDs (Task 125.12)                            | `bench_lf_eviction_at_capacity`                   | `bench_lf_eviction_at_capacity`       |
 | LF eviction retained-row sweep, limits 1,000 / 10,000 / 50,000 (Task 125.12)                                                          | `bench_lf_eviction_scaling`                       | `bench_lf_eviction_scaling`           |
+| Full-depth width-change reflow, 10k scrollback: `{live,compacted,compressed}/{widen,narrow,one_col}` IDs (Task 120.1)                 | `reflow_full_depth`                               | `bench_reflow_full_depth`             |
+| Full-depth reflow, 100k scrollback, `{live,compacted,compressed}/one_col` (opt-in: runs only when the filter names `100k`)            | `reflow_full_depth_100k`                          | `bench_reflow_full_depth_100k`        |
 
 ## freminal-terminal-emulator/benches/buffer_benches.rs
 

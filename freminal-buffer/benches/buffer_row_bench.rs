@@ -1531,6 +1531,220 @@ fn bench_idle_compression_tick(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmarks: full-depth width-change reflow (Task 120.1).
+//
+// `buffer_resize` and `softwrap_heavy` reflow small buffers and do not show
+// the cost a real pane pays: a width change reflows the WHOLE scrollback
+// (`Buffer::reflow_to_width`), so its cost is proportional to scrollback
+// depth, not to the width delta. These groups fill the default 10,000-row
+// scrollback with realistic shell-like content -- ~70-char lines carrying a
+// few colour runs, ~15% of lines long enough to soft-wrap -- bring it to one
+// of the three storage states the idle tick produces, and time ONE
+// `set_size` width change.
+//
+// Storage states (via the public idle-tick entry points, run to completion):
+// - `live`: rows exactly as written (the state right after output);
+// - `compacted`: `compact_idle_scrollback(usize::MAX)` (Task 118);
+// - `compressed`: compacted, then `compress_idle_scrollback(usize::MAX)`
+//   (Task 119), so reflow must first decompress every LZ4 block.
+//
+// Width changes from the 100-column fill width: `widen` (100 -> 160),
+// `narrow` (100 -> 60) and `one_col` (100 -> 99). The 1-column case is the
+// one a drag resize produces on almost every frame.
+//
+// Each iteration rebuilds the buffer in untimed setup (`iter_batched` +
+// `BatchSize::LargeInput`): reflow replaces every row and leaves them `Live`,
+// so a reused buffer would no longer be in the stated storage state. The
+// reflowed buffer is returned from the routine so its drop is not timed.
+//
+// The 100,000-row variant (`reflow_full_depth_100k`, `one_col` only) costs
+// over a second per iteration plus setup, so it is opt-in: it runs only when
+// the Criterion filter names `100k`, e.g.
+// `cargo bench -p freminal-buffer --bench buffer_row_bench -- reflow_full_depth_100k`.
+// ---------------------------------------------------------------
+
+/// Fill width of the reflow benches (columns).
+const REFLOW_WIDTH: usize = 100;
+
+/// Screen height of the reflow benches (rows).
+const REFLOW_HEIGHT: usize = 40;
+
+/// Storage state of the scrollback when the timed reflow runs.
+#[derive(Clone, Copy)]
+enum ReflowStorage {
+    Live,
+    Compacted,
+    Compressed,
+}
+
+impl ReflowStorage {
+    const ALL: [Self; 3] = [Self::Live, Self::Compacted, Self::Compressed];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Compacted => "compacted",
+            Self::Compressed => "compressed",
+        }
+    }
+}
+
+/// The width changes timed, as `(label, new_width)`.
+const REFLOW_WIDTH_CHANGES: [(&str, usize); 3] = [
+    ("widen", 160),
+    ("narrow", 60),
+    ("one_col", REFLOW_WIDTH - 1),
+];
+
+/// A foreground-only format tag in `color`.
+fn reflow_tag(color: TerminalColor) -> FormatTag {
+    FormatTag {
+        colors: StateColors {
+            color,
+            ..StateColors::default()
+        },
+        ..FormatTag::default()
+    }
+}
+
+/// Write one shell-like line `i`: alternating default and coloured runs,
+/// ~70 chars in total. Every 7th line (~15%) is extended past `REFLOW_WIDTH`
+/// so it soft-wraps onto a continuation row.
+fn write_reflow_line(buf: &mut Buffer, i: usize, tags: &[FormatTag; 4]) {
+    let wraps = i.is_multiple_of(7);
+    let total = if wraps { 130 + (i % 40) } else { 60 + (i % 21) };
+    let words = format!("line {i:06} drwxr-xr-x fred users 4096 Oct 08 src/buffer/resize.rs ");
+    let mut written = 0usize;
+    let mut run = 0usize;
+    while written < total {
+        // Alternate default and coloured runs of 8..=19 chars.
+        let run_len = (8 + (i + run * 5) % 12).min(total - written);
+        let tag = if run.is_multiple_of(2) {
+            &tags[0]
+        } else {
+            &tags[1 + (run / 2) % 3]
+        };
+        buf.set_format(tag.clone());
+        let text: Vec<TChar> = words
+            .bytes()
+            .cycle()
+            .skip(written)
+            .take(run_len)
+            .map(TChar::Ascii)
+            .collect();
+        buf.insert_text(&text);
+        written += run_len;
+        run += 1;
+    }
+    buf.set_format(tags[0].clone());
+    buf.handle_cr();
+    buf.handle_lf();
+}
+
+/// Build a `REFLOW_WIDTH` x `REFLOW_HEIGHT` buffer whose scrollback is full at
+/// `limit` rows, in the given storage state.
+fn build_reflow_buffer(limit: usize, storage: ReflowStorage) -> Buffer {
+    let tags = [
+        FormatTag::default(),
+        reflow_tag(TerminalColor::Custom(220, 80, 80)),
+        reflow_tag(TerminalColor::Custom(80, 200, 120)),
+        reflow_tag(TerminalColor::Custom(90, 140, 230)),
+    ];
+    let mut buf = Buffer::new(REFLOW_WIDTH, REFLOW_HEIGHT).with_scrollback_limit(limit);
+    // Logical lines, not rows: ~15% of lines take two rows, so this
+    // overfills the row budget and the buffer settles at capacity.
+    for i in 0..limit + REFLOW_HEIGHT {
+        write_reflow_line(&mut buf, i, &tags);
+    }
+    match storage {
+        ReflowStorage::Live => {}
+        ReflowStorage::Compacted => {
+            let _ = buf.compact_idle_scrollback(usize::MAX);
+        }
+        ReflowStorage::Compressed => {
+            let _ = buf.compact_idle_scrollback(usize::MAX);
+            let _ = buf.compress_idle_scrollback(usize::MAX);
+        }
+    }
+    buf
+}
+
+/// Verify (once, outside timing) that a reflow buffer is at capacity and in
+/// the storage state its label claims.
+fn assert_reflow_buffer(limit: usize, storage: ReflowStorage, live_rows_bytes: usize) {
+    let buf = build_reflow_buffer(limit, storage);
+    let heap = buf.heap_bytes();
+    assert_eq!(
+        heap.total_rows,
+        REFLOW_HEIGHT + limit,
+        "reflow buffer must sit exactly at capacity"
+    );
+    match storage {
+        ReflowStorage::Live => assert_eq!(heap.blocks_bytes, 0),
+        ReflowStorage::Compacted => {
+            assert_eq!(heap.blocks_bytes, 0, "compacted state must not compress");
+            assert!(
+                heap.rows_bytes < live_rows_bytes / 2,
+                "compacted state must shrink row storage"
+            );
+        }
+        ReflowStorage::Compressed => assert!(
+            heap.blocks_bytes > 0,
+            "compressed state must hold compressed blocks"
+        ),
+    }
+}
+
+fn run_reflow_group(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    limit: usize,
+    changes: &[(&str, usize)],
+) {
+    let live_rows_bytes = build_reflow_buffer(limit, ReflowStorage::Live)
+        .heap_bytes()
+        .rows_bytes;
+    for storage in ReflowStorage::ALL {
+        assert_reflow_buffer(limit, storage, live_rows_bytes);
+        for &(change, new_width) in changes {
+            group.bench_function(BenchmarkId::new(storage.label(), change), |b| {
+                b.iter_batched(
+                    || build_reflow_buffer(limit, storage),
+                    |mut buf| {
+                        std::hint::black_box(buf.set_size(new_width, REFLOW_HEIGHT, 0));
+                        buf
+                    },
+                    BatchSize::LargeInput,
+                );
+            });
+        }
+    }
+}
+
+fn bench_reflow_full_depth(c: &mut Criterion) {
+    let mut group = c.benchmark_group("reflow_full_depth");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(12));
+    run_reflow_group(&mut group, 10_000, &REFLOW_WIDTH_CHANGES);
+    group.finish();
+}
+
+fn bench_reflow_full_depth_100k(c: &mut Criterion) {
+    // Opt-in: see the section comment. Runs only when a filter names `100k`.
+    let wanted = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .any(|f| f.contains("100k"));
+    if !wanted {
+        return;
+    }
+    let mut group = c.benchmark_group("reflow_full_depth_100k");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+    run_reflow_group(&mut group, 100_000, &REFLOW_WIDTH_CHANGES[2..]);
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -1566,6 +1780,8 @@ criterion_group!(
         bench_lf_eviction_at_capacity,
         bench_lf_eviction_scaling,
         bench_lf_eviction_long_run,
+        bench_reflow_full_depth,
+        bench_reflow_full_depth_100k,
 );
 
 criterion_main!(benches);

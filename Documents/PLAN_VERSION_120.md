@@ -886,6 +886,26 @@ Verification: `cargo bench --no-run --all`; the new group runs; clippy.
 
 Prohibitions: do NOT change production code.
 
+**Complete (2026-10-08).** Groups `reflow_full_depth` (10k, all nine IDs) and
+`reflow_full_depth_100k` (`one_col` per state; opt-in, runs only when the Criterion filter
+names `100k`) in `buffer_row_bench.rs`, catalogued in `freminal-bench-table`. Content: 100x40
+grid, alternating default/coloured runs, 60–80-char lines with every 7th line 130–169 chars
+(soft-wraps), filled to capacity; storage state set with `compact_idle_scrollback` /
+`compress_idle_scrollback` run to completion and asserted once before timing. Named Criterion
+baseline `before_120` (also covers `buffer_resize` and `softwrap_heavy`). A no-op rerun
+against the baseline moved by at most 5.3%.
+
+| Scrollback | Change    | Live     | Compacted | Compressed |
+| ---------- | --------- | -------- | --------- | ---------- |
+| 10k        | `widen`   | 44.8 ms  | 69.6 ms   | 83.5 ms    |
+| 10k        | `narrow`  | 48.9 ms  | 73.1 ms   | 86.7 ms    |
+| 10k        | `one_col` | 44.7 ms  | 70.3 ms   | 82.7 ms    |
+| 100k       | `one_col` | 449 ms   | 788 ms    | 1.02 s     |
+
+These are roughly half the 2026-10-08 probe's figures (different machine load and content
+shape), but the shape agrees: cost is flat in the width delta, linear in depth, and storage
+state adds ~55% (compacted) to ~85% (compressed) over live rows.
+
 #### 120.2 — Coalesce queued resizes on the PTY thread
 
 Scope: `freminal/src/gui/pty.rs` (the `recv(input_rx)` arm and `handle_input`); tests there.
