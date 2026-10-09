@@ -10,6 +10,7 @@ use std::str::FromStr;
 use crate::buffer_states::{
     ftcs::FtcsMarker, pointer_shape::PointerShape, progress::ProgressUpdate, url::Url,
 };
+use crate::key_value::{KeyValueItem, KeyValueSeparator, tokenize};
 use std::fmt;
 
 /// iTerm2 inline image dimension specification.
@@ -275,31 +276,47 @@ impl std::fmt::Display for UrlResponse {
     }
 }
 
-impl From<Vec<Option<AnsiOscToken>>> for UrlResponse {
-    fn from(value: Vec<Option<AnsiOscToken>>) -> Self {
-        // There are two tokens that we care about
-        // if BOTH tokens are None, then it is the end of the URL
+/// Maximum number of `key=value` items read from the parameter field of an
+/// OSC 8 hyperlink sequence. Items past the cap are ignored.
+pub const MAX_OSC8_PARAMS: usize = 64;
 
-        // Otherwise, the first token is the ID, and the second token is the URL
-        match value.as_slice() {
-            [
-                Some(AnsiOscToken::OscValue(8)),
-                Some(AnsiOscToken::String(id)),
-                Some(AnsiOscToken::String(url)),
-            ] => Self::Url(Url {
-                id: Some(id.clone()),
-                url: url.clone(),
-            }),
-            [
-                Some(AnsiOscToken::OscValue(8)),
-                None,
-                Some(AnsiOscToken::String(url)),
-            ] => Self::Url(Url {
-                id: None,
-                url: url.clone(),
-            }),
-            _ => Self::End,
+impl UrlResponse {
+    /// Parse the body of an OSC 8 hyperlink sequence.
+    ///
+    /// The wire shape is `OSC 8 ; params ; URI ST`. `body` is everything after
+    /// the leading `8;`, i.e. `params ; URI` as raw bytes.
+    ///
+    /// - A body with no `;`, or an empty URI, ends the hyperlink
+    ///   (`Some(UrlResponse::End)`).
+    /// - The body is split at the **first** `;`, so the URI is the whole
+    ///   remainder and may itself contain `;`.
+    /// - `params` is a `:`-separated list; only the first `id=` item with a
+    ///   non-empty, UTF-8 value is used, as the link id.
+    /// - A URI that is not valid UTF-8 yields `None` (no output).
+    #[must_use]
+    pub fn from_osc8_body(body: &[u8]) -> Option<Self> {
+        let Some(sep) = body.iter().position(|b| *b == b';') else {
+            return Some(Self::End);
+        };
+        let (params, rest) = body.split_at(sep);
+        let uri = rest.get(1..).unwrap_or_default();
+        if uri.is_empty() {
+            return Some(Self::End);
         }
+        let url = std::str::from_utf8(uri).ok()?.to_owned();
+
+        let id = tokenize(params, KeyValueSeparator::Colon, MAX_OSC8_PARAMS)
+            .map_while(Result::ok)
+            .find_map(|item| match item {
+                KeyValueItem::Pair { key, value } if key == b"id" && !value.is_empty() => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .map(str::to_owned);
+
+        Some(Self::Url(Url { id, url }))
     }
 }
 
@@ -669,56 +686,130 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // From<Vec<Option<AnsiOscToken>>> for UrlResponse tests
+    // UrlResponse::from_osc8_body tests
     // ------------------------------------------------------------------
 
+    fn url_of(id: Option<&str>, url: &str) -> UrlResponse {
+        UrlResponse::Url(Url {
+            id: id.map(str::to_owned),
+            url: url.to_owned(),
+        })
+    }
+
     #[test]
-    fn url_response_from_tokens_with_id() {
-        let tokens = vec![
-            Some(AnsiOscToken::OscValue(8)),
-            Some(AnsiOscToken::String("myid".to_string())),
-            Some(AnsiOscToken::String("https://example.com".to_string())),
-        ];
-        let r = UrlResponse::from(tokens);
-        match r {
-            UrlResponse::Url(url) => {
-                assert_eq!(url.id, Some("myid".to_string()));
-                assert_eq!(url.url, "https://example.com");
-            }
-            UrlResponse::End => panic!("expected Url, got End"),
+    fn osc8_body_url_keeps_semicolons() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b";http://a;b"),
+            Some(url_of(None, "http://a;b"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_with_id() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"id=x;u"),
+            Some(url_of(Some("x"), "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_id_among_other_params() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"foo=1:id=x;u"),
+            Some(url_of(Some("x"), "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_first_id_wins() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"id=a:id=b;u"),
+            Some(url_of(Some("a"), "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_empty_id_value_is_no_id() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"id=;u"),
+            Some(url_of(None, "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_bare_param_is_no_id() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"foo;u"),
+            Some(url_of(None, "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_numeric_uri_is_text() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b";123"),
+            Some(url_of(None, "123"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_empty_uri_is_end() {
+        assert_eq!(UrlResponse::from_osc8_body(b";"), Some(UrlResponse::End));
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"id=x;"),
+            Some(UrlResponse::End)
+        );
+    }
+
+    #[test]
+    fn osc8_body_without_separator_is_end() {
+        assert_eq!(UrlResponse::from_osc8_body(b""), Some(UrlResponse::End));
+        assert_eq!(UrlResponse::from_osc8_body(b"id=x"), Some(UrlResponse::End));
+    }
+
+    #[test]
+    fn osc8_body_non_utf8_uri_is_none() {
+        assert_eq!(UrlResponse::from_osc8_body(b";http://e\xe9"), None);
+        assert_eq!(UrlResponse::from_osc8_body(b"id=x;\xff"), None);
+    }
+
+    #[test]
+    fn osc8_body_non_utf8_id_is_no_id() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"id=\xe9;u"),
+            Some(url_of(None, "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_non_utf8_params_do_not_block_uri() {
+        assert_eq!(
+            UrlResponse::from_osc8_body(b"\xe9=1:id=x;u"),
+            Some(url_of(Some("x"), "u"))
+        );
+    }
+
+    #[test]
+    fn osc8_body_params_past_cap_are_ignored() {
+        let mut body = Vec::new();
+        for i in 0..MAX_OSC8_PARAMS {
+            body.extend_from_slice(format!("k{i}=v:").as_bytes());
         }
+        body.extend_from_slice(b"id=late;u");
+        assert_eq!(UrlResponse::from_osc8_body(&body), Some(url_of(None, "u")));
     }
 
     #[test]
-    fn url_response_from_tokens_without_id() {
-        let tokens = vec![
-            Some(AnsiOscToken::OscValue(8)),
-            None,
-            Some(AnsiOscToken::String("https://example.com".to_string())),
-        ];
-        let r = UrlResponse::from(tokens);
-        match r {
-            UrlResponse::Url(url) => {
-                assert_eq!(url.id, None);
-                assert_eq!(url.url, "https://example.com");
-            }
-            UrlResponse::End => panic!("expected Url, got End"),
+    fn osc8_body_id_at_cap_is_honoured() {
+        let mut body = Vec::new();
+        for i in 0..MAX_OSC8_PARAMS - 1 {
+            body.extend_from_slice(format!("k{i}=v:").as_bytes());
         }
-    }
-
-    #[test]
-    fn url_response_from_tokens_end() {
-        // A pattern that doesn't match either URL arm → End
-        let tokens: Vec<Option<AnsiOscToken>> = vec![None, None];
-        let r = UrlResponse::from(tokens);
-        assert_eq!(r, UrlResponse::End);
-    }
-
-    #[test]
-    fn url_response_from_empty_tokens_is_end() {
-        let tokens: Vec<Option<AnsiOscToken>> = vec![];
-        let r = UrlResponse::from(tokens);
-        assert_eq!(r, UrlResponse::End);
+        body.extend_from_slice(b"id=last;u");
+        assert_eq!(
+            UrlResponse::from_osc8_body(&body),
+            Some(url_of(Some("last"), "u"))
+        );
     }
 
     // ------------------------------------------------------------------

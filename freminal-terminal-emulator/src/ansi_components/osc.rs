@@ -258,6 +258,27 @@ fn push_osc_text(
     ParserOutcome::Finished
 }
 
+/// Handle OSC 8 (hyperlink) from the raw body.
+///
+/// The body after the OSC number is `params ; URI`; see
+/// [`UrlResponse::from_osc8_body`]. A malformed hyperlink produces no output.
+fn handle_osc_url(raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+    let body = raw_params
+        .iter()
+        .position(|b| *b == b';')
+        .and_then(|sep| raw_params.get(sep + 1..))
+        .unwrap_or_default();
+    if let Some(response) = UrlResponse::from_osc8_body(body) {
+        output.push(TerminalOutput::OscResponse(AnsiOscType::Url(response)));
+    } else {
+        tracing::debug!(
+            "OSC 8 with a non-UTF-8 URI dropped: body length {}",
+            raw_params.len()
+        );
+    }
+    ParserOutcome::Finished
+}
+
 /// Handle OSC 133 (FTCS) from the tokenised body.
 fn handle_osc_ftcs(
     params: &[Option<AnsiOscToken>],
@@ -348,11 +369,7 @@ fn dispatch_osc_target(
             handle_osc_reset_palette(&params, out);
         }),
         OscTarget::RemoteHost => push_osc_text(raw_params, output, AnsiOscType::RemoteHost),
-        OscTarget::Url => with_osc_tokens(raw_params, output, |params, out| {
-            out.push(TerminalOutput::OscResponse(AnsiOscType::Url(
-                UrlResponse::from(params),
-            )));
-        }),
+        OscTarget::Url => handle_osc_url(raw_params, output),
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_pointer_shape(&params, out);
@@ -464,9 +481,10 @@ fn split_params_into_semicolon_delimited_tokens(
 mod tests {
     use super::{AnsiOscParser, AnsiOscParserState};
     use crate::ansi::ParserOutcome;
-    use freminal_common::buffer_states::osc::AnsiOscType;
+    use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
     use freminal_common::buffer_states::pointer_shape::PointerShape;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
+    use freminal_common::buffer_states::url::Url;
 
     fn feed_osc(payload: &[u8]) -> Vec<TerminalOutput> {
         let mut parser = AnsiOscParser::new();
@@ -1118,12 +1136,12 @@ mod tests {
 
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
-        // OSC 52 clipboard, OSC 8 hyperlink, OSC 133 FTCS, plus the colour,
-        // palette and pointer-shape targets that tokenise. (Titles and OSC 7
-        // no longer tokenise; see the 129.6 tests below.)
+        // OSC 52 clipboard, OSC 133 FTCS, plus the colour, palette and
+        // pointer-shape targets that tokenise. (Titles and OSC 7 no longer
+        // tokenise; see the 129.6 tests below. Neither does OSC 8; see the
+        // 129.7 tests below.)
         for payload in [
             &b"52;c;\xe9\x07"[..],
-            b"8;;http://e\xe9\x07",
             b"133;A;\xe9\x07",
             b"10;\xe9\x07",
             b"11;\xe9\x07",
@@ -1138,7 +1156,7 @@ mod tests {
 
     #[test]
     fn non_utf8_in_later_segment_of_tokenising_target_is_invalid() {
-        assert_invalid(b"8;;ok;\xe9\x07");
+        assert_invalid(b"4;1;ok;\xe9\x07");
     }
 
     #[test]
@@ -1240,5 +1258,56 @@ mod tests {
         for payload in [&b"7\x07"[..], b"7;file://h\xe9/\x07"] {
             assert_eq!(feed_text_osc(payload), []);
         }
+    }
+
+    // ── OSC 8 parsed from the raw body (Task 129.7) ─────────────────────────
+
+    fn hyperlink(id: Option<&str>, url: &str) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::Url(UrlResponse::Url(Url {
+            id: id.map(str::to_owned),
+            url: url.to_owned(),
+        })))
+    }
+
+    fn hyperlink_end() -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::Url(UrlResponse::End))
+    }
+
+    #[test]
+    fn osc8_url_with_semicolon_is_one_link() {
+        assert_eq!(
+            feed_text_osc(b"8;;http://a;b\x07"),
+            [hyperlink(None, "http://a;b")]
+        );
+    }
+
+    #[test]
+    fn osc8_id_is_parsed_from_params() {
+        assert_eq!(
+            feed_text_osc(b"8;foo=1:id=x;u\x07"),
+            [hyperlink(Some("x"), "u")]
+        );
+    }
+
+    #[test]
+    fn osc8_empty_uri_and_bare_number_end_the_link() {
+        for payload in [&b"8;;\x07"[..], b"8\x07", b"8;id=x\x07"] {
+            assert_eq!(feed_text_osc(payload), [hyperlink_end()]);
+        }
+    }
+
+    #[test]
+    fn osc8_non_utf8_uri_produces_no_output_and_is_not_invalid() {
+        for payload in [&b"8;;http://e\xe9\x07"[..], b"8;;ok;\xe9\x07"] {
+            assert_eq!(feed_text_osc(payload), []);
+        }
+    }
+
+    #[test]
+    fn osc8_non_utf8_params_do_not_invalidate_the_sequence() {
+        assert_eq!(
+            feed_text_osc(b"8;\xe9=1:id=x;u\x07"),
+            [hyperlink(Some("x"), "u")]
+        );
     }
 }
