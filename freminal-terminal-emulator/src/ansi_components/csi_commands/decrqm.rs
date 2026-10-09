@@ -4,7 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::ParserOutcome;
-use crate::ansi_components::csi::push_split_mode_params;
+use crate::ansi_components::csi_commands::dec_modes::push_split_mode_params;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;

@@ -3,53 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::buffer_states::mode::{Mode, SetMode};
+use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
-
-/// Split CSI mode parameters on `;` and emit one `TerminalOutput::Mode` per sub-parameter.
-///
-/// When the parameter string starts with `?` (DEC private indicator), the `?` prefix is
-/// re-applied to each sub-parameter so that `terminal_mode_from_params` matches correctly.
-///
-/// For example, `?1049;2004` is split into `?1049` and `?2004`, each producing its own
-/// `TerminalOutput::Mode`.
-pub(crate) fn push_split_mode_params(
-    params: &[u8],
-    mode: SetMode,
-    output: &mut Vec<TerminalOutput>,
-) {
-    let (is_dec_private, param_body) = if params.first() == Some(&b'?') {
-        (true, &params[1..])
-    } else {
-        (false, params)
-    };
-
-    // Fast path: no semicolons means a single parameter — avoid allocation.
-    if !param_body.contains(&b';') {
-        output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-            params, mode,
-        )));
-        return;
-    }
-
-    for sub_param in param_body.split(|&b| b == b';') {
-        if sub_param.is_empty() {
-            continue;
-        }
-        if is_dec_private {
-            let mut prefixed = Vec::with_capacity(1 + sub_param.len());
-            prefixed.push(b'?');
-            prefixed.extend_from_slice(sub_param);
-            output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-                &prefixed, mode,
-            )));
-        } else {
-            output.push(TerminalOutput::Mode(Mode::terminal_mode_from_params(
-                sub_param, mode,
-            )));
-        }
-    }
-}
 
 use super::csi_commands::{
     cbt::ansi_parser_inner_csi_finished_cbt, cha::ansi_parser_inner_csi_finished_cha,
@@ -58,6 +13,7 @@ use super::csi_commands::{
     cud::ansi_parser_inner_csi_finished_cud, cuf::ansi_parser_inner_csi_finished_cuf,
     cup::ansi_parser_inner_csi_finished_cup, cuu::ansi_parser_inner_csi_finished_cuu,
     da::ansi_parser_inner_csi_finished_da, dch::ansi_parser_inner_csi_finished_dch,
+    dec_modes::push_split_mode_params, decreqtparm::ansi_parser_inner_csi_finished_decreqtparm,
     decrqm::ansi_parser_inner_csi_finished_decrqm,
     decscusr::ansi_parser_inner_csi_finished_decscusr,
     decslpp::ansi_parser_inner_csi_finished_decslpp,
@@ -406,42 +362,15 @@ impl AnsiCsiParser {
             }
             AnsiCsiParserState::Finished(b'x') => {
                 // DECREQTPARM — Request Terminal Parameters.
-                // Only plain CSI Ps x is valid (Ps=0 or Ps=1).
-                // Reject if '>' intermediate is present (that would be a
-                // malformed DA2/xtversion sequence, not DECREQTPARM).
-                let has_gt = self.intermediates.contains(&b'>')
-                    || self.params.first().copied() == Some(b'>');
-                if has_gt {
+                // A '>' intermediate would be a malformed DA2/xtversion
+                // sequence, not DECREQTPARM. (`>` is a parameter byte and is
+                // never stored as an intermediate, so this check is dead; the
+                // `>`-prefix case is handled inside the handler.)
+                if self.intermediates.contains(&b'>') {
                     output.push(TerminalOutput::Invalid);
                     return push_result;
                 }
-                // Parse first `;`-separated parameter only.
-                // DECREQTPARM accepts Ps=0 (default) or Ps=1; reject anything else.
-                let mut params = self.params.split(|&b| b == b';');
-                let first_param = params.next().unwrap_or_default();
-                let has_extra_params = params.any(|param| !param.is_empty());
-
-                if has_extra_params {
-                    output.push(TerminalOutput::Invalid);
-                    return push_result;
-                }
-
-                let parsed_ps = if first_param.is_empty() {
-                    Some(0u8)
-                } else if first_param.iter().all(u8::is_ascii_digit) {
-                    first_param
-                        .iter()
-                        .try_fold(0u8, |acc, d| acc.checked_mul(10)?.checked_add(*d - b'0'))
-                } else {
-                    None
-                };
-
-                match parsed_ps {
-                    Some(ps @ 0..=1) => {
-                        output.push(TerminalOutput::RequestTerminalParameters(ps));
-                    }
-                    _ => output.push(TerminalOutput::Invalid),
-                }
+                ansi_parser_inner_csi_finished_decreqtparm(&self.params, output);
                 push_result
             }
             AnsiCsiParserState::Finished(_esc) => {
@@ -479,6 +408,7 @@ fn is_csi_intermediate(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::mode::Mode;
     use freminal_common::buffer_states::modes::{
         decckm::Decckm,
         mouse::{MouseEncoding, MouseTrack},
@@ -705,43 +635,6 @@ mod tests {
             "expected at least 2 outputs, got {output:?}"
         );
         assert!(output.iter().all(|o| matches!(o, TerminalOutput::Mode(_))));
-    }
-
-    // ── DECREQTPARM CSI x ───────────────────────────────────────────────────
-
-    #[test]
-    fn decreqtparm_ps0_emits_request_terminal_parameters() {
-        // ESC[0x → RequestTerminalParameters(0)
-        let output = parse_csi_sequence(b"0x");
-        assert_eq!(output, vec![TerminalOutput::RequestTerminalParameters(0)]);
-    }
-
-    #[test]
-    fn decreqtparm_ps1_emits_request_terminal_parameters_1() {
-        // ESC[1x → RequestTerminalParameters(1)
-        let output = parse_csi_sequence(b"1x");
-        assert_eq!(output, vec![TerminalOutput::RequestTerminalParameters(1)]);
-    }
-
-    #[test]
-    fn decreqtparm_ps2_is_invalid() {
-        // ESC[2x → ps=2 is out of range → Invalid
-        let output = parse_csi_sequence(b"2x");
-        assert_eq!(output, vec![TerminalOutput::Invalid]);
-    }
-
-    #[test]
-    fn decreqtparm_with_gt_prefix_is_invalid() {
-        // ESC[>0x → has_gt=true → Invalid
-        let output = parse_csi_sequence(b">0x");
-        assert_eq!(output, vec![TerminalOutput::Invalid]);
-    }
-
-    #[test]
-    fn decreqtparm_extra_params_is_invalid() {
-        // ESC[1;2x → has_extra_params=true → Invalid
-        let output = parse_csi_sequence(b"1;2x");
-        assert_eq!(output, vec![TerminalOutput::Invalid]);
     }
 
     // ── CSI > ... q: XTVERSION vs. `>`-prefixed sequences with intermediates ─

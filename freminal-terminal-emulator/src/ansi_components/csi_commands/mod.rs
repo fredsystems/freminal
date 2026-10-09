@@ -64,6 +64,8 @@ pub mod cup;
 pub mod cuu;
 pub mod da;
 pub mod dch;
+pub mod dec_modes;
+pub mod decreqtparm;
 pub mod decrqm;
 pub mod decscusr;
 pub mod decslpp;
