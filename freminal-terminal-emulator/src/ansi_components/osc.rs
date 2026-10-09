@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi::{ParserOutcome, PrevByte, parse_param_as};
 use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
@@ -21,12 +21,71 @@ use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_99, handle_osc_no
 use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 use super::osc_shell_info::handle_osc_shell_info;
 
+/// Default maximum size of an OSC sequence, in bytes.
+///
+/// The cap applies to the accumulated OSC body **before its terminator**: the
+/// OSC number, its `;` separator and the payload. A sequence whose body,
+/// excluding the closing BEL or `ESC \`, is `MAX_OSC_BYTES` or fewer is
+/// dispatched; one more byte and it is dropped. (A trailing ESC is not counted
+/// until the byte after it shows it was not the start of the terminator.)
+///
+/// kitty's own cap is 256 KiB (`MAX_ESCAPE_CODE_LENGTH` in `vt-parser.c`).
+/// Freminal is deliberately more generous at 1 MiB, and raises it to
+/// [`MAX_OSC_LARGE_BYTES`] for the OSC numbers that legitimately carry large
+/// payloads.
+pub const MAX_OSC_BYTES: usize = 1024 * 1024;
+
+/// Maximum size of an OSC sequence whose number is 52 (clipboard) or 1337
+/// (iTerm2 inline images and files), in bytes. Counted exactly like
+/// [`MAX_OSC_BYTES`].
+///
+/// A single clipboard payload or inline image is legitimately far larger than
+/// 1 MiB. This is far above kitty's 256 KiB cap because Freminal implements the
+/// iTerm2 image protocol, which kitty does not.
+pub const MAX_OSC_LARGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Which byte cap applies to the OSC sequence being accumulated.
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+enum OscLimit {
+    /// [`MAX_OSC_BYTES`].
+    Default,
+    /// [`MAX_OSC_LARGE_BYTES`]: the OSC number is 52 or 1337.
+    Large,
+}
+
+impl OscLimit {
+    const fn max_bytes(self) -> usize {
+        match self {
+            Self::Default => MAX_OSC_BYTES,
+            Self::Large => MAX_OSC_LARGE_BYTES,
+        }
+    }
+
+    /// The limit that applies to a body that has just reached the default cap.
+    /// Only here is the OSC number examined, so the common path stays a single
+    /// length comparison.
+    fn for_body(params: &[u8]) -> Self {
+        match params.split(|b| *b == b';').next() {
+            Some(b"52" | b"1337") => Self::Large,
+            _ => Self::Default,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum AnsiOscParserState {
     Params,
     Finished,
     Invalid,
     InvalidFinished,
+    /// The body went over its cap; the buffer was released and only what
+    /// terminator detection needs is kept.
+    Overflow {
+        total: usize,
+        prev: PrevByte,
+    },
+    /// An overflowed sequence reached its terminator. It produces no output.
+    OverflowFinished,
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -34,6 +93,7 @@ pub struct AnsiOscParser {
     pub(crate) state: AnsiOscParserState,
     pub(crate) params: Vec<u8>,
     pub(crate) intermediates: Vec<u8>,
+    limit: OscLimit,
 }
 
 // OSC Sequence looks like this:
@@ -52,6 +112,7 @@ impl AnsiOscParser {
             state: AnsiOscParserState::Params,
             params: Vec::new(),
             intermediates: Vec::new(),
+            limit: OscLimit::Default,
         }
     }
 
@@ -74,7 +135,10 @@ impl AnsiOscParser {
     /// Will return an error if the parser is in the `Finished` or `InvalidFinished` state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        if let AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished = &self.state {
+        if let AnsiOscParserState::Finished
+        | AnsiOscParserState::InvalidFinished
+        | AnsiOscParserState::OverflowFinished = &self.state
+        {
             return ParserOutcome::Invalid("Parsed Pushed To Once Finished".to_string());
         }
 
@@ -112,9 +176,16 @@ impl AnsiOscParser {
                     return ParserOutcome::Finished;
                 }
 
+                if self.params.len() > self.limit.max_bytes() {
+                    self.overflow_if_over_cap();
+                }
+
                 ParserOutcome::Continue
             }
-            AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished => {
+            AnsiOscParserState::Overflow { .. } => self.push_overflowed(b),
+            AnsiOscParserState::Finished
+            | AnsiOscParserState::InvalidFinished
+            | AnsiOscParserState::OverflowFinished => {
                 // Guarded by the early-return at the top of `push`, but surface
                 // explicitly as an invalid outcome rather than panicking if the
                 // invariant ever breaks.
@@ -128,6 +199,63 @@ impl AnsiOscParser {
                 ParserOutcome::Invalid("Invalid OSC sequence terminated".to_string())
             }
         }
+    }
+
+    /// Called only once the accumulated body is longer than the current cap and
+    /// is not terminated. A trailing ESC may still be the start of the
+    /// terminator, so it is not counted. If the rest is still over the cap, the
+    /// body's OSC number picks the cap (52 and 1337 get the large one) and, if
+    /// it is still exceeded, the buffer is dropped.
+    fn overflow_if_over_cap(&mut self) {
+        let last = self.params.last().copied().unwrap_or_default();
+        let uncounted = usize::from(last == 0x1b);
+        if self.params.len().saturating_sub(uncounted) <= self.limit.max_bytes() {
+            return;
+        }
+
+        if self.limit == OscLimit::Default {
+            self.limit = OscLimit::for_body(&self.params);
+            if self.params.len().saturating_sub(uncounted) <= self.limit.max_bytes() {
+                return;
+            }
+        }
+
+        self.state = AnsiOscParserState::Overflow {
+            total: self.params.len(),
+            prev: PrevByte::of(last),
+        };
+        self.params = Vec::new();
+        self.intermediates = Vec::new();
+    }
+
+    /// Consume one byte of an overflowed sequence. Bytes that are invalid in an
+    /// OSC body still invalidate it, exactly as when within the cap; BEL and
+    /// `ESC \` end it with no output.
+    fn push_overflowed(&mut self, b: u8) -> ParserOutcome {
+        let AnsiOscParserState::Overflow { total, prev } = &mut self.state else {
+            return ParserOutcome::Continue;
+        };
+
+        if !is_valid_osc_param(b) {
+            debug!("Invalid OSC param: {:x}", b);
+            self.state = AnsiOscParserState::Invalid;
+            return ParserOutcome::Invalid("Invalid OSC param encountered".to_string());
+        }
+
+        *total = total.saturating_add(1);
+        let terminated = b == 0x07 || (*prev == PrevByte::Esc && b == 0x5c);
+        *prev = PrevByte::of(b);
+
+        if terminated {
+            tracing::warn!(
+                "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
+                self.limit.max_bytes()
+            );
+            self.state = AnsiOscParserState::OverflowFinished;
+            return ParserOutcome::Finished;
+        }
+
+        ParserOutcome::Continue
     }
 
     /// Parse the OSC sequence
@@ -163,6 +291,11 @@ impl AnsiOscParser {
                 dispatch_osc_target(&osc_target, &self.params, output)
             }
             AnsiOscParserState::Invalid => ParserOutcome::Invalid("Invalid OSC State".to_string()),
+            // An overflowed sequence emits nothing; report exactly what `push`
+            // decided (`Continue`, or `Finished` on its terminator).
+            AnsiOscParserState::Overflow { .. } | AnsiOscParserState::OverflowFinished => {
+                push_result
+            }
             _ => ParserOutcome::Continue,
         }
     }
@@ -470,8 +603,8 @@ fn split_params_into_semicolon_delimited_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::{AnsiOscParser, AnsiOscParserState};
-    use crate::ansi::ParserOutcome;
+    use super::{AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES};
+    use crate::ansi::{FreminalAnsiParser, ParserOutcome};
     use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
     use freminal_common::buffer_states::pointer_shape::PointerShape;
@@ -1350,5 +1483,200 @@ mod tests {
             assert_no_invalid(&output, &outcome);
             assert_eq!(output, [], "payload {payload:?}");
         }
+    }
+
+    // ── Byte caps (Task 129.9) ──────────────────────────────────────────────
+
+    /// An OSC body `prefix` padded with `x` to exactly `len` bytes.
+    fn body_of_len(prefix: &[u8], len: usize) -> Vec<u8> {
+        let mut body = prefix.to_vec();
+        body.resize(len, b'x');
+        body
+    }
+
+    /// A parser that has already accepted `body`, without a terminator.
+    ///
+    /// Sets `params` directly so the 64 MiB boundaries do not need a 64 MiB
+    /// byte-at-a-time loop. The limit stays `Default`, exactly as if the bytes
+    /// had been pushed, because the OSC number is only examined once a push
+    /// crosses the default cap.
+    fn parser_with_body(body: Vec<u8>) -> AnsiOscParser {
+        let mut parser = AnsiOscParser::new();
+        parser.params = body;
+        parser
+    }
+
+    #[test]
+    fn exactly_at_cap_is_dispatched_with_bel_and_with_st() {
+        // The cap counts the body before its terminator: `2;` + title.
+        let body = body_of_len(b"2;", MAX_OSC_BYTES);
+        for terminator in [&b"\x07"[..], &b"\x1b\\"[..]] {
+            let mut payload = body.clone();
+            payload.extend_from_slice(terminator);
+            let (output, outcome) = feed_osc_with_outcome(&payload);
+            assert_eq!(outcome, ParserOutcome::Finished);
+            assert_eq!(output.len(), 1);
+            let TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(title)) = &output[0] else {
+                panic!("expected a title, got {:?}", output[0]);
+            };
+            assert_eq!(title.len(), MAX_OSC_BYTES - 2);
+        }
+    }
+
+    #[test]
+    fn one_byte_over_cap_is_dropped() {
+        let body = body_of_len(b"2;", MAX_OSC_BYTES + 1);
+        for terminator in [&b"\x07"[..], &b"\x1b\\"[..]] {
+            let mut payload = body.clone();
+            payload.extend_from_slice(terminator);
+            let (output, outcome) = feed_osc_with_outcome(&payload);
+            assert_eq!(outcome, ParserOutcome::Finished);
+            assert_eq!(output, []);
+        }
+    }
+
+    #[test]
+    fn overflow_releases_the_buffer() {
+        let mut parser = AnsiOscParser::new();
+        for &b in &body_of_len(b"2;", MAX_OSC_BYTES + 1) {
+            assert_eq!(parser.push(b), ParserOutcome::Continue);
+        }
+        assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+        assert_eq!(parser.params.capacity(), 0);
+    }
+
+    #[test]
+    fn large_cap_applies_to_osc_52_and_osc_1337_but_not_osc_2() {
+        for prefix in [&b"52;c;"[..], &b"1337;File=inline=1:"[..]] {
+            let mut parser = AnsiOscParser::new();
+            for &b in &body_of_len(prefix, MAX_OSC_BYTES + 1024) {
+                assert_eq!(parser.push(b), ParserOutcome::Continue);
+            }
+            assert_eq!(parser.state, AnsiOscParserState::Params, "{prefix:?}");
+            assert_eq!(parser.params.len(), MAX_OSC_BYTES + 1024, "{prefix:?}");
+        }
+
+        for prefix in [
+            &b"2;"[..],
+            &b"522;"[..],
+            &b"13370;"[..],
+            &b"no-semicolon"[..],
+        ] {
+            let mut parser = AnsiOscParser::new();
+            for &b in &body_of_len(prefix, MAX_OSC_BYTES + 1024) {
+                assert_eq!(parser.push(b), ParserOutcome::Continue);
+            }
+            assert!(
+                matches!(parser.state, AnsiOscParserState::Overflow { .. }),
+                "{prefix:?}"
+            );
+            assert_eq!(parser.params.capacity(), 0, "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn osc_52_over_the_default_cap_is_dispatched() {
+        // 2 MiB of base64 'A' (a multiple of four) after `52;c;`.
+        let mut payload = b"52;c;".to_vec();
+        payload.resize(5 + 2 * 1024 * 1024, b'A');
+        payload.push(0x07);
+        let (output, outcome) = feed_osc_with_outcome(&payload);
+        assert_eq!(outcome, ParserOutcome::Finished);
+        assert_eq!(output.len(), 1);
+        assert!(
+            !matches!(output[0], TerminalOutput::Invalid),
+            "{:?}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn large_cap_exactly_at_cap_is_dispatched_and_one_over_is_dropped() {
+        for prefix in [&b"52;c;"[..], &b"1337;File=inline=1:"[..]] {
+            // At the cap: BEL completes it.
+            let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES - 1));
+            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+            assert_eq!(parser.state, AnsiOscParserState::Params, "{prefix:?}");
+            assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
+            assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+            assert_eq!(parser.state, AnsiOscParserState::Finished, "{prefix:?}");
+            assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
+
+            // One byte over: dropped, and ST ends it with no output.
+            let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES));
+            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+            assert!(
+                matches!(parser.state, AnsiOscParserState::Overflow { .. }),
+                "{prefix:?}"
+            );
+            assert_eq!(parser.params.capacity(), 0);
+            assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+            assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+            assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+        }
+    }
+
+    #[test]
+    fn overflowed_osc_ends_only_at_bel_or_a_real_st() {
+        let overflowed = || {
+            let mut parser = parser_with_body(body_of_len(b"2;", MAX_OSC_BYTES));
+            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+            assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+            parser
+        };
+
+        // A lone backslash and an ESC followed by something else do not end it.
+        let mut parser = overflowed();
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Continue);
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Continue);
+        // ESC ESC \: the second ESC starts the terminator.
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+
+        // BEL ends it.
+        let mut parser = overflowed();
+        assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+    }
+
+    #[test]
+    fn overflowed_osc_still_rejects_invalid_bytes() {
+        let mut parser = parser_with_body(body_of_len(b"2;", MAX_OSC_BYTES));
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        // 0x01 is not a valid OSC body byte; same handling as within the cap.
+        assert!(matches!(parser.push(0x01), ParserOutcome::Invalid(_)));
+        assert_eq!(parser.state, AnsiOscParserState::Invalid);
+    }
+
+    #[test]
+    fn overflowed_sequence_is_followed_by_normal_text() {
+        for terminator in [&b"\x07"[..], &b"\x1b\\"[..]] {
+            let mut bytes = b"\x1b]2;".to_vec();
+            bytes.extend(std::iter::repeat_n(b'T', MAX_OSC_BYTES + 10));
+            bytes.extend_from_slice(terminator);
+            bytes.extend_from_slice(b"hello");
+
+            let mut parser = FreminalAnsiParser::new();
+            let output = parser.push(&bytes);
+            assert_eq!(output, vec![TerminalOutput::Data(b"hello".to_vec())]);
+        }
+    }
+
+    #[test]
+    fn at_cap_sequence_through_the_full_parser_is_dispatched() {
+        let mut bytes = b"\x1b]".to_vec();
+        bytes.extend(body_of_len(b"2;", MAX_OSC_BYTES));
+        bytes.extend_from_slice(b"\x07hello");
+
+        let mut parser = FreminalAnsiParser::new();
+        let output = parser.push(&bytes);
+        assert_eq!(output.len(), 2);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(_))
+        ));
+        assert_eq!(output[1], TerminalOutput::Data(b"hello".to_vec()));
     }
 }

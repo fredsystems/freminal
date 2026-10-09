@@ -243,6 +243,50 @@ fn bench_parse_osc9(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_parse_kitty_apc_chunks
+// ---------------------------------------------------------------
+
+/// Number of 4096-byte chunks in the kitty graphics APC stream.
+const KITTY_APC_CHUNK_COUNT: usize = 16;
+/// Base64 payload bytes per chunk (kitty's maximum chunk size).
+const KITTY_APC_CHUNK_PAYLOAD: usize = 4096;
+
+/// A chunked kitty graphics transmission: `KITTY_APC_CHUNK_COUNT` APC
+/// sequences, each `ESC _ G <control> ; <4096 bytes of base64> ESC \`. Every
+/// chunk but the last carries `m=1`; the last carries `m=0`.
+fn kitty_apc_chunks_payload() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(KITTY_APC_CHUNK_COUNT * (KITTY_APC_CHUNK_PAYLOAD + 32));
+    for i in 0..KITTY_APC_CHUNK_COUNT {
+        let more = if i + 1 == KITTY_APC_CHUNK_COUNT { 0 } else { 1 };
+        payload.extend_from_slice(b"\x1b_Ga=t,f=100,i=1,m=");
+        payload.extend_from_slice(more.to_string().as_bytes());
+        payload.push(b';');
+        payload.extend(std::iter::repeat_n(b'A', KITTY_APC_CHUNK_PAYLOAD));
+        payload.extend_from_slice(b"\x1b\\");
+    }
+    payload
+}
+
+fn bench_parse_kitty_apc_chunks(c: &mut Criterion) {
+    let payload = kitty_apc_chunks_payload();
+
+    let mut group = c.benchmark_group("bench_parse_kitty_apc_chunks");
+    group.throughput(Throughput::Bytes(payload.len() as u64));
+
+    group.bench_function(BenchmarkId::new("parser_push", payload.len()), |b| {
+        b.iter_batched(
+            FreminalAnsiParser::new,
+            |mut parser| {
+                std::hint::black_box(parser.push(&payload));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_parse_cup_writes — parser + handler together
 // ---------------------------------------------------------------
 fn bench_parse_cup_writes(c: &mut Criterion) {
@@ -914,6 +958,7 @@ criterion_group!(
         bench_parse_plain_text,
         bench_parse_sgr_heavy,
         bench_parse_osc9,
+        bench_parse_kitty_apc_chunks,
         bench_parse_cup_writes,
         bench_parse_bursty,
         bench_handle_incoming_data,

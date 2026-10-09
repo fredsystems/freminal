@@ -5,8 +5,46 @@
 
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-use crate::ansi::ParserOutcome;
+use crate::ansi::{ParserOutcome, PrevByte};
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
+
+/// Maximum size of a DCS sequence, in bytes.
+///
+/// The cap applies to the stored sequence **before its terminator**: the `P`
+/// introducer plus the body. A sequence whose stored bytes, excluding the
+/// closing `ESC \`, number `MAX_DCS_BYTES` or fewer is dispatched; one more
+/// byte and it is dropped. (A trailing ESC is not counted until the byte after
+/// it shows it was not the start of the terminator.)
+///
+/// DCS carries sixel images and tmux passthrough, where a single large
+/// sequence is legitimate, so unlike OSC and APC (1 MiB) the cap is 64 MiB.
+/// kitty's own cap is 256 KiB (`MAX_ESCAPE_CODE_LENGTH` in `vt-parser.c`);
+/// Freminal is deliberately more generous because it also implements sixel.
+pub const MAX_DCS_BYTES: usize = 64 * 1024 * 1024;
+
+/// How an overflowed DCS finds its terminator.
+#[derive(Eq, PartialEq, Debug)]
+enum DcsOverflowTerminator {
+    /// Plain DCS: a real ST is any `ESC \`.
+    Plain { prev: PrevByte },
+    /// tmux passthrough (`Ptmux;`): every inner ESC is doubled, so `ESC \` is
+    /// a real ST only when the run of consecutive ESC bytes before the `\` is
+    /// odd. `esc_run` is the current run length.
+    Tmux { esc_run: usize },
+}
+
+/// Whether a DCS sequence is still being accumulated or has been dropped.
+#[derive(Eq, PartialEq, Debug)]
+enum DcsState {
+    /// Bytes are accumulated in [`DcsParser::sequence`].
+    Accumulating,
+    /// The sequence went over [`MAX_DCS_BYTES`]; its buffer was released and
+    /// only what terminator detection needs is kept.
+    Overflow {
+        total: usize,
+        terminator: DcsOverflowTerminator,
+    },
+}
 
 /// Parser for DCS (Device Control String) sequences.
 ///
@@ -18,10 +56,16 @@ use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 /// in the inner payload is doubled. The parser correctly handles this by
 /// counting consecutive ESC bytes before the trailing `\` to distinguish
 /// real ST from doubled inner content.
+///
+/// A sequence larger than [`MAX_DCS_BYTES`] is dropped: its buffer is freed,
+/// it is consumed through its (real) terminator, it produces no output, and
+/// one warning (introducer, cap and total length, never the payload) is
+/// logged.
 #[derive(Eq, PartialEq, Debug)]
 pub struct DcsParser {
     /// Accumulated sequence bytes, starting with `P`.
     pub sequence: Vec<u8>,
+    state: DcsState,
 }
 
 impl Default for DcsParser {
@@ -35,6 +79,7 @@ impl DcsParser {
     pub fn new() -> Self {
         Self {
             sequence: vec![b'P'],
+            state: DcsState::Accumulating,
         }
     }
 
@@ -104,8 +149,37 @@ impl DcsParser {
     ///
     /// Accumulates bytes until a String Terminator is detected, at which
     /// point it emits `TerminalOutput::DeviceControlString` and returns
-    /// `ParserOutcome::Finished`.
+    /// `ParserOutcome::Finished`. A sequence over [`MAX_DCS_BYTES`] is
+    /// consumed through its terminator and returns `Finished` without
+    /// emitting anything.
     pub fn dcs_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+        if let DcsState::Overflow { total, terminator } = &mut self.state {
+            *total = total.saturating_add(1);
+            let terminated = match terminator {
+                DcsOverflowTerminator::Plain { prev } => {
+                    let terminated = *prev == PrevByte::Esc && b == b'\\';
+                    *prev = PrevByte::of(b);
+                    terminated
+                }
+                DcsOverflowTerminator::Tmux { esc_run } => {
+                    let terminated = b == b'\\' && *esc_run % 2 == 1;
+                    *esc_run = if b == 0x1b {
+                        esc_run.saturating_add(1)
+                    } else {
+                        0
+                    };
+                    terminated
+                }
+            };
+            if terminated {
+                tracing::warn!(
+                    "DCS sequence over the {MAX_DCS_BYTES}-byte cap dropped: total length {total} bytes"
+                );
+                return ParserOutcome::Finished;
+            }
+            return ParserOutcome::Continue;
+        }
+
         self.sequence.push(b);
 
         if self.contains_string_terminator() {
@@ -115,14 +189,48 @@ impl DcsParser {
             return ParserOutcome::Finished;
         }
 
+        if self.sequence.len() > MAX_DCS_BYTES {
+            self.overflow_if_over_cap();
+        }
+
         ParserOutcome::Continue
+    }
+
+    /// Called only once the stored sequence is longer than the cap and is not
+    /// terminated. A trailing ESC may still be the start of the terminator, so
+    /// it is not counted; if the rest is still over the cap, drop the buffer.
+    fn overflow_if_over_cap(&mut self) {
+        let last = self.sequence.last().copied().unwrap_or_default();
+        let uncounted = usize::from(last == 0x1b);
+        if self.sequence.len().saturating_sub(uncounted) <= MAX_DCS_BYTES {
+            return;
+        }
+
+        let terminator = if self.is_tmux_passthrough() {
+            let esc_run = self
+                .sequence
+                .iter()
+                .rev()
+                .take_while(|&&c| c == 0x1b)
+                .count();
+            DcsOverflowTerminator::Tmux { esc_run }
+        } else {
+            DcsOverflowTerminator::Plain {
+                prev: PrevByte::of(last),
+            }
+        };
+        self.state = DcsState::Overflow {
+            total: self.sequence.len(),
+            terminator,
+        };
+        self.sequence = Vec::new();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DcsParser;
-    use crate::ansi::ParserOutcome;
+    use super::{DcsParser, MAX_DCS_BYTES};
+    use crate::ansi::{FreminalAnsiParser, ParserOutcome};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     #[test]
@@ -210,5 +318,136 @@ mod tests {
         parser.sequence.push(0x1b);
         parser.sequence.push(b'\\');
         assert!(parser.contains_string_terminator());
+    }
+
+    // ------------------------------------------------------------------
+    // Byte cap (Task 129.9)
+    // ------------------------------------------------------------------
+
+    /// A parser whose stored sequence is `prefix` padded with `x` to exactly
+    /// `len` bytes. Avoids pushing 64 MiB a byte at a time in every test.
+    fn parser_with_stored_len(prefix: &[u8], len: usize) -> DcsParser {
+        let mut parser = DcsParser::new();
+        parser.sequence = prefix.to_vec();
+        parser.sequence.resize(len, b'x');
+        parser
+    }
+
+    fn push_all(parser: &mut DcsParser, bytes: &[u8], output: &mut Vec<TerminalOutput>) {
+        for &b in bytes {
+            let outcome = parser.dcs_parser_inner(b, output);
+            assert!(matches!(outcome, ParserOutcome::Continue));
+        }
+    }
+
+    #[test]
+    fn exactly_at_cap_is_dispatched() {
+        // Stored bytes before the terminator: `P` + body == MAX_DCS_BYTES.
+        let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        // The terminator is not counted: the ESC is accepted at the cap...
+        parser.dcs_parser_inner(0x1b, &mut output);
+        // ...and `\` completes it.
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output.len(), 1);
+        let TerminalOutput::DeviceControlString(seq) = &output[0] else {
+            panic!("expected a DCS output, got {:?}", output[0]);
+        };
+        assert_eq!(seq.len(), MAX_DCS_BYTES + 2);
+    }
+
+    #[test]
+    fn tmux_exactly_at_cap_is_dispatched() {
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output.len(), 1);
+    }
+
+    #[test]
+    fn one_byte_over_cap_is_dropped() {
+        let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        push_all(&mut parser, b"x", &mut output);
+        // Over the cap: buffer released, nothing emitted.
+        assert_eq!(parser.sequence.capacity(), 0);
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn overflowed_plain_dcs_ends_only_at_a_real_st() {
+        let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        push_all(&mut parser, b"x", &mut output);
+        // A lone backslash, and an ESC followed by something else, do not end it.
+        push_all(&mut parser, b"\\", &mut output);
+        push_all(&mut parser, b"\x1bx", &mut output);
+        // ESC ESC \ ends a plain DCS: the second ESC starts the terminator.
+        push_all(&mut parser, b"\x1b\x1b", &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn overflowed_tmux_dcs_with_doubled_escapes_ends_at_the_real_st() {
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES);
+        let mut output = Vec::new();
+        push_all(&mut parser, b"x", &mut output);
+        assert_eq!(parser.sequence.capacity(), 0);
+
+        // A doubled ESC followed by `\` is inner content, not the ST.
+        push_all(&mut parser, b"\x1b\x1b\\", &mut output);
+        // So is two doubled ESCs (run of four) followed by `\`.
+        push_all(&mut parser, b"yy\x1b\x1b\x1b\x1b\\", &mut output);
+        // An ESC, an inner doubled pair, then `\` makes a run of three: odd,
+        // so this is a real ST.
+        push_all(&mut parser, b"z\x1b\x1b", &mut output);
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn tmux_escape_run_is_carried_across_the_overflow_point() {
+        // The ESC run that is still open when the cap is crossed must be
+        // counted: here the buffer is MAX - 1 long, then three ESC bytes cross
+        // the cap, so an odd run (3) is open and the next `\` is the real ST.
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES - 1);
+        let mut output = Vec::new();
+        push_all(&mut parser, b"\x1b\x1b\x1b", &mut output);
+        assert_eq!(parser.sequence.capacity(), 0);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+
+        // Four ESC bytes cross the cap: an even run, so `\` is inner content
+        // and only a following ESC `\` ends the sequence.
+        let mut parser = parser_with_stored_len(b"Ptmux;", MAX_DCS_BYTES - 2);
+        push_all(&mut parser, b"\x1b\x1b\x1b\x1b", &mut output);
+        assert_eq!(parser.sequence.capacity(), 0);
+        push_all(&mut parser, b"\\", &mut output);
+        parser.dcs_parser_inner(0x1b, &mut output);
+        let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+        assert!(matches!(outcome, ParserOutcome::Finished));
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn overflowed_sequence_is_followed_by_normal_text() {
+        let mut bytes = b"\x1bPq".to_vec();
+        bytes.extend(std::iter::repeat_n(b'~', MAX_DCS_BYTES + 10));
+        bytes.extend_from_slice(b"\x1b\\hello");
+
+        let mut parser = FreminalAnsiParser::new();
+        let output = parser.push(&bytes);
+        assert_eq!(output, vec![TerminalOutput::Data(b"hello".to_vec())]);
     }
 }
