@@ -99,7 +99,8 @@ const KITTY_FILE_ERROR_RESPONSE: &str = "EBADF:Failed to read image file";
 /// Substring a `t=t` file's path must contain before freminal will delete it.
 const KITTY_TEMP_FILE_MARKER: &str = "tty-graphics-protocol";
 
-/// Why a Kitty file transmission (`t=f` / `t=t`) was refused.
+/// Why a Kitty file transmission (`t=f` / `t=t`) was refused, or why the
+/// `t=t` cleanup of the file could not be carried out.
 ///
 /// Never sent to the client (see [`KITTY_FILE_ERROR_RESPONSE`]); it exists
 /// for the debug log.
@@ -121,6 +122,58 @@ enum KittyFileError {
     Read(std::io::Error),
     #[error("file exceeds the {MAX_KITTY_FILE_BYTES}-byte limit")]
     TooLarge,
+    /// The path no longer resolves to the object that was opened.
+    #[cfg(unix)]
+    #[error("path no longer resolves to the opened file")]
+    ChangedDuringOpen,
+    /// The path has no parent directory or no file name to delete by.
+    #[cfg(unix)]
+    #[error("path has no parent directory or file name")]
+    DeleteTargetInvalid,
+    /// The entry at the path is no longer the file that was read.
+    #[cfg(unix)]
+    #[error("entry is no longer the file that was read")]
+    DeleteTargetChanged,
+    #[error("failed to delete file: {0}")]
+    Delete(std::io::Error),
+}
+
+/// The identity of a filesystem object: device and inode.
+///
+/// Two handles refer to the same object exactly when their identities are
+/// equal. Unix only: other platforms have no `(dev, ino)` pair in `std`, and
+/// need none, because the prefixes this module refuses (`/proc`, `/sys`,
+/// `/dev`) only exist on unix.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentity {
+    /// The identity of the object `metadata` was taken from.
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+}
+
+/// A file read for a `t=f` / `t=t` transmission.
+struct LoadedKittyFile {
+    /// The canonical path the file was opened through.
+    canonical: std::path::PathBuf,
+    /// The file contents.
+    data: Vec<u8>,
+    /// The identity of the opened object, so a `t=t` deletion can be bound
+    /// to the file that was actually read rather than to whatever the path
+    /// names by then.
+    #[cfg(unix)]
+    identity: FileIdentity,
 }
 
 /// Whether `canonical` lies under a prefix that must never be read.
@@ -143,16 +196,19 @@ fn is_refused_kitty_path(canonical: &std::path::Path) -> bool {
 /// Open `canonical` read-only and confirm the handle is a regular file.
 ///
 /// On unix the file is opened `O_NONBLOCK` so that opening a FIFO cannot
-/// block the PTY thread; the type check is done on the opened handle
-/// (`fstat`), not on the path, so it cannot be raced.
+/// block the PTY thread, and `O_NOFOLLOW` so that a final component swapped
+/// for a symlink after canonicalisation fails to open instead of being
+/// followed. The type check is done on the opened handle (`fstat`), not on
+/// the path, so it cannot be raced.
 fn open_regular_kitty_file(canonical: &std::path::Path) -> Result<std::fs::File, KittyFileError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
 
     #[cfg(unix)]
     {
+        use nix::fcntl::OFlag;
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+        options.custom_flags((OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW).bits());
     }
 
     let file = options.open(canonical).map_err(KittyFileError::Open)?;
@@ -161,6 +217,46 @@ fn open_regular_kitty_file(canonical: &std::path::Path) -> Result<std::fs::File,
         Ok(file)
     } else {
         Err(KittyFileError::NotRegularFile)
+    }
+}
+
+/// Bind the refused-prefix check to the object that was actually opened.
+///
+/// Mirrors kitty's `is_ok_to_read_image_file`: after opening, the path is
+/// resolved again, vetted again, and the object it resolves to must be the
+/// one the handle refers to (`samestat(stat(realpath), fstat(fd))`).
+/// Without this, a path component could be swapped for a symlink into
+/// `/proc`, `/sys` or `/dev` between the first canonicalisation and the open.
+///
+/// `/proc`, `/sys` and `/dev` are separate filesystems, so a handle opened
+/// inside them cannot share `(dev, ino)` with a file at a permitted path: if
+/// the identities match, the object read is the one at the vetted path.
+///
+/// Unix only. Other platforms have no refused prefixes (see
+/// [`FileIdentity`]), so there is nothing for a swap to bypass.
+///
+/// Returns the identity of the opened object.
+#[cfg(unix)]
+fn verify_opened_kitty_file(
+    file: &std::fs::File,
+    original: &std::path::Path,
+    canonical: &std::path::Path,
+) -> Result<FileIdentity, KittyFileError> {
+    let opened = FileIdentity::of(&file.metadata().map_err(KittyFileError::Open)?);
+
+    let recanonical = std::fs::canonicalize(original).map_err(KittyFileError::Canonicalize)?;
+    if is_refused_kitty_path(&recanonical) {
+        return Err(KittyFileError::RefusedPrefix);
+    }
+    if recanonical != canonical {
+        return Err(KittyFileError::ChangedDuringOpen);
+    }
+
+    let current = std::fs::metadata(&recanonical).map_err(KittyFileError::Open)?;
+    if FileIdentity::of(&current) == opened {
+        Ok(opened)
+    } else {
+        Err(KittyFileError::ChangedDuringOpen)
     }
 }
 
@@ -182,9 +278,9 @@ fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, KittyFil
 
 /// Validate, open and read the file named by a `t=f` / `t=t` payload.
 ///
-/// Returns the canonical path (so a `t=t` deletion targets exactly what was
-/// read) together with the file contents.
-fn load_kitty_file(payload: &[u8]) -> Result<(std::path::PathBuf, Vec<u8>), KittyFileError> {
+/// The result carries the canonical path and (on unix) the identity of the
+/// opened object, so a `t=t` deletion targets exactly what was read.
+fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
     let path_str = std::str::from_utf8(payload).map_err(|_| KittyFileError::NotUtf8)?;
     let path = std::path::Path::new(path_str);
     if !path.is_absolute() {
@@ -197,8 +293,15 @@ fn load_kitty_file(payload: &[u8]) -> Result<(std::path::PathBuf, Vec<u8>), Kitt
     }
 
     let file = open_regular_kitty_file(&canonical)?;
+    #[cfg(unix)]
+    let identity = verify_opened_kitty_file(&file, path, &canonical)?;
     let data = read_capped(file, MAX_KITTY_FILE_BYTES)?;
-    Ok((canonical, data))
+    Ok(LoadedKittyFile {
+        canonical,
+        data,
+        #[cfg(unix)]
+        identity,
+    })
 }
 
 /// Whether a `t=t` file at `canonical` may be deleted after reading.
@@ -219,6 +322,72 @@ fn may_delete_kitty_temp_file(canonical: &std::path::Path) -> bool {
     .iter()
     .filter_map(|dir| std::fs::canonicalize(dir).ok())
     .any(|dir| canonical.starts_with(dir))
+}
+
+/// Delete the `t=t` file that `loaded` was read from.
+///
+/// The caller has already decided the file may be deleted
+/// ([`may_delete_kitty_temp_file`]). The deletion is bound to the file that
+/// was read rather than to the pathname:
+///
+/// 1. the parent directory is opened (`O_NOFOLLOW | O_DIRECTORY`), fixing
+///    the directory the entry is resolved in;
+/// 2. the entry is opened relative to that directory handle (`O_NOFOLLOW`)
+///    and must be a regular file with the same `(dev, ino)` as the file that
+///    was read;
+/// 3. only then is the entry unlinked, relative to the same directory handle.
+///
+/// Residual: there is still a window between steps 2 and 3 in which the
+/// entry can be replaced, but within a fixed directory handle the only thing
+/// that can be removed is a name that was just verified to be a link to the
+/// inode that was read, or a replacement placed by someone with write access
+/// to that directory. Pathname resolution can no longer redirect the unlink
+/// to a different directory.
+#[cfg(unix)]
+fn delete_kitty_temp_file(loaded: &LoadedKittyFile) -> Result<(), KittyFileError> {
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let (Some(parent), Some(name)) = (loaded.canonical.parent(), loaded.canonical.file_name())
+    else {
+        return Err(KittyFileError::DeleteTargetInvalid);
+    };
+
+    let dirfd = open(
+        parent,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|e| KittyFileError::Delete(std::io::Error::from(e)))?;
+
+    let entry = openat(
+        &dirfd,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| KittyFileError::Delete(std::io::Error::from(e)))?;
+    let metadata = std::fs::File::from(entry)
+        .metadata()
+        .map_err(KittyFileError::Delete)?;
+    if !metadata.is_file() || FileIdentity::of(&metadata) != loaded.identity {
+        return Err(KittyFileError::DeleteTargetChanged);
+    }
+
+    unlinkat(&dirfd, name, UnlinkatFlags::NoRemoveDir)
+        .map_err(|e| KittyFileError::Delete(std::io::Error::from(e)))
+}
+
+/// Delete the `t=t` file that `loaded` was read from.
+///
+/// Non-unix fallback: `std` exposes no handle-relative delete, so this
+/// removes by pathname. The race the unix implementation closes (a swap
+/// redirecting the path into `/proc`, `/sys` or `/dev`) does not apply
+/// here, since those prefixes do not exist on Windows.
+#[cfg(not(unix))]
+fn delete_kitty_temp_file(loaded: &LoadedKittyFile) -> Result<(), KittyFileError> {
+    std::fs::remove_file(&loaded.canonical).map_err(KittyFileError::Delete)
 }
 
 /// Apply a signed cell offset (`H=`/`V=`) to a `usize` origin coordinate.
@@ -1211,7 +1380,7 @@ impl TerminalHandler {
         quiet: u8,
         delete_after: bool,
     ) -> Option<Vec<u8>> {
-        let (canonical, data) = match load_kitty_file(payload) {
+        let loaded = match load_kitty_file(payload) {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::debug!("Kitty graphics: refusing file transmission: {e}");
@@ -1226,30 +1395,33 @@ impl TerminalHandler {
 
         tracing::debug!(
             "Kitty graphics: read {} bytes from file: {} (delete_after={delete_after})",
-            data.len(),
-            canonical.display(),
+            loaded.data.len(),
+            loaded.canonical.display(),
         );
 
         if delete_after {
-            if may_delete_kitty_temp_file(&canonical) {
-                if let Err(e) = std::fs::remove_file(&canonical) {
+            if may_delete_kitty_temp_file(&loaded.canonical) {
+                if let Err(e) = delete_kitty_temp_file(&loaded) {
                     // Not fatal -- we still have the data.
                     tracing::debug!(
                         "Kitty graphics: failed to delete temp file {}: {e}",
-                        canonical.display()
+                        loaded.canonical.display()
                     );
                 } else {
-                    tracing::debug!("Kitty graphics: deleted temp file {}", canonical.display());
+                    tracing::debug!(
+                        "Kitty graphics: deleted temp file {}",
+                        loaded.canonical.display()
+                    );
                 }
             } else {
                 tracing::debug!(
                     "Kitty graphics: not deleting {}: not a tty-graphics-protocol file in a temporary directory",
-                    canonical.display()
+                    loaded.canonical.display()
                 );
             }
         }
 
-        Some(data)
+        Some(loaded.data)
     }
 
     /// Read a Kitty shared-memory object (`t=s`).
@@ -3414,6 +3586,11 @@ fn extract_rect(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(unix)]
+    use super::{
+        FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
+        verify_opened_kitty_file,
+    };
     use super::{KittyFileError, is_refused_kitty_path, read_capped};
     use freminal_common::{
         buffer_states::{
@@ -6439,6 +6616,150 @@ mod tests {
 
         assert!(stored, "file should still be read for t=t");
         assert!(survived, "t=t must not delete a file lacking the marker");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_temp_file_symlink_reads_target_and_spares_unmarked_target() {
+        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // The target has no marker; only the symlink's name does. The path
+        // is canonicalised first, so the read follows the link and the
+        // deletion gate sees the (unmarked) target path.
+        let target = write_unique_png("freminal_symlink_target_");
+        let link = std::env::temp_dir().join(format!(
+            "tty-graphics-protocol-link-{}",
+            target
+                .file_name()
+                .expect("file name")
+                .to_str()
+                .expect("utf-8")
+        ));
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let payload = link.to_str().expect("utf-8").as_bytes().to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::TempFile, 985, payload);
+
+        let stored = handler.buffer().image_store().get(985).is_some();
+        let target_survived = target.exists();
+        let link_survived = link.symlink_metadata().is_ok();
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        assert!(stored, "the symlink's target should be read");
+        assert!(target_survived, "an unmarked target must not be deleted");
+        assert!(link_survived, "the symlink itself must not be deleted");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_open_refuses_symlink_final_component() {
+        let target = write_unique_png("freminal_nofollow_target_");
+        let link = std::env::temp_dir().join(format!(
+            "freminal_nofollow_link_{}",
+            target
+                .file_name()
+                .expect("file name")
+                .to_str()
+                .expect("utf-8")
+        ));
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let result = open_regular_kitty_file(&link);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        assert!(
+            matches!(result, Err(KittyFileError::Open(_))),
+            "O_NOFOLLOW must refuse a symlink as the final component"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_file_identity_distinguishes_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"a").expect("write a");
+        std::fs::write(&b, b"b").expect("write b");
+
+        let id_a1 = FileIdentity::of(&std::fs::File::open(&a).unwrap().metadata().unwrap());
+        let id_a2 = FileIdentity::of(&std::fs::File::open(&a).unwrap().metadata().unwrap());
+        let id_b = FileIdentity::of(&std::fs::File::open(&b).unwrap().metadata().unwrap());
+
+        assert_eq!(id_a1, id_a2, "the same file has one identity");
+        assert_ne!(id_a1, id_b, "different files have different identities");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_verify_opened_file_rejects_path_naming_another_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = std::fs::canonicalize(dir.path())
+            .expect("canonical dir")
+            .join("a");
+        let b = a.with_file_name("b");
+        std::fs::write(&a, b"a").expect("write a");
+        std::fs::write(&b, b"b").expect("write b");
+
+        let opened_a = std::fs::File::open(&a).expect("open a");
+
+        assert!(
+            verify_opened_kitty_file(&opened_a, &a, &a).is_ok(),
+            "handle and path agree"
+        );
+        // The handle is `a`, but the (re-resolved) path names `b`.
+        assert!(matches!(
+            verify_opened_kitty_file(&opened_a, &b, &b),
+            Err(KittyFileError::ChangedDuringOpen)
+        ));
+        // The path now resolves somewhere other than the first canonical path.
+        assert!(matches!(
+            verify_opened_kitty_file(&opened_a, &b, &a),
+            Err(KittyFileError::ChangedDuringOpen)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_delete_refuses_entry_replaced_after_load() {
+        let path = write_unique_png("tty-graphics-protocol-swap-");
+        let loaded = load_kitty_file(path.to_str().expect("utf-8").as_bytes()).expect("load");
+
+        // Replace the entry with a different file. The replacement is created
+        // while the original still exists so it cannot reuse its inode.
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, b"replacement").expect("write replacement");
+        std::fs::rename(&replacement, &path).expect("swap entry");
+
+        let result = delete_kitty_temp_file(&loaded);
+        let survived = path.exists();
+        let content = std::fs::read(&path).ok();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            matches!(result, Err(KittyFileError::DeleteTargetChanged)),
+            "a swapped entry must not be deleted: {result:?}"
+        );
+        assert!(survived, "the replacement file must survive");
+        assert_eq!(content.as_deref(), Some(&b"replacement"[..]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_delete_removes_the_file_that_was_read() {
+        let path = write_unique_png("tty-graphics-protocol-direct-");
+        let loaded = load_kitty_file(path.to_str().expect("utf-8").as_bytes()).expect("load");
+
+        let result = delete_kitty_temp_file(&loaded);
+        let gone = !path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(gone, "the verified file should be unlinked");
     }
 
     #[test]
