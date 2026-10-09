@@ -83,11 +83,13 @@ fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
     (chars, tags)
 }
 
-/// The cursor draw parameters for a synthetic frame: a steady block at the
-/// origin in the theme's cursor color, or nothing when the frame hides it.
+/// The cursor draw parameters for a synthetic frame at the origin in the
+/// theme's cursor color: a steady solid block, a steady hollow block (an
+/// unfocused pane), or nothing when the frame hides it.
 const fn synthetic_cursor(frame: &SyntheticFrame) -> CursorDrawParams {
     let appearance = match frame.cursor {
         CursorPresence::Shown => CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+        CursorPresence::Hollow => CursorAppearance::Hollow,
         CursorPresence::Hidden => CursorAppearance::Hidden,
     };
     CursorDrawParams {
@@ -103,8 +105,10 @@ const fn synthetic_cursor(frame: &SyntheticFrame) -> CursorDrawParams {
 /// Whether the synthetic frame includes a visible cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorPresence {
-    /// The cursor is drawn.
+    /// The cursor is drawn as a solid steady block (the focused pane).
     Shown,
+    /// The cursor is drawn as a steady hollow block (a non-focused pane).
+    Hollow,
     /// The cursor is not drawn.
     Hidden,
 }
