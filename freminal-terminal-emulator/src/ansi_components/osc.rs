@@ -279,31 +279,21 @@ fn handle_osc_url(raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> Parser
     ParserOutcome::Finished
 }
 
-/// Handle OSC 133 (FTCS) from the tokenised body.
-fn handle_osc_ftcs(
-    params: &[Option<AnsiOscToken>],
-    raw_params: &[u8],
-    output: &mut Vec<TerminalOutput>,
-) {
-    // Serialize each token to its display form so numeric exit codes
-    // (e.g. "0", "127" — tokenised as `AnsiOscToken::OscValue`) survive
-    // the filter alongside string tokens like "D" or "P".  Owned
-    // `String`s are required because `OscValue` numerics are formatted
-    // at runtime; refs collected into `ftcs_str_refs` for the call.
-    let ftcs_strs: Vec<String> = params
+/// Handle OSC 133 (FTCS) from the raw body.
+///
+/// The FTCS items are everything after the first `;` of `raw_params` (the body
+/// is empty when there is no `;`); see
+/// [`parse_ftcs_params`](freminal_common::buffer_states::ftcs::parse_ftcs_params).
+fn handle_osc_ftcs(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
+    let body = raw_params
         .iter()
-        .skip(1) // skip the "133" token
-        .filter_map(|t| match t {
-            Some(AnsiOscToken::String(s)) => Some(s.clone()),
-            Some(AnsiOscToken::OscValue(n)) => Some(n.to_string()),
-            None => None,
-        })
-        .collect();
-    let ftcs_str_refs: Vec<&str> = ftcs_strs.iter().map(String::as_str).collect();
+        .position(|b| *b == b';')
+        .and_then(|sep| raw_params.get(sep + 1..))
+        .unwrap_or_default();
 
-    if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
+    if let Some(marker) = parse_ftcs_params(body) {
         output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
-    } else if is_known_ftcs_marker(&ftcs_str_refs) {
+    } else if is_known_ftcs_marker(body) {
         // Known FTCS marker (A/B/C/D/P) that we recognise but did not
         // act on — a foreign emitter sent it without the `freminal=1`
         // tag (e.g. Apple Terminal's `133;A;cl=m;aid=$$`, or
@@ -356,9 +346,10 @@ fn dispatch_osc_target(
         OscTarget::TitleBar | OscTarget::IconName => {
             push_osc_text(raw_params, output, AnsiOscType::SetTitleBar)
         }
-        OscTarget::Ftcs => with_osc_tokens(raw_params, output, |params, out| {
-            handle_osc_ftcs(&params, raw_params, out);
-        }),
+        OscTarget::Ftcs => {
+            handle_osc_ftcs(raw_params, output);
+            ParserOutcome::Finished
+        }
         OscTarget::Clipboard => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_clipboard(&params, raw_params, out);
         }),
@@ -481,6 +472,7 @@ fn split_params_into_semicolon_delimited_tokens(
 mod tests {
     use super::{AnsiOscParser, AnsiOscParserState};
     use crate::ansi::ParserOutcome;
+    use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
     use freminal_common::buffer_states::pointer_shape::PointerShape;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -1136,13 +1128,12 @@ mod tests {
 
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
-        // OSC 52 clipboard, OSC 133 FTCS, plus the colour, palette and
-        // pointer-shape targets that tokenise. (Titles and OSC 7 no longer
-        // tokenise; see the 129.6 tests below. Neither does OSC 8; see the
-        // 129.7 tests below.)
+        // OSC 52 clipboard, plus the colour, palette and pointer-shape
+        // targets that tokenise. (Titles and OSC 7 no longer tokenise; see
+        // the 129.6 tests below. Neither does OSC 8; see the 129.7 tests
+        // below. Neither does OSC 133; see the 129.8 tests below.)
         for payload in [
             &b"52;c;\xe9\x07"[..],
-            b"133;A;\xe9\x07",
             b"10;\xe9\x07",
             b"11;\xe9\x07",
             b"12;\xe9\x07",
@@ -1309,5 +1300,55 @@ mod tests {
             feed_text_osc(b"8;\xe9=1:id=x;u\x07"),
             [hyperlink(Some("x"), "u")]
         );
+    }
+
+    // ── OSC 133 parsed from the raw body (Task 129.8) ───────────────────────
+
+    fn ftcs_marker(output: &[TerminalOutput]) -> &FtcsMarker {
+        match output {
+            [TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker))] => marker,
+            other => panic!("expected a single FTCS marker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc133_non_utf8_item_does_not_invalidate_the_sequence() {
+        // A foreign, non-UTF-8 item no longer makes the sequence Invalid.
+        let (output, outcome) = feed_osc_with_outcome(b"133;A;aid=\xe9;freminal=1;fid=x\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(
+            ftcs_marker(&output),
+            &FtcsMarker::PromptStart {
+                fid: "x".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn osc133_non_utf8_fid_is_dropped_without_invalid() {
+        let (output, outcome) = feed_osc_with_outcome(b"133;A;freminal=1;fid=\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc133_exit_code_with_leading_zeros_and_empty_fields() {
+        let output = feed_osc(b"133;D;;007;;freminal=1;fid=t1\x07");
+        assert_eq!(
+            ftcs_marker(&output),
+            &FtcsMarker::CommandFinished {
+                exit_code: Some(7),
+                fid: "t1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn osc133_without_body_is_consumed_without_output() {
+        for payload in [&b"133\x07"[..], b"133;\x07", b"133;;\x07"] {
+            let (output, outcome) = feed_osc_with_outcome(payload);
+            assert_no_invalid(&output, &outcome);
+            assert_eq!(output, [], "payload {payload:?}");
+        }
     }
 }
