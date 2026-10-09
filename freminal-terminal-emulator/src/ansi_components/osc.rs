@@ -4,7 +4,9 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, parse_param_as};
-use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 use crate::error::AnsiParseError;
 use freminal_common::buffer_states::ftcs::{is_known_ftcs_marker, parse_ftcs_params};
 use freminal_common::buffer_states::osc::{
@@ -32,18 +34,6 @@ pub struct AnsiOscParser {
     pub(crate) state: AnsiOscParserState,
     pub(crate) params: Vec<u8>,
     pub(crate) intermediates: Vec<u8>,
-    pub(crate) seq_trace: SequenceTracer,
-}
-
-impl SequenceTraceable for AnsiOscParser {
-    #[inline]
-    fn seq_tracer(&mut self) -> &mut SequenceTracer {
-        &mut self.seq_trace
-    }
-    #[inline]
-    fn seq_tracer_ref(&self) -> &SequenceTracer {
-        &self.seq_trace
-    }
 }
 
 // OSC Sequence looks like this:
@@ -62,15 +52,20 @@ impl AnsiOscParser {
             state: AnsiOscParserState::Params,
             params: Vec::new(),
             intermediates: Vec::new(),
-            seq_trace: SequenceTracer::new(),
         }
     }
 
-    /// Expose current sequence trace for testing and diagnostics.
+    /// Expose the current OSC body for testing and diagnostics.
+    ///
+    /// Rendered from [`Self::params`] (every body byte accepted so far, with
+    /// the terminator removed once the sequence finishes), lossily decoded and
+    /// bounded to
+    /// [`crate::ansi_components::tracer::LOG_SEQUENCE_MAX_BYTES`].
     #[must_use]
     pub fn trace_str(&self) -> String {
-        trace!("current buffer trace: {}", self.seq_trace.as_str());
-        self.seq_trace.as_str()
+        let trace = lossy_sequence_for_log_bounded(&self.params);
+        trace!("current buffer trace: {}", trace);
+        trace
     }
 
     /// Push a byte into the parser
@@ -79,7 +74,6 @@ impl AnsiOscParser {
     /// Will return an error if the parser is in the `Finished` or `InvalidFinished` state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        self.append_trace(b);
         if let AnsiOscParserState::Finished | AnsiOscParserState::InvalidFinished = &self.state {
             return ParserOutcome::Invalid("Parsed Pushed To Once Finished".to_string());
         }
@@ -102,8 +96,6 @@ impl AnsiOscParser {
 
                 if is_osc_terminator(&self.params) {
                     self.state = AnsiOscParserState::Finished;
-
-                    self.seq_trace.trim_control_tail();
 
                     if !self.params.is_empty() {
                         while let Some(&last) = self.params.last() {
@@ -160,7 +152,7 @@ impl AnsiOscParser {
                         output.push(TerminalOutput::Invalid);
                         return ParserOutcome::Invalid(format!(
                             "Invalid OSC params: recent='{}'",
-                            self.seq_trace.as_str()
+                            lossy_sequence_for_log_bounded(&self.params)
                         ));
                     };
 
@@ -173,7 +165,6 @@ impl AnsiOscParser {
                         osc_internal_type,
                         params,
                         &self.params,
-                        &self.seq_trace,
                         output,
                     );
                 } else {
@@ -181,7 +172,7 @@ impl AnsiOscParser {
 
                     return ParserOutcome::Invalid(format!(
                         "Invalid OSC params: recent='{}'",
-                        self.seq_trace.as_str()
+                        lossy_sequence_for_log_bounded(&self.params)
                     ));
                 }
 
@@ -224,7 +215,6 @@ fn dispatch_osc_target(
     osc_internal_type: AnsiOscInternalType,
     params: Vec<Option<AnsiOscToken>>,
     raw_params: &[u8],
-    seq_trace: &SequenceTracer,
     output: &mut Vec<TerminalOutput>,
 ) {
     match *osc_target {
@@ -286,15 +276,15 @@ fn dispatch_osc_target(
                 // unhandled surface can be audited.
                 tracing::warn!(
                     "OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P); raw sequence: \"{}\"",
-                    seq_trace.as_escaped()
+                    escape_sequence_for_log_bounded(raw_params)
                 );
             }
         }
         OscTarget::Clipboard => {
-            handle_osc_clipboard(&params, seq_trace, output);
+            handle_osc_clipboard(&params, raw_params, output);
         }
         OscTarget::PaletteColor => {
-            handle_osc_palette_color(&params, seq_trace, output);
+            handle_osc_palette_color(&params, raw_params, output);
         }
         OscTarget::ResetPaletteColor => {
             handle_osc_reset_palette(&params, output);
@@ -322,21 +312,21 @@ fn dispatch_osc_target(
             ));
         }
         OscTarget::ITerm2 => {
-            handle_osc_iterm2(raw_params, seq_trace, output);
+            handle_osc_iterm2(raw_params, output);
         }
         OscTarget::ShellInfo => {
-            handle_osc_shell_info(raw_params, seq_trace, output);
+            handle_osc_shell_info(raw_params, output);
         }
         // OSC 9 / OSC 777 — desktop notifications (Task 76).  Parsed from the
         // raw bytes so notification bodies containing `;` survive intact.
         OscTarget::Notify9 => {
-            handle_osc_notify_9(raw_params, seq_trace, output);
+            handle_osc_notify_9(raw_params, output);
         }
         OscTarget::Notify777 => {
-            handle_osc_notify_777(raw_params, seq_trace, output);
+            handle_osc_notify_777(raw_params, output);
         }
         OscTarget::Notify99 => {
-            handle_osc_notify_99(raw_params, seq_trace, output);
+            handle_osc_notify_99(raw_params, output);
         }
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => {
@@ -356,7 +346,7 @@ fn dispatch_osc_target(
         | OscTarget::ColorSchemeNotification => {
             tracing::warn!(
                 "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}; raw sequence: \"{}\"",
-                seq_trace.as_escaped()
+                escape_sequence_for_log_bounded(raw_params)
             );
         }
         OscTarget::Unknown => {
@@ -364,7 +354,7 @@ fn dispatch_osc_target(
             // but logged at warn with the full raw sequence for auditing.
             tracing::warn!(
                 "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}; raw sequence: \"{}\"",
-                seq_trace.as_escaped()
+                escape_sequence_for_log_bounded(raw_params)
             );
         }
     }

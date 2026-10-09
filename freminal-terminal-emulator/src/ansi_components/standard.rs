@@ -7,7 +7,7 @@ use freminal_common::buffer_states::line_draw::DecSpecialGraphics;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use crate::ansi::ParserOutcome;
-use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 #[derive(Eq, PartialEq, Debug)]
 pub(crate) enum StandardParserState {
@@ -22,25 +22,11 @@ pub struct StandardParser {
     pub(crate) state: StandardParserState,
     pub params: Vec<u8>,
     pub intermediates: Vec<u8>,
-
-    // Internal trace of recent bytes for diagnostics.
-    seq_trace: SequenceTracer,
 }
 
 impl Default for StandardParser {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl SequenceTraceable for StandardParser {
-    #[inline]
-    fn seq_tracer(&mut self) -> &mut SequenceTracer {
-        &mut self.seq_trace
-    }
-    #[inline]
-    fn seq_tracer_ref(&self) -> &SequenceTracer {
-        &self.seq_trace
     }
 }
 
@@ -51,14 +37,22 @@ impl StandardParser {
             state: StandardParserState::Intermediates,
             params: Vec::with_capacity(8),
             intermediates: Vec::with_capacity(8),
-            seq_trace: SequenceTracer::new(),
         }
     }
 
-    /// Expose current sequence trace for testing and diagnostics.
+    /// Expose the current sequence for testing and diagnostics.
+    ///
+    /// Rendered from the accepted bytes the parser already holds: the
+    /// intermediates followed by the parameter byte (which is the order they
+    /// arrive in). Bytes rejected as invalid are not retained. Lossily decoded
+    /// and bounded to
+    /// [`crate::ansi_components::tracer::LOG_SEQUENCE_MAX_BYTES`].
     #[must_use]
     pub fn trace_str(&self) -> String {
-        self.seq_trace.as_str()
+        let mut bytes = Vec::with_capacity(self.intermediates.len() + self.params.len());
+        bytes.extend_from_slice(&self.intermediates);
+        bytes.extend_from_slice(&self.params);
+        lossy_sequence_for_log_bounded(&bytes)
     }
 
     /// Push a byte into the parser
@@ -67,8 +61,6 @@ impl StandardParser {
     /// Will return an error if the parser is in a finished state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        self.append_trace(b);
-
         if let StandardParserState::Finished | StandardParserState::Invalid = &self.state {
             return ParserOutcome::Invalid("Parser pushed to after finish".to_string());
         }
@@ -77,8 +69,6 @@ impl StandardParser {
             StandardParserState::Intermediates => {
                 if is_standard_intermediate_final(b) {
                     self.state = StandardParserState::Finished;
-
-                    self.seq_trace.trim_control_tail();
                     self.intermediates.push(b);
 
                     return ParserOutcome::Finished;
@@ -97,8 +87,6 @@ impl StandardParser {
                 if is_standard_param(b) {
                     self.params.push(b);
                     self.state = StandardParserState::Finished;
-
-                    self.seq_trace.trim_control_tail();
 
                     return ParserOutcome::Finished;
                 }

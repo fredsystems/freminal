@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::parse_color_spec;
@@ -16,7 +16,7 @@ use freminal_common::colors::parse_color_spec;
 /// - `spec` = `#RRGGBB` (6 hex digits) → set palette entry
 pub(super) fn handle_osc_palette_color(
     params: &[Option<AnsiOscToken>],
-    seq_trace: &SequenceTracer,
+    raw_params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) {
     // params[0] = OscValue(4), params[1] = index string, params[2] = color spec
@@ -40,7 +40,10 @@ pub(super) fn handle_osc_palette_color(
             u8::try_from(v).unwrap_or(0)
         }
         _ => {
-            tracing::warn!("OSC 4: missing index: recent='{}'", seq_trace.as_str());
+            tracing::warn!(
+                "OSC 4: missing index: recent='{}'",
+                lossy_sequence_for_log_bounded(raw_params)
+            );
             return;
         }
     };
@@ -48,7 +51,10 @@ pub(super) fn handle_osc_palette_color(
     let spec = if let Some(Some(AnsiOscToken::String(s))) = params.get(2) {
         s.as_str()
     } else {
-        tracing::warn!("OSC 4: missing color spec: recent='{}'", seq_trace.as_str());
+        tracing::warn!(
+            "OSC 4: missing color spec: recent='{}'",
+            lossy_sequence_for_log_bounded(raw_params)
+        );
         return;
     };
 

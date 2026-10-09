@@ -6,25 +6,27 @@
 //! Phase 13: Standard parser edge cases (invalid bytes, partial ESC, UTF-8 oddities)
 
 use freminal_terminal_emulator::ansi_components::standard::StandardParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
 #[test]
 fn standard_invalid_and_control_bytes() {
     let mut p = StandardParser::default();
-    // mix invalid and control bytes
+    // mix invalid and control bytes: the first (NUL) is not a valid
+    // intermediate, so the parser goes invalid and retains nothing.
     for &b in [0x00u8, 0xffu8, 0x1bu8, b'A', 0x9bu8].iter() {
         let _ = p.push(b);
     }
-    assert!(!p.current_trace_str().is_empty() || p.current_trace_str().is_empty());
+    assert!(p.trace_str().is_empty());
     // sanity: no panic
 }
 
 #[test]
 fn standard_partial_escape_then_text() {
     let mut p = StandardParser::default();
-    let _ = p.push(0x1b); // ESC start
-    for &b in b"[31mHello".iter() {
+    // The real parser never forwards the leading ESC to the sub-parser, so
+    // the partial escape is `(` (a charset intermediate) followed by text.
+    let _ = p.push(b'(');
+    for &b in b"Hello".iter() {
         let _ = p.push(b);
     }
-    assert!(!p.current_trace_str().is_empty());
+    assert!(p.trace_str().starts_with('('));
 }

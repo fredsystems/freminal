@@ -40,7 +40,7 @@
 //! `9;Build finished`, `777;notify;Title;Body`, or
 //! `99;i=x:p=title;Hello world`).
 
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
 use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 use freminal_common::buffer_states::progress::ProgressUpdate;
@@ -53,17 +53,13 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// in which case it is parsed into a typed [`ProgressUpdate`] and emitted as
 /// [`AnsiOscType::Progress`] instead (issue #507). An empty notification body
 /// is silently consumed (nothing useful to display).
-pub(super) fn handle_osc_notify_9(
-    raw_params: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+pub(super) fn handle_osc_notify_9(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // raw_params looks like: b"9;Build finished"
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
         // `OSC 9 ST` with no body — nothing to notify.
         tracing::debug!(
             "OSC 9: missing notification body: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     };
@@ -78,14 +74,14 @@ pub(super) fn handle_osc_notify_9(
     // A `4;`-prefixed body that doesn't match the progress wire form falls
     // through: it is ordinary notification text.
 
-    let Some(body) = decode_utf8(body_bytes, seq_trace) else {
+    let Some(body) = decode_utf8(body_bytes, raw_params) else {
         return;
     };
 
     if body.is_empty() {
         tracing::debug!(
             "OSC 9: empty notification body: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     }
@@ -181,19 +177,18 @@ fn parse_conemu_progress_report(payload: &[u8]) -> Option<ProgressUpdate> {
 ///   leading `777;`) is the body, with no title.
 ///
 /// An entirely empty payload is silently consumed.
-pub(super) fn handle_osc_notify_777(
-    raw_params: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+pub(super) fn handle_osc_notify_777(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // raw_params looks like: b"777;notify;Title;Body"
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::debug!("OSC 777: missing payload: recent='{}'", seq_trace.as_str());
+        tracing::debug!(
+            "OSC 777: missing payload: recent='{}'",
+            lossy_sequence_for_log_bounded(raw_params)
+        );
         return;
     };
 
     let rest = &raw_params[first_semi + 1..];
-    let Some(rest) = decode_utf8(rest, seq_trace) else {
+    let Some(rest) = decode_utf8(rest, raw_params) else {
         return;
     };
 
@@ -203,7 +198,7 @@ pub(super) fn handle_osc_notify_777(
     if title.as_deref().is_none_or(str::is_empty) && body.is_empty() {
         tracing::debug!(
             "OSC 777: empty notification: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     }
@@ -239,12 +234,11 @@ pub(super) fn handle_osc_notify_777(
 /// [`AnsiOscType::Notify99`] is appended to `output`; on error the failure
 /// is logged at `debug!` level and the function returns without output.
 pub(super) fn handle_osc_notify_99(
+    // OSC 99 payloads can carry notification text, icon data, and other
+    // application metadata, so the raw sequence must never be copied into logs
+    // (even at `debug`). Diagnostics below describe the failure without
+    // echoing the payload.
     raw_params: &[u8],
-    // Intentionally unused: OSC 99 payloads can carry notification text,
-    // icon data, and other application metadata, so the raw sequence trace
-    // must never be copied into logs (even at `debug`). Diagnostics below
-    // describe the failure without echoing the payload.
-    _seq_trace: &SequenceTracer,
     output: &mut Vec<TerminalOutput>,
 ) {
     // Step 1: find the first `;`, separating "99" from the rest.
@@ -299,12 +293,12 @@ fn parse_777_payload(payload: &str) -> (Option<String>, String) {
 /// Decode notification payload bytes as UTF-8, logging and bailing on
 /// invalid input rather than lossy-decoding (which would corrupt the
 /// displayed text).
-fn decode_utf8(bytes: &[u8], seq_trace: &SequenceTracer) -> Option<String> {
+fn decode_utf8(bytes: &[u8], raw_params: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).map_or_else(
         |_| {
             tracing::debug!(
                 "OSC notification: non-UTF-8 payload (ignored): recent='{}'",
-                seq_trace.as_str()
+                lossy_sequence_for_log_bounded(raw_params)
             );
             None
         },
@@ -316,7 +310,6 @@ fn decode_utf8(bytes: &[u8], seq_trace: &SequenceTracer) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
-    use super::super::tracer::SequenceTracer;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{Osc99Command, Osc99PayloadType};
     use freminal_common::buffer_states::progress::ProgressUpdate;
@@ -329,10 +322,6 @@ mod tests {
             parser.ansiparser_inner_osc(b, &mut output);
         }
         output
-    }
-
-    fn tracer() -> SequenceTracer {
-        SequenceTracer::new()
     }
 
     fn expect_notify(output: &[TerminalOutput]) -> (OscNotifySource, &Option<String>, &str) {
@@ -692,14 +681,14 @@ mod tests {
         let mut output = Vec::new();
         let mut raw = b"9;".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
-        super::handle_osc_notify_9(&raw, &tracer(), &mut output);
+        super::handle_osc_notify_9(&raw, &mut output);
         assert_eq!(output, []);
     }
 
     #[test]
     fn notify9_missing_semicolon_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_notify_9(b"9", &tracer(), &mut output);
+        super::handle_osc_notify_9(b"9", &mut output);
         assert_eq!(output, []);
     }
 
@@ -708,14 +697,14 @@ mod tests {
         let mut output = Vec::new();
         let mut raw = b"777;".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
-        super::handle_osc_notify_777(&raw, &tracer(), &mut output);
+        super::handle_osc_notify_777(&raw, &mut output);
         assert_eq!(output, []);
     }
 
     #[test]
     fn notify777_missing_semicolon_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_notify_777(b"777", &tracer(), &mut output);
+        super::handle_osc_notify_777(b"777", &mut output);
         assert_eq!(output, []);
     }
 
@@ -813,7 +802,7 @@ mod tests {
         // Direct-call test: invalid metadata bytes → empty output, no panic.
         let mut output = Vec::new();
         // "foo=bar" has a multi-char key → InvalidMetadata
-        super::handle_osc_notify_99(b"99;foo=bar;body", &tracer(), &mut output);
+        super::handle_osc_notify_99(b"99;foo=bar;body", &mut output);
         assert_eq!(output, []);
     }
 }

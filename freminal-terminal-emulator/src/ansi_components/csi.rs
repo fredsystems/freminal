@@ -7,8 +7,8 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::csi_dispatch::{dispatch_csi, warn_unhandled};
 use super::csi_key::CsiKey;
-use crate::ansi_components::tracer::{SequenceTracer, escape_sequence_for_log};
-use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
+use crate::ansi::ParserOutcome;
+use crate::ansi_components::tracer::{escape_sequence_for_log, lossy_sequence_for_log_bounded};
 
 #[derive(Eq, PartialEq, Debug, Default)]
 pub(crate) enum AnsiCsiParserState {
@@ -52,19 +52,6 @@ pub struct AnsiCsiParser {
     pub sequence: Vec<u8>,
     /// The introducer that began this sequence, for lossless diagnostics.
     introducer: CsiIntroducer,
-    /// Internal trace of recent bytes for diagnostics.
-    seq_trace: SequenceTracer,
-}
-
-impl SequenceTraceable for AnsiCsiParser {
-    #[inline]
-    fn seq_tracer(&mut self) -> &mut SequenceTracer {
-        &mut self.seq_trace
-    }
-    #[inline]
-    fn seq_tracer_ref(&self) -> &SequenceTracer {
-        &self.seq_trace
-    }
 }
 
 impl AnsiCsiParser {
@@ -88,14 +75,17 @@ impl AnsiCsiParser {
             intermediates: Vec::with_capacity(4),
             sequence: Vec::with_capacity(16),
             introducer,
-            seq_trace: SequenceTracer::new(),
         }
     }
 
-    /// Expose current sequence trace for testing and diagnostics.
+    /// Expose the current sequence for testing and diagnostics.
+    ///
+    /// Rendered from [`Self::sequence`] (the CSI body bytes pushed so far,
+    /// without the introducer), lossily decoded and bounded to
+    /// [`crate::ansi_components::tracer::LOG_SEQUENCE_MAX_BYTES`].
     #[must_use]
     pub fn trace_str(&self) -> String {
-        self.seq_trace.as_str()
+        lossy_sequence_for_log_bounded(&self.sequence)
     }
 
     /// Render the full raw CSI sequence — including the reconstructed CSI
@@ -121,8 +111,6 @@ impl AnsiCsiParser {
     /// Will return an error if the parser is in a finished state
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
-        self.append_trace(b);
-
         if let AnsiCsiParserState::Finished(_) | AnsiCsiParserState::InvalidFinished = &self.state {
             return ParserOutcome::Invalid("Parser pushed to once finished".to_string());
         }
@@ -140,7 +128,6 @@ impl AnsiCsiParser {
                     return ParserOutcome::Continue;
                 } else if is_csi_terminator(b) {
                     self.state = AnsiCsiParserState::Finished(b);
-                    self.seq_trace.trim_control_tail();
                     return ParserOutcome::Finished;
                 }
 
@@ -158,7 +145,6 @@ impl AnsiCsiParser {
                     return ParserOutcome::Continue;
                 } else if is_csi_terminator(b) {
                     self.state = AnsiCsiParserState::Finished(b);
-                    self.seq_trace.trim_control_tail();
                     return ParserOutcome::Finished;
                 }
 
