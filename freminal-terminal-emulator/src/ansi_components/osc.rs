@@ -219,6 +219,45 @@ fn with_osc_tokens(
     }
 }
 
+/// The text after the first `;` of an OSC body, as UTF-8.
+///
+/// Used by the title (OSC 0/1/2) and remote-host (OSC 7) targets, whose value
+/// is the whole remainder of the body, `;` included. An empty remainder is an
+/// empty string. A body with no `;`, or a remainder that is not valid UTF-8,
+/// yields `None` (logged at debug with the body length only; never the
+/// payload) and the caller emits nothing.
+fn osc_text_remainder(raw_params: &[u8]) -> Option<&str> {
+    let Some(sep) = raw_params.iter().position(|b| *b == b';') else {
+        tracing::debug!(
+            "OSC text sequence without a value dropped: body length {}",
+            raw_params.len()
+        );
+        return None;
+    };
+    let value = raw_params.get(sep + 1..).unwrap_or_default();
+    std::str::from_utf8(value)
+        .inspect_err(|_| {
+            tracing::debug!(
+                "OSC text sequence with a non-UTF-8 value dropped: body length {}",
+                raw_params.len()
+            );
+        })
+        .ok()
+}
+
+/// Push the text remainder of `raw_params` (see [`osc_text_remainder`]) as the
+/// response built by `make`, or push nothing if there is none.
+fn push_osc_text(
+    raw_params: &[u8],
+    output: &mut Vec<TerminalOutput>,
+    make: fn(String) -> AnsiOscType,
+) -> ParserOutcome {
+    if let Some(text) = osc_text_remainder(raw_params) {
+        output.push(TerminalOutput::OscResponse(make(text.to_owned())));
+    }
+    ParserOutcome::Finished
+}
+
 /// Handle OSC 133 (FTCS) from the tokenised body.
 fn handle_osc_ftcs(
     params: &[Option<AnsiOscToken>],
@@ -294,11 +333,7 @@ fn dispatch_osc_target(
             ));
         }),
         OscTarget::TitleBar | OscTarget::IconName => {
-            with_osc_tokens(raw_params, output, |params, out| {
-                out.push(TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
-                    AnsiOscInternalType::from(&params).to_string(),
-                )));
-            })
+            push_osc_text(raw_params, output, AnsiOscType::SetTitleBar)
         }
         OscTarget::Ftcs => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_ftcs(&params, raw_params, out);
@@ -312,11 +347,7 @@ fn dispatch_osc_target(
         OscTarget::ResetPaletteColor => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_reset_palette(&params, out);
         }),
-        OscTarget::RemoteHost => with_osc_tokens(raw_params, output, |params, out| {
-            out.push(TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
-                AnsiOscInternalType::from(&params).to_string(),
-            )));
-        }),
+        OscTarget::RemoteHost => push_osc_text(raw_params, output, AnsiOscType::RemoteHost),
         OscTarget::Url => with_osc_tokens(raw_params, output, |params, out| {
             out.push(TerminalOutput::OscResponse(AnsiOscType::Url(
                 UrlResponse::from(params),
@@ -832,11 +863,12 @@ mod tests {
     fn osc7_remote_host() {
         // OSC 7 ; file:///home/user BEL
         let output = feed_osc(b"7;file:///home/user\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::RemoteHost(_))
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
+                "file:///home/user".to_owned()
+            ))]
+        );
     }
 
     // ── Lines 281-293: Reset color OSCs ─────────────────────────────────────
@@ -1086,14 +1118,11 @@ mod tests {
 
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
-        // OSC 2 title, OSC 52 clipboard, OSC 8 hyperlink, OSC 133 FTCS, plus
-        // the colour, palette and pointer-shape targets that tokenise.
+        // OSC 52 clipboard, OSC 8 hyperlink, OSC 133 FTCS, plus the colour,
+        // palette and pointer-shape targets that tokenise. (Titles and OSC 7
+        // no longer tokenise; see the 129.6 tests below.)
         for payload in [
-            &b"2;t\xe9\x07"[..],
-            b"0;t\xe9\x07",
-            b"1;t\xe9\x07",
-            b"7;file://h\xe9/\x07",
-            b"52;c;\xe9\x07",
+            &b"52;c;\xe9\x07"[..],
             b"8;;http://e\xe9\x07",
             b"133;A;\xe9\x07",
             b"10;\xe9\x07",
@@ -1109,7 +1138,7 @@ mod tests {
 
     #[test]
     fn non_utf8_in_later_segment_of_tokenising_target_is_invalid() {
-        assert_invalid(b"2;ok;\xe9\x07");
+        assert_invalid(b"8;;ok;\xe9\x07");
     }
 
     #[test]
@@ -1144,6 +1173,72 @@ mod tests {
             let (output, outcome) = feed_osc_with_outcome(payload);
             assert_no_invalid(&output, &outcome);
             assert_eq!(output, []);
+        }
+    }
+
+    // ── Titles and OSC 7 take the full remainder (Task 129.6) ───────────────
+
+    fn feed_text_osc(payload: &[u8]) -> Vec<TerminalOutput> {
+        let (output, outcome) = feed_osc_with_outcome(payload);
+        assert_no_invalid(&output, &outcome);
+        output
+    }
+
+    fn set_title(text: &str) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(text.to_owned()))
+    }
+
+    #[test]
+    fn osc2_title_keeps_semicolons() {
+        assert_eq!(feed_text_osc(b"2;a;b\x07"), [set_title("a;b")]);
+    }
+
+    #[test]
+    fn osc0_numeric_title_is_text() {
+        assert_eq!(feed_text_osc(b"0;123\x07"), [set_title("123")]);
+    }
+
+    #[test]
+    fn osc0_question_mark_title_is_text() {
+        assert_eq!(feed_text_osc(b"0;?\x07"), [set_title("?")]);
+    }
+
+    #[test]
+    fn osc2_empty_remainder_is_empty_title() {
+        assert_eq!(feed_text_osc(b"2;\x07"), [set_title("")]);
+    }
+
+    #[test]
+    fn osc2_without_separator_produces_no_output() {
+        assert_eq!(feed_text_osc(b"2\x07"), []);
+    }
+
+    #[test]
+    fn osc_title_non_utf8_produces_no_output_and_is_not_invalid() {
+        for payload in [&b"2;t\xe9\x07"[..], b"0;t\xe9\x07", b"2;ok;\xe9\x07"] {
+            assert_eq!(feed_text_osc(payload), []);
+        }
+    }
+
+    #[test]
+    fn osc1_icon_name_maps_to_set_title_bar() {
+        assert_eq!(feed_text_osc(b"1;icon\x07"), [set_title("icon")]);
+    }
+
+    #[test]
+    fn osc7_keeps_semicolons_in_uri() {
+        assert_eq!(
+            feed_text_osc(b"7;file://host/a;b\x07"),
+            [TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
+                "file://host/a;b".to_owned()
+            ))]
+        );
+    }
+
+    #[test]
+    fn osc7_without_separator_or_non_utf8_produces_no_output() {
+        for payload in [&b"7\x07"[..], b"7;file://h\xe9/\x07"] {
+            assert_eq!(feed_text_osc(payload), []);
         }
     }
 }
