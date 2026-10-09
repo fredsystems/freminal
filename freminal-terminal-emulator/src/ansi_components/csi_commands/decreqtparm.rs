@@ -87,10 +87,11 @@ mod tests {
     }
 
     #[test]
-    fn decreqtparm_with_gt_prefix_is_invalid() {
-        // ESC[>0x → has_gt=true → Invalid
+    fn decreqtparm_with_gt_prefix_is_unrouted() {
+        // ESC[>0x has no route (`>` prefix, no intermediate, final `x`), so the
+        // router recognises it as unhandled and emits nothing.
         let output = parse_csi_sequence(b">0x");
-        assert_eq!(output, vec![TerminalOutput::Invalid]);
+        assert_eq!(output, []);
     }
 
     #[test]

@@ -22,8 +22,6 @@
 /// Named by the byte rather than by meaning, because what a marker means
 /// depends on the final byte (`CSI ? ... h` and `CSI ? ... J` are unrelated
 /// uses of the same marker).
-// TODO(128.3): consumed by the strict router
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsiPrefix {
     /// No private marker.
@@ -42,8 +40,6 @@ pub enum CsiPrefix {
 ///
 /// One variant per byte, in byte order. [`CsiIntermediate::Multiple`] means two
 /// or more intermediates were present; no route accepts it.
-// TODO(128.3): consumed by the strict router
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsiIntermediate {
     /// No intermediate byte.
@@ -85,8 +81,6 @@ pub enum CsiIntermediate {
 }
 
 /// Why a CSI sequence could not be given an identity.
-// TODO(128.3): consumed by the strict router
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsiKeyError {
     /// A private-marker byte (`<`, `=`, `>`, `?`) appeared in the parameter
@@ -98,8 +92,6 @@ pub enum CsiKeyError {
 }
 
 /// The identity of a CSI sequence: prefix, intermediate, and final byte.
-// TODO(128.3): consumed by the strict router
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CsiKey {
     pub prefix: CsiPrefix,
@@ -153,8 +145,6 @@ impl CsiIntermediate {
     }
 }
 
-// TODO(128.3): consumed by the strict router
-#[cfg_attr(not(test), expect(dead_code))]
 impl CsiKey {
     /// Classify a CSI sequence from its parameter bytes, intermediate bytes, and
     /// final byte.

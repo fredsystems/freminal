@@ -3,31 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::buffer_states::mode::SetMode;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-use super::csi_commands::{
-    cbt::ansi_parser_inner_csi_finished_cbt, cha::ansi_parser_inner_csi_finished_cha,
-    cht::ansi_parser_inner_csi_finished_cht, cnl::ansi_parser_inner_csi_finished_cnl,
-    cpl::ansi_parser_inner_csi_finished_cpl, cub::ansi_parser_inner_csi_finished_cub,
-    cud::ansi_parser_inner_csi_finished_cud, cuf::ansi_parser_inner_csi_finished_cuf,
-    cup::ansi_parser_inner_csi_finished_cup, cuu::ansi_parser_inner_csi_finished_cuu,
-    da::ansi_parser_inner_csi_finished_da, dch::ansi_parser_inner_csi_finished_dch,
-    dec_modes::push_split_mode_params, decreqtparm::ansi_parser_inner_csi_finished_decreqtparm,
-    decrqm::ansi_parser_inner_csi_finished_decrqm,
-    decscusr::ansi_parser_inner_csi_finished_decscusr,
-    decslpp::ansi_parser_inner_csi_finished_decslpp,
-    decslrm::ansi_parser_inner_csi_finished_decslrm,
-    decstbm::ansi_parser_inner_csi_finished_decstbm, decstr::ansi_parser_inner_csi_finished_decstr,
-    dl::ansi_parser_inner_csi_finished_dl, dsr::ansi_parser_inner_csi_finished_dsr,
-    ech::ansi_parser_inner_csi_finished_ech, ed::ansi_parser_inner_csi_finished_ed,
-    el::ansi_parser_inner_csi_finished_el, ich::ansi_parser_inner_csi_finished_ich,
-    il::ansi_parser_inner_csi_finished_il, rep::ansi_parser_inner_csi_finished_rep,
-    scorc::ansi_parser_inner_csi_finished_scorc, sd::ansi_parser_inner_csi_finished_sd,
-    sgr::ansi_parser_inner_csi_finished_sgr, su::ansi_parser_inner_csi_finished_su,
-    tbc::ansi_parser_inner_csi_finished_tbc, vpa::ansi_parser_inner_csi_finished_vpa,
-    xtversion::ansi_parser_inner_csi_finished_xtversion,
-};
+use super::csi_dispatch::{dispatch_csi, warn_unhandled};
+use super::csi_key::CsiKey;
 use crate::ansi_components::tracer::{SequenceTracer, escape_sequence_for_log};
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
 
@@ -204,11 +183,13 @@ impl AnsiCsiParser {
 
     /// Push a byte into the parser and return the next state
     ///
+    /// When the byte completes the sequence, the sequence is classified into a
+    /// [`CsiKey`] and routed by [`dispatch_csi`]. A sequence whose private
+    /// marker is misplaced cannot be classified and is treated like any other
+    /// recognised-but-unhandled sequence: logged, no output.
+    ///
     /// # Errors
     /// Will return an error if the parser encounters an invalid state
-    // Inherently large: CSI final-byte dispatch table (ECMA-48 §8.3). Each arm handles a
-    // distinct CSI sequence. Splitting would scatter a single coherent dispatch table.
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn ansiparser_inner_csi(
         &mut self,
@@ -217,179 +198,20 @@ impl AnsiCsiParser {
     ) -> ParserOutcome {
         let push_result = self.push(b);
 
-        match self.state {
-            AnsiCsiParserState::Finished(b'A') => {
-                ansi_parser_inner_csi_finished_cuu(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'B') => {
-                ansi_parser_inner_csi_finished_cud(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'C') => {
-                ansi_parser_inner_csi_finished_cuf(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'D') => {
-                ansi_parser_inner_csi_finished_cub(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'E') => {
-                ansi_parser_inner_csi_finished_cnl(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'F') => {
-                ansi_parser_inner_csi_finished_cpl(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'H' | b'f') => {
-                ansi_parser_inner_csi_finished_cup(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'I') => {
-                // CHT — Cursor Forward Tabulation
-                ansi_parser_inner_csi_finished_cht(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'G' | b'`') => {
-                // CHA (CSI G) and HPA (CSI `) — cursor horizontal absolute
-                ansi_parser_inner_csi_finished_cha(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'J') => {
-                ansi_parser_inner_csi_finished_ed(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'K') => {
-                ansi_parser_inner_csi_finished_el(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'L') => {
-                ansi_parser_inner_csi_finished_il(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'M') => {
-                ansi_parser_inner_csi_finished_dl(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'P') => {
-                ansi_parser_inner_csi_finished_dch(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'S') => {
-                ansi_parser_inner_csi_finished_su(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'T') => {
-                ansi_parser_inner_csi_finished_sd(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'X') => {
-                ansi_parser_inner_csi_finished_ech(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'Z') => {
-                // CBT — Cursor Backward Tabulation
-                ansi_parser_inner_csi_finished_cbt(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'b') => {
-                // REP — Repeat preceding graphic character
-                ansi_parser_inner_csi_finished_rep(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'g') => {
-                // TBC — Tab Clear
-                ansi_parser_inner_csi_finished_tbc(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'm') => {
-                ansi_parser_inner_csi_finished_sgr(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'h') => {
-                push_split_mode_params(&self.params, SetMode::DecSet, output);
-                push_result
-            }
-            AnsiCsiParserState::Finished(b'l') => {
-                push_split_mode_params(&self.params, SetMode::DecRst, output);
-                push_result
-            }
-            AnsiCsiParserState::Finished(b'@') => {
-                ansi_parser_inner_csi_finished_ich(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'n') => {
-                ansi_parser_inner_csi_finished_dsr(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b't') => {
-                ansi_parser_inner_csi_finished_decslpp(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'p') => {
-                if self.intermediates.as_slice() == b"!" {
-                    // DECSTR — Soft Terminal Reset (`CSI ! p`). Exactly one
-                    // `!` intermediate: `CSI !! p` or `CSI $ ! p` is not
-                    // DECSTR and must not trigger a soft reset.
-                    ansi_parser_inner_csi_finished_decstr(&self.params, output)
-                } else {
-                    ansi_parser_inner_csi_finished_decrqm(
-                        &self.params,
-                        &self.intermediates,
-                        b,
-                        output,
-                    )
-                }
-            }
-            AnsiCsiParserState::Finished(b'q') => {
-                if self.params.first() != Some(&b'>') {
-                    return ansi_parser_inner_csi_finished_decscusr(&self.params, output);
-                }
-                if !self.intermediates.is_empty() {
-                    // `CSI > ... <intermediate> q` (e.g. kitty multiple-cursors
-                    // `CSI > Ps ; ... SP q`) is valid grammar but is not
-                    // XTVERSION. Recognised and unimplemented until Task 103:
-                    // emit nothing rather than a bogus XTVERSION reply.
-                    tracing::warn!(
-                        "Unhandled CSI final byte (valid grammar, no dispatch): {}",
-                        self.format_raw_csi()
-                    );
-                    return push_result;
-                }
-                ansi_parser_inner_csi_finished_xtversion(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'd') => {
-                ansi_parser_inner_csi_finished_vpa(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'r') => {
-                ansi_parser_inner_csi_finished_decstbm(&self.params, output)
-            }
-            AnsiCsiParserState::Finished(b'c') => {
-                ansi_parser_inner_csi_finished_da(&self.params, &self.intermediates, output)
-            }
-            AnsiCsiParserState::Finished(b's') => {
-                // When params are present this is DECSLRM (set left/right margins);
-                // when empty it is SCOSC (save cursor).  The handler
-                // (`process_outputs`) ignores SetLeftAndRightMargins when
-                // DECLRMM is not active, so the parse is always safe.
-                if self.params.is_empty() {
-                    output.push(TerminalOutput::SaveCursor);
-                    push_result
-                } else {
-                    ansi_parser_inner_csi_finished_decslrm(&self.params, output)
-                }
-            }
-            AnsiCsiParserState::Finished(b'u') => {
-                ansi_parser_inner_csi_finished_scorc(&self.params, output);
-                push_result
-            }
-            AnsiCsiParserState::Finished(b'x') => {
-                // DECREQTPARM — Request Terminal Parameters.
-                // A '>' intermediate would be a malformed DA2/xtversion
-                // sequence, not DECREQTPARM. (`>` is a parameter byte and is
-                // never stored as an intermediate, so this check is dead; the
-                // `>`-prefix case is handled inside the handler.)
-                if self.intermediates.contains(&b'>') {
-                    output.push(TerminalOutput::Invalid);
-                    return push_result;
-                }
-                ansi_parser_inner_csi_finished_decreqtparm(&self.params, output);
-                push_result
-            }
-            AnsiCsiParserState::Finished(_esc) => {
-                // Syntactically valid CSI whose final byte we do not implement.
-                // The grammar accepted it (params/intermediates/terminator all
-                // legal) but no dispatch arm matched, so nothing is emitted.
-                // Log the complete raw sequence — reconstructed with its actual
-                // introducer — so the offending sequence is identifiable rather
-                // than silently dropped.
-                tracing::warn!(
-                    "Unhandled CSI final byte (valid grammar, no dispatch): {}",
-                    self.format_raw_csi()
-                );
-                push_result
-            }
+        // Anything that is not a finished sequence (Continue, Invalid, ...)
+        // is reported exactly as `push` reported it.
+        let AnsiCsiParserState::Finished(final_byte) = self.state else {
+            return push_result;
+        };
 
-            // Below should cover the invalid state(AnsiCsiParserState::Invalid) as well as any other finished states
-            _ => push_result,
-        }
+        let raw = || self.format_raw_csi();
+
+        let Ok(key) = CsiKey::classify(&self.params, &self.intermediates, final_byte) else {
+            warn_unhandled(&raw);
+            return ParserOutcome::Finished;
+        };
+
+        dispatch_csi(key, &self.params, &self.intermediates, &raw, output)
     }
 }
 
