@@ -29,11 +29,14 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use freminal::gui::atlas::GlyphAtlas;
+use freminal::gui::colors::cursor_f;
 use freminal::gui::font_manager::FontManager;
 use freminal::gui::renderer::{
-    BackgroundFrame, FgRenderOptions, build_background_instances, build_foreground_instances,
+    BackgroundFrame, CursorBlinkPhase, CursorDrawParams, FgRenderOptions,
+    build_background_instances, build_foreground_instances,
 };
 use freminal::gui::shaping::ShapingCache;
+use freminal::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::cursor::StateColors;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
@@ -797,8 +800,14 @@ fn bench_bg_instances(c: &mut Criterion) {
         let strikeout_offset = fm.strikeout_offset();
         let stroke_size = fm.stroke_size();
 
-        let cursor_pixel_pos = (0.0_f32, 0.0_f32);
-        let cursor_style = CursorVisualStyle::BlockCursorSteady;
+        let cursor = CursorDrawParams {
+            appearance: CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+            col: 0.0,
+            row: 0.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::On,
+        };
 
         group.bench_function(
             BenchmarkId::new("build_bg_instances", format!("{width}x{height}")),
@@ -806,7 +815,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                 let mut instances = Vec::new();
                 let mut deco = Vec::new();
                 b.iter(|| {
-                    let _cursor_quad_appended = build_background_instances(
+                    let _cursor_range = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: &lines,
                             cell_width,
@@ -815,18 +824,13 @@ fn bench_bg_instances(c: &mut Criterion) {
                             underline_offset,
                             strikeout_offset,
                             stroke_size,
-                            show_cursor: true,
-                            cursor_blink_on: true,
-                            cursor_pixel_pos,
-                            cursor_width_scale: 1.0,
-                            cursor_visual_style: &cursor_style,
+                            cursor: &cursor,
                             selection: None,
                             selection_is_block: false,
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             theme: &CATPPUCCIN_MOCHA,
-                            cursor_color_override: None,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -903,8 +907,14 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
     let width = 200;
     let height = 50;
     let mut group = c.benchmark_group("instanced_bg_partial_dirty");
-    let cursor_pixel_pos = (0.0_f32, 0.0_f32);
-    let cursor_style = CursorVisualStyle::BlockCursorSteady;
+    let cursor = CursorDrawParams {
+        appearance: CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+        col: 0.0,
+        row: 0.0,
+        color: cursor_f(&CATPPUCCIN_MOCHA, None),
+        x_scale: 1.0,
+        blink_on: CursorBlinkPhase::On,
+    };
 
     for corpus in [
         BackgroundCorpus::AllDefault,
@@ -931,7 +941,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                 let mut instances = Vec::with_capacity(width * height * 6);
                 let mut deco = Vec::with_capacity(width * height * 12);
                 b.iter(|| {
-                    let _cursor_quad_appended = build_background_instances(
+                    let _cursor_range = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: &lines,
                             cell_width,
@@ -940,18 +950,13 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             underline_offset,
                             strikeout_offset,
                             stroke_size,
-                            show_cursor: true,
-                            cursor_blink_on: true,
-                            cursor_pixel_pos,
-                            cursor_width_scale: 1.0,
-                            cursor_visual_style: &cursor_style,
+                            cursor: &cursor,
                             selection: None,
                             selection_is_block: false,
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             theme: &CATPPUCCIN_MOCHA,
-                            cursor_color_override: None,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -971,7 +976,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                 let mut instances = Vec::with_capacity(width * 6);
                 let mut deco = Vec::with_capacity(width * 12);
                 b.iter(|| {
-                    let _cursor_quad_appended = build_background_instances(
+                    let _cursor_range = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: single_row,
                             cell_width,
@@ -980,18 +985,13 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             underline_offset,
                             strikeout_offset,
                             stroke_size,
-                            show_cursor: true,
-                            cursor_blink_on: true,
-                            cursor_pixel_pos,
-                            cursor_width_scale: 1.0,
-                            cursor_visual_style: &cursor_style,
+                            cursor: &cursor,
                             selection: None,
                             selection_is_block: false,
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             theme: &CATPPUCCIN_MOCHA,
-                            cursor_color_override: None,
                             reverse_screen: false,
                         },
                         &mut instances,

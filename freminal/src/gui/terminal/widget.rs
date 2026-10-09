@@ -36,11 +36,13 @@ use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
 use super::{
     super::{
         atlas::GlyphAtlas,
+        colors::cursor_f,
         font_manager::FontManager,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, GlRetireQueue, ImageDrawEntry,
-            MatchHighlight, TerminalRenderer, WindowPostRenderer, build_background_instances,
-            build_cursor_verts_only, build_foreground_instances, build_image_verts, gl_facade::Gl,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams,
+            FgRenderOptions, GlRetireQueue, ImageDrawEntry, MatchHighlight, TerminalRenderer,
+            WindowPostRenderer, build_background_instances, build_cursor_verts_only,
+            build_foreground_instances, build_image_verts, gl_facade::Gl,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -48,6 +50,7 @@ use super::{
         },
     },
     coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, running_block_extent},
+    cursor_appearance::CursorAppearance,
     frame_dirty::{
         CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
         evaluate_frame_dirty_state,
@@ -3364,6 +3367,23 @@ impl FreminalTerminalWidget {
             effective_show_cursor = dirty.effective_show_cursor;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
+            // Draw params shared by the cursor-only and full-rebuild paths.
+            // `col`/`row` are the same trail-animated visual coordinates
+            // `dirty.cursor_pixel_pos` was derived from (127.3 does not yet
+            // derive `Hollow` from focus state: `Solid`/`Hidden` mirror
+            // `effective_show_cursor` exactly).
+            let cursor_draw = CursorDrawParams {
+                appearance: if effective_show_cursor {
+                    CursorAppearance::Solid(snap.cursor_visual_style.clone())
+                } else {
+                    CursorAppearance::Hidden
+                },
+                col: view_state.cursor_visual_col,
+                row: view_state.cursor_visual_row,
+                color: cursor_f(snap.theme, snap.cursor_color_override),
+                x_scale: cursor_x_scale,
+                blink_on: CursorBlinkPhase::from_blink_on(cursor_blink_on),
+            };
             let cursor_animating = dirty.cursor_animating;
             let anim_tick = dirty.image_anim_tick;
 
@@ -3472,17 +3492,7 @@ impl FreminalTerminalWidget {
 
             if matches!(dirty.rebuild, VertexRebuild::CursorOnly) {
                 // Fast path: build just the cursor quad and stash it.
-                let cursor_verts = build_cursor_verts_only(
-                    cell_w,
-                    cell_h,
-                    effective_show_cursor,
-                    cursor_blink_on,
-                    cursor_pixel_pos,
-                    cursor_x_scale,
-                    &snap.cursor_visual_style,
-                    snap.theme,
-                    snap.cursor_color_override,
-                );
+                let cursor_verts = build_cursor_verts_only(cell_w, cell_h, &cursor_draw);
                 is_cursor_only = true;
 
                 // Compute the frame-damage rect (#435): the region that
@@ -3735,7 +3745,7 @@ impl FreminalTerminalWidget {
                     // disjoint field accesses (MutexGuard's DerefMut is opaque).
                     let rs_ref: &mut RenderState = &mut rs;
 
-                    let cursor_quad_appended = build_background_instances(
+                    let cursor_range = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: &rendered_shaped_lines,
                             cell_width: cell_w,
@@ -3744,18 +3754,13 @@ impl FreminalTerminalWidget {
                             underline_offset: self.font_manager.underline_offset(),
                             strikeout_offset: self.font_manager.strikeout_offset(),
                             stroke_size: self.font_manager.stroke_size(),
-                            show_cursor: effective_show_cursor,
-                            cursor_blink_on,
-                            cursor_pixel_pos,
-                            cursor_width_scale: cursor_x_scale,
-                            cursor_visual_style: &snap.cursor_visual_style,
+                            cursor: &cursor_draw,
                             selection: screen_selection_rendered,
                             selection_is_block: view_state.selection.is_block,
                             match_highlights: &search_highlights,
                             command_block_hover_rows,
                             term_width_cols: snap.term_width,
                             theme: snap.theme,
-                            cursor_color_override: snap.cursor_color_override,
                             // Task 115.2: DECSCNM (whole-screen reverse video)
                             // composes with per-cell SGR-7 by XOR inside the
                             // vertex builders via `effective_fg`/`effective_bg`.
@@ -3770,14 +3775,16 @@ impl FreminalTerminalWidget {
                     // Record where the cursor quad starts in the decoration VBO.
                     // The cursor is always appended at the END of deco_verts, and
                     // is exactly CURSOR_QUAD_FLOATS floats (or absent when
-                    // hidden). MUST use `cursor_quad_appended` (the authoritative
-                    // answer from `build_background_instances`) rather than
+                    // hidden). MUST use `cursor_range` (the authoritative
+                    // answer from `build_background_instances`; "appended" is
+                    // `cursor_range.len > 0`) rather than
                     // re-deriving it from `effective_show_cursor` alone —
                     // `effective_show_cursor` does not account for the blink
                     // phase, so recomputing it here could disagree with what was
                     // actually appended whenever this rebuild happened to land on
                     // the cursor's blink-off phase, corrupting a later
                     // cursor-only patch (issue #432).
+                    let cursor_quad_appended = cursor_range.len > 0;
                     let cursor_vert_float_offset = if cursor_quad_appended {
                         rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                     } else {

@@ -26,7 +26,6 @@ use crate::gui::frame_drain::WindowFocus;
 
 /// The combined focus state that determines whether a cursor is drawn as
 /// focused or unfocused.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorFocus {
     /// The window is focused and this is the active pane.
@@ -39,7 +38,6 @@ pub enum CursorFocus {
 }
 
 /// How the cursor should be drawn for one pane in one frame.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CursorAppearance {
     /// No cursor is drawn.
@@ -54,7 +52,6 @@ pub enum CursorAppearance {
 
 /// Whether the terminal application has asked for the cursor to be shown
 /// (derived from `snap.show_cursor`, i.e. `DECTCEM`).
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorVisibility {
     /// The application wants the cursor shown.
@@ -65,7 +62,6 @@ pub enum CursorVisibility {
 
 /// Whether the pane's terminal is in echo-off mode (e.g. a password prompt),
 /// in which the cursor is suppressed.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EchoState {
     /// Normal echo; the cursor is not suppressed on this account.
@@ -75,7 +71,6 @@ pub enum EchoState {
 }
 
 /// Everything [`resolve_cursor_appearance`] needs to decide.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorAppearanceInputs {
     /// Whether the application wants the cursor shown.
@@ -105,7 +100,6 @@ pub(super) const fn cursor_focus(pane: PaneFocus, window: WindowFocus) -> Cursor
 
 /// The steady counterpart of a DECSCUSR style. Steady styles map to
 /// themselves.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 const fn steady_variant(style: &CursorVisualStyle) -> CursorVisualStyle {
     match style {
         CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
@@ -129,7 +123,7 @@ const fn steady_variant(style: &CursorVisualStyle) -> CursorVisualStyle {
 /// - When not focused, the user's [`UnfocusedCursorStyle`] applies: `Hollow`
 ///   draws a hollow block, `Unchanged` keeps the shape but forces it steady,
 ///   and `Hidden` draws nothing.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
+#[must_use]
 pub fn resolve_cursor_appearance(inputs: &CursorAppearanceInputs) -> CursorAppearance {
     if inputs.snapshot_visible == CursorVisibility::Hidden || inputs.echo == EchoState::EchoOff {
         return CursorAppearance::Hidden;
