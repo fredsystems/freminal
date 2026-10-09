@@ -20,7 +20,6 @@ use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualSt
 use super::TerminalHandler;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
-use crate::ansi_components::csi_key::{CsiIntermediate, CsiKey, CsiPrefix};
 use crate::ansi_components::tracer::escape_sequence_for_log;
 
 impl TerminalHandler {
@@ -225,6 +224,12 @@ impl TerminalHandler {
     /// the terminator.  Returns `true` if the command was handled directly,
     /// `false` if the caller should fall back to the reparse queue.
     ///
+    /// Only a body whose every byte before the terminator is a digit or `;`
+    /// is dispatched directly.  Any other byte (private marker, intermediate,
+    /// `:`, C0 control, a byte in `0x40..=0x7E`, or a byte `>= 0x7F`) makes
+    /// the strict main parser's reading differ from a direct dispatch, so
+    /// such a body falls through to the reparse queue.
+    ///
     /// This handles the subset of CSI commands that are purely buffer-level
     /// (cursor movement, erase) so they execute immediately — critical for
     /// correct ordering when a CUP precedes a Kitty Put in the same frame.
@@ -244,34 +249,32 @@ impl TerminalHandler {
             return false;
         }
 
-        // Everything before the terminator is parameter bytes (0x30..=0x3F)
-        // and intermediate bytes (0x20..=0x2F).
         let body = &csi_body[..csi_body.len() - 1];
 
-        // Only plain CSI (no private-marker prefix, no intermediate) is
-        // dispatched directly. A prefixed sequence (`CSI ? h`, `CSI > 0 T`,
-        // `CSI < 1 H`, ...) or one with an intermediate (`CSI 3 + T`,
-        // `CSI ! p`, ...) has a different identity from the plain command that
-        // shares its final byte, so it must go through the strict main parser
-        // via the reparse queue. A misplaced private marker is malformed and
-        // is likewise left to the main parser.
+        // Direct-dispatch only a body made entirely of digits and `;`
+        // (0x30..=0x39, 0x3B). Anything else is left to the strict main
+        // parser via the reparse queue, because the main parser would not
+        // treat it as one plain CSI sequence:
         //
-        // Any intermediate byte anywhere in the body means the key cannot be
-        // `CsiIntermediate::None`, so there is nothing to classify. Otherwise
-        // the body is all parameter bytes and is classified as-is, with no
-        // intermediates, without copying it.
-        let has_intermediate = body.iter().any(|b| (0x20..=0x2f).contains(b));
-        let is_plain = !has_intermediate
-            && matches!(
-                CsiKey::classify(body, &[], terminator),
-                Ok(CsiKey {
-                    prefix: CsiPrefix::None,
-                    intermediate: CsiIntermediate::None,
-                    ..
-                })
+        // - a byte in 0x40..=0x7E before the last byte ends the sequence
+        //   there (`1H2J` is CUP followed by text and ED, not one ED);
+        // - a C0 control (< 0x20) is executed inline mid-sequence, and ESC
+        //   aborts it;
+        // - a byte >= 0x7F is invalid;
+        // - an intermediate (0x20..=0x2F) or a private marker (`<=>?`)
+        //   gives the sequence a different identity from the plain command
+        //   that shares its final byte (`CSI > 0 T` is not SD);
+        // - `:` is a sub-parameter separator. The main parser's handlers
+        //   split on `;` only and reject a `:` field, whereas
+        //   `parse_csi_params` would silently turn it into a default, so
+        //   the two would disagree.
+        //
+        // A body that passes this check cannot carry a prefix or an
+        // intermediate, so no classification is needed.
+        if !body.iter().all(|b| b.is_ascii_digit() || *b == b';') {
+            tracing::debug!(
+                "DCS tmux passthrough: queuing CSI with non-parameter bytes for re-parse"
             );
-        if !is_plain {
-            tracing::debug!("DCS tmux passthrough: queuing prefixed/intermediate CSI for re-parse");
             return false;
         }
 
@@ -1879,6 +1882,62 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         // CSI 3 + T has an intermediate; it is not SD (CSI 3 T).
         assert!(!handler.dispatch_tmux_csi(b"3+T"));
+    }
+
+    #[test]
+    fn tmux_csi_embedded_final_byte_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // `H` ends the sequence in the main parser; `2J` is then text.
+        assert!(!handler.dispatch_tmux_csi(b"1H2J"));
+        assert_eq!(handler.buffer.cursor().pos, before, "nothing may run");
+    }
+
+    #[test]
+    fn tmux_csi_c0_control_in_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // BS is executed inline by the main parser, mid-sequence.
+        assert!(!handler.dispatch_tmux_csi(b"1\x082H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_byte_above_7e_in_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b"1\x7f2H"));
+        assert!(!handler.dispatch_tmux_csi(b"1\xc32H"));
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
+    }
+
+    #[test]
+    fn tmux_csi_colon_sub_parameter_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // The main parser's CUP handler splits on `;` only and rejects `:`;
+        // `parse_csi_params` would default it. Leave it to the main parser.
+        assert!(!handler.dispatch_tmux_csi(b"5:2H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_plain_bodies_still_dispatch_directly() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(handler.dispatch_tmux_csi(b"5;10H"));
+        assert!(handler.dispatch_tmux_csi(b"3A"));
+        assert!(handler.dispatch_tmux_csi(b"2J"));
+        assert!(handler.dispatch_tmux_csi(b"K"));
+    }
+
+    #[test]
+    fn tmux_passthrough_embedded_final_byte_is_queued_for_reparse() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b[1H2J");
+        assert_eq!(handler.tmux_reparse_queue, vec![b"\x1b[1H2J".to_vec()]);
     }
 
     #[test]
