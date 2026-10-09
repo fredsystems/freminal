@@ -230,6 +230,15 @@ pub fn decode_strict(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
     Ok(out)
 }
 
+/// Where a [`StreamDecoder`] stands relative to base64 quantum boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPosition {
+    /// No characters of an unfinished quantum are pending.
+    Aligned,
+    /// One to three characters of an unfinished quantum are pending.
+    MidQuantum,
+}
+
 /// Incremental base64 decoder for input delivered in chunks.
 ///
 /// Any chunk may end mid-quantum, or may end with its own padding (both
@@ -303,6 +312,25 @@ impl StreamDecoder {
             }
             _ => Err(Base64Error::MisplacedPadding { offset }),
         }
+    }
+
+    /// Whether the decoder is between quanta or holds a partial one.
+    ///
+    /// Padding still consumable after a closed quantum (the second `=` of
+    /// `"YQ=="` may arrive in a later chunk) does not count as partial.
+    #[must_use]
+    pub const fn position(&self) -> StreamPosition {
+        if self.quantum.pending == 0 {
+            StreamPosition::Aligned
+        } else {
+            StreamPosition::MidQuantum
+        }
+    }
+
+    /// Total number of bytes passed to [`feed`](Self::feed) so far.
+    #[must_use]
+    pub const fn bytes_fed(&self) -> usize {
+        self.consumed
     }
 
     /// Finish decoding, flushing a pending partial quantum into `out`.
@@ -700,6 +728,23 @@ mod tests {
                 byte: b'!'
             })
         );
+    }
+
+    #[test]
+    fn stream_position_and_bytes_fed() {
+        let mut decoder = StreamDecoder::new();
+        let mut out = Vec::new();
+        assert_eq!(decoder.position(), StreamPosition::Aligned);
+        assert_eq!(decoder.bytes_fed(), 0);
+        decoder.feed(b"SGVsb", &mut out).unwrap();
+        assert_eq!(decoder.position(), StreamPosition::MidQuantum);
+        assert_eq!(decoder.bytes_fed(), 5);
+        decoder.feed(b"G8=", &mut out).unwrap();
+        assert_eq!(decoder.position(), StreamPosition::Aligned);
+        assert_eq!(decoder.bytes_fed(), 8);
+        // A closed quantum with one more `=` still consumable is aligned.
+        decoder.feed(b"YQ=", &mut out).unwrap();
+        assert_eq!(decoder.position(), StreamPosition::Aligned);
     }
 
     #[test]

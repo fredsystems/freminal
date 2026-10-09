@@ -67,6 +67,7 @@ use std::time::Instant;
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
 
+mod chunk_assembler;
 mod cursor_ops;
 mod dcs;
 mod edit_ops;
