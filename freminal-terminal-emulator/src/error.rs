@@ -114,10 +114,6 @@ pub enum ParserFailures {
     UnhandledDECSTBMCommand(String),
     #[error("Invalid set left/right margins (DECSLRM) sequence: {0}")]
     UnhandledDECSLRMCommand(String),
-    #[error("Invalid request mode (DECRQM) sequence: {0:?}")]
-    UnhandledDECRQMCommand(Vec<u8>),
-    #[error("Request mode (DECRQM) with intermediates other than a single `$`: {0:?}")]
-    MalformedDECRQMIntermediates(Vec<u8>),
     #[error("Request mode (DECRQM) with no mode number: {0:?}")]
     MissingDECRQMMode(Vec<u8>),
     #[error("Invalid send device attributes (DA) set position sequence: {0}")]

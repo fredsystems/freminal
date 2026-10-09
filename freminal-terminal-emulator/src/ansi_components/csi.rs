@@ -211,7 +211,7 @@ impl AnsiCsiParser {
             return ParserOutcome::Finished;
         };
 
-        dispatch_csi(key, &self.params, &self.intermediates, &raw, output)
+        dispatch_csi(key, &self.params, &raw, output)
     }
 }
 
