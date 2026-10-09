@@ -471,7 +471,7 @@ pub fn parse_kitty_graphics(apc: &[u8]) -> Result<KittyGraphicsCommand, KittyPar
         let b64_str = std::str::from_utf8(payload_b64).map_err(|_| {
             KittyParseError::InvalidControlPair("payload is not valid UTF-8".to_owned())
         })?;
-        crate::base64::decode(b64_str)
+        crate::base64::decode(b64_str.as_bytes())
             .map_err(|e| KittyParseError::InvalidControlPair(format!("base64 decode error: {e}")))?
     };
 
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn parse_simple_transmit_and_display() {
-        let apc = make_apc("a=T,f=100,s=200,v=100,i=42", "iVBOR");
+        let apc = make_apc("a=T,f=100,s=200,v=100,i=42", "iVBORw");
         let cmd = parse_kitty_graphics(&apc).unwrap();
 
         assert_eq!(cmd.control.action, Some(KittyAction::TransmitAndDisplay));

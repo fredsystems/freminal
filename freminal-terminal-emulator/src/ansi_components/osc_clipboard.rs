@@ -26,20 +26,22 @@ pub(super) fn handle_osc_clipboard(
                 selection,
             )));
         }
-        Some(Some(AnsiOscToken::String(data))) => match freminal_common::base64::decode(data) {
-            Ok(decoded_bytes) => {
-                let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
-                output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
-                    selection, content,
-                )));
+        Some(Some(AnsiOscToken::String(data))) => {
+            match freminal_common::base64::decode(data.as_bytes()) {
+                Ok(decoded_bytes) => {
+                    let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
+                    output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
+                        selection, content,
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
+                        escape_sequence_for_log_bounded(raw_params)
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
-                    escape_sequence_for_log_bounded(raw_params)
-                );
-            }
-        },
+        }
         _ => {
             tracing::warn!(
                 "OSC 52: missing or invalid payload; raw sequence: \"{}\"",

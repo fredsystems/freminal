@@ -88,7 +88,7 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
             match key {
                 "name" => {
                     // Name is base64-encoded.
-                    if let Ok(decoded) = freminal_common::base64::decode(value) {
+                    if let Ok(decoded) = freminal_common::base64::decode(value.as_bytes()) {
                         name = Some(String::from_utf8_lossy(&decoded).into_owned());
                     }
                 }
@@ -157,7 +157,7 @@ fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec
         return;
     };
 
-    let data = match freminal_common::base64::decode(b64_str) {
+    let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!("OSC 1337 File=: base64 decode failed: {e}");
@@ -216,7 +216,7 @@ fn handle_osc_iterm2_file_part(
         return;
     };
 
-    let data = match freminal_common::base64::decode(b64_str) {
+    let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(

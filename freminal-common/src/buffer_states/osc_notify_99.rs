@@ -175,7 +175,7 @@ pub struct Osc99Command {
 fn decode_base64_utf8(value: &[u8]) -> Result<String, Osc99ParseError> {
     let s = std::str::from_utf8(value)
         .map_err(|_| Osc99ParseError::InvalidValue(String::from_utf8_lossy(value).into_owned()))?;
-    let bytes = crate::base64::decode(s)
+    let bytes = crate::base64::decode(s.as_bytes())
         .map_err(|e| Osc99ParseError::InvalidValue(format!("base64 decode error: {e}")))?;
     String::from_utf8(bytes)
         .map_err(|_| Osc99ParseError::InvalidValue(format!("base64 result is not UTF-8: {s}")))
@@ -383,7 +383,7 @@ fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99Pa
         let s = std::str::from_utf8(payload).map_err(|_| {
             Osc99ParseError::InvalidBase64(String::from_utf8_lossy(payload).into_owned())
         })?;
-        crate::base64::decode(s)
+        crate::base64::decode(s.as_bytes())
             .map_err(|e| Osc99ParseError::InvalidBase64(format!("base64 decode error: {e}")))
     } else {
         // `e=0` / absent: payload is escape-safe UTF-8 — validate it, store raw bytes.
