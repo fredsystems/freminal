@@ -985,6 +985,12 @@ confirmation review **passed**. Remaining findings are 127.C1–127.C3.
   confirm the focus event always precedes the first redraw on every platform.
 - **Verification:** a new window's first frame draws a solid cursor.
 - **Scheduling:** independent; outside Task 127's crate scope.
+- **Status: Resolved (2026-10-09), commit `f0cfb0e1`.** `EguiState::new` seeds
+  `RawInput::focused` from `window.has_focus()` through the public `egui_input_mut()`, via a
+  small `seed_initial_focus` helper and an `InitialWindowFocus` enum. The dependency on
+  egui-winit behaviour is recorded as assumption A14 in `EGUI_UPGRADE_ASSUMPTIONS.md`. The
+  helper is unit-tested; the first-frame visual needs a display and was not checked by
+  hand.
 
 #### 127.C2 — `skip_draw` frames record cursor baselines that were never drawn
 
@@ -999,6 +1005,11 @@ confirmation review **passed**. Remaining findings are 127.C1–127.C3.
 - **Verification:** a test with a skipped frame carrying a cursor change, then an unchanged
   frame, presents the new cursor.
 - **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commit `a9cf78ab`.** `PaneRenderCache::record_cursor_frame`
+  takes `CursorFrame::{Drawn(DrawnCursor), Skipped}` and advances all six cursor baselines
+  only on drawn frames. A focus regain during a skipped frame still re-anchors the blink on
+  the first drawn frame. Tests cover a move, an appearance change and a colour change on a
+  skipped frame.
 
 #### 127.C3 — Cursor-focus derivation is duplicated and its `show()` wiring is untested
 
@@ -1016,6 +1027,14 @@ confirmation review **passed**. Remaining findings are 127.C1–127.C3.
   focus/appearance/phase derivation so it can be tested.
 - **Verification:** one definition of the focus rule; tests on the extracted function.
 - **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commits `17fa6df7`, `3fd57ee0`, `3779036a`.**
+  `cursor_focus` is the only focus rule; the blink-wake gate calls it (`PaneFocus` is
+  crate-visible). `CursorDrawParams::pixel_origin` is the only cursor-origin formula, used by
+  drawing and damage; `frame_dirty.rs` no longer computes `cursor_pixel_pos`. The per-frame
+  derivation is `frame_cursor_state(&CursorStateInputs)`, with an `ActivationBlinkReset`
+  enum, tested directly. After the cleanup review it moved with the blink clock into a new
+  `gui/terminal/cursor_blink.rs` (`widget.rs` shrank by about 550 lines). Output is unchanged:
+  the bit-identical solid-cursor test passes unmodified.
 
 ---
 
@@ -1343,6 +1362,8 @@ Remaining findings are 128.C1–128.C4.
 - **Suggested approach:** delete the variant.
 - **Verification:** workspace builds; tests and clippy green.
 - **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commit `cee56916`.** Deleted, together with
+  `MalformedDECRQMIntermediates`, which 128.C2 also made unreachable.
 
 #### 128.C2 — Vestigial handler parameters left by the strict router
 
@@ -1358,6 +1379,11 @@ Remaining findings are 128.C1–128.C4.
   `strip_prefix(b">")`.
 - **Verification:** `csi_dispatch_matrix.rs` unchanged and green.
 - **Scheduling:** independent; before Task 137 touches the same handlers.
+- **Status: Resolved (2026-10-09), commit `cee56916`.** Dropped `decrqm`'s terminator and
+  intermediates parameters (the router reaches it only for `$`-`p`), `da`'s intermediates
+  parameter and its unreachable "invalid intermediates" branch, and the now-unused
+  `intermediates` parameter of `dispatch_csi` and its group functions. `da` uses
+  `strip_prefix(b">")`. `csi_dispatch_matrix.rs` passes unchanged.
 
 #### 128.C3 — tmux direct dispatch accepts bodies with non-parameter bytes
 
@@ -1370,6 +1396,14 @@ Remaining findings are 128.C1–128.C4.
   (digits, `:`, `;`); otherwise fall through to the re-parse queue.
 - **Verification:** new tests for such bodies falling through; ordering test green.
 - **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commits `77d6d42b`, `500438e3`.** Deviation from the
+  suggested approach: only digits and `;` are accepted, not `:`. The direct handlers do not
+  interpret `:`, and the main parser's handlers reject a `:` field, so `:` bodies go to the
+  re-parse queue. The cleanup review then found that an all-digit field overflowing `usize`
+  was defaulted by the direct path but rejected by the main parser. The direct path now
+  parses with the main parser's `split_params_into_semicolon_delimited_usize` and falls
+  through on error, and the old `parse_csi_params` helper is gone. Real tmux traffic
+  (`CSI r;c H`, `CSI n A`, `CSI K`, `CSI J`) still dispatches directly.
 
 #### 128.C4 — Unrouted CSI is logged at `warn!` (maintainer decision)
 
@@ -1384,6 +1418,43 @@ Remaining findings are 128.C1–128.C4.
   rate-limiting; log `CsiKeyError` with its own message either way.
 - **Verification:** log-level test or manual check.
 - **Scheduling:** needs a maintainer decision.
+- **Status: Resolved by maintainer decision (2026-10-09): keep `warn!`.** No code change.
+
+#### 128.P1 — Per-sequence 8 KB trace buffer in every ANSI sub-parser
+
+- **Surfaced:** the maintainer asked about the SGR-heavy benchmark's memory-copy share after
+  128.3 (2026-10-09). Not a numbered cleanup entry; recorded here because it changed the
+  parser.
+- **Finding:** every escape sequence built a fresh sub-parser (CSI, OSC, DCS, APC,
+  ESC-standard) that embedded an 8 KB `SequenceTracer` ring buffer. That meant zero-filling
+  8 KB and moving the roughly 8 KB struct into `ParserInner`, about 16 KB of memory traffic
+  for a 15-byte `ESC[38;2;r;g;bm`. `perf` put memmove plus memset at 26–36% of samples in
+  `bench_parse_sgr_heavy`. The buffer was diagnostics only and duplicated bytes held
+  elsewhere: the top-level parser's own tracer (what the `recent=` logs print), CSI's
+  `sequence`, and OSC's `params`.
+- **Fix (maintainer-chosen option), commits `1f5f7f1c`, `500438e3`:** sub-parsers no longer
+  embed a tracer and render diagnostics from bytes they already hold. Log rendering of
+  sequence bytes is bounded to 256 bytes (head and tail, with an omitted-byte count) by
+  `escape_sequence_for_log_bounded` / `lossy_sequence_for_log_bounded`. OSC sub-dispatch
+  takes raw bytes instead of `&SequenceTracer`. `ParserInner` went from about 8.3 KB to
+  80 bytes; a size test (`sub_parsers_stay_small`, bound 128 bytes) guards against
+  regression. Public API change: the sub-parsers no longer implement `SequenceTraceable`,
+  and their `trace_str()` returns the sequence body without the introducer. No in-tree
+  caller depended on either.
+- **Measured** (interleaved A/B, three runs each, idle machine; before = `77d6d42b`):
+
+  | Bench                           | Before (µs) | After (µs)  | Change |
+  | ------------------------------- | ----------- | ----------- | ------ |
+  | `parser_push_sgr/4097`          | 85.0–96.5   | 64.2–75.0   | ~−25%  |
+  | `parser_push/4096` (plain text) | 22.4–22.7   | 19.1–19.2   | ~−15%  |
+  | `parse_and_handle_80x24`        | 65.5–66.6   | 61.7–63.1   | ~−5%   |
+  | `bursty_10_small_plus_1_large`  | 166.5–167.6 | 162.5–165.3 | ~−2%   |
+
+- **Remaining:** the SGR profile now shows about 10% memmove and 8% malloc. That is
+  ordinary allocation (the CSI parser's three small `Vec`s per sequence, the SGR handler's
+  segment `Vec`s, and growth of the output `Vec`), not avoidable copying. Reusing one CSI
+  parser's buffers across sequences would remove the per-sequence mallocs. That was the
+  larger option the maintainer did not choose.
 
 ---
 
