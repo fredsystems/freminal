@@ -393,6 +393,26 @@ this by setting `Options::zoom_with_keyboard = false` and never calling
   exercise the conversion math, not the zoom invariant). Fix: derive the
   divisor from `ctx.pixels_per_point()` instead of `window.scale_factor()`.
 
+### A14 — `RawInput::focused` is set only by `WindowEvent::Focused` and survives `take`
+
+Task 127 draws a hollow, non-blinking cursor when the window is unfocused,
+reading `ui.input(|i| i.focused)`. egui-winit starts every `State` with
+`focused: false` ("winit will tell us"), so freminal seeds it from
+`window.has_focus()` right after creating the state (127.C1). The seed is
+only correct while nothing else overwrites the field before the first real
+focus event.
+
+- **Our code:** `freminal-windowing/src/egui_integration.rs` —
+  `seed_initial_focus` / `InitialWindowFocus`, called in `EguiState::new`.
+- **Upstream (0.36.2):** `egui-winit/src/lib.rs` — `State::new` initialises
+  `RawInput { focused: false, .. }` (~148-150); `egui_input_mut` is public
+  (~253); only the `WindowEvent::Focused` arm writes `egui_input.focused`
+  (~427-437). `egui/src/data/input/raw_input.rs` — `RawInput::take` keeps
+  `focused: self.focused` (~140).
+- **Symptom if broken:** a new window draws a hollow cursor (and does not
+  blink) until the window manager sends a focus change. Cosmetic; no test
+  catches it end to end (the unit tests cover only the seeding helper).
+
 ## What is NOT covered here
 
 Behaviours that _are_ part of a stable public API (e.g. `Context::run_ui`,

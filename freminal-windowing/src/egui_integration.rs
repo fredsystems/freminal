@@ -390,12 +390,49 @@ fn format_repaint_causes(entries: &[(String, u64)]) -> String {
         .join("; ")
 }
 
+/// Whether a window had OS input focus at the moment its egui state was
+/// created. A named enum rather than a `bool` so the seeding helper's call
+/// site reads unambiguously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialWindowFocus {
+    Focused,
+    Unfocused,
+}
+
+impl InitialWindowFocus {
+    /// Query winit for the window's current focus.
+    fn of(window: &Window) -> Self {
+        if window.has_focus() {
+            Self::Focused
+        } else {
+            Self::Unfocused
+        }
+    }
+}
+
+/// Seed egui's focus flag from the window's focus at creation time.
+///
+/// `egui_winit::State::new` starts with `RawInput { focused: false, .. }`
+/// ("winit will tell us when we have focus", egui-winit `lib.rs`), and only
+/// `WindowEvent::Focused` ever updates it. A window created already focused
+/// would therefore report `ui.input(|i| i.focused) == false` until that event
+/// arrives, drawing a hollow, non-blinking cursor for its first frame(s)
+/// (Task 127.C1). The flag is sticky across `RawInput::take`, so writing it
+/// once through the public `egui_input_mut` accessor is sufficient.
+///
+/// Where `has_focus()` is unreliable at creation (e.g. Wayland, before the
+/// compositor sends focus) this reports `Unfocused`, which is exactly the
+/// pre-existing behaviour -- seeding is never worse than not seeding.
+fn seed_initial_focus(raw_input: &mut egui::RawInput, focus: InitialWindowFocus) {
+    raw_input.focused = focus == InitialWindowFocus::Focused;
+}
+
 impl EguiState {
     /// Create egui state for a window.
     pub(crate) fn new(window: &Window, gl_state: &GlState) -> Result<Self, Error> {
         let ctx = egui::Context::default();
 
-        let winit_state = egui_winit::State::new(
+        let mut winit_state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
             window,
@@ -405,6 +442,7 @@ impl EguiState {
             None,
             None,
         );
+        seed_initial_focus(winit_state.egui_input_mut(), InitialWindowFocus::of(window));
 
         let painter = egui_glow::Painter::new(Arc::clone(&gl_state.glow_context), "", None, false)
             .map_err(|e| Error::GlContextCreation(format!("egui painter creation failed: {e}")))?;
@@ -1111,6 +1149,41 @@ mod frame_profiling_tests {
 mod tests {
     use egui::epaint::Primitive;
     use egui::{Color32, Rect, pos2, vec2};
+
+    use super::{InitialWindowFocus, seed_initial_focus};
+
+    #[test]
+    fn seed_initial_focus_marks_focused_window_focused() {
+        // egui-winit's initial state is `focused: false`.
+        let mut raw = egui::RawInput {
+            focused: false,
+            ..Default::default()
+        };
+        seed_initial_focus(&mut raw, InitialWindowFocus::Focused);
+        assert!(raw.focused);
+    }
+
+    #[test]
+    fn seed_initial_focus_marks_unfocused_window_unfocused() {
+        // `RawInput::default()` has `focused: true`; an unfocused window must
+        // clear it.
+        let mut raw = egui::RawInput::default();
+        assert!(raw.focused);
+        seed_initial_focus(&mut raw, InitialWindowFocus::Unfocused);
+        assert!(!raw.focused);
+    }
+
+    #[test]
+    fn seeded_focus_survives_take() {
+        let mut raw = egui::RawInput {
+            focused: false,
+            ..Default::default()
+        };
+        seed_initial_focus(&mut raw, InitialWindowFocus::Focused);
+        let first = raw.take();
+        assert!(first.focused);
+        assert!(raw.focused, "focus must be sticky across take()");
+    }
 
     /// Sum the vertex/index counts across every `Mesh` primitive in a
     /// tessellation result. `Callback` primitives (paint callbacks) carry no
