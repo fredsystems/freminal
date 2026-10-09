@@ -6,6 +6,7 @@
 pub mod apc;
 pub mod csi;
 pub mod csi_commands;
+pub(crate) mod csi_key;
 pub mod dcs;
 pub mod osc;
 pub mod osc_clipboard;
