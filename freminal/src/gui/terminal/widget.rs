@@ -5134,6 +5134,16 @@ impl FreminalTerminalWidget {
         self.toggles.cursor_trail = trail;
         self.cursor_trail_duration = Duration::from_millis(u64::from(duration_ms));
     }
+
+    /// Live-preview the unfocused-cursor style (Task 127.7).
+    ///
+    /// A GUI-side render parameter `show()` reads each frame (it resolves
+    /// the inactive-pane / unfocused-window cursor appearance from this
+    /// cached value) -- no PTY round trip, no shaping, no atlas
+    /// invalidation.
+    pub const fn set_unfocused_cursor_style_preview(&mut self, style: UnfocusedCursorStyle) {
+        self.unfocused_cursor_style = style;
+    }
 }
 
 #[cfg(test)]
@@ -5210,6 +5220,29 @@ mod visual_preview_tests {
         widget.set_cursor_trail_preview(false, 400);
         assert!(!widget.toggles.cursor_trail);
         assert_eq!(widget.cursor_trail_duration, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn set_unfocused_cursor_style_preview_updates_cached_style() {
+        use freminal_common::config::UnfocusedCursorStyle;
+
+        let mut widget = widget();
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            Config::default().cursor.unfocused_style
+        );
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Hidden);
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hidden);
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Unchanged);
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            UnfocusedCursorStyle::Unchanged
+        );
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Hollow);
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hollow);
     }
 
     #[test]

@@ -534,8 +534,8 @@ impl FreminalGui {
     }
 
     /// Preview cursor shape/blink (broadcast to every pane, same as Apply)
-    /// and cursor trail/duration (GUI-side, per-window `terminal_widget`
-    /// state) — issue #452 phase B.
+    /// and cursor trail/duration and unfocused-cursor style (GUI-side,
+    /// per-window `terminal_widget` state) — issue #452 phase B, Task 127.7.
     fn apply_preview_cursor(
         &mut self,
         diff: &VisualPreviewDiff,
@@ -578,6 +578,18 @@ impl FreminalGui {
             for win in self.windows.values_mut() {
                 win.terminal_widget
                     .set_cursor_trail_preview(next.cursor.trail, next.cursor.trail_duration_ms);
+            }
+            self.request_repaint_all_windows(handle);
+        }
+
+        // Unfocused-cursor style (Task 127.7): GUI-side, cached on each
+        // window's `terminal_widget`. The blink-wake gate in `app_impl.rs`
+        // reads the committed config, which is fine: a non-focused cursor
+        // never blinks, so it never asks for a blink wake.
+        if let Some(style) = diff.cursor_unfocused_style {
+            for win in self.windows.values_mut() {
+                win.terminal_widget
+                    .set_unfocused_cursor_style_preview(style);
             }
             self.request_repaint_all_windows(handle);
         }

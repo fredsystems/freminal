@@ -10,7 +10,7 @@ use super::visual_preview::{PreviewTrigger, VisualPreview};
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
     self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
-    TabTitlePolicy, ThemeMode,
+    TabTitlePolicy, ThemeMode, UnfocusedCursorStyle,
 };
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
@@ -1020,6 +1020,40 @@ impl SettingsModal {
                 .draggable();
             });
         });
+        ui.add_space(8.0);
+
+        ui.label("Unfocused cursor:");
+        ComboBox::from_id_salt("cursor_unfocused_style")
+            .selected_text(unfocused_cursor_style_label(
+                self.draft.cursor.unfocused_style,
+            ))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.draft.cursor.unfocused_style,
+                    UnfocusedCursorStyle::Hollow,
+                    "Hollow",
+                )
+                .clickable();
+                ui.selectable_value(
+                    &mut self.draft.cursor.unfocused_style,
+                    UnfocusedCursorStyle::Unchanged,
+                    "Unchanged",
+                )
+                .clickable();
+                ui.selectable_value(
+                    &mut self.draft.cursor.unfocused_style,
+                    UnfocusedCursorStyle::Hidden,
+                    "Hidden",
+                )
+                .clickable();
+            })
+            .response
+            .on_hover_text(
+                "How the cursor is drawn in inactive split panes and unfocused windows. \
+                 Hollow draws a steady outline block, Unchanged keeps the application's \
+                 cursor shape (steady), and Hidden draws no cursor.",
+            )
+            .clickable();
     }
 
     fn show_theme_tab(&mut self, ui: &mut Ui) {
@@ -2940,6 +2974,15 @@ const fn cursor_shape_label(shape: &CursorShapeConfig) -> &'static str {
     }
 }
 
+/// Human-readable label for an `UnfocusedCursorStyle` variant.
+const fn unfocused_cursor_style_label(style: UnfocusedCursorStyle) -> &'static str {
+    match style {
+        UnfocusedCursorStyle::Hollow => "Hollow",
+        UnfocusedCursorStyle::Unchanged => "Unchanged",
+        UnfocusedCursorStyle::Hidden => "Hidden",
+    }
+}
+
 /// Human-readable label for a `TabBarPosition` variant.
 const fn tab_bar_position_label(pos: TabBarPosition) -> &'static str {
     match pos {
@@ -3269,6 +3312,22 @@ mod tests {
             "Underline"
         );
         assert_eq!(cursor_shape_label(&CursorShapeConfig::Bar), "Bar");
+    }
+
+    #[test]
+    fn unfocused_cursor_style_labels() {
+        assert_eq!(
+            unfocused_cursor_style_label(UnfocusedCursorStyle::Hollow),
+            "Hollow"
+        );
+        assert_eq!(
+            unfocused_cursor_style_label(UnfocusedCursorStyle::Unchanged),
+            "Unchanged"
+        );
+        assert_eq!(
+            unfocused_cursor_style_label(UnfocusedCursorStyle::Hidden),
+            "Hidden"
+        );
     }
 
     #[test]
