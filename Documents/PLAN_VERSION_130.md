@@ -370,6 +370,19 @@ and without the marker. `kitty_temp_file_transmission_reads_and_deletes` was rew
 legacy tests asserted the old per-failure codes (`EIO`, `EPERM`, `EINVAL`) and now expect the
 uniform `EBADF`. `check-windows` is clean.
 
+**PR #534 review follow-up (2026-10-08).** Copilot and CodeRabbit found two pathname races,
+and both are now closed on unix:
+
+- **Open race.** Files are opened `O_NOFOLLOW`. After opening, the path is re-resolved,
+  vetted again, and its `(dev, ino)` must match the opened handle, as kitty's `samestat`
+  check does.
+- **`t=t` deletion race.** The entry is re-opened relative to a parent-directory handle and
+  its identity checked against the file that was read. Only then is it removed, with
+  `unlinkat`.
+
+The suggestion to match the marker against the file name alone was declined. The spec says
+"in its full file path", and kitty matches on the full path too.
+
 #### 126.3 — Stop `CSI > … SP q` from triggering XTVERSION
 
 Scope:

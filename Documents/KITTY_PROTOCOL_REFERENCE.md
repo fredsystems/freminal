@@ -493,13 +493,20 @@ first. A delete received mid-chunked-upload aborts the partial upload.
 | `t=` | Medium                                                                                                                                                                                                                                    |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                        |
-| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below).    |
-| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.               |
+| `f`  | Regular file — implemented via `read_kitty_file`; hardened by Task 126.2 (see the security note below). `S=`/`O=` are not honoured for files (Task 135).                                                                                  |
+| `t`  | Temp file — as `f`, then deleted only if the canonical path is inside a temp directory (`temp_dir()`, `/tmp`, `/dev/shm`) and contains `tty-graphics-protocol` (Task 126.2).                                                              |
 | `s`  | Shared-memory object; read `S` bytes at offset `O`. POSIX: `shm_open`/`mmap`, then `shm_unlink`+close. Windows: `OpenFileMappingW`/`MapViewOfFile`, then unmap+close (no unlink; `S=` required). Payload = object name. Both implemented. |
 
 Security (upstream spec): refuse device/socket/special files; may refuse
-`/proc`, `/sys`, `/dev`. **freminal current state:** only the absolute-path
-check is enforced for `f`/`t` — see the graphics current-state section below.
+`/proc`, `/sys`, `/dev`. **freminal current state (Task 126.2):** the path must
+be absolute UTF-8; it is canonicalised and refused under `/proc`, `/sys` or
+`/dev` (except `/dev/shm`) before opening; it is opened `O_NONBLOCK |
+O_NOFOLLOW` (unix), must be a regular file, and is re-resolved after opening
+with its `(dev, ino)` required to match the opened handle; reads are capped at
+400 MiB. Every failure is answered with `EBADF:Failed to read image file`.
+A `t=t` deletion is bound to the file that was read: the entry is re-opened
+relative to a parent-directory handle, its identity checked, then `unlinkat`
+(unix; pathname removal elsewhere).
 
 ### Responses and error codes
 
@@ -620,15 +627,11 @@ implementation choice.
   transmit-only `a=t` images and lowercase-deleted images referenced again by
   id — PR #382 review fix.)
 
-**Confirmed still remaining (not resolved by Task 100):**
+**Closed after Task 100:**
 
-- **`t=f`/`t=t` file-path security is narrower than the upstream spec
-  suggests.** `read_kitty_file` only rejects non-absolute paths
-  (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not
-  refuse device/socket/special files, and does not restrict temp-file reads to
-  known temp directories or require `tty-graphics-protocol` in the path. The
-  transmission-media table above has been corrected to describe this actual
-  behavior rather than the previously-documented (and inaccurate) protections.
+- **`t=f`/`t=t` file-path security** — Task 100 left `read_kitty_file`
+  checking only `is_absolute()`. Task 126.2 (v0.13.0) implemented the spec's
+  file-safety rules; see the security note under "Transmission media" above.
 
 ---
 
