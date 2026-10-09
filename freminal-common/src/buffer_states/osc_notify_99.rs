@@ -20,6 +20,8 @@
 
 use std::fmt;
 
+use crate::key_value::{KeyValueError, KeyValueItem, KeyValueSeparator, tokenize};
+
 /// Payload type of an OSC 99 notification (`p=` key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99PayloadType {
@@ -80,6 +82,12 @@ pub enum Osc99ParseError {
     /// Rejected before any allocation/decode to bound memory use on
     /// untrusted terminal input.
     SequenceTooLarge(usize),
+    /// The metadata held more than [`MAX_OSC99_METADATA_ITEMS`] `key=value`
+    /// items. Rejected to bound work on untrusted terminal input.
+    TooManyMetadataItems {
+        /// The item cap that was exceeded.
+        max: usize,
+    },
 }
 
 impl fmt::Display for Osc99ParseError {
@@ -93,6 +101,9 @@ impl fmt::Display for Osc99ParseError {
             Self::InvalidPayloadUtf8(s) => write!(f, "invalid OSC 99 payload UTF-8: {s}"),
             Self::SequenceTooLarge(n) => {
                 write!(f, "OSC 99 sequence too large: {n} bytes")
+            }
+            Self::TooManyMetadataItems { max } => {
+                write!(f, "OSC 99 metadata has more than {max} items")
             }
         }
     }
@@ -108,6 +119,14 @@ impl fmt::Display for Osc99ParseError {
 /// `notify_99.rs`). 1 MiB comfortably covers any realistic notification icon
 /// while refusing pathological input.
 pub const MAX_OSC99_SEQUENCE_BYTES: usize = 1_048_576;
+
+/// Maximum number of `key=value` items accepted in one OSC 99 metadata region.
+///
+/// The protocol defines fewer than twenty keys, some of which may repeat
+/// (`n=`, `t=`), so 64 is generous for any real client while bounding the work
+/// a hostile sequence can force. Exceeding it yields
+/// [`Osc99ParseError::TooManyMetadataItems`].
+pub const MAX_OSC99_METADATA_ITEMS: usize = 64;
 
 /// Activation behaviour flags from the `a=` metadata key.
 ///
@@ -417,30 +436,33 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
 
     let mut state = ParseState::default();
 
-    // Parse the colon-separated key=value pairs in the metadata region.
-    for token in metadata.split(|&b| b == b':') {
-        // Skip empty tokens (leading/trailing/doubled colons).
-        if token.is_empty() {
-            continue;
+    // Parse the colon-separated key=value pairs in the metadata region. Empty
+    // tokens (leading/trailing/doubled colons) are skipped by the tokenizer.
+    for item in tokenize(metadata, KeyValueSeparator::Colon, MAX_OSC99_METADATA_ITEMS) {
+        match item {
+            // A token with no `=` is malformed.
+            Ok(KeyValueItem::Bare(token)) => {
+                return Err(Osc99ParseError::InvalidMetadata(
+                    String::from_utf8_lossy(token).into_owned(),
+                ));
+            }
+            Ok(KeyValueItem::Pair { key, value }) => {
+                // Key must be exactly one byte. Report the whole token.
+                let &[key_byte] = key else {
+                    let mut token = Vec::with_capacity(key.len() + 1 + value.len());
+                    token.extend_from_slice(key);
+                    token.push(b'=');
+                    token.extend_from_slice(value);
+                    return Err(Osc99ParseError::InvalidMetadata(
+                        String::from_utf8_lossy(&token).into_owned(),
+                    ));
+                };
+                apply_metadata_pair(&mut state, key_byte, value)?;
+            }
+            Err(KeyValueError::TooManyItems { max }) => {
+                return Err(Osc99ParseError::TooManyMetadataItems { max });
+            }
         }
-
-        // Find the first '=' — everything before is the key, everything after is
-        // the value.  A token with no '=' is malformed.
-        let eq_pos = token.iter().position(|&b| b == b'=').ok_or_else(|| {
-            Osc99ParseError::InvalidMetadata(String::from_utf8_lossy(token).into_owned())
-        })?;
-
-        // Key must be exactly one ASCII letter (eq_pos == 1 means one byte before '=').
-        if eq_pos != 1 {
-            return Err(Osc99ParseError::InvalidMetadata(
-                String::from_utf8_lossy(token).into_owned(),
-            ));
-        }
-
-        let key = token[0];
-        let value = &token[eq_pos + 1..];
-
-        apply_metadata_pair(&mut state, key, value)?;
     }
 
     let decoded_payload = decode_payload(&state, payload)?;
@@ -884,6 +906,140 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Pinned behaviour (Task 129.3): must survive the tokenizer migration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn empty_value_for_flag_keys_is_invalid_integer() {
+        // `c`, `d`, `e`, `u` and `w` parse their value strictly; empty fails.
+        for key in ["c", "d", "e", "u", "w"] {
+            let err = parse_osc_99(&meta(&format!("{key}=")), &pay("")).unwrap_err();
+            assert_eq!(
+                err,
+                Osc99ParseError::InvalidInteger(String::new()),
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_value_for_id_keys_is_accepted_as_empty_string() {
+        let cmd = parse_osc_99(&meta("i=:g="), &pay("")).unwrap();
+        assert_eq!(cmd.id, Some(String::new()));
+        assert_eq!(cmd.icon_cache_key, Some(String::new()));
+    }
+
+    #[test]
+    fn empty_value_for_base64_keys_decodes_to_empty() {
+        let cmd = parse_osc_99(&meta("f=:s=:n=:t="), &pay("")).unwrap();
+        assert_eq!(cmd.app_name, Some(String::new()));
+        assert_eq!(cmd.sound, Some(String::new()));
+        assert_eq!(cmd.icon_names, vec![String::new()]);
+        assert_eq!(cmd.notification_type, vec![String::new()]);
+    }
+
+    #[test]
+    fn empty_value_for_enum_keys_keeps_current_value() {
+        let cmd = parse_osc_99(&meta("o=unfocused:o=:p=body:p="), &pay("")).unwrap();
+        assert_eq!(cmd.occasion, NotificationOccasion::Unfocused);
+        assert_eq!(cmd.payload_type, Osc99PayloadType::Body);
+    }
+
+    #[test]
+    fn empty_value_for_actions_clears_both_flags() {
+        let cmd = parse_osc_99(&meta("a="), &pay("")).unwrap();
+        assert!(!cmd.actions.report_activation);
+        assert!(!cmd.actions.focus_on_activation);
+    }
+
+    #[test]
+    fn empty_value_for_unknown_key_is_ignored() {
+        let cmd = parse_osc_99(&meta("z=:d=0"), &pay("")).unwrap();
+        assert!(!cmd.done);
+    }
+
+    #[test]
+    fn duplicate_scalar_keys_last_wins() {
+        let cmd = parse_osc_99(&meta("i=first:i=second:u=0:u=2:d=0:d=1"), &pay("")).unwrap();
+        assert_eq!(cmd.id, Some("second".to_owned()));
+        assert_eq!(cmd.urgency, Some(NotificationUrgency::Critical));
+        assert!(cmd.done);
+    }
+
+    #[test]
+    fn multi_byte_key_error_carries_whole_token() {
+        let err = parse_osc_99(&meta("ab=1"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("ab=1".to_owned()));
+    }
+
+    #[test]
+    fn empty_key_error_carries_whole_token() {
+        let err = parse_osc_99(&meta("=x"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("=x".to_owned()));
+    }
+
+    #[test]
+    fn bare_token_error_carries_token() {
+        let err = parse_osc_99(&meta("d=1:foo"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("foo".to_owned()));
+    }
+
+    #[test]
+    fn multi_byte_key_error_with_equals_in_value_carries_whole_token() {
+        let err = parse_osc_99(&meta("ab=c=d"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("ab=c=d".to_owned()));
+    }
+
+    #[test]
+    fn value_may_contain_equals() {
+        // Base64 padding lands in the value; only the first `=` splits.
+        let cmd = parse_osc_99(&meta("f=TXlBcHA="), &pay("")).unwrap();
+        assert_eq!(cmd.app_name, Some("MyApp".to_owned()));
+    }
+
+    // ------------------------------------------------------------------
+    // Metadata item cap (Task 129.3)
+    // ------------------------------------------------------------------
+
+    fn repeated_metadata(count: usize) -> Vec<u8> {
+        vec!["d=1"; count].join(":").into_bytes()
+    }
+
+    #[test]
+    fn metadata_at_item_cap_is_accepted() {
+        let metadata = repeated_metadata(MAX_OSC99_METADATA_ITEMS);
+        assert!(parse_osc_99(&metadata, &pay("")).is_ok());
+    }
+
+    #[test]
+    fn metadata_over_item_cap_is_rejected() {
+        let metadata = repeated_metadata(MAX_OSC99_METADATA_ITEMS + 1);
+        let err = parse_osc_99(&metadata, &pay("")).unwrap_err();
+        assert_eq!(
+            err,
+            Osc99ParseError::TooManyMetadataItems {
+                max: MAX_OSC99_METADATA_ITEMS
+            }
+        );
+    }
+
+    #[test]
+    fn empty_segments_do_not_count_toward_metadata_cap() {
+        let metadata = vec!["d=1"; MAX_OSC99_METADATA_ITEMS]
+            .join("::")
+            .into_bytes();
+        assert!(parse_osc_99(&metadata, &pay("")).is_ok());
+    }
+
+    #[test]
+    fn earlier_malformed_item_wins_over_cap() {
+        let mut metadata = b"foo:".to_vec();
+        metadata.extend(repeated_metadata(MAX_OSC99_METADATA_ITEMS + 1));
+        let err = parse_osc_99(&metadata, &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("foo".to_owned()));
+    }
+
+    // ------------------------------------------------------------------
     // Realistic combined example
     // ------------------------------------------------------------------
 
@@ -940,6 +1096,7 @@ mod tests {
             Osc99ParseError::InvalidBase64("!!!".into()),
             Osc99ParseError::InvalidPayloadUtf8("bad".into()),
             Osc99ParseError::SequenceTooLarge(2_000_000),
+            Osc99ParseError::TooManyMetadataItems { max: 64 },
         ];
         for e in &errors {
             let s = format!("{e}");

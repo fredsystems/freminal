@@ -15,6 +15,17 @@
 
 use std::fmt;
 
+use crate::key_value::{KeyValueError, KeyValueItem, KeyValueSeparator, tokenize};
+
+/// Maximum number of `key=value` items accepted in one kitty graphics control
+/// data region.
+///
+/// The protocol defines roughly thirty single-character keys; 64 admits every
+/// legitimate command (including a few repeats) while bounding the work a
+/// hostile sequence can force. Exceeding it yields
+/// [`KittyParseError::TooManyControlItems`].
+pub const MAX_KITTY_CONTROL_ITEMS: usize = 64;
+
 /// Action requested by a Kitty graphics command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KittyAction {
@@ -240,6 +251,11 @@ pub enum KittyParseError {
     InvalidInteger(String),
     /// An unrecognized compression type.
     UnknownCompression(u8),
+    /// The control data held more than [`MAX_KITTY_CONTROL_ITEMS`] items.
+    TooManyControlItems {
+        /// The item cap that was exceeded.
+        max: usize,
+    },
 }
 
 impl fmt::Display for KittyParseError {
@@ -253,6 +269,9 @@ impl fmt::Display for KittyParseError {
             Self::UnknownDeleteTarget(c) => write!(f, "unknown delete target: {}", *c as char),
             Self::InvalidInteger(s) => write!(f, "invalid integer: {s}"),
             Self::UnknownCompression(c) => write!(f, "unknown compression: {}", *c as char),
+            Self::TooManyControlItems { max } => {
+                write!(f, "more than {max} control data items")
+            }
         }
     }
 }
@@ -395,26 +414,35 @@ fn apply_control_pair(
 fn parse_control_data(data: &[u8]) -> Result<KittyControlData, KittyParseError> {
     let mut ctrl = KittyControlData::default();
 
-    for pair in data.split(|&b| b == b',') {
-        if pair.is_empty() {
-            continue;
+    // Empty segments (leading/trailing/doubled commas) are skipped by the
+    // tokenizer.
+    for item in tokenize(data, KeyValueSeparator::Comma, MAX_KITTY_CONTROL_ITEMS) {
+        match item {
+            // A pair with no `=` is malformed.
+            Ok(KeyValueItem::Bare(pair)) => {
+                return Err(KittyParseError::InvalidControlPair(
+                    String::from_utf8_lossy(pair).into_owned(),
+                ));
+            }
+            Ok(KeyValueItem::Pair { key, value }) => {
+                // An empty key or an empty value is malformed. The key is the
+                // first byte only (a wider key is accepted as its first byte;
+                // tightening that is Task 135).
+                let Some(&key_byte) = key.first().filter(|_| !value.is_empty()) else {
+                    let mut pair = Vec::with_capacity(key.len() + 1 + value.len());
+                    pair.extend_from_slice(key);
+                    pair.push(b'=');
+                    pair.extend_from_slice(value);
+                    return Err(KittyParseError::InvalidControlPair(
+                        String::from_utf8_lossy(&pair).into_owned(),
+                    ));
+                };
+                apply_control_pair(&mut ctrl, key_byte, value)?;
+            }
+            Err(KeyValueError::TooManyItems { max }) => {
+                return Err(KittyParseError::TooManyControlItems { max });
+            }
         }
-
-        // Find the '=' separator
-        let eq_pos = pair.iter().position(|&b| b == b'=').ok_or_else(|| {
-            KittyParseError::InvalidControlPair(String::from_utf8_lossy(pair).into_owned())
-        })?;
-
-        if eq_pos == 0 || eq_pos + 1 >= pair.len() {
-            return Err(KittyParseError::InvalidControlPair(
-                String::from_utf8_lossy(pair).into_owned(),
-            ));
-        }
-
-        let key = pair[0];
-        let value = &pair[eq_pos + 1..];
-
-        apply_control_pair(&mut ctrl, key, value)?;
     }
 
     Ok(ctrl)
@@ -1006,6 +1034,105 @@ mod tests {
         assert_eq!(cmd.control.image_id, Some(1));
     }
 
+    // --- Pinned behaviour (Task 129.3): must survive the tokenizer migration ---
+
+    #[test]
+    fn multi_byte_key_uses_first_byte() {
+        // Known quirk (fixed in Task 135): only the key's first byte is used,
+        // so `ixyz=7` is read as `i=7`.
+        let apc = make_apc("ixyz=7", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.image_id, Some(7));
+    }
+
+    #[test]
+    fn multi_byte_key_abc_is_accepted_as_action_key() {
+        // `abc=q` is read as `a=q`.
+        let apc = make_apc("abc=q", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.action, Some(KittyAction::Query));
+    }
+
+    #[test]
+    fn multi_char_value_uses_first_byte_for_char_keys() {
+        // `a=tXYZ` is accepted as `a=t`.
+        let apc = make_apc("a=tXYZ", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.action, Some(KittyAction::Transmit));
+    }
+
+    #[test]
+    fn duplicate_keys_last_wins() {
+        let apc = make_apc("i=1,i=2,a=t,a=p", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.image_id, Some(2));
+        assert_eq!(cmd.control.action, Some(KittyAction::Put));
+    }
+
+    #[test]
+    fn invalid_control_pair_payloads_carry_the_token() {
+        for (control, token) in [
+            ("abc", "abc"),
+            ("a=", "a="),
+            ("=x", "=x"),
+            ("=", "="),
+            ("a=t,i=", "i="),
+        ] {
+            let err = parse_control_data(control.as_bytes()).unwrap_err();
+            assert_eq!(
+                err,
+                KittyParseError::InvalidControlPair(token.to_owned()),
+                "control {control:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_may_contain_equals() {
+        // Only the first `=` splits; the rest belongs to the value, which
+        // `parse_u32` then rejects.
+        let err = parse_control_data(b"i=1=2").unwrap_err();
+        assert_eq!(err, KittyParseError::InvalidInteger("1=2".to_owned()));
+    }
+
+    // --- Control item cap (Task 129.3) ---
+
+    fn repeated_control(count: usize) -> Vec<u8> {
+        vec!["i=1"; count].join(",").into_bytes()
+    }
+
+    #[test]
+    fn control_data_at_item_cap_is_accepted() {
+        let control = repeated_control(MAX_KITTY_CONTROL_ITEMS);
+        assert!(parse_control_data(&control).is_ok());
+    }
+
+    #[test]
+    fn control_data_over_item_cap_is_rejected() {
+        let control = repeated_control(MAX_KITTY_CONTROL_ITEMS + 1);
+        let err = parse_control_data(&control).unwrap_err();
+        assert_eq!(
+            err,
+            KittyParseError::TooManyControlItems {
+                max: MAX_KITTY_CONTROL_ITEMS
+            }
+        );
+    }
+
+    #[test]
+    fn empty_segments_do_not_count_toward_control_cap() {
+        let control = vec!["i=1"; MAX_KITTY_CONTROL_ITEMS].join(",,").into_bytes();
+        assert!(parse_control_data(&control).is_ok());
+    }
+
+    #[test]
+    fn earlier_malformed_pair_wins_over_cap() {
+        let mut control = b"abc,".to_vec();
+        control.extend(repeated_control(MAX_KITTY_CONTROL_ITEMS + 1));
+        let err = parse_control_data(&control).unwrap_err();
+        assert_eq!(err, KittyParseError::InvalidControlPair("abc".to_owned()));
+    }
+
     #[test]
     fn display_all_error_variants() {
         let errors = [
@@ -1017,6 +1144,7 @@ mod tests {
             KittyParseError::UnknownDeleteTarget(b'9'),
             KittyParseError::InvalidInteger("abc".into()),
             KittyParseError::UnknownCompression(b'x'),
+            KittyParseError::TooManyControlItems { max: 64 },
         ];
         for e in &errors {
             let s = format!("{e}");
