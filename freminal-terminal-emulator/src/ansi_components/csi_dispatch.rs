@@ -79,27 +79,20 @@ pub fn warn_unhandled(raw: &dyn Fn() -> String) {
 pub fn dispatch_csi(
     key: CsiKey,
     params: &[u8],
-    intermediates: &[u8],
     raw: &dyn Fn() -> String,
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     let routed = match (key.prefix, key.intermediate) {
-        (CsiPrefix::None, CsiIntermediate::None) => {
-            plain(key.final_byte, params, intermediates, output)
-        }
+        (CsiPrefix::None, CsiIntermediate::None) => plain(key.final_byte, params, output),
         (CsiPrefix::Question, CsiIntermediate::None) => question(key.final_byte, params, output),
         (CsiPrefix::Greater, CsiIntermediate::None) => greater(key.final_byte, params, output),
         (CsiPrefix::Less, CsiIntermediate::None) => less(key.final_byte, params, output),
-        (CsiPrefix::Equals, CsiIntermediate::None) => {
-            equals(key.final_byte, params, intermediates, output)
-        }
+        (CsiPrefix::Equals, CsiIntermediate::None) => equals(key.final_byte, params, output),
         (CsiPrefix::None, CsiIntermediate::Space) => space(key.final_byte, params, output),
         (CsiPrefix::None, CsiIntermediate::Bang) => bang(key.final_byte, params, output),
-        (CsiPrefix::None, CsiIntermediate::Dollar) => {
-            dollar(key.final_byte, params, intermediates, output)
-        }
+        (CsiPrefix::None, CsiIntermediate::Dollar) => dollar(key.final_byte, params, output),
         (CsiPrefix::Question, CsiIntermediate::Dollar) => {
-            question_dollar(key.final_byte, params, intermediates, output)
+            question_dollar(key.final_byte, params, output)
         }
         _ => None,
     };
@@ -111,12 +104,7 @@ pub fn dispatch_csi(
 }
 
 /// `CSI Ps ... <final>`: no prefix, no intermediate. `None` means no route.
-fn plain(
-    final_byte: u8,
-    params: &[u8],
-    intermediates: &[u8],
-    output: &mut Vec<TerminalOutput>,
-) -> Option<ParserOutcome> {
+fn plain(final_byte: u8, params: &[u8], output: &mut Vec<TerminalOutput>) -> Option<ParserOutcome> {
     let outcome = match final_byte {
         b'A' => ansi_parser_inner_csi_finished_cuu(params, output),
         b'B' => ansi_parser_inner_csi_finished_cud(params, output),
@@ -143,7 +131,7 @@ fn plain(
         b'd' => ansi_parser_inner_csi_finished_vpa(params, output),
         b'g' => ansi_parser_inner_csi_finished_tbc(params, output),
         b'm' => ansi_parser_inner_csi_finished_sgr(params, output),
-        _ => return plain_modes_and_reports(final_byte, params, intermediates, output),
+        _ => return plain_modes_and_reports(final_byte, params, output),
     };
     Some(outcome)
 }
@@ -153,7 +141,6 @@ fn plain(
 fn plain_modes_and_reports(
     final_byte: u8,
     params: &[u8],
-    intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> Option<ParserOutcome> {
     let outcome = match final_byte {
@@ -166,7 +153,7 @@ fn plain_modes_and_reports(
             ParserOutcome::Finished
         }
         b'n' => ansi_parser_inner_csi_finished_dsr(params, output),
-        b'c' => ansi_parser_inner_csi_finished_da(params, intermediates, output),
+        b'c' => ansi_parser_inner_csi_finished_da(params, output),
         b'r' => ansi_parser_inner_csi_finished_decstbm(params, output),
         // With params this is DECSLRM (set left/right margins); empty it is
         // SCOSC (save cursor). The handler (`process_outputs`) ignores
@@ -229,7 +216,7 @@ fn greater(
 ) -> Option<ParserOutcome> {
     let outcome = match final_byte {
         // DA2: the handler reads its own `>` prefix from `params`.
-        b'c' => ansi_parser_inner_csi_finished_da(params, &[], output),
+        b'c' => ansi_parser_inner_csi_finished_da(params, output),
         // XTVERSION.
         b'q' => ansi_parser_inner_csi_finished_xtversion(params, output),
         // XTMODKEYS (xterm modifyOtherKeys).
@@ -260,12 +247,11 @@ fn less(final_byte: u8, params: &[u8], output: &mut Vec<TerminalOutput>) -> Opti
 fn equals(
     final_byte: u8,
     params: &[u8],
-    intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> Option<ParserOutcome> {
     let outcome = match final_byte {
         // DA3: the handler reads its own `=` prefix from `params`.
-        b'c' => ansi_parser_inner_csi_finished_da(params, intermediates, output),
+        b'c' => ansi_parser_inner_csi_finished_da(params, output),
         // Kitty keyboard protocol: set.
         b'u' => {
             ansi_parser_inner_csi_finished_scorc(params, output);
@@ -298,17 +284,11 @@ fn bang(final_byte: u8, params: &[u8], output: &mut Vec<TerminalOutput>) -> Opti
 fn dollar(
     final_byte: u8,
     params: &[u8],
-    intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> Option<ParserOutcome> {
     match final_byte {
         // DECRQM (ANSI mode).
-        b'p' => Some(ansi_parser_inner_csi_finished_decrqm(
-            params,
-            intermediates,
-            final_byte,
-            output,
-        )),
+        b'p' => Some(ansi_parser_inner_csi_finished_decrqm(params, output)),
         _ => None,
     }
 }
@@ -317,17 +297,11 @@ fn dollar(
 fn question_dollar(
     final_byte: u8,
     params: &[u8],
-    intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> Option<ParserOutcome> {
     match final_byte {
         // DECRQM (DEC private mode).
-        b'p' => Some(ansi_parser_inner_csi_finished_decrqm(
-            params,
-            intermediates,
-            final_byte,
-            output,
-        )),
+        b'p' => Some(ansi_parser_inner_csi_finished_decrqm(params, output)),
         _ => None,
     }
 }

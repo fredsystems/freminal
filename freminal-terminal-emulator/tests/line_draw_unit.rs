@@ -6,18 +6,18 @@
 //! Line drawing transitions via ESC (0 and B) if supported
 
 use freminal_terminal_emulator::ansi_components::standard::StandardParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
 #[test]
 fn line_draw_enable_disable() {
+    // The real parser never forwards the leading ESC to the sub-parser.
     let mut p = StandardParser::default();
-    for &b in b"\x1b(0" {
+    for &b in b"(0" {
         let _ = p.push(b);
     } // enable line draw
-    assert!(!p.current_trace_str().is_empty());
-    p.clear_trace();
-    for &b in b"\x1b(B" {
+    assert_eq!(p.trace_str(), "(0");
+    let mut p = StandardParser::default();
+    for &b in b"(B" {
         let _ = p.push(b);
     } // disable line draw
-    assert!(!p.current_trace_str().is_empty());
+    assert_eq!(p.trace_str(), "(B");
 }

@@ -6,17 +6,19 @@
 //! Phase 13: Exhaustive CSI command coverage (movement, erase, insert/delete, scroll, tabs)
 
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
-fn feed(p: &mut AnsiCsiParser, s: &str) {
-    for &b in s.as_bytes() {
+/// Feed the CSI body (everything after the `ESC [` introducer, which the
+/// real parser never forwards to the CSI sub-parser) into a fresh parser.
+fn feed(s: &str) -> AnsiCsiParser {
+    let mut p = AnsiCsiParser::default();
+    for &b in s.strip_prefix("\x1b[").unwrap_or(s).as_bytes() {
         let _ = p.push(b);
     }
+    p
 }
 
 #[test]
 fn csi_move_family_full_matrix() {
-    let mut p = AnsiCsiParser::default();
     // CUP (H), CHA (G), CUU (A), CUD (B), CUF (C), CUB (D), HVP (f)
     for seq in [
         "\x1b[1;1H",
@@ -32,40 +34,34 @@ fn csi_move_family_full_matrix() {
         "\x1b[3D",
         "\x1b[5;10f",
     ] {
-        feed(&mut p, seq);
-        assert!(!p.current_trace_str().is_empty());
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(!p.trace_str().is_empty());
     }
 }
 
 #[test]
 fn csi_erase_family() {
-    let mut p = AnsiCsiParser::default();
     for seq in [
         "\x1b[J", "\x1b[0J", "\x1b[1J", "\x1b[2J", "\x1b[K", "\x1b[0K", "\x1b[1K", "\x1b[2K",
     ] {
-        feed(&mut p, seq);
-        assert!(p.current_trace_str().contains('J') || p.current_trace_str().contains('K'));
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(p.trace_str().contains('J') || p.trace_str().contains('K'));
     }
 }
 
 #[test]
 fn csi_insert_delete_chars_and_lines() {
-    let mut p = AnsiCsiParser::default();
     // DCH (P), ICH (@), IL (L), DL (M), ECH (X)
     for seq in [
         "\x1b[P", "\x1b[3P", "\x1b[@", "\x1b[4@", "\x1b[2L", "\x1b[2M", "\x1b[3X",
     ] {
-        feed(&mut p, seq);
-        assert!(!p.current_trace_str().is_empty());
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(!p.trace_str().is_empty());
     }
 }
 
 #[test]
 fn csi_scroll_region_and_scroll() {
-    let mut p = AnsiCsiParser::default();
     // DECSTBM: set top/bottom; SU (S), SD (T)
     for seq in [
         "\x1b[3;20r",
@@ -75,26 +71,22 @@ fn csi_scroll_region_and_scroll() {
         "\x1b[T",
         "\x1b[4T",
     ] {
-        feed(&mut p, seq);
-        assert!(!p.current_trace_str().is_empty());
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(!p.trace_str().is_empty());
     }
 }
 
 #[test]
 fn csi_tab_stops() {
-    let mut p = AnsiCsiParser::default();
     // HTS (H), TBC (g) with params 0/3
     for seq in ["\x1bH", "\x1b[0g", "\x1b[3g"] {
-        feed(&mut p, seq);
-        assert!(!p.current_trace_str().is_empty());
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(!p.trace_str().is_empty());
     }
 }
 
 #[test]
 fn csi_sgr_big_matrix() {
-    let mut p = AnsiCsiParser::default();
     for seq in [
         "\x1b[0m",
         "\x1b[1m",
@@ -138,20 +130,17 @@ fn csi_sgr_big_matrix() {
         "\x1b[38;2;12;34;56m",
         "\x1b[48;2;0;128;255m",
     ] {
-        feed(&mut p, seq);
-        assert!(p.current_trace_str().contains('m'));
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(p.trace_str().contains('m'));
     }
 }
 
 #[test]
 fn csi_error_paths_cover_invalid_finals_and_overflows() {
-    let mut p = AnsiCsiParser::default();
     // invalid final
-    feed(&mut p, "\x1b[12;24Z");
-    assert!(!p.current_trace_str().is_empty());
-    p.clear_trace();
+    let p = feed("\x1b[12;24Z");
+    assert!(!p.trace_str().is_empty());
     // param overflow
-    feed(&mut p, "\x1b[9999999999999999999A");
-    assert!(!p.current_trace_str().is_empty());
+    let p = feed("\x1b[9999999999999999999A");
+    assert!(!p.trace_str().is_empty());
 }

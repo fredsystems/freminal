@@ -19,10 +19,10 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// `>` and `=` are private-marker *parameter* bytes (`0x3C..=0x3F`), never
 /// intermediates: they arrive as the first byte of `params`
 /// (`params = [b'>', ...]`). The router (`csi_dispatch.rs`) calls this handler
-/// with empty `intermediates`.
+/// only for keys with no intermediate (`CsiIntermediate::None`), so this handler
+/// takes no intermediates.
 ///
-/// A leading `>` sets `is_gt_prefix` before the three sub-cases are
-/// evaluated:
+/// A leading `>` is stripped before the three sub-cases are evaluated:
 /// - **Case 1** — `>` alone, no numeric params → DA2 with `param = 0`.
 /// - **Case 2** — `>` followed by a single numeric value → DA2 with that
 ///   param (only `0` is meaningful; other values are rarely used).
@@ -32,8 +32,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// A leading `=` is DA3 (`ESC [ = c`).
 ///
 /// Without a `>` or `=` prefix the only valid form is a bare `ESC [ c` or
-/// `ESC [ 0 c` (DA1 with `param = 0`).  Any non-zero param or stray
-/// intermediates are rejected.
+/// `ESC [ 0 c` (DA1 with `param = 0`).  Any non-zero param is rejected.
 ///
 /// Note: the XTVERSION query (`ESC [ > q`) uses terminator `q` and is
 /// dispatched through `report_xt_version.rs`, not this function.
@@ -42,7 +41,6 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// Returns `InvalidParserFailure` if parameters are malformed.
 pub fn ansi_parser_inner_csi_finished_da(
     params: &[u8],
-    intermediates: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     // DA3: CSI = c — Tertiary Device Attributes
@@ -51,16 +49,7 @@ pub fn ansi_parser_inner_csi_finished_da(
         return ParserOutcome::Finished;
     }
 
-    let is_gt_prefix = params.first() == Some(&b'>');
-
-    if is_gt_prefix {
-        // Strip any leading '>' from params for numeric parsing
-        let clean_params = if !params.is_empty() && params[0] == b'>' {
-            &params[1..]
-        } else {
-            params
-        };
-
+    if let Some(clean_params) = params.strip_prefix(b">") {
         // case 1: pure '>' only (ESC[>c) → DA2 with implicit param 0
         if clean_params.is_empty() {
             output.push(TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 });
@@ -80,25 +69,19 @@ pub fn ansi_parser_inner_csi_finished_da(
     }
 
     // Primary DA (ESC[c)
-    if intermediates.is_empty() {
-        let Ok(param) = parse_param_as::<usize>(params) else {
-            return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDACommand(
-                String::from_utf8_lossy(params).to_string(),
-            ));
-        };
-        let param = param.unwrap_or(0);
-        if param != 0 {
-            return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDACommand(
-                format!("Invalid parameters for Send DA: {params:?}"),
-            ));
-        }
-        output.push(TerminalOutput::RequestDeviceAttributes);
-        return ParserOutcome::Finished;
+    let Ok(param) = parse_param_as::<usize>(params) else {
+        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDACommand(
+            String::from_utf8_lossy(params).to_string(),
+        ));
+    };
+    let param = param.unwrap_or(0);
+    if param != 0 {
+        return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDACommand(format!(
+            "Invalid parameters for Send DA: {params:?}"
+        )));
     }
-
-    ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDACommand(format!(
-        "Invalid intermediates for Send DA: {params:?}, intermediates={intermediates:?}",
-    )))
+    output.push(TerminalOutput::RequestDeviceAttributes);
+    ParserOutcome::Finished
 }
 
 #[cfg(test)]
@@ -109,7 +92,7 @@ mod tests {
     #[test]
     fn da_primary_empty_params_emits_request_device_attributes() {
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b"", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output, vec![TerminalOutput::RequestDeviceAttributes]);
     }
@@ -117,7 +100,7 @@ mod tests {
     #[test]
     fn da_primary_zero_param_emits_request_device_attributes() {
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"0", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b"0", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(output, vec![TerminalOutput::RequestDeviceAttributes]);
     }
@@ -125,7 +108,7 @@ mod tests {
     #[test]
     fn da_primary_non_zero_param_is_invalid() {
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"1", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b"1", &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
         assert_eq!(output, []);
     }
@@ -134,7 +117,7 @@ mod tests {
     fn da_secondary_gt_param_byte_emits_secondary_param0() {
         // `>` as first param byte, nothing else → DA2 with param=0
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b">", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b">", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(
             output,
@@ -146,7 +129,7 @@ mod tests {
     fn da_secondary_gt0_emits_secondary_param0() {
         // `>0` → DA2 with param=0
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b">0", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b">0", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(
             output,
@@ -158,7 +141,7 @@ mod tests {
     fn da_secondary_multi_params_is_invalid() {
         // `>1;2` → invalid (multiple numeric params after `>`)
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b">1;2", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b">1;2", &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
         assert_eq!(output, []);
     }
@@ -167,20 +150,11 @@ mod tests {
     fn da_tertiary_eq_param_byte_emits_tertiary() {
         // `=` as first param byte → Tertiary DA
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"=", &[], &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b"=", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(
             output,
             vec![TerminalOutput::RequestTertiaryDeviceAttributes]
         );
-    }
-
-    #[test]
-    fn da_invalid_intermediates_is_invalid() {
-        // some unknown intermediate → last fallthrough
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"0", b"!", &mut output);
-        assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert_eq!(output, []);
     }
 }

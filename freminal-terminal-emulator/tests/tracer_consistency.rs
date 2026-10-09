@@ -9,7 +9,7 @@ use freminal_terminal_emulator::ansi_components::{
 };
 use proptest::{prelude::any, prop_assert_eq, proptest};
 
-/// Ensure all parser variants record pushed bytes into their trace buffer.
+/// Ensure all parser variants expose the bytes they accepted via `trace_str`.
 #[test]
 fn seq_trace_updates_on_push() {
     // OSC
@@ -30,9 +30,11 @@ fn seq_trace_updates_on_push() {
 
     // Standard
     let mut std = StandardParser::new();
-    std.push(b'C');
+    // The standard sub-parser retains only bytes it accepts; `H` (HTS) is a
+    // valid final byte.
+    std.push(b'H');
     assert!(
-        std.trace_str().contains('C'),
+        std.trace_str().contains('H'),
         "Standard parser did not record byte in trace"
     );
 

@@ -698,7 +698,10 @@ impl FreminalAnsiParser {
         }
     }
 
-    /// Retrieve a snapshot of the currently active parser's trace buffer.
+    /// Render the bytes of the sequence currently being parsed, for
+    /// diagnostics. Each sub-parser renders the bytes it already holds
+    /// (bounded for logging); with no sub-parser active this falls back to the
+    /// top-level trace of recent input.
     #[must_use]
     pub fn current_trace_str(&self) -> String {
         match &self.inner {
@@ -1800,9 +1803,8 @@ mod tests {
         p.push(b"\x1b]0;partial");
         // Parser should be in OSC state
         assert!(matches!(p.inner, ParserInner::Osc(_)));
-        let trace = p.current_trace_str();
-        // Trace should contain the OSC sequence bytes
-        assert_ne!(trace, "");
+        // Reflects the OSC body bytes accepted so far (the sub-parser's `params`).
+        assert_eq!(p.current_trace_str(), "0;partial");
     }
 
     #[test]
@@ -1811,8 +1813,8 @@ mod tests {
         // Start a CSI sequence but don't finish it
         p.push(b"\x1b[1");
         assert!(matches!(p.inner, ParserInner::Csi(_)));
-        let trace = p.current_trace_str();
-        assert_ne!(trace, "");
+        // Reflects the CSI body so far (the sub-parser's `sequence`).
+        assert_eq!(p.current_trace_str(), "1");
     }
 
     #[test]
@@ -1821,8 +1823,8 @@ mod tests {
         // ESC ( enters Standard parser waiting for charset byte
         p.push(b"\x1b(");
         assert!(matches!(p.inner, ParserInner::Standard(_)));
-        let trace = p.current_trace_str();
-        assert_ne!(trace, "");
+        // Reflects the intermediates accepted so far.
+        assert_eq!(p.current_trace_str(), "(");
     }
 
     #[test]
@@ -1831,8 +1833,8 @@ mod tests {
         // Start a DCS sequence but don't finish it
         p.push(b"\x1bP$q");
         assert!(matches!(p.inner, ParserInner::Dcs(_)));
-        let trace = p.current_trace_str();
-        assert_ne!(trace, "");
+        // Reflects the DCS body so far, without the leading `P` introducer.
+        assert_eq!(p.current_trace_str(), "$q");
     }
 
     #[test]
@@ -1841,8 +1843,8 @@ mod tests {
         // Start an APC sequence but don't finish it
         p.push(b"\x1b_partial");
         assert!(matches!(p.inner, ParserInner::Apc(_)));
-        let trace = p.current_trace_str();
-        assert_ne!(trace, "");
+        // Reflects the APC body so far, without the leading `_` introducer.
+        assert_eq!(p.current_trace_str(), "partial");
     }
 
     #[test]
@@ -1938,5 +1940,28 @@ mod tests {
             has_title,
             "After ESC aborts CSI, new OSC should complete: {result:?}"
         );
+    }
+
+    // ── Size regression guard ───────────────────────────────────────────────
+
+    /// Every escape sequence constructs a fresh sub-parser and stores it in
+    /// `ParserInner`, so the size of those types is paid as a memset (on
+    /// construction) plus a memmove (into the enum) per sequence.
+    ///
+    /// Each sub-parser used to embed an 8 KB `SequenceTracer` ring buffer,
+    /// which made every sequence cost ~16 KB of memory traffic (26-36% of
+    /// samples in the SGR-heavy parse bench). Only the top-level
+    /// `FreminalAnsiParser` may own a tracer; sub-parsers must stay small. If
+    /// this test fails, a large inline array (or a tracer) crept back into a
+    /// sub-parser: move the buffer to the heap or to the top-level parser.
+    #[test]
+    fn sub_parsers_stay_small() {
+        const MAX_BYTES: usize = 128;
+        assert!(std::mem::size_of::<ParserInner>() < MAX_BYTES);
+        assert!(std::mem::size_of::<AnsiCsiParser>() < MAX_BYTES);
+        assert!(std::mem::size_of::<AnsiOscParser>() < MAX_BYTES);
+        assert!(std::mem::size_of::<StandardParser>() < MAX_BYTES);
+        assert!(std::mem::size_of::<DcsParser>() < MAX_BYTES);
+        assert!(std::mem::size_of::<ApcParser>() < MAX_BYTES);
     }
 }

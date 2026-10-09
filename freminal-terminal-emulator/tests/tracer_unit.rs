@@ -4,14 +4,12 @@
 // https://opensource.org/licenses/MIT.
 
 use freminal_terminal_emulator::ansi_components::osc::AnsiOscParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
 #[test]
-fn tracer_appends_and_clears() {
+fn osc_trace_str_reflects_pushed_bytes() {
     let mut p = AnsiOscParser::default();
-    p.append_trace(b'A');
-    p.append_trace(b'B');
-    assert_eq!(p.current_trace_str(), "AB");
-    p.clear_trace();
-    assert!(p.current_trace_str().is_empty());
+    assert!(p.trace_str().is_empty());
+    let _ = p.push(b'A');
+    let _ = p.push(b'B');
+    assert_eq!(p.trace_str(), "AB");
 }

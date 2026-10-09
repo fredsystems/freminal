@@ -6,17 +6,19 @@
 //! Phase 13: DEC private modes and queries (broad set)
 
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
-fn feed(p: &mut AnsiCsiParser, s: &str) {
-    for &b in s.as_bytes() {
+/// Feed the CSI body (everything after the `ESC [` introducer, which the
+/// real parser never forwards to the CSI sub-parser) into a fresh parser.
+fn feed(s: &str) -> AnsiCsiParser {
+    let mut p = AnsiCsiParser::default();
+    for &b in s.strip_prefix("\x1b[").unwrap_or(s).as_bytes() {
         let _ = p.push(b);
     }
+    p
 }
 
 #[test]
 fn dec_private_modes_toggle_common() {
-    let mut p = AnsiCsiParser::default();
     for seq in [
         "\x1b[?1h",
         "\x1b[?1l",
@@ -35,28 +37,23 @@ fn dec_private_modes_toggle_common() {
         "\x1b[?1049h",
         "\x1b[?1049l",
     ] {
-        feed(&mut p, seq);
-        assert!(p.current_trace_str().contains('?'));
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(p.trace_str().contains('?'));
     }
 }
 
 #[test]
 fn dec_mode_reports_regular_and_private() {
-    let mut p = AnsiCsiParser::default();
     for seq in ["\x1b[1$p", "\x1b[2$p", "\x1b[?25$p", "\x1b[?1049$p"] {
-        feed(&mut p, seq);
-        assert!(p.current_trace_str().contains("$p"));
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(p.trace_str().contains("$p"));
     }
 }
 
 #[test]
 fn device_attributes_and_xtversion() {
-    let mut p = AnsiCsiParser::default();
     for seq in ["\x1b[c", "\x1b[>c", "\x1b[>0q"] {
-        feed(&mut p, seq);
-        assert!(!p.current_trace_str().is_empty());
-        p.clear_trace();
+        let p = feed(seq);
+        assert!(!p.trace_str().is_empty());
     }
 }

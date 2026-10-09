@@ -340,11 +340,12 @@ proptest! {
 fn osc_1337_sequence_records_bytes() {
     use freminal_terminal_emulator::ansi_components::osc::AnsiOscParser;
     let mut osc = AnsiOscParser::default();
-    let seq = b"\x1b]1337;File=name=test.png;size=1000\x07";
+    // The real parser never forwards the `ESC ]` introducer to the OSC sub-parser.
+    let seq = b"1337;File=name=test.png;size=1000\x07";
     for b in seq.iter().copied() {
         osc.push(b);
     }
-    let trace = osc.current_trace_str();
+    let trace = osc.trace_str();
     assert!(
         trace.contains("1337"),
         "Trace should contain 1337, got: {trace}"

@@ -25,7 +25,9 @@
 //! the terminator, so `raw_params` contains only the printable
 //! `1338;HISTFILE=<path>` bytes.
 
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 use freminal_common::buffer_states::osc::AnsiOscType;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use std::path::PathBuf;
@@ -36,18 +38,14 @@ use std::path::PathBuf;
 /// splitting upstream).  We parse from the raw bytes because the sub-
 /// command may contain its own `=` (and could one day contain encoded
 /// `;`), so the upstream semicolon split is too aggressive.
-pub(super) fn handle_osc_shell_info(
-    raw_params: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+pub(super) fn handle_osc_shell_info(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // raw_params looks like: b"1338;HISTFILE=/home/u/.zsh_history"
     //
     // Find the first ';' to skip past "1338".
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
         tracing::warn!(
             "OSC 1338: missing sub-command: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     };
@@ -56,7 +54,7 @@ pub(super) fn handle_osc_shell_info(
 
     // HISTFILE= sub-command (case-sensitive).
     if let Some(after_key) = strip_ascii_prefix(rest, b"HISTFILE=") {
-        handle_shell_info_histfile(after_key, seq_trace, output);
+        handle_shell_info_histfile(after_key, raw_params, output);
         return;
     }
 
@@ -66,21 +64,17 @@ pub(super) fn handle_osc_shell_info(
     // error.
     tracing::warn!(
         "OSC 1338: unrecognised sub-command (ignored); raw sequence: \"{}\"",
-        seq_trace.as_escaped()
+        escape_sequence_for_log_bounded(raw_params)
     );
 }
 
 /// Parse the value bytes of `HISTFILE=<path>` and emit the corresponding
 /// `AnsiOscType::ShellInfoHistFile`.
-fn handle_shell_info_histfile(
-    value: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+fn handle_shell_info_histfile(value: &[u8], raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     if value.is_empty() {
         tracing::warn!(
             "OSC 1338 HISTFILE=: empty path: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     }
@@ -94,7 +88,7 @@ fn handle_shell_info_histfile(
     let Ok(s) = std::str::from_utf8(value) else {
         tracing::warn!(
             "OSC 1338 HISTFILE=: non-UTF-8 path: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     };
@@ -117,7 +111,6 @@ fn strip_ascii_prefix<'a>(haystack: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]>
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
-    use super::super::tracer::SequenceTracer;
     use freminal_common::buffer_states::osc::AnsiOscType;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use std::path::PathBuf;
@@ -129,10 +122,6 @@ mod tests {
             parser.ansiparser_inner_osc(b, &mut output);
         }
         output
-    }
-
-    fn tracer() -> SequenceTracer {
-        SequenceTracer::new()
     }
 
     // ── End-to-end OSC 1338 HISTFILE=... parsing ─────────────────────────
@@ -218,14 +207,14 @@ mod tests {
     #[test]
     fn shell_info_missing_semicolon_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_shell_info(b"1338HISTFILE=/x", &tracer(), &mut output);
+        super::handle_osc_shell_info(b"1338HISTFILE=/x", &mut output);
         assert_eq!(output, []);
     }
 
     #[test]
     fn shell_info_unrecognised_subcommand_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_shell_info(b"1338;UNKNOWN=bar", &tracer(), &mut output);
+        super::handle_osc_shell_info(b"1338;UNKNOWN=bar", &mut output);
         assert_eq!(output, []);
     }
 
@@ -235,14 +224,14 @@ mod tests {
         // Build "1338;HISTFILE=" + invalid UTF-8 bytes.
         let mut raw = b"1338;HISTFILE=".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
-        super::handle_osc_shell_info(&raw, &tracer(), &mut output);
+        super::handle_osc_shell_info(&raw, &mut output);
         assert_eq!(output, []);
     }
 
     #[test]
     fn shell_info_histfile_empty_value_direct_call() {
         let mut output = Vec::new();
-        super::handle_shell_info_histfile(b"", &tracer(), &mut output);
+        super::handle_shell_info_histfile(b"", b"1338;HISTFILE=", &mut output);
         assert_eq!(output, []);
     }
 }
