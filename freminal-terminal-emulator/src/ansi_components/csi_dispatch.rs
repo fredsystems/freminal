@@ -19,7 +19,7 @@
 //!
 //! | Prefix | Intermediate | Finals                                                              |
 //! |--------|--------------|---------------------------------------------------------------------|
-//! | none   | none         | `A B C D E F G H I J K L M P S T X Z @ \` b d f g m h l n c r s u t x` |
+//! | none   | none         | ``A B C D E F G H I J K L M P S T X Z @ ` b d f g m h l n c r s u t x`` |
 //! | none   | `$`          | `p` (DECRQM, ANSI)                                                  |
 //! | none   | `!`          | `p` (DECSTR)                                                        |
 //! | none   | SP           | `q` (DECSCUSR)                                                      |

@@ -184,7 +184,7 @@ impl AnsiCsiParser {
     /// Push a byte into the parser and return the next state
     ///
     /// When the byte completes the sequence, the sequence is classified into a
-    /// [`CsiKey`] and routed by [`dispatch_csi`]. A sequence whose private
+    /// `CsiKey` and routed by `csi_dispatch::dispatch_csi`. A sequence whose private
     /// marker is misplaced cannot be classified and is treated like any other
     /// recognised-but-unhandled sequence: logged, no output.
     ///

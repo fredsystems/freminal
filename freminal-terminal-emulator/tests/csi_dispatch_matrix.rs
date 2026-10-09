@@ -6,23 +6,33 @@
 //! Exhaustive coverage of the strict CSI router (Task 128.3).
 //!
 //! A CSI sequence is identified by its private-marker prefix, intermediate
-//! byte(s) and final byte *together*. The router routes only the keys in the
-//! table mirrored by [`routed`]; every other syntactically valid key is
-//! recognised-but-unhandled and must emit no output.
+//! byte(s) and final byte *together*. The router routes only the keys listed
+//! in [`routes`]; every other syntactically valid key is recognised-but-
+//! unhandled and must emit no output.
 //!
 //! The matrix drives every combination of
-//! 5 prefixes (none, `?`, `>`, `<`, `=`) x 20 intermediate shapes (none, all
-//! sixteen single intermediates `0x20..=0x2F`, and several two-byte forms) x
+//! 5 prefixes (none, `?`, `>`, `<`, `=`) x 22 intermediate shapes (none, all
+//! sixteen single intermediates `0x20..=0x2F`, and five two-byte forms) x
 //! every final byte `0x40..=0x7E`, and checks:
 //!
-//! - a key not in the routed set emits nothing and returns
-//!   `ParserOutcome::Finished`;
-//! - a key in the routed set emits output (any output, `Invalid` included).
+//! - a key not in the routed table emits nothing and returns
+//!   `ParserOutcome::Finished`, both with a parameter and with none;
+//! - a key in the routed table emits *exactly* the output its handler
+//!   produces for the table's parameters, and returns
+//!   `ParserOutcome::Finished`. Pinning the exact `TerminalOutput` is what
+//!   catches two routed keys with their handlers swapped (for example the four
+//!   kitty keyboard `u` keys, or DA2 against DA3).
 //!
 //! The named regression tests below pin each misroute the old final-byte-only
 //! dispatch produced.
 
-use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::buffer_states::mode::Mode;
+use freminal_common::buffer_states::modes::dectcem::Dectcem;
+use freminal_common::buffer_states::modes::irm::Irm;
+use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+use freminal_common::cursor::CursorVisualStyle;
+use freminal_common::sgr::SelectGraphicRendition;
 use freminal_terminal_emulator::ansi::ParserOutcome;
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
 
@@ -38,43 +48,303 @@ fn parse(body: &[u8]) -> (Vec<TerminalOutput>, ParserOutcome) {
     (output, last)
 }
 
-/// Mirror of the routing table in `csi_dispatch.rs`. `prefix` is the private
-/// marker byte, if any; `intermediates` is the full intermediate string.
-fn routed(prefix: Option<u8>, intermediates: &[u8], final_byte: u8) -> bool {
-    match (prefix, intermediates) {
-        (None, []) => b"ABCDEFGHIJKLMPSTXZ@`bdfgmhlncrsutx".contains(&final_byte),
-        (None, b"$" | b"!") | (Some(b'?'), b"$") => final_byte == b'p',
-        (None, b" ") => final_byte == b'q',
-        (Some(b'?'), []) => b"hlnu".contains(&final_byte),
-        (Some(b'>'), []) => b"cqmu".contains(&final_byte),
-        (Some(b'<'), []) => final_byte == b'u',
-        (Some(b'='), []) => b"cu".contains(&final_byte),
-        _ => false,
+/// One routed CSI key and what its handler must produce.
+///
+/// `params` are the parameter bytes *after* the private-marker prefix. The
+/// expectations are derived from each handler's source, not from observed
+/// output. Every route is expected to yield `ParserOutcome::Finished`, as
+/// every handler does for valid parameters.
+struct Route {
+    prefix: Option<u8>,
+    intermediates: &'static [u8],
+    final_byte: u8,
+    params: &'static [u8],
+    expected: Vec<TerminalOutput>,
+}
+
+fn route(
+    prefix: Option<u8>,
+    intermediates: &'static [u8],
+    final_byte: u8,
+    params: &'static [u8],
+    expected: Vec<TerminalOutput>,
+) -> Route {
+    Route {
+        prefix,
+        intermediates,
+        final_byte,
+        params,
+        expected,
     }
 }
 
-/// Parameter digits (after the prefix byte) for which the handler of a routed
-/// key emits at least one `TerminalOutput`.
-///
-/// Most handlers emit output for `1`. These keys need something else, because
-/// with `1` the handler returns a parser failure and pushes nothing:
-///
-/// - DA1 (`CSI c`), DA2 (`CSI > c`), DA3 (`CSI = c`): empty (DA1 rejects a
-///   non-zero parameter).
-/// - DECSTR (`CSI ! p`): empty (any parameter is rejected).
-/// - SCOSC / SCORC / kitty query (`CSI s`, `CSI u`, `CSI ? u`): empty (a bare
-///   `CSI s` is SCOSC; `CSI u` is SCORC).
-/// - XTVERSION (`CSI > q`): empty (only `>` or `>0` is accepted).
-/// - XTMODKEYS (`CSI > m`): `4;1` (`Ps = 4` selects modifyOtherKeys).
-/// - DECREQTPARM (`CSI x`): `0` (the documented default; `1` also works).
-fn params_for(prefix: Option<u8>, intermediates: &[u8], final_byte: u8) -> &'static [u8] {
-    match (prefix, intermediates, final_byte) {
-        (None, [], b'c' | b's' | b'u') | (None, b"!", b'p') => b"",
-        (Some(b'?'), [], b'u') | (Some(b'>'), [], b'c' | b'q') | (Some(b'='), [], b'c') => b"",
-        (Some(b'>'), [], b'm') => b"4;1",
-        (None, [], b'x') => b"0",
-        _ => b"1",
-    }
+fn rel(x: Option<i32>, y: Option<i32>) -> TerminalOutput {
+    TerminalOutput::SetCursorPosRel { x, y }
+}
+
+fn pos(x: Option<usize>, y: Option<usize>) -> TerminalOutput {
+    TerminalOutput::SetCursorPos { x, y }
+}
+
+/// The routed table, in three groups. Counts are `3` wherever a handler maps
+/// `0`/`1` to its default of `1`, so a handler that ignored its parameter would
+/// be caught.
+fn routes() -> Vec<Route> {
+    let mut all = cursor_and_edit_routes();
+    all.extend(mode_and_report_routes());
+    all.extend(prefixed_and_intermediate_routes());
+    all
+}
+
+/// Plain keys that move the cursor or edit text (24 keys).
+fn cursor_and_edit_routes() -> Vec<Route> {
+    vec![
+        route(None, b"", b'A', b"3", vec![rel(None, Some(-3))]),
+        route(None, b"", b'B', b"3", vec![rel(None, Some(3))]),
+        route(None, b"", b'C', b"3", vec![rel(Some(3), None)]),
+        route(None, b"", b'D', b"3", vec![rel(Some(-3), None)]),
+        route(
+            None,
+            b"",
+            b'E',
+            b"3",
+            vec![rel(None, Some(3)), pos(Some(1), None)],
+        ),
+        route(
+            None,
+            b"",
+            b'F',
+            b"3",
+            vec![rel(None, Some(-3)), pos(Some(1), None)],
+        ),
+        route(None, b"", b'G', b"3", vec![pos(Some(3), None)]),
+        route(None, b"", b'H', b"3;4", vec![pos(Some(4), Some(3))]),
+        route(
+            None,
+            b"",
+            b'I',
+            b"3",
+            vec![TerminalOutput::CursorForwardTab(3)],
+        ),
+        route(None, b"", b'J', b"2", vec![TerminalOutput::ClearDisplay]),
+        route(None, b"", b'K', b"2", vec![TerminalOutput::ClearLine]),
+        route(None, b"", b'L', b"3", vec![TerminalOutput::InsertLines(3)]),
+        route(None, b"", b'M', b"3", vec![TerminalOutput::DeleteLines(3)]),
+        route(None, b"", b'P', b"3", vec![TerminalOutput::Delete(3)]),
+        route(None, b"", b'S', b"3", vec![TerminalOutput::ScrollUp(3)]),
+        route(None, b"", b'T', b"3", vec![TerminalOutput::ScrollDown(3)]),
+        route(None, b"", b'X', b"3", vec![TerminalOutput::Erase(3)]),
+        route(
+            None,
+            b"",
+            b'Z',
+            b"3",
+            vec![TerminalOutput::CursorBackwardTab(3)],
+        ),
+        route(None, b"", b'@', b"3", vec![TerminalOutput::InsertSpaces(3)]),
+        // HPA is CHA under another final byte.
+        route(None, b"", b'`', b"3", vec![pos(Some(3), None)]),
+        route(
+            None,
+            b"",
+            b'b',
+            b"3",
+            vec![TerminalOutput::RepeatCharacter(3)],
+        ),
+        route(None, b"", b'd', b"3", vec![pos(None, Some(3))]),
+        // HVP is CUP under another final byte.
+        route(None, b"", b'f', b"3;4", vec![pos(Some(4), Some(3))]),
+        route(
+            None,
+            b"",
+            b'g',
+            b"3",
+            vec![TerminalOutput::TabClear(TabClearMode::AllCharacter)],
+        ),
+    ]
+}
+
+/// Plain keys for SGR, modes, reports, margins and window operations (10
+/// keys).
+fn mode_and_report_routes() -> Vec<Route> {
+    let wm = WindowManipulation::ResizeWindowToLinesAndColumns(24, 80);
+    vec![
+        route(
+            None,
+            b"",
+            b'm',
+            b"1",
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Bold)],
+        ),
+        // ANSI (not DEC private) set/reset: IRM is ANSI mode 4.
+        route(
+            None,
+            b"",
+            b'h',
+            b"4",
+            vec![TerminalOutput::Mode(Mode::Irm(Irm::Insert))],
+        ),
+        route(
+            None,
+            b"",
+            b'l',
+            b"4",
+            vec![TerminalOutput::Mode(Mode::Irm(Irm::Replace))],
+        ),
+        route(
+            None,
+            b"",
+            b'n',
+            b"5",
+            vec![TerminalOutput::DeviceStatusReport],
+        ),
+        route(
+            None,
+            b"",
+            b'c',
+            b"",
+            vec![TerminalOutput::RequestDeviceAttributes],
+        ),
+        route(
+            None,
+            b"",
+            b'r',
+            b"3;9",
+            vec![TerminalOutput::SetTopAndBottomMargins {
+                top_margin: 3,
+                bottom_margin: 9,
+            }],
+        ),
+        // With no parameters `CSI s` is SCOSC; with parameters it is DECSLRM
+        // (covered by `csi_s_with_parameters_is_decslrm`).
+        route(None, b"", b's', b"", vec![TerminalOutput::SaveCursor]),
+        route(None, b"", b'u', b"", vec![TerminalOutput::RestoreCursor]),
+        route(
+            None,
+            b"",
+            b't',
+            b"8;24;80",
+            vec![TerminalOutput::WindowManipulation(wm)],
+        ),
+        route(
+            None,
+            b"",
+            b'x',
+            b"0",
+            vec![TerminalOutput::RequestTerminalParameters(0)],
+        ),
+    ]
+}
+
+/// Keys with an intermediate (3) and keys with a private-marker prefix (12).
+fn prefixed_and_intermediate_routes() -> Vec<Route> {
+    vec![
+        route(
+            None,
+            b"$",
+            b'p',
+            b"4",
+            vec![TerminalOutput::Mode(Mode::Irm(Irm::Query))],
+        ),
+        route(None, b"!", b'p', b"", vec![TerminalOutput::SoftReset]),
+        route(
+            None,
+            b" ",
+            b'q',
+            b"5",
+            vec![TerminalOutput::CursorVisualStyle(
+                CursorVisualStyle::VerticalLineCursorBlink,
+            )],
+        ),
+        // `?` prefix.
+        route(
+            Some(b'?'),
+            b"",
+            b'h',
+            b"25",
+            vec![TerminalOutput::Mode(Mode::Dectem(Dectcem::Show))],
+        ),
+        route(
+            Some(b'?'),
+            b"",
+            b'l',
+            b"25",
+            vec![TerminalOutput::Mode(Mode::Dectem(Dectcem::Hide))],
+        ),
+        route(
+            Some(b'?'),
+            b"",
+            b'n',
+            b"996",
+            vec![TerminalOutput::ColorThemeReport],
+        ),
+        route(
+            Some(b'?'),
+            b"",
+            b'u',
+            b"",
+            vec![TerminalOutput::KittyKeyboardQuery],
+        ),
+        route(
+            Some(b'?'),
+            b"$",
+            b'p',
+            b"25",
+            vec![TerminalOutput::Mode(Mode::Dectem(Dectcem::Query))],
+        ),
+        // `>` prefix.
+        route(
+            Some(b'>'),
+            b"",
+            b'c',
+            b"",
+            vec![TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 }],
+        ),
+        route(
+            Some(b'>'),
+            b"",
+            b'q',
+            b"",
+            vec![TerminalOutput::RequestDeviceNameAndVersion],
+        ),
+        route(
+            Some(b'>'),
+            b"",
+            b'm',
+            b"4;1",
+            vec![TerminalOutput::ModifyOtherKeys(1)],
+        ),
+        route(
+            Some(b'>'),
+            b"",
+            b'u',
+            b"5",
+            vec![TerminalOutput::KittyKeyboardPush(5)],
+        ),
+        // `<` prefix.
+        route(
+            Some(b'<'),
+            b"",
+            b'u',
+            b"2",
+            vec![TerminalOutput::KittyKeyboardPop(2)],
+        ),
+        // `=` prefix.
+        route(
+            Some(b'='),
+            b"",
+            b'c',
+            b"",
+            vec![TerminalOutput::RequestTertiaryDeviceAttributes],
+        ),
+        route(
+            Some(b'='),
+            b"",
+            b'u',
+            b"5;2",
+            vec![TerminalOutput::KittyKeyboardSet { flags: 5, mode: 2 }],
+        ),
+    ]
 }
 
 fn prefix_label(prefix: Option<u8>) -> String {
@@ -96,46 +366,108 @@ fn intermediate_shapes() -> Vec<Vec<u8>> {
     shapes
 }
 
+/// Build a CSI body: optional prefix, parameters, intermediates, final byte.
+fn body_of(prefix: Option<u8>, params: &[u8], intermediates: &[u8], final_byte: u8) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    body.extend(prefix);
+    body.extend_from_slice(params);
+    body.extend_from_slice(intermediates);
+    body.push(final_byte);
+    body
+}
+
 #[test]
 fn matrix_prefix_x_intermediate_x_final() {
-    let mut routed_count = 0usize;
+    let routes = routes();
+    let mut routed_seen = 0usize;
     let mut unrouted_count = 0usize;
 
     for prefix in [None, Some(b'?'), Some(b'>'), Some(b'<'), Some(b'=')] {
         for intermediates in intermediate_shapes() {
             for final_byte in 0x40u8..=0x7E {
-                let mut body: Vec<u8> = Vec::new();
-                body.extend(prefix);
-                body.extend_from_slice(params_for(prefix, &intermediates, final_byte));
-                body.extend_from_slice(&intermediates);
-                body.push(final_byte);
+                let found = routes.iter().find(|r| {
+                    r.prefix == prefix
+                        && r.intermediates == intermediates.as_slice()
+                        && r.final_byte == final_byte
+                });
 
-                let (output, outcome) = parse(&body);
-                let label = format!(
-                    "prefix={} intermediates={intermediates:?} final={:?} body={body:?}",
-                    prefix_label(prefix),
-                    char::from(final_byte),
-                );
-
-                if routed(prefix, &intermediates, final_byte) {
-                    routed_count += 1;
-                    assert!(!output.is_empty(), "routed key produced no output: {label}");
-                } else {
-                    unrouted_count += 1;
-                    assert_eq!(output, [], "unrouted key produced output: {label}");
+                if let Some(r) = found {
+                    routed_seen += 1;
+                    let body = body_of(prefix, r.params, &intermediates, final_byte);
+                    let (output, outcome) = parse(&body);
+                    let label = format!(
+                        "prefix={} intermediates={intermediates:?} final={:?} body={body:?}",
+                        prefix_label(prefix),
+                        char::from(final_byte),
+                    );
+                    assert_eq!(output, r.expected, "routed key output wrong: {label}");
                     assert_eq!(
                         outcome,
                         ParserOutcome::Finished,
-                        "unrouted key must finish cleanly: {label}"
+                        "routed key must finish cleanly: {label}"
                     );
+                } else {
+                    for params in [&b"1"[..], b""] {
+                        unrouted_count += 1;
+                        let body = body_of(prefix, params, &intermediates, final_byte);
+                        let (output, outcome) = parse(&body);
+                        let label = format!(
+                            "prefix={} intermediates={intermediates:?} final={:?} body={body:?}",
+                            prefix_label(prefix),
+                            char::from(final_byte),
+                        );
+                        assert_eq!(output, [], "unrouted key produced output: {label}");
+                        assert_eq!(
+                            outcome,
+                            ParserOutcome::Finished,
+                            "unrouted key must finish cleanly: {label}"
+                        );
+                    }
                 }
             }
         }
     }
 
-    // The routed table has 34 + 1 + 1 + 1 + 4 + 1 + 4 + 1 + 2 = 49 keys.
-    assert_eq!(routed_count, 49, "routed set size drifted");
-    assert!(unrouted_count > 5000, "matrix did not cover enough keys");
+    // 34 plain + 3 intermediate + 5 `?` + 4 `>` + 1 `<` + 2 `=` = 49 keys.
+    assert_eq!(routes.len(), 49, "routed table size drifted");
+    assert_eq!(
+        routed_seen, 49,
+        "a routed key was not reached by the matrix"
+    );
+    assert!(unrouted_count > 10_000, "matrix did not cover enough keys");
+}
+
+#[test]
+fn routed_table_has_no_duplicate_keys() {
+    let routes = routes();
+    for (i, a) in routes.iter().enumerate() {
+        for b in &routes[i + 1..] {
+            assert!(
+                !(a.prefix == b.prefix
+                    && a.intermediates == b.intermediates
+                    && a.final_byte == b.final_byte),
+                "duplicate route: prefix={} intermediates={:?} final={:?}",
+                prefix_label(a.prefix),
+                a.intermediates,
+                char::from(a.final_byte),
+            );
+        }
+    }
+}
+
+#[test]
+fn csi_s_with_parameters_is_decslrm() {
+    // The one routed key with two handlers: `CSI s` is SCOSC, `CSI Pl ; Pr s`
+    // is DECSLRM.
+    let (output, outcome) = parse(b"3;7s");
+    assert_eq!(
+        output,
+        [TerminalOutput::SetLeftAndRightMargins {
+            left_margin: 3,
+            right_margin: 7,
+        }]
+    );
+    assert_eq!(outcome, ParserOutcome::Finished);
 }
 
 // ── Regression: each misroute the final-byte-only dispatch produced ──────────

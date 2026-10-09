@@ -245,42 +245,38 @@ impl TerminalHandler {
         }
 
         // Everything before the terminator is parameter bytes (0x30..=0x3F)
-        // and intermediate bytes (0x20..=0x2F).  Split them so the sequence's
-        // identity can be classified exactly as the main parser would.
+        // and intermediate bytes (0x20..=0x2F).
         let body = &csi_body[..csi_body.len() - 1];
-        let intermediates: Vec<u8> = body
-            .iter()
-            .copied()
-            .filter(|b| (0x20..=0x2f).contains(b))
-            .collect();
-        let params: Vec<u8> = body
-            .iter()
-            .copied()
-            .filter(|b| !(0x20..=0x2f).contains(b))
-            .collect();
 
         // Only plain CSI (no private-marker prefix, no intermediate) is
-        // dispatched directly.  A prefixed sequence (`CSI ? h`, `CSI > 0 T`,
+        // dispatched directly. A prefixed sequence (`CSI ? h`, `CSI > 0 T`,
         // `CSI < 1 H`, ...) or one with an intermediate (`CSI 3 + T`,
         // `CSI ! p`, ...) has a different identity from the plain command that
         // shares its final byte, so it must go through the strict main parser
-        // via the reparse queue.  A misplaced private marker is malformed and
+        // via the reparse queue. A misplaced private marker is malformed and
         // is likewise left to the main parser.
-        let is_plain = matches!(
-            CsiKey::classify(&params, &intermediates, terminator),
-            Ok(CsiKey {
-                prefix: CsiPrefix::None,
-                intermediate: CsiIntermediate::None,
-                ..
-            })
-        );
+        //
+        // Any intermediate byte anywhere in the body means the key cannot be
+        // `CsiIntermediate::None`, so there is nothing to classify. Otherwise
+        // the body is all parameter bytes and is classified as-is, with no
+        // intermediates, without copying it.
+        let has_intermediate = body.iter().any(|b| (0x20..=0x2f).contains(b));
+        let is_plain = !has_intermediate
+            && matches!(
+                CsiKey::classify(body, &[], terminator),
+                Ok(CsiKey {
+                    prefix: CsiPrefix::None,
+                    intermediate: CsiIntermediate::None,
+                    ..
+                })
+            );
         if !is_plain {
             tracing::debug!("DCS tmux passthrough: queuing prefixed/intermediate CSI for re-parse");
             return false;
         }
 
         // Parse semicolon-delimited numeric parameters.
-        let numeric_params = Self::parse_csi_params(&params);
+        let numeric_params = Self::parse_csi_params(body);
 
         match terminator {
             // CUP — Cursor Position: ESC [ row ; col H  (or f)
@@ -523,12 +519,12 @@ impl TerminalHandler {
                 true
             }
             // SCOSC — Save Cursor: ESC [ s
-            b's' if params.is_empty() => {
+            b's' if body.is_empty() => {
                 self.buffer.save_cursor();
                 true
             }
             // SCORC — Restore Cursor: ESC [ u
-            b'u' if params.is_empty() => {
+            b'u' if body.is_empty() => {
                 self.buffer.restore_cursor();
                 true
             }
@@ -1844,6 +1840,20 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         // CSI with intermediate byte (space + p = DECRQM)
         assert!(!handler.dispatch_tmux_csi(b"?1049$p"));
+    }
+
+    #[test]
+    fn tmux_csi_intermediate_mid_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // The space sits between parameter bytes, not just before the final
+        // byte. It is still an intermediate, so this is not a plain CUP.
+        assert!(
+            !handler.dispatch_tmux_csi(b"1 ;2H"),
+            "an intermediate anywhere in the body must fall through"
+        );
+        assert_eq!(handler.buffer.cursor().pos, before);
     }
 
     #[test]
