@@ -7,7 +7,6 @@ use std::iter::Peekable;
 use std::vec::IntoIter;
 
 use crate::ansi::{ParserOutcome, parse_param_as};
-use crate::ansi_components::csi_commands::modify_other_keys::ansi_parser_inner_csi_finished_modify_other_keys;
 use crate::ansi_components::tracer::escape_sequence_for_log;
 use freminal_common::buffer_states::fonts::UnderlineStyle;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -22,16 +21,12 @@ use freminal_common::sgr::SelectGraphicRendition;
 /// Supports colon-delimited subparameters within a semicolon-separated segment
 /// (e.g., `4:3` for curly underline, `38:2::255:0:0` for truecolor).
 ///
-/// When `params` starts with `>`, dispatches to the xterm `modifyOtherKeys`
-/// handler instead.
+/// Only plain `CSI Ps m` reaches this handler. `CSI > Ps m` (XTMODKEYS) is
+/// routed to the `modify_other_keys` handler by `csi_dispatch.rs`.
 pub fn ansi_parser_inner_csi_finished_sgr(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
-    if params.first() == Some(&b'>') {
-        return ansi_parser_inner_csi_finished_modify_other_keys(params, output);
-    }
-
     // Split by semicolons first — each segment is a top-level SGR parameter
     // that may itself contain colon-delimited subparameters.
     let segments: Vec<&[u8]> = params.split(|b| *b == b';').collect();
@@ -313,6 +308,7 @@ pub fn handle_custom_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ansi_components::csi::AnsiCsiParser;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::colors::TerminalColor;
     use freminal_common::sgr::SelectGraphicRendition;
@@ -328,22 +324,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sgr_gt_prefix_delegates_to_modify_other_keys() {
-        // `>4;1` → modifyOtherKeys level 1
+    /// Feed a full CSI sequence (everything after ESC[) through the parser.
+    fn parse_csi_sequence(bytes: &[u8]) -> Vec<TerminalOutput> {
+        let mut parser = AnsiCsiParser::new();
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_sgr(b">4;1", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(output, vec![TerminalOutput::ModifyOtherKeys(1)]);
+        for &b in bytes {
+            parser.ansiparser_inner_csi(b, &mut output);
+        }
+        output
     }
 
     #[test]
-    fn sgr_gt4_no_level_resets_modify_other_keys() {
-        // `>4` (no level) → modifyOtherKeys level 0 (reset)
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_sgr(b">4", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(output, vec![TerminalOutput::ModifyOtherKeys(0)]);
+    fn sgr_gt_prefix_is_routed_to_modify_other_keys() {
+        // `CSI > 4 ; 1 m` is XTMODKEYS, routed past the SGR handler.
+        assert_eq!(
+            parse_csi_sequence(b">4;1m"),
+            vec![TerminalOutput::ModifyOtherKeys(1)]
+        );
+    }
+
+    #[test]
+    fn sgr_gt4_no_level_is_routed_to_modify_other_keys_reset() {
+        // `CSI > 4 m` (no level) → modifyOtherKeys level 0 (reset)
+        assert_eq!(
+            parse_csi_sequence(b">4m"),
+            vec![TerminalOutput::ModifyOtherKeys(0)]
+        );
     }
 
     #[test]

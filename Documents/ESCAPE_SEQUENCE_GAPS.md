@@ -1,5 +1,20 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-09 — Task 128 (strict CSI dispatch) — the CSI router now
+matches on private-marker prefix, intermediate and final byte together, so the
+misroutes recorded under "CSI Gaps" are fixed: `CSI Ps + T`, `CSI Ps # P`,
+`CSI … $ r`, `CSI Ps * x`, `CSI ? s` / `CSI ? r` and `CSI > … SP q` are now
+recognised and ignored (warn-logged, no output) until their tasks land. The
+DECSCA claims are corrected: before Task 128, DECSCA (`CSI Ps " q`) was
+misrouted to DECSCUSR and changed the cursor style; it now genuinely has no
+effect (recognised and ignored). Selective erase (DECSED / DECSEL) remains
+unimplemented because the buffer has no protected-cell bit. Other forms that
+used to misroute and are now recognised and ignored are DECRARA
+(`CSI … $ t`, not planned), `CSI Ps SP t`, DECLL (`CSI Ps q`), `CSI Ps SP u`,
+SL (`CSI Ps SP @`) and `CSI > SP c`. DECSCUSR now requires its SP
+intermediate; a bare `CSI Ps q` is no longer accepted. See
+`ESCAPE_SEQUENCE_COVERAGE.md` for the updated rows.
+
 Last updated: 2026-10-08 — Task 126.4 (v0.13.0 audit truth reset) — the
 2026-10-08 kitty-compliance audit (`PLAN_VERSION_130.md`) overturned two
 claims in this document: "Kitty graphics is fully implemented" and "Kitty
@@ -23,7 +38,8 @@ transmission is hardened (canonicalised paths, `/proc`, `/sys`, `/dev` except
 `tty-graphics-protocol` files inside a temporary directory); (126.3)
 `CSI > … <intermediate> q` emits nothing and XTVERSION answers only
 `CSI > q` / `CSI > 0 q`. The CSI misroutes noted below (`CSI # P`,
-`CSI … $ r`, `CSI * x`, `CSI Ps + T`) are Task 128.
+`CSI … $ r`, `CSI * x`, `CSI Ps + T`) were fixed by Task 128 (see the
+2026-10-09 entry above).
 
 Last updated: 2026-10-05 — PR #527 review — recorded the ANSI-mode DECRQM
 (`CSI Pa $ p`) defects under "CSI Standard Mode Gaps" below: replies use the
@@ -52,7 +68,9 @@ on soft reset) surfaced two pre-existing gaps that were not previously
 tracked in this document: KAM (keyboard action mode) has no representation
 in freminal (added to "CSI Standard Mode Gaps" below), and DECSCA (select
 character attribute) has no effect because the buffer's cell model has no
-per-cell protected-character bit, which as a consequence also leaves
+per-cell protected-character bit (at the time of this entry DECSCA was in fact
+misrouted to DECSCUSR and changed the cursor style; Task 128 made it a true
+no-op), which as a consequence also leaves
 DECSED/DECSEL (selective erase) unimplemented (added to "Buffer Semantics
 Gaps" below). Neither is a regression from DECSTR; both were already true
 and are now recorded. See `Documents/ESCAPE_SEQUENCE_COVERAGE.md` for the
@@ -265,9 +283,9 @@ to the screen on restore). Reference: xterm `cursor.c` (`CursorSave`,
 One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
 (Soft Terminal Reset, issue #507) audit:
 
-| Feature                                    | Importance | Type | Planned | Notes                                                                                                                                                                                                             |
-| ------------------------------------------ | ---------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DECSCA / selective erase (protected cells) | ⬜         | ⬜   | —       | No per-cell protected-character bit exists in the buffer's cell model, so DECSCA (`CSI Ps " q`) has no effect; DECSED (`CSI ? Ps J`) and DECSEL (`CSI ? Ps K`) selective erase are unimplemented as a consequence |
+| Feature                                    | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------ | ---------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECSCA / selective erase (protected cells) | ⬜         | ⬜   | —       | No per-cell protected-character bit exists in the buffer's cell model, so DECSCA (`CSI Ps " q`) is recognised and ignored (Task 128; before, it was misrouted to DECSCUSR and changed the cursor style); DECSED (`CSI ? Ps J`) and DECSEL (`CSI ? Ps K`) selective erase are unimplemented as a consequence |
 
 ---
 
@@ -337,19 +355,21 @@ G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work corr
 
 ## CSI Gaps
 
-Kitty and xterm extensions that are missing. Several currently misroute through the CSI
-dispatcher, which ignores private prefixes and intermediates; Task 128 fixes the routing.
+Kitty and xterm extensions that are missing. Since Task 128 the CSI router matches on
+prefix, intermediate and final byte together, so each sequence below is recognised and
+ignored (warn-logged, no output) until its task lands; none of them misroutes any more.
 
-| Sequence                                                                   | Importance | Type | Planned          | Notes                                                                                                                                           |
-| -------------------------------------------------------------------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CSI Ps + T` (unscroll)                                                    | 🟨         | ⬜   | v0.13.2 Task 142 | Currently executes as SD (scroll down); routing fix is Task 128                                                                                 |
-| `CSI … $ r` (DECCARA), `CSI Ps * x` (DECSACE)                              | 🟨         | ⬜   | v0.13.2 Task 143 | `CSI … $ r` routes to DECSTBM; `CSI * x` writes an unsolicited DECREQTPARM reply (routing: Task 128)                                            |
-| `CSI Ps # P` / `# Q` / `# R` (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | ⬜         | ⬜   | v0.13.2 Task 144 | `CSI # P` currently misroutes to DCH and deletes characters (routing: Task 128)                                                                 |
-| `CSI ? Pm s` / `CSI ? Pm r` (XTSAVE / XTRESTORE)                           | ⬜         | ⬜   | v0.13.2 Task 141 | Missing, including the bare `CSI ? s` / `CSI ? r` forms                                                                                         |
-| `CSI 22 J`                                                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Move screen to scrollback, then ED 2; no `EraseDisplayMode` variant. Prerequisite for multiple cursors                                          |
-| `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                             |
-| `CSI 221 m` / `CSI 222 m` (SGR)                                            | ⬜         | ⬜   | v0.13.0 Task 140 | Independent bold-off / faint-off — missing. SGR 21 also means bold-off where kitty means double underline (Task 140, needs maintainer sign-off) |
-| `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply)                                               |
+| Sequence                                                                   | Importance | Type | Planned          | Notes                                                                                                                                                                |
+| -------------------------------------------------------------------------- | ---------- | ---- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CSI Ps + T` (unscroll)                                                    | 🟨         | ⬜   | v0.13.2 Task 142 | Recognised and ignored since Task 128 (before, it executed as SD)                                                                                                    |
+| `CSI … $ r` (DECCARA), `CSI Ps * x` (DECSACE)                              | 🟨         | ⬜   | v0.13.2 Task 143 | Both recognised and ignored since Task 128 (before, `CSI … $ r` was routed to DECSTBM and `CSI * x` wrote an unsolicited DECREQTPARM reply)                          |
+| `CSI Ps # P` / `# Q` / `# R` (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | ⬜         | ⬜   | v0.13.2 Task 144 | Recognised and ignored since Task 128 (before, `CSI # P` was routed to DCH and deleted characters)                                                                   |
+| `CSI ? Pm s` / `CSI ? Pm r` (XTSAVE / XTRESTORE)                           | ⬜         | ⬜   | v0.13.2 Task 141 | Missing, including the bare `CSI ? s` / `CSI ? r` forms. Recognised and ignored since Task 128 (before, they were routed to DECSLRM / DECSTBM and failed as Invalid) |
+| `CSI 22 J`                                                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Move screen to scrollback, then ED 2; no `EraseDisplayMode` variant. Prerequisite for multiple cursors                                                               |
+| `CSI < 288 ; x ; y M` (mouse-leave report)                                 | ⬜         | ⬜   | v0.13.2 Task 141 | Not sent on window leave or pane-to-pane transitions under SGR-pixel mouse encoding                                                                                  |
+| `CSI 221 m` / `CSI 222 m` (SGR)                                            | ⬜         | ⬜   | v0.13.0 Task 140 | Independent bold-off / faint-off — missing. SGR 21 also means bold-off where kitty means double underline (Task 140, needs maintainer sign-off)                      |
+| `CSI > … SP q` (multiple cursors)                                          | 🟨         | ⬜   | v0.13.2 Task 103 | Missing. Recognised and ignored since 126.3 (before, it triggered an unsolicited XTVERSION reply); Task 128 makes this a routing rule                                |
+| `CSI … $ t` (DECRARA)                                                      | ⬜         | ⬜   | —                | Not implemented and not planned. Recognised and ignored since Task 128 (before, it was handled as a window operation)                                                |
 
 ---
 

@@ -16,22 +16,22 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 ///
 /// ## Disambiguation logic
 ///
-/// The `>` character appears in two positions depending on the terminal
-/// program:
-/// - As an **intermediate byte** (`intermediates = [b'>']`): standards-
-///   compliant form produced by most modern terminals.
-/// - As the **first parameter byte** (`params = [b'>', ...]`): produced by
-///   some older programs that include `>` in the parameter string.
+/// `>` and `=` are private-marker *parameter* bytes (`0x3C..=0x3F`), never
+/// intermediates: they arrive as the first byte of `params`
+/// (`params = [b'>', ...]`). The router (`csi_dispatch.rs`) calls this handler
+/// with empty `intermediates`.
 ///
-/// Both cases are normalised to `is_gt_prefix = true` before the three
-/// sub-cases are evaluated:
+/// A leading `>` sets `is_gt_prefix` before the three sub-cases are
+/// evaluated:
 /// - **Case 1** — `>` alone, no numeric params → DA2 with `param = 0`.
 /// - **Case 2** — `>` followed by a single numeric value → DA2 with that
 ///   param (only `0` is meaningful; other values are rarely used).
 /// - **Case 3** — `>` followed by anything unparsable (e.g. `"1;2"`) →
 ///   error (malformed).
 ///
-/// Without a `>` prefix the only valid form is a bare `ESC [ c` or
+/// A leading `=` is DA3 (`ESC [ = c`).
+///
+/// Without a `>` or `=` prefix the only valid form is a bare `ESC [ c` or
 /// `ESC [ 0 c` (DA1 with `param = 0`).  Any non-zero param or stray
 /// intermediates are rejected.
 ///
@@ -46,12 +46,12 @@ pub fn ansi_parser_inner_csi_finished_da(
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     // DA3: CSI = c — Tertiary Device Attributes
-    if intermediates.contains(&b'=') || (!params.is_empty() && params[0] == b'=') {
+    if params.first() == Some(&b'=') {
         output.push(TerminalOutput::RequestTertiaryDeviceAttributes);
         return ParserOutcome::Finished;
     }
 
-    let is_gt_prefix = intermediates.contains(&b'>') || (!params.is_empty() && params[0] == b'>');
+    let is_gt_prefix = params.first() == Some(&b'>');
 
     if is_gt_prefix {
         // Strip any leading '>' from params for numeric parsing
@@ -131,18 +131,6 @@ mod tests {
     }
 
     #[test]
-    fn da_secondary_bare_gt_intermediate_emits_secondary_param0() {
-        // `>` in intermediates, no params → DA2 with param=0
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"", b">", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(
-            output,
-            vec![TerminalOutput::RequestSecondaryDeviceAttributes { param: 0 }]
-        );
-    }
-
-    #[test]
     fn da_secondary_gt_param_byte_emits_secondary_param0() {
         // `>` as first param byte, nothing else → DA2 with param=0
         let mut output = Vec::new();
@@ -176,10 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn da_tertiary_eq_intermediate_emits_tertiary() {
-        // `=` in intermediates → Tertiary DA
+    fn da_tertiary_eq_param_byte_emits_tertiary() {
+        // `=` as first param byte → Tertiary DA
         let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_da(b"", b"=", &mut output);
+        let result = ansi_parser_inner_csi_finished_da(b"=", &[], &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert_eq!(
             output,
