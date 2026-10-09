@@ -36,6 +36,8 @@ use freminal_buffer::image_store::{
 use super::KittyImageState;
 use super::RealPlacement;
 use super::TerminalHandler;
+use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkLimits};
+use crate::ansi_components::apc::MAX_APC_BYTES;
 
 /// Default gap (ms) kitty applies to a newly-created animation frame when
 /// `z=` is absent or `0`. The root frame's default gap remains `0`
@@ -84,11 +86,26 @@ impl From<bool> for ImageDataDisposition {
 /// least 8; a 9th link is rejected.
 const MAX_RELATIVE_PLACEMENT_DEPTH: usize = 8;
 
+/// Maximum number of decoded bytes accepted for one Kitty graphics image.
+///
+/// Matches kitty's own `MAX_DATA_SZ` (400 MiB). It caps both a chunked
+/// transfer's assembled payload and a `t=f` / `t=t` file.
+const MAX_KITTY_DATA_BYTES: usize = 400 * 1024 * 1024;
+
 /// Maximum number of bytes read from a `t=f` / `t=t` file transmission.
 ///
 /// Matches kitty's own `MAX_DATA_SZ` (400 MiB). A file larger than this is
 /// rejected outright rather than truncated.
-const MAX_KITTY_FILE_BYTES: u64 = 400 * 1024 * 1024;
+const MAX_KITTY_FILE_BYTES: usize = MAX_KITTY_DATA_BYTES;
+
+/// The caps applied to a chunked Kitty graphics transfer.
+///
+/// A chunk is at most one APC sequence ([`MAX_APC_BYTES`]); the assembled
+/// payload is at most [`MAX_KITTY_DATA_BYTES`].
+const KITTY_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+    max_chunk_bytes: MAX_APC_BYTES,
+    max_total_bytes: MAX_KITTY_DATA_BYTES,
+};
 
 /// The single error response sent for every file-transmission failure.
 ///
@@ -295,7 +312,8 @@ fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
     let file = open_regular_kitty_file(&canonical)?;
     #[cfg(unix)]
     let identity = verify_opened_kitty_file(&file, path, &canonical)?;
-    let data = read_capped(file, MAX_KITTY_FILE_BYTES)?;
+    let cap = u64::value_from(MAX_KITTY_FILE_BYTES).map_err(|_| KittyFileError::TooLarge)?;
+    let data = read_capped(file, cap)?;
     Ok(LoadedKittyFile {
         canonical,
         data,
@@ -671,13 +689,18 @@ impl TerminalHandler {
             );
         }
 
-        let capacity = usize::value_from(cmd.control.data_size.unwrap_or(0)).unwrap_or(0);
-        let mut accumulated_data = Vec::with_capacity(capacity);
-        accumulated_data.extend_from_slice(&cmd.payload);
+        // The sender-supplied `S=` is never used to size an allocation; the
+        // assembler grows only as bytes actually arrive.
+        let mut data = BoundedChunkAssembler::new(KITTY_CHUNK_LIMITS);
+        if let Err(err) = data.push(&cmd.payload, ChunkEncoding::Raw) {
+            tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
+            self.kitty_state = None;
+            return;
+        }
 
         self.kitty_state = Some(KittyImageState {
             control: cmd.control,
-            accumulated_data,
+            data,
         });
 
         tracing::debug!(
@@ -695,34 +718,40 @@ impl TerminalHandler {
             return;
         };
 
-        state.accumulated_data.extend_from_slice(&cmd.payload);
+        if let Err(err) = state.data.push(&cmd.payload, ChunkEncoding::Raw) {
+            tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
+            self.kitty_state = None;
+            return;
+        }
 
         if cmd.control.more_data {
             // More chunks to come.
             tracing::debug!(
                 "Kitty graphics: appended chunk ({} bytes total so far)",
-                state.accumulated_data.len(),
+                state.data.len(),
             );
         } else {
             // Final chunk — take ownership and dispatch.
-            let final_state = self.kitty_state.take().unwrap_or_else(|| {
-                // This branch is unreachable because we checked `is_some` above,
-                // but we need to avoid `unwrap()` in production code.
-                KittyImageState {
-                    control: KittyControlData::default(),
-                    accumulated_data: Vec::new(),
-                }
-            });
+            let Some(final_state) = self.kitty_state.take() else {
+                // Unreachable: `state` above borrowed `kitty_state` as `Some`.
+                return;
+            };
 
-            tracing::debug!(
-                "Kitty graphics: chunked transfer complete ({} bytes)",
-                final_state.accumulated_data.len(),
-            );
+            let total = final_state.data.len();
+            let payload = match final_state.data.finish() {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
+                    return;
+                }
+            };
+
+            tracing::debug!("Kitty graphics: chunked transfer complete ({total} bytes)");
 
             let action = final_state.control.action.unwrap_or(KittyAction::Transmit);
             let final_cmd = KittyGraphicsCommand {
                 control: final_state.control,
-                payload: final_state.accumulated_data,
+                payload,
             };
             if action == KittyAction::AnimationFrame {
                 self.handle_kitty_animation_frame(&final_cmd);
@@ -8254,6 +8283,143 @@ mod tests {
             "Chunked transfer should be complete"
         );
         assert!(handler.buffer().image_store().get(300).is_some());
+    }
+
+    /// Chunk caps small enough to cross in a test without allocating hundreds
+    /// of MiB.
+    const SMALL_KITTY_LIMITS: super::ChunkLimits = super::ChunkLimits {
+        max_chunk_bytes: 8,
+        max_total_bytes: 12,
+    };
+
+    /// A first chunk (`m=1`) of an RGBA 2x2 transmit-and-display with `id`.
+    fn kitty_chunk_first(id: u32, payload: Vec<u8>) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::KittyFormat;
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(id),
+                more_data: true,
+                ..KittyControlData::default()
+            },
+            payload,
+        }
+    }
+
+    /// A continuation chunk (no explicit action) with the given `m` value.
+    fn kitty_chunk_next(more_data: bool, payload: Vec<u8>) -> KittyGraphicsCommand {
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: None,
+                more_data,
+                ..KittyControlData::default()
+            },
+            payload,
+        }
+    }
+
+    /// Complete a whole 2x2 RGBA chunked transfer with `id` and assert the
+    /// image was stored: proof the handler is usable after an abandonment.
+    fn assert_chunked_transfer_works(handler: &mut TerminalHandler, id: u32) {
+        handler.handle_kitty_graphics(kitty_chunk_first(id, vec![255, 0, 0, 255, 0, 255, 0, 255]));
+        handler.handle_kitty_graphics(kitty_chunk_next(
+            false,
+            vec![0, 0, 255, 255, 255, 255, 0, 255],
+        ));
+        assert!(handler.kitty_state.is_none());
+        assert!(handler.buffer().image_store().get(u64::from(id)).is_some());
+    }
+
+    #[test]
+    fn kitty_chunked_transfer_over_total_cap_is_abandoned_silently() {
+        let (mut handler, rx) = kitty_handler();
+
+        // Start through the real path, then swap the assembler for one with
+        // small limits so the cap can be crossed cheaply.
+        handler.handle_kitty_graphics(kitty_chunk_first(400, vec![0; 8]));
+        let state = handler.kitty_state.as_mut().expect("transfer in progress");
+        let mut small = super::BoundedChunkAssembler::new(SMALL_KITTY_LIMITS);
+        small.push(&[0; 8], super::ChunkEncoding::Raw).unwrap();
+        state.data = small;
+
+        // 8 + 8 = 16 > 12: over the total cap.
+        handler.handle_kitty_graphics(kitty_chunk_next(true, vec![0; 8]));
+
+        assert!(handler.kitty_state.is_none(), "transfer must be abandoned");
+        assert!(handler.buffer().image_store().get(400).is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_chunked_transfer_works(&mut handler, 401);
+    }
+
+    #[test]
+    fn kitty_chunked_transfer_at_total_cap_is_accepted() {
+        let (mut handler, _rx) = kitty_handler();
+        handler.handle_kitty_graphics(kitty_chunk_first(410, vec![0; 8]));
+        let state = handler.kitty_state.as_mut().expect("transfer in progress");
+        let mut small = super::BoundedChunkAssembler::new(SMALL_KITTY_LIMITS);
+        small.push(&[0; 8], super::ChunkEncoding::Raw).unwrap();
+        state.data = small;
+
+        // 8 + 4 = 12 == cap: still accepted.
+        handler.handle_kitty_graphics(kitty_chunk_next(true, vec![0; 4]));
+        assert!(handler.kitty_state.is_some());
+    }
+
+    #[test]
+    fn kitty_first_chunk_over_apc_cap_is_abandoned_silently() {
+        let (mut handler, rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            420,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+
+        assert!(handler.kitty_state.is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_chunked_transfer_works(&mut handler, 421);
+    }
+
+    #[test]
+    fn kitty_continuation_chunk_over_apc_cap_is_abandoned_silently() {
+        let (mut handler, rx) = kitty_handler();
+
+        // A chunk of exactly the cap is accepted.
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            430,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES],
+        ));
+        assert!(handler.kitty_state.is_some());
+
+        // One byte over is not.
+        handler.handle_kitty_graphics(kitty_chunk_next(
+            true,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+        assert!(handler.kitty_state.is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_chunked_transfer_works(&mut handler, 431);
+    }
+
+    #[test]
+    fn kitty_huge_declared_size_does_not_preallocate() {
+        let (mut handler, _rx) = kitty_handler();
+
+        let mut first = kitty_chunk_first(440, Vec::new());
+        first.control.data_size = Some(u32::MAX);
+        handler.handle_kitty_graphics(first);
+
+        let state = handler.kitty_state.as_ref().expect("transfer in progress");
+        assert_eq!(state.data.len(), 0);
+        assert_eq!(state.data.capacity(), 0, "S= must not size an allocation");
     }
 
     #[test]

@@ -68,6 +68,7 @@ use freminal_buffer::buffer::Buffer;
 use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
 
 mod chunk_assembler;
+use chunk_assembler::BoundedChunkAssembler;
 mod cursor_ops;
 mod dcs;
 mod edit_ops;
@@ -93,8 +94,9 @@ mod window_ops;
 struct MultipartImageState {
     /// Metadata parsed from the `MultipartFile=` begin sequence.
     metadata: ITerm2InlineImageData,
-    /// Accumulated decoded bytes from all `FilePart=` chunks so far.
-    accumulated_data: Vec<u8>,
+    /// Accumulated decoded bytes from all `FilePart=` chunks so far, under
+    /// the multipart caps.
+    data: BoundedChunkAssembler,
 }
 
 /// In-progress state for a Kitty graphics chunked transfer.
@@ -105,8 +107,9 @@ struct MultipartImageState {
 struct KittyImageState {
     /// Control data from the first chunk of the transfer.
     control: KittyControlData,
-    /// Accumulated decoded payload bytes from all chunks so far.
-    accumulated_data: Vec<u8>,
+    /// Accumulated decoded payload bytes from all chunks so far, under the
+    /// graphics caps.
+    data: BoundedChunkAssembler,
 }
 
 /// Tracked state for diacritic inheritance between consecutive placeholder cells.

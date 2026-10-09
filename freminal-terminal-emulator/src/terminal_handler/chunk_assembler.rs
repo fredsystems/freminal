@@ -11,9 +11,6 @@
 //! decoding them as one continuous stream, while enforcing a per-chunk and a
 //! total cap.  It never pre-allocates from a sender-supplied size.
 
-// TODO(129.11): remove once the graphics and iTerm2 accumulators use the assembler.
-#![cfg_attr(not(test), expect(dead_code))]
-
 use freminal_common::base64::{Base64Error, StreamDecoder, StreamPosition};
 
 /// Size caps applied by a [`BoundedChunkAssembler`].
@@ -31,6 +28,8 @@ pub enum ChunkEncoding {
     /// The chunk's bytes are appended verbatim.
     Raw,
     /// The chunk is part of one continuous base64 stream.
+    // TODO(129.12): used once OSC 99 decodes through the assembler.
+    #[cfg_attr(not(test), expect(dead_code))]
     Base64,
 }
 
@@ -95,6 +94,14 @@ impl BoundedChunkAssembler {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// Allocated capacity of the assembled buffer; lets other modules' tests
+    /// prove nothing is pre-allocated from a sender-supplied size.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.data.capacity()
     }
 
     /// Append one chunk.

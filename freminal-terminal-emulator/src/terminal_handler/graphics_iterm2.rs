@@ -21,7 +21,23 @@ use freminal_buffer::image_store::{
     ImageProtocol, ImageSizeMode, InlineImage, next_image_id, next_placement_instance_id,
 };
 
+use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkLimits};
 use super::{MultipartImageState, TerminalHandler};
+
+/// Maximum size of an iTerm2 multipart transfer, per `FilePart=` chunk and in
+/// total.
+///
+/// Matches the OSC 1337 parser cap
+/// ([`MAX_OSC_LARGE_BYTES`](crate::ansi_components::osc::MAX_OSC_LARGE_BYTES)):
+/// a single `FilePart=` sequence can never be larger than that, and the
+/// assembled file is held to the same bound.
+const MAX_ITERM2_MULTIPART_BYTES: usize = 64 * 1024 * 1024;
+
+/// The caps applied to an iTerm2 multipart transfer.
+const ITERM2_MULTIPART_LIMITS: ChunkLimits = ChunkLimits {
+    max_chunk_bytes: MAX_ITERM2_MULTIPART_BYTES,
+    max_total_bytes: MAX_ITERM2_MULTIPART_BYTES,
+};
 
 impl TerminalHandler {
     /// Handle an iTerm2 `OSC 1337 ; File=` inline image.
@@ -162,13 +178,11 @@ impl TerminalHandler {
             );
         }
 
-        // Pre-allocate the accumulator to the declared size if available,
-        // otherwise start with an empty vec.
-        let capacity = data.size.unwrap_or(0);
-
+        // The sender-supplied `size=` is never used to size an allocation;
+        // the assembler grows only as bytes actually arrive.
         self.multipart_state = Some(MultipartImageState {
             metadata: data.clone(),
-            accumulated_data: Vec::with_capacity(capacity),
+            data: BoundedChunkAssembler::new(ITERM2_MULTIPART_LIMITS),
         });
 
         tracing::debug!(
@@ -186,11 +200,15 @@ impl TerminalHandler {
             return;
         };
 
-        state.accumulated_data.extend_from_slice(bytes);
+        if let Err(err) = state.data.push(bytes, ChunkEncoding::Raw) {
+            tracing::warn!("OSC 1337 FilePart=: multipart transfer abandoned: {err}");
+            self.multipart_state = None;
+            return;
+        }
         tracing::debug!(
             "OSC 1337 FilePart=: appended {} bytes (total so far: {})",
             bytes.len(),
-            state.accumulated_data.len(),
+            state.data.len(),
         );
     }
 
@@ -204,19 +222,25 @@ impl TerminalHandler {
             return;
         };
 
-        if state.accumulated_data.is_empty() {
+        if state.data.is_empty() {
             tracing::warn!("OSC 1337 FileEnd: transfer completed with empty payload; ignoring");
             return;
         }
 
-        tracing::debug!(
-            "OSC 1337 FileEnd: transfer complete ({} bytes)",
-            state.accumulated_data.len(),
-        );
+        let total = state.data.len();
+        let data = match state.data.finish() {
+            Ok(data) => data,
+            Err(err) => {
+                tracing::warn!("OSC 1337 FileEnd: multipart transfer abandoned: {err}");
+                return;
+            }
+        };
+
+        tracing::debug!("OSC 1337 FileEnd: transfer complete ({total} bytes)");
 
         // Assemble the final image data from metadata + accumulated bytes.
         let final_data = ITerm2InlineImageData {
-            data: state.accumulated_data,
+            data,
             ..state.metadata
         };
 
@@ -877,6 +901,101 @@ mod tests {
         );
     }
 
+    /// Metadata for a multipart transfer, with an optional declared `size=`.
+    fn multipart_begin(size: Option<usize>) -> AnsiOscType {
+        AnsiOscType::ITerm2MultipartBegin(ITerm2InlineImageData {
+            name: None,
+            size,
+            width: None,
+            height: None,
+            preserve_aspect_ratio: true,
+            inline: true,
+            do_not_move_cursor: false,
+            data: Vec::new(),
+        })
+    }
+
+    /// Run a whole multipart transfer of a real PNG and assert it was placed:
+    /// proof the handler is usable after an abandonment.
+    fn assert_multipart_transfer_works(handler: &mut TerminalHandler) {
+        handler.handle_osc(&multipart_begin(None));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(make_test_png()));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        assert!(handler.multipart_state.is_none());
+        assert!(handler.buffer().has_any_image_cell());
+    }
+
+    #[test]
+    fn multipart_over_total_cap_is_abandoned_silently() {
+        use super::super::chunk_assembler::{BoundedChunkAssembler, ChunkLimits};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // Start through the real path, then swap the assembler for one with
+        // small limits so the cap can be crossed cheaply.
+        handler.handle_osc(&multipart_begin(None));
+        let state = handler.multipart_state.as_mut().unwrap();
+        let mut small = BoundedChunkAssembler::new(ChunkLimits {
+            max_chunk_bytes: 8,
+            max_total_bytes: 12,
+        });
+        small.push(&[0; 8], ChunkEncoding::Raw).unwrap();
+        state.data = small;
+
+        // 8 + 8 = 16 > 12: over the total cap.
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![0; 8]));
+        assert!(handler.multipart_state.is_none(), "transfer abandoned");
+
+        // The rest of the abandoned transfer is ignored.
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![0; 4]));
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_multipart_transfer_works(&mut handler);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn multipart_chunk_over_cap_is_abandoned_silently() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.handle_osc(&multipart_begin(None));
+        handler.handle_osc(&AnsiOscType::ITerm2FilePart(vec![
+            0;
+            MAX_ITERM2_MULTIPART_BYTES
+                + 1
+        ]));
+
+        assert!(handler.multipart_state.is_none(), "transfer abandoned");
+        handler.handle_osc(&AnsiOscType::ITerm2FileEnd);
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_multipart_transfer_works(&mut handler);
+    }
+
+    #[test]
+    fn multipart_huge_declared_size_does_not_preallocate() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.handle_osc(&multipart_begin(Some(usize::MAX)));
+
+        let state = handler.multipart_state.as_ref().unwrap();
+        assert_eq!(state.data.len(), 0);
+        assert_eq!(
+            state.data.capacity(),
+            0,
+            "size= must not size an allocation"
+        );
+    }
+
     #[test]
     fn multipart_single_chunk_places_image() {
         let mut handler = TerminalHandler::new(80, 24);
@@ -974,7 +1093,7 @@ mod tests {
         let state = handler.multipart_state.as_ref().unwrap();
         assert_eq!(state.metadata.name, Some("second.png".to_string()));
         assert!(
-            state.accumulated_data.is_empty(),
+            state.data.is_empty(),
             "accumulated data should be empty after new begin"
         );
 
