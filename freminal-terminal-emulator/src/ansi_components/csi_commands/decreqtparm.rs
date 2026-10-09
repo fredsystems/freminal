@@ -8,17 +8,14 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 /// DECREQTPARM — Request Terminal Parameters (`CSI Ps x`)
 ///
-/// Only plain `CSI Ps x` is valid (`Ps` = 0 or 1). A `>` prefix is rejected
-/// (that would be a malformed DA2/xtversion sequence, not DECREQTPARM), as are
-/// extra non-empty `;`-separated parameters and any `Ps` other than 0 or 1.
+/// Only plain `CSI Ps x` is valid (`Ps` = 0 or 1). Extra non-empty
+/// `;`-separated parameters and any `Ps` other than 0 or 1 are rejected. The
+/// router never calls this handler for a prefixed sequence (`CSI > Ps x` is
+/// recognised and unhandled).
 pub fn ansi_parser_inner_csi_finished_decreqtparm(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
-    if params.first().copied() == Some(b'>') {
-        output.push(TerminalOutput::Invalid);
-        return ParserOutcome::Finished;
-    }
     // Parse first `;`-separated parameter only.
     // DECREQTPARM accepts Ps=0 (default) or Ps=1; reject anything else.
     let mut params = params.split(|&b| b == b';');

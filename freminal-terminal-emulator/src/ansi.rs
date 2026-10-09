@@ -61,6 +61,12 @@ pub fn split_params_into_semicolon_delimited_usize(
         .collect::<Result<Vec<Option<usize>>, AnsiParseError>>()
 }
 
+/// Split a parameter string on `:` and parse each piece as a `usize`.
+///
+/// Not yet called from production code: its intended consumer is Task 103
+/// (kitty multiple cursors), whose `CSI > ... SP q` sequence carries colon
+/// sub-parameters.
+///
 /// # Errors
 /// Will return an error if the parameter is not a valid number
 pub fn split_params_into_colon_delimited_usize(
