@@ -41,6 +41,21 @@ pub enum Osc99PayloadType {
     Query,
 }
 
+/// How the payload of one OSC 99 chunk is encoded (`e=` key).
+///
+/// The payload carried by [`Osc99Command`] is always the raw bytes received;
+/// this says whether they are verbatim UTF-8 text or base64 text.  The
+/// terminal handler decodes base64 chunks as one continuous stream, because
+/// the spec allows a payload to be split either before or after encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Osc99PayloadEncoding {
+    /// `e=0` (default): the payload is escape-safe UTF-8 text.
+    #[default]
+    Plain,
+    /// `e=1`: the payload is base64 text.
+    Base64,
+}
+
 /// Urgency level of an OSC 99 notification (`u=` key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationUrgency {
@@ -75,6 +90,9 @@ pub enum Osc99ParseError {
     /// An `i=`/`g=` identifier contained a disallowed character.
     InvalidId(String),
     /// The payload was declared base64 (`e=1`) but failed to decode.
+    ///
+    /// No longer produced by [`parse_osc_99`]: base64 payloads are decoded
+    /// as a stream during reassembly, where failure drops the notification.
     InvalidBase64(String),
     /// The payload was not valid escape-safe UTF-8 (non-base64 payloads).
     InvalidPayloadUtf8(String),
@@ -163,8 +181,13 @@ pub struct Osc99Command {
     pub payload_type: Osc99PayloadType,
     /// Done/finalize flag (`d=`), default `true`.
     pub done: bool,
-    /// The decoded payload bytes (base64-decoded if `e=1`, else raw UTF-8 bytes).
+    /// The raw payload bytes exactly as received: UTF-8 text for
+    /// [`Osc99PayloadEncoding::Plain`], base64 text for
+    /// [`Osc99PayloadEncoding::Base64`].  Base64 is **not** decoded here;
+    /// chunks are decoded as one stream during reassembly.
     pub payload: Vec<u8>,
+    /// How [`payload`](Self::payload) is encoded (`e=`), default `Plain`.
+    pub payload_encoding: Osc99PayloadEncoding,
     /// Activation behaviour flags (`a=`).
     pub actions: Osc99Actions,
     /// Whether `c=1` (close report wanted).
@@ -395,22 +418,23 @@ fn apply_metadata_pair(
     Ok(())
 }
 
-/// Decode the payload bytes based on the `e=` flag in `state`.
-fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99ParseError> {
+/// Validate the payload for the encoding declared by the `e=` flag in `state`.
+///
+/// A `Plain` payload must be UTF-8 (C0/C1 rejection is a higher-level
+/// concern).  A `Base64` payload is **not** inspected: it may be one slice of
+/// a larger base64 stream that only decodes once every chunk has arrived, so
+/// the stream decoder validates it.
+fn validate_payload(
+    state: &ParseState,
+    payload: &[u8],
+) -> Result<Osc99PayloadEncoding, Osc99ParseError> {
     if state.base64_payload {
-        // `e=1`: base64-decode the raw payload bytes.
-        let s = std::str::from_utf8(payload).map_err(|_| {
-            Osc99ParseError::InvalidBase64(String::from_utf8_lossy(payload).into_owned())
-        })?;
-        crate::base64::decode(s.as_bytes())
-            .map_err(|e| Osc99ParseError::InvalidBase64(format!("base64 decode error: {e}")))
+        Ok(Osc99PayloadEncoding::Base64)
     } else {
-        // `e=0` / absent: payload is escape-safe UTF-8 — validate it, store raw bytes.
-        // Note: we do not reject C0/C1 here; that is a higher-level concern.
         std::str::from_utf8(payload).map_err(|_| {
             Osc99ParseError::InvalidPayloadUtf8(String::from_utf8_lossy(payload).into_owned())
         })?;
-        Ok(payload.to_vec())
+        Ok(Osc99PayloadEncoding::Plain)
     }
 }
 
@@ -424,11 +448,11 @@ fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99Pa
 ///
 /// # Errors
 /// Returns [`Osc99ParseError`] if metadata is malformed, an id is unsafe, an
-/// integer/urgency is invalid, or the payload fails base64/UTF-8 decoding.
+/// integer/urgency is invalid, or a non-base64 payload is not UTF-8.  A base64
+/// payload is returned undecoded (see [`Osc99Command::payload`]).
 pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc99ParseError> {
-    // Reject oversized input before any allocation/decode. `base64::decode`
-    // reserves proportional to the input length, so an unbounded payload on
-    // untrusted terminal input could force a large allocation.
+    // Reject oversized input before any allocation, so an unbounded payload
+    // on untrusted terminal input cannot force a large allocation.
     let total = metadata.len().saturating_add(payload.len());
     if total > MAX_OSC99_SEQUENCE_BYTES {
         return Err(Osc99ParseError::SequenceTooLarge(total));
@@ -465,13 +489,14 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
         }
     }
 
-    let decoded_payload = decode_payload(&state, payload)?;
+    let payload_encoding = validate_payload(&state, payload)?;
 
     Ok(Osc99Command {
         id: state.id,
         payload_type: state.payload_type,
         done: state.done,
-        payload: decoded_payload,
+        payload: payload.to_vec(),
+        payload_encoding,
         actions: state.actions,
         close_report: state.close_report,
         app_name: state.app_name,
@@ -643,22 +668,45 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn e_equals_one_base64_payload_decoded() {
-        // "Hello" in base64 is "SGVsbG8="
+    fn e_equals_one_base64_payload_kept_raw() {
+        // The payload is NOT decoded by the parser; reassembly decodes it.
         let cmd = parse_osc_99(&meta("e=1"), &pay("SGVsbG8=")).unwrap();
-        assert_eq!(cmd.payload, b"Hello");
+        assert_eq!(cmd.payload, b"SGVsbG8=");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
     }
 
     #[test]
-    fn e_equals_one_invalid_base64_returns_error() {
-        let err = parse_osc_99(&meta("e=1"), &pay("not-valid-base64!!!")).unwrap_err();
-        assert!(matches!(err, Osc99ParseError::InvalidBase64(_)));
+    fn e_equals_one_payload_is_not_validated_by_the_parser() {
+        // A base64 payload may be one slice of a larger stream, so the parser
+        // cannot judge it; the stream decoder rejects it later.
+        let cmd = parse_osc_99(&meta("e=1"), &pay("not-valid-base64!!!")).unwrap();
+        assert_eq!(cmd.payload, b"not-valid-base64!!!");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
+    }
+
+    #[test]
+    fn e_equals_one_non_utf8_payload_is_kept_raw() {
+        let cmd = parse_osc_99(&meta("e=1"), &[0xFF, 0xFE]).unwrap();
+        assert_eq!(cmd.payload, [0xFF, 0xFE]);
     }
 
     #[test]
     fn e_equals_zero_plain_utf8_payload() {
         let cmd = parse_osc_99(&meta("e=0"), &pay("plain text")).unwrap();
         assert_eq!(cmd.payload, b"plain text");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
+    }
+
+    #[test]
+    fn e_absent_defaults_to_plain_encoding() {
+        let cmd = parse_osc_99(&meta(""), &pay("x")).unwrap();
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
+    }
+
+    #[test]
+    fn e_equals_zero_non_utf8_payload_is_rejected() {
+        let err = parse_osc_99(&meta("e=0"), &[0xFF, 0xFE]).unwrap_err();
+        assert!(matches!(err, Osc99ParseError::InvalidPayloadUtf8(_)));
     }
 
     // ------------------------------------------------------------------
@@ -1056,7 +1104,9 @@ mod tests {
         assert_eq!(cmd.payload_type, Osc99PayloadType::Body);
         assert!(cmd.close_report);
         assert_eq!(cmd.urgency, Some(NotificationUrgency::Normal));
-        assert_eq!(cmd.payload, b"Build complete");
+        // Raw base64 text; decoded to "Build complete" during reassembly.
+        assert_eq!(cmd.payload, b"QnVpbGQgY29tcGxldGU=");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
         assert!(cmd.done);
     }
 

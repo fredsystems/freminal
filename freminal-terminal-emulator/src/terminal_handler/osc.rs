@@ -254,7 +254,8 @@ mod tests {
     use super::TerminalHandler;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command, Osc99PayloadType,
+        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command,
+        Osc99PayloadEncoding, Osc99PayloadType,
     };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
@@ -332,6 +333,7 @@ mod tests {
             payload_type: Osc99PayloadType::Title,
             done: true,
             payload: Vec::new(),
+            payload_encoding: Osc99PayloadEncoding::Plain,
             actions: Osc99Actions::default(),
             close_report: false,
             app_name: None,
@@ -550,6 +552,41 @@ mod tests {
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
+    }
+
+    /// A base64 title split mid-quantum across two sequences reaches the GUI
+    /// as one decoded `Notification99` window command.
+    #[test]
+    fn osc_notify99_base64_title_split_mid_quantum_pushes_decoded_command() {
+        use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        // "Hello" -> "SGVsbG8=", split after "SGV" (mid-quantum).
+        let first = parse_osc_99(b"i=s:d=0:e=1", b"SGV").unwrap();
+        let second = parse_osc_99(b"i=s:e=1", b"sbG8=").unwrap();
+        handler.process_outputs(&[
+            TerminalOutput::OscResponse(AnsiOscType::Notify99(first)),
+            TerminalOutput::OscResponse(AnsiOscType::Notify99(second)),
+        ]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("Hello"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
+    }
+
+    /// Invalid base64 in a standalone notification pushes no window command.
+    #[test]
+    fn osc_notify99_invalid_base64_pushes_no_window_command() {
+        use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = parse_osc_99(b"e=1", b"@@@@").unwrap();
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+        assert_eq!(handler.window_commands, []);
     }
 
     /// A fully-specified notification maps urgency/occasion/expiry/actions

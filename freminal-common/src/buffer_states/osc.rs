@@ -1211,13 +1211,15 @@ mod tests {
     #[test]
     fn display_ansi_osc_notify99() {
         use crate::buffer_states::osc_notify_99::{
-            NotificationOccasion, Osc99Actions, Osc99Command, Osc99PayloadType,
+            NotificationOccasion, Osc99Actions, Osc99Command, Osc99PayloadEncoding,
+            Osc99PayloadType,
         };
         let cmd = Osc99Command {
             id: Some("abc".to_owned()),
             payload_type: Osc99PayloadType::Title,
             done: true,
             payload: b"Hello".to_vec(),
+            payload_encoding: Osc99PayloadEncoding::Plain,
             actions: Osc99Actions::default(),
             close_report: false,
             app_name: None,

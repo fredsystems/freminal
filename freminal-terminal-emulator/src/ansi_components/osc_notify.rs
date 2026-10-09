@@ -309,7 +309,9 @@ fn decode_utf8(bytes: &[u8], raw_params: &[u8]) -> Option<String> {
 mod tests {
     use super::super::osc::AnsiOscParser;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
-    use freminal_common::buffer_states::osc_notify_99::{Osc99Command, Osc99PayloadType};
+    use freminal_common::buffer_states::osc_notify_99::{
+        Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
+    };
     use freminal_common::buffer_states::progress::ProgressUpdate;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -773,12 +775,20 @@ mod tests {
     }
 
     #[test]
-    fn osc99_base64_payload_decoded() {
-        // "Hello" in base64 is "SGVsbG8="
+    fn osc99_base64_payload_kept_raw() {
+        // The parser leaves base64 undecoded; reassembly decodes the stream.
         // 99 ; e=1 ; SGVsbG8=  BEL
         let output = feed_osc(b"99;e=1;SGVsbG8=\x07");
         let cmd = expect_notify99(&output);
-        assert_eq!(cmd.payload, b"Hello");
+        assert_eq!(cmd.payload, b"SGVsbG8=");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
+    }
+
+    #[test]
+    fn osc99_plain_payload_has_plain_encoding() {
+        let output = feed_osc(b"99;;Hello\x07");
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
     }
 
     #[test]

@@ -28,8 +28,6 @@ pub enum ChunkEncoding {
     /// The chunk's bytes are appended verbatim.
     Raw,
     /// The chunk is part of one continuous base64 stream.
-    // TODO(129.12): used once OSC 99 decodes through the assembler.
-    #[cfg_attr(not(test), expect(dead_code))]
     Base64,
 }
 
