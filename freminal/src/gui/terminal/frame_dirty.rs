@@ -332,8 +332,6 @@ pub(super) struct DirtyTrackingOutcome {
     /// visibility folded in -- a cursor hidden behind a fold is
     /// [`CursorAppearance::Hidden`].
     pub(super) cursor_appearance: CursorAppearance,
-    /// Pixel position of the (possibly trail-animated) visual cursor.
-    pub(super) cursor_pixel_pos: (f32, f32),
     /// Horizontal scale factor for the cursor quad (`2.0` on a
     /// DECDWL/DECDHL row, `1.0` otherwise).
     pub(super) cursor_x_scale: f32,
@@ -461,7 +459,7 @@ pub(super) struct FrameDirtyContext<'a> {
 }
 
 /// Pixel geometry [`evaluate_frame_dirty_state`] needs to translate the
-/// selection into screen coordinates and place the cursor.
+/// selection into screen coordinates.
 #[derive(Clone, Copy)]
 pub(super) struct FrameDirtyGeometry {
     /// The pane's full rect, including the command-block gutter.
@@ -472,10 +470,6 @@ pub(super) struct FrameDirtyGeometry {
     pub(super) gutter_inset: f32,
     /// Logical (not physical) cell height.
     pub(super) logical_cell_h: f32,
-    /// Cell width in physical pixels.
-    pub(super) cell_w_f: f32,
-    /// Row height in physical pixels.
-    pub(super) row_h_f: f32,
 }
 
 /// Cursor-related inputs for one frame.
@@ -546,8 +540,6 @@ pub(super) fn evaluate_frame_dirty_state(
         terminal_rect,
         gutter_inset,
         logical_cell_h,
-        cell_w_f,
-        row_h_f,
     } = geometry;
     let CursorFrameInputs {
         blink: raw_cursor_blink,
@@ -852,13 +844,12 @@ pub(super) fn evaluate_frame_dirty_state(
         }
     };
 
-    // Compute the pixel position from the (possibly animated) visual
-    // cursor coordinates.  These are fractional cell coords, so we
-    // multiply by cell dimensions in pixels.
-    //
-    // For double-width / double-height rows (DECDWL / DECDHL), the
-    // cursor x-position is scaled by the row's horizontal scale factor
-    // so it aligns with the magnified glyphs.
+    // For double-width / double-height rows (DECDWL / DECDHL), the cursor
+    // x-position is scaled by the row's horizontal scale factor so it aligns
+    // with the magnified glyphs. The cursor's pixel origin is NOT computed
+    // here: the caller derives it from the `CursorDrawParams` it builds from
+    // this outcome (`CursorDrawParams::pixel_origin`), the same call the
+    // quad builders use, so damage and draw share one formula.
     let cursor_row_lw = snap
         .visible_line_widths
         .get(cursor_snap_row)
@@ -869,10 +860,6 @@ pub(super) fn evaluate_frame_dirty_state(
     } else {
         1.0
     };
-    let cursor_pixel_pos = (
-        view_state.cursor_visual_col * cell_w_f * cursor_x_scale,
-        view_state.cursor_visual_row * row_h_f,
-    );
 
     // ── Kitty animated image playback (Task 100.2c) ─────────────────
     // Advance the GUI-side wall-clock frame selector for every
@@ -1047,7 +1034,6 @@ pub(super) fn evaluate_frame_dirty_state(
         cursor_state_changed,
         cursor_blink_phase,
         cursor_appearance,
-        cursor_pixel_pos,
         cursor_x_scale,
         cursor_animating,
         image_anim_tick: anim_tick,
@@ -1243,8 +1229,6 @@ mod evaluate_frame_dirty_state_tests {
                 terminal_rect,
                 gutter_inset: 0.0,
                 logical_cell_h: 10.0,
-                cell_w_f: 8.0,
-                row_h_f: 16.0,
             },
             CursorFrameInputs {
                 blink: CursorBlinkPhase::from_blink_on(cursor_blink_on),

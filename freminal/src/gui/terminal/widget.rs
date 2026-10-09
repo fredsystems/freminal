@@ -152,6 +152,119 @@ const fn blink_anchor_action(previous: CursorFocus, now: CursorFocus) -> BlinkAn
     }
 }
 
+/// Half-period of the cursor blink cycle, in seconds.
+const BLINK_TICK_SECONDS: f64 = 0.50;
+
+/// Whether the GUI flagged this pane's blink clock for an activation
+/// re-anchor (`ViewState::cursor_blink_reset_pending`).
+///
+/// A named enum rather than a `bool` so [`FrameCursorInputs`] has no bare
+/// flag; converted from the field at the `show()` boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationBlinkReset {
+    /// The pane was just activated or revealed; re-anchor the blink clock.
+    Pending,
+    /// No activation re-anchor requested.
+    NotPending,
+}
+
+impl ActivationBlinkReset {
+    /// Build from the raw `ViewState::cursor_blink_reset_pending` flag.
+    const fn from_bool(pending: bool) -> Self {
+        if pending {
+            Self::Pending
+        } else {
+            Self::NotPending
+        }
+    }
+}
+
+/// The plain values `show()` has in hand that determine one frame's cursor
+/// focus, appearance and blink phase.
+struct FrameCursorInputs<'a> {
+    /// Whether this pane is the active one.
+    pane_focus: PaneFocus,
+    /// Whether the window has input focus.
+    window_focus: WindowFocus,
+    /// The focus the cursor was last drawn with (`PaneRenderCache`).
+    previous_focus: CursorFocus,
+    /// Whether an activation re-anchor is pending.
+    activation_reset: ActivationBlinkReset,
+    /// Whether the application wants the cursor shown (`DECTCEM`).
+    snapshot_visible: CursorVisibility,
+    /// Whether the pane is in echo-off mode.
+    echo: EchoState,
+    /// The application's DECSCUSR style.
+    style: &'a freminal_common::cursor::CursorVisualStyle,
+    /// The user's preference for unfocused cursors.
+    unfocused_style: UnfocusedCursorStyle,
+    /// The egui input clock, in seconds.
+    time: f64,
+    /// The pane's current blink anchor, if any.
+    anchor: Option<f64>,
+}
+
+/// One frame's cursor focus, appearance and blink clock, as derived by
+/// [`frame_cursor_state`].
+#[derive(Debug, Clone, PartialEq)]
+struct FrameCursorState {
+    /// The combined pane/window focus the cursor is drawn with.
+    focus: CursorFocus,
+    /// How the cursor is drawn, before fold/off-screen visibility is applied.
+    appearance: CursorAppearance,
+    /// The RAW blink-clock phase. Pinning it for a cursor that does not blink
+    /// is done by `evaluate_frame_dirty_state`, which returns the effective
+    /// phase.
+    raw_blink: CursorBlinkPhase,
+    /// The blink anchor to store back on the `ViewState`: `Some(time)` when
+    /// this frame re-anchored, otherwise the input anchor unchanged.
+    anchor: Option<f64>,
+}
+
+/// Derive one frame's cursor focus, appearance and blink clock.
+///
+/// The blink anchor is re-set to `time` when either the GUI flagged an
+/// activation reset or the cursor just regained focus
+/// ([`blink_anchor_action`]); a pending activation reset is thereby consumed,
+/// and the caller must clear its flag. The raw phase is then measured from the
+/// (possibly new) anchor, so a freshly (re)focused or (re)activated pane's
+/// first frame is blink-on.
+///
+/// Lives beside [`blink_anchor_action`] and [`cursor_blink_phase`] because
+/// those own the *when* of the cursor (the blink clock); the *what* is
+/// delegated to `cursor_appearance`'s [`cursor_focus`] and
+/// [`resolve_cursor_appearance`], which stay the single definitions of the
+/// focus and appearance rules.
+#[must_use]
+fn frame_cursor_state(inputs: &FrameCursorInputs<'_>) -> FrameCursorState {
+    let focus = cursor_focus(inputs.pane_focus, inputs.window_focus);
+    let anchor = if inputs.activation_reset == ActivationBlinkReset::Pending
+        || blink_anchor_action(inputs.previous_focus, focus) == BlinkAnchorAction::Reanchor
+    {
+        Some(inputs.time)
+    } else {
+        inputs.anchor
+    };
+    let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+        snapshot_visible: inputs.snapshot_visible,
+        echo: inputs.echo,
+        focus,
+        style: inputs.style.clone(),
+        unfocused_style: inputs.unfocused_style,
+    });
+    let raw_blink = CursorBlinkPhase::from_blink_on(cursor_blink_phase(
+        inputs.time,
+        anchor,
+        BLINK_TICK_SECONDS,
+    ));
+    FrameCursorState {
+        focus,
+        appearance,
+        raw_blink,
+        anchor,
+    }
+}
+
 /// Patch the cursor's geometry into `deco_verts` for a cursor-only frame
 /// (content, selection, and everything else unchanged; only the cursor's
 /// appearance, blink state, position, or color changed since the last frame).
@@ -2857,8 +2970,6 @@ impl FreminalTerminalWidget {
         present_region: &Arc<Mutex<freminal_windowing::PresentRegion>>,
         split_border_hover: SplitBorderHover,
     ) -> (bool, bool, Vec<freminal_common::keybindings::KeyAction>) {
-        const BLINK_TICK_SECONDS: f64 = 0.50;
-
         // `sync_pixels_per_point()` has already been called by
         // `FreminalGui::ui()` before this method, so font metrics are
         // up-to-date.  We just read `ppp` for logical-pixel conversions.
@@ -3249,24 +3360,30 @@ impl FreminalTerminalWidget {
         // ("on") half regardless of the global cycle — no cursor-appear lag on
         // pane switch or tab switch. The anchor is captured lazily on the
         // first render after activation, when a valid `time` is available.
-        let cursor_focus_now = cursor_focus(pane_focus_now, window_focus);
+        //
         // A focus regain re-anchors the blink exactly as an activation reset
-        // does, so the regained (now solid) cursor starts visible.
-        if view_state.cursor_blink_reset_pending
-            || blink_anchor_action(cache.previous_cursor_focus, cursor_focus_now)
-                == BlinkAnchorAction::Reanchor
-        {
-            view_state.cursor_blink_anchor = Some(time);
-            view_state.cursor_blink_reset_pending = false;
-        }
-        // The RAW blink-clock phase. Pinning it for a cursor that does not
-        // blink (so a flip is not a cursor-state change) is done inside
-        // `evaluate_frame_dirty_state`, which returns the effective phase.
-        let raw_cursor_blink = CursorBlinkPhase::from_blink_on(cursor_blink_phase(
+        // does, so the regained (now solid) cursor starts visible. The whole
+        // derivation (focus, appearance, anchor, raw phase) is
+        // `frame_cursor_state`, which is unit-tested.
+        let frame_cursor = frame_cursor_state(&FrameCursorInputs {
+            pane_focus: pane_focus_now,
+            window_focus,
+            previous_focus: cache.previous_cursor_focus,
+            activation_reset: ActivationBlinkReset::from_bool(
+                view_state.cursor_blink_reset_pending,
+            ),
+            snapshot_visible: CursorVisibility::from_bool(snap.show_cursor),
+            echo: EchoState::from_echo_off(is_echo_off),
+            style: &snap.cursor_visual_style,
+            unfocused_style: self.unfocused_cursor_style,
             time,
-            view_state.cursor_blink_anchor,
-            BLINK_TICK_SECONDS,
-        ));
+            anchor: view_state.cursor_blink_anchor,
+        });
+        view_state.cursor_blink_anchor = frame_cursor.anchor;
+        // `frame_cursor_state` consumes any pending activation reset.
+        view_state.cursor_blink_reset_pending = false;
+        let cursor_focus_now = frame_cursor.focus;
+        let raw_cursor_blink = frame_cursor.raw_blink;
 
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
@@ -3326,21 +3443,7 @@ impl FreminalTerminalWidget {
         // (DECTCEM ?25l) or a password prompt is active (the echo-off lock
         // icon replaces it); otherwise solid when focused, and styled by
         // `[cursor] unfocused_style` when the pane or window is not focused.
-        let mut cursor_appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
-            snapshot_visible: if snap.show_cursor {
-                CursorVisibility::Shown
-            } else {
-                CursorVisibility::Hidden
-            },
-            echo: if is_echo_off {
-                EchoState::EchoOff
-            } else {
-                EchoState::Normal
-            },
-            focus: cursor_focus_now,
-            style: snap.cursor_visual_style.clone(),
-            unfocused_style: self.unfocused_cursor_style,
-        });
+        let mut cursor_appearance = frame_cursor.appearance;
 
         // ── Command-block folding (Task 72.10b) ─────────────────────────────
         //
@@ -3444,8 +3547,6 @@ impl FreminalTerminalWidget {
                     terminal_rect,
                     gutter_inset,
                     logical_cell_h,
-                    cell_w_f,
-                    row_h_f,
                 },
                 CursorFrameInputs {
                     blink: raw_cursor_blink,
@@ -3468,11 +3569,11 @@ impl FreminalTerminalWidget {
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             let cursor_state_changed = dirty.cursor_state_changed;
             cursor_appearance = dirty.cursor_appearance;
-            let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
             // Draw params shared by the cursor-only and full-rebuild paths.
-            // `col`/`row` are the same trail-animated visual coordinates
-            // `dirty.cursor_pixel_pos` was derived from. `appearance` is the
+            // `col`/`row` are the trail-animated visual coordinates, and the
+            // cursor's pixel origin (for the damage rect below) is derived
+            // from these same params via `pixel_origin`. `appearance` is the
             // focus-resolved appearance with fold/off-screen visibility
             // already applied, and `blink_on` is the focus-pinned phase
             // `evaluate_frame_dirty_state` derived from the raw one.
@@ -3608,7 +3709,7 @@ impl FreminalTerminalWidget {
                 // pixels; `PaneDamageRect` handles the Y-flip to GL origin.
                 let cell_w_px = cell_w_f * cursor_x_scale;
                 // Current cursor cell, relative to the viewport top-left.
-                let (cur_x, cur_y) = cursor_pixel_pos;
+                let (cur_x, cur_y) = cursor_draw.pixel_origin(cell_w, cell_h);
                 let mut damage_cells: Vec<(f32, f32, f32, f32)> =
                     vec![(cur_x, cur_y, cell_w_px, row_h_f)];
                 // If the cursor moved since last frame, also damage the old
@@ -6003,6 +6104,227 @@ mod cursor_blink_phase_tests {
             blink_anchor_action(cache.previous_cursor_focus, CursorFocus::Focused),
             BlinkAnchorAction::Reanchor
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_cursor_state_tests {
+    //! Tests for [`frame_cursor_state`], the pure per-frame cursor derivation
+    //! `show()` calls: focus, appearance, blink anchor and raw blink phase.
+
+    use super::{ActivationBlinkReset, FrameCursorInputs, FrameCursorState, frame_cursor_state};
+    use crate::gui::frame_drain::WindowFocus;
+    use crate::gui::renderer::CursorBlinkPhase;
+    use crate::gui::terminal::cursor_appearance::{
+        CursorAppearance, CursorFocus, CursorVisibility, EchoState,
+    };
+    use crate::gui::terminal::input::PaneFocus;
+    use freminal_common::config::UnfocusedCursorStyle;
+    use freminal_common::cursor::CursorVisualStyle;
+
+    /// A time at which the un-anchored global blink clock is in its OFF half
+    /// (`0.7 / 0.5 = 1.4 -> tick 1 -> off`).
+    const OFF_HALF_TIME: f64 = 0.7;
+
+    const BLINK: CursorVisualStyle = CursorVisualStyle::BlockCursorBlink;
+
+    /// A focused, visible, normal-echo frame at [`OFF_HALF_TIME`] with no
+    /// anchor and no pending reset; each test overrides what it exercises.
+    fn base(style: &CursorVisualStyle) -> FrameCursorInputs<'_> {
+        FrameCursorInputs {
+            pane_focus: PaneFocus::Active,
+            window_focus: WindowFocus::Focused,
+            previous_focus: CursorFocus::Focused,
+            activation_reset: ActivationBlinkReset::NotPending,
+            snapshot_visible: CursorVisibility::Shown,
+            echo: EchoState::Normal,
+            style,
+            unfocused_style: UnfocusedCursorStyle::Hollow,
+            time: OFF_HALF_TIME,
+            anchor: None,
+        }
+    }
+
+    fn state(inputs: &FrameCursorInputs<'_>) -> FrameCursorState {
+        frame_cursor_state(inputs)
+    }
+
+    /// Control: with no re-anchor trigger the un-anchored clock is in its off
+    /// half, so this scenario really does depend on the re-anchor below.
+    #[test]
+    fn without_a_trigger_the_global_clock_is_in_its_off_half() {
+        let got = state(&base(&BLINK));
+        assert_eq!(got.anchor, None);
+        assert_eq!(got.raw_blink, CursorBlinkPhase::Off);
+        assert_eq!(got.focus, CursorFocus::Focused);
+    }
+
+    #[test]
+    fn regaining_window_focus_reanchors_so_the_first_focused_frame_is_on() {
+        let got = state(&FrameCursorInputs {
+            previous_focus: CursorFocus::UnfocusedWindow,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(OFF_HALF_TIME));
+        assert_eq!(got.raw_blink, CursorBlinkPhase::On);
+        assert_eq!(got.appearance, CursorAppearance::Solid(BLINK));
+    }
+
+    #[test]
+    fn becoming_the_active_pane_reanchors() {
+        let got = state(&FrameCursorInputs {
+            previous_focus: CursorFocus::InactivePane,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(OFF_HALF_TIME));
+        assert_eq!(got.raw_blink, CursorBlinkPhase::On);
+    }
+
+    #[test]
+    fn a_pending_activation_reset_reanchors_even_when_focus_is_unchanged() {
+        let got = state(&FrameCursorInputs {
+            activation_reset: ActivationBlinkReset::Pending,
+            anchor: Some(0.0),
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(OFF_HALF_TIME));
+        assert_eq!(got.raw_blink, CursorBlinkPhase::On);
+    }
+
+    /// Staying focused must not restart the blink every frame: the existing
+    /// anchor is kept and the phase is measured from it.
+    #[test]
+    fn staying_focused_keeps_the_anchor_and_follows_its_clock() {
+        // Anchored at 0.0, 0.7s in is the second (off) half-period.
+        let got = state(&FrameCursorInputs {
+            anchor: Some(0.0),
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(0.0));
+        assert_eq!(got.raw_blink, CursorBlinkPhase::Off);
+
+        // And 1.1s in it is on again.
+        let got = state(&FrameCursorInputs {
+            anchor: Some(0.0),
+            time: 1.1,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(0.0));
+        assert_eq!(got.raw_blink, CursorBlinkPhase::On);
+    }
+
+    /// Losing focus never re-anchors (there is no phase to restore: the
+    /// cursor is steady while not focused).
+    #[test]
+    fn losing_focus_keeps_the_anchor() {
+        let got = state(&FrameCursorInputs {
+            window_focus: WindowFocus::Unfocused,
+            previous_focus: CursorFocus::Focused,
+            anchor: Some(0.1),
+            ..base(&BLINK)
+        });
+        assert_eq!(got.anchor, Some(0.1));
+        assert_eq!(got.focus, CursorFocus::UnfocusedWindow);
+    }
+
+    #[test]
+    fn inactive_pane_resolves_to_a_hollow_cursor() {
+        let got = state(&FrameCursorInputs {
+            pane_focus: PaneFocus::Inactive,
+            previous_focus: CursorFocus::InactivePane,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.focus, CursorFocus::InactivePane);
+        assert_eq!(got.appearance, CursorAppearance::Hollow);
+    }
+
+    #[test]
+    fn unfocused_window_resolves_to_a_hollow_cursor_even_for_the_active_pane() {
+        let got = state(&FrameCursorInputs {
+            window_focus: WindowFocus::Unfocused,
+            previous_focus: CursorFocus::UnfocusedWindow,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.focus, CursorFocus::UnfocusedWindow);
+        assert_eq!(got.appearance, CursorAppearance::Hollow);
+    }
+
+    /// The user's unfocused preference reaches the resolution: `Unchanged`
+    /// keeps the shape but steady, `Hidden` draws nothing.
+    #[test]
+    fn unfocused_preference_is_applied_to_a_non_focused_cursor() {
+        let unchanged = state(&FrameCursorInputs {
+            pane_focus: PaneFocus::Inactive,
+            previous_focus: CursorFocus::InactivePane,
+            unfocused_style: UnfocusedCursorStyle::Unchanged,
+            ..base(&BLINK)
+        });
+        assert_eq!(
+            unchanged.appearance,
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady)
+        );
+        let hidden = state(&FrameCursorInputs {
+            pane_focus: PaneFocus::Inactive,
+            previous_focus: CursorFocus::InactivePane,
+            unfocused_style: UnfocusedCursorStyle::Hidden,
+            ..base(&BLINK)
+        });
+        assert_eq!(hidden.appearance, CursorAppearance::Hidden);
+    }
+
+    #[test]
+    fn dectcem_hidden_is_hidden_in_every_focus_state() {
+        for (pane_focus, window_focus, previous_focus) in [
+            (
+                PaneFocus::Active,
+                WindowFocus::Focused,
+                CursorFocus::Focused,
+            ),
+            (
+                PaneFocus::Inactive,
+                WindowFocus::Focused,
+                CursorFocus::InactivePane,
+            ),
+            (
+                PaneFocus::Active,
+                WindowFocus::Unfocused,
+                CursorFocus::UnfocusedWindow,
+            ),
+        ] {
+            let got = state(&FrameCursorInputs {
+                pane_focus,
+                window_focus,
+                previous_focus,
+                snapshot_visible: CursorVisibility::Hidden,
+                ..base(&BLINK)
+            });
+            assert_eq!(
+                got.appearance,
+                CursorAppearance::Hidden,
+                "{pane_focus:?} / {window_focus:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn echo_off_is_hidden() {
+        let got = state(&FrameCursorInputs {
+            echo: EchoState::EchoOff,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.appearance, CursorAppearance::Hidden);
+    }
+
+    /// The returned phase is the RAW clock: it is not pinned for a non-focused
+    /// cursor here (that is `evaluate_frame_dirty_state`'s job).
+    #[test]
+    fn the_blink_phase_is_the_raw_clock_even_when_not_focused() {
+        let got = state(&FrameCursorInputs {
+            pane_focus: PaneFocus::Inactive,
+            previous_focus: CursorFocus::InactivePane,
+            ..base(&BLINK)
+        });
+        assert_eq!(got.raw_blink, CursorBlinkPhase::Off);
     }
 }
 
@@ -8800,29 +9122,28 @@ mod pane_cursor_focus_geometry_tests {
     //! `FreminalTerminalWidget::show` needs a live egui `Ui` and a GL context,
     //! so it cannot be driven from a unit test. These tests instead drive the
     //! narrowest seam that still runs the real code on both sides of the wiring
-    //! `show()` performs: [`cursor_focus`] and [`resolve_cursor_appearance`]
-    //! (the same two calls, fed the same kinds of inputs) produce the
-    //! [`CursorDrawParams`] that [`build_cursor_verts_only`] -- the builder the
-    //! cursor-only path uses, and which emits identical geometry to the
-    //! full-rebuild path for identical params -- turns into quads. The focus
-    //! pinning of the blink phase is the one piece of `show()` that is not
-    //! reachable from here.
+    //! `show()` performs: [`frame_cursor_state`] (the very function `show()`
+    //! calls to derive focus and appearance) produces the appearance that
+    //! becomes the [`CursorDrawParams`] [`build_cursor_verts_only`] -- the
+    //! builder the cursor-only path uses, and which emits identical geometry to
+    //! the full-rebuild path for identical params -- turns into quads. The
+    //! focus pinning of the blink phase is the one piece of `show()` that is
+    //! not reachable from here.
 
     use crate::gui::colors::cursor_f;
     use crate::gui::frame_drain::WindowFocus;
     use crate::gui::renderer::{
         CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams, build_cursor_verts_only,
     };
-    use crate::gui::terminal::cursor_appearance::{
-        CursorAppearanceInputs, CursorVisibility, EchoState, cursor_focus,
-        resolve_cursor_appearance,
-    };
+    use crate::gui::terminal::cursor_appearance::{CursorFocus, CursorVisibility, EchoState};
     use crate::gui::terminal::input::PaneFocus;
     use freminal_common::config::{Config, UnfocusedCursorStyle};
     use freminal_common::cursor::CursorVisualStyle;
     use freminal_common::themes::CATPPUCCIN_MOCHA;
 
-    use super::FreminalTerminalWidget;
+    use super::{
+        ActivationBlinkReset, FrameCursorInputs, FreminalTerminalWidget, frame_cursor_state,
+    };
 
     /// The cursor floats a pane would emit, resolved exactly as `show()`
     /// resolves them from its pane focus, window focus, and DECTCEM state.
@@ -8832,15 +9153,21 @@ mod pane_cursor_focus_geometry_tests {
         visibility: CursorVisibility,
         unfocused_style: UnfocusedCursorStyle,
     ) -> Vec<f32> {
-        let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+        let style = CursorVisualStyle::BlockCursorSteady;
+        let state = frame_cursor_state(&FrameCursorInputs {
+            pane_focus: pane,
+            window_focus: window,
+            previous_focus: CursorFocus::Focused,
+            activation_reset: ActivationBlinkReset::NotPending,
             snapshot_visible: visibility,
             echo: EchoState::Normal,
-            focus: cursor_focus(pane, window),
-            style: CursorVisualStyle::BlockCursorSteady,
+            style: &style,
             unfocused_style,
+            time: 0.0,
+            anchor: None,
         });
         let params = CursorDrawParams {
-            appearance,
+            appearance: state.appearance,
             col: 3.0,
             row: 1.0,
             color: cursor_f(&CATPPUCCIN_MOCHA, None),

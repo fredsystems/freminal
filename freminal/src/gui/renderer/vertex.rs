@@ -315,6 +315,25 @@ pub struct CursorDrawParams {
     pub blink_on: CursorBlinkPhase,
 }
 
+impl CursorDrawParams {
+    /// Pixel position of the cursor cell's top-left corner, relative to the
+    /// terminal viewport's top-left, for the given cell size in physical
+    /// pixels.
+    ///
+    /// This is the single definition of the cursor's origin: the quad
+    /// builders anchor their geometry on it and the cursor-only damage rect
+    /// is derived from it, so the pixels drawn and the pixels declared dirty
+    /// cannot drift apart. The x position is scaled by [`Self::x_scale`] so
+    /// it aligns with the magnified glyphs of a DECDWL/DECDHL row.
+    #[must_use]
+    pub fn pixel_origin(&self, cell_width: u32, cell_height: u32) -> (f32, f32) {
+        (
+            self.col * gl_f32_u32(cell_width) * self.x_scale,
+            self.row * gl_f32_u32(cell_height),
+        )
+    }
+}
+
 /// The exact float range the cursor occupies inside a decoration buffer.
 ///
 /// `len == 0` when nothing was drawn (hidden, or a blinking cursor in its off
@@ -346,8 +365,7 @@ fn push_cursor_quads(
 ) {
     let cell_w = gl_f32_u32(cell_width);
     let ch = gl_f32_u32(cell_height);
-    let cx = params.col * cell_w * params.x_scale;
-    let cy = params.row * ch;
+    let (cx, cy) = params.pixel_origin(cell_width, cell_height);
     let cw = cell_w * params.x_scale;
     let color = params.color;
 
@@ -3269,6 +3287,41 @@ mod tests {
                 "{style:?} at x_scale {scale} drifted from the pre-refactor output"
             );
         }
+    }
+
+    /// `pixel_origin` is `(col * cell_w * x_scale, row * cell_h)`, written out
+    /// independently here, and the cursor geometry is anchored on exactly it:
+    /// a block cursor's top-left vertex IS the origin. The damage path derives
+    /// its rect from the same call, so the two cannot disagree.
+    #[test]
+    fn pixel_origin_is_the_block_cursors_top_left_and_scales_x_only() {
+        for scale in [1.0_f32, 2.0] {
+            let params = fractional_params(
+                CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+                scale,
+                CursorBlinkPhase::On,
+            );
+            let (ox, oy) = params.pixel_origin(8, 16);
+            assert_eq!(ox.to_bits(), (2.3_f32 * 8.0 * scale).to_bits());
+            assert_eq!(oy.to_bits(), (3.7_f32 * 16.0).to_bits());
+
+            let verts = build_cursor_verts_only(8, 16, &params);
+            let rects = quad_rects(&verts);
+            assert_eq!(rects.len(), 1);
+            assert_eq!(rects[0].0.to_bits(), ox.to_bits(), "x at scale {scale}");
+            assert_eq!(rects[0].1.to_bits(), oy.to_bits(), "y at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn pixel_origin_is_independent_of_appearance_and_blink_phase() {
+        let shown = fractional_params(
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+            1.0,
+            CursorBlinkPhase::On,
+        );
+        let hidden = fractional_params(CursorAppearance::Hidden, 1.0, CursorBlinkPhase::Off);
+        assert_eq!(shown.pixel_origin(9, 18), hidden.pixel_origin(9, 18));
     }
 
     #[test]
