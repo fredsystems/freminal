@@ -97,15 +97,17 @@ impl AnsiOscParser {
                 if is_osc_terminator(&self.params) {
                     self.state = AnsiOscParserState::Finished;
 
-                    if !self.params.is_empty() {
-                        while let Some(&last) = self.params.last() {
-                            if is_final_character_osc_terminator(last) {
-                                self.params.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+                    // Remove exactly the terminator: one byte for BEL, two for
+                    // `ESC \`. The two suffixes are disjoint (the last byte is
+                    // 0x07 or 0x5c), and any other trailing `\`, BEL-adjacent
+                    // ESC, etc. belongs to the body and must be preserved.
+                    let terminator_len = if self.params.ends_with(&[0x1b, 0x5c]) {
+                        2
+                    } else {
+                        1
+                    };
+                    self.params
+                        .truncate(self.params.len().saturating_sub(terminator_len));
 
                     return ParserOutcome::Finished;
                 }
@@ -360,15 +362,10 @@ fn dispatch_osc_target(
     }
 }
 
+// Detects the full OSC terminator (BEL or `ESC \`) at the end of the accumulated buffer.
+// `push` removes exactly the matched terminator once this returns true.
 const fn is_osc_terminator(b: &[u8]) -> bool {
     matches!(b, [.., 0x07] | [.., 0x1b, 0x5c])
-}
-
-// Strips individual trailing terminator bytes from the accumulated OSC parameter buffer.
-// Works in tandem with `is_osc_terminator` (which detects the full ST sequence on the buffer)
-// to clean up after termination is detected.
-const fn is_final_character_osc_terminator(b: u8) -> bool {
-    b == 0x5c || b == 0x07 || b == 0x1b
 }
 
 fn is_valid_osc_param(b: u8) -> bool {
@@ -868,6 +865,66 @@ mod tests {
             &output[0],
             TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(_))
         ));
+    }
+
+    // ── Terminator stripping removes exactly the terminator ─────────────────
+    fn title_of(output: &[TerminalOutput]) -> &str {
+        match output {
+            [TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(t))] => t.as_str(),
+            other => panic!("expected a single SetTitleBar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc_title_ending_in_backslash_bel_keeps_backslash() {
+        let output = feed_osc(b"0;C:\\\x07");
+        assert_eq!(title_of(&output), "C:\\");
+    }
+
+    #[test]
+    fn osc_title_ending_in_backslash_st_keeps_backslash() {
+        let output = feed_osc(b"0;C:\\\x1b\\");
+        assert_eq!(title_of(&output), "C:\\");
+    }
+
+    #[test]
+    fn osc_title_ending_in_two_backslashes_bel_keeps_both() {
+        let output = feed_osc(b"0;a\\\\\x07");
+        assert_eq!(title_of(&output), "a\\\\");
+    }
+
+    #[test]
+    fn osc_body_ending_in_esc_terminated_by_bel_keeps_esc() {
+        // OSC 9 ; hi ESC BEL — the ESC belongs to the body, BEL is the terminator.
+        let output = feed_osc(b"9;hi\x1b\x07");
+        assert_eq!(output.len(), 1);
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::Notify { body, .. }) => {
+                assert_eq!(body, "hi\u{1b}");
+            }
+            other => panic!("expected Notify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_strips_one_byte_for_bel_and_two_for_st() {
+        let mut bel = AnsiOscParser::new();
+        for &b in b"0;a\\\x07" {
+            bel.push(b);
+        }
+        assert_eq!(bel.params, b"0;a\\");
+
+        let mut st = AnsiOscParser::new();
+        for &b in b"0;a\\\x1b\\" {
+            st.push(b);
+        }
+        assert_eq!(st.params, b"0;a\\");
+
+        let mut esc_bel = AnsiOscParser::new();
+        for &b in b"0;a\x1b\x07" {
+            esc_bel.push(b);
+        }
+        assert_eq!(esc_bel.params, b"0;a\x1b");
     }
 
     // ── ST terminator (ESC \) ───────────────────────────────────────────────
