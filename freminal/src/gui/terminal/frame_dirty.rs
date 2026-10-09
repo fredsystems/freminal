@@ -3143,6 +3143,10 @@ mod evaluate_frame_dirty_state_tests {
     /// be reported by the next frame. The skipped frame draws nothing, so its
     /// cursor must not become the baseline; otherwise the next, otherwise
     /// unchanged, frame sees "no change" and the old cursor stays on screen.
+    ///
+    /// The skipped frame is modelled by `record_cursor_frame(Skipped)`. The
+    /// `show()` wiring that chooses `Skipped` when `snap.skip_draw` is set
+    /// needs a live egui `Ui` and GL context and is not covered here.
     #[test]
     fn cursor_move_on_a_skipped_frame_is_still_a_change_on_the_next_frame() {
         let settled = base_snapshot();
