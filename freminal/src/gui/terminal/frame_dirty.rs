@@ -27,7 +27,7 @@ use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
 use crate::gui::view_state::{ImageAnimationTick, LogicalCell, ViewState};
 
-use super::cursor_appearance::CursorAppearance;
+use super::cursor_appearance::{CursorAppearance, CursorFocus};
 use super::widget::{
     FoldLayout, PaneRenderCache, RenderState, compute_command_block_hover_rows,
     image_pixels_changed,
@@ -409,6 +409,9 @@ pub(super) struct CursorFrameInputs {
     /// the function when the cursor row is not on screen, and returned in
     /// [`DirtyTrackingOutcome`].
     pub(super) appearance: CursorAppearance,
+    /// The combined pane/window focus. Only a [`CursorFocus::Focused`] cursor
+    /// animates its trail; any other focus snaps the cursor to its target.
+    pub(super) focus: CursorFocus,
     /// Whether the cursor-trail animation is enabled by config.
     pub(super) trail_enabled: bool,
     /// How long a cursor-trail animation runs.
@@ -461,6 +464,7 @@ pub(super) fn evaluate_frame_dirty_state(
     let CursorFrameInputs {
         blink_on: cursor_blink_on,
         appearance: mut cursor_appearance,
+        focus: cursor_focus,
         trail_enabled: cursor_trail,
         trail_duration: cursor_trail_duration,
     } = cursor;
@@ -740,12 +744,20 @@ pub(super) fn evaluate_frame_dirty_state(
         .unwrap_or(snap.cursor_pos.y)
         .approx_as::<f32>()
         .unwrap_or(0.0);
-    let cursor_animating = view_state.update_cursor_animation(
-        target_col,
-        target_row,
-        cursor_trail,
-        cursor_trail_duration,
-    );
+    // Only a focused cursor glides. An inactive pane or unfocused window draws
+    // a steady cursor, so a trail toward it would just keep waking the repaint
+    // scheduler for an animation nobody is watching.
+    let cursor_animating = match cursor_focus {
+        CursorFocus::Focused => view_state.update_cursor_animation(
+            target_col,
+            target_row,
+            cursor_trail,
+            cursor_trail_duration,
+        ),
+        CursorFocus::InactivePane | CursorFocus::UnfocusedWindow => {
+            view_state.snap_cursor_animation(target_col, target_row)
+        }
+    };
 
     // Compute the pixel position from the (possibly animated) visual
     // cursor coordinates.  These are fractional cell coords, so we
@@ -958,7 +970,7 @@ mod evaluate_frame_dirty_state_tests {
     use super::*;
     use crate::gui::renderer::WindowPostRenderer;
     use crate::gui::terminal::cursor_appearance::{
-        CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState, resolve_cursor_appearance,
+        CursorAppearanceInputs, CursorVisibility, EchoState, resolve_cursor_appearance,
     };
     use crate::gui::view_state::SearchState;
     use freminal_common::buffer_states::row_number::RowNumber;
@@ -1060,6 +1072,41 @@ mod evaluate_frame_dirty_state_tests {
         cursor_blink_on: bool,
         cursor_appearance: CursorAppearance,
     ) -> DirtyTrackingOutcome {
+        call_with_trail(
+            snap,
+            view_state,
+            cache,
+            render_state,
+            cursor_blink_on,
+            cursor_appearance,
+            TrailProbe {
+                focus: CursorFocus::Focused,
+                trail_enabled: false,
+            },
+        )
+    }
+
+    /// The focus and trail setting a trail-sensitive test drives.
+    #[derive(Clone, Copy)]
+    struct TrailProbe {
+        focus: CursorFocus,
+        trail_enabled: bool,
+    }
+
+    /// [`call`] with an explicit focus and cursor-trail setting.
+    fn call_with_trail(
+        snap: &TerminalSnapshot,
+        view_state: &mut ViewState,
+        cache: &PaneRenderCache,
+        render_state: &Arc<Mutex<RenderState>>,
+        cursor_blink_on: bool,
+        cursor_appearance: CursorAppearance,
+        probe: TrailProbe,
+    ) -> DirtyTrackingOutcome {
+        let TrailProbe {
+            focus,
+            trail_enabled,
+        } = probe;
         let layout = FoldLayout::new(snap, &view_state.folded_blocks);
         let command_blocks_config = CommandBlocksConfig::default();
         let pane_rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
@@ -1085,8 +1132,11 @@ mod evaluate_frame_dirty_state_tests {
             CursorFrameInputs {
                 blink_on: cursor_blink_on,
                 appearance: cursor_appearance,
-                trail_enabled: false,
-                trail_duration: Duration::from_millis(120),
+                focus,
+                trail_enabled,
+                // Long enough that a trail started by a test can never
+                // finish between two calls, however loaded the machine is.
+                trail_duration: Duration::from_secs(10),
             },
         )
     }
@@ -2809,5 +2859,78 @@ mod evaluate_frame_dirty_state_tests {
         );
 
         assert!(outcome.cursor_screen_row.is_some());
+    }
+
+    /// Drive two consecutive frames with the trail enabled: the first
+    /// observes the cursor at the origin, the second after it moved to
+    /// `(3, 2)`. Returns whether the second frame reports a trail in
+    /// progress, and the view state for position assertions.
+    fn move_cursor_with_trail(focus: CursorFocus) -> (bool, ViewState) {
+        let first = base_snapshot();
+        let cache = settled_cache(&first, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let probe = TrailProbe {
+            focus,
+            trail_enabled: true,
+        };
+
+        call_with_trail(
+            &first,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+            probe,
+        );
+        std::thread::sleep(Duration::from_millis(5));
+
+        let mut moved = base_snapshot();
+        moved.cursor_pos = freminal_common::buffer_states::cursor::CursorPos { x: 3, y: 2 };
+        let outcome = call_with_trail(
+            &moved,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+            probe,
+        );
+        (outcome.cursor_animating, view_state)
+    }
+
+    /// Control: a focused pane with the trail enabled still glides toward a
+    /// moved cursor (focused behaviour is unchanged by Task 127.6).
+    #[test]
+    fn focused_pane_animates_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::Focused);
+
+        assert!(animating, "a focused cursor must still glide");
+        assert!(
+            view_state.cursor_visual_col < 3.0,
+            "the visual position must lag the target mid-glide"
+        );
+    }
+
+    /// An inactive pane draws a steady hollow cursor, so its trail must not
+    /// animate (it would only keep waking the repaint scheduler).
+    #[test]
+    fn inactive_pane_does_not_animate_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::InactivePane);
+
+        assert!(!animating);
+        assert!((view_state.cursor_visual_col - 3.0).abs() < f32::EPSILON);
+        assert!((view_state.cursor_visual_row - 2.0).abs() < f32::EPSILON);
+    }
+
+    /// An unfocused window likewise stops animating the trail.
+    #[test]
+    fn unfocused_window_does_not_animate_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::UnfocusedWindow);
+
+        assert!(!animating);
+        assert!((view_state.cursor_visual_col - 3.0).abs() < f32::EPSILON);
+        assert!((view_state.cursor_visual_row - 2.0).abs() < f32::EPSILON);
     }
 }

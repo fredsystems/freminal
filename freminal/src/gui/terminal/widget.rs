@@ -3385,6 +3385,7 @@ impl FreminalTerminalWidget {
                 CursorFrameInputs {
                     blink_on: cursor_blink_on,
                     appearance: cursor_appearance.clone(),
+                    focus: cursor_focus_now,
                     trail_enabled: self.toggles.cursor_trail,
                     trail_duration: self.cursor_trail_duration,
                 },
