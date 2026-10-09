@@ -3061,9 +3061,12 @@ impl freminal_windowing::App for FreminalGui {
                 //
                 // A blink-style cursor only needs the periodic ~500ms wake
                 // when the cursor is ACTUALLY on screen — i.e. exactly the
-                // condition the drawing side gates on (`effective_show_cursor`
-                // in `terminal/widget.rs`: `snap.show_cursor && !is_echo_off
-                // && is_active_pane`). Scheduling the wake off the configured
+                // condition the drawing side gates on (the appearance resolved
+                // by `resolve_cursor_appearance` in
+                // `terminal/cursor_appearance.rs` from DECTCEM visibility, echo
+                // state, pane/window focus, and the configured style; the
+                // wake is needed only when that appearance is a blinking
+                // `Solid` one). Scheduling the wake off the configured
                 // cursor *style* alone (ignoring `show_cursor`) is a real
                 // over-repaint bug: a full-screen TUI that hides the cursor
                 // via DECTCEM (`\e[?25l`) — btop, vim, htop, less, … — keeps
