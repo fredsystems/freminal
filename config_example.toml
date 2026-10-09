@@ -50,6 +50,12 @@ trail = false
 # Duration of the cursor trail animation in milliseconds
 trail_duration_ms = 150
 
+# How the cursor is drawn in an inactive pane or an unfocused window:
+#   hollow     - a steady hollow block
+#   unchanged  - the application's cursor shape, drawn solid but steady
+#   hidden     - no cursor is drawn
+unfocused_style = "hollow"
+
 ## ##############################################################################
 # THEME SETTINGS
 ## ##############################################################################
