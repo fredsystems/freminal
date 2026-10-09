@@ -149,36 +149,18 @@ impl AnsiOscParser {
 
         match self.state {
             AnsiOscParserState::Finished => {
-                if let Ok(params) = split_params_into_semicolon_delimited_tokens(&self.params) {
-                    let Some(type_number) = extract_param(0, &params) else {
-                        output.push(TerminalOutput::Invalid);
-                        return ParserOutcome::Invalid(format!(
-                            "Invalid OSC params: recent='{}'",
-                            lossy_sequence_for_log_bounded(&self.params)
-                        ));
-                    };
+                // The OSC number is everything before the first `;`; the whole
+                // body (number included, terminator already stripped) is handed
+                // to the dispatcher so each target can parse what it needs.
+                let number_bytes = self.params.split(|b| *b == b';').next().unwrap_or_default();
 
-                    // Only clone what's actually reused later.
-                    let osc_target = OscTarget::from(&type_number);
-                    let osc_internal_type = AnsiOscInternalType::from(&params);
+                let Ok(Some(type_number)) = parse_param_as::<AnsiOscToken>(number_bytes) else {
+                    return invalid_osc_params(&self.params, output);
+                };
 
-                    dispatch_osc_target(
-                        &osc_target,
-                        osc_internal_type,
-                        params,
-                        &self.params,
-                        output,
-                    );
-                } else {
-                    output.push(TerminalOutput::Invalid);
+                let osc_target = OscTarget::from(&type_number);
 
-                    return ParserOutcome::Invalid(format!(
-                        "Invalid OSC params: recent='{}'",
-                        lossy_sequence_for_log_bounded(&self.params)
-                    ));
-                }
-
-                ParserOutcome::Finished
+                dispatch_osc_target(&osc_target, &self.params, output)
             }
             AnsiOscParserState::Invalid => ParserOutcome::Invalid("Invalid OSC State".to_string()),
             _ => ParserOutcome::Continue,
@@ -207,132 +189,180 @@ fn handle_osc_pointer_shape(params: &[Option<AnsiOscToken>], output: &mut Vec<Te
     )));
 }
 
-// A flat dispatch match over every recognised OSC target.  Its bulk is the
-// match itself; splitting it would scatter one-line arms across helpers and
-// obscure the dispatch table, so the over-100-line lint is suppressed here
-// (consistent with similar flat-match allows elsewhere in the parser).
-#[allow(clippy::too_many_lines)]
-fn dispatch_osc_target(
-    osc_target: &OscTarget,
-    osc_internal_type: AnsiOscInternalType,
-    params: Vec<Option<AnsiOscToken>>,
+/// Push `TerminalOutput::Invalid` and build the matching `ParserOutcome` for
+/// an OSC body whose number or parameters could not be parsed.
+fn invalid_osc_params(raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+    output.push(TerminalOutput::Invalid);
+    ParserOutcome::Invalid(format!(
+        "Invalid OSC params: recent='{}'",
+        lossy_sequence_for_log_bounded(raw_params)
+    ))
+}
+
+/// Tokenise the whole OSC body (so token 0 is the OSC number) and run `handler`
+/// on the tokens.
+///
+/// Used by every target that works on tokens rather than the raw body. A
+/// tokenisation failure (a non-UTF-8 segment) yields `TerminalOutput::Invalid`
+/// and `ParserOutcome::Invalid`, exactly as before raw-body dispatch.
+fn with_osc_tokens(
+    raw_params: &[u8],
+    output: &mut Vec<TerminalOutput>,
+    handler: impl FnOnce(Vec<Option<AnsiOscToken>>, &mut Vec<TerminalOutput>),
+) -> ParserOutcome {
+    match split_params_into_semicolon_delimited_tokens(raw_params) {
+        Ok(params) => {
+            handler(params, output);
+            ParserOutcome::Finished
+        }
+        Err(_) => invalid_osc_params(raw_params, output),
+    }
+}
+
+/// Handle OSC 133 (FTCS) from the tokenised body.
+fn handle_osc_ftcs(
+    params: &[Option<AnsiOscToken>],
     raw_params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) {
-    match *osc_target {
-        OscTarget::Background => {
-            output.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryBackground(osc_internal_type),
-            ));
-        }
-        OscTarget::Foreground => {
-            output.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryForeground(osc_internal_type),
-            ));
-        }
-        OscTarget::CursorColor => {
-            output.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryCursor(osc_internal_type),
-            ));
-        }
-        OscTarget::TitleBar | OscTarget::IconName => {
-            output.push(TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
-                osc_internal_type.to_string(),
-            )));
-        }
-        OscTarget::Ftcs => {
-            // Serialize each token to its display form so numeric exit codes
-            // (e.g. "0", "127" — tokenised as `AnsiOscToken::OscValue`) survive
-            // the filter alongside string tokens like "D" or "P".  Owned
-            // `String`s are required because `OscValue` numerics are formatted
-            // at runtime; refs collected into `ftcs_str_refs` for the call.
-            let ftcs_strs: Vec<String> = params
-                .iter()
-                .skip(1) // skip the "133" token
-                .filter_map(|t| match t {
-                    Some(AnsiOscToken::String(s)) => Some(s.clone()),
-                    Some(AnsiOscToken::OscValue(n)) => Some(n.to_string()),
-                    None => None,
-                })
-                .collect();
-            let ftcs_str_refs: Vec<&str> = ftcs_strs.iter().map(String::as_str).collect();
+    // Serialize each token to its display form so numeric exit codes
+    // (e.g. "0", "127" — tokenised as `AnsiOscToken::OscValue`) survive
+    // the filter alongside string tokens like "D" or "P".  Owned
+    // `String`s are required because `OscValue` numerics are formatted
+    // at runtime; refs collected into `ftcs_str_refs` for the call.
+    let ftcs_strs: Vec<String> = params
+        .iter()
+        .skip(1) // skip the "133" token
+        .filter_map(|t| match t {
+            Some(AnsiOscToken::String(s)) => Some(s.clone()),
+            Some(AnsiOscToken::OscValue(n)) => Some(n.to_string()),
+            None => None,
+        })
+        .collect();
+    let ftcs_str_refs: Vec<&str> = ftcs_strs.iter().map(String::as_str).collect();
 
-            if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
-                output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
-            } else if is_known_ftcs_marker(&ftcs_str_refs) {
-                // Known FTCS marker (A/B/C/D/P) that we recognise but did not
-                // act on — a foreign emitter sent it without the `freminal=1`
-                // tag (e.g. Apple Terminal's `133;A;cl=m;aid=$$`, or
-                // Starship/oh-my-zsh/VTE). Freminal uses its own
-                // `freminal=1`-tagged FTCS variant (see shell-integration/) and
-                // deliberately ignores foreign duplicates to avoid double
-                // command blocks. This is expected and benign, so it is
-                // silently dropped WITHOUT a log by design.
-            } else {
-                // Unknown or malformed OSC 133: the marker letter is not one we
-                // recognise (e.g. `Z`, or a future FTCS addition like `E`), or
-                // the parameter list was empty. Unlike a known-foreign marker,
-                // this is a genuine gap — the OSC 133 surface may have grown a
-                // variant we do not handle, or a program sent something
-                // malformed. Log it at warn with the full raw sequence so the
-                // unhandled surface can be audited.
-                tracing::warn!(
-                    "OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P); raw sequence: \"{}\"",
-                    escape_sequence_for_log_bounded(raw_params)
-                );
-            }
+    if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
+        output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
+    } else if is_known_ftcs_marker(&ftcs_str_refs) {
+        // Known FTCS marker (A/B/C/D/P) that we recognise but did not
+        // act on — a foreign emitter sent it without the `freminal=1`
+        // tag (e.g. Apple Terminal's `133;A;cl=m;aid=$$`, or
+        // Starship/oh-my-zsh/VTE). Freminal uses its own
+        // `freminal=1`-tagged FTCS variant (see shell-integration/) and
+        // deliberately ignores foreign duplicates to avoid double
+        // command blocks. This is expected and benign, so it is
+        // silently dropped WITHOUT a log by design.
+    } else {
+        // Unknown or malformed OSC 133: the marker letter is not one we
+        // recognise (e.g. `Z`, or a future FTCS addition like `E`), or
+        // the parameter list was empty. Unlike a known-foreign marker,
+        // this is a genuine gap — the OSC 133 surface may have grown a
+        // variant we do not handle, or a program sent something
+        // malformed. Log it at warn with the full raw sequence so the
+        // unhandled surface can be audited.
+        tracing::warn!(
+            "OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P); raw sequence: \"{}\"",
+            escape_sequence_for_log_bounded(raw_params)
+        );
+    }
+}
+
+/// Dispatch a finished OSC body to the handler for `osc_target`.
+///
+/// `raw_params` is the whole OSC body (`number[;rest]`, terminator stripped).
+/// Raw-body targets consume it directly; token-based targets tokenise it
+/// themselves via [`with_osc_tokens`].
+fn dispatch_osc_target(
+    osc_target: &OscTarget,
+    raw_params: &[u8],
+    output: &mut Vec<TerminalOutput>,
+) -> ParserOutcome {
+    match *osc_target {
+        OscTarget::Background => with_osc_tokens(raw_params, output, |params, out| {
+            out.push(TerminalOutput::OscResponse(
+                AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::from(&params)),
+            ));
+        }),
+        OscTarget::Foreground => with_osc_tokens(raw_params, output, |params, out| {
+            out.push(TerminalOutput::OscResponse(
+                AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::from(&params)),
+            ));
+        }),
+        OscTarget::CursorColor => with_osc_tokens(raw_params, output, |params, out| {
+            out.push(TerminalOutput::OscResponse(
+                AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::from(&params)),
+            ));
+        }),
+        OscTarget::TitleBar | OscTarget::IconName => {
+            with_osc_tokens(raw_params, output, |params, out| {
+                out.push(TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
+                    AnsiOscInternalType::from(&params).to_string(),
+                )));
+            })
         }
-        OscTarget::Clipboard => {
-            handle_osc_clipboard(&params, raw_params, output);
-        }
-        OscTarget::PaletteColor => {
-            handle_osc_palette_color(&params, raw_params, output);
-        }
-        OscTarget::ResetPaletteColor => {
-            handle_osc_reset_palette(&params, output);
-        }
-        OscTarget::RemoteHost => {
-            output.push(TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
-                osc_internal_type.to_string(),
+        OscTarget::Ftcs => with_osc_tokens(raw_params, output, |params, out| {
+            handle_osc_ftcs(&params, raw_params, out);
+        }),
+        OscTarget::Clipboard => with_osc_tokens(raw_params, output, |params, out| {
+            handle_osc_clipboard(&params, raw_params, out);
+        }),
+        OscTarget::PaletteColor => with_osc_tokens(raw_params, output, |params, out| {
+            handle_osc_palette_color(&params, raw_params, out);
+        }),
+        OscTarget::ResetPaletteColor => with_osc_tokens(raw_params, output, |params, out| {
+            handle_osc_reset_palette(&params, out);
+        }),
+        OscTarget::RemoteHost => with_osc_tokens(raw_params, output, |params, out| {
+            out.push(TerminalOutput::OscResponse(AnsiOscType::RemoteHost(
+                AnsiOscInternalType::from(&params).to_string(),
             )));
-        }
-        OscTarget::Url => {
-            let url_response = UrlResponse::from(params);
-            output.push(TerminalOutput::OscResponse(AnsiOscType::Url(url_response)));
-        }
+        }),
+        OscTarget::Url => with_osc_tokens(raw_params, output, |params, out| {
+            out.push(TerminalOutput::OscResponse(AnsiOscType::Url(
+                UrlResponse::from(params),
+            )));
+        }),
+        // OSC 22 — set the pointer (mouse cursor) shape.
+        OscTarget::PointerShape => with_osc_tokens(raw_params, output, |params, out| {
+            handle_osc_pointer_shape(&params, out);
+        }),
         OscTarget::ResetCursorColor => {
             output.push(TerminalOutput::OscResponse(AnsiOscType::ResetCursorColor));
+            ParserOutcome::Finished
         }
         OscTarget::ResetForeground => {
             output.push(TerminalOutput::OscResponse(
                 AnsiOscType::ResetForegroundColor,
             ));
+            ParserOutcome::Finished
         }
         OscTarget::ResetBackground => {
             output.push(TerminalOutput::OscResponse(
                 AnsiOscType::ResetBackgroundColor,
             ));
+            ParserOutcome::Finished
         }
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, output);
+            ParserOutcome::Finished
         }
         OscTarget::ShellInfo => {
             handle_osc_shell_info(raw_params, output);
+            ParserOutcome::Finished
         }
         // OSC 9 / OSC 777 — desktop notifications (Task 76).  Parsed from the
         // raw bytes so notification bodies containing `;` survive intact.
         OscTarget::Notify9 => {
             handle_osc_notify_9(raw_params, output);
+            ParserOutcome::Finished
         }
         OscTarget::Notify777 => {
             handle_osc_notify_777(raw_params, output);
+            ParserOutcome::Finished
         }
         OscTarget::Notify99 => {
             handle_osc_notify_99(raw_params, output);
-        }
-        // OSC 22 — set the pointer (mouse cursor) shape.
-        OscTarget::PointerShape => {
-            handle_osc_pointer_shape(&params, output);
+            ParserOutcome::Finished
         }
         // Known-but-unimplemented OSC targets.  These are recognised
         // sequences sent by common programs (vim/neovim, zsh, tmux) that
@@ -346,20 +376,35 @@ fn dispatch_osc_target(
         | OscTarget::HighlightBackground
         | OscTarget::HighlightForeground
         | OscTarget::ColorSchemeNotification => {
-            tracing::warn!(
-                "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}; raw sequence: \"{}\"",
-                escape_sequence_for_log_bounded(raw_params)
-            );
+            warn_unimplemented_osc(osc_target, raw_params);
+            ParserOutcome::Finished
         }
         OscTarget::Unknown => {
-            // Unknown OSC sequences are silently consumed (like xterm/VTE)
-            // but logged at warn with the full raw sequence for auditing.
-            tracing::warn!(
-                "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}; raw sequence: \"{}\"",
-                escape_sequence_for_log_bounded(raw_params)
-            );
+            warn_unknown_osc(raw_params);
+            ParserOutcome::Finished
         }
     }
+}
+
+/// Warn about a recognised-but-unimplemented OSC target, with the full raw
+/// sequence so the unhandled surface can be audited.
+fn warn_unimplemented_osc(osc_target: &OscTarget, raw_params: &[u8]) {
+    tracing::warn!(
+        "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}; raw sequence: \"{}\"",
+        escape_sequence_for_log_bounded(raw_params)
+    );
+}
+
+/// Unknown OSC sequences are silently consumed (like xterm/VTE) but logged at
+/// warn with the full raw sequence for auditing. The OSC number is the text
+/// before the first `;`; the rest of the body is not tokenised here.
+fn warn_unknown_osc(raw_params: &[u8]) {
+    let number = raw_params.split(|b| *b == b';').next().unwrap_or_default();
+    tracing::warn!(
+        "Unknown OSC Target (silently consumed): type_number='{}'; raw sequence: \"{}\"",
+        lossy_sequence_for_log_bounded(number),
+        escape_sequence_for_log_bounded(raw_params)
+    );
 }
 
 // Detects the full OSC terminator (BEL or `ESC \`) at the end of the accumulated buffer.
@@ -382,10 +427,6 @@ fn split_params_into_semicolon_delimited_tokens(
         .split(|b| *b == b';')
         .map(parse_param_as::<AnsiOscToken>)
         .collect::<Result<Vec<Option<AnsiOscToken>>, AnsiParseError>>()
-}
-
-fn extract_param(idx: usize, params: &[Option<AnsiOscToken>]) -> Option<AnsiOscToken> {
-    params.get(idx).and_then(std::clone::Clone::clone)
 }
 
 #[cfg(test)]
@@ -937,5 +978,172 @@ mod tests {
             &output[0],
             TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(_))
         ));
+    }
+
+    // ── Raw-body dispatch (Task 129.5) ──────────────────────────────────────
+
+    /// Feed a full OSC body and return both the output and the outcome of the
+    /// final byte.
+    fn feed_osc_with_outcome(payload: &[u8]) -> (Vec<TerminalOutput>, ParserOutcome) {
+        let mut parser = AnsiOscParser::new();
+        let mut output = Vec::new();
+        let mut outcome = ParserOutcome::Continue;
+        for &b in payload {
+            outcome = parser.ansiparser_inner_osc(b, &mut output);
+        }
+        (output, outcome)
+    }
+
+    fn assert_no_invalid(output: &[TerminalOutput], outcome: &ParserOutcome) {
+        assert!(
+            !output.iter().any(|o| matches!(o, TerminalOutput::Invalid)),
+            "unexpected TerminalOutput::Invalid in {output:?}"
+        );
+        assert_eq!(*outcome, ParserOutcome::Finished);
+    }
+
+    fn assert_invalid(payload: &[u8]) {
+        let (output, outcome) = feed_osc_with_outcome(payload);
+        assert!(
+            output.iter().any(|o| matches!(o, TerminalOutput::Invalid)),
+            "expected TerminalOutput::Invalid for {payload:?}, got {output:?}"
+        );
+        assert!(
+            matches!(&outcome, ParserOutcome::Invalid(m) if m.starts_with("Invalid OSC params: recent='")),
+            "unexpected outcome {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn osc9_with_latin1_byte_reaches_handler() {
+        // The OSC 9 handler validates UTF-8 itself and drops the payload.
+        let (output, outcome) = feed_osc_with_outcome(b"9;naiv\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc9_valid_notification_still_dispatched() {
+        let (output, outcome) = feed_osc_with_outcome(b"9;hello; world\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::Notify { .. })
+        ));
+    }
+
+    #[test]
+    fn osc777_with_latin1_byte_reaches_handler() {
+        let (output, outcome) = feed_osc_with_outcome(b"777;notify;t\xe9;body\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc99_with_latin1_byte_reaches_handler() {
+        // The OSC 99 handler decides; whatever it emits, the sequence is not Invalid.
+        let (output, outcome) = feed_osc_with_outcome(b"99;i=1:d=0;naiv\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert!(
+            output
+                .iter()
+                .all(|o| matches!(o, TerminalOutput::OscResponse(AnsiOscType::Notify99(_)))),
+            "unexpected output {output:?}"
+        );
+    }
+
+    #[test]
+    fn osc1337_with_latin1_byte_reaches_handler() {
+        // Unrecognised iTerm2 sub-command carrying a non-UTF-8 byte: the
+        // handler reports it as unknown; the parser must not flag the
+        // sequence invalid.
+        let (output, outcome) = feed_osc_with_outcome(b"1337;SetMark\xe9=1\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown)]
+        );
+    }
+
+    #[test]
+    fn osc1338_with_latin1_byte_reaches_handler() {
+        let (output, outcome) = feed_osc_with_outcome(b"1338;HISTFILE=/home/\xe9/h\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc1338_valid_histfile_still_dispatched() {
+        let (output, outcome) = feed_osc_with_outcome(b"1338;HISTFILE=/home/u/h\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::ShellInfoHistFile(_))
+        ));
+    }
+
+    #[test]
+    fn tokenising_targets_with_non_utf8_byte_still_invalid() {
+        // OSC 2 title, OSC 52 clipboard, OSC 8 hyperlink, OSC 133 FTCS, plus
+        // the colour, palette and pointer-shape targets that tokenise.
+        for payload in [
+            &b"2;t\xe9\x07"[..],
+            b"0;t\xe9\x07",
+            b"1;t\xe9\x07",
+            b"7;file://h\xe9/\x07",
+            b"52;c;\xe9\x07",
+            b"8;;http://e\xe9\x07",
+            b"133;A;\xe9\x07",
+            b"10;\xe9\x07",
+            b"11;\xe9\x07",
+            b"12;\xe9\x07",
+            b"4;1;\xe9\x07",
+            b"104;\xe9\x07",
+            b"22;\xe9\x07",
+        ] {
+            assert_invalid(payload);
+        }
+    }
+
+    #[test]
+    fn non_utf8_in_later_segment_of_tokenising_target_is_invalid() {
+        assert_invalid(b"2;ok;\xe9\x07");
+    }
+
+    #[test]
+    fn empty_osc_number_is_invalid() {
+        assert_invalid(b";body\x07");
+        assert_invalid(b"\x07");
+    }
+
+    #[test]
+    fn non_numeric_osc_number_is_unknown_not_invalid() {
+        let (output, outcome) = feed_osc_with_outcome(b"abc;body\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn non_utf8_osc_number_is_invalid() {
+        assert_invalid(b"\xe9;body\x07");
+        assert_invalid(b"9\xe9;body\x07");
+    }
+
+    #[test]
+    fn unknown_target_with_non_utf8_body_consumed_without_invalid() {
+        let (output, outcome) = feed_osc_with_outcome(b"999;\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn logging_targets_with_non_utf8_body_consumed_without_invalid() {
+        for payload in [&b"13;\xe9\x07"[..], b"66;\xe9\x07"] {
+            let (output, outcome) = feed_osc_with_outcome(payload);
+            assert_no_invalid(&output, &outcome);
+            assert_eq!(output, []);
+        }
     }
 }
