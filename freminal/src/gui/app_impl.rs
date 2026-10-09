@@ -2858,6 +2858,7 @@ impl freminal_windowing::App for FreminalGui {
                             &self.binding_map,
                             is_echo_off,
                             is_active,
+                            WindowFocus::from_bool(window_focused),
                             pane_id,
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,

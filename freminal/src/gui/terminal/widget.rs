@@ -21,7 +21,7 @@ use freminal_common::{
         command_block::CommandStatus, pointer_shape::PointerShape, progress::ProgressState,
         row_number::RowNumber, tchar::TChar, url::Url,
     },
-    config::Config,
+    config::{Config, UnfocusedCursorStyle},
     send_or_log,
     themes::ThemePalette,
 };
@@ -38,6 +38,7 @@ use super::{
         atlas::GlyphAtlas,
         colors::cursor_f,
         font_manager::FontManager,
+        frame_drain::WindowFocus,
         renderer::{
             BackgroundFrame, CursorBlinkPhase, CursorDrawParams, CursorVertRange, FgRenderOptions,
             GlRetireQueue, ImageDrawEntry, MatchHighlight, TerminalRenderer, WindowPostRenderer,
@@ -50,7 +51,10 @@ use super::{
         },
     },
     coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, running_block_extent},
-    cursor_appearance::CursorAppearance,
+    cursor_appearance::{
+        CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
+        cursor_focus, resolve_cursor_appearance,
+    },
     frame_dirty::{
         CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
         evaluate_frame_dirty_state,
@@ -1529,8 +1533,10 @@ pub struct PaneRenderCache {
     /// Cursor screen row from the most recently drawn frame. This advances
     /// only after damage has consumed the old row and never on `skip_draw`.
     pub(super) previous_cursor_screen_row: Option<usize>,
-    /// Whether the cursor was shown in the most recently rendered frame.
-    pub(super) previous_show_cursor: bool,
+    /// How the cursor was drawn in the most recently rendered frame
+    /// (visibility and focus-driven shape together: a hidden-to-hollow or
+    /// solid-to-hollow switch is a change even when the cursor did not move).
+    pub(super) previous_cursor_appearance: CursorAppearance,
     /// Cursor color override from the most recently rendered frame.
     pub(super) previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
@@ -1742,9 +1748,11 @@ pub struct PaneRenderCache {
     /// Records which render path this pane took, so the per-window
     /// aggregation in `app_impl` can decide whether the whole frame was a
     /// pure cursor-only update (skip-clear + partial present) or must clear
-    /// and present fully. See [`PaneFrameDamage`] for the three cases. Only
-    /// the active pane ever produces a cursor rect; inactive unchanged panes
-    /// report [`PaneFrameDamage::Unchanged`] and never force a full frame.
+    /// and present fully. See [`PaneFrameDamage`] for the three cases. Any
+    /// pane with a visible cursor -- the active pane's solid one or an
+    /// inactive pane's hollow one -- can produce a cursor rect when only its
+    /// cursor changed; a pane whose content and cursor are both unchanged
+    /// reports [`PaneFrameDamage::Unchanged`] and never forces a full frame.
     ///
     /// Set every frame by [`FreminalTerminalWidget::show`].
     ///
@@ -1807,7 +1815,7 @@ impl PaneRenderCache {
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_cursor_screen_row: None,
-            previous_show_cursor: false,
+            previous_cursor_appearance: CursorAppearance::Hidden,
             previous_cursor_color_override: None,
             last_rendered_visible: None,
             last_rendered_row_epochs: None,
@@ -2550,6 +2558,10 @@ pub struct FreminalTerminalWidget {
     toggles: WidgetDisplayToggles,
     /// Duration of the cursor trail animation.
     cursor_trail_duration: Duration,
+    /// How a cursor is drawn when its pane or window is not focused (config
+    /// `[cursor] unfocused_style`). Cached like `cursor_trail_duration` so
+    /// `show()` reads it each frame without touching the config.
+    unfocused_cursor_style: UnfocusedCursorStyle,
     /// The base egui `FontDefinitions` (without any preview font registered).
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
@@ -2639,6 +2651,7 @@ impl FreminalTerminalWidget {
             cursor_trail_duration: Duration::from_millis(u64::from(
                 config.cursor.trail_duration_ms,
             )),
+            unfocused_cursor_style: config.cursor.unfocused_style,
             base_font_defs,
             egui_fonts_dirty: false,
         })
@@ -2737,7 +2750,10 @@ impl FreminalTerminalWidget {
     /// - `bg_image_opacity` — background image opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_mode` — background image fit mode from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
-    /// - `is_active_pane` — whether this pane currently has keyboard focus.
+    /// - `is_active_pane` — whether this pane is the active pane of its tab.
+    /// - `window_focus` — whether the OS window has input focus; together
+    ///   with `is_active_pane` it decides whether the cursor is drawn as a
+    ///   focused (solid) or an unfocused (config-styled) cursor.
     /// - `key_broadcast_targets` — input senders of the other panes to mirror
     ///   keyboard input to when broadcast mode is active (Task 74); empty when
     ///   broadcast is off or this is not the active pane.
@@ -2776,6 +2792,7 @@ impl FreminalTerminalWidget {
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
+        window_focus: WindowFocus,
         pane_id: crate::gui::panes::PaneId,
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
@@ -3179,8 +3196,18 @@ impl FreminalTerminalWidget {
             view_state.cursor_blink_anchor = Some(time);
             view_state.cursor_blink_reset_pending = false;
         }
-        let cursor_blink_on =
-            cursor_blink_phase(time, view_state.cursor_blink_anchor, BLINK_TICK_SECONDS);
+        let cursor_focus_now = cursor_focus(pane_focus_now, window_focus);
+        // Only a focused cursor honours its blink cycle. Every other
+        // appearance is steady (`Hollow`, or `Solid` forced to a steady style
+        // by `resolve_cursor_appearance`), so the phase is pinned to "on" for
+        // both change detection and drawing: a blink flip must not register
+        // as a cursor-state change for a cursor that does not blink.
+        let cursor_blink_on = match cursor_focus_now {
+            CursorFocus::Focused => {
+                cursor_blink_phase(time, view_state.cursor_blink_anchor, BLINK_TICK_SECONDS)
+            }
+            CursorFocus::InactivePane | CursorFocus::UnfocusedWindow => true,
+        };
 
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
@@ -3236,12 +3263,25 @@ impl FreminalTerminalWidget {
         // reflects whatever was last written to it.
         let mut is_cursor_only = false;
 
-        // Suppress the cursor when:
-        // - the terminal has hidden it (DECTCEM ?25l),
-        // - a password prompt is active (echo-off lock icon replaces it), or
-        // - this pane is not the active/focused pane (tmux-style: only the
-        //   focused pane shows a cursor).
-        let mut effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+        // How the cursor is drawn. Hidden when the terminal has hidden it
+        // (DECTCEM ?25l) or a password prompt is active (the echo-off lock
+        // icon replaces it); otherwise solid when focused, and styled by
+        // `[cursor] unfocused_style` when the pane or window is not focused.
+        let mut cursor_appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+            snapshot_visible: if snap.show_cursor {
+                CursorVisibility::Shown
+            } else {
+                CursorVisibility::Hidden
+            },
+            echo: if is_echo_off {
+                EchoState::EchoOff
+            } else {
+                EchoState::Normal
+            },
+            focus: cursor_focus_now,
+            style: snap.cursor_visual_style.clone(),
+            unfocused_style: self.unfocused_cursor_style,
+        });
 
         // ── Command-block folding (Task 72.10b) ─────────────────────────────
         //
@@ -3344,7 +3384,7 @@ impl FreminalTerminalWidget {
                 },
                 CursorFrameInputs {
                     blink_on: cursor_blink_on,
-                    show_cursor: effective_show_cursor,
+                    appearance: cursor_appearance.clone(),
                     trail_enabled: self.toggles.cursor_trail,
                     trail_duration: self.cursor_trail_duration,
                 },
@@ -3361,20 +3401,16 @@ impl FreminalTerminalWidget {
             let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             let cursor_state_changed = dirty.cursor_state_changed;
-            effective_show_cursor = dirty.effective_show_cursor;
+            cursor_appearance = dirty.cursor_appearance;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
             // Draw params shared by the cursor-only and full-rebuild paths.
             // `col`/`row` are the same trail-animated visual coordinates
-            // `dirty.cursor_pixel_pos` was derived from (127.3 does not yet
-            // derive `Hollow` from focus state: `Solid`/`Hidden` mirror
-            // `effective_show_cursor` exactly).
+            // `dirty.cursor_pixel_pos` was derived from. `appearance` is the
+            // focus-resolved appearance with fold/off-screen visibility
+            // already applied, and `blink_on` is the focus-pinned phase.
             let cursor_draw = CursorDrawParams {
-                appearance: if effective_show_cursor {
-                    CursorAppearance::Solid(snap.cursor_visual_style.clone())
-                } else {
-                    CursorAppearance::Hidden
-                },
+                appearance: cursor_appearance.clone(),
                 col: view_state.cursor_visual_col,
                 row: view_state.cursor_visual_row,
                 color: cursor_f(snap.theme, snap.cursor_color_override),
@@ -3747,7 +3783,7 @@ impl FreminalTerminalWidget {
                     // `cursor_range` is the authoritative answer for where the
                     // cursor sits in `deco_verts` (always the final region). It
                     // MUST be stored as returned rather than re-derived from
-                    // `effective_show_cursor`, which ignores the blink phase and
+                    // `cursor_appearance`, which ignores the blink phase and
                     // the cursor's variable length (issue #432).
                     let cursor_range = build_background_instances(
                         &BackgroundFrame {
@@ -3970,7 +4006,7 @@ impl FreminalTerminalWidget {
         // Update per-frame cursor state for the next frame's comparison.
         cache.previous_cursor_blink_on = cursor_blink_on;
         cache.previous_cursor_pos = snap.cursor_pos;
-        cache.previous_show_cursor = effective_show_cursor;
+        cache.previous_cursor_appearance = cursor_appearance;
         cache.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
@@ -4401,8 +4437,9 @@ impl FreminalTerminalWidget {
 
         // ── Password-prompt lock indicator ───────────────────────────
         // When echo-off is detected (password prompt), paint a lock icon
-        // at the cursor position.  The normal cursor is suppressed (via
-        // `effective_show_cursor`) so only the lock icon is visible.
+        // at the cursor position.  The normal cursor is suppressed (it
+        // resolves to `CursorAppearance::Hidden`) so only the lock icon is
+        // visible.
         if is_echo_off {
             let cursor_logical_x = view_state
                 .cursor_visual_col
@@ -4924,6 +4961,7 @@ impl FreminalTerminalWidget {
         };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
+        self.unfocused_cursor_style = new_config.cursor.unfocused_style;
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
         // modal).  This is retained from the old pipeline; it will be cleaned
@@ -4970,6 +5008,7 @@ impl FreminalTerminalWidget {
         };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
+        self.unfocused_cursor_style = new_config.cursor.unfocused_style;
 
         // Mark egui chrome fonts as needing update — will be applied on the
         // next frame when this window's update() runs with a real ctx.
@@ -8479,5 +8518,158 @@ mod terminal_rect_origin_tests {
         let (pane_rect, _) = fixture();
         let origin = terminal_rect_origin(pane_rect, 0.0);
         assert_eq!(point_to_egui(origin), pane_rect.min);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pane_cursor_focus_geometry_tests {
+    //! Task 127.5: what each pane's cursor looks like once focus is wired in.
+    //!
+    //! `FreminalTerminalWidget::show` needs a live egui `Ui` and a GL context,
+    //! so it cannot be driven from a unit test. These tests instead drive the
+    //! narrowest seam that still runs the real code on both sides of the wiring
+    //! `show()` performs: [`cursor_focus`] and [`resolve_cursor_appearance`]
+    //! (the same two calls, fed the same kinds of inputs) produce the
+    //! [`CursorDrawParams`] that [`build_cursor_verts_only`] -- the builder the
+    //! cursor-only path uses, and which emits identical geometry to the
+    //! full-rebuild path for identical params -- turns into quads. The focus
+    //! pinning of the blink phase is the one piece of `show()` that is not
+    //! reachable from here.
+
+    use crate::gui::colors::cursor_f;
+    use crate::gui::frame_drain::WindowFocus;
+    use crate::gui::renderer::{
+        CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams, build_cursor_verts_only,
+    };
+    use crate::gui::terminal::cursor_appearance::{
+        CursorAppearanceInputs, CursorVisibility, EchoState, cursor_focus,
+        resolve_cursor_appearance,
+    };
+    use crate::gui::terminal::input::PaneFocus;
+    use freminal_common::config::{Config, UnfocusedCursorStyle};
+    use freminal_common::cursor::CursorVisualStyle;
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
+
+    use super::FreminalTerminalWidget;
+
+    /// The cursor floats a pane would emit, resolved exactly as `show()`
+    /// resolves them from its pane focus, window focus, and DECTCEM state.
+    fn cursor_floats(
+        pane: PaneFocus,
+        window: WindowFocus,
+        visibility: CursorVisibility,
+        unfocused_style: UnfocusedCursorStyle,
+    ) -> Vec<f32> {
+        let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+            snapshot_visible: visibility,
+            echo: EchoState::Normal,
+            focus: cursor_focus(pane, window),
+            style: CursorVisualStyle::BlockCursorSteady,
+            unfocused_style,
+        });
+        let params = CursorDrawParams {
+            appearance,
+            col: 3.0,
+            row: 1.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::On,
+        };
+        build_cursor_verts_only(8, 16, &params)
+    }
+
+    #[test]
+    fn active_pane_in_a_focused_window_emits_one_solid_quad() {
+        let floats = cursor_floats(
+            PaneFocus::Active,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn inactive_pane_emits_four_hollow_border_quads() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), 4 * CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn active_pane_in_an_unfocused_window_emits_hollow_quads() {
+        let floats = cursor_floats(
+            PaneFocus::Active,
+            WindowFocus::Unfocused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), 4 * CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn unchanged_style_keeps_a_single_quad_for_an_inactive_pane() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Unchanged,
+        );
+        assert_eq!(floats.len(), CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn hidden_style_emits_nothing_for_an_inactive_pane() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hidden,
+        );
+        assert_eq!(floats, Vec::<f32>::new());
+    }
+
+    /// DECTCEM-off wins over every focus state: a hidden cursor is never
+    /// resurrected as a hollow one by the pane losing focus.
+    #[test]
+    fn dectcem_off_emits_nothing_in_any_focus_state() {
+        for (pane, window) in [
+            (PaneFocus::Active, WindowFocus::Focused),
+            (PaneFocus::Inactive, WindowFocus::Focused),
+            (PaneFocus::Active, WindowFocus::Unfocused),
+            (PaneFocus::Inactive, WindowFocus::Unfocused),
+        ] {
+            let floats = cursor_floats(
+                pane,
+                window,
+                CursorVisibility::Hidden,
+                UnfocusedCursorStyle::Hollow,
+            );
+            assert_eq!(floats, Vec::<f32>::new(), "{pane:?} / {window:?}");
+        }
+    }
+
+    #[test]
+    fn unfocused_cursor_style_is_cached_at_construction_and_on_config_apply() {
+        let ctx = egui::Context::default();
+        let mut widget = FreminalTerminalWidget::new(&ctx, &Config::default())
+            .expect("widget construction must succeed with the bundled default font");
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            Config::default().cursor.unfocused_style,
+            "construction must cache the configured style"
+        );
+
+        let old_config = Config::default();
+        let mut new_config = Config::default();
+        new_config.cursor.unfocused_style = UnfocusedCursorStyle::Hidden;
+        widget.apply_config_changes_no_ctx(&old_config, &new_config);
+
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hidden);
     }
 }

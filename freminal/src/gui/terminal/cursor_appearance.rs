@@ -89,7 +89,6 @@ pub struct CursorAppearanceInputs {
 ///
 /// An unfocused window wins over an inactive pane: when the window itself
 /// lacks focus, the pane's own active/inactive status is irrelevant.
-#[cfg_attr(not(test), expect(dead_code))] // TODO(127.5): wired into the pane renderer
 pub(super) const fn cursor_focus(pane: PaneFocus, window: WindowFocus) -> CursorFocus {
     match (window, pane) {
         (WindowFocus::Unfocused, _) => CursorFocus::UnfocusedWindow,
