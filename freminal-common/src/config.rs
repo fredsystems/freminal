@@ -139,6 +139,8 @@ pub struct CursorConfig {
     pub trail: bool,
     /// Duration of the cursor trail animation in milliseconds.
     pub trail_duration_ms: u32,
+    /// How the cursor is drawn in an unfocused pane or window.
+    pub unfocused_style: UnfocusedCursorStyle,
 }
 
 impl Default for CursorConfig {
@@ -148,8 +150,26 @@ impl Default for CursorConfig {
             blink: true,
             trail: false,
             trail_duration_ms: 150,
+            unfocused_style: UnfocusedCursorStyle::default(),
         }
     }
+}
+
+/// How the cursor is drawn in an inactive pane or an unfocused window.
+///
+/// Serialized as a `snake_case` string in TOML: `"hollow"`, `"unchanged"`,
+/// `"hidden"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfocusedCursorStyle {
+    /// An unfocused pane or window draws a steady hollow block. Default.
+    #[default]
+    Hollow,
+    /// The application's DECSCUSR shape is kept, drawn solid but steady.
+    Unchanged,
+    /// No cursor is drawn in inactive panes or unfocused windows (the
+    /// previous behaviour for inactive panes).
+    Hidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -4044,6 +4064,98 @@ trail_duration_ms = 250
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.cursor.trail);
         assert_eq!(deserialized.cursor.trail_duration_ms, 300);
+    }
+
+    // -----------------------------------------------------------------
+    //  cursor unfocused_style
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cursor_unfocused_style_defaults_to_hollow() {
+        assert_eq!(
+            UnfocusedCursorStyle::default(),
+            UnfocusedCursorStyle::Hollow
+        );
+        assert_eq!(
+            CursorConfig::default().unfocused_style,
+            UnfocusedCursorStyle::Hollow
+        );
+        assert_eq!(
+            Config::default().cursor.unfocused_style,
+            UnfocusedCursorStyle::Hollow
+        );
+    }
+
+    #[test]
+    fn cursor_unfocused_style_roundtrip_all_values() {
+        for (style, name) in [
+            (UnfocusedCursorStyle::Hollow, "hollow"),
+            (UnfocusedCursorStyle::Unchanged, "unchanged"),
+            (UnfocusedCursorStyle::Hidden, "hidden"),
+        ] {
+            let mut cfg = Config::default();
+            cfg.cursor.unfocused_style = style;
+
+            let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+            assert!(
+                toml_str.contains(&format!("unfocused_style = \"{name}\"")),
+                "expected unfocused_style = \"{name}\" in:\n{toml_str}"
+            );
+            let deserialized: Config =
+                toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+            assert_eq!(deserialized.cursor.unfocused_style, style);
+        }
+    }
+
+    #[test]
+    fn cursor_unfocused_style_missing_key_defaults_to_hollow() {
+        let toml_str = r"
+[cursor]
+trail = true
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let cursor = partial.cursor.expect("cursor section should be present");
+        assert_eq!(cursor.unfocused_style, UnfocusedCursorStyle::Hollow);
+    }
+
+    #[test]
+    fn cursor_unfocused_style_old_config_loads() {
+        // A pre-existing [cursor] section written before this key existed.
+        let toml_str = r#"
+[cursor]
+shape = "bar"
+blink = false
+trail = true
+trail_duration_ms = 200
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("old config should load");
+        assert_eq!(cfg.cursor.shape, CursorShapeConfig::Bar);
+        assert!(!cfg.cursor.blink);
+        assert!(cfg.cursor.trail);
+        assert_eq!(cfg.cursor.trail_duration_ms, 200);
+        assert_eq!(cfg.cursor.unfocused_style, UnfocusedCursorStyle::Hollow);
+    }
+
+    #[test]
+    fn cursor_unfocused_style_applied_via_partial() {
+        let mut cfg = Config::default();
+        let toml_str = r#"
+[cursor]
+unfocused_style = "hidden"
+"#;
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert_eq!(cfg.cursor.unfocused_style, UnfocusedCursorStyle::Hidden);
+    }
+
+    #[test]
+    fn cursor_unfocused_style_unknown_value_fails() {
+        let toml_str = r#"
+[cursor]
+unfocused_style = "dotted"
+"#;
+        assert!(toml::from_str::<Config>(toml_str).is_err());
+        assert!(toml::from_str::<ConfigPartial>(toml_str).is_err());
     }
 
     // =================================================================

@@ -25,8 +25,10 @@ use conv2::ConvUtil;
 use egui::Rect;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
+use crate::gui::renderer::CursorBlinkPhase;
 use crate::gui::view_state::{ImageAnimationTick, LogicalCell, ViewState};
 
+use super::cursor_appearance::{CursorAppearance, CursorFocus};
 use super::widget::{
     FoldLayout, PaneRenderCache, RenderState, compute_command_block_hover_rows,
     image_pixels_changed,
@@ -318,9 +320,18 @@ pub(super) struct DirtyTrackingOutcome {
     /// The bounded-damage caller uses this same signal rather than duplicating
     /// the cursor-change predicate.
     pub(super) cursor_state_changed: bool,
-    /// Whether the cursor should actually be drawn this frame (DECTCEM,
-    /// echo-off, active-pane, and fold-visibility all folded in).
-    pub(super) effective_show_cursor: bool,
+    /// The blink phase this frame's cursor is drawn with and that the next
+    /// frame diffs against: the caller's raw phase for a
+    /// [`CursorFocus::Focused`] cursor, and a constant
+    /// [`CursorBlinkPhase::On`] for any other focus (see
+    /// [`effective_cursor_blink_phase`]). The caller feeds this into the draw
+    /// params and stores it in `PaneRenderCache::previous_cursor_blink_phase`.
+    pub(super) cursor_blink_phase: CursorBlinkPhase,
+    /// How the cursor is drawn this frame: the caller's resolved appearance
+    /// (DECTCEM, echo-off, pane/window focus, style) with fold/off-screen
+    /// visibility folded in -- a cursor hidden behind a fold is
+    /// [`CursorAppearance::Hidden`].
+    pub(super) cursor_appearance: CursorAppearance,
     /// Pixel position of the (possibly trail-animated) visual cursor.
     pub(super) cursor_pixel_pos: (f32, f32),
     /// Horizontal scale factor for the cursor quad (`2.0` on a
@@ -333,6 +344,26 @@ pub(super) struct DirtyTrackingOutcome {
     pub(super) image_anim_tick: ImageAnimationTick,
 }
 
+/// The blink phase a cursor is actually drawn with, given the raw blink-clock
+/// phase and the cursor's focus.
+///
+/// Only a [`CursorFocus::Focused`] cursor honours its blink cycle. Every other
+/// appearance is steady (`Hollow`, or `Solid` forced to a steady style by
+/// `resolve_cursor_appearance`), so the phase is pinned to
+/// [`CursorBlinkPhase::On`]. That pin is what stops a blink flip from
+/// registering as a cursor-state change -- and therefore a cursor-only frame
+/// and a repaint -- for a cursor that does not blink.
+#[must_use]
+const fn effective_cursor_blink_phase(
+    raw: CursorBlinkPhase,
+    focus: CursorFocus,
+) -> CursorBlinkPhase {
+    match focus {
+        CursorFocus::Focused => raw,
+        CursorFocus::InactivePane | CursorFocus::UnfocusedWindow => CursorBlinkPhase::On,
+    }
+}
+
 /// Compute this frame's dirty-tracking decision: which vertex-rebuild path
 /// [`FreminalTerminalWidget::show`] should take, plus every derived
 /// observation the two candidate branches (and the post-branch animation
@@ -341,7 +372,7 @@ pub(super) struct DirtyTrackingOutcome {
 /// This is `show`'s largest near-pure block. `cache` is read-only here —
 /// nothing is written back into it; the caller does that once the branch it
 /// selects has actually run. The only non-freminal touch is locking
-/// `render_state` to check whether `deco_verts` is empty.
+/// `render_state` to check whether it has ever been built.
 ///
 /// Mutates `view_state` in three ways, in this order (preserved exactly,
 /// since later reads in this same function depend on the earlier writes):
@@ -361,7 +392,8 @@ pub(super) struct FrameDirtyContext<'a> {
     pub(super) snap: &'a TerminalSnapshot,
     /// Previous-frame values this decision diffs against. Read-only here.
     pub(super) cache: &'a PaneRenderCache,
-    /// Locked only to test whether `deco_verts` is empty.
+    /// Locked only to test whether the render state has ever been built
+    /// (`cursor_vert_range` is `Some`).
     pub(super) render_state: &'a Arc<Mutex<RenderState>>,
     /// Command-block fold layout for this frame.
     pub(super) layout: &'a FoldLayout,
@@ -391,17 +423,26 @@ pub(super) struct FrameDirtyGeometry {
 
 /// Cursor-related inputs for one frame.
 ///
-/// These are three independent simultaneous conditions plus a duration, not
-/// a state machine — but they are *parameters*, and a positional bool list
-/// is the case `freminal-state-representation` rule 1 forbids outright.
-/// Naming them as fields is what makes the call site readable.
-#[derive(Clone, Copy)]
+/// A blink phase, a resolved appearance, a trail toggle, and a duration --
+/// but they are *parameters*, and a positional bool list is the case
+/// `freminal-state-representation` rule 1 forbids outright. Naming them as
+/// fields is what makes the call site readable.
+#[derive(Clone)]
 pub(super) struct CursorFrameInputs {
-    /// Whether the blink phase is currently in its visible half.
-    pub(super) blink_on: bool,
-    /// Whether the cursor should be drawn at all this frame. Reassigned
-    /// inside the function and returned in [`DirtyTrackingOutcome`].
-    pub(super) show_cursor: bool,
+    /// The raw blink-clock phase. [`evaluate_frame_dirty_state`] reduces it to
+    /// the *effective* phase via [`effective_cursor_blink_phase`]: only a
+    /// focused cursor honours the blink cycle, so for any other focus the
+    /// phase is pinned to [`CursorBlinkPhase::On`] and blink flips do not
+    /// register as cursor-state changes for a steady cursor.
+    pub(super) blink: CursorBlinkPhase,
+    /// How the cursor should be drawn this frame, before fold/off-screen
+    /// visibility is applied. Reduced to [`CursorAppearance::Hidden`] inside
+    /// the function when the cursor row is not on screen, and returned in
+    /// [`DirtyTrackingOutcome`].
+    pub(super) appearance: CursorAppearance,
+    /// The combined pane/window focus. Only a [`CursorFocus::Focused`] cursor
+    /// animates its trail; any other focus snaps the cursor to its target.
+    pub(super) focus: CursorFocus,
     /// Whether the cursor-trail animation is enabled by config.
     pub(super) trail_enabled: bool,
     /// How long a cursor-trail animation runs.
@@ -452,11 +493,17 @@ pub(super) fn evaluate_frame_dirty_state(
         row_h_f,
     } = geometry;
     let CursorFrameInputs {
-        blink_on: cursor_blink_on,
-        show_cursor: mut effective_show_cursor,
+        blink: raw_cursor_blink,
+        appearance: mut cursor_appearance,
+        focus: cursor_focus,
         trail_enabled: cursor_trail,
         trail_duration: cursor_trail_duration,
     } = cursor;
+
+    // Pin the phase for a cursor that does not blink, BEFORE any change
+    // detection: this is the only thing stopping a blink flip from
+    // retriggering `cursor_state_changed` for a hollow or steady cursor.
+    let cursor_blink_phase = effective_cursor_blink_phase(raw_cursor_blink, cursor_focus);
 
     let row_map = &layout.row_map;
 
@@ -725,18 +772,28 @@ pub(super) fn evaluate_frame_dirty_state(
     // off the top), suppress it for this frame.  AND-ing here means the
     // cursor-only fast path and the full rebuild path agree on
     // visibility.
-    effective_show_cursor = effective_show_cursor && cursor_visible;
+    if !cursor_visible {
+        cursor_appearance = CursorAppearance::Hidden;
+    }
     let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
     let target_row = cursor_screen_row
         .unwrap_or(snap.cursor_pos.y)
         .approx_as::<f32>()
         .unwrap_or(0.0);
-    let cursor_animating = view_state.update_cursor_animation(
-        target_col,
-        target_row,
-        cursor_trail,
-        cursor_trail_duration,
-    );
+    // Only a focused cursor glides. An inactive pane or unfocused window draws
+    // a steady cursor, so a trail toward it would just keep waking the repaint
+    // scheduler for an animation nobody is watching.
+    let cursor_animating = match cursor_focus {
+        CursorFocus::Focused => view_state.update_cursor_animation(
+            target_col,
+            target_row,
+            cursor_trail,
+            cursor_trail_duration,
+        ),
+        CursorFocus::InactivePane | CursorFocus::UnfocusedWindow => {
+            view_state.snap_cursor_animation(target_col, target_row)
+        }
+    };
 
     // Compute the pixel position from the (possibly animated) visual
     // cursor coordinates.  These are fractional cell coords, so we
@@ -801,9 +858,13 @@ pub(super) fn evaluate_frame_dirty_state(
     //
     // When cursor trail is animating, we also enter the cursor-only
     // path so the visual position is updated each frame.
-    let cursor_state_changed = cursor_blink_on != cache.previous_cursor_blink_on
+    //
+    // An appearance change covers a visibility change AND a focus-driven
+    // shape change (solid <-> hollow) whose visibility and position are
+    // constant: without it the stale quad would be presented.
+    let cursor_state_changed = cursor_blink_phase != cache.previous_cursor_blink_phase
         || snap.cursor_pos != cache.previous_cursor_pos
-        || effective_show_cursor != cache.previous_show_cursor
+        || cursor_appearance != cache.previous_cursor_appearance
         || snap.cursor_color_override != cache.previous_cursor_color_override
         || cursor_animating;
 
@@ -815,16 +876,22 @@ pub(super) fn evaluate_frame_dirty_state(
         && (view_state.text_blink_slow_visible != cache.previous_text_blink_slow_visible
             || view_state.text_blink_fast_visible != cache.previous_text_blink_fast_visible);
 
-    // A pane whose decoration buffer was never populated has nothing on
-    // screen to preserve, so neither bounded path (cursor-only or
-    // row-bounded) may claim the rest of the pane is intact. 124.21 lists
-    // this among the eight genuinely-global triggers. Read once and shared
-    // by both decisions below rather than re-locking.
-    let deco_verts_empty = render_state
+    // A pane whose render state was never built has nothing on screen to
+    // preserve, so neither bounded path (cursor-only or row-bounded) may
+    // claim the rest of the pane is intact. 124.21 lists this among the
+    // eight genuinely-global triggers. Read once and shared by both
+    // decisions below rather than re-locking.
+    //
+    // The signal is `cursor_vert_range` being unset, NOT `deco_verts` being
+    // empty: a built pane with no underline/selection/search quads has an
+    // empty `deco_verts` whenever its cursor is blink-off or hidden, and
+    // treating that as "never built" would turn every blink-on frame into a
+    // full rebuild and a `Full` present.
+    let never_built = render_state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .deco_verts
-        .is_empty();
+        .cursor_vert_range
+        .is_none();
 
     let cursor_only = !content_changed
         && !selection_changed
@@ -834,7 +901,7 @@ pub(super) fn evaluate_frame_dirty_state(
         && !image_frame_changed
         && !image_pixels_changed
         && cursor_state_changed
-        && !deco_verts_empty;
+        && !never_built;
 
     // Task 124.14: a full rebuild whose damage is provably bounded, rather
     // than the whole pane. `content_changed` ORs four independent triggers
@@ -877,8 +944,8 @@ pub(super) fn evaluate_frame_dirty_state(
     // `build_bounded_damage`'s `EmptyBoundedDamage` parameter in `widget.rs`
     // for why that reports `Unchanged`, not `Full`.
     //
-    // `deco_verts_empty` is included for the same reason it vetoes
-    // `cursor_only`: with no previously-populated decoration buffer there is
+    // `never_built` is included for the same reason it vetoes
+    // `cursor_only`: with no previously-built render state there is
     // nothing on screen for a bounded region to leave intact. In the normal
     // flow that case already implies `ChangedRows::All` (a fresh
     // `PaneRenderCache` starts with no epoch baseline), but that is an
@@ -886,7 +953,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // `RenderState` is per-window, `PaneRenderCache` per-pane -- so it is
     // asserted here rather than relied upon.
     let bounded_change = !matches!(rows_changed, ChangedRows::All)
-        && !deco_verts_empty
+        && !never_built
         && !theme_changed
         && !dims_changed
         && !folds_changed
@@ -917,9 +984,12 @@ pub(super) fn evaluate_frame_dirty_state(
         screen_selection,
         search_epoch,
         command_block_hover_rows: command_block_hover_rows_early,
-        cursor_screen_row: effective_show_cursor.then_some(cursor_screen_row).flatten(),
+        cursor_screen_row: (cursor_appearance != CursorAppearance::Hidden)
+            .then_some(cursor_screen_row)
+            .flatten(),
         cursor_state_changed,
-        effective_show_cursor,
+        cursor_blink_phase,
+        cursor_appearance,
         cursor_pixel_pos,
         cursor_x_scale,
         cursor_animating,
@@ -936,19 +1006,30 @@ mod evaluate_frame_dirty_state_tests {
     //! test here is built around — is that [`VertexRebuild::CursorOnly`]
     //! must fire *only* when every content/selection/search/hover/image/
     //! text-blink observation is false, the cursor state genuinely changed,
-    //! and the decoration buffer is non-empty. Getting any of those terms
+    //! and the render state has been built (`cursor_vert_range` is `Some`). Getting any of those terms
     //! wrong is a visible rendering bug (a stale frame or a needless full
     //! rebuild every frame), not just a wrong test assertion.
     use super::super::widget::new_render_state;
     use super::*;
-    use crate::gui::renderer::WindowPostRenderer;
+    use crate::gui::renderer::{CursorVertRange, WindowPostRenderer};
+    use crate::gui::terminal::cursor_appearance::{
+        CursorAppearanceInputs, CursorVisibility, EchoState, resolve_cursor_appearance,
+    };
     use crate::gui::view_state::SearchState;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::CommandBlocksConfig;
+    use freminal_common::config::UnfocusedCursorStyle;
+    use freminal_common::cursor::CursorVisualStyle;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::{
         AnimationControl, AnimationRunMode, ImageFrame, ImageSizeMode, InlineImage,
     };
+
+    /// The appearance of an ordinary focused, visible cursor: the default
+    /// DECSCUSR style drawn solid.
+    fn solid() -> CursorAppearance {
+        CursorAppearance::Solid(CursorVisualStyle::default())
+    }
 
     /// A minimal, deterministic snapshot: a 10x5 grid, cursor at the
     /// origin, no command blocks, no blinking text — chosen so the cursor
@@ -971,13 +1052,13 @@ mod evaluate_frame_dirty_state_tests {
 
     /// A [`PaneRenderCache`] pre-populated to describe "the last full
     /// rebuild rendered exactly `snap`, with the given cursor-blink phase
-    /// and effective cursor visibility" — i.e. a settled frame where
+    /// and cursor appearance" — i.e. a settled frame where
     /// re-observing the identical `snap` unmodified should report no
     /// changes at all.
     fn settled_cache(
         snap: &TerminalSnapshot,
         cursor_blink_on: bool,
-        effective_show_cursor: bool,
+        cursor_appearance: CursorAppearance,
     ) -> PaneRenderCache {
         let mut cache = PaneRenderCache::new();
         cache.previous_theme = Some(snap.theme);
@@ -1001,24 +1082,41 @@ mod evaluate_frame_dirty_state_tests {
         // 124.14b-ii) -- see that field's doc comment. A "settled" cache
         // that disagreed on this pair would be describing a state `show()`
         // itself can never produce (the two are always written together).
-        cache.previous_cursor_blink_on = cursor_blink_on;
+        cache.previous_cursor_blink_phase = CursorBlinkPhase::from_blink_on(cursor_blink_on);
         cache.previous_cursor_pos = snap.cursor_pos;
-        cache.previous_show_cursor = effective_show_cursor;
+        cache.previous_cursor_appearance = cursor_appearance;
         cache.previous_cursor_color_override = snap.cursor_color_override;
         cache.previous_text_blink_slow_visible = true;
         cache.previous_text_blink_fast_visible = true;
         cache
     }
 
-    /// A fresh, GL-context-free `Arc<Mutex<RenderState>>`, optionally with a
-    /// non-empty `deco_verts` (mirroring "a previous full rebuild already
-    /// ran and left decoration vertices behind for the cursor-only patch
-    /// path to overwrite").
-    fn render_state_with_deco_verts(non_empty: bool) -> Arc<Mutex<RenderState>> {
+    /// A fresh, GL-context-free `Arc<Mutex<RenderState>>`. With `built ==
+    /// true` it mirrors "a previous full rebuild already ran": a stored
+    /// `cursor_vert_range` and a one-float `deco_verts` for the cursor-only
+    /// patch path to overwrite. With `false` it is a never-built render
+    /// state (`cursor_vert_range == None`).
+    ///
+    /// The flag is a test-fixture selector only; the production signal is the
+    /// `Option` itself (see [`render_state_built_with_empty_deco_verts`] for
+    /// why emptiness is not it).
+    fn render_state_with_deco_verts(built: bool) -> Arc<Mutex<RenderState>> {
         let rs = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
-        if non_empty {
-            rs.lock().unwrap().deco_verts.push(0.0);
+        if built {
+            let mut guard = rs.lock().unwrap();
+            guard.deco_verts.push(0.0);
+            guard.cursor_vert_range = Some(CursorVertRange { start: 0, len: 1 });
         }
+        rs
+    }
+
+    /// A render state that HAS been built but whose `deco_verts` is empty:
+    /// the plain-shell pane (no underline/selection/search quads) whose
+    /// cursor is currently blink-off or hidden, so the cursor range is
+    /// `Some { start: 0, len: 0 }`.
+    fn render_state_built_with_empty_deco_verts() -> Arc<Mutex<RenderState>> {
+        let rs = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+        rs.lock().unwrap().cursor_vert_range = Some(CursorVertRange { start: 0, len: 0 });
         rs
     }
 
@@ -1032,8 +1130,43 @@ mod evaluate_frame_dirty_state_tests {
         cache: &PaneRenderCache,
         render_state: &Arc<Mutex<RenderState>>,
         cursor_blink_on: bool,
-        effective_show_cursor: bool,
+        cursor_appearance: CursorAppearance,
     ) -> DirtyTrackingOutcome {
+        call_with_trail(
+            snap,
+            view_state,
+            cache,
+            render_state,
+            cursor_blink_on,
+            cursor_appearance,
+            TrailProbe {
+                focus: CursorFocus::Focused,
+                trail_enabled: false,
+            },
+        )
+    }
+
+    /// The focus and trail setting a trail-sensitive test drives.
+    #[derive(Clone, Copy)]
+    struct TrailProbe {
+        focus: CursorFocus,
+        trail_enabled: bool,
+    }
+
+    /// [`call`] with an explicit focus and cursor-trail setting.
+    fn call_with_trail(
+        snap: &TerminalSnapshot,
+        view_state: &mut ViewState,
+        cache: &PaneRenderCache,
+        render_state: &Arc<Mutex<RenderState>>,
+        cursor_blink_on: bool,
+        cursor_appearance: CursorAppearance,
+        probe: TrailProbe,
+    ) -> DirtyTrackingOutcome {
+        let TrailProbe {
+            focus,
+            trail_enabled,
+        } = probe;
         let layout = FoldLayout::new(snap, &view_state.folded_blocks);
         let command_blocks_config = CommandBlocksConfig::default();
         let pane_rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
@@ -1057,10 +1190,13 @@ mod evaluate_frame_dirty_state_tests {
                 row_h_f: 16.0,
             },
             CursorFrameInputs {
-                blink_on: cursor_blink_on,
-                show_cursor: effective_show_cursor,
-                trail_enabled: false,
-                trail_duration: Duration::from_millis(120),
+                blink: CursorBlinkPhase::from_blink_on(cursor_blink_on),
+                appearance: cursor_appearance,
+                focus,
+                trail_enabled,
+                // Long enough that a trail started by a test can never
+                // finish between two calls, however loaded the machine is.
+                trail_duration: Duration::from_secs(10),
             },
         )
     }
@@ -1072,11 +1208,11 @@ mod evaluate_frame_dirty_state_tests {
         // common steady-state frame that (at the call site) takes neither
         // branch — it re-draws the existing VBO data unchanged.
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(!outcome.observations.content_changed);
@@ -1134,7 +1270,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn byte_identical_reflatten_in_a_new_arc_is_no_longer_a_content_change() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         // Re-flatten: same bytes, new allocation. `row_epochs` is untouched
         // by the clone (same allocation, same values) — that IS what
@@ -1167,7 +1303,7 @@ mod evaluate_frame_dirty_state_tests {
             &cache,
             &render_state,
             false,
-            true,
+            solid(),
         );
 
         assert!(
@@ -1195,7 +1331,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn a_changed_row_epoch_is_reported_as_exactly_that_row() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         let mut epochs = (*changed.row_epochs).to_vec();
@@ -1204,7 +1340,14 @@ mod evaluate_frame_dirty_state_tests {
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert_eq!(
             outcome.changed_rows,
@@ -1289,7 +1432,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn a_line_width_change_is_caught_by_the_epoch_without_a_separate_pointer_test() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap.clone();
         let mut epochs = (*changed.row_epochs).to_vec();
@@ -1304,7 +1447,14 @@ mod evaluate_frame_dirty_state_tests {
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.content_changed,
@@ -1321,7 +1471,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn an_sgr_only_change_does_not_clear_the_selection() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         bump_one_row_epoch(&mut changed);
@@ -1331,7 +1481,14 @@ mod evaluate_frame_dirty_state_tests {
         with_committed_selection(&mut view_state);
         let render_state = render_state_with_deco_verts(true);
 
-        let _ = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let _ = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             view_state.selection.has_selection(),
@@ -1350,11 +1507,11 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn re_observing_the_same_arc_reports_no_content_change() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             !outcome.observations.content_changed,
@@ -1369,28 +1526,132 @@ mod evaluate_frame_dirty_state_tests {
         // exactly the fast path's reason to exist.
         let snap = base_snapshot();
         // Cache remembers blink ON; this frame observes blink OFF.
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
     }
 
     #[test]
-    fn cursor_change_with_empty_deco_verts_forces_full_rebuild() {
-        // Same cursor-blink change as above, but no previous rebuild ever
-        // populated `deco_verts` — there is nothing to patch, so the fast
-        // path must not be selected even though every other flag agrees.
+    fn cursor_change_on_a_never_built_render_state_forces_full_rebuild() {
+        // Same cursor-blink change as above, but no rebuild ever ran
+        // (`cursor_vert_range == None`) — there is nothing to patch, so the
+        // fast path must not be selected even though every other flag agrees.
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(false);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    /// A never-built render state also vetoes the row-bounded path: with
+    /// nothing previously built there is nothing on screen for a bounded
+    /// region to leave intact.
+    #[test]
+    fn a_bounded_row_change_on_a_never_built_render_state_forces_full_rebuild() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(false);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    /// Regression for the "empty prefix trips the never-built gate" defect:
+    /// a plain-shell pane has no underline/selection/search quads, so a
+    /// built render state's `deco_verts` is EMPTY whenever the cursor is
+    /// blink-off or hidden. That is not "never built", so a blink flip must
+    /// still take the cursor-only path -- in both directions.
+    #[test]
+    fn blink_flip_on_a_built_pane_with_empty_deco_verts_stays_cursor_only() {
+        let snap = base_snapshot();
+        let render_state = render_state_built_with_empty_deco_verts();
+        assert_eq!(render_state.lock().unwrap().deco_verts, Vec::<f32>::new());
+
+        // Blink-on -> blink-off.
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+
+        // Blink-off -> blink-on.
+        let cache = settled_cache(&snap, false, solid());
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+    }
+
+    /// The same built-but-empty pane with a cursor that becomes visible
+    /// (DECTCEM show after hide) is also a plain cursor-only frame.
+    #[test]
+    fn cursor_show_on_a_built_pane_with_empty_deco_verts_stays_cursor_only() {
+        let snap = base_snapshot();
+        let render_state = render_state_built_with_empty_deco_verts();
+        let cache = settled_cache(&snap, true, CursorAppearance::Hidden);
+        let mut view_state = ViewState::new();
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+    }
+
+    /// A built-but-empty render state must not veto the bounded path either.
+    #[test]
+    fn a_bounded_row_change_on_a_built_pane_with_empty_deco_verts_yields_bounded() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_built_with_empty_deco_verts();
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::Bounded);
     }
 
     /// Pins the call-site gate `widget.rs` reads off
@@ -1403,7 +1664,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn cursor_state_changed_is_true_for_a_moved_cursor_alongside_a_bounded_row_change() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         bump_one_row_epoch(&mut changed);
@@ -1411,7 +1672,14 @@ mod evaluate_frame_dirty_state_tests {
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert_eq!(
             outcome.rebuild,
@@ -1434,11 +1702,11 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn cursor_state_changed_is_false_when_settled() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             !outcome.cursor_state_changed,
@@ -1458,14 +1726,21 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn a_single_bounded_row_change_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         bump_one_row_epoch(&mut changed);
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert_eq!(
             outcome.rebuild,
@@ -1494,7 +1769,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_only_change_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut view_state = ViewState::new();
         view_state.selection.anchor = Some(LogicalCell {
@@ -1507,7 +1782,7 @@ mod evaluate_frame_dirty_state_tests {
         });
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             outcome.observations.selection_changed,
@@ -1545,7 +1820,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_clear_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache.previous_selection = Some((
             LogicalCell {
                 col: 0,
@@ -1563,7 +1838,7 @@ mod evaluate_frame_dirty_state_tests {
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             outcome.observations.selection_changed,
@@ -1614,7 +1889,7 @@ mod evaluate_frame_dirty_state_tests {
     /// A cache that has "rendered" `outcome`'s selection, as `show()`'s
     /// rebuild body leaves it.
     fn cache_after(snap: &TerminalSnapshot, outcome: &DirtyTrackingOutcome) -> PaneRenderCache {
-        let mut cache = settled_cache(snap, true, true);
+        let mut cache = settled_cache(snap, true, solid());
         cache.previous_selection = outcome.current_selection;
         cache.previous_screen_selection = outcome.screen_selection;
         cache
@@ -1638,17 +1913,24 @@ mod evaluate_frame_dirty_state_tests {
         let first = call(
             &snap_a,
             &mut view_state,
-            &settled_cache(&snap_a, true, true),
+            &settled_cache(&snap_a, true, solid()),
             &render_state,
             true,
-            true,
+            solid(),
         );
         assert_eq!(first.screen_selection, Some((0, 2, 3, 3)));
         let cache = cache_after(&snap_a, &first);
 
         // One row evicted: same text, same epochs, base 101 -> screen rows 1..=2.
         let snap_b = snapshot_at_base(101);
-        let second = call(&snap_b, &mut view_state, &cache, &render_state, true, true);
+        let second = call(
+            &snap_b,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert_eq!(
             second.current_selection, first.current_selection,
@@ -1689,14 +1971,14 @@ mod evaluate_frame_dirty_state_tests {
         let first = call(
             &snap,
             &mut view_state,
-            &settled_cache(&snap, true, true),
+            &settled_cache(&snap, true, solid()),
             &render_state,
             true,
-            true,
+            solid(),
         );
         let cache = cache_after(&snap, &first);
 
-        let again = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let again = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(!again.observations.selection_changed);
         assert_eq!(again.screen_selection, first.screen_selection);
@@ -1716,10 +1998,10 @@ mod evaluate_frame_dirty_state_tests {
         let first = call(
             &snap_a,
             &mut view_state,
-            &settled_cache(&snap_a, true, true),
+            &settled_cache(&snap_a, true, solid()),
             &render_state,
             true,
-            true,
+            solid(),
         );
         assert_eq!(first.screen_selection, Some((2, 3, 5, 4)));
         let cache = cache_after(&snap_a, &first);
@@ -1728,7 +2010,14 @@ mod evaluate_frame_dirty_state_tests {
         let mut snap_b = snapshot_at_base(102);
         snap_b.row_epochs = Arc::from(vec![3_u64, 4, 5, 6, 7]);
         snap_b.scroll_changed = true;
-        let second = call(&snap_b, &mut view_state, &cache, &render_state, true, true);
+        let second = call(
+            &snap_b,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert_eq!(
             second.current_selection, first.current_selection,
@@ -1756,10 +2045,10 @@ mod evaluate_frame_dirty_state_tests {
         let outcome = call(
             &snap,
             &mut view_state,
-            &settled_cache(&snap, true, true),
+            &settled_cache(&snap, true, solid()),
             &render_state,
             true,
-            true,
+            solid(),
         );
 
         assert_eq!(
@@ -1793,10 +2082,10 @@ mod evaluate_frame_dirty_state_tests {
         let outcome = call(
             &snap,
             &mut view_state,
-            &settled_cache(&snap, true, true),
+            &settled_cache(&snap, true, solid()),
             &render_state,
             true,
-            true,
+            solid(),
         );
 
         assert!(!view_state.selection.has_selection());
@@ -1825,7 +2114,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn hover_clear_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         // Must agree with `previous_command_block_hover_rows` -- see that
         // field's doc comment (Task 124.14b-ii).
         cache.previous_command_block_hover_rows = Some((0, 0));
@@ -1833,7 +2122,7 @@ mod evaluate_frame_dirty_state_tests {
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             outcome.observations.hover_changed,
@@ -1866,14 +2155,14 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn changed_rows_all_does_not_yield_bounded_rebuild() {
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         // No recorded baseline: `diff_row_epochs` conservatively reports
         // every row changed (see `no_recorded_epochs_reports_every_row_changed`).
         cache.last_rendered_row_epochs = None;
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert_eq!(
             outcome.changed_rows,
@@ -1901,7 +2190,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         bump_one_row_epoch(&mut changed);
@@ -1917,7 +2206,14 @@ mod evaluate_frame_dirty_state_tests {
         });
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.selection_changed,
@@ -1959,7 +2255,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn hover_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         // `call()`'s fixed geometry (`gutter_inset: 0.0`) makes
         // `compute_command_block_hover_rows` always return `None`, so
         // recording a `Some` here as the previous frame's hover range is
@@ -1973,7 +2269,14 @@ mod evaluate_frame_dirty_state_tests {
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.hover_changed,
@@ -2007,7 +2310,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn search_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache.previous_search_epoch = cache.previous_search_epoch.wrapping_add(1);
 
         let mut changed = snap;
@@ -2015,7 +2318,14 @@ mod evaluate_frame_dirty_state_tests {
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.search_changed,
@@ -2068,14 +2378,21 @@ mod evaluate_frame_dirty_state_tests {
         let mut images = std::collections::HashMap::new();
         images.insert(1, image);
         snap.images = Arc::new(images);
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
 
         let mut changed = snap;
         bump_one_row_epoch(&mut changed);
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.image_pixels_changed,
@@ -2134,7 +2451,7 @@ mod evaluate_frame_dirty_state_tests {
         images.insert(1, image);
         snap.images = Arc::new(images);
 
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache
             .last_rendered_image_pixel_ptrs
             .insert(1, Arc::as_ptr(&frame3_pixels).addr());
@@ -2145,7 +2462,14 @@ mod evaluate_frame_dirty_state_tests {
         let mut view_state = ViewState::new();
         view_state.seed_anim_clock_for_test(1, 1, Duration::from_millis(100), 0);
         let render_state = render_state_with_deco_verts(true);
-        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
 
         assert!(
             outcome.observations.image_frame_changed,
@@ -2171,12 +2495,19 @@ mod evaluate_frame_dirty_state_tests {
         // frame: `content_changed` must veto the fast path even though the
         // cursor state also changed.
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache.previous_theme = Some(&freminal_common::themes::DRACULA);
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.content_changed);
@@ -2188,12 +2519,19 @@ mod evaluate_frame_dirty_state_tests {
         // frame: the stale-vertex-slivers hazard means `content_changed`
         // (via `dims_changed`) must veto the fast path.
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache.previous_term_width = snap.term_width + 1;
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.content_changed);
@@ -2239,7 +2577,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn spurious_row_epoch_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         // Bump the epoch *after* `settled_cache` captured the baseline, so
         // the pre-filter fires even though `last_rendered_visible` still
         // equals `snap.visible_chars` — the text has demonstrably not
@@ -2250,7 +2588,7 @@ mod evaluate_frame_dirty_state_tests {
         with_committed_selection(&mut view_state);
         let render_state = render_state_with_deco_verts(true);
 
-        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             view_state.selection.has_selection(),
@@ -2264,7 +2602,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn genuine_content_change_still_discards_a_selection() {
         let mut snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         bump_one_row_epoch(&mut snap);
         snap.scroll_changed = false;
         // Last-rendered text differs from the snapshot's.
@@ -2275,7 +2613,7 @@ mod evaluate_frame_dirty_state_tests {
         with_committed_selection(&mut view_state);
         let render_state = render_state_with_deco_verts(true);
 
-        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(
             !view_state.selection.has_selection(),
@@ -2288,7 +2626,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn scroll_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         bump_one_row_epoch(&mut snap);
         snap.scroll_changed = true;
         cache.last_rendered_visible = Some(Arc::new(vec![
@@ -2298,7 +2636,7 @@ mod evaluate_frame_dirty_state_tests {
         with_committed_selection(&mut view_state);
         let render_state = render_state_with_deco_verts(true);
 
-        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(view_state.selection.has_selection());
     }
@@ -2308,7 +2646,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_committed_this_frame_survives_a_genuine_content_change() {
         let mut snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         bump_one_row_epoch(&mut snap);
         snap.scroll_changed = false;
         cache.last_rendered_visible = Some(Arc::new(vec![
@@ -2319,7 +2657,7 @@ mod evaluate_frame_dirty_state_tests {
         view_state.selection_committed_this_frame = true;
         let render_state = render_state_with_deco_verts(true);
 
-        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, solid());
 
         assert!(view_state.selection.has_selection());
     }
@@ -2333,14 +2671,21 @@ mod evaluate_frame_dirty_state_tests {
         // `ReevaluateFullRebuild`, because the search overlay's own
         // highlight-row union bounds the damage.
         let snap = base_snapshot();
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         // Any value that differs from this frame's epoch stands in for "the
         // search state changed since the last rendered frame".
         cache.previous_search_epoch = cache.previous_search_epoch.wrapping_add(1);
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::Bounded);
         assert!(outcome.observations.search_changed);
@@ -2360,7 +2705,7 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_change_beats_cursor_change() {
         let snap = base_snapshot();
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         view_state.selection.anchor = Some(LogicalCell {
             col: 0,
@@ -2372,7 +2717,14 @@ mod evaluate_frame_dirty_state_tests {
         });
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(
             outcome.rebuild,
@@ -2392,12 +2744,19 @@ mod evaluate_frame_dirty_state_tests {
         // fast path even though it is a separate trigger from cursor-only.
         let mut snap = base_snapshot();
         snap.has_blinking_text = true;
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         view_state.text_blink_slow_visible = false;
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.text_blink_changed);
@@ -2427,11 +2786,18 @@ mod evaluate_frame_dirty_state_tests {
         let mut images = std::collections::HashMap::new();
         images.insert(1, image);
         snap.images = Arc::new(images);
-        let cache = settled_cache(&snap, true, true);
+        let cache = settled_cache(&snap, true, solid());
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.image_pixels_changed);
@@ -2478,7 +2844,7 @@ mod evaluate_frame_dirty_state_tests {
         images.insert(1, image);
         snap.images = Arc::new(images);
 
-        let mut cache = settled_cache(&snap, true, true);
+        let mut cache = settled_cache(&snap, true, solid());
         cache
             .last_rendered_image_pixel_ptrs
             .insert(1, Arc::as_ptr(&frame3_pixels).addr());
@@ -2487,10 +2853,304 @@ mod evaluate_frame_dirty_state_tests {
         view_state.seed_anim_clock_for_test(1, 1, Duration::from_millis(100), 0);
         let render_state = render_state_with_deco_verts(true);
 
-        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.image_frame_changed);
         assert!(!outcome.observations.image_pixels_changed);
+    }
+
+    /// A focus switch (here: the pane lost focus) changes the cursor's shape
+    /// while its visibility and position stay constant. That must still take
+    /// the cursor-only rebuild, or the stale solid quad would be presented.
+    #[test]
+    fn focus_only_change_takes_the_cursor_only_path() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        // `InactivePane` is what resolves to `Hollow`; a `Focused` +
+        // `Hollow` pair is one `show()` never produces.
+        let outcome = call_with_trail(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            CursorAppearance::Hollow,
+            TrailProbe {
+                focus: CursorFocus::InactivePane,
+                trail_enabled: false,
+            },
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.cursor_appearance, CursorAppearance::Hollow);
+    }
+
+    /// The reverse switch (hollow back to solid on regaining focus) is also a
+    /// cursor-state change.
+    #[test]
+    fn regaining_focus_takes_the_cursor_only_path() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, CursorAppearance::Hollow);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.cursor_appearance, solid());
+    }
+
+    /// A steady hollow cursor is settled: repeating the same appearance with
+    /// the same blink phase reports no cursor-state change.
+    #[test]
+    fn steady_hollow_cursor_does_not_retrigger() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, CursorAppearance::Hollow);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call_with_trail(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            CursorAppearance::Hollow,
+            TrailProbe {
+                focus: CursorFocus::InactivePane,
+                trail_enabled: false,
+            },
+        );
+
+        assert!(!outcome.cursor_state_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    /// The blink-phase pin (127.6): a non-focused cursor does not blink, so
+    /// the raw clock flipping to its off half must NOT register as a cursor
+    /// state change -- otherwise a hollow/steady cursor would cost a
+    /// cursor-only frame and a repaint every half second. The outcome
+    /// reports the pinned phase, which is what the caller draws and caches.
+    #[test]
+    fn raw_blink_flip_does_not_change_state_for_non_focused_cursors() {
+        for focus in [CursorFocus::InactivePane, CursorFocus::UnfocusedWindow] {
+            let snap = base_snapshot();
+            // The cache holds the pinned `On` phase from the last frame.
+            let cache = settled_cache(&snap, true, CursorAppearance::Hollow);
+            let mut view_state = ViewState::new();
+            let render_state = render_state_with_deco_verts(true);
+
+            let outcome = call_with_trail(
+                &snap,
+                &mut view_state,
+                &cache,
+                &render_state,
+                // Raw blink clock: off half.
+                false,
+                CursorAppearance::Hollow,
+                TrailProbe {
+                    focus,
+                    trail_enabled: false,
+                },
+            );
+
+            assert!(
+                !outcome.cursor_state_changed,
+                "{focus:?}: a raw blink flip must not be a cursor-state change"
+            );
+            assert_eq!(outcome.cursor_blink_phase, CursorBlinkPhase::On);
+        }
+    }
+
+    /// Control for the pin: the very same raw flip against the very same
+    /// cache IS a cursor-state change for a focused cursor, which honours its
+    /// blink cycle, and the outcome reports the raw (off) phase.
+    #[test]
+    fn raw_blink_flip_changes_state_for_a_focused_cursor() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call_with_trail(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+            TrailProbe {
+                focus: CursorFocus::Focused,
+                trail_enabled: false,
+            },
+        );
+
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.cursor_blink_phase, CursorBlinkPhase::Off);
+    }
+
+    /// A pane whose application hid the cursor (DECTCEM off) resolves to
+    /// `Hidden` even when unfocused with a hollow preference, and a pane that
+    /// already was hidden stays settled -- no cursor-only rebuild, no cursor
+    /// row to damage.
+    #[test]
+    fn dectcem_off_inactive_pane_stays_hidden() {
+        let snap = base_snapshot();
+        let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+            snapshot_visible: CursorVisibility::Hidden,
+            echo: EchoState::Normal,
+            focus: CursorFocus::InactivePane,
+            style: CursorVisualStyle::default(),
+            unfocused_style: UnfocusedCursorStyle::Hollow,
+        });
+        assert_eq!(appearance, CursorAppearance::Hidden);
+
+        let cache = settled_cache(&snap, true, CursorAppearance::Hidden);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            appearance,
+        );
+
+        assert!(!outcome.cursor_state_changed);
+        assert_eq!(outcome.cursor_appearance, CursorAppearance::Hidden);
+        assert_eq!(outcome.cursor_screen_row, None);
+    }
+
+    /// Fold/off-screen visibility maps ANY visible appearance to `Hidden`,
+    /// hollow included, and that is itself a cursor-state change.
+    #[test]
+    fn hollow_cursor_off_screen_resolves_to_hidden() {
+        let mut snap = base_snapshot();
+        snap.cursor_pos.y = 50;
+        let cache = settled_cache(&snap, true, CursorAppearance::Hollow);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            CursorAppearance::Hollow,
+        );
+
+        assert_eq!(outcome.cursor_appearance, CursorAppearance::Hidden);
+        assert_eq!(outcome.cursor_screen_row, None);
+        assert!(outcome.cursor_state_changed);
+    }
+
+    /// A visible hollow cursor reports its screen row, so a bounded rebuild
+    /// can damage the inactive pane's cursor row.
+    #[test]
+    fn visible_hollow_cursor_reports_its_screen_row() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, CursorAppearance::Hollow);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            CursorAppearance::Hollow,
+        );
+
+        assert!(outcome.cursor_screen_row.is_some());
+    }
+
+    /// Drive two consecutive frames with the trail enabled: the first
+    /// observes the cursor at the origin, the second after it moved to
+    /// `(3, 2)`. Returns whether the second frame reports a trail in
+    /// progress, and the view state for position assertions.
+    fn move_cursor_with_trail(focus: CursorFocus) -> (bool, ViewState) {
+        let first = base_snapshot();
+        let cache = settled_cache(&first, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let probe = TrailProbe {
+            focus,
+            trail_enabled: true,
+        };
+
+        call_with_trail(
+            &first,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+            probe,
+        );
+        std::thread::sleep(Duration::from_millis(5));
+
+        let mut moved = base_snapshot();
+        moved.cursor_pos = freminal_common::buffer_states::cursor::CursorPos { x: 3, y: 2 };
+        let outcome = call_with_trail(
+            &moved,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+            probe,
+        );
+        (outcome.cursor_animating, view_state)
+    }
+
+    /// Control: a focused pane with the trail enabled still glides toward a
+    /// moved cursor (focused behaviour is unchanged by Task 127.6).
+    #[test]
+    fn focused_pane_animates_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::Focused);
+
+        assert!(animating, "a focused cursor must still glide");
+        assert!(
+            view_state.cursor_visual_col < 3.0,
+            "the visual position must lag the target mid-glide"
+        );
+    }
+
+    /// An inactive pane draws a steady hollow cursor, so its trail must not
+    /// animate (it would only keep waking the repaint scheduler).
+    #[test]
+    fn inactive_pane_does_not_animate_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::InactivePane);
+
+        assert!(!animating);
+        assert!((view_state.cursor_visual_col - 3.0).abs() < f32::EPSILON);
+        assert!((view_state.cursor_visual_row - 2.0).abs() < f32::EPSILON);
+    }
+
+    /// An unfocused window likewise stops animating the trail.
+    #[test]
+    fn unfocused_window_does_not_animate_trail_after_cursor_move() {
+        let (animating, view_state) = move_cursor_with_trail(CursorFocus::UnfocusedWindow);
+
+        assert!(!animating);
+        assert!((view_state.cursor_visual_col - 3.0).abs() < f32::EPSILON);
+        assert!((view_state.cursor_visual_row - 2.0).abs() < f32::EPSILON);
     }
 }

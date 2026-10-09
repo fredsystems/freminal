@@ -43,12 +43,14 @@ use super::gpu::TerminalRenderer;
 use super::toast_pass::{ToastQuad, ToastRenderer};
 use super::toast_text_pass::{ToastTextRenderer, ToastTextRun};
 use super::vertex::{
-    BackgroundFrame, FgRenderOptions, build_background_instances, build_cursor_verts_only,
-    build_foreground_instances,
+    BackgroundFrame, CursorBlinkPhase, CursorDrawParams, FgRenderOptions,
+    build_background_instances, build_cursor_verts_only, build_foreground_instances,
 };
 use crate::gui::atlas::GlyphAtlas;
+use crate::gui::colors::cursor_f;
 use crate::gui::font_manager::FontManager;
 use crate::gui::shaping::ShapingCache;
+use crate::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::config::BackgroundImageMode;
@@ -81,11 +83,32 @@ fn synthetic_grid(cols: usize, rows: usize) -> (Vec<TChar>, Vec<FormatTag>) {
     (chars, tags)
 }
 
+/// The cursor draw parameters for a synthetic frame at the origin in the
+/// theme's cursor color: a steady solid block, a steady hollow block (an
+/// unfocused pane), or nothing when the frame hides it.
+const fn synthetic_cursor(frame: &SyntheticFrame) -> CursorDrawParams {
+    let appearance = match frame.cursor {
+        CursorPresence::Shown => CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+        CursorPresence::Hollow => CursorAppearance::Hollow,
+        CursorPresence::Hidden => CursorAppearance::Hidden,
+    };
+    CursorDrawParams {
+        appearance,
+        col: 0.0,
+        row: 0.0,
+        color: cursor_f(&CATPPUCCIN_MOCHA, None),
+        x_scale: 1.0,
+        blink_on: CursorBlinkPhase::On,
+    }
+}
+
 /// Whether the synthetic frame includes a visible cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorPresence {
-    /// The cursor is drawn.
+    /// The cursor is drawn as a solid steady block (the focused pane).
     Shown,
+    /// The cursor is drawn as a steady hollow block (a non-focused pane).
+    Hollow,
     /// The cursor is not drawn.
     Hidden,
 }
@@ -276,10 +299,10 @@ impl HeadlessRenderer {
             &[],
         );
 
-        let cursor_style = CursorVisualStyle::BlockCursorSteady;
+        let cursor = synthetic_cursor(frame);
         let mut bg = Vec::new();
         let mut deco = Vec::new();
-        let _cursor_appended = build_background_instances(
+        let _cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: &lines,
                 cell_width,
@@ -288,18 +311,13 @@ impl HeadlessRenderer {
                 underline_offset: font_manager.underline_offset(),
                 strikeout_offset: font_manager.strikeout_offset(),
                 stroke_size: font_manager.stroke_size(),
-                show_cursor: matches!(frame.cursor, CursorPresence::Shown),
-                cursor_blink_on: true,
-                cursor_pixel_pos: (0.0, 0.0),
-                cursor_width_scale: 1.0,
-                cursor_visual_style: &cursor_style,
+                cursor: &cursor,
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: None,
                 term_width_cols: frame.cols,
                 theme: &CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen: false,
             },
             &mut bg,
@@ -389,17 +407,7 @@ impl HeadlessRenderer {
         let cell_width_f32: f32 = cell_width.value_as().unwrap_or(0.0);
         let cell_height_f32: f32 = cell_height.value_as().unwrap_or(0.0);
 
-        let deco = build_cursor_verts_only(
-            cell_width,
-            cell_height,
-            matches!(frame.cursor, CursorPresence::Shown),
-            true,
-            (0.0, 0.0),
-            1.0,
-            &CursorVisualStyle::BlockCursorSteady,
-            &CATPPUCCIN_MOCHA,
-            None,
-        );
+        let deco = build_cursor_verts_only(cell_width, cell_height, &synthetic_cursor(frame));
 
         self.renderer.draw_with_cursor_only_update(
             gl,

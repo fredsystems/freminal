@@ -21,7 +21,7 @@ use freminal_common::{
         command_block::CommandStatus, pointer_shape::PointerShape, progress::ProgressState,
         row_number::RowNumber, tchar::TChar, url::Url,
     },
-    config::Config,
+    config::{Config, UnfocusedCursorStyle},
     send_or_log,
     themes::ThemePalette,
 };
@@ -36,11 +36,14 @@ use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
 use super::{
     super::{
         atlas::GlyphAtlas,
+        colors::cursor_f,
         font_manager::FontManager,
+        frame_drain::WindowFocus,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, GlRetireQueue, ImageDrawEntry,
-            MatchHighlight, TerminalRenderer, WindowPostRenderer, build_background_instances,
-            build_cursor_verts_only, build_foreground_instances, build_image_verts, gl_facade::Gl,
+            BackgroundFrame, CursorBlinkPhase, CursorDrawParams, CursorVertRange, FgRenderOptions,
+            GlRetireQueue, ImageDrawEntry, MatchHighlight, TerminalRenderer, WindowPostRenderer,
+            build_background_instances, build_cursor_verts_only, build_foreground_instances,
+            build_image_verts, gl_facade::Gl,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -48,6 +51,10 @@ use super::{
         },
     },
     coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, running_block_extent},
+    cursor_appearance::{
+        CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
+        cursor_focus, resolve_cursor_appearance,
+    },
     frame_dirty::{
         CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
         evaluate_frame_dirty_state,
@@ -114,55 +121,88 @@ fn cursor_blink_phase(time: f64, anchor: Option<f64>, tick_seconds: f64) -> bool
     }
 }
 
-/// Patch the cursor's quad into `deco_verts` for a cursor-only frame
+/// Whether the blink clock must be re-anchored because the cursor's focus
+/// changed between frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlinkAnchorAction {
+    /// The cursor regained focus: re-anchor so the blink starts in its
+    /// visible half.
+    Reanchor,
+    /// No focus-driven re-anchor.
+    Keep,
+}
+
+/// Decide whether a focus change requires re-anchoring the blink clock.
+///
+/// While a cursor is not [`CursorFocus::Focused`] it is drawn hollow/steady
+/// with the blink phase pinned `On`, but the blink clock itself keeps
+/// running. When focus returns (window refocus, or the pane becoming the
+/// active one) the cursor turns solid and starts honouring the clock, which
+/// may well be in its off half -- leaving no visible cursor for up to a blink
+/// tick. Re-anchoring on the non-`Focused` -> `Focused` edge makes the first
+/// focused frame blink-on, exactly as the activation reset does for a
+/// newly-activated pane.
+#[must_use]
+const fn blink_anchor_action(previous: CursorFocus, now: CursorFocus) -> BlinkAnchorAction {
+    match (previous, now) {
+        (CursorFocus::InactivePane | CursorFocus::UnfocusedWindow, CursorFocus::Focused) => {
+            BlinkAnchorAction::Reanchor
+        }
+        _ => BlinkAnchorAction::Keep,
+    }
+}
+
+/// Patch the cursor's geometry into `deco_verts` for a cursor-only frame
 /// (content, selection, and everything else unchanged; only the cursor's
-/// blink state, position, or color changed since the last frame).
+/// appearance, blink state, position, or color changed since the last frame).
 ///
-/// `cfo` (`cursor_vert_float_offset`) is the offset recorded by the most
-/// recent full rebuild. It reflects whether that rebuild actually appended a
-/// cursor quad (`cursor_quad_appended` from [`build_background_instances`]),
-/// which depends on blink phase as well as `show_cursor` — so `cfo` can
-/// legitimately equal `deco_verts.len()` (no reserved tail region) when that
-/// rebuild happened to land on the cursor's blink-off half of the cycle.
+/// `range` is the [`CursorVertRange`] recorded by the most recent full rebuild
+/// (or the previous cursor-only patch): the exact float range the cursor
+/// occupies in `deco_verts`. [`build_background_instances`] always emits the
+/// cursor as the **final** region of the decoration buffer, so everything
+/// before `range.start` is non-cursor decoration (underlines, selection,
+/// search and hover quads) that this function must never touch.
 ///
-/// `cursor_verts` is the freshly-built cursor quad for *this* frame — empty
-/// when the cursor should not be visible right now (hidden, or blink-off),
-/// or exactly `CURSOR_QUAD_FLOATS` floats when it should be.
+/// `cursor_verts` is the freshly-built cursor geometry for *this* frame from
+/// [`build_cursor_verts_only`]. Its length is not fixed: empty when nothing
+/// should be drawn (hidden, or blink-off), `CURSOR_QUAD_FLOATS` for a solid
+/// cursor, or four times that for a hollow one.
 ///
-/// Three cases:
-/// - A reserved region exists (`cfo + CURSOR_QUAD_FLOATS <= deco_verts.len()`)
-///   and the cursor should be hidden now: zero it out in place.
-/// - A reserved region exists and the cursor should be visible now: overwrite
-///   it in place with the new quad.
-/// - **No** reserved region exists (`cfo == deco_verts.len()`, the blink-off
-///   rebuild case above) and the cursor should be visible now: the quad must
-///   be *appended*, not patched in place — issue #432's follow-up defect,
-///   where skipping this case silently left the cursor invisible until an
-///   unrelated full rebuild happened to run. This is safe precisely because
-///   the GPU upload path always re-uploads `deco_verts` based on its current
-///   (dynamic) length rather than a fixed reserved-tail count. `cfo` itself
-///   never needs updating: it already equals the offset the newly-appended
-///   quad lands at.
+/// The patch truncates `deco_verts` to `range.start` and appends
+/// `cursor_verts`. Hiding the cursor is therefore just a truncate, and a
+/// cursor whose length changed between frames (solid -> hollow, hidden ->
+/// visible) needs no special case. Making the buffer's length vary is safe
+/// because the GPU upload path always uploads `deco_verts` at its current
+/// length and draws that many vertices rather than assuming a fixed-size
+/// reserved tail.
 ///
-/// Any other combination (an out-of-bounds `cfo` that is neither a valid
-/// reserved region nor exactly the tail) is a defensive no-op — this should
-/// not occur given `cfo` is always produced by the full-rebuild bookkeeping,
-/// but silently doing nothing is safer than a panic or corrupting unrelated
-/// data.
-fn patch_cursor_only_deco_verts(deco_verts: &mut Vec<f32>, cfo: usize, cursor_verts: &[f32]) {
-    if cursor_verts.is_empty() {
-        // Hide cursor: zero out the region, if one is actually reserved.
-        if cfo + CURSOR_QUAD_FLOATS <= deco_verts.len() {
-            for f in &mut deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
-                *f = 0.0;
-            }
-        }
-    } else if cursor_verts.len() == CURSOR_QUAD_FLOATS {
-        if cfo + CURSOR_QUAD_FLOATS <= deco_verts.len() {
-            deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(cursor_verts);
-        } else if cfo == deco_verts.len() {
-            deco_verts.extend_from_slice(cursor_verts);
-        }
+/// Returns the new [`CursorVertRange`], which the caller must store: it is
+/// what the next patch truncates to. Deriving it from anything but the
+/// geometry actually written is the issue #432 corruption class (a stale
+/// offset overwrites the bottom-row selection quad).
+///
+/// `range` is `Option` because the render state stores it that way
+/// (`RenderState::cursor_vert_range`: `None` until the first rebuild). A
+/// cursor-only frame is never selected for a never-built render state
+/// (`evaluate_frame_dirty_state` vetoes it), so `None` cannot reach here; it
+/// is handled defensively by appending after whatever is present. The
+/// caller stores the returned range as `Some`.
+///
+/// A `range.start` beyond the end of `deco_verts` cannot be produced by the
+/// bookkeeping; it is clamped to the buffer's length rather than panicking,
+/// so the cursor is appended after whatever is present.
+#[must_use]
+fn patch_cursor_only_deco_verts(
+    deco_verts: &mut Vec<f32>,
+    range: Option<CursorVertRange>,
+    cursor_verts: &[f32],
+) -> CursorVertRange {
+    let start = range.map_or(deco_verts.len(), |r| r.start.min(deco_verts.len()));
+    deco_verts.truncate(start);
+    deco_verts.extend_from_slice(cursor_verts);
+    CursorVertRange {
+        start,
+        len: cursor_verts.len(),
     }
 }
 
@@ -1300,10 +1340,21 @@ pub struct RenderState {
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
     /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
     pub(super) snap_images: std::collections::HashMap<u64, InlineImage>,
-    /// Float offset (not byte offset) into `deco_verts` where the cursor quad
-    /// data begins.  Set after every full vertex rebuild so cursor-only frames
-    /// can patch just this region.
-    pub(super) cursor_vert_float_offset: usize,
+    /// The exact float range (not byte range) the cursor occupies in
+    /// `deco_verts`; always the buffer's final region.  Set after every full
+    /// vertex rebuild from [`build_background_instances`]'s return value, and
+    /// updated by every cursor-only patch, so cursor-only frames can replace
+    /// just this region whatever its length (0, solid, or hollow).
+    ///
+    /// `None` means no rebuild has ever populated this render state: the
+    /// "never built" signal that 124.21 lists among the eight genuinely
+    /// global damage triggers. It is deliberately NOT inferred from
+    /// `deco_verts.is_empty()`: a plain-shell pane has no underline,
+    /// selection, or search quads, so a blink-off (or DECTCEM-hidden)
+    /// cursor legitimately leaves `deco_verts` empty on a built pane, and
+    /// reading that as "never built" turns every blink-on frame into a full
+    /// rebuild and a `Full` present.
+    pub(super) cursor_vert_range: Option<CursorVertRange>,
     /// Cell dimensions in physical pixels, for the instanced background shader.
     pub(super) cell_width_px: f32,
     pub(super) cell_height_px: f32,
@@ -1409,7 +1460,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         image_verts: Vec::new(),
         image_draw_order: Vec::new(),
         snap_images: std::collections::HashMap::new(),
-        cursor_vert_float_offset: 0,
+        cursor_vert_range: None,
         cell_width_px: 0.0,
         cell_height_px: 0.0,
         bg_opacity: 1.0,
@@ -1522,15 +1573,26 @@ pub struct PaneRenderCache {
     pub(super) super_state: super::input::SuperKeyState,
     /// Last scroll amount processed.
     pub(super) previous_scroll_amount: f32,
-    /// Cursor blink state from the most recently rendered frame.
-    pub(super) previous_cursor_blink_on: bool,
+    /// The effective cursor blink phase from the most recently rendered
+    /// frame (already pinned to `On` for a non-focused cursor, as
+    /// `evaluate_frame_dirty_state` returns it).
+    pub(super) previous_cursor_blink_phase: CursorBlinkPhase,
+    /// The cursor's pane/window focus from the most recently rendered frame.
+    /// A non-`Focused` -> `Focused` transition re-anchors the blink clock so
+    /// the regained cursor starts in its visible half (see
+    /// [`blink_anchor_action`]). Initialised to `Focused` so the first frame
+    /// never counts as a regain: a freshly-created pane is anchored by the
+    /// activation reset (`cursor_blink_reset_pending`) instead.
+    pub(super) previous_cursor_focus: CursorFocus,
     /// Cursor position from the most recently rendered frame.
     pub(super) previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
     /// Cursor screen row from the most recently drawn frame. This advances
     /// only after damage has consumed the old row and never on `skip_draw`.
     pub(super) previous_cursor_screen_row: Option<usize>,
-    /// Whether the cursor was shown in the most recently rendered frame.
-    pub(super) previous_show_cursor: bool,
+    /// How the cursor was drawn in the most recently rendered frame
+    /// (visibility and focus-driven shape together: a hidden-to-hollow or
+    /// solid-to-hollow switch is a change even when the cursor did not move).
+    pub(super) previous_cursor_appearance: CursorAppearance,
     /// Cursor color override from the most recently rendered frame.
     pub(super) previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
@@ -1742,9 +1804,11 @@ pub struct PaneRenderCache {
     /// Records which render path this pane took, so the per-window
     /// aggregation in `app_impl` can decide whether the whole frame was a
     /// pure cursor-only update (skip-clear + partial present) or must clear
-    /// and present fully. See [`PaneFrameDamage`] for the three cases. Only
-    /// the active pane ever produces a cursor rect; inactive unchanged panes
-    /// report [`PaneFrameDamage::Unchanged`] and never force a full frame.
+    /// and present fully. See [`PaneFrameDamage`] for the three cases. Any
+    /// pane with a visible cursor -- the active pane's solid one or an
+    /// inactive pane's hollow one -- can produce a cursor rect when only its
+    /// cursor changed; a pane whose content and cursor are both unchanged
+    /// reports [`PaneFrameDamage::Unchanged`] and never forces a full frame.
     ///
     /// Set every frame by [`FreminalTerminalWidget::show`].
     ///
@@ -1804,10 +1868,11 @@ impl PaneRenderCache {
             previous_key: None,
             super_state: super::input::SuperKeyState::default(),
             previous_scroll_amount: 0.0,
-            previous_cursor_blink_on: true,
+            previous_cursor_blink_phase: CursorBlinkPhase::On,
+            previous_cursor_focus: CursorFocus::Focused,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
             previous_cursor_screen_row: None,
-            previous_show_cursor: false,
+            previous_cursor_appearance: CursorAppearance::Hidden,
             previous_cursor_color_override: None,
             last_rendered_visible: None,
             last_rendered_row_epochs: None,
@@ -2550,6 +2615,10 @@ pub struct FreminalTerminalWidget {
     toggles: WidgetDisplayToggles,
     /// Duration of the cursor trail animation.
     cursor_trail_duration: Duration,
+    /// How a cursor is drawn when its pane or window is not focused (config
+    /// `[cursor] unfocused_style`). Cached like `cursor_trail_duration` so
+    /// `show()` reads it each frame without touching the config.
+    unfocused_cursor_style: UnfocusedCursorStyle,
     /// The base egui `FontDefinitions` (without any preview font registered).
     /// Captured at construction and updated on `apply_config_changes`. Used by
     /// the settings modal to register a temporary preview font without losing
@@ -2639,6 +2708,7 @@ impl FreminalTerminalWidget {
             cursor_trail_duration: Duration::from_millis(u64::from(
                 config.cursor.trail_duration_ms,
             )),
+            unfocused_cursor_style: config.cursor.unfocused_style,
             base_font_defs,
             egui_fonts_dirty: false,
         })
@@ -2737,7 +2807,10 @@ impl FreminalTerminalWidget {
     /// - `bg_image_opacity` — background image opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_mode` — background image fit mode from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
-    /// - `is_active_pane` — whether this pane currently has keyboard focus.
+    /// - `is_active_pane` — whether this pane is the active pane of its tab.
+    /// - `window_focus` — whether the OS window has input focus; together
+    ///   with `is_active_pane` it decides whether the cursor is drawn as a
+    ///   focused (solid) or an unfocused (config-styled) cursor.
     /// - `key_broadcast_targets` — input senders of the other panes to mirror
     ///   keyboard input to when broadcast mode is active (Task 74); empty when
     ///   broadcast is off or this is not the active pane.
@@ -2776,6 +2849,7 @@ impl FreminalTerminalWidget {
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
+        window_focus: WindowFocus,
         pane_id: crate::gui::panes::PaneId,
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
@@ -3175,12 +3249,24 @@ impl FreminalTerminalWidget {
         // ("on") half regardless of the global cycle — no cursor-appear lag on
         // pane switch or tab switch. The anchor is captured lazily on the
         // first render after activation, when a valid `time` is available.
-        if view_state.cursor_blink_reset_pending {
+        let cursor_focus_now = cursor_focus(pane_focus_now, window_focus);
+        // A focus regain re-anchors the blink exactly as an activation reset
+        // does, so the regained (now solid) cursor starts visible.
+        if view_state.cursor_blink_reset_pending
+            || blink_anchor_action(cache.previous_cursor_focus, cursor_focus_now)
+                == BlinkAnchorAction::Reanchor
+        {
             view_state.cursor_blink_anchor = Some(time);
             view_state.cursor_blink_reset_pending = false;
         }
-        let cursor_blink_on =
-            cursor_blink_phase(time, view_state.cursor_blink_anchor, BLINK_TICK_SECONDS);
+        // The RAW blink-clock phase. Pinning it for a cursor that does not
+        // blink (so a flip is not a cursor-state change) is done inside
+        // `evaluate_frame_dirty_state`, which returns the effective phase.
+        let raw_cursor_blink = CursorBlinkPhase::from_blink_on(cursor_blink_phase(
+            time,
+            view_state.cursor_blink_anchor,
+            BLINK_TICK_SECONDS,
+        ));
 
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
@@ -3236,12 +3322,25 @@ impl FreminalTerminalWidget {
         // reflects whatever was last written to it.
         let mut is_cursor_only = false;
 
-        // Suppress the cursor when:
-        // - the terminal has hidden it (DECTCEM ?25l),
-        // - a password prompt is active (echo-off lock icon replaces it), or
-        // - this pane is not the active/focused pane (tmux-style: only the
-        //   focused pane shows a cursor).
-        let mut effective_show_cursor = snap.show_cursor && !is_echo_off && is_active_pane;
+        // How the cursor is drawn. Hidden when the terminal has hidden it
+        // (DECTCEM ?25l) or a password prompt is active (the echo-off lock
+        // icon replaces it); otherwise solid when focused, and styled by
+        // `[cursor] unfocused_style` when the pane or window is not focused.
+        let mut cursor_appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+            snapshot_visible: if snap.show_cursor {
+                CursorVisibility::Shown
+            } else {
+                CursorVisibility::Hidden
+            },
+            echo: if is_echo_off {
+                EchoState::EchoOff
+            } else {
+                EchoState::Normal
+            },
+            focus: cursor_focus_now,
+            style: snap.cursor_visual_style.clone(),
+            unfocused_style: self.unfocused_cursor_style,
+        });
 
         // ── Command-block folding (Task 72.10b) ─────────────────────────────
         //
@@ -3318,6 +3417,12 @@ impl FreminalTerminalWidget {
         #[cfg(feature = "frame-profiling")]
         let mut profiling_token: Option<PaneFrameToken> = None;
 
+        // The effective blink phase `evaluate_frame_dirty_state` derived this
+        // frame, to be stored for the next frame's comparison. `None` on a
+        // `skip_draw` frame, where no dirty evaluation (and no draw) ran and
+        // so the cached phase is left describing the last frame that did.
+        let mut drawn_cursor_blink_phase: Option<CursorBlinkPhase> = None;
+
         if !snap.skip_draw {
             // See `evaluate_frame_dirty_state`'s doc for the full rationale
             // behind every flag and translation computed here; this call
@@ -3343,8 +3448,9 @@ impl FreminalTerminalWidget {
                     row_h_f,
                 },
                 CursorFrameInputs {
-                    blink_on: cursor_blink_on,
-                    show_cursor: effective_show_cursor,
+                    blink: raw_cursor_blink,
+                    appearance: cursor_appearance.clone(),
+                    focus: cursor_focus_now,
                     trail_enabled: self.toggles.cursor_trail,
                     trail_duration: self.cursor_trail_duration,
                 },
@@ -3361,9 +3467,24 @@ impl FreminalTerminalWidget {
             let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             let cursor_state_changed = dirty.cursor_state_changed;
-            effective_show_cursor = dirty.effective_show_cursor;
+            drawn_cursor_blink_phase = Some(dirty.cursor_blink_phase);
+            cursor_appearance = dirty.cursor_appearance;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
+            // Draw params shared by the cursor-only and full-rebuild paths.
+            // `col`/`row` are the same trail-animated visual coordinates
+            // `dirty.cursor_pixel_pos` was derived from. `appearance` is the
+            // focus-resolved appearance with fold/off-screen visibility
+            // already applied, and `blink_on` is the focus-pinned phase
+            // `evaluate_frame_dirty_state` derived from the raw one.
+            let cursor_draw = CursorDrawParams {
+                appearance: cursor_appearance.clone(),
+                col: view_state.cursor_visual_col,
+                row: view_state.cursor_visual_row,
+                color: cursor_f(snap.theme, snap.cursor_color_override),
+                x_scale: cursor_x_scale,
+                blink_on: dirty.cursor_blink_phase,
+            };
             let cursor_animating = dirty.cursor_animating;
             let anim_tick = dirty.image_anim_tick;
 
@@ -3408,6 +3529,10 @@ impl FreminalTerminalWidget {
                 VertexRebuild::CursorOnly => None,
                 VertexRebuild::Bounded => Some(FullRebuildDamage::Bounded),
                 VertexRebuild::ReevaluateFullRebuild => {
+                    // The last clause is the "never built" signal (124.21's
+                    // empty-prior-state category): no rebuild has ever stored
+                    // a cursor range. NOT `deco_verts.is_empty()` -- see
+                    // `RenderState::cursor_vert_range`.
                     if content_changed
                         || selection_changed
                         || text_blink_changed
@@ -3418,8 +3543,8 @@ impl FreminalTerminalWidget {
                         || render_state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .deco_verts
-                            .is_empty()
+                            .cursor_vert_range
+                            .is_none()
                     {
                         Some(FullRebuildDamage::Full)
                     } else {
@@ -3472,17 +3597,7 @@ impl FreminalTerminalWidget {
 
             if matches!(dirty.rebuild, VertexRebuild::CursorOnly) {
                 // Fast path: build just the cursor quad and stash it.
-                let cursor_verts = build_cursor_verts_only(
-                    cell_w,
-                    cell_h,
-                    effective_show_cursor,
-                    cursor_blink_on,
-                    cursor_pixel_pos,
-                    cursor_x_scale,
-                    &snap.cursor_visual_style,
-                    snap.theme,
-                    snap.cursor_color_override,
-                );
+                let cursor_verts = build_cursor_verts_only(cell_w, cell_h, &cursor_draw);
                 is_cursor_only = true;
 
                 // Compute the frame-damage rect (#435): the region that
@@ -3532,10 +3647,17 @@ impl FreminalTerminalWidget {
                 let mut rs = render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // We overwrite the cursor quad data in the CPU copy so that if
-                // a full rebuild happens next frame it starts from correct state.
-                let cfo = rs.cursor_vert_float_offset;
-                patch_cursor_only_deco_verts(&mut rs.deco_verts, cfo, &cursor_verts);
+                // We replace the cursor geometry in the CPU copy so that the
+                // GPU upload sees the current cursor, and record its new
+                // range for the next cursor-only patch.
+                // (`None` cannot reach here -- see
+                // `patch_cursor_only_deco_verts`.)
+                let range = rs.cursor_vert_range;
+                rs.cursor_vert_range = Some(patch_cursor_only_deco_verts(
+                    &mut rs.deco_verts,
+                    range,
+                    &cursor_verts,
+                ));
             } else if let Some(full_rebuild_damage) = full_rebuild {
                 // Full rebuild path: the whole pane changed, so the frame
                 // must clear + present fully -- or, when the change is
@@ -3735,7 +3857,12 @@ impl FreminalTerminalWidget {
                     // disjoint field accesses (MutexGuard's DerefMut is opaque).
                     let rs_ref: &mut RenderState = &mut rs;
 
-                    let cursor_quad_appended = build_background_instances(
+                    // `cursor_range` is the authoritative answer for where the
+                    // cursor sits in `deco_verts` (always the final region). It
+                    // MUST be stored as returned rather than re-derived from
+                    // `cursor_appearance`, which ignores the blink phase and
+                    // the cursor's variable length (issue #432).
+                    let cursor_range = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: &rendered_shaped_lines,
                             cell_width: cell_w,
@@ -3744,18 +3871,13 @@ impl FreminalTerminalWidget {
                             underline_offset: self.font_manager.underline_offset(),
                             strikeout_offset: self.font_manager.strikeout_offset(),
                             stroke_size: self.font_manager.stroke_size(),
-                            show_cursor: effective_show_cursor,
-                            cursor_blink_on,
-                            cursor_pixel_pos,
-                            cursor_width_scale: cursor_x_scale,
-                            cursor_visual_style: &snap.cursor_visual_style,
+                            cursor: &cursor_draw,
                             selection: screen_selection_rendered,
                             selection_is_block: view_state.selection.is_block,
                             match_highlights: &search_highlights,
                             command_block_hover_rows,
                             term_width_cols: snap.term_width,
                             theme: snap.theme,
-                            cursor_color_override: snap.cursor_color_override,
                             // Task 115.2: DECSCNM (whole-screen reverse video)
                             // composes with per-cell SGR-7 by XOR inside the
                             // vertex builders via `effective_fg`/`effective_bg`.
@@ -3766,23 +3888,6 @@ impl FreminalTerminalWidget {
                         &mut rs_ref.bg_instances,
                         &mut rs_ref.deco_verts,
                     );
-
-                    // Record where the cursor quad starts in the decoration VBO.
-                    // The cursor is always appended at the END of deco_verts, and
-                    // is exactly CURSOR_QUAD_FLOATS floats (or absent when
-                    // hidden). MUST use `cursor_quad_appended` (the authoritative
-                    // answer from `build_background_instances`) rather than
-                    // re-deriving it from `effective_show_cursor` alone —
-                    // `effective_show_cursor` does not account for the blink
-                    // phase, so recomputing it here could disagree with what was
-                    // actually appended whenever this rebuild happened to land on
-                    // the cursor's blink-off phase, corrupting a later
-                    // cursor-only patch (issue #432).
-                    let cursor_vert_float_offset = if cursor_quad_appended {
-                        rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
-                    } else {
-                        rs_ref.deco_verts.len()
-                    };
 
                     let fg_opts = FgRenderOptions {
                         selection: screen_selection_rendered,
@@ -3827,7 +3932,7 @@ impl FreminalTerminalWidget {
                             img.pixels = Arc::clone(px);
                         }
                     }
-                    rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
+                    rs_ref.cursor_vert_range = Some(cursor_range);
                     rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
                     rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
                     rs_ref.bg_opacity = bg_opacity;
@@ -3976,9 +4081,12 @@ impl FreminalTerminalWidget {
         }
 
         // Update per-frame cursor state for the next frame's comparison.
-        cache.previous_cursor_blink_on = cursor_blink_on;
+        if let Some(phase) = drawn_cursor_blink_phase {
+            cache.previous_cursor_blink_phase = phase;
+        }
+        cache.previous_cursor_focus = cursor_focus_now;
         cache.previous_cursor_pos = snap.cursor_pos;
-        cache.previous_show_cursor = effective_show_cursor;
+        cache.previous_cursor_appearance = cursor_appearance;
         cache.previous_cursor_color_override = snap.cursor_color_override;
 
         // Allocate the exact terminal rect (in logical points for egui).
@@ -4409,8 +4517,9 @@ impl FreminalTerminalWidget {
 
         // ── Password-prompt lock indicator ───────────────────────────
         // When echo-off is detected (password prompt), paint a lock icon
-        // at the cursor position.  The normal cursor is suppressed (via
-        // `effective_show_cursor`) so only the lock icon is visible.
+        // at the cursor position.  The normal cursor is suppressed (it
+        // resolves to `CursorAppearance::Hidden`) so only the lock icon is
+        // visible.
         if is_echo_off {
             let cursor_logical_x = view_state
                 .cursor_visual_col
@@ -4932,6 +5041,7 @@ impl FreminalTerminalWidget {
         };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
+        self.unfocused_cursor_style = new_config.cursor.unfocused_style;
 
         // Keep egui font infrastructure updated for chrome (menu bar, settings
         // modal).  This is retained from the old pipeline; it will be cleaned
@@ -4978,6 +5088,7 @@ impl FreminalTerminalWidget {
         };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
+        self.unfocused_cursor_style = new_config.cursor.unfocused_style;
 
         // Mark egui chrome fonts as needing update — will be applied on the
         // next frame when this window's update() runs with a real ctx.
@@ -5102,6 +5213,16 @@ impl FreminalTerminalWidget {
         self.toggles.cursor_trail = trail;
         self.cursor_trail_duration = Duration::from_millis(u64::from(duration_ms));
     }
+
+    /// Live-preview the unfocused-cursor style (Task 127.7).
+    ///
+    /// A GUI-side render parameter `show()` reads each frame (it resolves
+    /// the inactive-pane / unfocused-window cursor appearance from this
+    /// cached value) -- no PTY round trip, no shaping, no atlas
+    /// invalidation.
+    pub const fn set_unfocused_cursor_style_preview(&mut self, style: UnfocusedCursorStyle) {
+        self.unfocused_cursor_style = style;
+    }
 }
 
 #[cfg(test)]
@@ -5178,6 +5299,29 @@ mod visual_preview_tests {
         widget.set_cursor_trail_preview(false, 400);
         assert!(!widget.toggles.cursor_trail);
         assert_eq!(widget.cursor_trail_duration, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn set_unfocused_cursor_style_preview_updates_cached_style() {
+        use freminal_common::config::UnfocusedCursorStyle;
+
+        let mut widget = widget();
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            Config::default().cursor.unfocused_style
+        );
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Hidden);
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hidden);
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Unchanged);
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            UnfocusedCursorStyle::Unchanged
+        );
+
+        widget.set_unfocused_cursor_style_preview(UnfocusedCursorStyle::Hollow);
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hollow);
     }
 
     #[test]
@@ -5725,7 +5869,8 @@ mod bell_flash_tests {
 
 #[cfg(test)]
 mod cursor_blink_phase_tests {
-    use super::cursor_blink_phase;
+    use super::{BlinkAnchorAction, blink_anchor_action, cursor_blink_phase};
+    use crate::gui::terminal::cursor_appearance::CursorFocus;
 
     const TICK: f64 = 0.50;
 
@@ -5770,104 +5915,458 @@ mod cursor_blink_phase_tests {
         // 1.0s after activation -> "on" again.
         assert!(cursor_blink_phase(anchor + 1.0, Some(anchor), TICK));
     }
+
+    /// Regaining focus (window refocus, or the pane becoming active) from
+    /// either non-focused state re-anchors the blink clock.
+    #[test]
+    fn focus_regain_reanchors_the_blink() {
+        for previous in [CursorFocus::InactivePane, CursorFocus::UnfocusedWindow] {
+            assert_eq!(
+                blink_anchor_action(previous, CursorFocus::Focused),
+                BlinkAnchorAction::Reanchor,
+                "{previous:?} -> Focused"
+            );
+        }
+    }
+
+    /// Every other transition leaves the anchor alone: staying focused must
+    /// not restart the blink each frame, and losing focus has no phase to
+    /// restore (the phase is pinned on while not focused).
+    #[test]
+    fn other_focus_transitions_keep_the_anchor() {
+        let all = [
+            CursorFocus::Focused,
+            CursorFocus::InactivePane,
+            CursorFocus::UnfocusedWindow,
+        ];
+        for previous in all {
+            for now in all {
+                if now == CursorFocus::Focused && previous != CursorFocus::Focused {
+                    continue;
+                }
+                assert_eq!(
+                    blink_anchor_action(previous, now),
+                    BlinkAnchorAction::Keep,
+                    "{previous:?} -> {now:?}"
+                );
+            }
+        }
+    }
+
+    /// The point of the re-anchor: refocusing while the global clock is in
+    /// its off half would otherwise show no cursor for up to a tick; anchored
+    /// at the regain time the first focused frame is blink-on.
+    #[test]
+    fn reanchoring_on_regain_makes_the_first_focused_frame_visible() {
+        let regain_time = 0.7; // global phase here is "off"
+        assert!(!cursor_blink_phase(regain_time, None, TICK));
+        assert_eq!(
+            blink_anchor_action(CursorFocus::UnfocusedWindow, CursorFocus::Focused),
+            BlinkAnchorAction::Reanchor
+        );
+        assert!(cursor_blink_phase(regain_time, Some(regain_time), TICK));
+    }
 }
 
 #[cfg(test)]
 mod patch_cursor_only_deco_verts_tests {
-    //! Tests for [`patch_cursor_only_deco_verts`], the pure cursor-only
-    //! decoration-buffer patch decision. Covers the two pre-existing cases
-    //! (in-place hide/show) plus the issue #432 follow-up defect: a
-    //! CodeRabbit-flagged regression where `cfo` legitimately pointing past
-    //! the end of `deco_verts` (no reserved tail — the last full rebuild
-    //! landed on the cursor's blink-off phase) combined with a now-visible
-    //! cursor silently dropped the write instead of appending, leaving the
-    //! cursor invisible until an unrelated full rebuild happened to run.
+    //! Tests for [`patch_cursor_only_deco_verts`], the cursor-only
+    //! decoration-buffer patch, and the [`CursorVertRange`] bookkeeping that
+    //! drives it.
+    //!
+    //! The cursor's length is not fixed (0 floats hidden / blink-off,
+    //! `CURSOR_QUAD_FLOATS` solid, `4 * CURSOR_QUAD_FLOATS` hollow), so the
+    //! patch truncates to the recorded cursor start and appends. The
+    //! integration-style tests here use the real vertex builders as the
+    //! reference: after every patch, `deco_verts` must be bit-identical to a
+    //! from-scratch full rebuild with the same cursor params. That is the
+    //! invariant whose violation was issue #432 (stale offset bookkeeping
+    //! overwriting the bottom row's selection quad).
 
-    use super::{CURSOR_QUAD_FLOATS, patch_cursor_only_deco_verts};
+    use super::{CursorVertRange, patch_cursor_only_deco_verts};
+    use crate::gui::renderer::{
+        BackgroundFrame, CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams,
+        build_background_instances, build_cursor_verts_only,
+    };
+    use crate::gui::terminal::cursor_appearance::CursorAppearance;
+    use crate::gui::{colors::cursor_f, shaping::ShapedLine};
+    use freminal_common::{cursor::CursorVisualStyle, themes::CATPPUCCIN_MOCHA};
+    use freminal_terminal_emulator::LineWidth;
+    use std::sync::Arc;
 
-    /// A fake "cursor quad" of the correct size, filled with a distinct
-    /// sentinel value so tests can assert on its presence/absence precisely.
-    fn fake_cursor_quad() -> Vec<f32> {
-        vec![9.0; CURSOR_QUAD_FLOATS]
+    const CELL_W: u32 = 8;
+    const CELL_H: u32 = 16;
+
+    fn params(appearance: CursorAppearance, blink_on: CursorBlinkPhase) -> CursorDrawParams {
+        CursorDrawParams {
+            appearance,
+            col: 2.0,
+            row: 1.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on,
+        }
     }
 
-    #[test]
-    fn hides_cursor_by_zeroing_a_reserved_region() {
-        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS]; // selection quad, say
-        deco.extend(fake_cursor_quad()); // reserved cursor tail
-        let cfo = CURSOR_QUAD_FLOATS;
-
-        patch_cursor_only_deco_verts(&mut deco, cfo, &[]);
-
-        assert_eq!(deco.len(), CURSOR_QUAD_FLOATS * 2, "must not resize");
-        assert!(
-            deco[cfo..].iter().all(|&f| f == 0.0),
-            "reserved cursor region must be zeroed"
-        );
-        assert!(
-            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
-            "content before the cursor region must be untouched"
-        );
+    fn solid() -> CursorDrawParams {
+        params(
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+            CursorBlinkPhase::On,
+        )
     }
 
-    #[test]
-    fn overwrites_a_reserved_region_in_place() {
-        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
-        deco.extend(vec![0.0; CURSOR_QUAD_FLOATS]); // previously hidden/zeroed
-        let cfo = CURSOR_QUAD_FLOATS;
-        let cursor_verts = fake_cursor_quad();
+    fn hollow() -> CursorDrawParams {
+        params(CursorAppearance::Hollow, CursorBlinkPhase::On)
+    }
 
-        patch_cursor_only_deco_verts(&mut deco, cfo, &cursor_verts);
+    fn hidden() -> CursorDrawParams {
+        params(CursorAppearance::Hidden, CursorBlinkPhase::On)
+    }
 
-        assert_eq!(deco.len(), CURSOR_QUAD_FLOATS * 2, "must not resize");
+    /// A blinking cursor caught in its off phase: nothing is drawn.
+    fn blink_off() -> CursorDrawParams {
+        params(
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+            CursorBlinkPhase::Off,
+        )
+    }
+
+    /// A from-scratch full rebuild over a two-row screen whose rows are both
+    /// selected, so `deco` has non-cursor quads (the bottom row's selection
+    /// quad is the last one before the cursor, the quad #432 corrupted).
+    fn full_rebuild(cursor: &CursorDrawParams) -> (Vec<f32>, CursorVertRange) {
+        full_rebuild_with_selection(cursor, Some((0, 0, 2, 1)))
+    }
+
+    /// A from-scratch full rebuild of a plain-shell screen: no selection,
+    /// underline, or search quads, so the cursor is the ONLY content of
+    /// `deco_verts` (empty whenever it is blink-off or hidden).
+    fn plain_shell_rebuild(cursor: &CursorDrawParams) -> (Vec<f32>, CursorVertRange) {
+        full_rebuild_with_selection(cursor, None)
+    }
+
+    fn full_rebuild_with_selection(
+        cursor: &CursorDrawParams,
+        selection: Option<(usize, usize, usize, usize)>,
+    ) -> (Vec<f32>, CursorVertRange) {
+        let line = Arc::new(ShapedLine {
+            runs: Vec::new(),
+            line_width: LineWidth::Normal,
+        });
+        let lines = [Arc::clone(&line), line];
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
+        let range = build_background_instances(
+            &BackgroundFrame {
+                shaped_lines: &lines,
+                cell_width: CELL_W,
+                cell_height: CELL_H,
+                ascent: 14.0,
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                cursor,
+                selection,
+                selection_is_block: false,
+                match_highlights: &[],
+                command_block_hover_rows: None,
+                term_width_cols: 0,
+                theme: &CATPPUCCIN_MOCHA,
+                reverse_screen: false,
+            },
+            &mut instances,
+            &mut deco,
+        );
+        (deco, range)
+    }
+
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|f| f.to_bits()).collect()
+    }
+
+    /// Apply a cursor-only frame the way the widget does and return the new
+    /// stored range.
+    fn cursor_only_frame(
+        deco: &mut Vec<f32>,
+        range: CursorVertRange,
+        cursor: &CursorDrawParams,
+    ) -> CursorVertRange {
+        let verts = build_cursor_verts_only(CELL_W, CELL_H, cursor);
+        patch_cursor_only_deco_verts(deco, Some(range), &verts)
+    }
+
+    /// Assert the patched state is bit-identical to a full rebuild, that the
+    /// recorded range matches the rebuild's, and that the cursor is the final
+    /// region of the buffer.
+    fn assert_matches_full_rebuild(
+        deco: &[f32],
+        range: CursorVertRange,
+        cursor: &CursorDrawParams,
+        label: &str,
+    ) {
+        let (expected, expected_range) = full_rebuild(cursor);
+        assert_eq!(bits(deco), bits(&expected), "{label}: deco_verts differ");
+        assert_eq!(range, expected_range, "{label}: stored range differs");
         assert_eq!(
-            deco[cfo..],
-            cursor_verts[..],
-            "reserved cursor region must contain the new cursor quad"
-        );
-        assert!(
-            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
-            "content before the cursor region must be untouched"
-        );
-    }
-
-    /// Regression for the CodeRabbit-flagged follow-up to issue #432: `cfo`
-    /// pointing exactly at the end of `deco_verts` (no reserved tail, because
-    /// the last full rebuild landed on blink-off) with a now-visible cursor
-    /// must *append* the quad, not silently drop it.
-    #[test]
-    fn appends_cursor_quad_when_no_tail_was_reserved() {
-        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS]; // e.g. one selection quad
-        let cfo = deco.len(); // no reserved region: cfo == len
-        let cursor_verts = fake_cursor_quad();
-
-        patch_cursor_only_deco_verts(&mut deco, cfo, &cursor_verts);
-
-        assert_eq!(
+            range.start + range.len,
             deco.len(),
-            CURSOR_QUAD_FLOATS * 2,
-            "the cursor quad must be appended, growing deco_verts"
-        );
-        assert_eq!(
-            deco[cfo..],
-            cursor_verts[..],
-            "the appended region must be the new cursor quad"
-        );
-        assert!(
-            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
-            "pre-existing content must be untouched"
+            "{label}: the cursor must be the final region of deco_verts"
         );
     }
 
+    /// Replaces the old `hides_cursor_by_zeroing_a_reserved_region`: hiding
+    /// is now a truncate. Nothing is zeroed in place and the non-cursor prefix
+    /// is untouched.
     #[test]
-    fn no_reserved_tail_and_cursor_hidden_is_a_no_op() {
+    fn hiding_the_cursor_truncates_to_the_range_start() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS]; // selection quad, say
+        deco.extend(vec![9.0; CURSOR_QUAD_FLOATS]); // solid cursor
+        let range = CursorVertRange {
+            start: CURSOR_QUAD_FLOATS,
+            len: CURSOR_QUAD_FLOATS,
+        };
+
+        let new_range = patch_cursor_only_deco_verts(&mut deco, Some(range), &[]);
+
+        assert_eq!(
+            new_range,
+            CursorVertRange {
+                start: CURSOR_QUAD_FLOATS,
+                len: 0
+            }
+        );
+        assert_eq!(deco, vec![1.0; CURSOR_QUAD_FLOATS], "cursor must be gone");
+    }
+
+    /// Replaces the old `overwrites_a_reserved_region_in_place` and
+    /// `appends_cursor_quad_when_no_tail_was_reserved`: one path now covers
+    /// both, so the same-length replace and the zero-length append are
+    /// asserted together, and so is a length-changing replace (solid -> hollow)
+    /// the old in-place overwrite could not express.
+    #[test]
+    fn replaces_the_cursor_region_whatever_its_old_and_new_length() {
+        let prefix = vec![1.0; CURSOR_QUAD_FLOATS];
+        let solid_quad = vec![9.0; CURSOR_QUAD_FLOATS];
+        let hollow_quads = vec![7.0; 4 * CURSOR_QUAD_FLOATS];
+        let start = prefix.len();
+
+        // (old cursor floats, new cursor floats)
+        let cases: [(&[f32], &[f32]); 4] = [
+            (&solid_quad, &solid_quad),   // same length, new content below
+            (&[], &solid_quad),           // append (old: no reserved tail)
+            (&solid_quad, &hollow_quads), // grow
+            (&hollow_quads, &solid_quad), // shrink
+        ];
+        for (old, new) in cases {
+            let mut deco = prefix.clone();
+            deco.extend_from_slice(old);
+            let range = CursorVertRange {
+                start,
+                len: old.len(),
+            };
+
+            let new_range = patch_cursor_only_deco_verts(&mut deco, Some(range), new);
+
+            assert_eq!(
+                new_range,
+                CursorVertRange {
+                    start,
+                    len: new.len()
+                }
+            );
+            assert_eq!(deco[..start], prefix[..], "prefix must be untouched");
+            assert_eq!(deco[start..], *new, "cursor region must be the new floats");
+        }
+    }
+
+    /// Replaces the old `no_reserved_tail_and_cursor_hidden_is_a_no_op`:
+    /// hiding an already-hidden cursor changes nothing and keeps the range.
+    #[test]
+    fn hiding_an_already_hidden_cursor_is_a_no_op() {
         let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
-        let cfo = deco.len();
         let original = deco.clone();
+        let range = CursorVertRange {
+            start: deco.len(),
+            len: 0,
+        };
 
-        patch_cursor_only_deco_verts(&mut deco, cfo, &[]);
+        let new_range = patch_cursor_only_deco_verts(&mut deco, Some(range), &[]);
 
-        assert_eq!(deco, original, "nothing to hide, nothing to append");
+        assert_eq!(deco, original);
+        assert_eq!(new_range, range);
+    }
+
+    /// A start past the end cannot come from the bookkeeping; it is clamped
+    /// to the buffer length instead of panicking or leaving a gap.
+    #[test]
+    fn out_of_range_start_is_clamped_to_the_buffer_length() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
+        let range = CursorVertRange {
+            start: CURSOR_QUAD_FLOATS * 10,
+            len: CURSOR_QUAD_FLOATS,
+        };
+        let cursor = vec![9.0; CURSOR_QUAD_FLOATS];
+
+        let new_range = patch_cursor_only_deco_verts(&mut deco, Some(range), &cursor);
+
+        assert_eq!(
+            new_range,
+            CursorVertRange {
+                start: CURSOR_QUAD_FLOATS,
+                len: CURSOR_QUAD_FLOATS
+            }
+        );
+        assert_eq!(deco.len(), CURSOR_QUAD_FLOATS * 2);
+        assert_eq!(deco[CURSOR_QUAD_FLOATS..], cursor[..]);
+    }
+
+    /// Consecutive cursor-only frames of changing length (solid -> hollow ->
+    /// hidden -> solid -> blink-off -> hollow) leave `deco_verts` identical to
+    /// a full rebuild after every step, with the cursor always last.
+    #[test]
+    fn consecutive_cursor_only_frames_match_a_full_rebuild_each_time() {
+        let (mut deco, mut range) = full_rebuild(&solid());
+        assert_matches_full_rebuild(&deco, range, &solid(), "initial solid rebuild");
+        assert_eq!(range.len, CURSOR_QUAD_FLOATS);
+
+        let steps = [
+            ("solid -> hollow", hollow(), 4 * CURSOR_QUAD_FLOATS),
+            ("hollow -> hidden", hidden(), 0),
+            ("hidden -> solid", solid(), CURSOR_QUAD_FLOATS),
+            ("solid -> blink-off", blink_off(), 0),
+            ("blink-off -> hollow", hollow(), 4 * CURSOR_QUAD_FLOATS),
+            ("hollow -> solid", solid(), CURSOR_QUAD_FLOATS),
+        ];
+        for (label, cursor, expected_len) in steps {
+            range = cursor_only_frame(&mut deco, range, &cursor);
+            assert_eq!(range.len, expected_len, "{label}: cursor length");
+            assert_matches_full_rebuild(&deco, range, &cursor, label);
+        }
+    }
+
+    /// The same chain, but the cursor moves between frames too: position is
+    /// part of the cursor floats, not of the range.
+    #[test]
+    fn cursor_only_frames_track_a_moving_cursor() {
+        let (mut deco, mut range) = full_rebuild(&solid());
+        let mut moved = hollow();
+        moved.col = 5.0;
+        moved.row = 0.0;
+
+        range = cursor_only_frame(&mut deco, range, &moved);
+
+        assert_matches_full_rebuild(&deco, range, &moved, "moved hollow");
+    }
+
+    /// Issue #432-style regression: a full rebuild lands between cursor-only
+    /// frames of differing lengths. The rebuild's blink-off cursor has length
+    /// 0, so the stored range must be `{ start: len, len: 0 }`; a later
+    /// cursor-only patch must append after it and never overwrite the bottom
+    /// row's selection quad (the last non-cursor quad).
+    #[test]
+    fn full_rebuild_between_cursor_only_frames_of_different_lengths() {
+        let (prefix, _) = full_rebuild(&hidden());
+        assert_eq!(
+            prefix.len(),
+            2 * CURSOR_QUAD_FLOATS,
+            "fixture: one selection quad per row"
+        );
+        let bottom_row_quad = prefix[CURSOR_QUAD_FLOATS..].to_vec();
+
+        // Full rebuild with a visible cursor, then a hollow cursor-only patch
+        // (4x the length of the rebuild's cursor).
+        let (mut deco, mut range) = full_rebuild(&solid());
+        range = cursor_only_frame(&mut deco, range, &hollow());
+        assert_matches_full_rebuild(&deco, range, &hollow(), "hollow cursor-only");
+
+        // A full rebuild now runs on the cursor's blink-off phase: the cursor
+        // has length 0 and the tail of deco is the bottom-row selection quad.
+        let (rebuilt, rebuilt_range) = full_rebuild(&blink_off());
+        deco = rebuilt;
+        range = rebuilt_range;
+        assert_eq!(
+            range,
+            CursorVertRange {
+                start: deco.len(),
+                len: 0
+            }
+        );
+        assert_eq!(deco[CURSOR_QUAD_FLOATS..], bottom_row_quad[..]);
+
+        // Cursor-only frame with the solid cursor visible again.
+        range = cursor_only_frame(&mut deco, range, &solid());
+
+        assert_eq!(
+            deco[..prefix.len()],
+            prefix[..],
+            "non-cursor quads must be untouched"
+        );
+        assert_eq!(
+            deco[CURSOR_QUAD_FLOATS..prefix.len()],
+            bottom_row_quad[..],
+            "the bottom-row selection quad must survive"
+        );
+        assert_matches_full_rebuild(&deco, range, &solid(), "solid after blink-off rebuild");
+
+        // And back to hollow, then hidden, off the same bookkeeping.
+        range = cursor_only_frame(&mut deco, range, &hollow());
+        assert_matches_full_rebuild(&deco, range, &hollow(), "hollow after solid");
+        range = cursor_only_frame(&mut deco, range, &hidden());
+        assert_matches_full_rebuild(&deco, range, &hidden(), "hidden after hollow");
+    }
+
+    /// Regression for the "empty prefix" defect: on a plain-shell pane the
+    /// cursor is the only decoration, so a blink-off patch leaves `deco_verts`
+    /// EMPTY. The stored range must stay `Some` (the render state is still
+    /// built -- only the buffer is empty), and each blink-on / blink-off
+    /// patch must equal a from-scratch rebuild, however many times it
+    /// repeats.
+    #[test]
+    fn blink_cycles_on_an_empty_prefix_match_a_full_rebuild_each_time() {
+        let (mut deco, range) = plain_shell_rebuild(&solid());
+        let mut stored: Option<CursorVertRange> = Some(range);
+        assert_eq!(range.start, 0, "fixture: the cursor is the whole buffer");
+
+        for cycle in 0..3 {
+            for (label, cursor) in [("blink-off", blink_off()), ("blink-on", solid())] {
+                let verts = build_cursor_verts_only(CELL_W, CELL_H, &cursor);
+                stored = Some(patch_cursor_only_deco_verts(&mut deco, stored, &verts));
+
+                let (expected, expected_range) = plain_shell_rebuild(&cursor);
+                let label = format!("cycle {cycle} {label}");
+                assert_eq!(bits(&deco), bits(&expected), "{label}: deco_verts differ");
+                assert_eq!(
+                    stored,
+                    Some(expected_range),
+                    "{label}: stored range must stay Some and match the rebuild"
+                );
+            }
+        }
+        // The blink-off half really did empty the buffer, so this exercises
+        // the case a `deco_verts.is_empty()` "never built" test misreads.
+        let verts = build_cursor_verts_only(CELL_W, CELL_H, &blink_off());
+        stored = Some(patch_cursor_only_deco_verts(&mut deco, stored, &verts));
+        assert_eq!(deco, Vec::<f32>::new());
+        assert_eq!(stored, Some(CursorVertRange { start: 0, len: 0 }));
+    }
+
+    /// Defensive `None` handling (never selected in practice): the cursor is
+    /// appended after whatever is present and the returned range describes it.
+    #[test]
+    fn patching_with_no_recorded_range_appends_after_existing_data() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
+        let cursor = vec![9.0; CURSOR_QUAD_FLOATS];
+
+        let range = patch_cursor_only_deco_verts(&mut deco, None, &cursor);
+
+        assert_eq!(
+            range,
+            CursorVertRange {
+                start: CURSOR_QUAD_FLOATS,
+                len: CURSOR_QUAD_FLOATS
+            }
+        );
+        assert_eq!(deco.len(), 2 * CURSOR_QUAD_FLOATS);
     }
 }
 
@@ -5888,7 +6387,7 @@ mod subtask_1_7_tests {
             bg_instances: Vec::new(),
             deco_verts: Vec::new(),
             fg_instances: Vec::new(),
-            cursor_vert_float_offset: 0,
+            cursor_vert_range: None,
             image_verts: Vec::new(),
             image_draw_order: Vec::new(),
             snap_images: std::collections::HashMap::new(),
@@ -8252,5 +8751,158 @@ mod terminal_rect_origin_tests {
         let (pane_rect, _) = fixture();
         let origin = terminal_rect_origin(pane_rect, 0.0);
         assert_eq!(point_to_egui(origin), pane_rect.min);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pane_cursor_focus_geometry_tests {
+    //! Task 127.5: what each pane's cursor looks like once focus is wired in.
+    //!
+    //! `FreminalTerminalWidget::show` needs a live egui `Ui` and a GL context,
+    //! so it cannot be driven from a unit test. These tests instead drive the
+    //! narrowest seam that still runs the real code on both sides of the wiring
+    //! `show()` performs: [`cursor_focus`] and [`resolve_cursor_appearance`]
+    //! (the same two calls, fed the same kinds of inputs) produce the
+    //! [`CursorDrawParams`] that [`build_cursor_verts_only`] -- the builder the
+    //! cursor-only path uses, and which emits identical geometry to the
+    //! full-rebuild path for identical params -- turns into quads. The focus
+    //! pinning of the blink phase is the one piece of `show()` that is not
+    //! reachable from here.
+
+    use crate::gui::colors::cursor_f;
+    use crate::gui::frame_drain::WindowFocus;
+    use crate::gui::renderer::{
+        CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams, build_cursor_verts_only,
+    };
+    use crate::gui::terminal::cursor_appearance::{
+        CursorAppearanceInputs, CursorVisibility, EchoState, cursor_focus,
+        resolve_cursor_appearance,
+    };
+    use crate::gui::terminal::input::PaneFocus;
+    use freminal_common::config::{Config, UnfocusedCursorStyle};
+    use freminal_common::cursor::CursorVisualStyle;
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
+
+    use super::FreminalTerminalWidget;
+
+    /// The cursor floats a pane would emit, resolved exactly as `show()`
+    /// resolves them from its pane focus, window focus, and DECTCEM state.
+    fn cursor_floats(
+        pane: PaneFocus,
+        window: WindowFocus,
+        visibility: CursorVisibility,
+        unfocused_style: UnfocusedCursorStyle,
+    ) -> Vec<f32> {
+        let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+            snapshot_visible: visibility,
+            echo: EchoState::Normal,
+            focus: cursor_focus(pane, window),
+            style: CursorVisualStyle::BlockCursorSteady,
+            unfocused_style,
+        });
+        let params = CursorDrawParams {
+            appearance,
+            col: 3.0,
+            row: 1.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::On,
+        };
+        build_cursor_verts_only(8, 16, &params)
+    }
+
+    #[test]
+    fn active_pane_in_a_focused_window_emits_one_solid_quad() {
+        let floats = cursor_floats(
+            PaneFocus::Active,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn inactive_pane_emits_four_hollow_border_quads() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), 4 * CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn active_pane_in_an_unfocused_window_emits_hollow_quads() {
+        let floats = cursor_floats(
+            PaneFocus::Active,
+            WindowFocus::Unfocused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hollow,
+        );
+        assert_eq!(floats.len(), 4 * CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn unchanged_style_keeps_a_single_quad_for_an_inactive_pane() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Unchanged,
+        );
+        assert_eq!(floats.len(), CURSOR_QUAD_FLOATS);
+    }
+
+    #[test]
+    fn hidden_style_emits_nothing_for_an_inactive_pane() {
+        let floats = cursor_floats(
+            PaneFocus::Inactive,
+            WindowFocus::Focused,
+            CursorVisibility::Shown,
+            UnfocusedCursorStyle::Hidden,
+        );
+        assert_eq!(floats, Vec::<f32>::new());
+    }
+
+    /// DECTCEM-off wins over every focus state: a hidden cursor is never
+    /// resurrected as a hollow one by the pane losing focus.
+    #[test]
+    fn dectcem_off_emits_nothing_in_any_focus_state() {
+        for (pane, window) in [
+            (PaneFocus::Active, WindowFocus::Focused),
+            (PaneFocus::Inactive, WindowFocus::Focused),
+            (PaneFocus::Active, WindowFocus::Unfocused),
+            (PaneFocus::Inactive, WindowFocus::Unfocused),
+        ] {
+            let floats = cursor_floats(
+                pane,
+                window,
+                CursorVisibility::Hidden,
+                UnfocusedCursorStyle::Hollow,
+            );
+            assert_eq!(floats, Vec::<f32>::new(), "{pane:?} / {window:?}");
+        }
+    }
+
+    #[test]
+    fn unfocused_cursor_style_is_cached_at_construction_and_on_config_apply() {
+        let ctx = egui::Context::default();
+        let mut widget = FreminalTerminalWidget::new(&ctx, &Config::default())
+            .expect("widget construction must succeed with the bundled default font");
+        assert_eq!(
+            widget.unfocused_cursor_style,
+            Config::default().cursor.unfocused_style,
+            "construction must cache the configured style"
+        );
+
+        let old_config = Config::default();
+        let mut new_config = Config::default();
+        new_config.cursor.unfocused_style = UnfocusedCursorStyle::Hidden;
+        widget.apply_config_changes_no_ctx(&old_config, &new_config);
+
+        assert_eq!(widget.unfocused_cursor_style, UnfocusedCursorStyle::Hidden);
     }
 }

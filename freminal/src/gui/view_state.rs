@@ -1274,6 +1274,26 @@ impl ViewState {
         true
     }
 
+    /// Place the cursor at its target with no animation.
+    ///
+    /// The counterpart of [`Self::update_cursor_animation`] for a cursor that
+    /// is not focused: an inactive pane or an unfocused window draws a steady
+    /// cursor, so a trail gliding toward it would only keep waking the
+    /// repaint scheduler. The visual position is set equal to the target and
+    /// the last-frame timestamp is cleared, so the first focused observation
+    /// afterwards snaps to its target rather than gliding from a stale spot.
+    ///
+    /// Always returns `false` (never animating), matching the return type of
+    /// [`Self::update_cursor_animation`].
+    pub const fn snap_cursor_animation(&mut self, target_col: f32, target_row: f32) -> bool {
+        self.cursor_target_col = target_col;
+        self.cursor_target_row = target_row;
+        self.cursor_visual_col = target_col;
+        self.cursor_visual_row = target_row;
+        self.cursor_last_frame = None;
+        false
+    }
+
     /// Advance the text blink cycle if enough time has elapsed.
     ///
     /// Called from `update()` every frame when `has_blinking_text` is true.
@@ -2799,6 +2819,40 @@ mod tests {
             (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
             "visual row should be at target"
         );
+    }
+
+    #[test]
+    fn snap_cursor_animation_places_cursor_at_target_and_is_not_animating() {
+        let mut vs = ViewState::new();
+        // Establish a trail in progress: a far move that has not converged.
+        vs.update_cursor_animation(0.0, 0.0, true, Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            vs.update_cursor_animation(30.0, 10.0, true, Duration::from_secs(10)),
+            "precondition: the trail is mid-glide"
+        );
+
+        let animating = vs.snap_cursor_animation(30.0, 10.0);
+
+        assert!(!animating, "a snap is never an animation in progress");
+        assert!((vs.cursor_visual_col - 30.0).abs() < f32::EPSILON);
+        assert!((vs.cursor_visual_row - 10.0).abs() < f32::EPSILON);
+        assert!((vs.cursor_target_col - 30.0).abs() < f32::EPSILON);
+        assert!((vs.cursor_target_row - 10.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn snap_cursor_animation_does_not_glide_on_next_focused_update() {
+        let mut vs = ViewState::new();
+        vs.update_cursor_animation(0.0, 0.0, true, Duration::from_secs(10));
+        vs.snap_cursor_animation(12.0, 4.0);
+
+        // Staying put after a snap: nothing left to animate.
+        let animating = vs.update_cursor_animation(12.0, 4.0, true, Duration::from_secs(10));
+
+        assert!(!animating, "no glide from a stale position after a snap");
+        assert!((vs.cursor_visual_col - 12.0).abs() < f32::EPSILON);
+        assert!((vs.cursor_visual_row - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -67,7 +67,7 @@ use super::{rendering, toast};
 /// `FreminalGui::route_window_manipulation_events` convert back via
 /// [`Self::is_focused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WindowFocus {
+pub enum WindowFocus {
     /// The window has input focus this frame.
     Focused,
     /// The window does not have input focus this frame.

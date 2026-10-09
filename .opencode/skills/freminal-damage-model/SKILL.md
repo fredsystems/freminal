@@ -44,7 +44,7 @@ paid at full-surface cost:
 | Terminal `theme_changed` | colours are baked per-vertex; every drawn cell is stale |
 | `dims_changed` | a resize reflows and re-shapes every row |
 | `ChangedRows::All` | no per-row epoch baseline exists to diff against |
-| Empty prior decoration/vertex state (`deco_verts.is_empty()`) | no previous rebuild ever populated a reusable buffer |
+| Never-built decoration/vertex state (`RenderState::cursor_vert_range.is_none()`; since Task 127 an empty `deco_verts` is NOT this signal) | no previous rebuild ever populated a reusable buffer |
 | Degenerate/unresolvable cursor damage (`CursorOnly(None)`) | the cursor rect did not resolve to a valid bound after clamping |
 | `shader_recomposites` | a post-process shader rewrites the whole framebuffer |
 | Chrome `style_changed` / `size_changed` / `ppp_changed` (one grouped category) | chrome-layer geometry/style invalidates the whole chrome surface |

@@ -83,9 +83,9 @@ pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};
 pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 pub use vertex::{
-    BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
-    build_background_instances, build_cursor_verts_only, build_foreground_instances,
-    build_image_verts,
+    BackgroundFrame, CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams, CursorVertRange,
+    FgRenderOptions, ImageDrawEntry, MatchHighlight, build_background_instances,
+    build_cursor_verts_only, build_foreground_instances, build_image_verts,
 };
 
 /// Per-window GL state for the fully-owned toast overlay (issue #433).

@@ -62,6 +62,7 @@ let
           blink
           trail
           trail_duration_ms
+          unfocused_style
           ;
       };
 
@@ -300,6 +301,20 @@ in
           type = types.ints.unsigned;
           default = 150;
           description = "Duration of the cursor trail animation in milliseconds.";
+        };
+
+        unfocused_style = mkOption {
+          type = types.enum [
+            "hollow"
+            "unchanged"
+            "hidden"
+          ];
+          default = "hollow";
+          description = ''
+            How the cursor is drawn in an inactive pane or an unfocused window:
+            hollow (steady hollow block), unchanged (the application's shape,
+            solid but steady), or hidden (no cursor).
+          '';
         };
       };
 
