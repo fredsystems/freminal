@@ -107,7 +107,7 @@ fn decscusr_valid_range_and_default_and_invalid() {
     }
 
     // Malformed param should not panic
-    let bad = ["\x1b[x q", "\x1b[; q", "\x1b[q"]; // missing space param
+    let bad = ["\x1b[x q", "\x1b[; q"];
     for s in bad {
         let outs = push_seq(s);
         println!("DECSCUSR malformed {:?} -> {:?}", s, outs);
@@ -117,4 +117,18 @@ fn decscusr_valid_range_and_default_and_invalid() {
             s
         );
     }
+
+    // Bare `CSI q` has no SP intermediate, so it is not DECSCUSR: it is a
+    // recognised-but-unhandled sequence and must produce no cursor-style output.
+    let outs = push_seq("\x1b[q");
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::CursorVisualStyle(_))),
+        "bare CSI q must not produce a cursor style, got {outs:?}"
+    );
+    assert!(
+        outs.is_empty(),
+        "bare CSI q must produce no output, got {outs:?}"
+    );
 }

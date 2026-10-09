@@ -51,20 +51,21 @@
 //! behaviour a committed (Apply) failure still gets.
 use freminal_common::config::{
     BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
+    UnfocusedCursorStyle,
 };
 use freminal_common::gui_theme::StyleProfile;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// The cursor-related subset of [`VisualPreview`]: shape, blink, and trail
-/// (+ duration).
+/// The cursor-related subset of [`VisualPreview`]: shape, blink, trail
+/// (+ duration), and the unfocused-cursor style.
 ///
 /// Grouped into its own type -- rather than four flat fields on
 /// [`VisualPreview`] -- purely to keep that struct's own bool count under
 /// clippy's `struct_excessive_bools` threshold (`blink` and `trail` are two
 /// of `VisualPreview`'s four TOML-config-toggle bools; `ligatures` and
 /// `hide_menu_bar` are the other two). The grouping doubles as a genuine
-/// cohesive unit -- these four fields are exactly `CursorConfig` -- unlike
+/// cohesive unit -- these fields are exactly `CursorConfig` -- unlike
 /// `FreminalTerminalWidget::WidgetDisplayToggles`, which groups otherwise
 /// unrelated toggles for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +79,9 @@ pub(super) struct CursorPreview {
     /// Cursor trail animation duration in milliseconds
     /// (`CursorConfig::trail_duration_ms`).
     pub(super) trail_duration_ms: u32,
+    /// How the cursor is drawn in inactive panes / unfocused windows
+    /// (`CursorConfig::unfocused_style`).
+    pub(super) unfocused_style: UnfocusedCursorStyle,
 }
 
 /// The font-rebuild-cost subset of [`VisualPreview`]: family, size, and line
@@ -327,6 +331,7 @@ impl VisualPreview {
                 blink: config.cursor.blink,
                 trail: config.cursor.trail,
                 trail_duration_ms: config.cursor.trail_duration_ms,
+                unfocused_style: config.cursor.unfocused_style,
             },
             ligatures: config.font.ligatures,
             background_image_opacity: config.ui.background_image_opacity,
@@ -365,6 +370,9 @@ impl VisualPreview {
             cursor_trail_duration_ms: (self.cursor.trail_duration_ms
                 != previous.cursor.trail_duration_ms)
                 .then_some(self.cursor.trail_duration_ms),
+            cursor_unfocused_style: (self.cursor.unfocused_style
+                != previous.cursor.unfocused_style)
+                .then_some(self.cursor.unfocused_style),
             ligatures: (self.ligatures != previous.ligatures).then_some(self.ligatures),
             background_image_opacity: ((self.background_image_opacity
                 - previous.background_image_opacity)
@@ -415,6 +423,8 @@ pub(super) struct VisualPreviewDiff {
     pub(super) cursor_trail: Option<bool>,
     /// `Some(new_duration_ms)` if the cursor trail duration changed.
     pub(super) cursor_trail_duration_ms: Option<u32>,
+    /// `Some(new_style)` if the unfocused-cursor style changed.
+    pub(super) cursor_unfocused_style: Option<UnfocusedCursorStyle>,
     /// `Some(new_ligatures)` if the ligature toggle changed.
     pub(super) ligatures: Option<bool>,
     /// `Some(new_opacity)` if the background image opacity changed.
@@ -761,6 +771,7 @@ mod tests {
     };
     use freminal_common::config::{
         BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition, ThemeMode,
+        UnfocusedCursorStyle,
     };
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -824,6 +835,7 @@ mod tests {
         cfg.cursor.blink = false;
         cfg.cursor.trail = true;
         cfg.cursor.trail_duration_ms = 400;
+        cfg.cursor.unfocused_style = UnfocusedCursorStyle::Hidden;
         cfg.font.ligatures = false;
         cfg.ui.background_image_opacity = 0.75;
         cfg.ui.background_image_mode = BackgroundImageMode::Tile;
@@ -834,6 +846,7 @@ mod tests {
         assert!(!preview.cursor.blink);
         assert!(preview.cursor.trail);
         assert_eq!(preview.cursor.trail_duration_ms, 400);
+        assert_eq!(preview.cursor.unfocused_style, UnfocusedCursorStyle::Hidden);
         assert!(!preview.ligatures);
         assert!((preview.background_image_opacity - 0.75).abs() < f32::EPSILON);
         assert_eq!(preview.background_image_mode, BackgroundImageMode::Tile);
@@ -984,6 +997,7 @@ mod tests {
         assert_eq!(diff.cursor_blink, None);
         assert_eq!(diff.cursor_trail, None);
         assert_eq!(diff.cursor_trail_duration_ms, None);
+        assert_eq!(diff.cursor_unfocused_style, None);
         assert_eq!(diff.ligatures, None);
         assert_eq!(diff.background_image_opacity, None);
         assert_eq!(diff.background_image_mode, None);
@@ -1009,6 +1023,7 @@ mod tests {
         after.cursor.blink = !before.cursor.blink;
         after.cursor.trail = !before.cursor.trail;
         after.cursor.trail_duration_ms = before.cursor.trail_duration_ms + 50;
+        after.cursor.unfocused_style = UnfocusedCursorStyle::Unchanged;
         after.ligatures = !before.ligatures;
         after.background_image_opacity = before.background_image_opacity + 0.1;
         after.background_image_mode = BackgroundImageMode::Tile;
@@ -1021,6 +1036,10 @@ mod tests {
         assert_eq!(
             diff.cursor_trail_duration_ms,
             Some(after.cursor.trail_duration_ms)
+        );
+        assert_eq!(
+            diff.cursor_unfocused_style,
+            Some(UnfocusedCursorStyle::Unchanged)
         );
         assert_eq!(diff.ligatures, Some(after.ligatures));
         assert_eq!(
@@ -1089,6 +1108,7 @@ mod tests {
         assert_eq!(diff.cursor_blink, None);
         assert_eq!(diff.cursor_trail, None);
         assert_eq!(diff.cursor_trail_duration_ms, None);
+        assert_eq!(diff.cursor_unfocused_style, None);
         assert_eq!(diff.ligatures, None);
         assert_eq!(diff.background_image_opacity, None);
         assert_eq!(diff.background_image_mode, None);
@@ -1230,6 +1250,34 @@ mod tests {
             revert_diff.cursor_shape,
             Some(CursorShapeConfig::Block),
             "reverting to the committed config must restore the original cursor shape"
+        );
+    }
+
+    /// Same shape again, for the unfocused-cursor style (Task 127.7):
+    /// previewing a changed style is detected, and re-previewing the
+    /// committed config reverts it.
+    #[test]
+    fn reverting_to_committed_config_restores_the_original_unfocused_cursor_style() {
+        let mut committed = Config::default();
+        committed.cursor.unfocused_style = UnfocusedCursorStyle::Hollow;
+        let committed_preview = VisualPreview::from_config(&committed, false);
+
+        // The user previews Hidden without applying.
+        committed.cursor.unfocused_style = UnfocusedCursorStyle::Hidden;
+        let previewed_preview = VisualPreview::from_config(&committed, false);
+
+        let preview_diff = previewed_preview.diff_from(&committed_preview);
+        assert_eq!(
+            preview_diff.cursor_unfocused_style,
+            Some(UnfocusedCursorStyle::Hidden),
+            "previewing an unfocused-cursor style change must be reported as a diff"
+        );
+
+        let revert_diff = committed_preview.diff_from(&previewed_preview);
+        assert_eq!(
+            revert_diff.cursor_unfocused_style,
+            Some(UnfocusedCursorStyle::Hollow),
+            "reverting to the committed config must restore the original style"
         );
     }
 

@@ -6,11 +6,9 @@
 //! SGR permutations and resets
 
 use freminal_terminal_emulator::ansi_components::csi::AnsiCsiParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
 #[test]
 fn sgr_all_resets_and_styles() {
-    let mut p = AnsiCsiParser::default();
     let seqs = [
         "\x1b[0m",
         "\x1b[1m",
@@ -43,10 +41,11 @@ fn sgr_all_resets_and_styles() {
         "\x1b[48;2;0;128;255m",
     ];
     for s in seqs {
-        for &b in s.as_bytes() {
+        // The real parser never forwards the `ESC [` introducer.
+        let mut p = AnsiCsiParser::default();
+        for &b in s.strip_prefix("\x1b[").unwrap_or(s).as_bytes() {
             let _ = p.push(b);
         }
-        assert!(p.current_trace_str().contains('m'));
-        p.clear_trace();
+        assert!(p.trace_str().contains('m'));
     }
 }

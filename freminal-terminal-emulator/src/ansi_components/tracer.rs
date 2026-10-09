@@ -3,8 +3,18 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Internal, lightweight ring buffer for capturing the most recent input bytes.
-//! Kept fully internal (pub(crate)) and allocation-free on the hot path.
+//! Diagnostics for raw escape-sequence bytes.
+//!
+//! A ring buffer of the most recent input bytes (pushing is allocation-free),
+//! plus helpers that render byte slices for logs, with bounded variants for
+//! potentially huge payloads.
+//!
+//! Only the top-level `FreminalAnsiParser` owns a [`SequenceTracer`]. The
+//! per-sequence sub-parsers (CSI, OSC, DCS, APC, standard) must NOT embed one:
+//! the buffer is 8 KB, and every escape sequence constructs and moves a fresh
+//! sub-parser, so an embedded tracer costs ~16 KB of memset + memmove per
+//! sequence. Sub-parsers render diagnostics from the bytes they already
+//! accumulate, via the bounded helpers below.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SequenceTracer {
@@ -77,24 +87,6 @@ impl SequenceTracer {
     pub fn as_escaped(&self) -> String {
         escape_sequence_for_log(&self.to_bytes())
     }
-
-    /// Trim trailing control terminators (ESC, '\', BEL) from the end of the trace.
-    pub(crate) const fn trim_control_tail(&mut self) {
-        while self.len > 0 {
-            let end_idx = if self.idx == 0 {
-                self.buf.len() - 1
-            } else {
-                self.idx - 1
-            };
-            let c = self.buf[end_idx];
-            if matches!(c, 0x1B | 0x5C | 0x07) {
-                self.idx = end_idx;
-                self.len -= 1;
-            } else {
-                break;
-            }
-        }
-    }
 }
 
 /// Render a raw escape-sequence byte slice as an unambiguous, printable,
@@ -140,6 +132,65 @@ pub fn escape_sequence_for_log(bytes: &[u8]) -> String {
     out
 }
 
+/// Maximum number of sequence bytes rendered into a single log line or
+/// diagnostic string by [`escape_sequence_for_log_bounded`] and
+/// [`lossy_sequence_for_log_bounded`].
+///
+/// Sub-parsers no longer carry an 8 KB ring buffer, so they hand the bytes they
+/// already accumulate to the logger. OSC 52 / iTerm2 image payloads can be
+/// megabytes, so the rendered form keeps only the first and last
+/// `LOG_SEQUENCE_MAX_BYTES / 2` bytes and notes how many were omitted.
+pub const LOG_SEQUENCE_MAX_BYTES: usize = 256;
+
+/// Split `bytes` for bounded logging: the whole slice when it fits in
+/// [`LOG_SEQUENCE_MAX_BYTES`], otherwise its head, its tail, and the number of
+/// bytes omitted between them.
+const fn bounded_log_parts(bytes: &[u8]) -> (&[u8], &[u8], usize) {
+    if bytes.len() <= LOG_SEQUENCE_MAX_BYTES {
+        return (bytes, &[], 0);
+    }
+    let half = LOG_SEQUENCE_MAX_BYTES / 2;
+    let (head, _) = bytes.split_at(half);
+    let (_, tail) = bytes.split_at(bytes.len() - half);
+    (head, tail, bytes.len() - LOG_SEQUENCE_MAX_BYTES)
+}
+
+/// Like [`escape_sequence_for_log`], but bounded to [`LOG_SEQUENCE_MAX_BYTES`].
+///
+/// A longer sequence is rendered as `<head>...[N bytes omitted]...<tail>`,
+/// where head and tail are each escaped exactly as by
+/// [`escape_sequence_for_log`].
+#[must_use]
+pub fn escape_sequence_for_log_bounded(bytes: &[u8]) -> String {
+    let (head, tail, omitted) = bounded_log_parts(bytes);
+    if omitted == 0 {
+        return escape_sequence_for_log(head);
+    }
+    format!(
+        "{}...[{omitted} bytes omitted]...{}",
+        escape_sequence_for_log(head),
+        escape_sequence_for_log(tail)
+    )
+}
+
+/// Render `bytes` with lossy UTF-8 decoding, bounded like
+/// [`escape_sequence_for_log_bounded`].
+///
+/// Bounded to [`LOG_SEQUENCE_MAX_BYTES`]. Used for human-readable
+/// `recent='...'` diagnostics where the escaped form is unnecessary.
+#[must_use]
+pub fn lossy_sequence_for_log_bounded(bytes: &[u8]) -> String {
+    let (head, tail, omitted) = bounded_log_parts(bytes);
+    if omitted == 0 {
+        return String::from_utf8_lossy(head).into_owned();
+    }
+    format!(
+        "{}...[{omitted} bytes omitted]...{}",
+        String::from_utf8_lossy(head),
+        String::from_utf8_lossy(tail)
+    )
+}
+
 /// A small helper trait that standardizes how parsers collect and present
 /// the raw bytes of the *current* sequence they are parsing.
 pub trait SequenceTraceable {
@@ -167,7 +218,10 @@ pub trait SequenceTraceable {
 
 #[cfg(test)]
 mod tests {
-    use super::{SequenceTraceable, SequenceTracer, escape_sequence_for_log};
+    use super::{
+        LOG_SEQUENCE_MAX_BYTES, SequenceTraceable, SequenceTracer, escape_sequence_for_log,
+        escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+    };
 
     /// Minimal `SequenceTraceable` host so the trait's default methods can be
     /// exercised directly (rather than only via real parsers).
@@ -325,52 +379,61 @@ mod tests {
     }
 
     #[test]
-    fn trim_control_tail_removes_bel() {
-        let mut tracer = SequenceTracer::new();
-        tracer.push(b'A');
-        tracer.push(b'B');
-        tracer.push(0x07); // BEL
-        tracer.trim_control_tail();
-        assert_eq!(tracer.as_str(), "AB");
+    fn bounded_escape_short_input_matches_unbounded() {
+        let raw = b"1337;File=inline=1\x1b";
+        assert_eq!(
+            escape_sequence_for_log_bounded(raw),
+            escape_sequence_for_log(raw)
+        );
+        assert_eq!(escape_sequence_for_log_bounded(b""), "");
     }
 
     #[test]
-    fn trim_control_tail_removes_esc_backslash() {
-        let mut tracer = SequenceTracer::new();
-        tracer.push(b'X');
-        tracer.push(0x1b); // ESC
-        tracer.push(0x5c); // '\'
-        tracer.trim_control_tail();
-        assert_eq!(tracer.as_str(), "X");
+    fn bounded_escape_at_limit_is_not_truncated() {
+        let raw = vec![b'a'; LOG_SEQUENCE_MAX_BYTES];
+        assert_eq!(escape_sequence_for_log_bounded(&raw).len(), raw.len());
     }
 
     #[test]
-    fn trim_control_tail_on_empty_is_safe() {
-        let mut tracer = SequenceTracer::new();
-        // Should not panic on empty
-        tracer.trim_control_tail();
-        assert_eq!(tracer.as_str(), "");
+    fn bounded_escape_one_past_limit_omits_one_byte() {
+        let mut raw = vec![b'H'; LOG_SEQUENCE_MAX_BYTES / 2];
+        raw.push(b'M');
+        raw.extend(vec![b'T'; LOG_SEQUENCE_MAX_BYTES / 2]);
+        assert_eq!(raw.len(), LOG_SEQUENCE_MAX_BYTES + 1);
+        assert_eq!(
+            escape_sequence_for_log_bounded(&raw),
+            format!(
+                "{}...[1 bytes omitted]...{}",
+                "H".repeat(LOG_SEQUENCE_MAX_BYTES / 2),
+                "T".repeat(LOG_SEQUENCE_MAX_BYTES / 2)
+            )
+        );
     }
 
     #[test]
-    fn trim_control_tail_removes_multiple_trailing_controls() {
-        let mut tracer = SequenceTracer::new();
-        tracer.push(b'Z');
-        tracer.push(0x07); // BEL
-        tracer.push(0x1b); // ESC
-        tracer.push(0x5c); // '\'
-        tracer.trim_control_tail();
-        // All control characters after 'Z' are stripped
-        assert_eq!(tracer.as_str(), "Z");
+    fn bounded_escape_truncates_to_head_and_tail() {
+        let mut raw = vec![b'H'; LOG_SEQUENCE_MAX_BYTES / 2];
+        raw.extend(vec![b'M'; 5000]);
+        raw.extend(vec![b'T'; LOG_SEQUENCE_MAX_BYTES / 2]);
+        let rendered = escape_sequence_for_log_bounded(&raw);
+        let omitted = raw.len() - LOG_SEQUENCE_MAX_BYTES;
+        assert_eq!(
+            rendered,
+            format!(
+                "{}...[{omitted} bytes omitted]...{}",
+                "H".repeat(LOG_SEQUENCE_MAX_BYTES / 2),
+                "T".repeat(LOG_SEQUENCE_MAX_BYTES / 2)
+            )
+        );
+        assert!(!rendered.contains('M'));
     }
 
     #[test]
-    fn trim_control_tail_stops_at_non_control() {
-        let mut tracer = SequenceTracer::new();
-        tracer.push(b'H');
-        tracer.push(b'i');
-        tracer.push(0x07); // BEL
-        tracer.trim_control_tail();
-        assert_eq!(tracer.as_str(), "Hi");
+    fn bounded_lossy_matches_from_utf8_lossy_and_truncates() {
+        assert_eq!(lossy_sequence_for_log_bounded(b"ab\xffc"), "ab\u{fffd}c");
+        let raw = vec![b'x'; 10_000];
+        let rendered = lossy_sequence_for_log_bounded(&raw);
+        assert!(rendered.contains("[9744 bytes omitted]"));
+        assert!(rendered.len() < 400);
     }
 }

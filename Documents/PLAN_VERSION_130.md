@@ -41,9 +41,9 @@ enriched stubs again and get re-decomposed at activation.
 
 | #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
 | --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Pending merge | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Planned       | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Planned       | 126.3                              |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Pending merge | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Pending merge | 126.3                              |
 | 129 | Kitty Wire Infrastructure                   | v0.13.0   | M     | Planned       | None                               |
 | 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | M     | Planned       | 129                                |
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | M     | Planned       | None                               |
@@ -600,6 +600,13 @@ to 127.2.
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** `UnfocusedCursorStyle { Hollow, Unchanged, Hidden }`
+(snake_case, default `Hollow`) and `CursorConfig::unfocused_style`. `ConfigPartial` carries
+the whole `[cursor]` section, so no partial wiring was needed; a test confirms
+`apply_partial` applies it. `config_example.toml` and the home-manager module are updated.
+Six tests: round trip, defaults, missing key, old config, partial, unknown value. Commit
+`98101fbe`.
+
 #### 127.2 — Pure appearance decision module
 
 Scope:
@@ -631,6 +638,12 @@ a `TODO(127.5)` comment — the documented temporary-refactor exception).
 Prohibitions: do NOT wire it into `widget.rs`; do NOT proceed to 127.3.
 
 Stop: report and await review.
+
+**Status: Complete (2026-10-09).** Implemented as specified, plus `CursorVisibility` and
+`EchoState` (no echo-off enum existed). A private `steady_variant` maps blink styles to
+steady ones. An exhaustive 216-case table test and four `cursor_focus` tests. Items are `pub`
+inside the crate-private module because `clippy::redundant_pub_crate` is denied;
+`cursor_focus` is `pub(super)` because `PaneFocus` is. Commit `9828fb77`.
 
 #### 127.3 — Vertex builder: one cursor-quad helper, hollow geometry, exact cursor range
 
@@ -700,6 +713,21 @@ Prohibitions:
 
 Stop: report with the benchmark table; await review.
 
+**Status: Complete (2026-10-09).** `CursorDrawParams { appearance, col, row, color, x_scale,
+blink_on }`, `CursorBlinkPhase { On, Off }` (with `from_blink_on` as the single bool→enum
+boundary) and `CursorVertRange { start, len }`. `col`/`row` are the trail-animated visual
+cell coordinates; the pixel origin uses the same float order as `frame_dirty.rs`, and `Solid`
+output is pinned bit-identical to a pre-refactor capture for all six styles at `x_scale` 1
+and 2. Hollow thickness is `max(cw * 0.1, 1).round()` where `cw` is the drawn width
+(including `x_scale`). `BackgroundFrame.cursor` borrows the params. Both the
+`too_many_arguments` and `struct_excessive_bools` allows are gone. **Maintainer-approved
+scope change:** `gui/terminal/mod.rs` declares `pub mod cursor_appearance` so the public
+bench can name `CursorAppearance`; the 127.2 `expect(dead_code)` gates were removed and
+`#[must_use]` added in the same commit. Benchmarks, measured back to back against the
+parent commit with the other worktree idle (the first captures were taken under load and
+discarded): `instanced_bg` and `instanced_bg_partial_dirty` moved between 0% and +2.4%, all
+within the 15% threshold. Commit `f26c722d`.
+
 #### 127.4 — Variable-length cursor patching
 
 Scope: `freminal/src/gui/terminal/widget.rs`, limited to:
@@ -735,6 +763,15 @@ assertions must stay green for solid cursors.
 Prohibitions: do NOT wire focus (127.5); do NOT touch `vertex.rs`; do NOT proceed to 127.5.
 
 Stop: report and await review.
+
+**Status: Complete (2026-10-09).** Plan drift: the offset lived on `RenderState`
+(`cursor_vert_float_offset`), not `PaneRenderCache`; `RenderState` was treated as the cache.
+It is now `cursor_vert_range`, and `patch_cursor_only_deco_verts` truncates to `start` and
+appends, returning the new range. The GPU upload already uploads `deco_verts` at its current
+length, so no GL change was needed. The four old zero-in-place tests were replaced, and
+rebuild-equivalence and #432-style tests added. `headless_workloads.rs` is unchanged.
+Commit `d29e1011`. The empty-prefix regression this introduced was caught in review and
+fixed (see "127 Review").
 
 #### 127.5 — Wire focus into the pane renderer, with change detection
 
@@ -794,6 +831,16 @@ Prohibitions:
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** `show()` takes `window_focus: WindowFocus`.
+`effective_show_cursor` is replaced by the resolved `CursorAppearance`, which feeds change
+detection (`CursorFrameInputs.appearance`, `PaneRenderCache.previous_cursor_appearance`) and
+both draw paths. The fold/off-screen AND maps a visible appearance to `Hidden`. Non-focused
+cursors use a constant blink phase. No new damage category. **Maintainer-approved scope
+changes:** `WindowFocus` is `pub` in `gui/frame_drain.rs` (a `pub` method's parameter), and
+`unfocused_cursor_style` is cached on `FreminalTerminalWidget` (set in `new()` and both
+config-apply methods). `frame-profiling` tests pass. Plan drift: `CursorFrameInputs` is in
+`frame_dirty.rs`. Commit `a9f75418`.
+
 #### 127.6 — Blink-wake gating and trail snapping for unfocused cursors
 
 Scope:
@@ -830,6 +877,13 @@ Prohibitions: do NOT change trail behaviour for the focused pane; do NOT proceed
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** `cursor_blink_wants_repaint(&CursorAppearance,
+CursorFocus)` replaces the three bool parameters. `ViewState::snap_cursor_animation` jumps
+the trail to its target and clears the last-frame timestamp, and `frame_dirty.rs` calls it
+for non-focused panes (`CursorFrameInputs.focus`). `cursor_focus` is not reachable from
+`app_impl.rs`, so the call site repeats its rule; see 127.C3. Trail tests use 10 s
+durations so they cannot race under load. Commit `63acd823`.
+
 #### 127.7 — Settings UI control and live preview
 
 Scope: the Settings Cursor tab in `freminal/src/gui/settings/` (find it by the existing
@@ -859,6 +913,13 @@ requires; do NOT proceed to 127.8.
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** Plan drift: the settings UI is the single file
+`gui/settings.rs`. An "Unfocused cursor" combo box (with `.clickable()` affordances and hover
+text). `CursorPreview.unfocused_style` and `VisualPreviewDiff.cursor_unfocused_style`;
+`apply_preview_cursor` pushes it to every window's widget through
+`set_unfocused_cursor_style_preview`. Cancel reverts by previewing the committed config. No
+new `SettingsAction`. Commit `90a00d44`.
+
 #### 127.8 — Pixel golden, final verification, Windows cross-check
 
 Scope:
@@ -882,6 +943,98 @@ pixel test under `nix develop .#gl-pixel`.
 Prohibitions: do NOT loosen any pixel tolerance; do NOT proceed beyond Task 127.
 
 Stop: report and await review. Task 127 then goes to PR.
+
+**Status: Complete (2026-10-09).** `CursorPresence::Hollow` in `headless.rs` and
+`capture_side_by_side` in `pixel_harness.rs` draw both panes into one framebuffer through
+per-pane GL viewports, as the application does. Golden
+`cursor_active_solid_inactive_hollow.png` (llvmpipe, LLVM 21.1.8) with exact tolerance,
+explicit border/interior pixel assertions, a per-half equals-solo-capture check and a
+bit-identical repeat check. Six consecutive `gl-pixel` runs with `FREMINAL_REQUIRE_GL=1`
+passed. No CHANGELOG exists. `check-windows` is clean. The implementing sub-agent was cut
+off by an infrastructure error; the orchestrator verified and committed its work. Commit
+`bc917f34`.
+
+### 127 Review
+
+An adversarial sub-agent review of the full branch **failed** on one MAJOR finding. 127.4's
+truncate-and-append patch empties `deco_verts` when the cursor is the only decoration (a
+plain shell) on blink-off or DECTCEM hide. `deco_verts.is_empty()` was also the "never built"
+damage signal, so every blink-on frame became a full rebuild and `Full` present. Fix commit
+`438dcfce`:
+
+- `RenderState::cursor_vert_range` is `Option<CursorVertRange>`, and `None` is the
+  never-built signal in all three gates.
+- Blink-phase pinning moved into `evaluate_frame_dirty_state` (`effective_cursor_blink_phase`)
+  so it is tested.
+- The blink re-anchors when focus is regained (`blink_anchor_action`), so a refocused cursor
+  does not open on the off half.
+
+Commit `32bffc25` updates the `freminal-damage-model` skill to name the new signal. A
+confirmation review **passed**. Remaining findings are 127.C1–127.C3.
+
+### 127 Cleanup entries
+
+#### 127.C1 — New windows start with egui `focused = false`
+
+- **Surfaced:** 127 review (2026-10-09).
+- **Impact:** `freminal-windowing` never seeds egui's focus from `window.has_focus()`; egui-winit
+  starts `focused: false` until winit delivers `Focused(true)`. A new window can draw a
+  hollow, non-blinking cursor for its first frames. Cosmetic.
+- **Scope of fix:** `freminal-windowing` (window creation / egui-winit state init).
+- **Suggested approach:** seed the focus state from `window.has_focus()` at creation, or
+  confirm the focus event always precedes the first redraw on every platform.
+- **Verification:** a new window's first frame draws a solid cursor.
+- **Scheduling:** independent; outside Task 127's crate scope.
+- **Status: Resolved (2026-10-09), commit `f0cfb0e1`.** `EguiState::new` seeds
+  `RawInput::focused` from `window.has_focus()` through the public `egui_input_mut()`, via a
+  small `seed_initial_focus` helper and an `InitialWindowFocus` enum. The dependency on
+  egui-winit behaviour is recorded as assumption A14 in `EGUI_UPGRADE_ASSUMPTIONS.md`. The
+  helper is unit-tested; the first-frame visual needs a display and was not checked by
+  hand.
+
+#### 127.C2 — `skip_draw` frames record cursor baselines that were never drawn
+
+- **Surfaced:** 127 confirmation review (2026-10-09).
+- **Impact:** on a `skip_draw` frame, `widget.rs` still stores `previous_cursor_pos`,
+  `previous_cursor_appearance` and `previous_cursor_focus`, though nothing was drawn (the blink
+  phase is correctly not stored). A cursor move or focus change during a skipped frame,
+  followed by a frame with no content change, can leave the old cursor on screen. Partly
+  predates 127 (`previous_show_cursor` behaved the same). Unlikely in practice.
+- **Scope of fix:** `freminal/src/gui/terminal/widget.rs` cache-update block.
+- **Suggested approach:** store all cursor baselines only on drawn frames.
+- **Verification:** a test with a skipped frame carrying a cursor change, then an unchanged
+  frame, presents the new cursor.
+- **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commit `a9cf78ab`.** `PaneRenderCache::record_cursor_frame`
+  takes `CursorFrame::{Drawn(DrawnCursor), Skipped}` and advances all six cursor baselines
+  only on drawn frames. A focus regain during a skipped frame still re-anchors the blink on
+  the first drawn frame. Tests cover a move, an appearance change and a colour change on a
+  skipped frame.
+
+#### 127.C3 — Cursor-focus derivation is duplicated and its `show()` wiring is untested
+
+- **Surfaced:** 127.6 and the 127 reviews (2026-10-09).
+- **Impact:** `app_impl.rs`'s blink-wake gate repeats `cursor_focus`'s rule because
+  `cursor_focus` and `PaneFocus` are `pub(super)` in `gui::terminal`, and resolves a full
+  appearance although the result does not depend on `unfocused_style`. The damage origin
+  (`frame_dirty.rs` `cursor_pixel_pos`) and the draw origin (`vertex.rs`) are computed
+  separately. The re-anchor/phase wiring inside `show()` has no direct test. No current
+  defect; the copies can drift.
+- **Scope of fix:** `gui/terminal/input.rs` / `cursor_appearance.rs` visibility, `app_impl.rs`
+  blink gate, and possibly a small pure "frame cursor state" function used by `show()`.
+- **Suggested approach:** make `cursor_focus` (and `PaneFocus`) `pub(crate)` and call it from
+  the blink gate; derive the damage origin from `CursorDrawParams`; extract the per-frame
+  focus/appearance/phase derivation so it can be tested.
+- **Verification:** one definition of the focus rule; tests on the extracted function.
+- **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commits `17fa6df7`, `3fd57ee0`, `3779036a`.**
+  `cursor_focus` is the only focus rule; the blink-wake gate calls it (`PaneFocus` is
+  crate-visible). `CursorDrawParams::pixel_origin` is the only cursor-origin formula, used by
+  drawing and damage; `frame_dirty.rs` no longer computes `cursor_pixel_pos`. The per-frame
+  derivation is `frame_cursor_state(&CursorStateInputs)`, with an `ActivationBlinkReset`
+  enum, tested directly. After the cleanup review it moved with the blink clock into a new
+  `gui/terminal/cursor_blink.rs` (`widget.rs` shrank by about 550 lines). Output is unchanged:
+  the bit-identical solid-cursor test passes unmodified.
 
 ---
 
@@ -995,6 +1148,10 @@ Prohibitions: do NOT change dispatch; do NOT proceed to 128.2.
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** As designed. Items are `pub` inside the crate-private
+module (`redundant_pub_crate`). An out-of-range single intermediate maps to `Multiple`, so no
+route accepts it. Twelve table-driven tests. Commit `ff27cb9c`.
+
 #### 128.2 — Extract inline arms into handler modules (pure moves)
 
 Scope:
@@ -1022,6 +1179,11 @@ Verification: `cargo test --all`; clippy.
 Prohibitions: do NOT change behaviour; do NOT proceed to 128.3.
 
 Stop: report and await review.
+
+**Status: Complete (2026-10-09).** DECREQTPARM moved to `csi_commands/decreqtparm.rs`
+and `push_split_mode_params` to `csi_commands/dec_modes.rs`, removing the `decrqm` → `csi`
+import loop. The dead `>`-intermediate check stayed in the `x` arm for 128.5. Test lists
+before and after differ only by module path. Commit `2443e647`.
 
 #### 128.3 — Strict router
 
@@ -1065,6 +1227,19 @@ signatures; do NOT touch the tmux path; do NOT proceed to 128.4.
 
 Stop: report with the benchmark table; await review.
 
+**Status: Complete (2026-10-09).** `csi_dispatch.rs` with the nine group functions
+(`plain` is split into two to stay short); the `too_many_lines` allow is gone. Routed keys keep
+their old handler, arguments and `ParserOutcome`. Exactly two existing tests changed, as the
+plan said. `csi_dispatch_matrix.rs` covers 5 prefixes × 22 intermediate shapes × every final
+byte, and after review pins the exact output and outcome for all 49 routed keys. Benchmarks,
+back to back against the 128.2 commit with the other worktree idle: plain text +1.3%, CUP
++1.8%, bursty −0.8% (all noise), SGR-heavy +7.0%. The SGR result was investigated at the
+maintainer's request. Four interleaved A/B runs gave medians of 79.7 µs before and 79.8 µs
+after, with single runs spread from 72 to 117 µs. A `perf` profile showed the CSI parser's
+share of samples fell from 17.2% to 12.4% (classify, dispatch and handlers inline into
+`ansiparser_inner_csi`), while `memmove` (22–28%) drives the variance. The +7% is bench
+noise, not router cost. Commit `1475525e`.
+
 #### 128.4 — tmux passthrough prefix/intermediate guard
 
 Scope: `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (`dispatch_tmux_csi`, the
@@ -1094,6 +1269,11 @@ wrapping; do NOT proceed to 128.5.
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** `dispatch_tmux_csi` falls through on any prefix,
+intermediate or misplaced marker, using `CsiKey::classify`. After review it is
+allocation-free. The stale OSC and CSI doc lines were corrected. A misplaced marker (`1?2H`)
+used to dispatch and now falls through, per the plan. Commit `d9feaef8`.
+
 #### 128.5 — Dead-branch cleanup and dispatch-table doc
 
 Scope:
@@ -1122,6 +1302,13 @@ Prohibitions: do NOT change routed behaviour; do NOT proceed to 128.6.
 
 Stop: report and await review.
 
+**Status: Complete (2026-10-09).** The dead branches in `da.rs`, `decrqm.rs` (`h`/`l` and
+the unhandled `else`), `decreqtparm.rs` and `sgr.rs` (`>` delegation) are removed. The
+`decrqm` terminator parameter is kept as `_terminator` so the signature is unchanged (the
+sub-agent's `debug_assert` was replaced). The `mod.rs` dispatch table is rewritten. Tests for
+removed branches were deleted; the `sgr >` tests now drive the full parser. Leftovers are
+128.C1 and 128.C2. Commit `c6bb1332`.
+
 #### 128.6 — Escape-sequence dual-doc update
 
 Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
@@ -1149,6 +1336,125 @@ Verification: `cargo xtask lint-markdown`.
 Prohibitions: do NOT touch code; do NOT proceed beyond Task 128.
 
 Stop: report and await review. Task 128 then goes to PR.
+
+**Status: Complete (2026-10-09).** Both docs updated as specified. Plan drift: the GAPS
+DECSCA claims were at lines ~53, 203, 262, 270 and 460, not 227/386. A DECRARA gap row was
+added. Verified with `markdownlint-cli2` (0 issues), `prettier --check` and the pre-commit
+hooks; `cargo xtask lint-markdown` remains broken tree-wide (126.C1). Commit `8b093649`.
+
+### 128 Review
+
+An adversarial sub-agent review found no BLOCKER or MAJOR issues: every routed key keeps
+its handler, arguments and outcome, and no real-world sequence that used to work is now
+dropped. Fix commit `b071cbaf` addressed the in-scope MINORs: the matrix pins the exact
+output and outcome for all 49 routed keys (so swapped handlers fail), the tmux guard no
+longer allocates, and two rustdoc issues were fixed. A confirmation review **passed**.
+Remaining findings are 128.C1–128.C4.
+
+### 128 Cleanup entries
+
+#### 128.C1 — `ParserFailures::UnhandledDECRQMCommand` has no constructor
+
+- **Surfaced:** 128.5 (2026-10-09).
+- **Impact:** dead public variant in `freminal-terminal-emulator/src/error.rs:~118`; no lint
+  fires because the enum is public.
+- **Scope of fix:** `error.rs` (and any match arms naming it).
+- **Suggested approach:** delete the variant.
+- **Verification:** workspace builds; tests and clippy green.
+- **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commit `cee56916`.** Deleted, together with
+  `MalformedDECRQMIntermediates`, which 128.C2 also made unreachable.
+
+#### 128.C2 — Vestigial handler parameters left by the strict router
+
+- **Surfaced:** 128 review (2026-10-09).
+- **Impact:** `decrqm`'s `_terminator` is always `p`. `da`'s `intermediates` is always empty
+  from the router (`greater()` passes `&[]` while `plain()`/`equals()` pass the real slice),
+  so its "invalid intermediates" branch is unreachable, and an inner
+  `params[0] == b'>'` re-check is tautological. The plan kept handler signatures unchanged
+  through 128.5; this is the follow-up.
+- **Scope of fix:** `csi_commands/decrqm.rs`, `csi_commands/da.rs`, their call sites in
+  `csi_dispatch.rs`, and their tests.
+- **Suggested approach:** drop the unused parameters and the unreachable branch; use
+  `strip_prefix(b">")`.
+- **Verification:** `csi_dispatch_matrix.rs` unchanged and green.
+- **Scheduling:** independent; before Task 137 touches the same handlers.
+- **Status: Resolved (2026-10-09), commit `cee56916`.** Dropped `decrqm`'s terminator and
+  intermediates parameters (the router reaches it only for `$`-`p`), `da`'s intermediates
+  parameter and its unreachable "invalid intermediates" branch, and the now-unused
+  `intermediates` parameter of `dispatch_csi` and its group functions. `da` uses
+  `strip_prefix(b">")`. `csi_dispatch_matrix.rs` passes unchanged.
+
+#### 128.C3 — tmux direct dispatch accepts bodies with non-parameter bytes
+
+- **Surfaced:** 128 review (2026-10-09). Predates Task 128.
+- **Impact:** `dispatch_tmux_csi` direct-dispatches a body containing C0 controls or bytes
+  ≥ 0x40 before the terminator (e.g. `1H2J`), where the main parser would end or split the
+  sequence differently.
+- **Scope of fix:** `terminal_handler/dcs.rs` `dispatch_tmux_csi`.
+- **Suggested approach:** direct-dispatch only when every body byte is in `0x30..=0x3B`
+  (digits, `:`, `;`); otherwise fall through to the re-parse queue.
+- **Verification:** new tests for such bodies falling through; ordering test green.
+- **Scheduling:** independent.
+- **Status: Resolved (2026-10-09), commits `77d6d42b`, `500438e3`.** Deviation from the
+  suggested approach: only digits and `;` are accepted, not `:`. The direct handlers do not
+  interpret `:`, and the main parser's handlers reject a `:` field, so `:` bodies go to the
+  re-parse queue. The cleanup review then found that an all-digit field overflowing `usize`
+  was defaulted by the direct path but rejected by the main parser. The direct path now
+  parses with the main parser's `split_params_into_semicolon_delimited_usize` and falls
+  through on error, and the old `parse_csi_params` helper is gone. Real tmux traffic
+  (`CSI r;c H`, `CSI n A`, `CSI K`, `CSI J`) still dispatches directly.
+
+#### 128.C4 — Unrouted CSI is logged at `warn!` (maintainer decision)
+
+- **Surfaced:** 128 review (2026-10-09).
+- **Impact:** sequences that used to fail as `InvalidParserFailure` (logged at `debug!`), such
+  as XTSMGRAPHICS `CSI ? Pi;Pa;Pv S` or `CSI > Ps t`, now log at `warn!` through
+  `warn_unhandled`, and a misplaced private marker is logged with the "valid grammar"
+  message. An application that probes on every redraw produces log noise. The level
+  follows the plan's "log with `tracing::warn!`" decision.
+- **Scope of fix:** `ansi_components/csi_dispatch.rs` / `csi.rs` logging only.
+- **Suggested approach:** maintainer decides between keeping `warn!`, lowering to `debug!`, or
+  rate-limiting; log `CsiKeyError` with its own message either way.
+- **Verification:** log-level test or manual check.
+- **Scheduling:** needs a maintainer decision.
+- **Status: Resolved by maintainer decision (2026-10-09): keep `warn!`.** No code change.
+
+#### 128.P1 — Per-sequence 8 KB trace buffer in every ANSI sub-parser
+
+- **Surfaced:** the maintainer asked about the SGR-heavy benchmark's memory-copy share after
+  128.3 (2026-10-09). Not a numbered cleanup entry; recorded here because it changed the
+  parser.
+- **Finding:** every escape sequence built a fresh sub-parser (CSI, OSC, DCS, APC,
+  ESC-standard) that embedded an 8 KB `SequenceTracer` ring buffer. That meant zero-filling
+  8 KB and moving the roughly 8 KB struct into `ParserInner`, about 16 KB of memory traffic
+  for a 15-byte `ESC[38;2;r;g;bm`. `perf` put memmove plus memset at 26–36% of samples in
+  `bench_parse_sgr_heavy`. The buffer was diagnostics only and duplicated bytes held
+  elsewhere: the top-level parser's own tracer (what the `recent=` logs print), CSI's
+  `sequence`, and OSC's `params`.
+- **Fix (maintainer-chosen option), commits `1f5f7f1c`, `500438e3`:** sub-parsers no longer
+  embed a tracer and render diagnostics from bytes they already hold. Log rendering of
+  sequence bytes is bounded to 256 bytes (head and tail, with an omitted-byte count) by
+  `escape_sequence_for_log_bounded` / `lossy_sequence_for_log_bounded`. OSC sub-dispatch
+  takes raw bytes instead of `&SequenceTracer`. `ParserInner` went from about 8.3 KB to
+  80 bytes; a size test (`sub_parsers_stay_small`, bound 128 bytes) guards against
+  regression. Public API change: the sub-parsers no longer implement `SequenceTraceable`,
+  and their `trace_str()` returns the sequence body without the introducer. No in-tree
+  caller depended on either.
+- **Measured** (interleaved A/B, three runs each, idle machine; before = `77d6d42b`):
+
+  | Bench                           | Before (µs) | After (µs)  | Change |
+  | ------------------------------- | ----------- | ----------- | ------ |
+  | `parser_push_sgr/4097`          | 85.0–96.5   | 64.2–75.0   | ~−25%  |
+  | `parser_push/4096` (plain text) | 22.4–22.7   | 19.1–19.2   | ~−15%  |
+  | `parse_and_handle_80x24`        | 65.5–66.6   | 61.7–63.1   | ~−5%   |
+  | `bursty_10_small_plus_1_large`  | 166.5–167.6 | 162.5–165.3 | ~−2%   |
+
+- **Remaining:** the SGR profile now shows about 10% memmove and 8% malloc. That is
+  ordinary allocation (the CSI parser's three small `Vec`s per sequence, the SGR handler's
+  segment `Vec`s, and growth of the output `Vec`), not avoidable copying. Reusing one CSI
+  parser's buffers across sequences would remove the per-sequence mallocs. That was the
+  larger option the maintainer did not choose.
 
 ---
 

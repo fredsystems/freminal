@@ -291,6 +291,58 @@ pub fn capture_with_full_viewport_scissor(
     Ok(read_back(off.gl(), width, height))
 }
 
+/// Draw `left` and `right` as two panes side by side into ONE framebuffer
+/// and capture the whole thing.
+///
+/// Added for 127.8. This mirrors how the application draws a split tab:
+/// every pane renders into the shared window framebuffer through its own
+/// GL viewport, set by the caller before the pane's draw (in production
+/// the egui paint callback; here this function). The renderer itself
+/// never sets a viewport -- it only passes the pane's pixel size to its
+/// shaders as `u_viewport_size` -- so offsetting the GL viewport is all it
+/// takes to place a second pane, and the same [`HeadlessRenderer`] (shared
+/// atlas, shared buffers) draws both, as one `TerminalRenderer` does for a
+/// window's panes.
+///
+/// Both frames must have identical pixel dimensions. The result is
+/// `2 * pane_width` wide: `left` occupies `x in [0, pane_width)` and
+/// `right` occupies `x in [pane_width, 2 * pane_width)`.
+///
+/// # Errors
+///
+/// As [`capture`], plus [`PixelHarnessError::InvalidSize`] when the two
+/// frames differ in size.
+pub fn capture_side_by_side(
+    left: &SyntheticFrame,
+    right: &SyntheticFrame,
+) -> Result<PixelFrame, PixelHarnessError> {
+    let mut driver = HeadlessRenderer::new()?;
+    let (pane_w, pane_h) = driver.viewport_px(left);
+    if driver.viewport_px(right) != (pane_w, pane_h) {
+        let (rw, rh) = driver.viewport_px(right);
+        return Err(PixelHarnessError::InvalidSize(rw, rh));
+    }
+    let (total_w, fb_height) = match (u32::try_from(pane_w), u32::try_from(pane_h)) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => (w.saturating_mul(2), h),
+        _ => return Err(PixelHarnessError::InvalidSize(pane_w, pane_h)),
+    };
+
+    let off = OffscreenGl::new(total_w, fb_height)?;
+    let gl = Gl::real(off.gl());
+    driver.init(&gl)?;
+
+    unsafe {
+        off.gl().viewport(0, 0, pane_w, pane_h);
+    }
+    driver.draw_frame(&gl, left);
+    unsafe {
+        off.gl().viewport(pane_w, 0, pane_w, pane_h);
+    }
+    driver.draw_frame(&gl, right);
+
+    Ok(read_back(off.gl(), total_w, fb_height))
+}
+
 /// The GL renderer string of a freshly-created offscreen context.
 ///
 /// Reported alongside any pixel result: a golden image is only meaningful
@@ -525,10 +577,19 @@ mod tests {
         let Some(captured) = capture_or_skip(&frame, "golden") else {
             return;
         };
+        check_or_update_golden(name, &captured);
+    }
+
+    /// Compare `captured` against the golden `name` (or regenerate it when
+    /// `UPDATE_GOLDEN=1`), declining to compare across rasterisers.
+    ///
+    /// Shared by every golden test so the renderer-sidecar policy below
+    /// lives in one place.
+    pub(super) fn check_or_update_golden(name: &str, captured: &PixelFrame) {
         let renderer = renderer_string().expect("renderer string after a successful capture");
 
         if update_requested() {
-            write_golden(name, &captured, &renderer).expect("golden written");
+            write_golden(name, captured, &renderer).expect("golden written");
             eprintln!("wrote golden {name} for renderer {renderer}");
             return;
         }
@@ -578,7 +639,7 @@ mod tests {
             return;
         }
 
-        match compare(name, &captured).expect("comparison ran") {
+        match compare(name, captured).expect("comparison ran") {
             GoldenComparison::Match => {}
             GoldenComparison::Missing { path } => {
                 panic!(
@@ -760,7 +821,7 @@ mod present_region_scissor_tests {
     /// to draw would otherwise have changed pixels there.
     ///
     /// The synthetic cursor is always drawn at cell (0, 0) (`headless.rs`'s
-    /// `cursor_pixel_pos: (0.0, 0.0)`), so hiding it changes pixels only
+    /// `synthetic_cursor`: `col: 0.0, row: 0.0`), so hiding it changes pixels only
     /// within that top-left cell's column -- `first`'s cursor-shown draw
     /// and `second`'s cursor-hidden draw are pixel-identical everywhere
     /// else. That is confirmed here directly (the "control" check) rather
@@ -966,5 +1027,234 @@ mod region_present_matches_full_present_tests {
              damage silently changed what got drawn, which is the exact \
              hazard 124.14's correctness argument exists to rule out"
         );
+    }
+}
+
+/// Task 127.8: the focused pane's cursor is solid, a non-focused pane's is
+/// a hollow block, and both appear in one framebuffer exactly as a split
+/// tab draws them.
+///
+/// The scene is two panes side by side, each a 20x6 grid of the same text,
+/// each with its cursor at cell (0, 0). The active (left) pane draws the
+/// steady **block** DECSCUSR style so the solid-versus-hollow difference is
+/// unambiguous; the inactive (right) pane draws [`CursorPresence::Hollow`].
+///
+/// Approach: both panes are drawn into ONE offscreen framebuffer by
+/// [`capture_side_by_side`], which sets a per-pane GL viewport the way the
+/// application's paint callbacks do. No composition-after-the-fact was
+/// needed, because the renderer never sets a viewport itself.
+#[cfg(test)]
+mod unfocused_cursor_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use freminal_common::themes::CATPPUCCIN_MOCHA;
+
+    use super::super::headless::{CursorPresence, SyntheticFrame};
+    use super::{PixelFrame, capture, capture_side_by_side};
+
+    const COLS: usize = 20;
+    const ROWS: usize = 6;
+
+    /// The theme's cursor colour as the opaque RGBA the renderer writes.
+    fn cursor_rgba() -> [u8; 4] {
+        let (r, g, b) = CATPPUCCIN_MOCHA.cursor;
+        [r, g, b, 255]
+    }
+
+    fn active_pane() -> SyntheticFrame {
+        SyntheticFrame::new(COLS, ROWS).with_cursor(CursorPresence::Shown)
+    }
+
+    fn inactive_pane() -> SyntheticFrame {
+        SyntheticFrame::new(COLS, ROWS).with_cursor(CursorPresence::Hollow)
+    }
+
+    /// Both panes in one framebuffer, or `None` when this environment has
+    /// no GL context (the shared guard decides skip versus fail).
+    fn composite_or_skip(what: &str) -> Option<PixelFrame> {
+        // The shared guard owns the skip/fail policy for a missing context;
+        // probing with the active pane alone keeps that policy in one place.
+        super::tests::capture_or_skip(&active_pane(), what)?;
+        Some(
+            capture_side_by_side(&active_pane(), &inactive_pane())
+                .expect("side-by-side capture after a successful solo capture"),
+        )
+    }
+
+    /// Assert that `frame` has the cursor colour at `(x, y)` and say which
+    /// probe it was if not.
+    fn assert_cursor_colour(frame: &PixelFrame, x: u32, y: u32, what: &str) {
+        assert_eq!(
+            frame.pixel(x, y),
+            Some(cursor_rgba()),
+            "{what} at ({x}, {y}) must be the cursor colour"
+        );
+    }
+
+    /// Assert that `frame` does NOT have the cursor colour at `(x, y)`.
+    fn assert_not_cursor_colour(frame: &PixelFrame, x: u32, y: u32, what: &str) {
+        let px = frame.pixel(x, y);
+        assert!(px.is_some(), "{what}: ({x}, {y}) is outside the image");
+        assert_ne!(
+            px,
+            Some(cursor_rgba()),
+            "{what} at ({x}, {y}) must NOT be the cursor colour"
+        );
+    }
+
+    /// The focused pane's cursor is a solid block and the non-focused
+    /// pane's is a hollow one: border pixels are cursor-coloured in both,
+    /// but the interior is cursor-coloured only in the solid one.
+    #[test]
+    fn active_pane_is_solid_and_inactive_pane_is_hollow() {
+        let Some(composite) = composite_or_skip("unfocused-cursor-asserts") else {
+            return;
+        };
+
+        let pane_w = composite.width / 2;
+        let cell_w = pane_w / u32::try_from(COLS).unwrap();
+        let cell_h = composite.height / u32::try_from(ROWS).unwrap();
+        assert!(
+            cell_w >= 8 && cell_h >= 8,
+            "cell {cell_w}x{cell_h} is too small for a border/centre probe"
+        );
+        let (mid_x, mid_y) = (cell_w / 2, cell_h / 2);
+
+        // The synthetic grid puts a glyph ('a') in this very cell, and the
+        // renderer draws text over the cursor without blending in this
+        // harness (no GL_BLEND is enabled), so the glyph's rows -- roughly
+        // the middle of the cell -- overwrite the cursor colour, including
+        // the exact centre pixel and the cell's left and right edges in
+        // those rows. Every probe below therefore sits in the glyph-free
+        // upper quarter (`probe_y`) or bottom row, where only the cursor
+        // itself has drawn.
+        let probe_y = cell_h / 4;
+
+        // Active (left) pane: a solid block fills the cell.
+        assert_cursor_colour(&composite, mid_x, probe_y, "active pane upper centre");
+        assert_cursor_colour(&composite, 0, probe_y, "active pane left edge");
+        assert_cursor_colour(&composite, 1, probe_y, "active pane near-edge interior");
+        assert_cursor_colour(&composite, mid_x, cell_h - 2, "active pane lower centre");
+
+        // Inactive (right) pane: the same cell, offset by one pane width.
+        let x0 = pane_w;
+        assert_cursor_colour(&composite, x0, probe_y, "inactive pane left border");
+        assert_cursor_colour(
+            &composite,
+            x0 + cell_w - 1,
+            probe_y,
+            "inactive pane right border",
+        );
+        assert_cursor_colour(&composite, x0 + mid_x, 0, "inactive pane top border");
+        assert_cursor_colour(
+            &composite,
+            x0 + mid_x,
+            cell_h - 1,
+            "inactive pane bottom border",
+        );
+        assert_cursor_colour(&composite, x0, 0, "inactive pane top-left corner");
+        assert_cursor_colour(
+            &composite,
+            x0 + cell_w - 1,
+            cell_h - 1,
+            "inactive pane bottom-right corner",
+        );
+        // The same upper-quarter row that is cursor-coloured at the border
+        // is NOT cursor-coloured one pixel inside it, and neither is the
+        // block's centre: that is the hollow-versus-solid difference.
+        assert_not_cursor_colour(&composite, x0 + 1, probe_y, "inactive pane inside border");
+        assert_not_cursor_colour(
+            &composite,
+            x0 + mid_x,
+            probe_y,
+            "inactive pane upper centre",
+        );
+        assert_not_cursor_colour(&composite, x0 + mid_x, mid_y, "inactive pane centre");
+
+        // The hollow interior is not merely un-coloured by a glyph: the
+        // whole interior (inside a one-pixel-thicker margin than the
+        // border) must contain no cursor-coloured pixel at all.
+        let margin = 3;
+        for y in margin..cell_h - margin {
+            for x in margin..cell_w - margin {
+                assert_not_cursor_colour(&composite, x0 + x, y, "inactive pane interior");
+            }
+        }
+
+        // Overall coverage: the solid block paints far more of its cell in
+        // the cursor colour than the hollow one does, whatever the glyph
+        // covers.
+        let coverage = |x0: u32| {
+            (0..cell_h)
+                .flat_map(|y| (0..cell_w).map(move |x| (x0 + x, y)))
+                .filter(|&(x, y)| composite.pixel(x, y) == Some(cursor_rgba()))
+                .count()
+        };
+        let (solid, hollow) = (coverage(0), coverage(x0));
+        assert!(
+            hollow > 0 && solid > hollow * 2,
+            "solid cursor coverage ({solid}) must exceed twice the hollow \
+             cursor's ({hollow}), and the hollow cursor must draw something"
+        );
+    }
+
+    /// Drawing two panes through per-pane viewports into one framebuffer
+    /// must give each half exactly the pixels a lone capture of that pane
+    /// would -- the property that makes this composite a faithful model of
+    /// a split tab rather than a lookalike.
+    #[test]
+    fn each_half_of_the_composite_equals_a_solo_capture() {
+        let Some(composite) = composite_or_skip("unfocused-cursor-halves") else {
+            return;
+        };
+        let pane_w = composite.width / 2;
+
+        for (frame, x0, what) in [
+            (active_pane(), 0, "active (left)"),
+            (inactive_pane(), pane_w, "inactive (right)"),
+        ] {
+            let solo = capture(&frame).expect("solo capture");
+            assert_eq!(solo.width, pane_w, "{what}: solo width");
+            assert_eq!(solo.height, composite.height, "{what}: solo height");
+            for y in 0..solo.height {
+                for x in 0..solo.width {
+                    assert_eq!(
+                        composite.pixel(x0 + x, y),
+                        solo.pixel(x, y),
+                        "{what} pane pixel ({x}, {y}) differs between the \
+                         shared-framebuffer draw and a solo draw"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The side-by-side capture is deterministic: repeated runs are
+    /// bit-identical, which is what licenses the exact golden below.
+    #[test]
+    fn side_by_side_capture_is_bit_identical() {
+        let Some(first) = composite_or_skip("unfocused-cursor-stability") else {
+            return;
+        };
+        for _ in 0..2 {
+            let again = capture_side_by_side(&active_pane(), &inactive_pane())
+                .expect("repeat side-by-side capture");
+            assert_eq!(
+                first.differing_pixels(&again, 0),
+                Some(0),
+                "two side-by-side captures of the same scene must be \
+                 bit-identical; the tolerance is NOT the thing to change"
+            );
+        }
+    }
+
+    /// The pixel golden for the same scene, so a change to either cursor's
+    /// look (border thickness, colour, geometry) is a visible diff.
+    #[test]
+    fn solid_and_hollow_cursor_golden() {
+        let Some(composite) = composite_or_skip("unfocused-cursor-golden") else {
+            return;
+        };
+        super::tests::check_or_update_golden("cursor_active_solid_inactive_hollow", &composite);
     }
 }

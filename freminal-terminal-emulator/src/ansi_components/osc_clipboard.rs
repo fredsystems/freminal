@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::escape_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -12,7 +12,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// `params[0]` = `OscValue(52)`, `params[1]` = selection string, `params[2]` = base64 or `?`.
 pub(super) fn handle_osc_clipboard(
     params: &[Option<AnsiOscToken>],
-    seq_trace: &SequenceTracer,
+    raw_params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) {
     let selection = match params.get(1) {
@@ -36,14 +36,14 @@ pub(super) fn handle_osc_clipboard(
             Err(e) => {
                 tracing::warn!(
                     "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
-                    seq_trace.as_escaped()
+                    escape_sequence_for_log_bounded(raw_params)
                 );
             }
         },
         _ => {
             tracing::warn!(
                 "OSC 52: missing or invalid payload; raw sequence: \"{}\"",
-                seq_trace.as_escaped()
+                escape_sequence_for_log_bounded(raw_params)
             );
         }
     }

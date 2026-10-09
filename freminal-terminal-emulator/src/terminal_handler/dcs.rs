@@ -18,6 +18,7 @@ use conv2::ValueFrom;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualStyle};
 
 use super::TerminalHandler;
+use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
 use crate::ansi_components::tracer::escape_sequence_for_log;
@@ -128,8 +129,13 @@ impl TerminalHandler {
     ///   (e.g. Kitty graphics protocol).
     /// - **DCS** (`ESC P`): dispatched to [`Self::handle_device_control_string`]
     ///   (recursive — the inner DCS is itself unwrapped).
-    /// - **OSC** (`ESC ]`): not yet supported (logged at warn level).
-    /// - **CSI** (`ESC [`): not yet supported (logged at warn level).
+    /// - **OSC** (`ESC ]`): queued on `tmux_reparse_queue` and re-parsed by
+    ///   the main parser after the current DCS batch.
+    /// - **CSI** (`ESC [`): plain cursor-movement and erase commands are
+    ///   dispatched directly (see [`Self::dispatch_tmux_csi`]) to preserve
+    ///   ordering; anything else, including every sequence with a private
+    ///   marker prefix or an intermediate byte, is queued on
+    ///   `tmux_reparse_queue` for the main parser.
     ///
     /// Any other introducer byte is logged at warn level.
     pub(super) fn handle_tmux_passthrough(&mut self, payload: &[u8]) {
@@ -219,6 +225,12 @@ impl TerminalHandler {
     /// the terminator.  Returns `true` if the command was handled directly,
     /// `false` if the caller should fall back to the reparse queue.
     ///
+    /// Only a body whose every byte before the terminator is a digit or `;`
+    /// is dispatched directly.  Any other byte (private marker, intermediate,
+    /// `:`, C0 control, a byte in `0x40..=0x7E`, or a byte `>= 0x7F`) makes
+    /// the strict main parser's reading differ from a direct dispatch, so
+    /// such a body falls through to the reparse queue.
+    ///
     /// This handles the subset of CSI commands that are purely buffer-level
     /// (cursor movement, erase) so they execute immediately — critical for
     /// correct ordering when a CUP precedes a Kitty Put in the same frame.
@@ -230,13 +242,6 @@ impl TerminalHandler {
             return false;
         }
 
-        // CSI parameters that start with '?' are DEC private modes (h/l).
-        // These need TerminalState-level sync, so fall back to the reparse queue.
-        if csi_body.first() == Some(&b'?') {
-            tracing::debug!("DCS tmux passthrough: queuing DEC private CSI for re-parse");
-            return false;
-        }
-
         // Find the terminator: the last byte in 0x40..=0x7E range.
         let Some(&terminator) = csi_body.last() else {
             return false;
@@ -245,18 +250,41 @@ impl TerminalHandler {
             return false;
         }
 
-        // Param bytes are everything before the terminator.
-        let params = &csi_body[..csi_body.len() - 1];
+        let body = &csi_body[..csi_body.len() - 1];
 
-        // Check for intermediate bytes (0x20..=0x2F) — these indicate
-        // extended CSI commands that we don't handle directly.
-        if params.iter().any(|&b| (0x20..=0x2f).contains(&b)) {
-            tracing::debug!("DCS tmux passthrough: queuing CSI with intermediates for re-parse");
+        // Direct-dispatch only a body made entirely of digits and `;`
+        // (0x30..=0x39, 0x3B). Anything else is left to the strict main
+        // parser via the reparse queue, because the main parser would not
+        // treat it as one plain CSI sequence:
+        //
+        // - a byte in 0x40..=0x7E before the last byte ends the sequence
+        //   there (`1H2J` is CUP followed by text and ED, not one ED);
+        // - a C0 control (< 0x20) is executed inline mid-sequence, and ESC
+        //   aborts it;
+        // - a byte >= 0x7F is invalid;
+        // - an intermediate (0x20..=0x2F) or a private marker (`<=>?`)
+        //   gives the sequence a different identity from the plain command
+        //   that shares its final byte (`CSI > 0 T` is not SD);
+        // - `:` is a sub-parameter separator that the direct handlers do not
+        //   interpret; the main parser's handlers decide what it means.
+        //
+        // A body that passes this check cannot carry a prefix or an
+        // intermediate, so no classification is needed.
+        if !body.iter().all(|b| b.is_ascii_digit() || *b == b';') {
+            tracing::debug!(
+                "DCS tmux passthrough: queuing CSI with non-parameter bytes for re-parse"
+            );
             return false;
         }
 
-        // Parse semicolon-delimited numeric parameters.
-        let numeric_params = Self::parse_csi_params(params);
+        // Parse semicolon-delimited numeric parameters with the same parser
+        // the main CSI handlers use. A field it rejects (e.g. a value that
+        // overflows `usize`) makes the main parser reject the sequence, so
+        // leave it to the main parser rather than silently defaulting it.
+        let Ok(numeric_params) = split_params_into_semicolon_delimited_usize(body) else {
+            tracing::debug!("DCS tmux passthrough: queuing unparsable CSI params for re-parse");
+            return false;
+        };
 
         match terminator {
             // CUP — Cursor Position: ESC [ row ; col H  (or f)
@@ -499,12 +527,12 @@ impl TerminalHandler {
                 true
             }
             // SCOSC — Save Cursor: ESC [ s
-            b's' if params.is_empty() => {
+            b's' if body.is_empty() => {
                 self.buffer.save_cursor();
                 true
             }
             // SCORC — Restore Cursor: ESC [ u
-            b'u' if params.is_empty() => {
+            b'u' if body.is_empty() => {
                 self.buffer.restore_cursor();
                 true
             }
@@ -519,29 +547,6 @@ impl TerminalHandler {
                 false
             }
         }
-    }
-
-    /// Parse CSI parameter bytes into a list of `Option<usize>` values.
-    ///
-    /// Parameters are separated by `;`.  An empty field yields `None`.
-    /// For example, `b"1;42"` → `[Some(1), Some(42)]`,
-    /// `b""` → `[]`, `b";"` → `[None, None]`.
-    pub(super) fn parse_csi_params(params: &[u8]) -> Vec<Option<usize>> {
-        if params.is_empty() {
-            return Vec::new();
-        }
-
-        let param_str = std::str::from_utf8(params).unwrap_or("");
-        param_str
-            .split(';')
-            .map(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    s.parse::<usize>().ok()
-                }
-            })
-            .collect()
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -1823,32 +1828,150 @@ mod tests {
     }
 
     #[test]
-    fn parse_csi_params_basic() {
+    fn tmux_csi_intermediate_mid_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // The space sits between parameter bytes, not just before the final
+        // byte. It is still an intermediate, so this is not a plain CUP.
+        assert!(
+            !handler.dispatch_tmux_csi(b"1 ;2H"),
+            "an intermediate anywhere in the body must fall through"
+        );
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_greater_prefix_falls_through_instead_of_scrolling() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_data(b"Hello");
+        let before = handler.buffer.cursor().pos;
+        // CSI > 0 T is xterm title-mode reset, not SD (CSI 0 T).
+        assert!(
+            !handler.dispatch_tmux_csi(b">0T"),
+            "CSI > 0 T must fall through to the main parser"
+        );
+        assert_eq!(handler.buffer.cursor().pos, before);
         assert_eq!(
-            TerminalHandler::parse_csi_params(b"1;42"),
-            vec![Some(1), Some(42)]
+            handler.buffer.cursor().pos.y,
+            0,
+            "no scroll may have happened"
         );
     }
 
     #[test]
-    fn parse_csi_params_empty() {
-        assert_eq!(
-            TerminalHandler::parse_csi_params(b""),
-            Vec::<Option<usize>>::new()
-        );
+    fn tmux_csi_plus_intermediate_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // CSI 3 + T has an intermediate; it is not SD (CSI 3 T).
+        assert!(!handler.dispatch_tmux_csi(b"3+T"));
     }
 
     #[test]
-    fn parse_csi_params_missing_field() {
-        assert_eq!(
-            TerminalHandler::parse_csi_params(b";42"),
-            vec![None, Some(42)]
-        );
+    fn tmux_csi_embedded_final_byte_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // `H` ends the sequence in the main parser; `2J` is then text.
+        assert!(!handler.dispatch_tmux_csi(b"1H2J"));
+        assert_eq!(handler.buffer.cursor().pos, before, "nothing may run");
     }
 
     #[test]
-    fn parse_csi_params_single() {
-        assert_eq!(TerminalHandler::parse_csi_params(b"5"), vec![Some(5)]);
+    fn tmux_csi_c0_control_in_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // BS is executed inline by the main parser, mid-sequence.
+        assert!(!handler.dispatch_tmux_csi(b"1\x082H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_byte_above_7e_in_body_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b"1\x7f2H"));
+        assert!(!handler.dispatch_tmux_csi(b"1\xc32H"));
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
+    }
+
+    #[test]
+    fn tmux_csi_colon_sub_parameter_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        // `:` is a sub-parameter separator the direct handlers do not
+        // interpret; the main parser decides what it means.
+        assert!(!handler.dispatch_tmux_csi(b"5:2H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_overflowing_param_falls_through() {
+        // The main parser rejects a parameter that overflows `usize`; the
+        // direct path must not silently default it to CUP(1, 1).
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        assert!(!handler.dispatch_tmux_csi(b"99999999999999999999999;2H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_plain_bodies_still_dispatch_directly() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(handler.dispatch_tmux_csi(b"5;10H"));
+        assert!(handler.dispatch_tmux_csi(b"3A"));
+        assert!(handler.dispatch_tmux_csi(b"2J"));
+        assert!(handler.dispatch_tmux_csi(b"K"));
+    }
+
+    #[test]
+    fn tmux_passthrough_embedded_final_byte_is_queued_for_reparse() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b[1H2J");
+        assert_eq!(handler.tmux_reparse_queue, vec![b"\x1b[1H2J".to_vec()]);
+    }
+
+    #[test]
+    fn tmux_csi_less_prefix_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b"<1H"));
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
+    }
+
+    #[test]
+    fn tmux_csi_equals_prefix_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b"=1H"));
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
+    }
+
+    #[test]
+    fn tmux_csi_misplaced_private_marker_falls_through() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(!handler.dispatch_tmux_csi(b"1?2H"));
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
+    }
+
+    #[test]
+    fn tmux_passthrough_prefixed_csi_is_queued_for_reparse() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // ESC bytes are doubled inside the tmux envelope.
+        handler.handle_tmux_passthrough(b"\x1b\x1b[>0T");
+        assert_eq!(handler.tmux_reparse_queue, vec![b"\x1b[>0T".to_vec()]);
+    }
+
+    #[test]
+    fn tmux_passthrough_plain_cup_is_not_queued() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b[5;10H");
+        assert_eq!(handler.tmux_reparse_queue, Vec::<Vec<u8>>::new());
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (9, 4));
     }
 
     // ------------------------------------------------------------------

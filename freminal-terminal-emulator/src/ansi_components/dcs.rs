@@ -6,7 +6,7 @@
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use crate::ansi::ParserOutcome;
-use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 /// Parser for DCS (Device Control String) sequences.
 ///
@@ -22,9 +22,6 @@ use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 pub struct DcsParser {
     /// Accumulated sequence bytes, starting with `P`.
     pub sequence: Vec<u8>,
-
-    // Internal trace of recent bytes for diagnostics.
-    seq_trace: SequenceTracer,
 }
 
 impl Default for DcsParser {
@@ -33,23 +30,11 @@ impl Default for DcsParser {
     }
 }
 
-impl SequenceTraceable for DcsParser {
-    #[inline]
-    fn seq_tracer(&mut self) -> &mut SequenceTracer {
-        &mut self.seq_trace
-    }
-    #[inline]
-    fn seq_tracer_ref(&self) -> &SequenceTracer {
-        &self.seq_trace
-    }
-}
-
 impl DcsParser {
     #[must_use]
     pub fn new() -> Self {
         Self {
             sequence: vec![b'P'],
-            seq_trace: SequenceTracer::new(),
         }
     }
 
@@ -105,10 +90,14 @@ impl DcsParser {
         self.sequence.starts_with(b"Ptmux;")
     }
 
-    /// Expose current sequence trace for testing and diagnostics.
+    /// Expose the current sequence for testing and diagnostics.
+    ///
+    /// Rendered from [`Self::sequence`] without its leading `P` introducer,
+    /// lossily decoded and bounded to
+    /// [`crate::ansi_components::tracer::LOG_SEQUENCE_MAX_BYTES`].
     #[must_use]
     pub fn trace_str(&self) -> String {
-        self.seq_trace.as_str()
+        lossy_sequence_for_log_bounded(self.sequence.get(1..).unwrap_or_default())
     }
 
     /// Push a byte into the DCS parser and return the parser outcome.
@@ -117,11 +106,9 @@ impl DcsParser {
     /// point it emits `TerminalOutput::DeviceControlString` and returns
     /// `ParserOutcome::Finished`.
     pub fn dcs_parser_inner(&mut self, b: u8, output: &mut Vec<TerminalOutput>) -> ParserOutcome {
-        self.append_trace(b);
         self.sequence.push(b);
 
         if self.contains_string_terminator() {
-            self.seq_trace.trim_control_tail();
             output.push(TerminalOutput::DeviceControlString(std::mem::take(
                 &mut self.sequence,
             )));
@@ -136,7 +123,6 @@ impl DcsParser {
 mod tests {
     use super::DcsParser;
     use crate::ansi::ParserOutcome;
-    use crate::ansi_components::tracer::SequenceTraceable;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     #[test]
@@ -151,23 +137,6 @@ mod tests {
         let parser = DcsParser::new();
         assert_eq!(parser.sequence, vec![b'P']);
         assert!(!parser.contains_string_terminator());
-    }
-
-    #[test]
-    fn seq_tracer_returns_mutable_reference() {
-        let mut parser = DcsParser::new();
-        // Calling seq_tracer() should give a mutable reference to the internal tracer
-        let tracer = parser.seq_tracer();
-        tracer.push(b'A');
-    }
-
-    #[test]
-    fn seq_tracer_ref_returns_immutable_reference() {
-        let parser = DcsParser::new();
-        // seq_tracer_ref() should return a reference to the internal tracer
-        let tracer = parser.seq_tracer_ref();
-        // The tracer starts empty
-        assert_eq!(tracer.as_str(), "");
     }
 
     #[test]

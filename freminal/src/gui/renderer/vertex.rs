@@ -22,11 +22,12 @@ use std::sync::Arc;
 use super::super::{
     atlas::{AtlasEntry, GlyphAtlas, GlyphKey},
     colors::{
-        command_block_hover_bg_f, cursor_f, internal_color_to_gl, search_current_bg_f,
-        search_match_bg_f, selection_bg_f, selection_fg_f,
+        command_block_hover_bg_f, internal_color_to_gl, search_current_bg_f, search_match_bg_f,
+        selection_bg_f, selection_fg_f,
     },
     font_manager::FontManager,
     shaping::{ShapedGlyph, ShapedLine},
+    terminal::cursor_appearance::CursorAppearance,
 };
 
 // ---------------------------------------------------------------------------
@@ -256,16 +257,178 @@ pub struct ImageDrawEntry {
 //  Build background instances + decoration verts
 // ---------------------------------------------------------------------------
 
-/// Returns whether the cursor should be visible given its style and blink state.
-const fn cursor_blink_is_visible(style: &CursorVisualStyle, blink_on: bool) -> bool {
+/// Which half of its blink cycle the cursor is currently in.
+///
+/// Only blinking DECSCUSR styles consult it (see [`cursor_blink_is_visible`]);
+/// steady styles and [`CursorAppearance::Hollow`] ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorBlinkPhase {
+    /// The visible half of the cycle.
+    On,
+    /// The hidden half of the cycle.
+    Off,
+}
+
+impl CursorBlinkPhase {
+    /// Convert the blink clock's raw "is it in the on half" answer into a
+    /// phase. This is the single bool -> enum boundary for the cursor; the
+    /// renderer API itself never carries the bool.
+    #[must_use]
+    pub const fn from_blink_on(blink_on: bool) -> Self {
+        if blink_on { Self::On } else { Self::Off }
+    }
+}
+
+/// Returns whether the cursor should be visible given its style and blink phase.
+const fn cursor_blink_is_visible(style: &CursorVisualStyle, phase: CursorBlinkPhase) -> bool {
     match style {
         CursorVisualStyle::BlockCursorSteady
         | CursorVisualStyle::UnderlineCursorSteady
         | CursorVisualStyle::VerticalLineCursorSteady => true,
         CursorVisualStyle::BlockCursorBlink
         | CursorVisualStyle::UnderlineCursorBlink
-        | CursorVisualStyle::VerticalLineCursorBlink => blink_on,
+        | CursorVisualStyle::VerticalLineCursorBlink => matches!(phase, CursorBlinkPhase::On),
     }
+}
+
+/// Everything the vertex builders need to draw one pane's cursor.
+///
+/// Shared by [`build_background_instances`] (full rebuild, cursor quads
+/// appended last in `deco`) and [`build_cursor_verts_only`] (cursor-only
+/// patch), so both emit identical geometry for identical params.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorDrawParams {
+    /// What to draw: nothing, a solid DECSCUSR-style cursor, or a hollow box.
+    pub appearance: CursorAppearance,
+    /// Visual column of the cursor, in (possibly fractional, trail-animated)
+    /// cells.
+    pub col: f32,
+    /// Visual row of the cursor, in (possibly fractional, trail-animated)
+    /// cells.
+    pub row: f32,
+    /// RGBA cursor color, resolved by the caller (theme + override).
+    pub color: [f32; 4],
+    /// Horizontal scale of the cursor's row: `2.0` on DECDWL/DECDHL rows,
+    /// `1.0` otherwise.
+    pub x_scale: f32,
+    /// Current blink phase; only consulted by solid blinking styles.
+    pub blink_on: CursorBlinkPhase,
+}
+
+impl CursorDrawParams {
+    /// Pixel position of the cursor cell's top-left corner, relative to the
+    /// terminal viewport's top-left, for the given cell size in physical
+    /// pixels.
+    ///
+    /// This is the single definition of the cursor's origin: the quad
+    /// builders anchor their geometry on it and the cursor-only damage rect
+    /// is derived from it, so the pixels drawn and the pixels declared dirty
+    /// cannot drift apart. The x position is scaled by [`Self::x_scale`] so
+    /// it aligns with the magnified glyphs of a DECDWL/DECDHL row.
+    #[must_use]
+    pub fn pixel_origin(&self, cell_width: u32, cell_height: u32) -> (f32, f32) {
+        (
+            self.col * gl_f32_u32(cell_width) * self.x_scale,
+            self.row * gl_f32_u32(cell_height),
+        )
+    }
+}
+
+/// The exact float range the cursor occupies inside a decoration buffer.
+///
+/// `len == 0` when nothing was drawn (hidden, or a blinking cursor in its off
+/// phase). Otherwise `start` is the buffer length before the cursor quads
+/// were pushed and `len` is how many floats they occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorVertRange {
+    /// Index of the first cursor float in the decoration buffer.
+    pub start: usize,
+    /// Number of cursor floats (`0` when no cursor was drawn).
+    pub len: usize,
+}
+
+/// Append the cursor's quads for `params` to `out`.
+///
+/// - [`CursorAppearance::Hidden`] appends nothing.
+/// - [`CursorAppearance::Solid`] appends one quad (when the style's blink
+///   gate is open): a full cell for block, a bottom bar for underline, a left
+///   bar for vertical line.
+/// - [`CursorAppearance::Hollow`] appends four non-overlapping border quads
+///   (see [`push_hollow_cursor_quads`]) and ignores the blink phase.
+///
+/// The pixel origin is `(col * cell_width * x_scale, row * cell_height)`.
+fn push_cursor_quads(
+    params: &CursorDrawParams,
+    cell_width: u32,
+    cell_height: u32,
+    out: &mut Vec<f32>,
+) {
+    let cell_w = gl_f32_u32(cell_width);
+    let ch = gl_f32_u32(cell_height);
+    let (cx, cy) = params.pixel_origin(cell_width, cell_height);
+    let cw = cell_w * params.x_scale;
+    let color = params.color;
+
+    match &params.appearance {
+        CursorAppearance::Hidden => {}
+        CursorAppearance::Solid(style) => {
+            if !cursor_blink_is_visible(style, params.blink_on) {
+                return;
+            }
+            match style {
+                CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
+                    push_quad(out, cx, cy, cx + cw, cy + ch, color);
+                }
+                CursorVisualStyle::UnderlineCursorBlink
+                | CursorVisualStyle::UnderlineCursorSteady => {
+                    let bar_h = (ch * 0.1).max(2.0);
+                    push_quad(out, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
+                }
+                CursorVisualStyle::VerticalLineCursorBlink
+                | CursorVisualStyle::VerticalLineCursorSteady => {
+                    let bar_w = (cw * 0.1).max(1.0);
+                    push_quad(out, cx, cy, cx + bar_w, cy + ch, color);
+                }
+            }
+        }
+        CursorAppearance::Hollow => push_hollow_cursor_quads(out, cx, cy, cw, ch, color),
+    }
+}
+
+/// Append a hollow-box cursor: four inset border quads (top, bottom, left,
+/// right) that tile the border without overlapping.
+///
+/// The border thickness is `t = max(cw * 0.1, 1.0)` rounded to whole pixels
+/// (and at least one pixel), where `cw` is the cursor's drawn width
+/// (`cell_width * x_scale`), so a DECDWL cursor gets a proportionally thicker
+/// border. The top and bottom quads span the full width; the left and right
+/// quads span only the interior height (`cy + t .. cy + ch - t`), so the
+/// corners are blended exactly once. When the cell is too small to have an
+/// interior (`2 * t >= cw` or `2 * t >= ch`) the cursor degrades to a single
+/// filled quad covering the cell.
+fn push_hollow_cursor_quads(
+    out: &mut Vec<f32>,
+    cx: f32,
+    cy: f32,
+    cw: f32,
+    ch: f32,
+    color: [f32; 4],
+) {
+    let t = (cw * 0.1).max(1.0).round().max(1.0);
+    let x0 = cx;
+    let y0 = cy;
+    let x1 = cx + cw;
+    let y1 = cy + ch;
+
+    if 2.0 * t >= cw || 2.0 * t >= ch {
+        push_quad(out, x0, y0, x1, y1, color);
+        return;
+    }
+
+    push_quad(out, x0, y0, x1, y0 + t, color);
+    push_quad(out, x0, y1 - t, x1, y1, color);
+    push_quad(out, x0, y0 + t, x0 + t, y1 - t, color);
+    push_quad(out, x1 - t, y0 + t, x1, y1 - t, color);
 }
 
 /// A search match span for match-highlight rendering.
@@ -288,10 +451,6 @@ pub struct MatchHighlight {
 ///
 /// Passing a struct instead of 18 positional parameters keeps call sites
 /// readable and eliminates the need for `#[allow(clippy::too_many_arguments)]`.
-// Independent, short-lived per-frame rendering-intent flags (cursor
-// visibility/blink, selection shape, DECSCNM state); a state machine would
-// couple unrelated concerns and obscure intent.
-#[allow(clippy::struct_excessive_bools)]
 pub struct BackgroundFrame<'a> {
     pub shaped_lines: &'a [Arc<ShapedLine>],
     pub cell_width: u32,
@@ -300,11 +459,10 @@ pub struct BackgroundFrame<'a> {
     pub underline_offset: f32,
     pub strikeout_offset: f32,
     pub stroke_size: f32,
-    pub show_cursor: bool,
-    pub cursor_blink_on: bool,
-    pub cursor_pixel_pos: (f32, f32),
-    pub cursor_width_scale: f32,
-    pub cursor_visual_style: &'a CursorVisualStyle,
+    /// The cursor to draw (borrowed: the caller builds one
+    /// [`CursorDrawParams`] per frame and shares it with the cursor-only
+    /// path, avoiding a clone of the appearance).
+    pub cursor: &'a CursorDrawParams,
     pub selection: Option<(usize, usize, usize, usize)>,
     pub selection_is_block: bool,
     pub match_highlights: &'a [MatchHighlight],
@@ -318,7 +476,6 @@ pub struct BackgroundFrame<'a> {
     /// are.  Should match `TerminalSnapshot::term_width` at call time.
     pub term_width_cols: usize,
     pub theme: &'a ThemePalette,
-    pub cursor_color_override: Option<(u8, u8, u8)>,
     /// `true` when DECSCNM (whole-screen reverse video) is active for this
     /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
     /// [`effective_bg`] (Task 115.2).
@@ -340,20 +497,20 @@ pub struct BackgroundFrame<'a> {
 /// The cursor quad (if visible) is always appended **last** in `deco_verts`
 /// so that cursor-only partial updates can patch just the tail.
 ///
-/// Returns `true` if a cursor quad was actually appended to `deco_verts`,
-/// `false` otherwise. The caller **must** use this return value (not its own
-/// copy of `frame.show_cursor`) to compute where the cursor's tail quad
-/// begins for later cursor-only patches — `frame.show_cursor` alone does not
-/// account for the blink-visibility gate (`cursor_blink_is_visible`) applied
-/// here, and recomputing the append decision independently let the two
-/// silently disagree whenever a full rebuild happened to run during the
-/// cursor's blink-off phase (issue #432): the offset bookkeeping would then
-/// assume a cursor quad was appended when it was not, causing a later
-/// cursor-only frame to blink the cursor back on by overwriting whatever
-/// quad actually occupies that tail position — in practice the bottom-most
-/// row's selection highlight quad, since selection quads are appended in
-/// top-to-bottom row order and the bottom row's is therefore always the last
-/// one pushed before the (absent) cursor quad.
+/// Returns the [`CursorVertRange`] the cursor occupies in `deco_verts`
+/// (`len == 0` when no cursor geometry was appended). The caller **must** use
+/// this return value (not its own guess from whether a cursor is wanted) to
+/// compute where the cursor's tail begins for later cursor-only patches: the
+/// wanted-cursor decision alone does not account for the blink-visibility
+/// gate (`cursor_blink_is_visible`) applied here, and recomputing the append
+/// decision independently let the two silently disagree whenever a full
+/// rebuild happened to run during the cursor's blink-off phase (issue #432):
+/// the offset bookkeeping would then assume a cursor quad was appended when it
+/// was not, causing a later cursor-only frame to blink the cursor back on by
+/// overwriting whatever quad actually occupies that tail position — in
+/// practice the bottom-most row's selection highlight quad, since selection
+/// quads are appended in top-to-bottom row order and the bottom row's is
+/// therefore always the last one pushed before the (absent) cursor quad.
 // All parameters are required geometric and style inputs for GPU instance data generation.
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_lines)]
@@ -362,7 +519,7 @@ pub fn build_background_instances(
     frame: &BackgroundFrame<'_>,
     instances: &mut Vec<f32>,
     deco: &mut Vec<f32>,
-) -> bool {
+) -> CursorVertRange {
     let shaped_lines = frame.shaped_lines;
     let cell_width = frame.cell_width;
     let cell_height = frame.cell_height;
@@ -370,18 +527,12 @@ pub fn build_background_instances(
     let underline_offset = frame.underline_offset;
     let strikeout_offset = frame.strikeout_offset;
     let stroke_size = frame.stroke_size;
-    let show_cursor = frame.show_cursor;
-    let cursor_blink_on = frame.cursor_blink_on;
-    let cursor_pixel_pos = frame.cursor_pixel_pos;
-    let cursor_width_scale = frame.cursor_width_scale;
-    let cursor_visual_style = frame.cursor_visual_style;
     let selection = frame.selection;
     let selection_is_block = frame.selection_is_block;
     let match_highlights = frame.match_highlights;
     let command_block_hover_rows = frame.command_block_hover_rows;
     let term_width_cols = frame.term_width_cols;
     let theme = frame.theme;
-    let cursor_color_override = frame.cursor_color_override;
     let reverse_screen = frame.reverse_screen;
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
@@ -616,87 +767,38 @@ pub fn build_background_instances(
         }
     }
 
-    // --- Cursor quad (always last in deco so cursor-only patches work) ---
-    let cursor_quad_appended =
-        show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on);
-    if cursor_quad_appended {
-        let (cx, cy) = cursor_pixel_pos;
-        let cw = gl_f32_u32(cell_width) * cursor_width_scale;
-        let ch = gl_f32_u32(cell_height);
-
-        let color = cursor_f(theme, cursor_color_override);
-
-        match cursor_visual_style {
-            CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-                push_quad(deco, cx, cy, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
-                let bar_h = (ch * 0.1).max(2.0);
-                push_quad(deco, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::VerticalLineCursorBlink
-            | CursorVisualStyle::VerticalLineCursorSteady => {
-                let bar_w = (cw * 0.1).max(1.0);
-                push_quad(deco, cx, cy, cx + bar_w, cy + ch, color);
-            }
-        }
+    // --- Cursor quads (always last in deco so cursor-only patches work) ---
+    let start = deco.len();
+    push_cursor_quads(frame.cursor, cell_width, cell_height, deco);
+    CursorVertRange {
+        start,
+        len: deco.len().saturating_sub(start),
     }
-
-    cursor_quad_appended
 }
 
 // ---------------------------------------------------------------------------
 //  Build cursor-only verts
 // ---------------------------------------------------------------------------
 
-/// Build just the cursor quad for the background VBO.
+/// Build just the cursor quads for the background VBO.
 ///
-/// Returns `CURSOR_QUAD_FLOATS` floats when the cursor is visible, or an
-/// empty `Vec` when it should not be painted (cursor hidden, or blink-off).
+/// Emits exactly the floats [`build_background_instances`] would append for
+/// the same `cursor` params: `CURSOR_QUAD_FLOATS` floats for a visible solid
+/// cursor, `4 * CURSOR_QUAD_FLOATS` for a hollow one (one filled quad when the
+/// cell is too small for an interior), or an empty `Vec` when nothing should
+/// be painted (hidden, or blink-off).
 ///
 /// This is the "cheap path" used for cursor-only frame updates: instead of
 /// rebuilding the entire background VBO, the caller patches only the cursor
 /// quad region in-place via `upload_verts_sub`.
 #[must_use]
-// All parameters are required for cursor geometry: cell dimensions, screen position, cursor
-// style, and color. No subset is independently reusable.
-#[allow(clippy::too_many_arguments)]
 pub fn build_cursor_verts_only(
     cell_width: u32,
     cell_height: u32,
-    show_cursor: bool,
-    cursor_blink_on: bool,
-    cursor_pixel_pos: (f32, f32),
-    cursor_width_scale: f32,
-    cursor_visual_style: &CursorVisualStyle,
-    theme: &ThemePalette,
-    cursor_color_override: Option<(u8, u8, u8)>,
+    cursor: &CursorDrawParams,
 ) -> Vec<f32> {
     let mut verts = Vec::new();
-
-    if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
-        let (cx, cy) = cursor_pixel_pos;
-        let cw = gl_f32_u32(cell_width) * cursor_width_scale;
-        let ch = gl_f32_u32(cell_height);
-
-        let color = cursor_f(theme, cursor_color_override);
-
-        match cursor_visual_style {
-            CursorVisualStyle::BlockCursorBlink | CursorVisualStyle::BlockCursorSteady => {
-                push_quad(&mut verts, cx, cy, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::UnderlineCursorBlink | CursorVisualStyle::UnderlineCursorSteady => {
-                let bar_h = (ch * 0.1).max(2.0);
-                push_quad(&mut verts, cx, cy + ch - bar_h, cx + cw, cy + ch, color);
-            }
-            CursorVisualStyle::VerticalLineCursorBlink
-            | CursorVisualStyle::VerticalLineCursorSteady => {
-                let bar_w = (cw * 0.1).max(1.0);
-                push_quad(&mut verts, cx, cy, cx + bar_w, cy + ch, color);
-            }
-        }
-    }
-
+    push_cursor_quads(cursor, cell_width, cell_height, &mut verts);
     verts
 }
 
@@ -1831,6 +1933,7 @@ mod tests {
     use freminal_common::config::Config;
     use freminal_common::themes;
 
+    use crate::gui::colors::cursor_f;
     use crate::gui::font_manager::FontManager;
     use crate::gui::shaping::{ShapedGlyph, ShapedLine, ShapedRun};
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
@@ -1899,6 +2002,36 @@ mod tests {
     //  Background instance + decoration tests
     // -----------------------------------------------------------------------
 
+    /// A `Hidden` cursor at the origin (for tests that exercise unrelated
+    /// `BackgroundFrame` behavior).
+    fn hidden_cursor() -> CursorDrawParams {
+        CursorDrawParams {
+            appearance: CursorAppearance::Hidden,
+            col: 0.0,
+            row: 0.0,
+            color: cursor_f(&themes::CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::Off,
+        }
+    }
+
+    /// Draw params for a cursor at integer cell `(col, row)`, `x_scale` 1.0,
+    /// theme color.
+    fn cursor_params(
+        appearance: CursorAppearance,
+        pos: CursorPos,
+        blink_on: CursorBlinkPhase,
+    ) -> CursorDrawParams {
+        CursorDrawParams {
+            appearance,
+            col: gl_f32(pos.x),
+            row: gl_f32(pos.y),
+            color: cursor_f(&themes::CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on,
+        }
+    }
+
     /// Shorthand for calling `build_background_instances` with typical test
     /// defaults (no selection, `CATPPUCCIN_MOCHA`, no cursor color override).
     ///
@@ -1913,13 +2046,19 @@ mod tests {
         cursor_pos: CursorPos,
         cursor_style: &CursorVisualStyle,
     ) -> (Vec<f32>, Vec<f32>) {
-        let cursor_pixel_pos = (
-            gl_f32(cursor_pos.x) * gl_f32_u32(cell_width),
-            gl_f32(cursor_pos.y) * gl_f32_u32(cell_height),
+        let appearance = if show_cursor {
+            CursorAppearance::Solid(cursor_style.clone())
+        } else {
+            CursorAppearance::Hidden
+        };
+        let cursor = cursor_params(
+            appearance,
+            cursor_pos,
+            CursorBlinkPhase::from_blink_on(cursor_blink_on),
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        let _cursor_quad_appended = build_background_instances(
+        let _cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: lines,
                 cell_width,
@@ -1928,18 +2067,13 @@ mod tests {
                 underline_offset: 13.0,
                 strikeout_offset: 8.0,
                 stroke_size: 1.0,
-                show_cursor,
-                cursor_blink_on,
-                cursor_pixel_pos,
-                cursor_width_scale: 1.0, // cursor_width_scale (normal for tests)
-                cursor_visual_style: cursor_style,
+                cursor: &cursor,
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen: false,
             },
             &mut instances,
@@ -1961,7 +2095,7 @@ mod tests {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        let _cursor_quad_appended = build_background_instances(
+        let _cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: lines,
                 cell_width: 8,
@@ -1970,18 +2104,13 @@ mod tests {
                 underline_offset: 13.0,
                 strikeout_offset: 8.0,
                 stroke_size: 1.0,
-                show_cursor: false,
-                cursor_blink_on: false,
-                cursor_pixel_pos: (0.0, 0.0),
-                cursor_width_scale: 1.0,
-                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                cursor: &hidden_cursor(),
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen,
             },
             &mut instances,
@@ -2746,50 +2875,48 @@ mod tests {
 
     #[test]
     fn blink_visible_steady_always_true() {
-        assert!(cursor_blink_is_visible(
-            &CursorVisualStyle::BlockCursorSteady,
-            false
-        ));
-        assert!(cursor_blink_is_visible(
-            &CursorVisualStyle::BlockCursorSteady,
-            true
-        ));
-        assert!(cursor_blink_is_visible(
-            &CursorVisualStyle::UnderlineCursorSteady,
-            false
-        ));
-        assert!(cursor_blink_is_visible(
-            &CursorVisualStyle::VerticalLineCursorSteady,
-            false
-        ));
+        for phase in [CursorBlinkPhase::On, CursorBlinkPhase::Off] {
+            for style in [
+                CursorVisualStyle::BlockCursorSteady,
+                CursorVisualStyle::UnderlineCursorSteady,
+                CursorVisualStyle::VerticalLineCursorSteady,
+            ] {
+                assert!(
+                    cursor_blink_is_visible(&style, phase),
+                    "{style:?} must be visible in {phase:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn blink_visible_blinking_follows_flag() {
-        assert!(!cursor_blink_is_visible(
-            &CursorVisualStyle::BlockCursorBlink,
-            false
-        ));
-        assert!(cursor_blink_is_visible(
-            &CursorVisualStyle::BlockCursorBlink,
-            true
-        ));
-        assert!(!cursor_blink_is_visible(
-            &CursorVisualStyle::UnderlineCursorBlink,
-            false
-        ));
-        assert!(!cursor_blink_is_visible(
-            &CursorVisualStyle::VerticalLineCursorBlink,
-            false
-        ));
+    fn blink_visible_blinking_follows_phase() {
+        for style in [
+            CursorVisualStyle::BlockCursorBlink,
+            CursorVisualStyle::UnderlineCursorBlink,
+            CursorVisualStyle::VerticalLineCursorBlink,
+        ] {
+            assert!(cursor_blink_is_visible(&style, CursorBlinkPhase::On));
+            assert!(!cursor_blink_is_visible(&style, CursorBlinkPhase::Off));
+        }
+    }
+
+    #[test]
+    fn blink_phase_from_blink_on_maps_both_values() {
+        assert_eq!(CursorBlinkPhase::from_blink_on(true), CursorBlinkPhase::On);
+        assert_eq!(
+            CursorBlinkPhase::from_blink_on(false),
+            CursorBlinkPhase::Off
+        );
     }
 
     // -----------------------------------------------------------------------
     //  build_cursor_verts_only
     // -----------------------------------------------------------------------
 
-    /// Test helper: wraps `build_cursor_verts_only`, converting a `CursorPos`
-    /// to pixel `(f32, f32)` using the same formula the production caller uses.
+    /// Test helper: wraps `build_cursor_verts_only` for a cursor at integer
+    /// cell `cursor_pos` with `x_scale` 1.0. `show_cursor == false` maps to
+    /// `CursorAppearance::Hidden`.
     #[allow(clippy::too_many_arguments)]
     fn cursor_verts_test(
         cell_width: u32,
@@ -2801,21 +2928,18 @@ mod tests {
         theme: &ThemePalette,
         cursor_color_override: Option<(u8, u8, u8)>,
     ) -> Vec<f32> {
-        let cursor_pixel_pos = (
-            gl_f32(cursor_pos.x) * gl_f32_u32(cell_width),
-            gl_f32(cursor_pos.y) * gl_f32_u32(cell_height),
+        let appearance = if show_cursor {
+            CursorAppearance::Solid(cursor_visual_style.clone())
+        } else {
+            CursorAppearance::Hidden
+        };
+        let mut cursor = cursor_params(
+            appearance,
+            cursor_pos,
+            CursorBlinkPhase::from_blink_on(cursor_blink_on),
         );
-        build_cursor_verts_only(
-            cell_width,
-            cell_height,
-            show_cursor,
-            cursor_blink_on,
-            cursor_pixel_pos,
-            1.0, // cursor_width_scale (normal for tests)
-            cursor_visual_style,
-            theme,
-            cursor_color_override,
-        )
+        cursor.color = cursor_f(theme, cursor_color_override);
+        build_cursor_verts_only(cell_width, cell_height, &cursor)
     }
 
     /// When the cursor is hidden (`show_cursor = false`), the function must
@@ -2946,7 +3070,7 @@ mod tests {
 
     /// Regression for issue #432: a full rebuild that happens to run during
     /// the cursor's blink-*off* phase (a blinking cursor style, not steady)
-    /// must report `cursor_quad_appended == false` and must NOT reserve
+    /// must report a zero-length cursor range and must NOT reserve
     /// `CURSOR_QUAD_FLOATS` tail floats for a cursor quad that was never
     /// actually pushed.
     ///
@@ -2966,7 +3090,16 @@ mod tests {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
 
-        let cursor_quad_appended = build_background_instances(
+        // The cursor is structurally supposed to show (a solid appearance),
+        // but this frame lands on the blink-off half of the cycle, and the
+        // style is a *blinking* one, so blink phase matters (a steady style
+        // would ignore the phase entirely).
+        let cursor = cursor_params(
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+            CursorPos { x: 0, y: 0 },
+            CursorBlinkPhase::Off,
+        );
+        let cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: std::slice::from_ref(&line),
                 cell_width: 8,
@@ -2975,15 +3108,7 @@ mod tests {
                 underline_offset: 13.0,
                 strikeout_offset: 8.0,
                 stroke_size: 1.0,
-                // The cursor is structurally supposed to show...
-                show_cursor: true,
-                // ...but this frame lands on the blink-off half of the cycle...
-                cursor_blink_on: false,
-                cursor_pixel_pos: (0.0, 0.0),
-                cursor_width_scale: 1.0,
-                // ...and the style is a *blinking* one, so blink phase matters
-                // (a steady style would ignore `cursor_blink_on` entirely).
-                cursor_visual_style: &CursorVisualStyle::BlockCursorBlink,
+                cursor: &cursor,
                 // A single-row selection spanning the whole shaped line.
                 selection: Some((0, 0, 2, 0)),
                 selection_is_block: false,
@@ -2991,15 +3116,14 @@ mod tests {
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen: false,
             },
             &mut instances,
             &mut deco,
         );
 
-        assert!(
-            !cursor_quad_appended,
+        assert_eq!(
+            cursor_range.len, 0,
             "blink-off phase with a blinking cursor style must not append a cursor quad"
         );
         assert_eq!(
@@ -3023,6 +3147,446 @@ mod tests {
             "the sole quad in deco_verts must be the selection highlight, not a cursor quad: \
              got {actual_color:?}, expected {expected_color:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    //  Cursor appearance geometry (Task 127.3)
+    // -----------------------------------------------------------------------
+
+    /// Fractional-position params used by the pinned-geometry tests: cell
+    /// `(2.3, 3.7)` (mid-trail), theme color, caller-chosen scale.
+    fn fractional_params(
+        appearance: CursorAppearance,
+        x_scale: f32,
+        blink_on: CursorBlinkPhase,
+    ) -> CursorDrawParams {
+        CursorDrawParams {
+            appearance,
+            col: 2.3,
+            row: 3.7,
+            color: cursor_f(&themes::CATPPUCCIN_MOCHA, None),
+            x_scale,
+            blink_on,
+        }
+    }
+
+    /// Split a vertex buffer into `(x0, y0, x1, y1)` rectangles, one per
+    /// quad, using the documented `push_quad` vertex order (vertex 0 is the
+    /// top-left corner, vertex 1 the top-right, vertex 2 the bottom-left,
+    /// vertex 4 the bottom-right).
+    fn quad_rects(verts: &[f32]) -> Vec<(f32, f32, f32, f32)> {
+        let (quads, rest) = verts.as_chunks::<CURSOR_QUAD_FLOATS>();
+        assert_eq!(rest.len(), 0, "whole quads only");
+        quads
+            .iter()
+            .map(|q| {
+                (
+                    q[0],
+                    q[1],
+                    q[DECO_VERTEX_FLOATS],
+                    q[4 * DECO_VERTEX_FLOATS + 1],
+                )
+            })
+            .collect()
+    }
+
+    fn rects_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+    }
+
+    /// `Solid` output must be bit-for-bit what the pre-127.3 builders produced.
+    ///
+    /// The expected `[x0, y0, x1, y1]` bit patterns were captured from
+    /// `build_cursor_verts_only` BEFORE the refactor (8x16 cells, cursor at
+    /// cell `(2.3, 3.7)` computed as `col * cell_w * scale` /
+    /// `row * cell_h`, blink on, `CATPPUCCIN_MOCHA`, no color override).
+    #[test]
+    fn solid_output_is_bit_identical_to_pre_refactor_capture() {
+        let cases: [(f32, CursorVisualStyle, [u32; 4]); 12] = [
+            (
+                1.0,
+                CursorVisualStyle::BlockCursorBlink,
+                [0x4193_3333, 0x426C_CCCD, 0x41D3_3333, 0x4296_6666],
+            ),
+            (
+                1.0,
+                CursorVisualStyle::BlockCursorSteady,
+                [0x4193_3333, 0x426C_CCCD, 0x41D3_3333, 0x4296_6666],
+            ),
+            (
+                1.0,
+                CursorVisualStyle::UnderlineCursorBlink,
+                [0x4193_3333, 0x4292_6666, 0x41D3_3333, 0x4296_6666],
+            ),
+            (
+                1.0,
+                CursorVisualStyle::UnderlineCursorSteady,
+                [0x4193_3333, 0x4292_6666, 0x41D3_3333, 0x4296_6666],
+            ),
+            (
+                1.0,
+                CursorVisualStyle::VerticalLineCursorBlink,
+                [0x4193_3333, 0x426C_CCCD, 0x419B_3333, 0x4296_6666],
+            ),
+            (
+                1.0,
+                CursorVisualStyle::VerticalLineCursorSteady,
+                [0x4193_3333, 0x426C_CCCD, 0x419B_3333, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::BlockCursorBlink,
+                [0x4213_3333, 0x426C_CCCD, 0x4253_3333, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::BlockCursorSteady,
+                [0x4213_3333, 0x426C_CCCD, 0x4253_3333, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::UnderlineCursorBlink,
+                [0x4213_3333, 0x4292_6666, 0x4253_3333, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::UnderlineCursorSteady,
+                [0x4213_3333, 0x4292_6666, 0x4253_3333, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::VerticalLineCursorBlink,
+                [0x4213_3333, 0x426C_CCCD, 0x4219_9999, 0x4296_6666],
+            ),
+            (
+                2.0,
+                CursorVisualStyle::VerticalLineCursorSteady,
+                [0x4213_3333, 0x426C_CCCD, 0x4219_9999, 0x4296_6666],
+            ),
+        ];
+        let color = cursor_f(&themes::CATPPUCCIN_MOCHA, None);
+
+        for (scale, style, bits) in cases {
+            let [x0, y0, x1, y1] = bits.map(f32::from_bits);
+            let [r, g, b, a] = color;
+            // Independently spelled-out vertex layout (two triangles).
+            let expected = [
+                x0, y0, r, g, b, a, x1, y0, r, g, b, a, x0, y1, r, g, b, a, x1, y0, r, g, b, a, x1,
+                y1, r, g, b, a, x0, y1, r, g, b, a,
+            ];
+            let params = fractional_params(
+                CursorAppearance::Solid(style.clone()),
+                scale,
+                CursorBlinkPhase::On,
+            );
+            let actual = build_cursor_verts_only(8, 16, &params);
+            let actual_bits: Vec<u32> = actual.iter().map(|f| f.to_bits()).collect();
+            let expected_bits: Vec<u32> = expected.iter().map(|f| f.to_bits()).collect();
+            assert_eq!(
+                actual_bits, expected_bits,
+                "{style:?} at x_scale {scale} drifted from the pre-refactor output"
+            );
+        }
+    }
+
+    /// `pixel_origin` is `(col * cell_w * x_scale, row * cell_h)`, written out
+    /// independently here, and the cursor geometry is anchored on exactly it:
+    /// a block cursor's top-left vertex IS the origin. The damage path derives
+    /// its rect from the same call, so the two cannot disagree.
+    #[test]
+    fn pixel_origin_is_the_block_cursors_top_left_and_scales_x_only() {
+        for scale in [1.0_f32, 2.0] {
+            let params = fractional_params(
+                CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+                scale,
+                CursorBlinkPhase::On,
+            );
+            let (ox, oy) = params.pixel_origin(8, 16);
+            assert_eq!(ox.to_bits(), (2.3_f32 * 8.0 * scale).to_bits());
+            assert_eq!(oy.to_bits(), (3.7_f32 * 16.0).to_bits());
+
+            let verts = build_cursor_verts_only(8, 16, &params);
+            let rects = quad_rects(&verts);
+            assert_eq!(rects.len(), 1);
+            assert_eq!(rects[0].0.to_bits(), ox.to_bits(), "x at scale {scale}");
+            assert_eq!(rects[0].1.to_bits(), oy.to_bits(), "y at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn pixel_origin_is_independent_of_appearance_and_blink_phase() {
+        let shown = fractional_params(
+            CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+            1.0,
+            CursorBlinkPhase::On,
+        );
+        let hidden = fractional_params(CursorAppearance::Hidden, 1.0, CursorBlinkPhase::Off);
+        assert_eq!(shown.pixel_origin(9, 18), hidden.pixel_origin(9, 18));
+    }
+
+    #[test]
+    fn hidden_emits_nothing() {
+        for phase in [CursorBlinkPhase::On, CursorBlinkPhase::Off] {
+            let params = fractional_params(CursorAppearance::Hidden, 1.0, phase);
+            assert!(
+                build_cursor_verts_only(8, 16, &params).is_empty(),
+                "Hidden must emit no verts ({phase:?})"
+            );
+            let mut out = vec![7.0];
+            push_cursor_quads(&params, 8, 16, &mut out);
+            assert_eq!(out, vec![7.0], "Hidden must not touch the buffer");
+        }
+    }
+
+    /// Hollow draws four quads that tile the border exactly: no pair
+    /// overlaps and their areas sum to `outer - interior`.
+    #[test]
+    fn hollow_emits_four_non_overlapping_quads() {
+        // (cell_w, cell_h, x_scale, expected thickness)
+        for (cell_w, cell_h, scale, t) in [
+            (8_u32, 16_u32, 1.0_f32, 1.0_f32), // 0.8 -> max 1.0
+            (8, 16, 2.0, 2.0),                 // drawn width 16 -> 1.6 -> 2
+            (20, 40, 1.0, 2.0),                // 2.0
+            (30, 40, 1.0, 3.0),                // 3.0
+        ] {
+            // Integer origin so the area sum is exact.
+            let params = CursorDrawParams {
+                appearance: CursorAppearance::Hollow,
+                col: 1.0,
+                row: 2.0,
+                color: [0.1, 0.2, 0.3, 1.0],
+                x_scale: scale,
+                blink_on: CursorBlinkPhase::On,
+            };
+            let verts = build_cursor_verts_only(cell_w, cell_h, &params);
+            assert_eq!(verts.len(), 4 * CURSOR_QUAD_FLOATS);
+
+            let rects = quad_rects(&verts);
+            assert_eq!(rects.len(), 4);
+            for (i, a) in rects.iter().enumerate() {
+                for b in &rects[i + 1..] {
+                    assert!(
+                        !rects_overlap(*a, *b),
+                        "hollow quads overlap: {a:?} vs {b:?} (cell {cell_w}x{cell_h} x{scale})"
+                    );
+                }
+            }
+
+            let w = gl_f32_u32(cell_w) * scale;
+            let h = gl_f32_u32(cell_h);
+            let area: f32 = rects.iter().map(|r| (r.2 - r.0) * (r.3 - r.1)).sum();
+            let interior = 2.0_f32.mul_add(-t, w) * 2.0_f32.mul_add(-t, h);
+            let expected_area = w.mul_add(h, -interior);
+            assert!(
+                (area - expected_area).abs() < 1e-3,
+                "border area {area} != {expected_area} (thickness {t}, cell {cell_w}x{cell_h} x{scale})"
+            );
+
+            // Every quad stays inside the cell.
+            // Origin is (col 1.0 * cell_w * scale, row 2.0 * cell_h).
+            let (ox, oy) = (w, 2.0 * h);
+            for r in &rects {
+                assert!(r.0 >= ox && r.2 <= ox + w && r.1 >= oy && r.3 <= oy + h);
+            }
+            // Top quad is `t` tall and spans the full width.
+            assert!(((rects[0].3 - rects[0].1) - t).abs() < 1e-4);
+            assert!(((rects[0].2 - rects[0].0) - w).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn hollow_ignores_blink_phase() {
+        let on = build_cursor_verts_only(
+            8,
+            16,
+            &fractional_params(CursorAppearance::Hollow, 1.0, CursorBlinkPhase::On),
+        );
+        let off = build_cursor_verts_only(
+            8,
+            16,
+            &fractional_params(CursorAppearance::Hollow, 1.0, CursorBlinkPhase::Off),
+        );
+        assert_eq!(on.len(), 4 * CURSOR_QUAD_FLOATS);
+        assert_eq!(on, off, "hollow cursor is steady");
+    }
+
+    /// A cell too small to have an interior falls back to one filled quad.
+    #[test]
+    fn hollow_tiny_cell_degrades_to_single_filled_quad() {
+        // 2x2: t = 1, 2t >= 2 on both axes. 8x2: width is fine, height is not.
+        // 2x16: height is fine, width is not.
+        for (cell_w, cell_h) in [(2_u32, 2_u32), (8, 2), (2, 16)] {
+            let params = CursorDrawParams {
+                appearance: CursorAppearance::Hollow,
+                col: 1.0,
+                row: 1.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+                x_scale: 1.0,
+                blink_on: CursorBlinkPhase::On,
+            };
+            let verts = build_cursor_verts_only(cell_w, cell_h, &params);
+            assert_eq!(
+                verts.len(),
+                CURSOR_QUAD_FLOATS,
+                "{cell_w}x{cell_h} cell must degrade to one quad"
+            );
+            let rects = quad_rects(&verts);
+            let w = gl_f32_u32(cell_w);
+            let h = gl_f32_u32(cell_h);
+            assert_eq!(rects[0], (w, h, w + w, h + h), "quad must cover the cell");
+        }
+    }
+
+    /// The full-rebuild builder and the cursor-only builder emit identical
+    /// cursor floats for identical params, for every appearance.
+    #[test]
+    fn background_and_cursor_only_builders_agree_for_all_appearances() {
+        let mut appearances = vec![CursorAppearance::Hidden, CursorAppearance::Hollow];
+        for style in [
+            CursorVisualStyle::BlockCursorBlink,
+            CursorVisualStyle::BlockCursorSteady,
+            CursorVisualStyle::UnderlineCursorBlink,
+            CursorVisualStyle::UnderlineCursorSteady,
+            CursorVisualStyle::VerticalLineCursorBlink,
+            CursorVisualStyle::VerticalLineCursorSteady,
+        ] {
+            appearances.push(CursorAppearance::Solid(style));
+        }
+
+        for appearance in appearances {
+            for phase in [CursorBlinkPhase::On, CursorBlinkPhase::Off] {
+                for scale in [1.0_f32, 2.0] {
+                    let params = fractional_params(appearance.clone(), scale, phase);
+                    let only = build_cursor_verts_only(8, 16, &params);
+
+                    let mut instances = Vec::new();
+                    let mut deco = Vec::new();
+                    let range = build_background_instances(
+                        &BackgroundFrame {
+                            shaped_lines: &[],
+                            cell_width: 8,
+                            cell_height: 16,
+                            ascent: 14.0,
+                            underline_offset: 13.0,
+                            strikeout_offset: 8.0,
+                            stroke_size: 1.0,
+                            cursor: &params,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
+                            theme: &themes::CATPPUCCIN_MOCHA,
+                            reverse_screen: false,
+                        },
+                        &mut instances,
+                        &mut deco,
+                    );
+
+                    let label = format!("{appearance:?} {phase:?} x{scale}");
+                    let a: Vec<u32> = deco.iter().map(|f| f.to_bits()).collect();
+                    let b: Vec<u32> = only.iter().map(|f| f.to_bits()).collect();
+                    assert_eq!(a, b, "builders disagree for {label}");
+                    assert_eq!(
+                        range,
+                        CursorVertRange {
+                            start: 0,
+                            len: only.len()
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    /// `CursorVertRange` locates the cursor floats exactly, including after
+    /// other (selection) quads, for every appearance.
+    #[test]
+    fn cursor_vert_range_is_exact_for_all_appearances() {
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
+        let build = |cursor: &CursorDrawParams| {
+            let mut instances = Vec::new();
+            let mut deco = Vec::new();
+            let range = build_background_instances(
+                &BackgroundFrame {
+                    shaped_lines: std::slice::from_ref(&line),
+                    cell_width: 8,
+                    cell_height: 16,
+                    ascent: 14.0,
+                    underline_offset: 13.0,
+                    strikeout_offset: 8.0,
+                    stroke_size: 1.0,
+                    cursor,
+                    selection: Some((0, 0, 2, 0)),
+                    selection_is_block: false,
+                    match_highlights: &[],
+                    command_block_hover_rows: None,
+                    term_width_cols: 0,
+                    theme: &themes::CATPPUCCIN_MOCHA,
+                    reverse_screen: false,
+                },
+                &mut instances,
+                &mut deco,
+            );
+            (range, deco)
+        };
+
+        // Baseline: the non-cursor floats (one selection quad).
+        let (hidden_range, prefix) = build(&fractional_params(
+            CursorAppearance::Hidden,
+            1.0,
+            CursorBlinkPhase::On,
+        ));
+        assert_eq!(prefix.len(), CURSOR_QUAD_FLOATS);
+        assert_eq!(
+            hidden_range,
+            CursorVertRange {
+                start: prefix.len(),
+                len: 0
+            }
+        );
+
+        let cases = [
+            (
+                CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+                CursorBlinkPhase::Off,
+                CURSOR_QUAD_FLOATS,
+            ),
+            (
+                CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+                CursorBlinkPhase::On,
+                CURSOR_QUAD_FLOATS,
+            ),
+            (
+                CursorAppearance::Solid(CursorVisualStyle::BlockCursorBlink),
+                CursorBlinkPhase::Off,
+                0,
+            ),
+            (
+                CursorAppearance::Hollow,
+                CursorBlinkPhase::Off,
+                4 * CURSOR_QUAD_FLOATS,
+            ),
+        ];
+        for (appearance, phase, expected_len) in cases {
+            let params = fractional_params(appearance.clone(), 1.0, phase);
+            let (range, deco) = build(&params);
+            assert_eq!(
+                range,
+                CursorVertRange {
+                    start: prefix.len(),
+                    len: expected_len
+                },
+                "{appearance:?} {phase:?}"
+            );
+            assert_eq!(deco.len(), range.start + range.len);
+            assert_eq!(deco[..range.start], prefix[..], "prefix must be untouched");
+            assert_eq!(
+                deco[range.start..],
+                build_cursor_verts_only(8, 16, &params)[..],
+                "range must contain exactly the cursor-only floats"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3322,7 +3886,7 @@ mod tests {
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        let cursor_quad_appended = build_background_instances(
+        let cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
@@ -3331,24 +3895,19 @@ mod tests {
                 underline_offset: 13.0,
                 strikeout_offset: 8.0,
                 stroke_size: 1.0,
-                show_cursor: false,
-                cursor_blink_on: false,
-                cursor_pixel_pos: (0.0, 0.0),
-                cursor_width_scale: 1.0,
-                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                cursor: &hidden_cursor(),
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: Some((0, 0)),
                 term_width_cols: 80,
                 theme: &themes::CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen: false,
             },
             &mut instances,
             &mut deco,
         );
-        assert!(!cursor_quad_appended, "show_cursor was false");
+        assert_eq!(cursor_range.len, 0, "cursor was Hidden");
 
         // The only deco quad produced (no cursor, no underlines, no
         // selection, no search highlights) is the hover-tint quad.
@@ -3386,7 +3945,7 @@ mod tests {
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        let cursor_quad_appended = build_background_instances(
+        let cursor_range = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
@@ -3395,24 +3954,19 @@ mod tests {
                 underline_offset: 13.0,
                 strikeout_offset: 8.0,
                 stroke_size: 1.0,
-                show_cursor: false,
-                cursor_blink_on: false,
-                cursor_pixel_pos: (0.0, 0.0),
-                cursor_width_scale: 1.0,
-                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                cursor: &hidden_cursor(),
                 selection: None,
                 selection_is_block: false,
                 match_highlights: &[],
                 command_block_hover_rows: Some((0, 0)),
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
-                cursor_color_override: None,
                 reverse_screen: false,
             },
             &mut instances,
             &mut deco,
         );
-        assert!(!cursor_quad_appended, "show_cursor was false");
+        assert_eq!(cursor_range.len, 0, "cursor was Hidden");
         assert!(
             deco.is_empty(),
             "expected no deco quads when term_width_cols == 0"

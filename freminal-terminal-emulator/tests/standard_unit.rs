@@ -7,7 +7,6 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 use freminal_terminal_emulator::ansi_components::dcs::DcsParser;
 use freminal_terminal_emulator::ansi_components::standard::StandardParser;
-use freminal_terminal_emulator::ansi_components::tracer::SequenceTraceable;
 
 #[test]
 fn standard_plain_text_does_not_panic() {
@@ -21,9 +20,9 @@ fn standard_plain_text_does_not_panic() {
 #[test]
 fn standard_esc_starts_control_sequence() {
     let mut p = StandardParser::default();
-    let _ = p.push(0x1b);
-    // Ensure internal trace has ESC recorded
-    assert!(p.current_trace_str().contains("\x1b") || !p.current_trace_str().is_empty());
+    // The real parser consumes the ESC itself; the sub-parser sees what follows.
+    let _ = p.push(b'(');
+    assert_eq!(p.trace_str(), "(");
 }
 
 // ── tmux-aware ST detection ──────────────────────────────────────────

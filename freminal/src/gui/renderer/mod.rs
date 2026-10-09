@@ -83,9 +83,9 @@ pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};
 pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 pub use vertex::{
-    BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
-    build_background_instances, build_cursor_verts_only, build_foreground_instances,
-    build_image_verts,
+    BackgroundFrame, CURSOR_QUAD_FLOATS, CursorBlinkPhase, CursorDrawParams, CursorVertRange,
+    FgRenderOptions, ImageDrawEntry, MatchHighlight, build_background_instances,
+    build_cursor_verts_only, build_foreground_instances, build_image_verts,
 };
 
 /// Per-window GL state for the fully-owned toast overlay (issue #433).
@@ -201,7 +201,7 @@ impl PaneDamageRect {
     ///   flip the Y axis into GL's bottom-left origin.
     /// - `cursor_cells`: each `(px_x, px_y, w, h)` is a changed cell in
     ///   physical pixels **relative to the viewport top-left**, top-left
-    ///   origin (matching `cursor_pixel_pos` / cell dimensions in `show`).
+    ///   origin (matching `CursorDrawParams::pixel_origin` / cell dimensions in `show`).
     ///   Usually one entry (blink) or two (a move: old + new cell).
     ///
     /// Returns `None` when there are no changed cells (nothing to present).

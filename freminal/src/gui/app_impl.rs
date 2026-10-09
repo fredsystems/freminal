@@ -33,6 +33,11 @@ use super::pointer_motion::{
 use super::renderer::{WindowPostRenderer, gl_facade::Gl};
 use super::rendering;
 use super::tabs::{Tab, TabManager};
+use super::terminal::cursor_appearance::{
+    CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
+    cursor_focus, resolve_cursor_appearance,
+};
+use super::terminal::input::PaneFocus;
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
 use super::visual_preview::ShaderErrorRoute;
@@ -85,30 +90,42 @@ const fn settings_owner_close_decision(
 /// wake this frame.
 ///
 /// A blinking cursor only needs to be re-rendered on a timer while it is
-/// actually visible on screen. The drawing side computes visibility as
-/// `snap.show_cursor && !is_echo_off && is_active_pane`
-/// (`terminal/widget.rs`'s `effective_show_cursor`); the repaint scheduler
-/// MUST gate the blink wake on the same condition, or a full-screen TUI that
-/// hides the cursor via DECTCEM (`\e[?25l`) — btop, htop, vim, less — keeps
-/// the default blink *style* and makes the terminal wake ~2x/sec forever to
-/// redraw an unchanged, cursor-hidden screen (a real idle-CPU drain).
+/// actually blinking on screen. The drawing side
+/// (`terminal/widget.rs`'s `show`) resolves a [`CursorAppearance`] from the
+/// DECTCEM state, echo-off, pane/window focus and the user's unfocused-cursor
+/// preference, and only a [`CursorAppearance::Solid`] cursor with a blink
+/// style in a [`CursorFocus::Focused`] pane honours its blink cycle; every
+/// other appearance is steady. The repaint scheduler MUST gate the blink wake
+/// on that same resolved appearance, or a full-screen TUI that hides the
+/// cursor via DECTCEM (`\e[?25l`) — btop, htop, vim, less — keeps the default
+/// blink *style* and makes the terminal wake ~2x/sec forever to redraw an
+/// unchanged, cursor-hidden screen (a real idle-CPU drain). The same applies
+/// to an inactive pane or an unfocused window, whose cursor is steady.
 ///
-/// Returns `true` only when the cursor style is a blink variant AND the
-/// cursor is actually visible (DECTCEM-shown, this is the active pane, and
-/// password-echo-off is not hiding it).
-const fn cursor_blink_wants_repaint(
-    style: &freminal_common::cursor::CursorVisualStyle,
-    show_cursor: bool,
-    is_active: bool,
-    is_echo_off: bool,
-) -> bool {
+/// Returns `true` only when `appearance` is a solid blink-style cursor AND
+/// `focus` is [`CursorFocus::Focused`].
+const fn cursor_blink_wants_repaint(appearance: &CursorAppearance, focus: CursorFocus) -> bool {
+    let CursorAppearance::Solid(style) = appearance else {
+        return false;
+    };
     let is_blink_style = matches!(
         style,
         freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
             | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
             | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
     );
-    is_blink_style && show_cursor && is_active && !is_echo_off
+    is_blink_style && matches!(focus, CursorFocus::Focused)
+}
+
+/// Whether the cursor described by `inputs` needs the periodic blink wake.
+///
+/// The scheduler-side counterpart of the drawing side's appearance
+/// resolution: it resolves the appearance through the same
+/// [`resolve_cursor_appearance`] (so the DECTCEM / echo-off / focus rules have
+/// one definition) and asks [`cursor_blink_wants_repaint`]. The caller builds
+/// `inputs.focus` with the shared `cursor_focus`.
+fn cursor_wants_blink_wake(inputs: &CursorAppearanceInputs) -> bool {
+    cursor_blink_wants_repaint(&resolve_cursor_appearance(inputs), inputs.focus)
 }
 
 /// #459 item 9: whether pointer motion this frame must force a full present.
@@ -2858,6 +2875,7 @@ impl freminal_windowing::App for FreminalGui {
                             &self.binding_map,
                             is_echo_off,
                             is_active,
+                            WindowFocus::from_bool(window_focused),
                             pane_id,
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
@@ -3055,22 +3073,44 @@ impl freminal_windowing::App for FreminalGui {
                 //
                 // A blink-style cursor only needs the periodic ~500ms wake
                 // when the cursor is ACTUALLY on screen — i.e. exactly the
-                // condition the drawing side gates on (`effective_show_cursor`
-                // in `terminal/widget.rs`: `snap.show_cursor && !is_echo_off
-                // && is_active_pane`). Scheduling the wake off the configured
+                // condition the drawing side gates on (the appearance resolved
+                // by `resolve_cursor_appearance` in
+                // `terminal/cursor_appearance.rs` from DECTCEM visibility, echo
+                // state, pane/window focus, and the configured style; the
+                // wake is needed only when that appearance is a blinking
+                // `Solid` one). Scheduling the wake off the configured
                 // cursor *style* alone (ignoring `show_cursor`) is a real
                 // over-repaint bug: a full-screen TUI that hides the cursor
                 // via DECTCEM (`\e[?25l`) — btop, vim, htop, less, … — keeps
                 // the default blink *style*, so the terminal wakes ~2x/sec to
                 // redraw an unchanged, cursor-hidden screen forever. Gating on
                 // the real cursor visibility lets those idle-at-hidden-cursor
-                // frames drop to zero.
-                let cursor_blink_wants_repaint = cursor_blink_wants_repaint(
-                    &pane_snap.cursor_visual_style,
-                    pane_snap.show_cursor,
-                    is_active,
-                    is_echo_off,
-                );
+                // frames drop to zero. The same resolved appearance also stops
+                // an inactive pane or unfocused window from waking: their
+                // cursor is steady.
+                //
+                // The focus is derived by the one shared rule,
+                // `terminal::cursor_appearance::cursor_focus` (an unfocused
+                // window wins over an inactive pane), and the appearance by
+                // the one shared `resolve_cursor_appearance`; this gate keeps
+                // no copy of either. The configured `unfocused_style` is
+                // passed through for fidelity with the drawing side, but the
+                // wake decision never depends on it: every non-`Focused`
+                // focus is steady whatever the style.
+                let cursor_blink_wants_repaint = cursor_wants_blink_wake(&CursorAppearanceInputs {
+                    snapshot_visible: CursorVisibility::from_bool(pane_snap.show_cursor),
+                    echo: EchoState::from_echo_off(is_echo_off),
+                    focus: cursor_focus(
+                        if is_active {
+                            PaneFocus::Active
+                        } else {
+                            PaneFocus::Inactive
+                        },
+                        WindowFocus::from_bool(window_focused),
+                    ),
+                    style: pane_snap.cursor_visual_style.clone(),
+                    unfocused_style: self.config.cursor.unfocused_style,
+                });
                 // Honour a content change only on the first observation of a
                 // genuinely-new snapshot (issue #439 fix #4). Re-reading the
                 // same published `Arc` on a later frame sees the same
@@ -4900,72 +4940,163 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, pointer_forces_full_present,
-        settings_owner_close_decision,
+        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, cursor_wants_blink_wake,
+        pointer_forces_full_present, settings_owner_close_decision,
     };
     use crate::gui::frame_damage::{self, PaneDamageInput};
     use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
+    use crate::gui::terminal::cursor_appearance::{
+        CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
+    };
+    use freminal_common::config::UnfocusedCursorStyle;
     use freminal_common::cursor::CursorVisualStyle;
 
+    /// Ask the scheduler gate through the same entry point the call site uses.
+    fn wants_repaint(
+        style: &CursorVisualStyle,
+        visibility: CursorVisibility,
+        echo: EchoState,
+        focus: CursorFocus,
+        unfocused_style: UnfocusedCursorStyle,
+    ) -> bool {
+        cursor_wants_blink_wake(&CursorAppearanceInputs {
+            snapshot_visible: visibility,
+            echo,
+            focus,
+            style: style.clone(),
+            unfocused_style,
+        })
+    }
+
     #[test]
-    fn blink_cursor_wants_repaint_only_when_actually_visible() {
-        // Visible, active, echo on, blink style -> wants the ~500ms wake.
-        assert!(cursor_blink_wants_repaint(
+    fn focused_blink_cursor_wants_repaint() {
+        assert!(wants_repaint(
             &CursorVisualStyle::BlockCursorBlink,
-            true,
-            true,
-            false
+            CursorVisibility::Shown,
+            EchoState::Normal,
+            CursorFocus::Focused,
+            UnfocusedCursorStyle::Hollow,
         ));
-        // DECTCEM-hidden (show_cursor false) -> NO wake. This is the btop /
-        // full-screen-TUI case: the fix. Style is still blink, but the
-        // cursor is hidden, so we must not wake ~2x/sec.
-        assert!(!cursor_blink_wants_repaint(
+    }
+
+    #[test]
+    fn hidden_cursor_never_wants_repaint() {
+        // DECTCEM-hidden: the btop / full-screen-TUI case. Style is still
+        // blink, but the cursor is hidden, so we must not wake ~2x/sec.
+        assert!(!wants_repaint(
             &CursorVisualStyle::BlockCursorBlink,
-            false,
-            true,
-            false
+            CursorVisibility::Hidden,
+            EchoState::Normal,
+            CursorFocus::Focused,
+            UnfocusedCursorStyle::Hollow,
         ));
-        // Not the active pane -> no wake (only the active pane draws a cursor).
-        assert!(!cursor_blink_wants_repaint(
-            &CursorVisualStyle::BlockCursorBlink,
-            true,
-            false,
-            false
-        ));
+    }
+
+    #[test]
+    fn echo_off_cursor_never_wants_repaint() {
         // Password echo-off hides the cursor -> no wake.
-        assert!(!cursor_blink_wants_repaint(
+        assert!(!wants_repaint(
             &CursorVisualStyle::BlockCursorBlink,
-            true,
-            true,
-            true
+            CursorVisibility::Shown,
+            EchoState::EchoOff,
+            CursorFocus::Focused,
+            UnfocusedCursorStyle::Hollow,
+        ));
+    }
+
+    #[test]
+    fn inactive_pane_never_wants_repaint_for_any_unfocused_style() {
+        for unfocused_style in [
+            UnfocusedCursorStyle::Hollow,
+            UnfocusedCursorStyle::Unchanged,
+            UnfocusedCursorStyle::Hidden,
+        ] {
+            assert!(
+                !wants_repaint(
+                    &CursorVisualStyle::BlockCursorBlink,
+                    CursorVisibility::Shown,
+                    EchoState::Normal,
+                    CursorFocus::InactivePane,
+                    unfocused_style,
+                ),
+                "inactive pane with {unfocused_style:?} must not request a blink wake"
+            );
+        }
+    }
+
+    #[test]
+    fn unfocused_window_never_wants_repaint_for_any_unfocused_style() {
+        // `Unchanged` keeps the shape but forces it steady, so even that must
+        // not wake: an unfocused window stops waking for blinks.
+        for unfocused_style in [
+            UnfocusedCursorStyle::Hollow,
+            UnfocusedCursorStyle::Unchanged,
+            UnfocusedCursorStyle::Hidden,
+        ] {
+            assert!(
+                !wants_repaint(
+                    &CursorVisualStyle::BlockCursorBlink,
+                    CursorVisibility::Shown,
+                    EchoState::Normal,
+                    CursorFocus::UnfocusedWindow,
+                    unfocused_style,
+                ),
+                "unfocused window with {unfocused_style:?} must not request a blink wake"
+            );
+        }
+    }
+
+    #[test]
+    fn hollow_appearance_never_wants_repaint_even_if_focus_were_focused() {
+        // The gate keys on the appearance, not only on focus: a hollow cursor
+        // is steady.
+        assert!(!cursor_blink_wants_repaint(
+            &CursorAppearance::Hollow,
+            CursorFocus::Focused
+        ));
+        assert!(!cursor_blink_wants_repaint(
+            &CursorAppearance::Hidden,
+            CursorFocus::Focused
         ));
     }
 
     #[test]
     fn non_blink_cursor_never_wants_blink_repaint() {
         // A steady (non-blink) cursor never needs the periodic wake, even
-        // when fully visible.
+        // when fully visible and focused.
         for style in [
             CursorVisualStyle::BlockCursorSteady,
             CursorVisualStyle::UnderlineCursorSteady,
             CursorVisualStyle::VerticalLineCursorSteady,
         ] {
             assert!(
-                !cursor_blink_wants_repaint(&style, true, true, false),
+                !wants_repaint(
+                    &style,
+                    CursorVisibility::Shown,
+                    EchoState::Normal,
+                    CursorFocus::Focused,
+                    UnfocusedCursorStyle::Hollow,
+                ),
                 "steady style {style:?} must not request a blink wake"
             );
         }
     }
 
     #[test]
-    fn each_blink_style_variant_wants_repaint_when_visible() {
+    fn each_blink_style_variant_wants_repaint_when_focused_and_visible() {
         for style in [
             CursorVisualStyle::BlockCursorBlink,
             CursorVisualStyle::UnderlineCursorBlink,
             CursorVisualStyle::VerticalLineCursorBlink,
         ] {
             assert!(
-                cursor_blink_wants_repaint(&style, true, true, false),
+                wants_repaint(
+                    &style,
+                    CursorVisibility::Shown,
+                    EchoState::Normal,
+                    CursorFocus::Focused,
+                    UnfocusedCursorStyle::Hollow,
+                ),
                 "blink style {style:?} must request a wake when visible"
             );
         }

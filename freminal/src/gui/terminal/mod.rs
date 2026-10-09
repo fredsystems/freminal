@@ -10,6 +10,8 @@
 //! and `new_render_state`) required by the multi-pane GUI architecture.
 
 pub(crate) mod coords;
+pub mod cursor_appearance;
+pub(crate) mod cursor_blink;
 pub(crate) mod frame_dirty;
 pub(crate) mod input;
 pub(crate) mod pty_mouse_report;

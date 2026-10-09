@@ -3,7 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 use freminal_common::buffer_states::osc::{AnsiOscType, ITerm2InlineImageData, ImageDimension};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -19,11 +21,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 /// `raw_params` is the full, un-split OSC parameter bytes (before `;` splitting).
 /// We parse from the raw bytes because the `;` delimiter inside the `File=` args
 /// must be handled together with the `:` that separates args from the base64 payload.
-pub(super) fn handle_osc_iterm2(
-    raw_params: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // raw_params looks like: b"1337;File=inline=1;width=auto:BASE64DATA"
     // or: b"1337;MultipartFile=inline=1;width=auto"
     // or: b"1337;FilePart=BASE64DATA"
@@ -34,7 +32,7 @@ pub(super) fn handle_osc_iterm2(
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
         tracing::warn!(
             "OSC 1337: missing sub-command: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     };
@@ -43,19 +41,19 @@ pub(super) fn handle_osc_iterm2(
 
     // Check for "File=" prefix (case-sensitive, per iTerm2 spec).
     if let Some(after_file) = strip_ascii_prefix(rest, b"File=") {
-        handle_osc_iterm2_file(after_file, seq_trace, output);
+        handle_osc_iterm2_file(after_file, raw_params, output);
         return;
     }
 
     // Check for "MultipartFile=" prefix.
     if let Some(after_mp) = strip_ascii_prefix(rest, b"MultipartFile=") {
-        handle_osc_iterm2_multipart_begin(after_mp, seq_trace, output);
+        handle_osc_iterm2_multipart_begin(after_mp, raw_params, output);
         return;
     }
 
     // Check for "FilePart=" prefix.
     if let Some(after_part) = strip_ascii_prefix(rest, b"FilePart=") {
-        handle_osc_iterm2_file_part(after_part, seq_trace, output);
+        handle_osc_iterm2_file_part(after_part, raw_params, output);
         return;
     }
 
@@ -68,7 +66,7 @@ pub(super) fn handle_osc_iterm2(
     // Not a recognised sub-command — silently consume, like xterm/VTE.
     tracing::warn!(
         "OSC 1337: unrecognised sub-command; raw sequence: \"{}\"",
-        seq_trace.as_escaped()
+        escape_sequence_for_log_bounded(raw_params)
     );
     output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown));
 }
@@ -132,17 +130,13 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
 }
 
 /// Handle `OSC 1337 ; File = [args] : [base64] BEL` — single-sequence inline image.
-fn handle_osc_iterm2_file(
-    after_file: &[u8],
-    seq_trace: &SequenceTracer,
-    output: &mut Vec<TerminalOutput>,
-) {
+fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // `after_file` is: b"inline=1;width=auto:BASE64DATA"
     // Split on ':' to separate key=value args from the base64 payload.
     let Some(colon_pos) = after_file.iter().position(|&b| b == b':') else {
         tracing::warn!(
             "OSC 1337 File=: missing ':' separator: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     };
@@ -188,7 +182,7 @@ fn handle_osc_iterm2_file(
 /// `MultipartFile=` has the same key=value args as `File=` but **no** `:base64` payload.
 fn handle_osc_iterm2_multipart_begin(
     after_mp: &[u8],
-    seq_trace: &SequenceTracer,
+    raw_params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) {
     let Ok(args_str) = std::str::from_utf8(after_mp) else {
@@ -199,7 +193,7 @@ fn handle_osc_iterm2_multipart_begin(
     if args_str.is_empty() {
         tracing::warn!(
             "OSC 1337 MultipartFile=: empty args: recent='{}'",
-            seq_trace.as_str()
+            lossy_sequence_for_log_bounded(raw_params)
         );
         return;
     }
@@ -214,7 +208,7 @@ fn handle_osc_iterm2_multipart_begin(
 /// Handle `OSC 1337 ; FilePart = [base64] BEL` — one chunk of multipart data.
 fn handle_osc_iterm2_file_part(
     after_part: &[u8],
-    seq_trace: &SequenceTracer,
+    raw_params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) {
     let Ok(b64_str) = std::str::from_utf8(after_part) else {
@@ -227,7 +221,7 @@ fn handle_osc_iterm2_file_part(
         Err(e) => {
             tracing::warn!(
                 "OSC 1337 FilePart=: base64 decode failed: {e}: recent='{}'",
-                seq_trace.as_str()
+                lossy_sequence_for_log_bounded(raw_params)
             );
             return;
         }
@@ -250,7 +244,6 @@ fn strip_ascii_prefix<'a>(haystack: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]>
 #[cfg(test)]
 mod tests {
     use super::super::osc::AnsiOscParser;
-    use super::super::tracer::SequenceTracer;
     use freminal_common::buffer_states::osc::{AnsiOscType, ImageDimension};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -610,17 +603,12 @@ mod tests {
     //  Coverage gap tests — exercise error branches via direct function calls
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// Helper: create a default `SequenceTracer` for direct-call tests.
-    fn tracer() -> SequenceTracer {
-        SequenceTracer::new()
-    }
-
     // ── Line 35/37/39: handle_osc_iterm2 — missing first semicolon ──────────
     #[test]
     fn osc1337_missing_semicolon_direct_call() {
         let mut output = Vec::new();
         // No ';' in raw_params at all
-        super::handle_osc_iterm2(b"1337File=inline=1", &tracer(), &mut output);
+        super::handle_osc_iterm2(b"1337File=inline=1", &mut output);
         assert_eq!(output, []);
     }
 
@@ -628,7 +616,7 @@ mod tests {
     #[test]
     fn osc1337_unrecognised_subcommand_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2(b"1337;SomeOtherCommand=x", &tracer(), &mut output);
+        super::handle_osc_iterm2(b"1337;SomeOtherCommand=x", &mut output);
         assert_eq!(output.len(), 1);
         assert!(matches!(
             &output[0],
@@ -649,7 +637,7 @@ mod tests {
     #[test]
     fn file_missing_colon_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2_file(b"inline=1", &tracer(), &mut output);
+        super::handle_osc_iterm2_file(b"inline=1", b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -660,7 +648,7 @@ mod tests {
         // args portion has invalid UTF-8, then ':' then payload
         let mut raw = vec![0xFF, 0xFE, b':'];
         raw.extend_from_slice(b"QUFB"); // "AAA" in base64
-        super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
+        super::handle_osc_iterm2_file(&raw, b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -671,7 +659,7 @@ mod tests {
         // Valid UTF-8 args, then ':', then non-UTF-8 base64 bytes
         let mut raw = b"inline=1:".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
-        super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
+        super::handle_osc_iterm2_file(&raw, b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -680,7 +668,7 @@ mod tests {
     fn file_bad_base64_direct_call() {
         let mut output = Vec::new();
         // Valid UTF-8 args and payload, but payload is not valid base64
-        super::handle_osc_iterm2_file(b"inline=1:!!!not-base64!!!", &tracer(), &mut output);
+        super::handle_osc_iterm2_file(b"inline=1:!!!not-base64!!!", b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -689,7 +677,7 @@ mod tests {
     fn file_empty_payload_after_decode_direct_call() {
         let mut output = Vec::new();
         // Empty base64 decodes to empty bytes
-        super::handle_osc_iterm2_file(b"inline=1:", &tracer(), &mut output);
+        super::handle_osc_iterm2_file(b"inline=1:", b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -697,7 +685,7 @@ mod tests {
     #[test]
     fn multipart_begin_non_utf8_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2_multipart_begin(&[0xFF, 0xFE], &tracer(), &mut output);
+        super::handle_osc_iterm2_multipart_begin(&[0xFF, 0xFE], b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -705,7 +693,7 @@ mod tests {
     #[test]
     fn multipart_begin_empty_args_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2_multipart_begin(b"", &tracer(), &mut output);
+        super::handle_osc_iterm2_multipart_begin(b"", b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -713,7 +701,7 @@ mod tests {
     #[test]
     fn file_part_non_utf8_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2_file_part(&[0xFF, 0xFE], &tracer(), &mut output);
+        super::handle_osc_iterm2_file_part(&[0xFF, 0xFE], b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 
@@ -721,7 +709,7 @@ mod tests {
     #[test]
     fn file_part_bad_base64_direct_call() {
         let mut output = Vec::new();
-        super::handle_osc_iterm2_file_part(b"!!!invalid!!!", &tracer(), &mut output);
+        super::handle_osc_iterm2_file_part(b"!!!invalid!!!", b"1337;test", &mut output);
         assert_eq!(output, []);
     }
 }
