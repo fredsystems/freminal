@@ -821,7 +821,7 @@ mod present_region_scissor_tests {
     /// to draw would otherwise have changed pixels there.
     ///
     /// The synthetic cursor is always drawn at cell (0, 0) (`headless.rs`'s
-    /// `cursor_pixel_pos: (0.0, 0.0)`), so hiding it changes pixels only
+    /// `synthetic_cursor`: `col: 0.0, row: 0.0`), so hiding it changes pixels only
     /// within that top-left cell's column -- `first`'s cursor-shown draw
     /// and `second`'s cursor-hidden draw are pixel-identical everywhere
     /// else. That is confirmed here directly (the "control" check) rather

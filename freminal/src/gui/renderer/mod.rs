@@ -201,7 +201,7 @@ impl PaneDamageRect {
     ///   flip the Y axis into GL's bottom-left origin.
     /// - `cursor_cells`: each `(px_x, px_y, w, h)` is a changed cell in
     ///   physical pixels **relative to the viewport top-left**, top-left
-    ///   origin (matching `cursor_pixel_pos` / cell dimensions in `show`).
+    ///   origin (matching `CursorDrawParams::pixel_origin` / cell dimensions in `show`).
     ///   Usually one entry (blink) or two (a move: old + new cell).
     ///
     /// Returns `None` when there are no changed cells (nothing to present).

@@ -60,6 +60,18 @@ pub enum CursorVisibility {
     Hidden,
 }
 
+impl CursorVisibility {
+    /// Build from the snapshot's raw `show_cursor` flag (`DECTCEM`).
+    #[must_use]
+    pub const fn from_bool(show_cursor: bool) -> Self {
+        if show_cursor {
+            Self::Shown
+        } else {
+            Self::Hidden
+        }
+    }
+}
+
 /// Whether the pane's terminal is in echo-off mode (e.g. a password prompt),
 /// in which the cursor is suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +80,18 @@ pub enum EchoState {
     Normal,
     /// Echo is off; the cursor is hidden.
     EchoOff,
+}
+
+impl EchoState {
+    /// Build from the pane's raw echo-off flag.
+    #[must_use]
+    pub const fn from_echo_off(echo_off: bool) -> Self {
+        if echo_off {
+            Self::EchoOff
+        } else {
+            Self::Normal
+        }
+    }
 }
 
 /// Everything [`resolve_cursor_appearance`] needs to decide.
@@ -89,7 +113,7 @@ pub struct CursorAppearanceInputs {
 ///
 /// An unfocused window wins over an inactive pane: when the window itself
 /// lacks focus, the pane's own active/inactive status is irrelevant.
-pub(super) const fn cursor_focus(pane: PaneFocus, window: WindowFocus) -> CursorFocus {
+pub(crate) const fn cursor_focus(pane: PaneFocus, window: WindowFocus) -> CursorFocus {
     match (window, pane) {
         (WindowFocus::Unfocused, _) => CursorFocus::UnfocusedWindow,
         (WindowFocus::Focused, PaneFocus::Inactive) => CursorFocus::InactivePane,
@@ -251,6 +275,14 @@ mod tests {
             resolve_cursor_appearance(&inputs),
             CursorAppearance::Solid(CursorVisualStyle::VerticalLineCursorSteady)
         );
+    }
+
+    #[test]
+    fn visibility_and_echo_constructors_map_the_raw_flags() {
+        assert_eq!(CursorVisibility::from_bool(true), CursorVisibility::Shown);
+        assert_eq!(CursorVisibility::from_bool(false), CursorVisibility::Hidden);
+        assert_eq!(EchoState::from_echo_off(true), EchoState::EchoOff);
+        assert_eq!(EchoState::from_echo_off(false), EchoState::Normal);
     }
 
     #[test]

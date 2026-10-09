@@ -1392,7 +1392,7 @@ pub(super) fn scroll_overlay_passthrough(
 /// boundary and is out of scope here — it stays a bool; this enum is
 /// constructed from it at the single `write_input_to_terminal` call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PaneFocus {
+pub enum PaneFocus {
     /// This pane currently has keyboard/mouse focus; all input routes to it.
     Active,
     /// This pane is not focused; only a primary left-click press is detected

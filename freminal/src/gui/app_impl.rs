@@ -35,8 +35,9 @@ use super::rendering;
 use super::tabs::{Tab, TabManager};
 use super::terminal::cursor_appearance::{
     CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
-    resolve_cursor_appearance,
+    cursor_focus, resolve_cursor_appearance,
 };
+use super::terminal::input::PaneFocus;
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
 use super::visual_preview::ShaderErrorRoute;
@@ -114,6 +115,17 @@ const fn cursor_blink_wants_repaint(appearance: &CursorAppearance, focus: Cursor
             | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
     );
     is_blink_style && matches!(focus, CursorFocus::Focused)
+}
+
+/// Whether the cursor described by `inputs` needs the periodic blink wake.
+///
+/// The scheduler-side counterpart of the drawing side's appearance
+/// resolution: it resolves the appearance through the same
+/// [`resolve_cursor_appearance`] (so the DECTCEM / echo-off / focus rules have
+/// one definition) and asks [`cursor_blink_wants_repaint`]. The caller builds
+/// `inputs.focus` with the shared `cursor_focus`.
+fn cursor_wants_blink_wake(inputs: &CursorAppearanceInputs) -> bool {
+    cursor_blink_wants_repaint(&resolve_cursor_appearance(inputs), inputs.focus)
 }
 
 /// #459 item 9: whether pointer motion this frame must force a full present.
@@ -3077,32 +3089,28 @@ impl freminal_windowing::App for FreminalGui {
                 // an inactive pane or unfocused window from waking: their
                 // cursor is steady.
                 //
-                // `CursorFocus` is derived here by the same rule as
-                // `terminal::cursor_appearance::cursor_focus` (which is not
-                // reachable from this module): an unfocused window wins over
-                // an inactive pane.
-                let blink_focus = match (WindowFocus::from_bool(window_focused), is_active) {
-                    (WindowFocus::Unfocused, _) => CursorFocus::UnfocusedWindow,
-                    (WindowFocus::Focused, false) => CursorFocus::InactivePane,
-                    (WindowFocus::Focused, true) => CursorFocus::Focused,
-                };
-                let blink_appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
-                    snapshot_visible: if pane_snap.show_cursor {
-                        CursorVisibility::Shown
-                    } else {
-                        CursorVisibility::Hidden
-                    },
-                    echo: if is_echo_off {
-                        EchoState::EchoOff
-                    } else {
-                        EchoState::Normal
-                    },
-                    focus: blink_focus,
+                // The focus is derived by the one shared rule,
+                // `terminal::cursor_appearance::cursor_focus` (an unfocused
+                // window wins over an inactive pane), and the appearance by
+                // the one shared `resolve_cursor_appearance`; this gate keeps
+                // no copy of either. The configured `unfocused_style` is
+                // passed through for fidelity with the drawing side, but the
+                // wake decision never depends on it: every non-`Focused`
+                // focus is steady whatever the style.
+                let cursor_blink_wants_repaint = cursor_wants_blink_wake(&CursorAppearanceInputs {
+                    snapshot_visible: CursorVisibility::from_bool(pane_snap.show_cursor),
+                    echo: EchoState::from_echo_off(is_echo_off),
+                    focus: cursor_focus(
+                        if is_active {
+                            PaneFocus::Active
+                        } else {
+                            PaneFocus::Inactive
+                        },
+                        WindowFocus::from_bool(window_focused),
+                    ),
                     style: pane_snap.cursor_visual_style.clone(),
                     unfocused_style: self.config.cursor.unfocused_style,
                 });
-                let cursor_blink_wants_repaint =
-                    cursor_blink_wants_repaint(&blink_appearance, blink_focus);
                 // Honour a content change only on the first observation of a
                 // genuinely-new snapshot (issue #439 fix #4). Re-reading the
                 // same published `Arc` on a later frame sees the same
@@ -4932,20 +4940,18 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, pointer_forces_full_present,
-        settings_owner_close_decision,
+        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, cursor_wants_blink_wake,
+        pointer_forces_full_present, settings_owner_close_decision,
     };
     use crate::gui::frame_damage::{self, PaneDamageInput};
     use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
     use crate::gui::terminal::cursor_appearance::{
         CursorAppearance, CursorAppearanceInputs, CursorFocus, CursorVisibility, EchoState,
-        resolve_cursor_appearance,
     };
     use freminal_common::config::UnfocusedCursorStyle;
     use freminal_common::cursor::CursorVisualStyle;
 
-    /// Resolve the appearance exactly as the call site does, then ask the
-    /// scheduler gate.
+    /// Ask the scheduler gate through the same entry point the call site uses.
     fn wants_repaint(
         style: &CursorVisualStyle,
         visibility: CursorVisibility,
@@ -4953,14 +4959,13 @@ mod tests {
         focus: CursorFocus,
         unfocused_style: UnfocusedCursorStyle,
     ) -> bool {
-        let appearance = resolve_cursor_appearance(&CursorAppearanceInputs {
+        cursor_wants_blink_wake(&CursorAppearanceInputs {
             snapshot_visible: visibility,
             echo,
             focus,
             style: style.clone(),
             unfocused_style,
-        });
-        cursor_blink_wants_repaint(&appearance, focus)
+        })
     }
 
     #[test]
