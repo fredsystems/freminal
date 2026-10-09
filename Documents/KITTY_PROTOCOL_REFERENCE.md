@@ -1,5 +1,18 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
+Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stubs
+renumbered to the v0.13.x plan; current-state sections flagged as superseded
+(see the note below).
+
+**Superseded current-state sections.** Every "freminal current-state" section in
+this file (notifications, graphics, keyboard) predates the **2026-10-08
+compliance audit** in `PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)").
+That audit found real spec deviations in every protocol freminal had claimed to
+support, so statements here that a protocol is "implemented" or "done" describe
+the feature surface that shipped, not conformance to the kitty spec. Where this
+file and the audit disagree, the audit wins. Each protocol task in v0.13.x
+refreshes its own section here as it lands.
+
 ## Provenance and scope
 
 This document is a **distilled, freminal-facing** reference for the kitty
@@ -40,19 +53,31 @@ achievable and verifiable.
 
 ## How this maps to the roadmap
 
-| Protocol                          | Version  | Task(s) | Status in this doc   |
-| --------------------------------- | -------- | ------- | -------------------- |
-| Desktop notifications (OSC 99)    | v0.11.0  | 99      | Filled in            |
-| Graphics protocol completion      | v0.11.0  | 100     | Filled in            |
-| Keyboard protocol compliance      | v0.11.0  | 101     | Filled in            |
-| File transfer over TTY (OSC 5113) | v0.13.0  | 102     | Stub                 |
-| Multiple cursors (CSI)            | v0.13.0  | 103     | Stub                 |
-| Text sizing (OSC 66)              | v0.13.0  | 104     | Stub                 |
-| Drag and drop (OSC 72)            | deferred | 105     | Stub (spec unstable) |
+| Protocol                                | Milestone | Task(s)                                               | Status in this doc                                    |
+| --------------------------------------- | --------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| Desktop notifications (OSC 99)          | v0.13.0   | 138 (conformance; 99 shipped)                         | Filled in                                             |
+| Pointer shapes (OSC 22)                 | v0.13.0   | 139                                                   | Not covered                                           |
+| Underlines and SGR parity               | v0.13.0   | 140                                                   | Not covered                                           |
+| Graphics protocol                       | v0.13.1   | 135, 136 (conformance and placement; 13, 100 shipped) | Filled in                                             |
+| Keyboard protocol                       | v0.13.1   | 137 (conformance; 35, 101, 114 shipped)               | Filled in                                             |
+| Multiple cursors (CSI)                  | v0.13.2   | 103                                                   | Stub                                                  |
+| Misc protocol extensions                | v0.13.2   | 141                                                   | Not covered                                           |
+| Unscroll (`CSI Ps + T`)                 | v0.13.2   | 142                                                   | Not covered                                           |
+| DECCARA / DECSACE                       | v0.13.2   | 143                                                   | Not covered                                           |
+| Color control (OSC 21) and colour stack | v0.13.2   | 144                                                   | Not covered                                           |
+| Shell integration compatibility         | v0.13.2   | 145                                                   | Not covered                                           |
+| File transfer over TTY (OSC 5113)       | v0.13.3   | 102                                                   | Stub                                                  |
+| Text sizing (OSC 66)                    | v0.13.3   | 104                                                   | Stub                                                  |
+| Clipboard (OSC 5522)                    | v0.13.3   | 146                                                   | Not covered                                           |
+| Drag and drop (OSC 72)                  | v0.13.4   | 105                                                   | Stub (stable upstream; blocked locally by winit 0.30) |
 
 Colored/styled underlines and the base kitty keyboard/graphics subsets are
 already shipped (Tasks 35, 13) and are covered here only where v0.11.0 extends
 them.
+
+Shared foundation work for these tasks (CSI dispatch, wire infrastructure, reverse
+path, screen-scoped state, colour foundation, consent prompt, Unicode width) is
+Tasks 128–134; see `PLAN_VERSION_130.md`.
 
 ---
 
@@ -468,13 +493,20 @@ first. A delete received mid-chunked-upload aborts the partial upload.
 | `t=` | Medium                                                                                                                                                                                                                                    |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                        |
-| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below).    |
-| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.               |
+| `f`  | Regular file — implemented via `read_kitty_file`; hardened by Task 126.2 (see the security note below). `S=`/`O=` are not honoured for files (Task 135).                                                                                  |
+| `t`  | Temp file — as `f`, then deleted only if the canonical path is inside a temp directory (`temp_dir()`, `/tmp`, `/dev/shm`) and contains `tty-graphics-protocol` (Task 126.2).                                                              |
 | `s`  | Shared-memory object; read `S` bytes at offset `O`. POSIX: `shm_open`/`mmap`, then `shm_unlink`+close. Windows: `OpenFileMappingW`/`MapViewOfFile`, then unmap+close (no unlink; `S=` required). Payload = object name. Both implemented. |
 
 Security (upstream spec): refuse device/socket/special files; may refuse
-`/proc`, `/sys`, `/dev`. **freminal current state:** only the absolute-path
-check is enforced for `f`/`t` — see the graphics current-state section below.
+`/proc`, `/sys`, `/dev`. **freminal current state (Task 126.2):** the path must
+be absolute UTF-8; it is canonicalised and refused under `/proc`, `/sys` or
+`/dev` (except `/dev/shm`) before opening; it is opened `O_NONBLOCK |
+O_NOFOLLOW` (unix), must be a regular file, and is re-resolved after opening
+with its `(dev, ino)` required to match the opened handle; reads are capped at
+400 MiB. Every failure is answered with `EBADF:Failed to read image file`.
+A `t=t` deletion is bound to the file that was read: the entry is re-opened
+relative to a parent-directory handle, its identity checked, then `unlinkat`
+(unix; pathname removal elsewhere).
 
 ### Responses and error codes
 
@@ -595,15 +627,11 @@ implementation choice.
   transmit-only `a=t` images and lowercase-deleted images referenced again by
   id — PR #382 review fix.)
 
-**Confirmed still remaining (not resolved by Task 100):**
+**Closed after Task 100:**
 
-- **`t=f`/`t=t` file-path security is narrower than the upstream spec
-  suggests.** `read_kitty_file` only rejects non-absolute paths
-  (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not
-  refuse device/socket/special files, and does not restrict temp-file reads to
-  known temp directories or require `tty-graphics-protocol` in the path. The
-  transmission-media table above has been corrected to describe this actual
-  behavior rather than the previously-documented (and inaccurate) protections.
+- **`t=f`/`t=t` file-path security** — Task 100 left `read_kitty_file`
+  checking only `is_absolute()`. Task 126.2 (v0.13.0) implemented the spec's
+  file-safety rules; see the security note under "Transmission media" above.
 
 ---
 
@@ -800,24 +828,25 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
 These are decomposed at their own version's activation, against the code as it
 then exists. Durable pointers only.
 
-### File transfer over TTY — OSC 5113 (v0.13.0, Task 102)
+### File transfer over TTY — OSC 5113 (v0.13.3, Task 102)
 
 Stateful bidirectional transfer with a mandatory user-consent prompt; reuses the
 reverse-write path. Spec: <https://sw.kovidgoyal.net/kitty/file-transfer-protocol/>.
 
-### Multiple cursors — CSI (v0.13.0, Task 103)
+### Multiple cursors — CSI (v0.13.2, Task 103)
 
 Renderer-light: snapshot gains a cursor list. Spec:
 <https://sw.kovidgoyal.net/kitty/multiple-cursors-protocol/>.
 
-### Text sizing — OSC 66 (v0.13.0, Task 104)
+### Text sizing — OSC 66 (v0.13.3, Task 104)
 
-Highest-risk rendering item (multicell blocks, fractional scaling). Mandatory
-first subtask: resolve the OSC 66 kitty-vs-Contour collision (freminal currently
-treats OSC 66 as the Contour ColorScheme notification). Spec:
+Highest-risk rendering item (multicell blocks, fractional scaling). The earlier
+claim that OSC 66 collides with Contour's ColorScheme notification was wrong:
+Contour does not use OSC 66 (its notification is `CSI ? 996 n` / `?2031`), and
+freminal's current OSC 66 handler is a vestigial no-op. Spec:
 <https://sw.kovidgoyal.net/kitty/text-sizing-protocol/>.
 
-### Drag and drop — OSC 72 (deferred, Task 105)
+### Drag and drop — OSC 72 (v0.13.4, Task 105)
 
-Spec under active upstream development (kitty 0.47, issue #9984); do not decompose
-against a moving target. Spec: <https://sw.kovidgoyal.net/kitty/dnd-protocol/>.
+Spec marked stable upstream on 2026-06-12 (kitty issue #9984 closed); still blocked
+locally by winit 0.30's DnD API. Spec: <https://sw.kovidgoyal.net/kitty/dnd-protocol/>.

@@ -293,11 +293,25 @@ pub fn parse_color_spec(spec: &str) -> Option<(u8, u8, u8)> {
         if parts.len() != 3 {
             return None;
         }
+        // Every channel must be pure ASCII hex digits.  This also rejects
+        // signs (`+f`) that `from_str_radix` would otherwise accept.
+        if !parts
+            .iter()
+            .all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return None;
+        }
         let r = scale_hex_channel(parts[0])?;
         let g = scale_hex_channel(parts[1])?;
         let b = scale_hex_channel(parts[2])?;
         Some((r, g, b))
     } else if let Some(hex) = spec.strip_prefix('#') {
+        // Validate before any byte-offset slicing: the input is
+        // attacker-controlled, and slicing inside a multi-byte character
+        // would panic.  ASCII-only guarantees every byte is a char boundary.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         match hex.len() {
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -342,6 +356,79 @@ pub fn scale_hex_channel(s: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn parse_color_spec_valid_formats_still_parse() {
+        assert_eq!(parse_color_spec("#ff8000"), Some((0xff, 0x80, 0x00)));
+        assert_eq!(parse_color_spec("#abc"), Some((0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_color_spec("rgb:ff/80/00"), Some((0xff, 0x80, 0x00)));
+        assert_eq!(parse_color_spec("rgb:f/8/0"), Some((0xff, 0x88, 0x00)));
+        assert_eq!(
+            parse_color_spec("rgb:ffff/8000/0000"),
+            Some((0xff, 0x80, 0x00))
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_non_ascii_hash_three_bytes_returns_none() {
+        // "aé" is 3 bytes; slicing [0..1], [1..2] would cut inside 'é'.
+        let spec = "#a\u{e9}";
+        assert_eq!(spec.len() - 1, 3);
+        assert_eq!(parse_color_spec(spec), None);
+    }
+
+    #[test]
+    fn parse_color_spec_non_ascii_hash_six_bytes_returns_none() {
+        // The OSC 11 panic case: "aéaé" is 6 bytes.
+        let spec = "#a\u{e9}a\u{e9}";
+        assert_eq!(spec.len() - 1, 6);
+        assert_eq!(parse_color_spec(spec), None);
+    }
+
+    #[test]
+    fn parse_color_spec_non_ascii_hash_twelve_bytes_returns_none() {
+        let spec = "#a\u{e9}a\u{e9}a\u{e9}a\u{e9}a\u{e9}a\u{e9}";
+        assert_eq!(spec.len() - 1, 18);
+        assert_eq!(parse_color_spec(spec), None);
+        // Exactly 12 bytes: 6 x 2-byte characters.
+        let spec = "#\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}";
+        assert_eq!(spec.len() - 1, 12);
+        assert_eq!(parse_color_spec(spec), None);
+    }
+
+    #[test]
+    fn parse_color_spec_non_ascii_rgb_channel_returns_none() {
+        assert_eq!(parse_color_spec("rgb:\u{e9}/00/00"), None);
+        assert_eq!(parse_color_spec("rgb:ff/a\u{e9}/00"), None);
+        assert_eq!(parse_color_spec("rgb:ff/00/\u{e9}\u{e9}"), None);
+    }
+
+    #[test]
+    fn parse_color_spec_rejects_signs_and_non_hex() {
+        assert_eq!(parse_color_spec("#+a+a+a"), None);
+        assert_eq!(parse_color_spec("#gggggg"), None);
+        assert_eq!(parse_color_spec("rgb:+f/00/00"), None);
+    }
+
+    proptest! {
+        #[test]
+        fn parse_color_spec_never_panics_on_arbitrary_string(s in any::<String>()) {
+            let _ = parse_color_spec(&s);
+        }
+
+        #[test]
+        fn parse_color_spec_never_panics_on_hash_prefixed(s in "#\\PC{0,12}") {
+            let _ = parse_color_spec(&s);
+        }
+
+        #[test]
+        fn parse_color_spec_never_panics_on_rgb_prefixed(
+            s in "rgb:\\PC{0,6}/\\PC{0,6}/\\PC{0,6}"
+        ) {
+            let _ = parse_color_spec(&s);
+        }
+    }
 
     #[test]
     fn scale_hex_channel_five_digit_returns_none() {
