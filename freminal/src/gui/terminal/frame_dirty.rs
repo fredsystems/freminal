@@ -364,6 +364,63 @@ const fn effective_cursor_blink_phase(
     }
 }
 
+/// The cursor as it was drawn on one frame: every value the *next* frame's
+/// cursor-change detection (`cursor_state_changed`) and focus-regain
+/// re-anchor (`blink_anchor_action`) compare against.
+#[derive(Debug, Clone)]
+pub(super) struct DrawnCursor {
+    /// The effective blink phase ([`DirtyTrackingOutcome::cursor_blink_phase`]).
+    pub(super) blink_phase: CursorBlinkPhase,
+    /// The pane/window focus the cursor was drawn with.
+    pub(super) focus: CursorFocus,
+    /// The cursor position in the snapshot.
+    pub(super) pos: freminal_common::buffer_states::cursor::CursorPos,
+    /// The cursor's screen row ([`DirtyTrackingOutcome::cursor_screen_row`]).
+    pub(super) screen_row: Option<usize>,
+    /// How the cursor was drawn ([`DirtyTrackingOutcome::cursor_appearance`]).
+    pub(super) appearance: CursorAppearance,
+    /// The cursor colour override in the snapshot.
+    pub(super) color_override: Option<(u8, u8, u8)>,
+}
+
+/// Whether a frame drew the cursor, and if so what it drew.
+///
+/// The cursor baselines in [`PaneRenderCache`] describe what is *on screen*,
+/// so they may only advance on a frame that actually drew. A `skip_draw` frame
+/// (synchronized-update deferral) runs no dirty evaluation and draws nothing;
+/// recording its cursor would make the next frame's comparison believe a
+/// cursor move or focus change had already been presented, leaving the old
+/// cursor on screen.
+#[derive(Debug, Clone)]
+pub(super) enum CursorFrame {
+    /// The frame drew; these are the values to diff the next frame against.
+    Drawn(DrawnCursor),
+    /// The frame was skipped; the baselines keep describing the last drawn one.
+    Skipped,
+}
+
+impl PaneRenderCache {
+    /// Advance every cursor baseline the next frame diffs against, but only
+    /// for a [`CursorFrame::Drawn`] frame. See [`CursorFrame`].
+    ///
+    /// `previous_cursor_focus` is deliberately held back on a skipped frame
+    /// too: the blink re-anchor fires on a non-`Focused` -> `Focused`
+    /// transition of it, and that must still be observed on the first *drawn*
+    /// frame after a regain that happened while skipped, where the regained
+    /// cursor first becomes visible.
+    pub(super) const fn record_cursor_frame(&mut self, frame: CursorFrame) {
+        let CursorFrame::Drawn(drawn) = frame else {
+            return;
+        };
+        self.previous_cursor_blink_phase = drawn.blink_phase;
+        self.previous_cursor_focus = drawn.focus;
+        self.previous_cursor_pos = drawn.pos;
+        self.previous_cursor_screen_row = drawn.screen_row;
+        self.previous_cursor_appearance = drawn.appearance;
+        self.previous_cursor_color_override = drawn.color_override;
+    }
+}
+
 /// Compute this frame's dirty-tracking decision: which vertex-rebuild path
 /// [`FreminalTerminalWidget::show`] should take, plus every derived
 /// observation the two candidate branches (and the post-branch animation
@@ -3079,6 +3136,172 @@ mod evaluate_frame_dirty_state_tests {
         );
 
         assert!(outcome.cursor_screen_row.is_some());
+    }
+
+    /// What `show()` records for a drawn frame whose cursor state is exactly
+    /// what [`call_with_trail`] would have been given for `snap`.
+    fn drawn_frame(
+        snap: &TerminalSnapshot,
+        appearance: CursorAppearance,
+        focus: CursorFocus,
+    ) -> CursorFrame {
+        CursorFrame::Drawn(DrawnCursor {
+            blink_phase: CursorBlinkPhase::On,
+            focus,
+            pos: snap.cursor_pos,
+            screen_row: Some(0),
+            appearance,
+            color_override: snap.cursor_color_override,
+        })
+    }
+
+    /// Task 127.C2: a cursor move that arrives on a skipped frame must still
+    /// be reported by the next frame. The skipped frame draws nothing, so its
+    /// cursor must not become the baseline; otherwise the next, otherwise
+    /// unchanged, frame sees "no change" and the old cursor stays on screen.
+    #[test]
+    fn cursor_move_on_a_skipped_frame_is_still_a_change_on_the_next_frame() {
+        let settled = base_snapshot();
+        let mut cache = settled_cache(&settled, true, solid());
+        let mut moved = base_snapshot();
+        moved.cursor_pos.x = 3;
+        moved.cursor_pos.y = 2;
+
+        // The skipped frame carried the move; nothing was drawn.
+        cache.record_cursor_frame(CursorFrame::Skipped);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(
+            &moved,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+        assert!(!outcome.observations.content_changed);
+    }
+
+    /// Control for the test above: had the same frame been *drawn*, the move
+    /// would have been presented and the next frame is settled. This is what
+    /// proves the skipped-frame test is sensitive to the baseline update.
+    #[test]
+    fn cursor_move_on_a_drawn_frame_is_settled_on_the_next_frame() {
+        let settled = base_snapshot();
+        let mut cache = settled_cache(&settled, true, solid());
+        let mut moved = base_snapshot();
+        moved.cursor_pos.x = 3;
+        moved.cursor_pos.y = 2;
+
+        cache.record_cursor_frame(drawn_frame(&moved, solid(), CursorFocus::Focused));
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(
+            &moved,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(!outcome.cursor_state_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    /// A focus-driven appearance change (solid -> hollow) on a skipped frame
+    /// is likewise still a change on the next frame.
+    #[test]
+    fn appearance_change_on_a_skipped_frame_is_still_a_change_on_the_next_frame() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+
+        cache.record_cursor_frame(CursorFrame::Skipped);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call_with_trail(
+            &snap,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            CursorAppearance::Hollow,
+            TrailProbe {
+                focus: CursorFocus::InactivePane,
+                trail_enabled: false,
+            },
+        );
+
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+        assert_eq!(outcome.cursor_appearance, CursorAppearance::Hollow);
+    }
+
+    /// A cursor colour override change on a skipped frame is still a change
+    /// on the next frame.
+    #[test]
+    fn color_override_change_on_a_skipped_frame_is_still_a_change_on_the_next_frame() {
+        let settled = base_snapshot();
+        let mut cache = settled_cache(&settled, true, solid());
+        let mut recoloured = base_snapshot();
+        recoloured.cursor_color_override = Some((1, 2, 3));
+
+        cache.record_cursor_frame(CursorFrame::Skipped);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(
+            &recoloured,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.cursor_state_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+    }
+
+    /// A drawn frame advances every cursor baseline, and a skipped frame
+    /// afterwards changes none of them.
+    #[test]
+    fn only_a_drawn_frame_advances_the_cursor_baselines() {
+        let mut cache = PaneRenderCache::new();
+        let mut snap = base_snapshot();
+        snap.cursor_pos.x = 4;
+        snap.cursor_color_override = Some((9, 8, 7));
+
+        cache.record_cursor_frame(CursorFrame::Drawn(DrawnCursor {
+            blink_phase: CursorBlinkPhase::Off,
+            focus: CursorFocus::InactivePane,
+            pos: snap.cursor_pos,
+            screen_row: Some(2),
+            appearance: CursorAppearance::Hollow,
+            color_override: snap.cursor_color_override,
+        }));
+
+        assert_eq!(cache.previous_cursor_blink_phase, CursorBlinkPhase::Off);
+        assert_eq!(cache.previous_cursor_focus, CursorFocus::InactivePane);
+        assert_eq!(cache.previous_cursor_pos, snap.cursor_pos);
+        assert_eq!(cache.previous_cursor_screen_row, Some(2));
+        assert_eq!(cache.previous_cursor_appearance, CursorAppearance::Hollow);
+        assert_eq!(cache.previous_cursor_color_override, Some((9, 8, 7)));
+
+        cache.record_cursor_frame(CursorFrame::Skipped);
+
+        assert_eq!(cache.previous_cursor_blink_phase, CursorBlinkPhase::Off);
+        assert_eq!(cache.previous_cursor_focus, CursorFocus::InactivePane);
+        assert_eq!(cache.previous_cursor_pos, snap.cursor_pos);
+        assert_eq!(cache.previous_cursor_screen_row, Some(2));
+        assert_eq!(cache.previous_cursor_appearance, CursorAppearance::Hollow);
+        assert_eq!(cache.previous_cursor_color_override, Some((9, 8, 7)));
     }
 
     /// Drive two consecutive frames with the trail enabled: the first

@@ -56,8 +56,8 @@ use super::{
         cursor_focus, resolve_cursor_appearance,
     },
     frame_dirty::{
-        CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
-        evaluate_frame_dirty_state,
+        CursorFrame, CursorFrameInputs, DrawnCursor, FrameDirtyContext, FrameDirtyGeometry,
+        VertexRebuild, evaluate_frame_dirty_state,
     },
     input::{
         InputCarryState, PaneFocus, WriteInputParams, scroll_overlay_passthrough,
@@ -3417,13 +3417,13 @@ impl FreminalTerminalWidget {
         #[cfg(feature = "frame-profiling")]
         let mut profiling_token: Option<PaneFrameToken> = None;
 
-        // The effective blink phase `evaluate_frame_dirty_state` derived this
-        // frame, to be stored for the next frame's comparison. `None` on a
-        // `skip_draw` frame, where no dirty evaluation (and no draw) ran and
-        // so the cached phase is left describing the last frame that did.
-        let mut drawn_cursor_blink_phase: Option<CursorBlinkPhase> = None;
-
-        if !snap.skip_draw {
+        // The cursor as drawn this frame, recorded into the cache's baselines
+        // once at the end of `show()`. `Skipped` on a `skip_draw` frame, where
+        // no dirty evaluation (and no draw) ran and so every cursor baseline is
+        // left describing the last frame that did draw.
+        let cursor_frame = if snap.skip_draw {
+            CursorFrame::Skipped
+        } else {
             // See `evaluate_frame_dirty_state`'s doc for the full rationale
             // behind every flag and translation computed here; this call
             // site only destructures the result back into the same local
@@ -3467,7 +3467,6 @@ impl FreminalTerminalWidget {
             let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             let cursor_state_changed = dirty.cursor_state_changed;
-            drawn_cursor_blink_phase = Some(dirty.cursor_blink_phase);
             cursor_appearance = dirty.cursor_appearance;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
@@ -4062,9 +4061,6 @@ impl FreminalTerminalWidget {
             // unchanged, selection unchanged, buffers not empty) -- simply
             // re-draw the existing VBO data, no CPU work at all.
 
-            // Advance only after damage has consumed the prior drawn row.
-            cache.previous_cursor_screen_row = dirty.cursor_screen_row;
-
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
             // Folded into `cache` (subtask 121.12), not requested on the
@@ -4078,16 +4074,23 @@ impl FreminalTerminalWidget {
             if let Some(due) = anim_tick.next_due {
                 cache.request_repaint_after(due);
             }
-        }
 
-        // Update per-frame cursor state for the next frame's comparison.
-        if let Some(phase) = drawn_cursor_blink_phase {
-            cache.previous_cursor_blink_phase = phase;
-        }
-        cache.previous_cursor_focus = cursor_focus_now;
-        cache.previous_cursor_pos = snap.cursor_pos;
-        cache.previous_cursor_appearance = cursor_appearance;
-        cache.previous_cursor_color_override = snap.cursor_color_override;
+            // Everything above has consumed the prior baselines (damage reads
+            // the previous cursor row), so it is now safe to replace them with
+            // what this frame drew.
+            CursorFrame::Drawn(DrawnCursor {
+                blink_phase: dirty.cursor_blink_phase,
+                focus: cursor_focus_now,
+                pos: snap.cursor_pos,
+                screen_row: dirty.cursor_screen_row,
+                appearance: cursor_appearance,
+                color_override: snap.cursor_color_override,
+            })
+        };
+
+        // Update per-frame cursor state for the next frame's comparison. A
+        // skipped frame drew nothing, so it leaves every baseline untouched.
+        cache.record_cursor_frame(cursor_frame);
 
         // Allocate the exact terminal rect (in logical points for egui).
         let desired_size = egui::Vec2::new(
@@ -5869,8 +5872,11 @@ mod bell_flash_tests {
 
 #[cfg(test)]
 mod cursor_blink_phase_tests {
-    use super::{BlinkAnchorAction, blink_anchor_action, cursor_blink_phase};
-    use crate::gui::terminal::cursor_appearance::CursorFocus;
+    use super::{BlinkAnchorAction, PaneRenderCache, blink_anchor_action, cursor_blink_phase};
+    use crate::gui::renderer::CursorBlinkPhase;
+    use crate::gui::terminal::cursor_appearance::{CursorAppearance, CursorFocus};
+    use crate::gui::terminal::frame_dirty::{CursorFrame, DrawnCursor};
+    use freminal_common::buffer_states::cursor::CursorPos;
 
     const TICK: f64 = 0.50;
 
@@ -5965,6 +5971,38 @@ mod cursor_blink_phase_tests {
             BlinkAnchorAction::Reanchor
         );
         assert!(cursor_blink_phase(regain_time, Some(regain_time), TICK));
+    }
+
+    /// Task 127.C2: the focus baseline is held back on a skipped frame, so a
+    /// regain that happened while skipped is still seen as a non-`Focused` ->
+    /// `Focused` edge on the first drawn frame, and the blink still
+    /// re-anchors there.
+    #[test]
+    fn regain_during_a_skipped_frame_still_reanchors_on_the_first_drawn_frame() {
+        let mut cache = PaneRenderCache::new();
+        // The last drawn frame showed the cursor unfocused.
+        cache.record_cursor_frame(CursorFrame::Drawn(DrawnCursor {
+            blink_phase: CursorBlinkPhase::On,
+            focus: CursorFocus::UnfocusedWindow,
+            pos: CursorPos::default(),
+            screen_row: Some(0),
+            appearance: CursorAppearance::Hollow,
+            color_override: None,
+        }));
+
+        // Focus returns during a skipped frame, which re-anchors on its own
+        // (the cursor is not visible yet) but does not advance the baseline.
+        assert_eq!(
+            blink_anchor_action(cache.previous_cursor_focus, CursorFocus::Focused),
+            BlinkAnchorAction::Reanchor
+        );
+        cache.record_cursor_frame(CursorFrame::Skipped);
+
+        // The first drawn focused frame must therefore still see the regain.
+        assert_eq!(
+            blink_anchor_action(cache.previous_cursor_focus, CursorFocus::Focused),
+            BlinkAnchorAction::Reanchor
+        );
     }
 }
 
