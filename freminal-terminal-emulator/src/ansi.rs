@@ -698,7 +698,10 @@ impl FreminalAnsiParser {
         }
     }
 
-    /// Retrieve a snapshot of the currently active parser's trace buffer.
+    /// Render the bytes of the sequence currently being parsed, for
+    /// diagnostics. Each sub-parser renders the bytes it already holds
+    /// (bounded for logging); with no sub-parser active this falls back to the
+    /// top-level trace of recent input.
     #[must_use]
     pub fn current_trace_str(&self) -> String {
         match &self.inner {
@@ -1953,7 +1956,7 @@ mod tests {
     /// sub-parser: move the buffer to the heap or to the top-level parser.
     #[test]
     fn sub_parsers_stay_small() {
-        const MAX_BYTES: usize = 512;
+        const MAX_BYTES: usize = 128;
         assert!(std::mem::size_of::<ParserInner>() < MAX_BYTES);
         assert!(std::mem::size_of::<AnsiCsiParser>() < MAX_BYTES);
         assert!(std::mem::size_of::<AnsiOscParser>() < MAX_BYTES);

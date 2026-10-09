@@ -233,14 +233,12 @@ pub(super) fn handle_osc_notify_777(raw_params: &[u8], output: &mut Vec<Terminal
 /// [`parse_osc_99`] which returns a typed [`Osc99Command`].  On success an
 /// [`AnsiOscType::Notify99`] is appended to `output`; on error the failure
 /// is logged at `debug!` level and the function returns without output.
-pub(super) fn handle_osc_notify_99(
-    // OSC 99 payloads can carry notification text, icon data, and other
-    // application metadata, so the raw sequence must never be copied into logs
-    // (even at `debug`). Diagnostics below describe the failure without
-    // echoing the payload.
-    raw_params: &[u8],
-    output: &mut Vec<TerminalOutput>,
-) {
+///
+/// OSC 99 payloads can carry notification text, icon data, and other
+/// application metadata, so the raw sequence must never be copied into logs
+/// (even at `debug`). Diagnostics below describe the failure without echoing
+/// the payload.
+pub(super) fn handle_osc_notify_99(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     // Step 1: find the first `;`, separating "99" from the rest.
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
         tracing::debug!("OSC 99: missing first `;` (malformed sequence)");

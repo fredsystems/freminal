@@ -3,8 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Internal, lightweight ring buffer for capturing the most recent input bytes.
-//! Kept fully internal (pub(crate)) and allocation-free on the hot path.
+//! Diagnostics for raw escape-sequence bytes.
+//!
+//! A ring buffer of the most recent input bytes (pushing is allocation-free),
+//! plus helpers that render byte slices for logs, with bounded variants for
+//! potentially huge payloads.
 //!
 //! Only the top-level `FreminalAnsiParser` owns a [`SequenceTracer`]. The
 //! per-sequence sub-parsers (CSI, OSC, DCS, APC, standard) must NOT embed one:
@@ -389,6 +392,22 @@ mod tests {
     fn bounded_escape_at_limit_is_not_truncated() {
         let raw = vec![b'a'; LOG_SEQUENCE_MAX_BYTES];
         assert_eq!(escape_sequence_for_log_bounded(&raw).len(), raw.len());
+    }
+
+    #[test]
+    fn bounded_escape_one_past_limit_omits_one_byte() {
+        let mut raw = vec![b'H'; LOG_SEQUENCE_MAX_BYTES / 2];
+        raw.push(b'M');
+        raw.extend(vec![b'T'; LOG_SEQUENCE_MAX_BYTES / 2]);
+        assert_eq!(raw.len(), LOG_SEQUENCE_MAX_BYTES + 1);
+        assert_eq!(
+            escape_sequence_for_log_bounded(&raw),
+            format!(
+                "{}...[1 bytes omitted]...{}",
+                "H".repeat(LOG_SEQUENCE_MAX_BYTES / 2),
+                "T".repeat(LOG_SEQUENCE_MAX_BYTES / 2)
+            )
+        );
     }
 
     #[test]

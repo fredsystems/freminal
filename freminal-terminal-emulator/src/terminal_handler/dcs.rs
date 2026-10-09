@@ -18,6 +18,7 @@ use conv2::ValueFrom;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualStyle};
 
 use super::TerminalHandler;
+use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
 use crate::ansi_components::tracer::escape_sequence_for_log;
@@ -264,10 +265,8 @@ impl TerminalHandler {
         // - an intermediate (0x20..=0x2F) or a private marker (`<=>?`)
         //   gives the sequence a different identity from the plain command
         //   that shares its final byte (`CSI > 0 T` is not SD);
-        // - `:` is a sub-parameter separator. The main parser's handlers
-        //   split on `;` only and reject a `:` field, whereas
-        //   `parse_csi_params` would silently turn it into a default, so
-        //   the two would disagree.
+        // - `:` is a sub-parameter separator that the direct handlers do not
+        //   interpret; the main parser's handlers decide what it means.
         //
         // A body that passes this check cannot carry a prefix or an
         // intermediate, so no classification is needed.
@@ -278,8 +277,14 @@ impl TerminalHandler {
             return false;
         }
 
-        // Parse semicolon-delimited numeric parameters.
-        let numeric_params = Self::parse_csi_params(body);
+        // Parse semicolon-delimited numeric parameters with the same parser
+        // the main CSI handlers use. A field it rejects (e.g. a value that
+        // overflows `usize`) makes the main parser reject the sequence, so
+        // leave it to the main parser rather than silently defaulting it.
+        let Ok(numeric_params) = split_params_into_semicolon_delimited_usize(body) else {
+            tracing::debug!("DCS tmux passthrough: queuing unparsable CSI params for re-parse");
+            return false;
+        };
 
         match terminator {
             // CUP — Cursor Position: ESC [ row ; col H  (or f)
@@ -542,29 +547,6 @@ impl TerminalHandler {
                 false
             }
         }
-    }
-
-    /// Parse CSI parameter bytes into a list of `Option<usize>` values.
-    ///
-    /// Parameters are separated by `;`.  An empty field yields `None`.
-    /// For example, `b"1;42"` → `[Some(1), Some(42)]`,
-    /// `b""` → `[]`, `b";"` → `[None, None]`.
-    pub(super) fn parse_csi_params(params: &[u8]) -> Vec<Option<usize>> {
-        if params.is_empty() {
-            return Vec::new();
-        }
-
-        let param_str = std::str::from_utf8(params).unwrap_or("");
-        param_str
-            .split(';')
-            .map(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    s.parse::<usize>().ok()
-                }
-            })
-            .collect()
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -1918,9 +1900,20 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_cursor_pos(Some(5), Some(5));
         let before = handler.buffer.cursor().pos;
-        // The main parser's CUP handler splits on `;` only and rejects `:`;
-        // `parse_csi_params` would default it. Leave it to the main parser.
+        // `:` is a sub-parameter separator the direct handlers do not
+        // interpret; the main parser decides what it means.
         assert!(!handler.dispatch_tmux_csi(b"5:2H"));
+        assert_eq!(handler.buffer.cursor().pos, before);
+    }
+
+    #[test]
+    fn tmux_csi_overflowing_param_falls_through() {
+        // The main parser rejects a parameter that overflows `usize`; the
+        // direct path must not silently default it to CUP(1, 1).
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(5), Some(5));
+        let before = handler.buffer.cursor().pos;
+        assert!(!handler.dispatch_tmux_csi(b"99999999999999999999999;2H"));
         assert_eq!(handler.buffer.cursor().pos, before);
     }
 
@@ -1979,35 +1972,6 @@ mod tests {
         assert_eq!(handler.tmux_reparse_queue, Vec::<Vec<u8>>::new());
         let cursor = handler.buffer.cursor().pos;
         assert_eq!((cursor.x, cursor.y), (9, 4));
-    }
-
-    #[test]
-    fn parse_csi_params_basic() {
-        assert_eq!(
-            TerminalHandler::parse_csi_params(b"1;42"),
-            vec![Some(1), Some(42)]
-        );
-    }
-
-    #[test]
-    fn parse_csi_params_empty() {
-        assert_eq!(
-            TerminalHandler::parse_csi_params(b""),
-            Vec::<Option<usize>>::new()
-        );
-    }
-
-    #[test]
-    fn parse_csi_params_missing_field() {
-        assert_eq!(
-            TerminalHandler::parse_csi_params(b";42"),
-            vec![None, Some(42)]
-        );
-    }
-
-    #[test]
-    fn parse_csi_params_single() {
-        assert_eq!(TerminalHandler::parse_csi_params(b"5"), vec![Some(5)]);
     }
 
     // ------------------------------------------------------------------

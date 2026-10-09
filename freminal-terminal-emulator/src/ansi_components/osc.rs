@@ -57,7 +57,7 @@ impl AnsiOscParser {
 
     /// Expose the current OSC body for testing and diagnostics.
     ///
-    /// Rendered from [`Self::params`] (every body byte accepted so far, with
+    /// Rendered from `params` (every body byte accepted so far, with
     /// the terminator removed once the sequence finishes), lossily decoded and
     /// bounded to
     /// [`crate::ansi_components::tracer::LOG_SEQUENCE_MAX_BYTES`].
@@ -633,7 +633,7 @@ mod tests {
         for &b in b"10;?\x07" {
             parser.ansiparser_inner_osc(b, &mut output);
         }
-        // trace_str just returns the internal tracer as a String
+        // trace_str renders the accumulated OSC params (bounded for logging)
         let _ = parser.trace_str();
     }
 
