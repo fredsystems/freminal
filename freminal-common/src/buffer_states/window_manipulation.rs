@@ -196,12 +196,13 @@ pub enum WindowManipulation {
     /// that parser, not here.  Transported via the `WindowCommand` channel
     /// (not the snapshot) and rendered by Task 99.5.
     Notification99(Box<Notification99Data>),
-    /// OSC 99 app→terminal control sequence (`p=close`/`p=alive`/`p=?`, Task 99).
+    /// OSC 99 app→terminal control sequence (`p=close` / `p=alive`, Task 99).
     ///
-    /// Routed distinctly from display notifications: it drives a terminal
-    /// response (close reconciliation, alive-id list, or capability
-    /// handshake) rather than a banner. The reverse writes land in Tasks
-    /// 99.6/99.7.
+    /// Routed distinctly from display notifications: it drives close
+    /// reconciliation or the alive-id list reply rather than a banner. The
+    /// capability query `p=?` is never carried here: it is answered on the PTY
+    /// thread from the host capabilities (Task 130.5) and does not reach the
+    /// GUI, so it never becomes an `Osc99Control`.
     Osc99Control {
         /// Notification id (`i=`) the control refers to, if any.
         id: Option<String>,

@@ -598,11 +598,11 @@ impl TerminalHandler {
     /// (Tasks 99.5c and 130.5, 130 adversarial review finding 14).
     ///
     /// While OSC 99 is unsupported by the host
-    /// ([`TerminalHandler::host_capabilities`]) **every** finalized request is
-    /// dropped here, with one payload-free debug line: display payloads,
-    /// `p=close`, `p=alive` and `p=?` alike. The application sees a terminal
-    /// that does not speak the protocol, and nothing reaches the GUI (which
-    /// would otherwise cache icons even though notification routing is off).
+    /// ([`TerminalHandler::host_capabilities`]) every request is dropped
+    /// BEFORE reassembly by the `Notify99` arm in `osc.rs` (which logs the
+    /// single payload-free debug line), so nothing reaches this function. The
+    /// check below is a defensive backstop only and deliberately does not log
+    /// again.
     ///
     /// While supported:
     ///
@@ -615,7 +615,6 @@ impl TerminalHandler {
         finalized: FinalizedNotification,
     ) {
         let Osc99Support::Supported(features) = self.host_capabilities().osc99 else {
-            tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
             return;
         };
 

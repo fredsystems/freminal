@@ -506,6 +506,71 @@ fn decrpm_lnm_after_reset_is_reset() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// IRM (ANSI mode 4) — answered in the ANSI form `4;Ps$y`, without `?`
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Text of the first visible row, trailing spaces trimmed.
+fn first_row_text(state: &TerminalState) -> String {
+    let rows = state.handler.buffer().visible_rows(0);
+    let text: String = rows[0].characters().iter().map(|c| c.into_utf8()).collect();
+    text.trim_end().to_string()
+}
+
+/// Write `X` over the start of a row holding `AB` and return what the row now
+/// reads: `XAB` when IRM is active (insert), `XB` when it is not (replace).
+fn write_x_at_column_one(state: &mut TerminalState) -> String {
+    state.handle_incoming_data(b"\x1b[2J\x1b[H"); // clear screen, home
+    state.handle_incoming_data(b"AB\x1b[1GX");
+    first_row_text(state)
+}
+
+#[test]
+fn decrpm_irm_default_is_reset_in_ansi_form() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y", "IRM default (replace) → Ps=2, no `?`");
+}
+
+#[test]
+fn decrpm_irm_after_set_is_set_and_insert_stays_active() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[4h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;1$y");
+    assert_eq!(
+        write_x_at_column_one(&mut state),
+        "XAB",
+        "a DECRQM must not turn insert mode off"
+    );
+}
+
+#[test]
+fn decrpm_irm_after_reset_is_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[4h");
+    state.handle_incoming_data(b"\x1b[4l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y");
+    assert_eq!(write_x_at_column_one(&mut state), "XB");
+}
+
+#[test]
+fn decrpm_irm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, b"\x9b4;2$y");
+}
+
+#[test]
+fn irm_query_on_default_state_leaves_replace_mode() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y");
+    assert_eq!(write_x_at_column_one(&mut state), "XB");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DECSCLM (?4) — recognised but never settable: always "permanently reset"
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -580,6 +645,27 @@ fn lnm_query_on_default_state_leaves_line_feed_mode_reset() {
     let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
     assert_eq!(resp, "\x1b[20;2$y");
     assert_eq!(state.modes.line_feed_mode, Lnm::LineFeed);
+}
+
+/// IRM lives on the handler rather than in `TerminalModes`, so the aggregate
+/// check below cannot see it: prove the same invariant observably, in both
+/// directions (a query must neither turn insert on nor turn it off).
+#[test]
+fn querying_irm_never_changes_insert_mode() {
+    for (label, change, expected) in [
+        ("insert stays on", &b"\x1b[4h"[..], "XAB"),
+        ("replace stays on", &b"\x1b[4l"[..], "XB"),
+    ] {
+        let (mut state, rx) = make_state();
+        let _ = feed_and_collect(&mut state, &rx, change);
+        let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+        assert!(!resp.is_empty(), "{label}: the query must be answered");
+        assert_eq!(
+            write_x_at_column_one(&mut state),
+            expected,
+            "{label}: a DECRQM must not change the stored IRM state"
+        );
+    }
 }
 
 /// Every `TerminalState`-owned mode whose enum has a `Query` variant (or whose

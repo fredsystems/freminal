@@ -57,7 +57,7 @@ use freminal_common::{
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
-    host_capabilities::HostCapabilities,
+    host_capabilities::{HostCapabilities, Osc99Support},
     pty_write::PtyWrite,
     themes::ThemePalette,
 };
@@ -547,7 +547,16 @@ impl TerminalHandler {
     /// Called with the GUI's value at pane spawn and again whenever a config
     /// change alters it. Not touched by a terminal reset: these are facts about
     /// the host, not terminal state.
-    pub const fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
+    ///
+    /// When the new value leaves OSC 99 unsupported, every in-flight OSC 99
+    /// chunk accumulator is discarded. Chunks received while unsupported are
+    /// dropped before reassembly, so without this a transfer begun while
+    /// supported could be completed by a later chunk after re-enabling,
+    /// splicing text from two separate eras of host configuration.
+    pub fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
+        if matches!(host_capabilities.osc99, Osc99Support::Unsupported) {
+            self.pending_notifications.clear();
+        }
         self.host_capabilities = host_capabilities;
     }
 
@@ -1969,7 +1978,18 @@ impl TerminalHandler {
                 }
 
                 // ── Insert/Replace Mode (IRM, ANSI mode 4) ───────────
-                Mode::Irm(irm) => {
+                // DECRQM (`CSI 4 $ p`) is answered from the stored state and
+                // never stores `Irm::Query` (which would silently turn insert
+                // mode off).
+                Mode::Irm(Irm::Query) => {
+                    let mode = if self.insert_mode.is_insert() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_csi_response(&Irm::Insert.report(Some(mode)));
+                }
+                Mode::Irm(irm @ (Irm::Insert | Irm::Replace)) => {
                     self.insert_mode = *irm;
                 }
 

@@ -246,3 +246,52 @@ fn query_for_a_tombstoned_id_is_answered_while_supported() {
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
 }
+
+// ── Gate before reassembly; pending cleared on disable (130 review N5) ──────
+
+/// The title of the single `Notification99` command in `state`, if there is
+/// exactly one.
+fn only_notification_title(state: &TerminalState) -> Option<String> {
+    let mut titles = state.window_commands.iter().filter_map(|c| match c {
+        WindowManipulation::Notification99(data) => Some(data.title.clone()),
+        _ => None,
+    });
+    let first = titles.next()?;
+    assert!(titles.next().is_none(), "expected exactly one notification");
+    first
+}
+
+#[test]
+fn chunk_received_while_unsupported_is_never_accumulated() {
+    let (mut state, _rx) = make_state(HostCapabilities::default());
+    state.handle_incoming_data(b"\x1b]99;i=1:d=0;aaa\x1b\\");
+    assert!(state.window_commands.is_empty());
+
+    state.handler.set_host_capabilities(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=1;bbb\x1b\\");
+
+    assert_eq!(
+        only_notification_title(&state).as_deref(),
+        Some("bbb"),
+        "the chunk dropped while unsupported must not be spliced in"
+    );
+}
+
+#[test]
+fn pending_transfer_is_discarded_when_support_is_disabled() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=2:d=0;aaa\x1b\\");
+    assert!(state.window_commands.is_empty());
+
+    state
+        .handler
+        .set_host_capabilities(HostCapabilities::default());
+    state.handler.set_host_capabilities(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=2;bbb\x1b\\");
+
+    assert_eq!(
+        only_notification_title(&state).as_deref(),
+        Some("bbb"),
+        "disabling OSC 99 must discard the in-flight accumulator"
+    );
+}

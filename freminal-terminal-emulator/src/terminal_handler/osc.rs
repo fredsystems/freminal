@@ -18,6 +18,7 @@ use freminal_common::buffer_states::{
     url::Url,
     window_manipulation::{NotificationKind, WindowManipulation},
 };
+use freminal_common::host_capabilities::Osc99Support;
 
 use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
@@ -216,17 +217,22 @@ impl TerminalHandler {
                 });
             }
 
-            // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
-            // reassembly machine; on finalize, `dispatch_finalized_osc99` acts on it:
-            // - while OSC 99 is unsupported EVERY finalized request (display payloads,
-            //   `p=close`, `p=alive`, `p=?`) is dropped, so the terminal looks like one
-            //   that does not speak the protocol;
-            // - while supported, `p=?` is answered here from the host capabilities
-            //   (Task 130.5) and never reaches the GUI;
-            // - `p=alive` / `p=close` are forwarded as `Osc99Control`;
-            // - display payloads (title/body/icon/buttons) push Notification99 (Task 99.4).
+            // OSC 99 stateful notification (Task 99).
+            // - while OSC 99 is unsupported EVERY chunk (display payloads,
+            //   `p=close`, `p=alive`, `p=?`) is dropped BEFORE reassembly, so the
+            //   terminal looks like one that does not speak the protocol and no
+            //   state accumulates for a transfer that could complete after the
+            //   host later enables the protocol;
+            // - while supported, each chunk is fed into the reassembly machine and
+            //   on finalize `dispatch_finalized_osc99` acts on it: `p=?` is answered
+            //   here from the host capabilities (Task 130.5) and never reaches the
+            //   GUI, `p=alive` / `p=close` are forwarded as `Osc99Control`, and
+            //   display payloads (title/body/icon/buttons) push Notification99
+            //   (Task 99.4).
             AnsiOscType::Notify99(cmd) => {
-                if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
+                if matches!(self.host_capabilities().osc99, Osc99Support::Unsupported) {
+                    tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
+                } else if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
                     self.dispatch_finalized_osc99(finalized);
                 }
             }
@@ -638,10 +644,15 @@ mod tests {
     fn osc_notify99_invalid_base64_pushes_no_window_command() {
         use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         let cmd = parse_osc_99(b"e=1", b"@@@@").unwrap();
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
         assert_eq!(handler.window_commands, []);
+
+        // Control: a valid base64 title through the same handler DOES push.
+        let ok = parse_osc_99(b"e=1", b"SGVsbG8=").unwrap();
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(ok))]);
+        assert_eq!(handler.window_commands.len(), 1);
     }
 
     /// A fully-specified notification maps urgency/occasion/expiry/actions
@@ -686,7 +697,7 @@ mod tests {
     /// command — it is still awaiting more chunks.
     #[test]
     fn osc_notify99_non_final_chunk_does_not_push_window_command() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("pending-1".to_owned()),
@@ -700,6 +711,23 @@ mod tests {
             handler.window_commands.is_empty(),
             "non-final chunk must not emit a window command"
         );
+
+        // Control: the final chunk of the same transfer DOES push, proving the
+        // empty assertion above is not vacuous.
+        let last = Osc99Command {
+            id: Some("pending-1".to_owned()),
+            done: true,
+            payload: b"-rest".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(last))]);
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("partial-rest"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
     }
 
     // ── OSC 99 control routing (Task 99.5c) ───────────────────────────────────
