@@ -30,7 +30,11 @@ pub(super) fn handle_osc_palette_color(
         }
         Some(Some(AnsiOscToken::String(s))) => {
             let Ok(v) = s.parse::<u16>() else {
-                tracing::warn!("OSC 4: invalid index string: {s}");
+                tracing::warn!("OSC 4: invalid index string");
+                tracing::debug!(
+                    "OSC 4: invalid index string: {}",
+                    lossy_sequence_for_log_bounded(s.as_bytes())
+                );
                 return;
             };
             if v > 255 {
@@ -40,7 +44,8 @@ pub(super) fn handle_osc_palette_color(
             u8::try_from(v).unwrap_or(0)
         }
         _ => {
-            tracing::warn!(
+            tracing::warn!("OSC 4: missing index");
+            tracing::debug!(
                 "OSC 4: missing index: recent='{}'",
                 lossy_sequence_for_log_bounded(raw_params)
             );
@@ -51,7 +56,8 @@ pub(super) fn handle_osc_palette_color(
     let spec = if let Some(Some(AnsiOscToken::String(s))) = params.get(2) {
         s.as_str()
     } else {
-        tracing::warn!(
+        tracing::warn!("OSC 4: missing color spec");
+        tracing::debug!(
             "OSC 4: missing color spec: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -70,7 +76,11 @@ pub(super) fn handle_osc_palette_color(
             index, rgb.0, rgb.1, rgb.2,
         )));
     } else {
-        tracing::warn!("OSC 4: invalid color spec: {spec}");
+        tracing::warn!("OSC 4: invalid color spec");
+        tracing::debug!(
+            "OSC 4: invalid color spec: {}",
+            lossy_sequence_for_log_bounded(spec.as_bytes())
+        );
     }
 }
 
@@ -108,7 +118,11 @@ pub(super) fn handle_osc_reset_palette(
                     tracing::warn!("OSC 104: index out of range: {v}");
                 }
             } else {
-                tracing::warn!("OSC 104: invalid index: {s}");
+                tracing::warn!("OSC 104: invalid index");
+                tracing::debug!(
+                    "OSC 104: invalid index: {}",
+                    lossy_sequence_for_log_bounded(s.as_bytes())
+                );
             }
         }
     }

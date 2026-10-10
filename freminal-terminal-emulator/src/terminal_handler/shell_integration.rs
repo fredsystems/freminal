@@ -713,11 +713,11 @@ mod tests {
     fn foreign_marker_rejection_is_handled_at_parse_layer() {
         // WezTerm-style: A without freminal=1 → parse returns None → handler never called
         use freminal_common::buffer_states::ftcs::parse_ftcs_params;
-        assert_eq!(parse_ftcs_params(&["A", "aid=12345"]), None);
-        assert_eq!(parse_ftcs_params(&["D", "0", "aid=12345"]), None);
+        assert_eq!(parse_ftcs_params(b"A;aid=12345"), None);
+        assert_eq!(parse_ftcs_params(b"D;0;aid=12345"), None);
         // Plain markers (old style)
-        assert_eq!(parse_ftcs_params(&["A"]), None);
-        assert_eq!(parse_ftcs_params(&["D", "0"]), None);
+        assert_eq!(parse_ftcs_params(b"A"), None);
+        assert_eq!(parse_ftcs_params(b"D;0"), None);
     }
 
     /// Completing a block by fid only closes the correct block.

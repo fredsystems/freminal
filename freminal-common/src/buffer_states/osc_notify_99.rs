@@ -20,6 +20,8 @@
 
 use std::fmt;
 
+use crate::key_value::{KeyValueError, KeyValueItem, KeyValueSeparator, tokenize};
+
 /// Payload type of an OSC 99 notification (`p=` key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99PayloadType {
@@ -37,6 +39,21 @@ pub enum Osc99PayloadType {
     Buttons,
     /// `p=?`: capability query.
     Query,
+}
+
+/// How the payload of one OSC 99 chunk is encoded (`e=` key).
+///
+/// The payload carried by [`Osc99Command`] is always the raw bytes received;
+/// this says whether they are verbatim UTF-8 text or base64 text.  The
+/// terminal handler decodes base64 chunks as one continuous stream, because
+/// the spec allows a payload to be split either before or after encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Osc99PayloadEncoding {
+    /// `e=0` (default): the payload is escape-safe UTF-8 text.
+    #[default]
+    Plain,
+    /// `e=1`: the payload is base64 text.
+    Base64,
 }
 
 /// Urgency level of an OSC 99 notification (`u=` key).
@@ -72,14 +89,18 @@ pub enum Osc99ParseError {
     InvalidInteger(String),
     /// An `i=`/`g=` identifier contained a disallowed character.
     InvalidId(String),
-    /// The payload was declared base64 (`e=1`) but failed to decode.
-    InvalidBase64(String),
     /// The payload was not valid escape-safe UTF-8 (non-base64 payloads).
     InvalidPayloadUtf8(String),
     /// The metadata + payload region exceeded [`MAX_OSC99_SEQUENCE_BYTES`].
     /// Rejected before any allocation/decode to bound memory use on
     /// untrusted terminal input.
     SequenceTooLarge(usize),
+    /// The metadata held more than [`MAX_OSC99_METADATA_ITEMS`] `key=value`
+    /// items. Rejected to bound work on untrusted terminal input.
+    TooManyMetadataItems {
+        /// The item cap that was exceeded.
+        max: usize,
+    },
 }
 
 impl fmt::Display for Osc99ParseError {
@@ -89,10 +110,12 @@ impl fmt::Display for Osc99ParseError {
             Self::InvalidValue(s) => write!(f, "invalid OSC 99 value: {s}"),
             Self::InvalidInteger(s) => write!(f, "invalid OSC 99 integer: {s}"),
             Self::InvalidId(s) => write!(f, "invalid OSC 99 id: {s}"),
-            Self::InvalidBase64(s) => write!(f, "invalid OSC 99 base64: {s}"),
             Self::InvalidPayloadUtf8(s) => write!(f, "invalid OSC 99 payload UTF-8: {s}"),
             Self::SequenceTooLarge(n) => {
                 write!(f, "OSC 99 sequence too large: {n} bytes")
+            }
+            Self::TooManyMetadataItems { max } => {
+                write!(f, "OSC 99 metadata has more than {max} items")
             }
         }
     }
@@ -108,6 +131,14 @@ impl fmt::Display for Osc99ParseError {
 /// `notify_99.rs`). 1 MiB comfortably covers any realistic notification icon
 /// while refusing pathological input.
 pub const MAX_OSC99_SEQUENCE_BYTES: usize = 1_048_576;
+
+/// Maximum number of `key=value` items accepted in one OSC 99 metadata region.
+///
+/// The protocol defines fewer than twenty keys, some of which may repeat
+/// (`n=`, `t=`), so 64 is generous for any real client while bounding the work
+/// a hostile sequence can force. Exceeding it yields
+/// [`Osc99ParseError::TooManyMetadataItems`].
+pub const MAX_OSC99_METADATA_ITEMS: usize = 64;
 
 /// Activation behaviour flags from the `a=` metadata key.
 ///
@@ -144,8 +175,13 @@ pub struct Osc99Command {
     pub payload_type: Osc99PayloadType,
     /// Done/finalize flag (`d=`), default `true`.
     pub done: bool,
-    /// The decoded payload bytes (base64-decoded if `e=1`, else raw UTF-8 bytes).
+    /// The raw payload bytes exactly as received: UTF-8 text for
+    /// [`Osc99PayloadEncoding::Plain`], base64 text for
+    /// [`Osc99PayloadEncoding::Base64`].  Base64 is **not** decoded here;
+    /// chunks are decoded as one stream during reassembly.
     pub payload: Vec<u8>,
+    /// How [`payload`](Self::payload) is encoded (`e=`), default `Plain`.
+    pub payload_encoding: Osc99PayloadEncoding,
     /// Activation behaviour flags (`a=`).
     pub actions: Osc99Actions,
     /// Whether `c=1` (close report wanted).
@@ -175,7 +211,7 @@ pub struct Osc99Command {
 fn decode_base64_utf8(value: &[u8]) -> Result<String, Osc99ParseError> {
     let s = std::str::from_utf8(value)
         .map_err(|_| Osc99ParseError::InvalidValue(String::from_utf8_lossy(value).into_owned()))?;
-    let bytes = crate::base64::decode(s)
+    let bytes = crate::base64::decode(s.as_bytes())
         .map_err(|e| Osc99ParseError::InvalidValue(format!("base64 decode error: {e}")))?;
     String::from_utf8(bytes)
         .map_err(|_| Osc99ParseError::InvalidValue(format!("base64 result is not UTF-8: {s}")))
@@ -376,22 +412,23 @@ fn apply_metadata_pair(
     Ok(())
 }
 
-/// Decode the payload bytes based on the `e=` flag in `state`.
-fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99ParseError> {
+/// Validate the payload for the encoding declared by the `e=` flag in `state`.
+///
+/// A `Plain` payload must be UTF-8 (C0/C1 rejection is a higher-level
+/// concern).  A `Base64` payload is **not** inspected: it may be one slice of
+/// a larger base64 stream that only decodes once every chunk has arrived, so
+/// the stream decoder validates it.
+fn validate_payload(
+    state: &ParseState,
+    payload: &[u8],
+) -> Result<Osc99PayloadEncoding, Osc99ParseError> {
     if state.base64_payload {
-        // `e=1`: base64-decode the raw payload bytes.
-        let s = std::str::from_utf8(payload).map_err(|_| {
-            Osc99ParseError::InvalidBase64(String::from_utf8_lossy(payload).into_owned())
-        })?;
-        crate::base64::decode(s)
-            .map_err(|e| Osc99ParseError::InvalidBase64(format!("base64 decode error: {e}")))
+        Ok(Osc99PayloadEncoding::Base64)
     } else {
-        // `e=0` / absent: payload is escape-safe UTF-8 — validate it, store raw bytes.
-        // Note: we do not reject C0/C1 here; that is a higher-level concern.
         std::str::from_utf8(payload).map_err(|_| {
             Osc99ParseError::InvalidPayloadUtf8(String::from_utf8_lossy(payload).into_owned())
         })?;
-        Ok(payload.to_vec())
+        Ok(Osc99PayloadEncoding::Plain)
     }
 }
 
@@ -405,11 +442,11 @@ fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99Pa
 ///
 /// # Errors
 /// Returns [`Osc99ParseError`] if metadata is malformed, an id is unsafe, an
-/// integer/urgency is invalid, or the payload fails base64/UTF-8 decoding.
+/// integer/urgency is invalid, or a non-base64 payload is not UTF-8.  A base64
+/// payload is returned undecoded (see [`Osc99Command::payload`]).
 pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc99ParseError> {
-    // Reject oversized input before any allocation/decode. `base64::decode`
-    // reserves proportional to the input length, so an unbounded payload on
-    // untrusted terminal input could force a large allocation.
+    // Reject oversized input before any allocation, so an unbounded payload
+    // on untrusted terminal input cannot force a large allocation.
     let total = metadata.len().saturating_add(payload.len());
     if total > MAX_OSC99_SEQUENCE_BYTES {
         return Err(Osc99ParseError::SequenceTooLarge(total));
@@ -417,39 +454,43 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
 
     let mut state = ParseState::default();
 
-    // Parse the colon-separated key=value pairs in the metadata region.
-    for token in metadata.split(|&b| b == b':') {
-        // Skip empty tokens (leading/trailing/doubled colons).
-        if token.is_empty() {
-            continue;
+    // Parse the colon-separated key=value pairs in the metadata region. Empty
+    // tokens (leading/trailing/doubled colons) are skipped by the tokenizer.
+    for item in tokenize(metadata, KeyValueSeparator::Colon, MAX_OSC99_METADATA_ITEMS) {
+        match item {
+            // A token with no `=` is malformed.
+            Ok(KeyValueItem::Bare(token)) => {
+                return Err(Osc99ParseError::InvalidMetadata(
+                    String::from_utf8_lossy(token).into_owned(),
+                ));
+            }
+            Ok(KeyValueItem::Pair { key, value }) => {
+                // Key must be exactly one byte. Report the whole token.
+                let &[key_byte] = key else {
+                    let mut token = Vec::with_capacity(key.len() + 1 + value.len());
+                    token.extend_from_slice(key);
+                    token.push(b'=');
+                    token.extend_from_slice(value);
+                    return Err(Osc99ParseError::InvalidMetadata(
+                        String::from_utf8_lossy(&token).into_owned(),
+                    ));
+                };
+                apply_metadata_pair(&mut state, key_byte, value)?;
+            }
+            Err(KeyValueError::TooManyItems { max }) => {
+                return Err(Osc99ParseError::TooManyMetadataItems { max });
+            }
         }
-
-        // Find the first '=' — everything before is the key, everything after is
-        // the value.  A token with no '=' is malformed.
-        let eq_pos = token.iter().position(|&b| b == b'=').ok_or_else(|| {
-            Osc99ParseError::InvalidMetadata(String::from_utf8_lossy(token).into_owned())
-        })?;
-
-        // Key must be exactly one ASCII letter (eq_pos == 1 means one byte before '=').
-        if eq_pos != 1 {
-            return Err(Osc99ParseError::InvalidMetadata(
-                String::from_utf8_lossy(token).into_owned(),
-            ));
-        }
-
-        let key = token[0];
-        let value = &token[eq_pos + 1..];
-
-        apply_metadata_pair(&mut state, key, value)?;
     }
 
-    let decoded_payload = decode_payload(&state, payload)?;
+    let payload_encoding = validate_payload(&state, payload)?;
 
     Ok(Osc99Command {
         id: state.id,
         payload_type: state.payload_type,
         done: state.done,
-        payload: decoded_payload,
+        payload: payload.to_vec(),
+        payload_encoding,
         actions: state.actions,
         close_report: state.close_report,
         app_name: state.app_name,
@@ -621,22 +662,45 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn e_equals_one_base64_payload_decoded() {
-        // "Hello" in base64 is "SGVsbG8="
+    fn e_equals_one_base64_payload_kept_raw() {
+        // The payload is NOT decoded by the parser; reassembly decodes it.
         let cmd = parse_osc_99(&meta("e=1"), &pay("SGVsbG8=")).unwrap();
-        assert_eq!(cmd.payload, b"Hello");
+        assert_eq!(cmd.payload, b"SGVsbG8=");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
     }
 
     #[test]
-    fn e_equals_one_invalid_base64_returns_error() {
-        let err = parse_osc_99(&meta("e=1"), &pay("not-valid-base64!!!")).unwrap_err();
-        assert!(matches!(err, Osc99ParseError::InvalidBase64(_)));
+    fn e_equals_one_payload_is_not_validated_by_the_parser() {
+        // A base64 payload may be one slice of a larger stream, so the parser
+        // cannot judge it; the stream decoder rejects it later.
+        let cmd = parse_osc_99(&meta("e=1"), &pay("not-valid-base64!!!")).unwrap();
+        assert_eq!(cmd.payload, b"not-valid-base64!!!");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
+    }
+
+    #[test]
+    fn e_equals_one_non_utf8_payload_is_kept_raw() {
+        let cmd = parse_osc_99(&meta("e=1"), &[0xFF, 0xFE]).unwrap();
+        assert_eq!(cmd.payload, [0xFF, 0xFE]);
     }
 
     #[test]
     fn e_equals_zero_plain_utf8_payload() {
         let cmd = parse_osc_99(&meta("e=0"), &pay("plain text")).unwrap();
         assert_eq!(cmd.payload, b"plain text");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
+    }
+
+    #[test]
+    fn e_absent_defaults_to_plain_encoding() {
+        let cmd = parse_osc_99(&meta(""), &pay("x")).unwrap();
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
+    }
+
+    #[test]
+    fn e_equals_zero_non_utf8_payload_is_rejected() {
+        let err = parse_osc_99(&meta("e=0"), &[0xFF, 0xFE]).unwrap_err();
+        assert!(matches!(err, Osc99ParseError::InvalidPayloadUtf8(_)));
     }
 
     // ------------------------------------------------------------------
@@ -884,6 +948,140 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Pinned behaviour (Task 129.3): must survive the tokenizer migration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn empty_value_for_flag_keys_is_invalid_integer() {
+        // `c`, `d`, `e`, `u` and `w` parse their value strictly; empty fails.
+        for key in ["c", "d", "e", "u", "w"] {
+            let err = parse_osc_99(&meta(&format!("{key}=")), &pay("")).unwrap_err();
+            assert_eq!(
+                err,
+                Osc99ParseError::InvalidInteger(String::new()),
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_value_for_id_keys_is_accepted_as_empty_string() {
+        let cmd = parse_osc_99(&meta("i=:g="), &pay("")).unwrap();
+        assert_eq!(cmd.id, Some(String::new()));
+        assert_eq!(cmd.icon_cache_key, Some(String::new()));
+    }
+
+    #[test]
+    fn empty_value_for_base64_keys_decodes_to_empty() {
+        let cmd = parse_osc_99(&meta("f=:s=:n=:t="), &pay("")).unwrap();
+        assert_eq!(cmd.app_name, Some(String::new()));
+        assert_eq!(cmd.sound, Some(String::new()));
+        assert_eq!(cmd.icon_names, vec![String::new()]);
+        assert_eq!(cmd.notification_type, vec![String::new()]);
+    }
+
+    #[test]
+    fn empty_value_for_enum_keys_keeps_current_value() {
+        let cmd = parse_osc_99(&meta("o=unfocused:o=:p=body:p="), &pay("")).unwrap();
+        assert_eq!(cmd.occasion, NotificationOccasion::Unfocused);
+        assert_eq!(cmd.payload_type, Osc99PayloadType::Body);
+    }
+
+    #[test]
+    fn empty_value_for_actions_clears_both_flags() {
+        let cmd = parse_osc_99(&meta("a="), &pay("")).unwrap();
+        assert!(!cmd.actions.report_activation);
+        assert!(!cmd.actions.focus_on_activation);
+    }
+
+    #[test]
+    fn empty_value_for_unknown_key_is_ignored() {
+        let cmd = parse_osc_99(&meta("z=:d=0"), &pay("")).unwrap();
+        assert!(!cmd.done);
+    }
+
+    #[test]
+    fn duplicate_scalar_keys_last_wins() {
+        let cmd = parse_osc_99(&meta("i=first:i=second:u=0:u=2:d=0:d=1"), &pay("")).unwrap();
+        assert_eq!(cmd.id, Some("second".to_owned()));
+        assert_eq!(cmd.urgency, Some(NotificationUrgency::Critical));
+        assert!(cmd.done);
+    }
+
+    #[test]
+    fn multi_byte_key_error_carries_whole_token() {
+        let err = parse_osc_99(&meta("ab=1"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("ab=1".to_owned()));
+    }
+
+    #[test]
+    fn empty_key_error_carries_whole_token() {
+        let err = parse_osc_99(&meta("=x"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("=x".to_owned()));
+    }
+
+    #[test]
+    fn bare_token_error_carries_token() {
+        let err = parse_osc_99(&meta("d=1:foo"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("foo".to_owned()));
+    }
+
+    #[test]
+    fn multi_byte_key_error_with_equals_in_value_carries_whole_token() {
+        let err = parse_osc_99(&meta("ab=c=d"), &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("ab=c=d".to_owned()));
+    }
+
+    #[test]
+    fn value_may_contain_equals() {
+        // Base64 padding lands in the value; only the first `=` splits.
+        let cmd = parse_osc_99(&meta("f=TXlBcHA="), &pay("")).unwrap();
+        assert_eq!(cmd.app_name, Some("MyApp".to_owned()));
+    }
+
+    // ------------------------------------------------------------------
+    // Metadata item cap (Task 129.3)
+    // ------------------------------------------------------------------
+
+    fn repeated_metadata(count: usize) -> Vec<u8> {
+        vec!["d=1"; count].join(":").into_bytes()
+    }
+
+    #[test]
+    fn metadata_at_item_cap_is_accepted() {
+        let metadata = repeated_metadata(MAX_OSC99_METADATA_ITEMS);
+        assert!(parse_osc_99(&metadata, &pay("")).is_ok());
+    }
+
+    #[test]
+    fn metadata_over_item_cap_is_rejected() {
+        let metadata = repeated_metadata(MAX_OSC99_METADATA_ITEMS + 1);
+        let err = parse_osc_99(&metadata, &pay("")).unwrap_err();
+        assert_eq!(
+            err,
+            Osc99ParseError::TooManyMetadataItems {
+                max: MAX_OSC99_METADATA_ITEMS
+            }
+        );
+    }
+
+    #[test]
+    fn empty_segments_do_not_count_toward_metadata_cap() {
+        let metadata = vec!["d=1"; MAX_OSC99_METADATA_ITEMS]
+            .join("::")
+            .into_bytes();
+        assert!(parse_osc_99(&metadata, &pay("")).is_ok());
+    }
+
+    #[test]
+    fn earlier_malformed_item_wins_over_cap() {
+        let mut metadata = b"foo:".to_vec();
+        metadata.extend(repeated_metadata(MAX_OSC99_METADATA_ITEMS + 1));
+        let err = parse_osc_99(&metadata, &pay("")).unwrap_err();
+        assert_eq!(err, Osc99ParseError::InvalidMetadata("foo".to_owned()));
+    }
+
+    // ------------------------------------------------------------------
     // Realistic combined example
     // ------------------------------------------------------------------
 
@@ -900,7 +1098,9 @@ mod tests {
         assert_eq!(cmd.payload_type, Osc99PayloadType::Body);
         assert!(cmd.close_report);
         assert_eq!(cmd.urgency, Some(NotificationUrgency::Normal));
-        assert_eq!(cmd.payload, b"Build complete");
+        // Raw base64 text; decoded to "Build complete" during reassembly.
+        assert_eq!(cmd.payload, b"QnVpbGQgY29tcGxldGU=");
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Base64);
         assert!(cmd.done);
     }
 
@@ -937,9 +1137,9 @@ mod tests {
             Osc99ParseError::InvalidValue("val".into()),
             Osc99ParseError::InvalidInteger("99".into()),
             Osc99ParseError::InvalidId("bad!id".into()),
-            Osc99ParseError::InvalidBase64("!!!".into()),
             Osc99ParseError::InvalidPayloadUtf8("bad".into()),
             Osc99ParseError::SequenceTooLarge(2_000_000),
+            Osc99ParseError::TooManyMetadataItems { max: 64 },
         ];
         for e in &errors {
             let s = format!("{e}");

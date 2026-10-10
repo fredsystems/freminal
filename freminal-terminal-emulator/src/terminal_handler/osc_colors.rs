@@ -18,6 +18,7 @@ use freminal_common::{
 };
 
 use super::TerminalHandler;
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 impl TerminalHandler {
     /// Handle OSC 10/11/12 foreground/background/cursor color query, set,
@@ -54,7 +55,11 @@ impl TerminalHandler {
                 if let Some(rgb) = parse_color_spec(spec) {
                     self.bg_color_override = Some(rgb);
                 } else {
-                    tracing::warn!("OSC 11: unrecognised color spec: {spec:?}");
+                    tracing::warn!("OSC 11: unrecognised color spec");
+                    tracing::debug!(
+                        "OSC 11: unrecognised color spec: {:?}",
+                        lossy_sequence_for_log_bounded(spec.as_bytes())
+                    );
                 }
             }
             // OSC 10 set: store a dynamic foreground color override.
@@ -62,7 +67,11 @@ impl TerminalHandler {
                 if let Some(rgb) = parse_color_spec(spec) {
                     self.fg_color_override = Some(rgb);
                 } else {
-                    tracing::warn!("OSC 10: unrecognised color spec: {spec:?}");
+                    tracing::warn!("OSC 10: unrecognised color spec");
+                    tracing::debug!(
+                        "OSC 10: unrecognised color spec: {:?}",
+                        lossy_sequence_for_log_bounded(spec.as_bytes())
+                    );
                 }
             }
             // OSC 12 set: store a dynamic cursor color override.
@@ -70,7 +79,11 @@ impl TerminalHandler {
                 if let Some(rgb) = parse_color_spec(spec) {
                     self.cursor_color_override = Some(rgb);
                 } else {
-                    tracing::warn!("OSC 12: unrecognised color spec: {spec:?}");
+                    tracing::warn!("OSC 12: unrecognised color spec");
+                    tracing::debug!(
+                        "OSC 12: unrecognised color spec: {:?}",
+                        lossy_sequence_for_log_bounded(spec.as_bytes())
+                    );
                 }
             }
             // OSC 110: reset dynamic foreground color override.

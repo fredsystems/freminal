@@ -25,7 +25,9 @@ use freminal_common::buffer_states::{
 pub enum ParserOutcome {
     /// The parser consumed the byte and no complete output was produced yet.
     Continue,
-    /// The parser produced at least one `TerminalOutput` as a result of this byte.
+    /// The byte completed a sequence. A completed sequence usually produces at
+    /// least one `TerminalOutput`, but need not: a sequence that is recognised
+    /// and ignored, or one dropped for exceeding its byte cap, produces none.
     Finished,
     /// The byte resulted in an invalid sequence or parse error (error string provided).
     Invalid(String),
@@ -42,6 +44,26 @@ impl fmt::Display for ParserOutcome {
                 write!(f, "InvalidParserFailure: {msg:?}")
             }
         }
+    }
+}
+
+/// What the previous byte was, for a string sequence (OSC, APC, DCS) that has
+/// overflowed its byte cap and so no longer keeps its payload.
+///
+/// An overflowed sequence is consumed only to find its terminator, and the
+/// terminator's first byte is ESC, so this is all that has to be remembered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrevByte {
+    /// The previous byte was ESC (`0x1b`).
+    Esc,
+    /// The previous byte was anything else.
+    Other,
+}
+
+impl PrevByte {
+    /// Classify `b` as the previous byte for the next push.
+    pub(crate) const fn of(b: u8) -> Self {
+        if b == 0x1b { Self::Esc } else { Self::Other }
     }
 }
 

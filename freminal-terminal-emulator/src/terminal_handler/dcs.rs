@@ -21,7 +21,9 @@ use super::TerminalHandler;
 use crate::ansi::split_params_into_semicolon_delimited_usize;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
-use crate::ansi_components::tracer::escape_sequence_for_log;
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 
 impl TerminalHandler {
     /// Handle a DCS (Device Control String) sequence.
@@ -35,9 +37,12 @@ impl TerminalHandler {
     /// - **tmux passthrough** (`tmux; <inner> ST`): un-doubles ESC bytes and
     ///   dispatches the inner escape sequence to the appropriate handler.
     ///
-    /// Unknown or unsupported DCS sub-commands are logged at warn level.
+    /// A DCS whose body starts with `@kitty-` (kitty's `@kitty-cmd`,
+    /// `@kitty-print` and friends) is consumed with a single debug line
+    /// carrying its length only. Other unknown or unsupported DCS
+    /// sub-commands are logged at warn level, without any payload bytes.
     pub fn handle_device_control_string(&mut self, dcs: &[u8]) {
-        tracing::debug!("DCS received: {:?}", String::from_utf8_lossy(dcs));
+        tracing::debug!("DCS received: \"{}\"", escape_sequence_for_log_bounded(dcs));
         // Strip leading 'P' and trailing ESC '\' to get inner content.
         let inner = Self::strip_dcs_envelope(dcs);
 
@@ -49,11 +54,12 @@ impl TerminalHandler {
             self.handle_sixel(inner);
         } else if let Some(payload) = inner.strip_prefix(b"tmux;") {
             self.handle_tmux_passthrough(payload);
+        } else if inner.starts_with(b"@kitty-") {
+            // kitty's own remote-control / print DCS family. Freminal does not
+            // implement it; consume it quietly, logging the length only.
+            tracing::debug!("DCS @kitty- sequence ignored ({} bytes)", inner.len());
         } else {
-            tracing::warn!(
-                "DCS sub-command not recognized: {}",
-                String::from_utf8_lossy(dcs)
-            );
+            tracing::warn!("DCS sub-command not recognized ({} bytes)", inner.len());
         }
     }
 
@@ -148,8 +154,12 @@ impl TerminalHandler {
 
         if inner.len() < 2 || inner[0] != 0x1b {
             tracing::warn!(
-                "DCS tmux passthrough: inner sequence does not start with ESC: {}",
-                String::from_utf8_lossy(&inner)
+                "DCS tmux passthrough: inner sequence does not start with ESC ({} bytes)",
+                inner.len()
+            );
+            tracing::debug!(
+                "DCS tmux passthrough: inner sequence: \"{}\"",
+                escape_sequence_for_log_bounded(&inner)
             );
             return;
         }
@@ -209,8 +219,12 @@ impl TerminalHandler {
             }
             other => {
                 tracing::warn!(
-                    "DCS tmux passthrough: unknown inner sequence type 0x{other:02x}: {}",
-                    String::from_utf8_lossy(&inner)
+                    "DCS tmux passthrough: unknown inner sequence type ({} bytes)",
+                    inner.len()
+                );
+                tracing::debug!(
+                    "DCS tmux passthrough: unknown inner sequence type 0x{other:02x}: \"{}\"",
+                    escape_sequence_for_log_bounded(&inner)
                 );
             }
         }
@@ -409,9 +423,10 @@ impl TerminalHandler {
                 if let Ok(m) = EraseDisplayMode::try_from(mode) {
                     self.handle_erase_in_display(m);
                 } else {
-                    tracing::warn!(
+                    tracing::warn!("DCS tmux passthrough: unknown ED mode {mode}");
+                    tracing::debug!(
                         "DCS tmux passthrough: unknown ED mode {mode}; raw CSI: \"\\x1b[{}\"",
-                        escape_sequence_for_log(csi_body)
+                        escape_sequence_for_log_bounded(csi_body)
                     );
                 }
                 true
@@ -426,9 +441,10 @@ impl TerminalHandler {
                 if let Ok(m) = EraseLineMode::try_from(mode) {
                     self.handle_erase_in_line(m);
                 } else {
-                    tracing::warn!(
+                    tracing::warn!("DCS tmux passthrough: unknown EL mode {mode}");
+                    tracing::debug!(
                         "DCS tmux passthrough: unknown EL mode {mode}; raw CSI: \"\\x1b[{}\"",
-                        escape_sequence_for_log(csi_body)
+                        escape_sequence_for_log_bounded(csi_body)
                     );
                 }
                 true
@@ -601,9 +617,10 @@ impl TerminalHandler {
             _ => {
                 // Invalid / unrecognized query → DCS 0 $ r ST
                 self.write_dcs_response("0$r");
-                tracing::warn!(
-                    "DECRQSS: unrecognized setting query: {}",
-                    String::from_utf8_lossy(pt)
+                tracing::warn!("DECRQSS: unrecognized setting query ({} bytes)", pt.len());
+                tracing::debug!(
+                    "DECRQSS: unrecognized setting query: \"{}\"",
+                    escape_sequence_for_log_bounded(pt)
                 );
             }
         }
@@ -618,8 +635,8 @@ impl TerminalHandler {
     ///           `DCS 0 + r <hex-name> ST` for unknown ones.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
         tracing::debug!(
-            "XTGETTCAP query: {:?}",
-            String::from_utf8_lossy(hex_payload)
+            "XTGETTCAP query: \"{}\"",
+            escape_sequence_for_log_bounded(hex_payload)
         );
         let payload_str = String::from_utf8_lossy(hex_payload);
 
@@ -630,7 +647,11 @@ impl TerminalHandler {
             }
 
             let Some(cap_name) = Self::hex_decode(hex_name) else {
-                tracing::warn!("XTGETTCAP: invalid hex encoding: {hex_name}");
+                tracing::warn!("XTGETTCAP: invalid hex encoding in capability name");
+                tracing::debug!(
+                    "XTGETTCAP: invalid hex encoding: {}",
+                    lossy_sequence_for_log_bounded(hex_name.as_bytes())
+                );
                 self.write_dcs_response(&format!("0+r{hex_name}"));
                 continue;
             };
@@ -648,7 +669,10 @@ impl TerminalHandler {
                 let hex_value = Self::hex_encode(value);
                 self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
             } else {
-                tracing::debug!("XTGETTCAP: unknown capability: {cap_name}");
+                tracing::debug!(
+                    "XTGETTCAP: unknown capability: {}",
+                    lossy_sequence_for_log_bounded(cap_name.as_bytes())
+                );
                 self.write_dcs_response(&format!("0+r{hex_name}"));
             }
         }
@@ -769,6 +793,9 @@ mod tests {
     };
 
     use super::TerminalHandler;
+    use crate::log_capture::{Captured, capture, warnings};
+    use crate::state::internal::TerminalState;
+    use tracing::Level;
 
     // ------------------------------------------------------------------
     // DECRQSS tests (DCS $ q ... ST)
@@ -2474,5 +2501,98 @@ mod tests {
         assert_eq!(cursor.y, 0, "row should be 1 - 1 = 0 (0-based)");
 
         // Now the APC Kitty Put would execute, reading cursor.pos correctly.
+    }
+
+    // ------------------------------------------------------------------
+    // Payload-free warn logging (129.14)
+    // ------------------------------------------------------------------
+
+    /// Feed `bytes` through the whole parser + handler pipeline and return
+    /// every log event emitted on this thread while doing so.
+    fn feed_and_capture(bytes: &[u8]) -> Vec<Captured> {
+        capture(|| {
+            let mut state = TerminalState::default();
+            state.handle_incoming_data(bytes);
+        })
+    }
+
+    #[test]
+    fn unknown_dcs_warns_without_payload() {
+        let events = feed_and_capture(b"\x1bPzzSECRETPAYLOAD\x1b\\");
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(
+                !text.contains("SECRETPAYLOAD"),
+                "{level} line leaked payload: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_print_dcs_produces_no_warn() {
+        let events = feed_and_capture(b"\x1bP@kitty-print|SECRETPAYLOAD\x1b\\");
+        assert!(
+            warnings(&events).is_empty(),
+            "@kitty- DCS must not warn: {events:?}"
+        );
+        assert!(
+            events.iter().any(|(level, text)| *level == Level::DEBUG
+                && text.contains("DCS @kitty- sequence ignored")),
+            "expected the dedicated @kitty- debug line: {events:?}"
+        );
+        assert!(
+            events.iter().all(|(level, text)| {
+                // Only the generic, bounded `DCS received` debug may show the body.
+                *level != Level::DEBUG
+                    || !text.contains("SECRETPAYLOAD")
+                    || text.contains("DCS received")
+            }),
+            "the @kitty- consumption line must carry a length only: {events:?}"
+        );
+    }
+
+    #[test]
+    fn decrqss_unrecognised_query_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1bP$qSECRETPAYLOAD\x1b\\");
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(
+                !text.contains("SECRETPAYLOAD"),
+                "{level} line leaked payload: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtgettcap_invalid_hex_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1bP+qSECRETPAYLOAD\x1b\\");
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(
+                !text.contains("SECRETPAYLOAD"),
+                "{level} line leaked payload: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn dcs_received_debug_is_bounded() {
+        let mut dcs = b"\x1bPzz".to_vec();
+        dcs.extend(std::iter::repeat_n(b'A', 100_000));
+        dcs.extend_from_slice(b"\x1b\\");
+        let events = feed_and_capture(&dcs);
+        // Every level, TRACE included: the per-output trace in
+        // `state/internal.rs` is bounded too (129.C6).
+        for (_, text) in &events {
+            assert!(
+                text.len() < 4096,
+                "a log line carried an unbounded payload ({} bytes): {}",
+                text.len(),
+                &text[..text.len().min(120)]
+            );
+        }
     }
 }

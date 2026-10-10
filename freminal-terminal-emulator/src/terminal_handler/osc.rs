@@ -19,9 +19,29 @@ use freminal_common::buffer_states::{
     window_manipulation::{NotificationKind, WindowManipulation},
 };
 
-use crate::ansi_components::tracer::escape_sequence_for_log;
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 
 use super::{TerminalHandler, notify_99, shell_integration};
+
+/// A payload-free, static description of a Kitty graphics parse failure, safe
+/// for a warn-level log line. The `Display` of [`KittyParseError`] embeds
+/// strings and bytes copied from the sequence, so it must not be logged at
+/// warn.
+const fn kitty_parse_error_kind(err: &KittyParseError) -> &'static str {
+    match err {
+        KittyParseError::NotKittyGraphics => "not a Kitty graphics command",
+        KittyParseError::InvalidControlPair(_) => "invalid control pair",
+        KittyParseError::UnknownAction(_) => "unknown action",
+        KittyParseError::UnknownFormat(_) => "unknown format",
+        KittyParseError::UnknownTransmission(_) => "unknown transmission",
+        KittyParseError::UnknownDeleteTarget(_) => "unknown delete target",
+        KittyParseError::InvalidInteger(_) => "invalid integer",
+        KittyParseError::UnknownCompression(_) => "unknown compression",
+        KittyParseError::TooManyControlItems { .. } => "too many control data items",
+    }
+}
 
 impl TerminalHandler {
     /// Handle an APC (Application Program Command) sequence.
@@ -33,12 +53,20 @@ impl TerminalHandler {
             Ok(cmd) => self.handle_kitty_graphics(cmd),
             Err(KittyParseError::NotKittyGraphics) => {
                 tracing::warn!(
+                    "APC received (not Kitty graphics, ignored): {} bytes",
+                    apc.len()
+                );
+                tracing::debug!(
                     "APC received (not Kitty graphics, ignored); raw sequence: \"{}\"",
-                    escape_sequence_for_log(apc)
+                    escape_sequence_for_log_bounded(apc)
                 );
             }
             Err(e) => {
-                tracing::warn!("Kitty graphics parse error: {e}");
+                tracing::warn!("Kitty graphics parse error: {}", kitty_parse_error_kind(&e));
+                tracing::debug!(
+                    "Kitty graphics parse error: {}",
+                    lossy_sequence_for_log_bounded(e.to_string().as_bytes())
+                );
             }
         }
     }
@@ -85,13 +113,23 @@ impl TerminalHandler {
             AnsiOscType::RemoteHost(value) => {
                 self.current_working_directory = shell_integration::parse_osc7_uri(value);
                 if self.current_working_directory.is_none() {
-                    tracing::warn!("OSC 7: failed to parse URI: {value}");
-                } else {
-                    tracing::debug!("OSC 7: CWD set to {:?}", self.current_working_directory);
+                    tracing::warn!("OSC 7: failed to parse URI");
+                    tracing::debug!(
+                        "OSC 7: failed to parse URI: {}",
+                        lossy_sequence_for_log_bounded(value.as_bytes())
+                    );
+                } else if let Some(cwd) = &self.current_working_directory {
+                    tracing::debug!(
+                        "OSC 7: CWD set to {:?}",
+                        lossy_sequence_for_log_bounded(cwd.as_bytes())
+                    );
                 }
             }
             AnsiOscType::ShellInfoHistFile(path) => {
-                tracing::debug!("OSC 1338: HISTFILE set to {:?}", path);
+                tracing::debug!(
+                    "OSC 1338: HISTFILE set to {:?}",
+                    lossy_sequence_for_log_bounded(path.to_string_lossy().as_bytes())
+                );
                 self.shell_histfile = Some(path.clone());
             }
             AnsiOscType::Ftcs(marker) => {
@@ -213,7 +251,10 @@ impl TerminalHandler {
     /// *does* reach this function — where it is handled as an informational
     /// no-op (see the `PromptProperty` arm below).
     pub(super) fn handle_osc_ftcs(&mut self, marker: &FtcsMarker) {
-        tracing::debug!("OSC 133 FTCS marker: {marker}");
+        tracing::debug!(
+            "OSC 133 FTCS marker: {}",
+            lossy_sequence_for_log_bounded(marker.to_string().as_bytes())
+        );
         match marker {
             FtcsMarker::PromptStart { fid } => {
                 self.ftcs_state = FtcsState::InPrompt;
@@ -252,9 +293,12 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::TerminalHandler;
+    use crate::log_capture::{Captured, capture, warnings};
+    use crate::state::internal::TerminalState;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command, Osc99PayloadType,
+        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command,
+        Osc99PayloadEncoding, Osc99PayloadType,
     };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
@@ -332,6 +376,7 @@ mod tests {
             payload_type: Osc99PayloadType::Title,
             done: true,
             payload: Vec::new(),
+            payload_encoding: Osc99PayloadEncoding::Plain,
             actions: Osc99Actions::default(),
             close_report: false,
             app_name: None,
@@ -552,6 +597,41 @@ mod tests {
         }
     }
 
+    /// A base64 title split mid-quantum across two sequences reaches the GUI
+    /// as one decoded `Notification99` window command.
+    #[test]
+    fn osc_notify99_base64_title_split_mid_quantum_pushes_decoded_command() {
+        use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        // "Hello" -> "SGVsbG8=", split after "SGV" (mid-quantum).
+        let first = parse_osc_99(b"i=s:d=0:e=1", b"SGV").unwrap();
+        let second = parse_osc_99(b"i=s:e=1", b"sbG8=").unwrap();
+        handler.process_outputs(&[
+            TerminalOutput::OscResponse(AnsiOscType::Notify99(first)),
+            TerminalOutput::OscResponse(AnsiOscType::Notify99(second)),
+        ]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("Hello"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
+    }
+
+    /// Invalid base64 in a standalone notification pushes no window command.
+    #[test]
+    fn osc_notify99_invalid_base64_pushes_no_window_command() {
+        use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = parse_osc_99(b"e=1", b"@@@@").unwrap();
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+        assert_eq!(handler.window_commands, []);
+    }
+
     /// A fully-specified notification maps urgency/occasion/expiry/actions
     /// correctly into the `Notification99Data` shell.
     #[test]
@@ -700,5 +780,123 @@ mod tests {
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
+    }
+
+    // ── Payload-free warn logging (129.14) ───────────────────────────────────
+
+    /// Feed `bytes` through the whole parser + handler pipeline and return
+    /// every log event emitted on this thread while doing so.
+    fn feed_and_capture(bytes: &[u8]) -> Vec<Captured> {
+        capture(|| {
+            let mut state = TerminalState::default();
+            state.handle_incoming_data(bytes);
+        })
+    }
+
+    /// Assert that at least one warn/error was logged and that none of them
+    /// contains `secret`.
+    fn assert_warns_without(events: &[Captured], secret: &str) {
+        let warns = warnings(events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(
+                !text.contains(secret),
+                "{level} line leaked payload: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_osc_warn_omits_payload_and_names_number() {
+        let events = feed_and_capture(b"\x1b]9999;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+        let warns = warnings(&events);
+        assert!(
+            warns.iter().any(|(_, text)| text.contains("OSC 9999")),
+            "warn should name the OSC number: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_osc_with_non_numeric_number_warn_omits_attacker_text() {
+        let events = feed_and_capture(b"\x1b]SECRETPAYLOAD;x\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+        let warns = warnings(&events);
+        assert!(
+            warns.iter().any(|(_, text)| text.contains("non-numeric")),
+            "warn should say the number is non-numeric: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn unimplemented_osc_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]13;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn non_kitty_apc_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b_XSECRETPAYLOAD\x1b\\");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn malformed_kitty_graphics_apc_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b_GSECRETPAYLOAD;AAAA\x1b\\");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_52_invalid_base64_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]52;c;SECRET!!\x07");
+        assert_warns_without(&events, "SECRET");
+    }
+
+    #[test]
+    fn osc_4_invalid_color_spec_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]4;1;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_10_unrecognised_color_spec_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]10;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_7_unparsable_uri_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]7;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_1337_unknown_sub_command_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]1337;SECRETPAYLOAD=1\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_1337_file_unknown_arg_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]1337;File=SECRETKEY=SECRETVALUE:QUJD\x07");
+        let warns = warnings(&events);
+        for (level, text) in warns {
+            assert!(
+                !text.contains("SECRETKEY") && !text.contains("SECRETVALUE"),
+                "{level} line leaked payload: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_133_unknown_marker_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]133;ZSECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_1338_unknown_sub_command_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]1338;SECRETPAYLOAD=1\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
     }
 }

@@ -43,7 +43,8 @@ pub(super) fn handle_osc_shell_info(raw_params: &[u8], output: &mut Vec<Terminal
     //
     // Find the first ';' to skip past "1338".
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::warn!(
+        tracing::warn!("OSC 1338: missing sub-command");
+        tracing::debug!(
             "OSC 1338: missing sub-command: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -62,7 +63,8 @@ pub(super) fn handle_osc_shell_info(raw_params: &[u8], output: &mut Vec<Terminal
     // future sub-commands added to newer shell-integration scripts will
     // be ignored by older freminal binaries without producing a parse
     // error.
-    tracing::warn!(
+    tracing::warn!("OSC 1338: unrecognised sub-command (ignored)");
+    tracing::debug!(
         "OSC 1338: unrecognised sub-command (ignored); raw sequence: \"{}\"",
         escape_sequence_for_log_bounded(raw_params)
     );
@@ -72,7 +74,8 @@ pub(super) fn handle_osc_shell_info(raw_params: &[u8], output: &mut Vec<Terminal
 /// `AnsiOscType::ShellInfoHistFile`.
 fn handle_shell_info_histfile(value: &[u8], raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
     if value.is_empty() {
-        tracing::warn!(
+        tracing::warn!("OSC 1338 HISTFILE=: empty path");
+        tracing::debug!(
             "OSC 1338 HISTFILE=: empty path: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -86,7 +89,8 @@ fn handle_shell_info_histfile(value: &[u8], raw_params: &[u8], output: &mut Vec<
     // round-trips to an openable file on disk.  The env-derived
     // fallback path in the GUI loader already covers the unhappy path.
     let Ok(s) = std::str::from_utf8(value) else {
-        tracing::warn!(
+        tracing::warn!("OSC 1338 HISTFILE=: non-UTF-8 path");
+        tracing::debug!(
             "OSC 1338 HISTFILE=: non-UTF-8 path: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );

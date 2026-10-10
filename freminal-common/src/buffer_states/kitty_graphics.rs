@@ -15,6 +15,17 @@
 
 use std::fmt;
 
+use crate::key_value::{KeyValueError, KeyValueItem, KeyValueSeparator, tokenize};
+
+/// Maximum number of `key=value` items accepted in one kitty graphics control
+/// data region.
+///
+/// The protocol defines roughly thirty single-character keys; 64 admits every
+/// legitimate command (including a few repeats) while bounding the work a
+/// hostile sequence can force. Exceeding it yields
+/// [`KittyParseError::TooManyControlItems`].
+pub const MAX_KITTY_CONTROL_ITEMS: usize = 64;
+
 /// Action requested by a Kitty graphics command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KittyAction {
@@ -240,6 +251,11 @@ pub enum KittyParseError {
     InvalidInteger(String),
     /// An unrecognized compression type.
     UnknownCompression(u8),
+    /// The control data held more than [`MAX_KITTY_CONTROL_ITEMS`] items.
+    TooManyControlItems {
+        /// The item cap that was exceeded.
+        max: usize,
+    },
 }
 
 impl fmt::Display for KittyParseError {
@@ -253,6 +269,9 @@ impl fmt::Display for KittyParseError {
             Self::UnknownDeleteTarget(c) => write!(f, "unknown delete target: {}", *c as char),
             Self::InvalidInteger(s) => write!(f, "invalid integer: {s}"),
             Self::UnknownCompression(c) => write!(f, "unknown compression: {}", *c as char),
+            Self::TooManyControlItems { max } => {
+                write!(f, "more than {max} control data items")
+            }
         }
     }
 }
@@ -395,26 +414,35 @@ fn apply_control_pair(
 fn parse_control_data(data: &[u8]) -> Result<KittyControlData, KittyParseError> {
     let mut ctrl = KittyControlData::default();
 
-    for pair in data.split(|&b| b == b',') {
-        if pair.is_empty() {
-            continue;
+    // Empty segments (leading/trailing/doubled commas) are skipped by the
+    // tokenizer.
+    for item in tokenize(data, KeyValueSeparator::Comma, MAX_KITTY_CONTROL_ITEMS) {
+        match item {
+            // A pair with no `=` is malformed.
+            Ok(KeyValueItem::Bare(pair)) => {
+                return Err(KittyParseError::InvalidControlPair(
+                    String::from_utf8_lossy(pair).into_owned(),
+                ));
+            }
+            Ok(KeyValueItem::Pair { key, value }) => {
+                // An empty key or an empty value is malformed. The key is the
+                // first byte only (a wider key is accepted as its first byte;
+                // tightening that is Task 135).
+                let Some(&key_byte) = key.first().filter(|_| !value.is_empty()) else {
+                    let mut pair = Vec::with_capacity(key.len() + 1 + value.len());
+                    pair.extend_from_slice(key);
+                    pair.push(b'=');
+                    pair.extend_from_slice(value);
+                    return Err(KittyParseError::InvalidControlPair(
+                        String::from_utf8_lossy(&pair).into_owned(),
+                    ));
+                };
+                apply_control_pair(&mut ctrl, key_byte, value)?;
+            }
+            Err(KeyValueError::TooManyItems { max }) => {
+                return Err(KittyParseError::TooManyControlItems { max });
+            }
         }
-
-        // Find the '=' separator
-        let eq_pos = pair.iter().position(|&b| b == b'=').ok_or_else(|| {
-            KittyParseError::InvalidControlPair(String::from_utf8_lossy(pair).into_owned())
-        })?;
-
-        if eq_pos == 0 || eq_pos + 1 >= pair.len() {
-            return Err(KittyParseError::InvalidControlPair(
-                String::from_utf8_lossy(pair).into_owned(),
-            ));
-        }
-
-        let key = pair[0];
-        let value = &pair[eq_pos + 1..];
-
-        apply_control_pair(&mut ctrl, key, value)?;
     }
 
     Ok(ctrl)
@@ -471,7 +499,7 @@ pub fn parse_kitty_graphics(apc: &[u8]) -> Result<KittyGraphicsCommand, KittyPar
         let b64_str = std::str::from_utf8(payload_b64).map_err(|_| {
             KittyParseError::InvalidControlPair("payload is not valid UTF-8".to_owned())
         })?;
-        crate::base64::decode(b64_str)
+        crate::base64::decode(b64_str.as_bytes())
             .map_err(|e| KittyParseError::InvalidControlPair(format!("base64 decode error: {e}")))?
     };
 
@@ -493,9 +521,13 @@ pub struct KittyResponseId {
     pub placement_id: Option<u32>,
 }
 
-/// Format a Kitty graphics response to be sent back to the PTY.
+/// Format the body of a Kitty graphics response to be sent back to the PTY.
 ///
-/// The response format is: `ESC _ G i=<id>[,I=<number>][,p=<placement_id>] ; <message> ESC \`
+/// The body format is: `G i=<id>[,I=<number>][,p=<placement_id>] ; <message>`
+///
+/// The result carries **no framing**: neither the APC introducer nor the
+/// string terminator is included. The caller frames it through
+/// `write_apc_response`, which picks the 7-bit or 8-bit (S8C1T) C1 forms.
 ///
 /// If `ok` is true, the message is `OK`. Otherwise it is the provided error string.
 ///
@@ -504,7 +536,7 @@ pub struct KittyResponseId {
 /// originating request specified a non-zero placement id; `None` and
 /// `Some(0)` (for the placement id) both omit it.
 #[must_use]
-pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> String {
+pub fn format_kitty_response_body(id: KittyResponseId, ok: bool, message: &str) -> String {
     use std::fmt::Write as _;
 
     let msg = if ok { "OK" } else { message };
@@ -518,7 +550,7 @@ pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> St
     {
         let _ = write!(key, ",p={pid}");
     }
-    format!("\x1b_G{key};{msg}\x1b\\")
+    format!("G{key};{msg}")
 }
 
 #[cfg(test)]
@@ -543,7 +575,7 @@ mod tests {
 
     #[test]
     fn parse_simple_transmit_and_display() {
-        let apc = make_apc("a=T,f=100,s=200,v=100,i=42", "iVBOR");
+        let apc = make_apc("a=T,f=100,s=200,v=100,i=42", "iVBORw");
         let cmd = parse_kitty_graphics(&apc).unwrap();
 
         assert_eq!(cmd.control.action, Some(KittyAction::TransmitAndDisplay));
@@ -724,7 +756,7 @@ mod tests {
 
     #[test]
     fn format_response_ok() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -733,12 +765,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+        assert_eq!(resp, "Gi=42;OK");
     }
 
     #[test]
     fn format_response_error() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -747,12 +779,12 @@ mod tests {
             false,
             "ENOENT:file not found",
         );
-        assert_eq!(resp, "\x1b_Gi=42;ENOENT:file not found\x1b\\");
+        assert_eq!(resp, "Gi=42;ENOENT:file not found");
     }
 
     #[test]
     fn format_response_with_nonzero_placement_id_includes_p() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -761,12 +793,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42,p=7;OK\x1b\\");
+        assert_eq!(resp, "Gi=42,p=7;OK");
     }
 
     #[test]
     fn format_response_with_zero_placement_id_omits_p() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -775,12 +807,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+        assert_eq!(resp, "Gi=42;OK");
     }
 
     #[test]
     fn format_response_with_image_number_includes_i_field() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 99,
                 image_number: Some(13),
@@ -789,12 +821,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=99,I=13;OK\x1b\\");
+        assert_eq!(resp, "Gi=99,I=13;OK");
     }
 
     #[test]
     fn format_response_with_image_number_and_placement_locks_field_order() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 99,
                 image_number: Some(13),
@@ -803,7 +835,7 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=99,I=13,p=7;OK\x1b\\");
+        assert_eq!(resp, "Gi=99,I=13,p=7;OK");
     }
 
     #[test]
@@ -1006,6 +1038,105 @@ mod tests {
         assert_eq!(cmd.control.image_id, Some(1));
     }
 
+    // --- Pinned behaviour (Task 129.3): must survive the tokenizer migration ---
+
+    #[test]
+    fn multi_byte_key_uses_first_byte() {
+        // Known quirk (fixed in Task 135): only the key's first byte is used,
+        // so `ixyz=7` is read as `i=7`.
+        let apc = make_apc("ixyz=7", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.image_id, Some(7));
+    }
+
+    #[test]
+    fn multi_byte_key_abc_is_accepted_as_action_key() {
+        // `abc=q` is read as `a=q`.
+        let apc = make_apc("abc=q", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.action, Some(KittyAction::Query));
+    }
+
+    #[test]
+    fn multi_char_value_uses_first_byte_for_char_keys() {
+        // `a=tXYZ` is accepted as `a=t`.
+        let apc = make_apc("a=tXYZ", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.action, Some(KittyAction::Transmit));
+    }
+
+    #[test]
+    fn duplicate_keys_last_wins() {
+        let apc = make_apc("i=1,i=2,a=t,a=p", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.image_id, Some(2));
+        assert_eq!(cmd.control.action, Some(KittyAction::Put));
+    }
+
+    #[test]
+    fn invalid_control_pair_payloads_carry_the_token() {
+        for (control, token) in [
+            ("abc", "abc"),
+            ("a=", "a="),
+            ("=x", "=x"),
+            ("=", "="),
+            ("a=t,i=", "i="),
+        ] {
+            let err = parse_control_data(control.as_bytes()).unwrap_err();
+            assert_eq!(
+                err,
+                KittyParseError::InvalidControlPair(token.to_owned()),
+                "control {control:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_may_contain_equals() {
+        // Only the first `=` splits; the rest belongs to the value, which
+        // `parse_u32` then rejects.
+        let err = parse_control_data(b"i=1=2").unwrap_err();
+        assert_eq!(err, KittyParseError::InvalidInteger("1=2".to_owned()));
+    }
+
+    // --- Control item cap (Task 129.3) ---
+
+    fn repeated_control(count: usize) -> Vec<u8> {
+        vec!["i=1"; count].join(",").into_bytes()
+    }
+
+    #[test]
+    fn control_data_at_item_cap_is_accepted() {
+        let control = repeated_control(MAX_KITTY_CONTROL_ITEMS);
+        assert!(parse_control_data(&control).is_ok());
+    }
+
+    #[test]
+    fn control_data_over_item_cap_is_rejected() {
+        let control = repeated_control(MAX_KITTY_CONTROL_ITEMS + 1);
+        let err = parse_control_data(&control).unwrap_err();
+        assert_eq!(
+            err,
+            KittyParseError::TooManyControlItems {
+                max: MAX_KITTY_CONTROL_ITEMS
+            }
+        );
+    }
+
+    #[test]
+    fn empty_segments_do_not_count_toward_control_cap() {
+        let control = vec!["i=1"; MAX_KITTY_CONTROL_ITEMS].join(",,").into_bytes();
+        assert!(parse_control_data(&control).is_ok());
+    }
+
+    #[test]
+    fn earlier_malformed_pair_wins_over_cap() {
+        let mut control = b"abc,".to_vec();
+        control.extend(repeated_control(MAX_KITTY_CONTROL_ITEMS + 1));
+        let err = parse_control_data(&control).unwrap_err();
+        assert_eq!(err, KittyParseError::InvalidControlPair("abc".to_owned()));
+    }
+
     #[test]
     fn display_all_error_variants() {
         let errors = [
@@ -1017,6 +1148,7 @@ mod tests {
             KittyParseError::UnknownDeleteTarget(b'9'),
             KittyParseError::InvalidInteger("abc".into()),
             KittyParseError::UnknownCompression(b'x'),
+            KittyParseError::TooManyControlItems { max: 64 },
         ];
         for e in &errors {
             let s = format!("{e}");

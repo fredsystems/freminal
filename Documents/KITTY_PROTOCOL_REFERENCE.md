@@ -515,8 +515,9 @@ ESC _ G i=<id>[,p=<placement>] ; <OK-or-ERROR[:detail]> ESC \
 ```
 
 - `p=` is included in the response **only if** the request specified a non-zero
-  `p=`. (freminal's `format_kitty_response` emits `p=<pid>` for non-zero
-  placements as of Task 100.)
+  `p=`. (freminal's `format_kitty_response_body` emits `p=<pid>` for non-zero
+  placements as of Task 100; renamed from `format_kitty_response` and framed
+  S8C1T-aware by `write_apc_response` since Task 129.13.)
 - `q=1` suppresses OK; `q=2` suppresses all. Message is printable ASCII.
 
 Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
@@ -566,7 +567,8 @@ implementation choice.
   Windows (`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle`
   via `winapi`; Task 100.10); `O=` byte offset is applied when reading a
   file/shm object (Tasks 100.6, 100.10).
-- `format_kitty_response(image_id, ok, message)` and `send_kitty_error` now
+- `format_kitty_response(image_id, ok, message)` (since Task 129.13
+  `format_kitty_response_body`) and `send_kitty_error` now
   take a placement id and emit `,p=<pid>` in the response when the request had
   a non-zero placement id (Tasks 100.2a, 100.3).
 - Image storage quota + LRU eviction is implemented in `ImageStore` (base

@@ -29,7 +29,7 @@ one plan document, grouped into milestones that ship as point releases:
 | v0.13.4   | Drag & Drop                                | 105                          |
 
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
-subtask breakdown: **126**, **127** and **128**. Everything else is an **enriched stub**:
+subtask breakdown: **126**, **127**, **128** and (activated 2026-10-09) **129**. Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
 example, OSC 66 is not a Contour code, and the 102 wire keys were wrong), so they are now
@@ -42,9 +42,9 @@ enriched stubs again and get re-decomposed at activation.
 | #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
 | --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
 | 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Pending merge | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Pending merge | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | M     | Planned       | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Pending merge | None                               |
 | 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | M     | Planned       | 129                                |
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | M     | Planned       | None                               |
 | 132 | Colour Foundation                           | v0.13.0   | L     | Planned       | 126.1                              |
@@ -1458,70 +1458,879 @@ Remaining findings are 128.C1–128.C4.
 
 ---
 
+## Task 129 — Kitty Wire Infrastructure
+
+### 129 Summary
+
+Build once the parsing and payload plumbing that every kitty OSC, APC and DCS protocol
+re-implements today, and fix the live wire-level bugs the audit found on the way. Activated
+and decomposed on 2026-10-09 against `72a5f7e1` (main after PR #535).
+
+### 129 Activation recon (2026-10-09)
+
+Three read-only audits re-traced the stub's findings against the current code. All of them
+were confirmed, and the recon added these details:
+
+- **Four hand-rolled `key=value` parsers, four different rule sets.**
+  - OSC 99 (`osc_notify_99.rs:409-464`): `:`-separated; the key must be exactly one byte;
+    missing `=` is an error.
+  - Graphics (`kitty_graphics.rs:395-421`): `,`-separated; the key is the **first byte** of
+    the pair (`abc=1` is accepted as `a=1`); an empty value is an error.
+  - FTCS (`ftcs.rs:169-243`): gets pre-split, re-stringified OSC tokens; uses positionals.
+  - iTerm2 (`osc_iterm2.rs:77-131`): `;`-separated; a pair without `=` is silently skipped.
+  - None of them caps the number of pairs.
+- **base64** (`freminal-common/src/base64.rs`): `decode(&str) -> Result<Vec<u8>, String>`.
+  Padding is optional, there is no length or tail-bit check, a lone trailing character
+  decodes to nothing, and the error is an untyped `String`. `encode` always pads.
+  - OSC 99 corruption is **confirmed**: `parse_osc_99` decodes each chunk on its own
+    (`osc_notify_99.rs:380-395`), so encode-then-chunk input split mid-quantum silently
+    produces wrong bytes. The spec allows both chunk-then-encode (each chunk padded) and
+    encode-then-chunk (arbitrary split, at most 4096 bytes per chunk).
+  - Graphics and iTerm2 `FilePart` also decode per chunk. The graphics spec requires
+    non-final chunks to be a multiple of 4, so that is conformant; it is not changed here.
+- **Accumulators.**
+  - Graphics (`KittyImageState`, `terminal_handler/mod.rs:104`): no byte cap, and
+    `Vec::with_capacity(S=)` pre-allocates up to about 4 GiB from a sender-chosen value
+    (`graphics_kitty.rs:674`).
+  - iTerm2 multipart (`MultipartImageState`, `mod.rs:92`): no byte cap, and
+    `Vec::with_capacity(size=)` (`graphics_iterm2.rs:167`) is unchecked.
+  - OSC 99 (`notify_99.rs`): capped at 128 pending ids and 1 MiB of decoded bytes per id.
+  - Neither graphics nor iTerm2 state is cleared by `full_reset`; that is Task 131's reset
+    work and is recorded there.
+- **Parsers.** `AnsiOscParser.params`, `ApcParser.sequence` and `DcsParser.sequence` grow
+  without bound. `sub_parsers_stay_small` (`ansi.rs:1958`) bounds each sub-parser at 128
+  bytes.
+- **Trailing backslash.** `AnsiOscParser::push` (`osc.rs:100-108`) pops every trailing
+  `0x5c`/`0x07`/`0x1b`, so `OSC 0;C:\ BEL` sets the title `C:`.
+- **Tokenise-first dispatch** (`osc.rs:150-176`). Every OSC is split on `;` and each field is
+  parsed as a `u16` or a UTF-8 `String` before dispatch, so a non-UTF-8 byte anywhere
+  invalidates every OSC, including the raw-payload targets (9, 99, 777, 1337, 1338).
+  - OSC 8: `8;;http://a;b` tokenises to four fields, matches neither accepted shape, and
+    becomes `UrlResponse::End`, closing the link. The `id` is stored as the whole params
+    field (`"id=foo"`) rather than parsed.
+  - OSC 0/1/2/7 use only field 1, so a title or URI containing `;` is truncated. Because the
+    value goes through `AnsiOscInternalType`'s `Display`, a numeric title `123` becomes
+    `Unknown(Some(OscValue(123)))` and a title of `?` becomes `Query`.
+- **Logging.** Unknown OSC payloads are logged at warn (bounded, escaped). Unknown DCS
+  payloads are logged at warn **unbounded** (`terminal_handler/dcs.rs:53-56`), as are the
+  non-kitty APC (`terminal_handler/osc.rs:35-38`), DECRQSS, XTGETTCAP and tmux inner-sequence
+  warns. Kitten `@kitty-*` DCS strings hit the unknown-DCS warn in full. `DCS received` is
+  logged at debug, unbounded.
+- **APC replies.** `format_kitty_response` (`freminal-common/.../kitty_graphics.rs:507-522`)
+  hard-codes `ESC _ G … ESC \`; S8C1T is never consulted. `pty_writer.rs` has CSI, DCS and
+  OSC introducer helpers but no APC one.
+
+### 129 Decisions (maintainer, 2026-10-09)
+
+- **Parser caps are per target, with a 1 MiB default.** OSC, APC and DCS default to
+  `1 MiB`. OSC 52, OSC 1337 and DCS (sixel and tmux passthrough) get `64 MiB`, because a
+  large single sequence is legitimate there. An over-cap sequence is consumed through its
+  terminator, produces **no** output, and is warn-logged with its introducer, cap and total
+  length only. kitty's own cap is 256 KiB (`vt-parser.c` `MAX_ESCAPE_CODE_LENGTH`); freminal
+  is deliberately more generous because it also implements iTerm2 images and sixel.
+- **Raw bytes are the OSC dispatch input for every target.** The dispatcher parses the OSC
+  number from the bytes before the first `;` and hands each target its raw body. Targets
+  that use tokens (4, 10, 11, 12, 22, 52, 104) tokenise for themselves, with identical
+  behaviour. Side effect, accepted: a non-UTF-8 byte no longer invalidates the raw-payload
+  targets (8, 9, 99, 777, 1337, 1338); each handler validates its own input.
+- **OSC 0/1/2/7 take the full remainder after the first `;`**, as xterm and kitty do. This
+  is in scope for 129.
+
+### 129 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **One tokenizer, one base64 module, one chunk assembler.** Protocol modules keep their own
+  typed models and error enums. Caps are named constants per protocol (the `MAX_OSC99_*`
+  precedent).
+- **The tokenizer reports, consumers decide.** It yields `Pair { key, value }` for a segment
+  with `=` (split at the first `=`, so the value may contain `=`; key or value may be empty)
+  and `Bare(segment)` for a segment without one. Empty segments are skipped (all four
+  current parsers do this). Past the pair cap it yields one `TooManyItems` error and stops.
+  Each consumer keeps its current rule for bare items, empty keys, empty values and key
+  width. **Graphics keeps its first-byte key quirk** (`abc=1` → `a`); kitty rejects such
+  keys, but that is a conformance change and belongs to Task 135.
+- **Pair caps: 64** for every consumer (`MAX_OSC99_METADATA_ITEMS`,
+  `MAX_KITTY_CONTROL_ITEMS`, `MAX_ITERM2_FILE_ARGS`, `MAX_FTCS_ITEMS`, `MAX_OSC8_PARAMS`).
+  OSC 99 and graphics turn `TooManyItems` into a parse error (new variants); iTerm2, FTCS and
+  OSC 8 ignore everything past the cap.
+- **base64 API.** `decode` stays the lenient default (optional padding) but takes `&[u8]`
+  and returns a typed `Base64Error`. It now **rejects a dangling single character**
+  (`len % 4 == 1` after padding is stripped), which RFC 4648 makes invalid and which today
+  silently decodes to nothing. `decode_strict` requires padded, length-multiple-of-4 input.
+  `encode_unpadded` is new. `StreamDecoder` decodes chunked input in which any chunk may end
+  mid-quantum **or** end with its own padding; this covers both chunking styles the OSC 99
+  spec permits.
+- **Only OSC 99 moves to stream decoding.** `parse_osc_99` stops decoding the payload;
+  `Osc99Command` carries the raw payload plus an `Osc99PayloadEncoding`, and reassembly
+  decodes through the assembler. A notification whose accumulated base64 is invalid is
+  dropped as a whole (debug log); the spec allows ignoring the entire escape code. Graphics
+  and iTerm2 keep per-chunk decoding (graphics is spec-conformant; iTerm2 is not a listed
+  bug) and use the assembler for caps only.
+- **Assembler caps.** Graphics: `400 MiB` total (kitty's `MAX_DATA_SZ`, the existing
+  `MAX_KITTY_FILE_BYTES` value). iTerm2 multipart: `64 MiB` total, matching the OSC 1337
+  parser cap. OSC 99: unchanged (`1 MiB` per notification). Exceeding a cap abandons the
+  transfer with a warn that carries sizes only and **no reply**; error replies for graphics
+  are Task 135's. No assembler pre-allocates from a sender-supplied size.
+- **OSC 8** follows the spec and kitty's `parse_osc_8`: the body after `8;` is
+  `params ; URI`, split at the **first** `;`; the URI is the whole remainder; `params` is a
+  `:`-separated list in which only a non-empty `id=` value is used. An empty URI is `End`.
+  A body with no `;` is `End` (as today). A non-UTF-8 URI produces no output.
+- **Titles and OSC 7.** The value is the remainder after the first `;`, as UTF-8. Non-UTF-8,
+  or no `;` at all, produces no output (debug log). An empty remainder is an empty title.
+- **APC replies are S8C1T-aware**, through a new `write_apc_response`. `format_kitty_response`
+  becomes `format_kitty_response_body` and returns the body only (`G…;msg`).
+- **Payload-free warn logging.** A warn-level log line never contains sequence payload
+  bytes or strings derived from them. It may contain the introducer, the OSC number, a
+  sub-command name freminal itself defines, and lengths. Payload detail moves to `debug!`,
+  always bounded with the existing `*_for_log_bounded` helpers. A DCS whose body starts with
+  `@kitty-` is logged at debug with its length only.
+
+### 129 Execution model
+
+Sequential, on one branch (`task-129/kitty-wire-infrastructure`) in the main checkout. The
+subtasks are small and most of them touch `ansi_components/osc.rs` or its neighbours, so
+parallel worktrees would buy nothing and cost merges. Each subtask is implemented by a
+sub-agent, code-reviewed by the orchestrator, and committed by the orchestrator. Order:
+
+1. Common building blocks: 129.1 (base64), 129.2 (tokenizer), 129.3 (OSC 99 and graphics
+   on the tokenizer).
+2. OSC parser: 129.4 (terminator), 129.5 (raw dispatch), 129.6 (titles, OSC 7), 129.7
+   (OSC 8), 129.8 (FTCS and iTerm2 args on the tokenizer).
+3. Caps and accumulation: 129.9 (parser caps), 129.10 (assembler), 129.11 (graphics and
+   iTerm2 on the assembler), 129.12 (OSC 99 stream decoding).
+4. Replies and logging: 129.13 (APC replies), 129.14 (payload-free logging).
+5. 129.15 (escape-sequence dual-doc update).
+
+Then an adversarial review of the whole branch, before the PR.
+
+### 129 Subtasks
+
+Every subtask's verification is `cargo test --all` and
+`cargo clippy --all-targets --all-features -- -D warnings`, plus anything named below. Every
+subtask's prohibitions include: do NOT touch files outside scope, do NOT commit, and do NOT
+proceed to the next subtask. Its stop condition is: report files changed and verification
+results, then await review.
+
+#### 129.1 — Typed base64: strict, lenient, streaming and unpadded
+
+Scope:
+
+- `freminal-common/src/base64.rs` (production code and tests);
+- call sites, mechanical changes only:
+  - `freminal-common/src/buffer_states/kitty_graphics.rs`;
+  - `freminal-common/src/buffer_states/osc_notify_99.rs`;
+  - `freminal-terminal-emulator/src/ansi_components/osc_clipboard.rs`;
+  - `freminal-terminal-emulator/src/ansi_components/osc_iterm2.rs`;
+  - any test module that calls `base64::decode` and stops compiling.
+
+What:
+
+- `pub enum Base64Error` (`thiserror`), with variants:
+  - `InvalidByte { offset: usize, byte: u8 }`;
+  - `InvalidLength { len: usize }`, a dangling single character, or for strict input a
+    length that is not a multiple of 4;
+  - `MisplacedPadding { offset: usize }`, `=` anywhere other than the end of a quantum.
+- `pub fn decode(input: &[u8]) -> Result<Vec<u8>, Base64Error>`, lenient. Optional trailing
+  padding. Trailing partial quanta of 2 or 3 characters are accepted; 1 character is
+  `InvalidLength`. No whitespace is accepted. Same alphabet as today.
+- `pub fn decode_strict(input: &[u8]) -> Result<Vec<u8>, Base64Error>`. Length must be a
+  multiple of 4. Padding (0–2 `=`) only in the final quantum.
+- `pub fn encode(input: &[u8]) -> String`, unchanged. `pub fn encode_unpadded(input: &[u8]) -> String`.
+- `pub struct StreamDecoder` with `new()`,
+  `feed(&mut self, chunk: &[u8], out: &mut Vec<u8>) -> Result<(), Base64Error>`, and
+  `finish(self, out: &mut Vec<u8>) -> Result<(), Base64Error>`. Semantics:
+  - a partial quantum carries over between `feed` calls;
+  - `=` at quantum position 2 or 3 closes the quantum (its bytes are emitted); further `=`
+    up to position 4 are consumed; a following non-`=` byte starts a new quantum. `=` at
+    position 0 or 1 is `MisplacedPadding`;
+  - `finish` accepts a pending partial quantum of 2 or 3 characters and rejects 1;
+  - `offset` in errors is the offset within the `feed` call's chunk.
+- Call sites: pass bytes (`.as_bytes()` where they had a `&str`) and map `Base64Error` into
+  their existing error variants or logs. Keep every caller's existing UTF-8 checks.
+
+Deliverable:
+
+- the API above;
+- unit tests:
+  - every existing behaviour of `decode` except the dangling-character case;
+  - the dangling-character case now errors;
+  - strict rejects unpadded input, interior padding and lengths that are not a multiple of 4;
+  - `encode_unpadded` for lengths 0–4;
+  - stream: the same text fed at every split point decodes identically to one-shot
+    `decode`;
+  - stream: per-chunk-padded input (`"YQ=="` + `"Yg=="` gives `"ab"`);
+  - stream: 1-character tail at `finish` errors;
+- proptests:
+  - round trip `decode(encode(x)) == x`;
+  - round trip through `encode_unpadded`;
+  - stream decoding equals one-shot decoding for arbitrary split points;
+  - `decode` and `decode_strict` never panic on arbitrary bytes.
+
+Prohibitions: do NOT move any decode call to a different place in the code; do NOT add caps
+to the decoders.
+
+**Status: Complete (2026-10-09).** As designed. Lenient `decode` also rejects padding beyond
+what completes the final quantum (`Zm9v=`, `YQ===`), which the old decoder accepted; `"YQ="`
+is still accepted. One graphics test used a 5-character payload and now uses a valid one.
+Commit `cebf0d28`.
+
+#### 129.2 — Bounded `key=value` tokenizer
+
+Scope:
+
+- `freminal-common/src/key_value.rs` (new; one concept: splitting kitty-style metadata);
+- `freminal-common/src/lib.rs` (module declaration only).
+
+What:
+
+- `pub enum KeyValueSeparator { Colon, Comma, Semicolon }`.
+- `pub enum KeyValueItem<'a> { Pair { key: &'a [u8], value: &'a [u8] }, Bare(&'a [u8]) }`.
+- `pub enum KeyValueError { TooManyItems { max: usize } }` (`thiserror`).
+- `pub fn tokenize(input: &'a [u8], separator: KeyValueSeparator, max_items: usize) -> KeyValueTokens<'a>`,
+  where `KeyValueTokens<'a>` implements `Iterator<Item = Result<KeyValueItem<'a>, KeyValueError>>`.
+  - Splits on the separator byte. Empty segments are skipped and do not count.
+  - A segment containing `=` is a `Pair`, split at the first `=`. A segment without one is
+    `Bare`.
+  - After `max_items` items, the next non-empty segment yields one
+    `Err(TooManyItems { max })`, and then the iterator is exhausted.
+  - No allocation.
+
+Deliverable: the module and tests for each separator; empty, leading, trailing and doubled
+separators; `=` inside a value; empty key (`=x`); empty value (`k=`); bare items; exactly
+`max_items` items (no error); `max_items + 1` (one error, then `None`); `max_items == 0`;
+non-UTF-8 bytes passed through untouched. A proptest that it never panics and never yields
+more than `max_items + 1` items.
+
+Prohibitions: do NOT migrate any consumer.
+
+**Status: Complete (2026-10-09).** As designed; `tokenize` is a `const fn` and the iterator
+is fused. Commit `244910c7`.
+
+#### 129.3 — OSC 99 and graphics control data on the tokenizer
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc_notify_99.rs` (`parse_osc_99`'s pair loop, the
+  error enum, and tests);
+- `freminal-common/src/buffer_states/kitty_graphics.rs` (`parse_control_data`, the error
+  enum, and tests).
+
+What:
+
+- **Pin first.** Before changing either loop, add tests for behaviour that is untested
+  today and must survive:
+  - OSC 99: empty value for each key class; duplicate scalar keys (last wins); a multi-byte
+    key (error); `=x` (error);
+  - graphics: `abc=1` is accepted as `a=1`; `a=tXYZ` is accepted as `a=t`; duplicate keys
+    (last wins).
+- Replace both pair loops with `key_value::tokenize`, keeping every current rule:
+  - OSC 99 (`Colon`): `Bare` → `InvalidMetadata`; key length ≠ 1 → `InvalidMetadata`.
+  - Graphics (`Comma`): `Bare`, empty key or empty value → `InvalidControlPair`; the key
+    is `key[0]`.
+- Add `pub const MAX_OSC99_METADATA_ITEMS: usize = 64` and
+  `pub const MAX_KITTY_CONTROL_ITEMS: usize = 64`, with new error variants
+  `Osc99ParseError::TooManyMetadataItems { max: usize }` and
+  `KittyParseError::TooManyControlItems { max: usize }`, including their `Display` arms.
+
+Deliverable: the migration; every existing test passes unchanged; the pin tests; a cap test
+for each (64 items accepted, 65 rejected).
+
+Prohibitions: do NOT change the value parsers, defaults or the payload split; do NOT fix the
+first-byte key quirk (Task 135).
+
+**Status: Complete (2026-10-09).** Pin tests were added and passed against the old loops
+before migration. Error strings are byte-identical. Commit `4c8f3d82`.
+
+#### 129.4 — OSC terminator strips exactly the terminator
+
+Scope: `freminal-terminal-emulator/src/ansi_components/osc.rs` (`push`,
+`is_final_character_osc_terminator`, tests).
+
+What: when `is_osc_terminator` matches, remove exactly the terminator: one byte for BEL,
+two bytes for `ESC \`. Delete `is_final_character_osc_terminator`.
+
+Deliverable: the fix and parser-level tests:
+
+- `OSC 0;C:\ BEL` sets the title `C:\`;
+- `OSC 0;C:\ ESC \` sets the title `C:\`;
+- `OSC 0;a\\ BEL` keeps both backslashes;
+- an OSC body ending in `ESC` and terminated by BEL keeps the `ESC` in the raw body
+  (assert on the raw body passed to an OSC 1338 or OSC 9 handler);
+- every existing OSC test still passes.
+
+Prohibitions: do NOT change dispatch or tokenisation (129.5).
+
+**Status: Complete (2026-10-09).** Commit `4436f5aa`.
+
+#### 129.5 — Raw-body OSC dispatch
+
+Scope: `freminal-terminal-emulator/src/ansi_components/osc.rs` (`ansiparser_inner_osc`,
+`dispatch_osc_target`, tests); `freminal-terminal-emulator/benches/buffer_benches.rs`
+(benchmark capture only, no edits unless a bench stops compiling).
+
+What:
+
+- On `Finished`: split `self.params` at the first `;` into `number` and `body` (`body` is
+  empty when there is no `;`). Parse `number` with `parse_param_as::<AnsiOscToken>`. If it
+  is empty or fails, keep today's path exactly: push `TerminalOutput::Invalid` and return
+  `ParserOutcome::Invalid("Invalid OSC params: …")`.
+- `dispatch_osc_target(osc_target: &OscTarget, raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome`.
+  - Tokenising arms (Foreground, Background, CursorColor, TitleBar, IconName, RemoteHost,
+    Ftcs, Url, Clipboard, PaletteColor, ResetPaletteColor, PointerShape) call
+    `split_params_into_semicolon_delimited_tokens(raw_params)` and derive
+    `AnsiOscInternalType` themselves. On a tokenisation error they push
+    `TerminalOutput::Invalid` and return the same `ParserOutcome::Invalid` as today.
+    Their behaviour is otherwise byte-identical. (TitleBar, IconName, RemoteHost, Ftcs and
+    Url keep the token path here; 129.6, 129.7 and 129.8 replace it.)
+  - Raw arms (ITerm2, ShellInfo, Notify9, Notify777, Notify99) and the logging arms are
+    unchanged and no longer tokenise.
+  - Every other arm returns `ParserOutcome::Finished`.
+
+Deliverable:
+
+- the refactor;
+- tests:
+  - each raw target with a non-UTF-8 byte in its payload now reaches its handler (OSC 9
+    with a Latin-1 byte, for example), and each handler's own validation decides the
+    outcome;
+  - each tokenising target with a non-UTF-8 byte still yields `TerminalOutput::Invalid`;
+  - an empty or non-UTF-8 OSC number still yields `Invalid` (a non-numeric UTF-8 number was
+    and remains `OscTarget::Unknown`, consumed with a warn; corrected at review);
+- every existing OSC test passes unchanged.
+
+Benchmarks: `bench_parse_osc9`, `bench_parse_plain_text` and `bench_parse_bursty`, before and
+after, per `performance-benchmarks` and `freminal-bench-table` (15% threshold). Include the
+table in the report.
+
+Prohibitions: do NOT change any handler outside `osc.rs`; do NOT change titles, OSC 7, OSC 8
+or FTCS semantics yet.
+
+**Status: Complete (2026-10-09).** The `too_many_lines` allow on `dispatch_osc_target` is
+gone (FTCS and the two warn bodies moved into helpers). Benchmarks (`parse_osc9`, plain text,
+bursty) moved between −3.7% and −0.8%, all noise. Commit `5399a401`.
+
+#### 129.6 — OSC 0/1/2/7 take the full remainder
+
+Scope: `freminal-terminal-emulator/src/ansi_components/osc.rs` (the TitleBar, IconName and
+RemoteHost arms and tests).
+
+What: the value is `raw_params` after the first `;`, as `&str` via `std::str::from_utf8`.
+No `;` at all, or non-UTF-8: no output, `debug!` with the length only. An empty remainder
+is an empty string. These arms no longer tokenise.
+
+Deliverable: the change and tests:
+
+- `OSC 2;a;b BEL` gives `a;b`;
+- `OSC 0;123 BEL` gives `123`;
+- `OSC 0;? BEL` gives `?`;
+- `OSC 2; BEL` gives the empty string;
+- `OSC 2 BEL` gives no output;
+- a non-UTF-8 title gives no output;
+- `OSC 7;file://host/a;b BEL` passes `file://host/a;b` through;
+- OSC 1 still maps to `SetTitleBar`.
+
+Update any existing test that pinned the `Display`-artefact titles, and name each such test
+in the report.
+
+Prohibitions: do NOT touch the handler side (`terminal_handler/`).
+
+**Status: Complete (2026-10-09).** Commit `0a73cc15`.
+
+#### 129.7 — OSC 8 parsed from the raw body
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc.rs` (`UrlResponse` construction and its tests);
+- `freminal-terminal-emulator/src/ansi_components/osc.rs` (the Url arm and tests).
+
+What:
+
+- Replace `impl From<Vec<Option<AnsiOscToken>>> for UrlResponse` with
+  `impl UrlResponse { pub fn from_osc8_body(body: &[u8]) -> Option<Self> }`, where `body` is
+  `raw_params` after `8;`:
+  - no `;` in `body`: `Some(End)`;
+  - split at the first `;` into `params` and `uri`; an empty `uri` gives `Some(End)`;
+  - a non-UTF-8 `uri` gives `None` (no output);
+  - `id` is the value of the first `id` `Pair` with a non-empty value from
+    `key_value::tokenize(params, Colon, MAX_OSC8_PARAMS)` (`MAX_OSC8_PARAMS = 64`), as UTF-8;
+    otherwise `None`. Items past the cap are ignored.
+- The Url arm calls it and pushes `AnsiOscType::Url` when it returns `Some`.
+
+Deliverable: the change and tests:
+
+- `8;;http://a;b` gives URL `http://a;b`;
+- `8;id=x;u` gives id `x`;
+- `8;foo=1:id=x;u` gives id `x`;
+- `8;id=;u` gives no id;
+- `8;foo;u` gives no id;
+- `8;;123` gives URL `123`;
+- `8;;` gives `End`;
+- `8` alone gives `End`;
+- a non-UTF-8 URI gives no output.
+
+Update the existing tests in `freminal-common/src/buffer_states/osc.rs` that pin the old
+`From` shape.
+
+Prohibitions: do NOT change `Url`, `AnsiOscType::Url` or the handler.
+
+**Status: Complete (2026-10-09).** The `From<Vec<Option<AnsiOscToken>>>` impl had no other
+users. Commit `2569a871`.
+
+#### 129.8 — FTCS and iTerm2 `File=` arguments on the tokenizer
+
+Scope:
+
+- `freminal-common/src/buffer_states/ftcs.rs`;
+- `freminal-terminal-emulator/src/ansi_components/osc.rs` (the Ftcs arm);
+- `freminal-terminal-emulator/src/ansi_components/osc_iterm2.rs` (`parse_iterm2_file_args`
+  and tests);
+- `freminal-terminal-emulator/src/terminal_handler/shell_integration.rs` (tests only, if
+  they call the FTCS functions directly).
+
+What:
+
+- `parse_ftcs_params(body: &[u8]) -> Option<FtcsMarker>` and
+  `is_known_ftcs_marker(body: &[u8]) -> bool`, where `body` is `raw_params` after `133;`.
+  Tokenise with `Semicolon` and `MAX_FTCS_ITEMS = 64` (items past the cap are ignored).
+  Positions count every item, as today: item 0 is the marker; the exit code is item 1 when
+  it is `Bare`. Values are converted with `std::str::from_utf8`; a conversion failure
+  behaves like today's missing value. The Ftcs arm stops tokenising and passes the body.
+- `parse_iterm2_file_args` tokenises its `&str` input with `Semicolon` and
+  `MAX_ITERM2_FILE_ARGS = 64`. `Bare` items are skipped silently, as today; items past the
+  cap are ignored. Key and value handling is unchanged.
+
+Deliverable: the migration; every existing FTCS, OSC 133, shell-integration and iTerm2 test
+passes (update only call signatures). New tests:
+
+- FTCS exit-code parsing with leading zeros (`D;007`);
+- FTCS with empty fields between items;
+- an FTCS body containing a non-UTF-8 `fid` is rejected;
+- the iTerm2 cap (65 args: the 65th is ignored).
+
+Prohibitions: do NOT change the `freminal=1` policy (Task 145); do NOT change iTerm2 value
+semantics.
+
+**Status: Complete (2026-10-09).** A non-UTF-8 value skips its item rather than clearing an
+earlier valid one, so `fid=ok;fid=<bad>` keeps `ok`. Commit `2a8e5fb4`.
+
+#### 129.9 — OSC, APC and DCS byte caps
+
+Scope:
+
+- `freminal-terminal-emulator/src/ansi_components/osc.rs`, `apc.rs`, `dcs.rs` (parsers and
+  tests);
+- `freminal-terminal-emulator/src/ansi.rs` (only if the size test or dispatch needs it);
+- `freminal-terminal-emulator/benches/buffer_benches.rs` (one new benchmark).
+
+What:
+
+- Constants in each parser module:
+  - `osc.rs`: `MAX_OSC_BYTES = 1 MiB` and `MAX_OSC_LARGE_BYTES = 64 MiB`. The large cap
+    applies when the OSC number is 52 or 1337. The number is only examined once the default
+    cap is reached, so the common path is one length comparison;
+  - `apc.rs`: `MAX_APC_BYTES = 1 MiB`;
+  - `dcs.rs`: `MAX_DCS_BYTES = 64 MiB`.
+- When a byte would take the accumulated sequence past its cap, the parser drops the buffer
+  (`Vec::new()`, releasing the memory) and enters an overflow state that remembers only
+  what terminator detection needs:
+  - the total length;
+  - whether the previous byte was ESC (OSC, APC, plain DCS);
+  - for a DCS that began `Ptmux;`, the current run of consecutive ESC bytes, so that the
+    odd/even rule in `contains_string_terminator` still holds.
+- On the terminator, an overflowed sequence produces **no** output and returns
+  `ParserOutcome::Finished`. It logs one `warn!` naming the introducer (`OSC`, `APC`,
+  `DCS`), the cap and the total length, and nothing else.
+- `sub_parsers_stay_small` must still pass.
+
+Deliverable:
+
+- the caps;
+- tests:
+  - exactly-at-cap is dispatched, and cap + 1 is dropped, for each parser;
+  - the large OSC cap applies to 52 and 1337 and not to 2;
+  - an overflowed tmux DCS containing doubled ESCs ends at the real ST and not before;
+  - an overflowed sequence followed by ordinary text prints the text;
+  - memory is released on overflow (the buffer's capacity is 0).
+
+Benchmarks: add `bench_parse_kitty_apc_chunks` (a stream of 4096-byte graphics APC chunks)
+to `buffer_benches.rs` **before** changing the parsers, capture it with `bench_parse_osc9`
+and `bench_parse_plain_text`, then capture again after. 15% threshold; include the table.
+
+Prohibitions: do NOT change what a within-cap sequence emits; do NOT add CAN/SUB handling.
+
+**Status: Complete (2026-10-09).** The cap counts stored bytes before the terminator; a
+trailing ESC is not counted until the next byte shows it is not the start of ST (the literal
+rule would have made the real limit `cap − 2`). `PrevByte` lives in `ansi.rs` beside
+`ParserOutcome`. The new `bench_parse_kitty_apc_chunks` moved +0.3%, the others −1% to −3%.
+Commit `547ad3f2`.
+
+#### 129.10 — `BoundedChunkAssembler`
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/chunk_assembler.rs` (new; one concept:
+  accumulating a chunked payload under caps);
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (module declaration only).
+
+What:
+
+- `pub struct ChunkLimits { pub max_chunk_bytes: usize, pub max_total_bytes: usize }`.
+- `pub enum ChunkEncoding { Raw, Base64 }`.
+- `pub enum ChunkError { ChunkTooLarge { len: usize, max: usize }, TotalTooLarge { max: usize }, Base64(Base64Error) }`
+  (`thiserror`).
+- `pub struct BoundedChunkAssembler` with:
+  - `new(limits: ChunkLimits) -> Self`, which allocates nothing;
+  - `push(&mut self, chunk: &[u8], encoding: ChunkEncoding) -> Result<(), ChunkError>`;
+  - `len(&self) -> usize`, the assembled (decoded) bytes so far;
+  - `is_empty(&self) -> bool`;
+  - `finish(self) -> Result<Vec<u8>, ChunkError>`.
+- Semantics:
+  - `max_chunk_bytes` applies to the chunk as received (encoded length);
+  - `max_total_bytes` applies to the assembled decoded bytes;
+  - `Base64` chunks go through one `base64::StreamDecoder` owned by the assembler;
+  - a `Raw` chunk pushed while the decoder holds a partial quantum is a
+    `Base64(InvalidLength)` error;
+  - `finish` flushes the decoder.
+- An error poisons the assembler: every later `push` and `finish` returns the same error.
+  Abandonment is explicit: the owner drops the assembler.
+
+Deliverable: the module and tests for each limit (at the cap, and over by one), raw and
+base64 pushes, mixed encodings, a mid-quantum split, per-chunk padding, poisoning, and that
+`new` does not allocate (capacity 0).
+
+Use the documented `expect(dead_code)` + `TODO(129.11)` exception if clippy flags it unused.
+
+Prohibitions: do NOT migrate any accumulator.
+
+**Status: Complete (2026-10-09).** Plan drift: `StreamDecoder` had no way to report a
+partial quantum, so `StreamPosition` / `position()` / `bytes_fed()` were added to
+`base64.rs` in the same commit. Commit `5fa526c5`.
+
+#### 129.11 — Graphics and iTerm2 accumulators on the assembler
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (`KittyImageState`,
+  `MultipartImageState`);
+- `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`handle_kitty_chunk_start`, `handle_kitty_chunk`, tests);
+- `freminal-terminal-emulator/src/terminal_handler/graphics_iterm2.rs`
+  (`handle_iterm2_multipart_begin`, `handle_iterm2_file_part`, `handle_iterm2_file_end`,
+  tests).
+
+What:
+
+- Replace `accumulated_data: Vec<u8>` in both states with a `BoundedChunkAssembler`, using
+  `ChunkEncoding::Raw` (payloads are still decoded per chunk upstream).
+- Limits:
+  - graphics: `max_chunk_bytes = MAX_APC_BYTES`, and
+    `max_total_bytes = MAX_KITTY_DATA_BYTES`, a new constant equal to `400 * 1024 * 1024`
+    (`MAX_KITTY_FILE_BYTES` may be defined in terms of it);
+  - iTerm2: `max_chunk_bytes = MAX_ITERM2_MULTIPART_BYTES` and
+    `max_total_bytes = MAX_ITERM2_MULTIPART_BYTES`, a new constant equal to
+    `64 * 1024 * 1024`.
+- Remove both `Vec::with_capacity(sender-supplied size)` calls.
+- A cap error abandons the transfer: the state is set to `None`, a `warn!` carries the
+  sizes only, and **no** reply is sent.
+- Abandonment rules and everything else are unchanged.
+
+Deliverable: the migration; existing chunked-transfer tests pass unchanged. New tests:
+
+- each cap: the transfer is abandoned, no image is placed, no reply is written, and a
+  following transfer works;
+- a huge `S=` or `size=` does not allocate up front.
+
+Prohibitions: do NOT change abandonment rules, replies or `full_reset` (Task 131); do NOT
+change per-chunk decoding.
+
+**Status: Complete (2026-10-09).** `MAX_KITTY_FILE_BYTES` became `usize`
+(`= MAX_KITTY_DATA_BYTES`) and is converted with `conv2` for `read_capped`. The review
+found that the tail of an abandoned transfer was still dispatched (see "129 Review").
+Commit `0a7f41c1`.
+
+#### 129.12 — OSC 99 stream decoding
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc_notify_99.rs` (`Osc99Command`, `parse_osc_99`,
+  `decode_payload`, tests);
+- `freminal-terminal-emulator/src/terminal_handler/notify_99.rs` (`PendingNotification`,
+  `reassemble_osc99`, helpers, tests);
+- `freminal-terminal-emulator/src/terminal_handler/osc.rs` (OSC 99 tests only);
+- `freminal-terminal-emulator/src/ansi_components/osc_notify.rs` (tests only).
+
+What:
+
+- `pub enum Osc99PayloadEncoding { Plain, Base64 }`. `Osc99Command` gains
+  `payload_encoding`, and `payload` now holds the **raw** payload bytes (still base64 text
+  when `Base64`). Update its doc comment.
+- `parse_osc_99` stops base64-decoding. It still validates UTF-8 for `Plain` payloads and
+  still enforces `MAX_OSC99_SEQUENCE_BYTES`.
+- `PendingNotification`'s four `Vec<u8>` fields become `BoundedChunkAssembler`s, with
+  `max_chunk_bytes = MAX_OSC99_SEQUENCE_BYTES` and
+  `max_total_bytes = MAX_OSC99_NOTIFICATION_BYTES`. Each chunk is pushed with the encoding
+  its own `e=` declared. The existing combined 1 MiB check stays, computed from `len()`.
+- The standalone (no-id) path decodes through a temporary assembler.
+- Finalisation calls `finish` on each assembler. Any `ChunkError` drops the whole
+  notification with a `debug!` that carries no payload.
+
+Deliverable:
+
+- the change;
+- regression tests:
+  - a title base64-encoded once and split at **every** offset into two chunks reassembles
+    exactly;
+  - chunk-then-encode input (each chunk padded) reassembles exactly;
+  - a body mixing a `Plain` chunk and a `Base64` chunk that ends on a quantum boundary;
+  - invalid base64 in a middle chunk drops the notification;
+  - the standalone path still decodes;
+- every existing OSC 99 test passes, updated only where it asserted that `parse_osc_99`
+  returns decoded bytes. Name each updated test in the report.
+
+Prohibitions: do NOT change any other OSC 99 conformance behaviour (Task 138); do NOT
+change the caps.
+
+**Status: Complete (2026-10-09).** Plan drift: the `display_ansi_osc_notify99` test literal
+in `freminal-common/src/buffer_states/osc.rs` also needed the new field. The review found
+that a dropped id was revived by its next chunk (see "129 Review"). Commit `ea007e85`.
+
+#### 129.13 — S8C1T-aware APC replies
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs`;
+- `freminal-common/src/buffer_states/kitty_graphics.rs` (`format_kitty_response` and tests);
+- `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (the call sites and
+  tests).
+
+What:
+
+- `const fn apc_response(&self) -> &'static [u8]`: `0x9F` in 8-bit mode, else `ESC _`.
+- `fn write_apc_response(&self, body: &str)`: APC + body + ST, via `write_bytes_to_pty` (so
+  tmux wrapping still applies).
+- Rename `format_kitty_response` to `format_kitty_response_body`, returning `G<keys>;<msg>`
+  with no framing. Every call site writes through `write_apc_response`.
+
+Deliverable: the change; existing graphics reply tests pass (7-bit framing is unchanged).
+New tests: 8-bit mode frames a graphics reply as `0x9F … 0x9C`; tmux passthrough still
+wraps a reply.
+
+Prohibitions: do NOT change which replies are sent or their content (Task 135).
+
+**Status: Complete (2026-10-09).** 7-bit output is byte-identical to before. Commit
+`91f2df2e`.
+
+#### 129.14 — Payload-free warn logging
+
+Scope:
+
+- `freminal-terminal-emulator/src/ansi_components/`: `osc.rs`, `osc_clipboard.rs`,
+  `osc_iterm2.rs`, `osc_notify.rs`, `osc_palette.rs`, `osc_shell_info.rs`, `apc.rs`, `dcs.rs`;
+- `freminal-terminal-emulator/src/terminal_handler/`: `dcs.rs`, `osc.rs`, `osc_colors.rs`,
+  `graphics_kitty.rs`, `graphics_iterm2.rs`, `graphics_sixel.rs`, `notify_99.rs`;
+- `freminal-terminal-emulator/src/ansi_components/tracer.rs`, only if a helper is needed.
+
+What: apply the "payload-free warn logging" decision to every `warn!` and `error!` in scope.
+
+- Each one that interpolates sequence bytes, or strings derived from them, becomes
+  payload-free. It keeps the introducer, the OSC number or sub-command, and lengths.
+- The payload moves to an adjacent `debug!`, bounded with
+  `escape_sequence_for_log_bounded` or `lossy_sequence_for_log_bounded`. Drop it where it
+  adds nothing.
+- A DCS whose body starts with `@kitty-` is consumed with one `debug!` carrying its length
+  only.
+- The `DCS received` debug log and the XTGETTCAP query debug log become bounded.
+- Fix the mislabelled `type_number=` in the unknown-OSC warn, so that it prints the OSC
+  number.
+
+Deliverable:
+
+- the sweep;
+- tests, using `tracing-test` or an equivalent existing capture helper in the crate:
+  - an unknown OSC, an unknown DCS and a non-kitty APC each warn without any payload byte;
+  - `@kitty-print` produces no warn;
+- a list in the report of every log line changed, as `file:line`, old level, new level.
+
+Prohibitions: do NOT change any behaviour other than logging; do NOT change the 128.C4
+`warn!` level decision for CSI.
+
+**Status: Complete (2026-10-09).** About 45 log lines changed across 12 files. Kitty parse
+errors log a static kind at warn (`kitty_parse_error_kind`); shared-memory warns no longer
+carry the sender-chosen object name. A `#[cfg(test)]` `log_capture` subscriber in
+`tracer.rs` backs 18 payload-absence tests. Out of scope and recorded as 129.C6: the
+trace-level `parsed terminal output` log. Commit `e0349570`.
+
+#### 129.15 — Escape-sequence dual-doc update
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+
+What: record the behaviour changes from 129.4–129.9 and 129.12:
+
+- the trailing-terminator fix;
+- raw-body dispatch, and that non-UTF-8 no longer invalidates the raw targets;
+- full-remainder titles and OSC 7;
+- the OSC 8 `;` and `id=` fixes;
+- the parser caps and over-cap behaviour;
+- OSC 99 chunked base64;
+- S8C1T-aware APC replies;
+- `@kitty-*` DCS silenced.
+
+Remove any GAPS row these close. Refresh both "Last updated" headers.
+
+Verification: `markdownlint-cli2` and `prettier --check` on both files; the pre-commit hooks
+(`cargo xtask lint-markdown` is broken tree-wide, see 126.C1).
+
+Prohibitions: do NOT touch code.
+
+**Status: Complete (2026-10-09).** A `DCS @kitty-…` row was added to both documents. No GAPS
+row was removed: the fixed bugs were only ever recorded in this plan. Commit `272761d7`.
+
+### 129 Review
+
+An adversarial sub-agent review of the whole branch found no BLOCKER, one MAJOR and several
+MINOR findings, each confirmed by reproduction:
+
+- **MAJOR — abandoned kitty transfer tail.** After a cap abandonment the remaining
+  continuation chunks were read as a new transmit, and the final `m=0` chunk wrote
+  `EINVAL:missing width` with `i=0`, contradicting 129.11's "no reply". Fixed in `a8b00442`:
+  `kitty_state: Option<…>` became `kitty_transfer: KittyTransfer { Idle, Receiving, Discarding }`;
+  `Discarding` swallows continuation chunks until `m=0`, and an explicit `a=` ends it.
+- **MINOR — OSC 99 dropped id revived.** A later chunk for a dropped id started a fresh
+  notification, so a `d=1` tail could display a truncated one. Fixed in `4aa278cb` with a
+  `PendingEntry::Dropped` tombstone that counts toward the 128-id cap; control requests for a
+  tombstoned id behave as if no entry existed.
+- **MINOR — logging.** The OSC 99 parse-error debug was unbounded (300 KB for a 100 KB
+  payload), the kitty `a=p` unknown-id warn listed every stored id, and `Base64Error`'s
+  Display put one payload byte into warn lines. Fixed in `a8b00442`, `4aa278cb` and
+  `45d254fe`.
+- **NIT — leading-zero OSC numbers.** `OSC 052` dispatched as 52 but got the default cap.
+  `OscLimit` now compares the parsed number (`45d254fe`).
+- Smaller fixes in the same commits: the dead `Osc99ParseError::InvalidBase64` variant is
+  deleted, a bool test-helper parameter became an enum, the bench's `as u64` cast is gone, and
+  `freminal-bench-table` lists `bench_parse_kitty_apc_chunks`.
+
+**Process failure and second pass (2026-10-10).** Three commits (`5fa526c5`, `a8b00442`,
+`45d254fe`) were salvaged from sub-agents that died mid-task ("endpoint unavailable") and
+were committed after only a partial review. `45d254fe` shipped flaky log-capture tests
+(7 failures in 200 runs) with a `rebuild_interest_cache` patch that could not work. Remedy:
+every 129 commit was re-audited against its subtask text by read-only agents, a confirmation
+review re-checked the three fixes, and each remaining finding was fixed or routed:
+
+- **Flaky log capture, root-caused** (`8a297acf`). With at most one dispatcher registered,
+  `tracing-core` computes a callsite's interest from the calling thread's default
+  dispatcher and caches it process-wide, so a parallel test thread with no subscriber cached
+  `never` for a callsite a capturing thread later used. `log_capture` (now its own
+  `#[cfg(test)]` module, `src/log_capture.rs`) installs one global always-interested
+  subscriber that routes events to a thread-local sink. 0 failures in 300 runs; a barrier
+  test reproduces the old race.
+- **Kitty** (`4e955a38`). `Discarding` swallows only a bare continuation (nothing but `m`/`q`),
+  so an actionless new command after an abandonment whose `m=0` never came is processed;
+  `o=z` inflation is capped (129.C4); a `Raw` push resets the assembler's base64 stream so a
+  stale padding slot cannot absorb a later `=`; `StreamDecoder` is no longer `Copy` and
+  `bytes_fed` is gone; tests for the bounded unknown-id log, the real chunk-limit constants
+  and the shared-memory warn.
+- **Parsers** (`1bbb6af3`, `912ab185`, `39544320`). `OscLimit` classifies the OSC number with
+  the same `parse_param_as` dispatch uses (`+52` too); an OSC body made one over the cap by
+  BEL after a held ESC is dropped; the parsed-output trace is bounded (129.C6); overflow-warn
+  content tests for OSC, APC and DCS; the raw-target tests now prove the handler ran; stale
+  line-number comments repaired.
+- **Test gaps** (`fd597840`): OSC 99 accumulated content, the dedicated `@kitty-` debug line,
+  FTCS non-UTF-8 duplicate values.
+- **Docs**: COVERAGE/GAPS wording (OSC 52 cap "introduced", not "raised"; `DCS received`
+  still logs a bounded body; GAPS DCS intro; the `o=z` inflation cap), the 1-mod-4 /
+  excess-padding base64 change (`dba627cb`), `KITTY_PROTOCOL_REFERENCE.md` function name, the 129.5 non-numeric-number sentence, and
+  the Task 131 stub's `kitty_state` references.
+
+Accepted as is, with reasons:
+
+- The kitty and iTerm2 total-cap tests swap in a small-limit assembler; the 400 MiB and
+  64 MiB constants are pinned by a value test instead of a 400 MiB push.
+- `Vec` doubling can transiently reserve about twice a total cap (documented on the type).
+- `decode_strict` and `encode_unpadded` have no production caller; Tasks 102 and 146 are
+  their consumers.
+- The 129.5 and 129.9 benchmark tables live in the status notes, not in the commits.
+- The unknown-id `a=p` warn is bounded but not rate-limited (one per command).
+- One DCS test pushes 64 MiB through the full parser (about 1.2 s in debug).
+
+- `is_bare_continuation` applies only while `Discarding`. While `Receiving`, any actionless
+  command is still a continuation, which tolerates clients that repeat `i=`/`f=` on every
+  chunk (kitty is equally lenient). After an abandonment, such a client's tail is read as a
+  new command and can draw an error reply; spec-compliant clients are unaffected.
+
+Routed to later tasks: `a=f` continuation chunks carry `a=`, so they never accumulate and
+an `a=f` chunk ends a discard (pre-existing, Task 135); `o=z` is capped at
+`MAX_KITTY_DATA_BYTES` only, not at the size implied by `s`/`v`/`f` (Task 135); `full_reset` leaves `kitty_transfer` live (Task 131, recorded in its stub); a
+saturated 128-id OSC 99 map refuses even complete single-chunk notifications, and tombstones
+keep unbounded id strings (Task 138).
+
+### 129 Cleanup entries
+
+#### 129.C1 — Tail chunks of an abandoned kitty transfer are dispatched
+
+- **Surfaced:** 129.11 (2026-10-09), confirmed by the 129 review.
+- **Status: Resolved (2026-10-09), commit `a8b00442`.** See "129 Review".
+
+#### 129.C2 — `Osc99ParseError::InvalidBase64` has no constructor
+
+- **Surfaced:** 129.12 (2026-10-09).
+- **Status: Resolved (2026-10-09), commit `4aa278cb`.** Deleted.
+
+#### 129.C3 — A dropped OSC 99 notification is revived by its next chunk
+
+- **Surfaced:** 129.12 (2026-10-09), confirmed by the 129 review.
+- **Status: Resolved (2026-10-09), commit `4aa278cb`.** See "129 Review".
+
+#### 129.C4 — Kitty `o=z` inflation is unbounded
+
+- **Surfaced:** 129 review (2026-10-09). Predates Task 129.
+- **Impact:** `inflate_zlib` (`graphics_kitty.rs`) uses `read_to_end` with no limit, so a
+  1 MiB compressed payload can inflate to about 1 GiB. That makes the 400 MiB assembly cap
+  partly cosmetic.
+- **Scope of fix:** `terminal_handler/graphics_kitty.rs` (`inflate_zlib` and its callers).
+- **Suggested approach:** inflate through `Read::take(MAX_KITTY_DATA_BYTES + 1)` and fail
+  over the cap, mirroring `read_capped`; when `S=`/`s`/`v` give an expected size, cap at it.
+- **Verification:** a zlib bomb test fails cleanly without allocating past the cap.
+- **Status: Resolved (2026-10-10), commit `4e955a38`.** `inflate_zlib` takes a limit
+  (`MAX_KITTY_DATA_BYTES` in production) and an over-limit stream takes the corrupt-stream
+  reply path.
+
+#### 129.C5 — An invalid byte inside an OSC leaks the rest of the sequence as text
+
+- **Surfaced:** 129 review (2026-10-09). Predates Task 129; behaviour is identical in-cap
+  and over-cap.
+- **Impact:** a C0 byte other than ESC/BEL (LF, CAN, …) inside an OSC makes the parser
+  emit `Invalid` and return to ground, so the remaining payload bytes up to the terminator
+  are printed as text. A program can use this to inject visible text from a payload.
+- **Scope of fix:** `ansi_components/osc.rs` and the top-level dispatcher in `ansi.rs`.
+- **Suggested approach:** follow the VT500 state machine: CAN/SUB abort the string; other
+  C0 bytes inside an OSC string are ignored rather than aborting it. Look up xterm's and
+  kitty's handling first; do not infer.
+- **Verification:** tests for LF, CAN and SUB inside an OSC, at both in-cap and over-cap
+  sizes.
+- **Status: Resolved (2026-10-10).** Semantics checked first: kitty (`vt-parser.c`
+  `find_st_terminator`) keeps every byte up to BEL or `ESC \` and never aborts; xterm and
+  the DEC VT500 parser ignore C0 inside a string and let CAN/SUB cancel it. **Maintainer
+  decision: xterm/VT500.** `osc_byte_class` classifies each byte: CAN/SUB cancel (new
+  `Cancelled` state, no output, buffer released); other C0 except BEL/ESC, and DEL, are
+  ignored without touching the ESC-before-`\` tracking; the old `Invalid`/`InvalidFinished`
+  states are gone. Applies identically within the cap and after overflow. No kitty protocol
+  carries raw C0 in an OSC, so compliant clients are unaffected. `bench_parse_osc9` and
+  `bench_parse_plain_text` are within noise. ESC handling is unchanged (an ESC not followed
+  by `\` stays in the body, as in kitty; VT500 would end the string).
+
+#### 129.C6 — `parsed terminal output` trace log is unbounded
+
+- **Surfaced:** 129.14 (2026-10-09).
+- **Impact:** `state/internal.rs` logs every parsed `TerminalOutput` at trace level with
+  `%output`, which prints whole DCS/APC/OSC payloads unbounded when trace logging is on.
+- **Scope of fix:** `freminal-terminal-emulator/src/state/internal.rs`.
+- **Suggested approach:** log the variant and a bounded rendering, or drop the payload.
+- **Verification:** a log-capture test at trace level.
+- **Status: Resolved (2026-10-10), commit `1bbb6af3`.** The output is rendered through
+  `lossy_sequence_for_log_bounded`; the test fails with a 102 KB event when reverted.
+
+---
+
 ## Foundation stubs (v0.13.0)
-
-### Task 129 — Kitty Wire Infrastructure (stub)
-
-**Goal.** Build once the parsing and payload plumbing that every kitty OSC, APC and DCS
-protocol re-implements today.
-
-**Audit findings.**
-
-- **Four hand-rolled `key=value` parsers:**
-  - OSC 99, colon-separated (`osc_notify_99.rs:409-464`);
-  - graphics, comma-separated (`kitty_graphics.rs:336-446`);
-  - FTCS (`ftcs.rs`);
-  - iTerm2 (`osc_iterm2.rs`).
-
-  Their integer and base64 helpers are private duplicates. OSC 5113, 5522, 66, 21 and 72
-  would each add another.
-
-- **The single base64 module is lenient.** `freminal-common/src/base64.rs` has optional
-  padding, no whitespace handling, no streaming and no length cap, and it reserves `len*3/4`
-  up front. OSC 5522 requires strict padded input and rejection of invalid input. OSC 5113's
-  stock client emits **unpadded** base64. OSC 99 corrupts chunked base64 whose chunk length
-  is not a multiple of 4.
-- **Three chunk accumulators** with independent caps and abandonment rules: graphics
-  (`terminal_handler/mod.rs:~99`), OSC 99 `pending_notifications`, and iTerm2 `FilePart`.
-- **No size cap on any OSC, APC or DCS accumulator** (`osc.rs:25-33`, `apc.rs`, `dcs.rs`).
-- **OSC tokenisation is lossy.** It splits on every `;` and numifies tokens
-  (`osc.rs:391-398`). OSC 9, 99, 777 and 1337 work around it via `raw_params`. OSC 8 URLs
-  containing `;` break.
-- **`AnsiOscParser::push` pops every trailing `0x5c`/`0x07`/`0x1b`** (`osc.rs:108-116`), so a
-  payload that ends in `\` loses it.
-- **Unknown OSC and DCS log the full raw payload at warn** (`ansi_components/osc.rs:362-369`,
-  `terminal_handler/dcs.rs:~49`). That is a privacy and log-spam hazard for clipboard,
-  transfer and notification payloads, and for kitten `@kitty-*` DCS.
-- **No APC response helper.** Graphics hand-builds `ESC _G … ESC \` (`kitty_graphics.rs:507-522`)
-  and ignores S8C1T.
-
-**Scope sketch.**
-
-- **`freminal-common`:**
-  - a bounded metadata tokenizer, parameterised by separator (`:`, `,`, `;`), yielding
-    `(key, value)` slices with a pair-count cap;
-  - strict and lenient base64 decoders, a streaming decoder for chunked payloads, and an
-    unpadded encoder.
-- **`freminal-terminal-emulator`:**
-  - a `BoundedChunkAssembler` (per-sequence and per-session byte caps, explicit abandonment);
-  - OSC, APC and DCS parser byte caps;
-  - raw-params as the default OSC dispatch input (opt-in tokenisation for the numeric OSCs);
-  - the trailing-backslash fix;
-  - a payload-safe unknown-sequence log (length and introducer only; silence `@kitty-*`);
-  - `apc_response()` in `pty_writer.rs`.
-- **Migrate the existing consumers** (graphics, OSC 99, iTerm2) onto the shared pieces.
-  Behaviour must stay identical, apart from the bugs listed above.
-
-**Durable decisions.**
-
-- One tokenizer, one base64 module, one chunk assembler. Protocol modules keep their own
-  typed models and error enums.
-- Caps follow the `MAX_OSC99_*` precedent: named constants, per protocol.
-
-**Open questions (decide at activation).**
-
-- Whether the OSC parser cap is global (e.g. kitty's 256 KB escape cap) or per-target.
-- Whether raw-params becomes the default for **all** OSC targets or only kitty-family ones.
 
 ### Task 130 — Reverse-Path & Capability-Query Consistency (stub)
 
@@ -1574,7 +2383,9 @@ hand-maintained list.
   main stack (B15): the call site does not guard double entry, while `Buffer::enter_alternate`
   does.
 - **Graphics.** Placement maps are handler-global, while image stores are swapped per screen.
-  `kitty_state` is not cleared on RIS.
+  The kitty chunked-transfer state (`kitty_transfer`, formerly `kitty_state`) is not cleared
+  on RIS. Neither are the iTerm2 `multipart_state` nor the `tmux_reparse_queue` (found by
+  the Task 129 activation recon and review).
 - **Pointer-shape stack.** OSC 22 needs per-screen stacks (Task 139). Multiple cursors clear
   on screen switch (Task 103). XTSAVE needs one global slot (Task 141).
 - **Reset lists are scattered.** `full_reset` (`mod.rs:602-640`) and `soft_reset`
@@ -1587,7 +2398,7 @@ hand-maintained list.
 - A `ScreenScoped<T>` holder with idempotent enter/leave.
 - A per-protocol `reset(kind: ResetKind)` with `ResetKind { Hard, Soft }`.
 - Migrate the keyboard stack and graphics placement maps.
-- Fix B15 and the RIS `kitty_state` leak.
+- Fix B15 and the RIS `kitty_transfer` / `multipart_state` / `tmux_reparse_queue` leaks.
 - An e2e `?1049`/`?47` test suite.
 
 **Open questions.**

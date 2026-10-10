@@ -26,22 +26,26 @@ pub(super) fn handle_osc_clipboard(
                 selection,
             )));
         }
-        Some(Some(AnsiOscToken::String(data))) => match freminal_common::base64::decode(data) {
-            Ok(decoded_bytes) => {
-                let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
-                output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
-                    selection, content,
-                )));
+        Some(Some(AnsiOscToken::String(data))) => {
+            match freminal_common::base64::decode(data.as_bytes()) {
+                Ok(decoded_bytes) => {
+                    let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
+                    output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
+                        selection, content,
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!("OSC 52: invalid base64 payload ({} bytes)", data.len());
+                    tracing::debug!(
+                        "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
+                        escape_sequence_for_log_bounded(raw_params)
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
-                    escape_sequence_for_log_bounded(raw_params)
-                );
-            }
-        },
+        }
         _ => {
-            tracing::warn!(
+            tracing::warn!("OSC 52: missing or invalid payload");
+            tracing::debug!(
                 "OSC 52: missing or invalid payload; raw sequence: \"{}\"",
                 escape_sequence_for_log_bounded(raw_params)
             );
@@ -52,6 +56,7 @@ pub(super) fn handle_osc_clipboard(
 #[cfg(test)]
 mod tests {
     use super::super::osc::AnsiOscParser;
+    use crate::log_capture::{capture, warnings};
     use freminal_common::buffer_states::osc::AnsiOscType;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -118,6 +123,21 @@ mod tests {
         let payload = b"52;c;!!!invalid!!!\x07";
         let output = feed_osc(payload);
         assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc52_invalid_base64_warn_carries_no_payload_byte() {
+        // 'Y','W','!','j' -- the '!' is byte 0x21, which Base64Error's Display
+        // would print. The warn must not.
+        let events = capture(|| {
+            let output = feed_osc(b"52;c;YW!j\x07");
+            assert_eq!(output, []);
+        });
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(!text.contains("0x"), "{level} line dumped a byte: {text}");
+        }
     }
 
     #[test]

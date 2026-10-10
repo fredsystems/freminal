@@ -8,6 +8,14 @@ use crate::ansi_components::tracer::{
 };
 use freminal_common::buffer_states::osc::{AnsiOscType, ITerm2InlineImageData, ImageDimension};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::key_value::{KeyValueItem, KeyValueSeparator, tokenize};
+
+/// The most `;`-separated `key=value` items a `File=` / `MultipartFile=`
+/// argument list is allowed to carry. Items past this cap are ignored.
+///
+/// iTerm2 defines fewer than ten arguments, so the cap only bounds a hostile or
+/// runaway argument list.
+const MAX_ITERM2_FILE_ARGS: usize = 64;
 
 /// Handle OSC 1337 (iTerm2 extensions).
 ///
@@ -30,7 +38,8 @@ pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutp
     //
     // Find the first ';' to skip past "1337".
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::warn!(
+        tracing::warn!("OSC 1337: missing sub-command");
+        tracing::debug!(
             "OSC 1337: missing sub-command: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -64,7 +73,8 @@ pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutp
     }
 
     // Not a recognised sub-command — silently consume, like xterm/VTE.
-    tracing::warn!(
+    tracing::warn!("OSC 1337: unrecognised sub-command");
+    tracing::debug!(
         "OSC 1337: unrecognised sub-command; raw sequence: \"{}\"",
         escape_sequence_for_log_bounded(raw_params)
     );
@@ -73,7 +83,9 @@ pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutp
 
 /// Parse the key=value args common to `File=` and `MultipartFile=`.
 ///
-/// `args_str` is the `;`-delimited key=value portion (e.g. `"inline=1;width=auto"`).
+/// `args_str` is the `;`-delimited key=value portion (e.g. `"inline=1;width=auto"`),
+/// split with the shared `key=value` tokenizer. Bare items (no `=`) are skipped
+/// silently, and items past [`MAX_ITERM2_FILE_ARGS`] are ignored.
 fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
     let mut name: Option<String> = None;
     let mut size: Option<usize> = None;
@@ -83,12 +95,24 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
     let mut inline = false;
     let mut do_not_move_cursor = false;
 
-    for pair in args_str.split(';') {
-        if let Some((key, value)) = pair.split_once('=') {
+    for item in tokenize(
+        args_str.as_bytes(),
+        KeyValueSeparator::Semicolon,
+        MAX_ITERM2_FILE_ARGS,
+    ) {
+        // The cap was exceeded: ignore the rest.
+        let Ok(item) = item else {
+            break;
+        };
+        // Slicing a `&str`'s bytes at `;` / `=` keeps both halves valid UTF-8,
+        // so the conversions cannot fail; skip rather than panic if they do.
+        if let KeyValueItem::Pair { key, value } = item
+            && let (Ok(key), Ok(value)) = (std::str::from_utf8(key), std::str::from_utf8(value))
+        {
             match key {
                 "name" => {
                     // Name is base64-encoded.
-                    if let Ok(decoded) = freminal_common::base64::decode(value) {
+                    if let Ok(decoded) = freminal_common::base64::decode(value.as_bytes()) {
                         name = Some(String::from_utf8_lossy(&decoded).into_owned());
                     }
                 }
@@ -111,7 +135,12 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
                     do_not_move_cursor = value == "1";
                 }
                 _ => {
-                    tracing::warn!("OSC 1337 File args: unknown arg: {key}={value}");
+                    tracing::warn!("OSC 1337 File args: unknown arg ignored");
+                    tracing::debug!(
+                        "OSC 1337 File args: unknown arg: {}={}",
+                        lossy_sequence_for_log_bounded(key.as_bytes()),
+                        lossy_sequence_for_log_bounded(value.as_bytes())
+                    );
                 }
             }
         }
@@ -134,7 +163,8 @@ fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec
     // `after_file` is: b"inline=1;width=auto:BASE64DATA"
     // Split on ':' to separate key=value args from the base64 payload.
     let Some(colon_pos) = after_file.iter().position(|&b| b == b':') else {
-        tracing::warn!(
+        tracing::warn!("OSC 1337 File=: missing ':' separator");
+        tracing::debug!(
             "OSC 1337 File=: missing ':' separator: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -157,10 +187,17 @@ fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec
         return;
     };
 
-    let data = match freminal_common::base64::decode(b64_str) {
+    let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::warn!("OSC 1337 File=: base64 decode failed: {e}");
+            tracing::warn!(
+                "OSC 1337 File=: base64 decode failed ({} bytes)",
+                b64_bytes.len()
+            );
+            tracing::debug!(
+                "OSC 1337 File=: base64 decode failed: {e}: recent='{}'",
+                lossy_sequence_for_log_bounded(raw_params)
+            );
             return;
         }
     };
@@ -191,7 +228,8 @@ fn handle_osc_iterm2_multipart_begin(
     };
 
     if args_str.is_empty() {
-        tracing::warn!(
+        tracing::warn!("OSC 1337 MultipartFile=: empty args");
+        tracing::debug!(
             "OSC 1337 MultipartFile=: empty args: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -216,10 +254,14 @@ fn handle_osc_iterm2_file_part(
         return;
     };
 
-    let data = match freminal_common::base64::decode(b64_str) {
+    let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(
+                "OSC 1337 FilePart=: base64 decode failed ({} bytes)",
+                after_part.len()
+            );
+            tracing::debug!(
                 "OSC 1337 FilePart=: base64 decode failed: {e}: recent='{}'",
                 lossy_sequence_for_log_bounded(raw_params)
             );
@@ -633,6 +675,30 @@ mod tests {
         assert_eq!(data.name, None);
     }
 
+    // ── File= argument cap (Task 129.8) ─────────────────────────────────────
+    #[test]
+    fn parse_iterm2_file_args_cap_ignores_the_65th_arg() {
+        // 64 bare items fill the cap exactly; `name=` is the 65th item.
+        let mut args = vec!["junk"; super::MAX_ITERM2_FILE_ARGS];
+        args.push("name=aGVsbG8=");
+        let data = super::parse_iterm2_file_args(&args.join(";"));
+        assert_eq!(data.name, None);
+    }
+
+    #[test]
+    fn parse_iterm2_file_args_cap_still_honours_the_64th_arg() {
+        let mut args = vec!["junk"; super::MAX_ITERM2_FILE_ARGS - 1];
+        args.push("name=aGVsbG8=");
+        let data = super::parse_iterm2_file_args(&args.join(";"));
+        assert_eq!(data.name.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_iterm2_file_args_skips_bare_and_empty_items() {
+        let data = super::parse_iterm2_file_args(";junk;;inline=1;;");
+        assert!(data.inline);
+    }
+
     // ── Lines 145: File= missing ':' separator ──────────────────────────────
     #[test]
     fn file_missing_colon_direct_call() {
@@ -711,5 +777,30 @@ mod tests {
         let mut output = Vec::new();
         super::handle_osc_iterm2_file_part(b"!!!invalid!!!", b"1337;test", &mut output);
         assert_eq!(output, []);
+    }
+
+    // ── Warn lines must not carry payload bytes ─────────────────────────────
+
+    fn assert_decode_warn_has_no_byte_dump(payload: &[u8]) {
+        use crate::log_capture::{capture, warnings};
+        let events = capture(|| {
+            let output = feed_osc(payload);
+            assert_eq!(output, []);
+        });
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(!text.contains("0x"), "{level} line dumped a byte: {text}");
+        }
+    }
+
+    #[test]
+    fn file_bad_base64_warn_carries_no_payload_byte() {
+        assert_decode_warn_has_no_byte_dump(b"1337;File=inline=1:YW!j\x07");
+    }
+
+    #[test]
+    fn file_part_bad_base64_warn_carries_no_payload_byte() {
+        assert_decode_warn_has_no_byte_dump(b"1337;FilePart=YW!j\x07");
     }
 }

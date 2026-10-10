@@ -72,6 +72,8 @@ pub mod cursor;
 pub mod geometry;
 /// Toolkit-agnostic GUI styling geometry (corner radii, strokes, spacing).
 pub mod gui_theme;
+/// Bounded, allocation-free `key=value` tokenizer for kitty-style metadata.
+pub mod key_value;
 /// Configurable key bindings: actions, key combos, and the binding map.
 pub mod keybindings;
 /// Layout file format types, parser, and resolver.

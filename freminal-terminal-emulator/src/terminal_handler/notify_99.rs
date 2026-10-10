@@ -14,11 +14,14 @@
 use std::collections::HashMap;
 
 use freminal_common::buffer_states::osc_notify_99::{
-    NotificationOccasion, NotificationUrgency, Osc99Command, Osc99PayloadType,
+    MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99Command,
+    Osc99PayloadEncoding, Osc99PayloadType,
 };
 use freminal_common::buffer_states::window_manipulation::{Notification99Data, Osc99ControlKind};
 
 use super::TerminalHandler;
+use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkError, ChunkLimits};
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 // ── Accumulator ──────────────────────────────────────────────────────────────
 
@@ -29,24 +32,28 @@ use super::TerminalHandler;
 /// `d`, defaulting to done). Same-typed payloads (`p=title`/`p=body`) are
 /// concatenated across chunks. This holds the in-flight accumulation until the
 /// terminating chunk finalizes it.
-#[derive(Debug, Clone, Default)]
+///
+/// Each payload type has its own [`BoundedChunkAssembler`], which decodes
+/// base64 chunks as one continuous stream (the spec lets a sender chunk before
+/// or after encoding) and enforces the size caps.
+#[derive(Debug)]
 pub(in crate::terminal_handler) struct PendingNotification {
     /// Accumulated `p=title` payload bytes.
-    title: Vec<u8>,
+    title: BoundedChunkAssembler,
     /// Accumulated `p=body` payload bytes.
-    body: Vec<u8>,
+    body: BoundedChunkAssembler,
     /// Accumulated `p=icon` payload bytes.
-    icon: Vec<u8>,
+    icon: BoundedChunkAssembler,
     /// Accumulated `p=buttons` payload bytes (U+2028-separated labels).
-    buttons: Vec<u8>,
+    buttons: BoundedChunkAssembler,
     /// The most-recent non-payload metadata (id, actions, urgency, occasion,
     /// sound, app name, icon names/cache key, close/report flags, expiry).
     ///
     /// `None` until the first chunk arrives; updated to `Some(chunk)` on each
     /// subsequent chunk.  Later chunks override earlier scalar fields; the
     /// terminating chunk's metadata wins.  The `payload` field of the stored
-    /// command is not meaningful here — the accumulated title/body/icon vecs
-    /// above are authoritative.
+    /// command is not meaningful here — the accumulators above are
+    /// authoritative.
     meta: Option<Osc99Command>,
 }
 
@@ -61,14 +68,114 @@ const MAX_PENDING_OSC99_NOTIFICATIONS: usize = 128;
 /// could otherwise grow a single accumulator without bound.
 const MAX_OSC99_NOTIFICATION_BYTES: usize = 1_048_576;
 
+/// Caps for each of a notification's four payload accumulators.
+const OSC99_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+    max_chunk_bytes: MAX_OSC99_SEQUENCE_BYTES,
+    max_total_bytes: MAX_OSC99_NOTIFICATION_BYTES,
+};
+
+/// The four payload byte strings of a notification once every chunk has been
+/// concatenated and decoded.
+struct FinishedPayloads {
+    /// The `p=title` bytes.
+    title: Vec<u8>,
+    /// The `p=body` bytes.
+    body: Vec<u8>,
+    /// The `p=icon` bytes.
+    icon: Vec<u8>,
+    /// The `p=buttons` bytes.
+    buttons: Vec<u8>,
+}
+
+impl Default for PendingNotification {
+    fn default() -> Self {
+        Self {
+            title: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            body: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            icon: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            buttons: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            meta: None,
+        }
+    }
+}
+
+/// How a chunk's declared `e=` encoding maps onto the assembler's.
+const fn chunk_encoding(encoding: Osc99PayloadEncoding) -> ChunkEncoding {
+    match encoding {
+        Osc99PayloadEncoding::Plain => ChunkEncoding::Raw,
+        Osc99PayloadEncoding::Base64 => ChunkEncoding::Base64,
+    }
+}
+
 impl PendingNotification {
-    /// Total accumulated payload bytes across all four content accumulators.
+    /// Total accumulated (decoded) payload bytes across all four content
+    /// accumulators.
     const fn accumulated_len(&self) -> usize {
         self.title
             .len()
             .saturating_add(self.body.len())
             .saturating_add(self.icon.len())
             .saturating_add(self.buttons.len())
+    }
+
+    /// Append `payload` to the accumulator selected by `payload_type`,
+    /// decoding it according to `encoding`.
+    ///
+    /// For `Close`, `Alive`, and `Query` payload types nothing is accumulated
+    /// (they are not chunked content payloads); only the metadata is updated
+    /// (done by the caller).
+    ///
+    /// # Errors
+    ///
+    /// Returns the accumulator's [`ChunkError`] (cap exceeded or invalid
+    /// base64); the caller drops the whole notification.
+    fn push_payload(
+        &mut self,
+        payload_type: Osc99PayloadType,
+        payload: &[u8],
+        encoding: Osc99PayloadEncoding,
+    ) -> Result<(), ChunkError> {
+        let target = match payload_type {
+            Osc99PayloadType::Title => &mut self.title,
+            Osc99PayloadType::Body => &mut self.body,
+            Osc99PayloadType::Icon => &mut self.icon,
+            Osc99PayloadType::Buttons => &mut self.buttons,
+            // Non-accumulating types: Close, Alive, Query.
+            Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {
+                return Ok(());
+            }
+        };
+        target.push(payload, chunk_encoding(encoding))
+    }
+
+    /// Finish all four accumulators, flushing any pending base64 quantum.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ChunkError`] from any accumulator, or
+    /// [`ChunkError::TotalTooLarge`] if the flushed payloads together exceed
+    /// [`MAX_OSC99_NOTIFICATION_BYTES`]. Flushing a pending 2- or 3-character
+    /// base64 tail adds bytes after the per-chunk combined check, so the
+    /// combined cap is re-checked here.
+    fn finish_payloads(self) -> Result<FinishedPayloads, ChunkError> {
+        let payloads = FinishedPayloads {
+            title: self.title.finish()?,
+            body: self.body.finish()?,
+            icon: self.icon.finish()?,
+            buttons: self.buttons.finish()?,
+        };
+        let total = payloads
+            .title
+            .len()
+            .saturating_add(payloads.body.len())
+            .saturating_add(payloads.icon.len())
+            .saturating_add(payloads.buttons.len());
+        if total > MAX_OSC99_NOTIFICATION_BYTES {
+            return Err(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES,
+            });
+        }
+        Ok(payloads)
     }
 }
 
@@ -189,49 +296,73 @@ fn split_button_labels(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Build a [`FinalizedNotification`] from the accumulated title/body/icon/
+/// Build a [`FinalizedNotification`] from the finished title/body/icon/
 /// buttons bytes and the final `meta` command. The terminating chunk's
-/// payload must already have been appended to the appropriate accumulator
-/// before this is called.
-fn build_finalized(
-    title_bytes: &[u8],
-    body_bytes: &[u8],
-    icon_bytes: Vec<u8>,
-    button_bytes: &[u8],
-    meta: Osc99Command,
-) -> FinalizedNotification {
-    let title = if title_bytes.is_empty() {
+/// payload must already have been pushed into the appropriate accumulator
+/// before the accumulators were finished.
+fn build_finalized(payloads: FinishedPayloads, meta: Osc99Command) -> FinalizedNotification {
+    let title = if payloads.title.is_empty() {
         None
     } else {
-        Some(String::from_utf8_lossy(title_bytes).into_owned())
+        Some(String::from_utf8_lossy(&payloads.title).into_owned())
     };
-    let body = if body_bytes.is_empty() {
+    let body = if payloads.body.is_empty() {
         None
     } else {
-        Some(String::from_utf8_lossy(body_bytes).into_owned())
+        Some(String::from_utf8_lossy(&payloads.body).into_owned())
     };
-    let icon = if icon_bytes.is_empty() {
+    let icon = if payloads.icon.is_empty() {
         None
     } else {
-        Some(icon_bytes)
+        Some(payloads.icon)
     };
     FinalizedNotification {
         title,
         body,
         icon,
-        buttons: split_button_labels(button_bytes),
+        buttons: split_button_labels(&payloads.buttons),
         meta,
     }
 }
 
 // ── PendingNotifications type alias ──────────────────────────────────────────
 
+/// The state held for one `i=` identifier in [`PendingNotifications`].
+#[derive(Debug)]
+pub(in crate::terminal_handler) enum PendingEntry {
+    /// Chunks are being accumulated; the notification is still valid.
+    ///
+    /// Boxed so the tombstone variant does not pay for four assemblers.
+    Accumulating(Box<PendingNotification>),
+    /// The notification was dropped mid-transfer (invalid base64 or a cap
+    /// breach). The id is remembered as a tombstone so the remaining chunks
+    /// of the same transfer are discarded instead of starting a fresh
+    /// accumulation from a tail fragment. The terminating (`d=1`) chunk
+    /// removes it. It counts toward [`MAX_PENDING_OSC99_NOTIFICATIONS`] like
+    /// any other pending entry, so the map stays bounded.
+    Dropped,
+}
+
 /// Map of in-flight OSC 99 notifications keyed by their `i=` identifier.
-pub(in crate::terminal_handler) type PendingNotifications = HashMap<String, PendingNotification>;
+pub(in crate::terminal_handler) type PendingNotifications = HashMap<String, PendingEntry>;
 
 // ── Reassembly impl on TerminalHandler ───────────────────────────────────────
 
 impl TerminalHandler {
+    /// Abandon the in-flight notification `id` after a decode or cap failure.
+    ///
+    /// If the offending chunk was the terminating one (`done`) the
+    /// notification is over and the entry is removed. Otherwise the id is
+    /// kept as a [`PendingEntry::Dropped`] tombstone so the remaining chunks
+    /// of the same transfer cannot start a fresh, truncated notification.
+    fn abandon_notification(&mut self, id: String, done: bool) {
+        if done {
+            self.pending_notifications.remove(&id);
+        } else {
+            self.pending_notifications.insert(id, PendingEntry::Dropped);
+        }
+    }
+
     /// Feed one parsed OSC 99 chunk into the notification reassembly machine.
     ///
     /// Returns `Some(finalized)` when the chunk terminates a notification
@@ -245,6 +376,12 @@ impl TerminalHandler {
     /// standalone notification; if `done == false` (a non-final chunk with no
     /// id), it is dropped and `None` is returned.
     /// An `i=` seen again after finalize starts a fresh accumulation.
+    ///
+    /// A notification dropped mid-transfer (invalid base64, or a size cap)
+    /// leaves a tombstone for its id: further content chunks are ignored and
+    /// the terminating chunk removes the tombstone without emitting anything.
+    /// Control chunks (`p=close`/`p=alive`/`p=?`) are not swallowed by a
+    /// tombstone; they are handled as if the id had no entry.
     pub(in crate::terminal_handler) fn reassemble_osc99(
         &mut self,
         chunk: Osc99Command,
@@ -253,16 +390,19 @@ impl TerminalHandler {
             // ── No id: standalone or drop ────────────────────────────────────
             None => {
                 if chunk.done {
-                    // Standalone, single-chunk notification — finalize immediately.
-                    let (title_bytes, body_bytes, icon_bytes, button_bytes) =
-                        payload_into_accumulators(chunk.payload_type, chunk.payload.clone());
-                    Some(build_finalized(
-                        &title_bytes,
-                        &body_bytes,
-                        icon_bytes,
-                        &button_bytes,
-                        chunk,
-                    ))
+                    // Standalone, single-chunk notification — decode it
+                    // through a temporary accumulator and finalize immediately.
+                    let mut pending = PendingNotification::default();
+                    let decoded = pending
+                        .push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
+                        .and_then(|()| pending.finish_payloads());
+                    match decoded {
+                        Ok(payloads) => Some(build_finalized(payloads, chunk)),
+                        Err(err) => {
+                            tracing::debug!("OSC 99: dropping standalone notification: {err}");
+                            None
+                        }
+                    }
                 } else {
                     // Non-final chunk with no id — no key to accumulate under; drop.
                     tracing::trace!(
@@ -275,6 +415,28 @@ impl TerminalHandler {
             // ── Has id: accumulate or finalize ────────────────────────────────
             Some(id) => {
                 let id = id.clone();
+
+                let done = chunk.done;
+
+                if matches!(
+                    self.pending_notifications.get(&id),
+                    Some(PendingEntry::Dropped)
+                ) {
+                    if control_kind(chunk.payload_type).is_some() {
+                        // A control request (`p=close`/`p=alive`/`p=?`) is not
+                        // part of the dropped content transfer: forget the
+                        // tombstone and handle it as if no entry existed.
+                        self.pending_notifications.remove(&id);
+                    } else {
+                        // The rest of a dropped transfer: ignore the payload;
+                        // the terminating chunk ends the notification.
+                        if done {
+                            self.pending_notifications.remove(&id);
+                        }
+                        tracing::trace!("OSC 99: ignoring chunk of a dropped notification");
+                        return None;
+                    }
+                }
 
                 // Bound the number of concurrent in-flight notifications: a
                 // new id is refused once the map is full (existing ids may
@@ -289,15 +451,35 @@ impl TerminalHandler {
                     return None;
                 }
 
-                // Bound the accumulated payload for this id: if appending this
-                // chunk would exceed the per-notification cap, drop the whole
-                // in-flight accumulation rather than grow without limit.
-                let current_len = self
+                let PendingEntry::Accumulating(entry) = self
                     .pending_notifications
-                    .get(&id)
-                    .map_or(0, PendingNotification::accumulated_len);
-                if current_len.saturating_add(chunk.payload.len()) > MAX_OSC99_NOTIFICATION_BYTES {
-                    self.pending_notifications.remove(&id);
+                    .entry(id.clone())
+                    .or_insert_with(|| PendingEntry::Accumulating(Box::default()))
+                else {
+                    // Unreachable: a tombstone was handled above.
+                    return None;
+                };
+
+                // Append the chunk's payload to the matching accumulator. An
+                // invalid base64 stream or an exceeded cap drops the whole
+                // in-flight notification rather than keeping a partial one.
+                if let Err(err) =
+                    entry.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
+                {
+                    self.abandon_notification(id.clone(), done);
+                    tracing::debug!(
+                        "OSC 99: dropping notification {:?}: {err}",
+                        lossy_sequence_for_log_bounded(id.as_bytes())
+                    );
+                    return None;
+                }
+
+                // Bound the accumulated payload for this id across all four
+                // accumulators: if it now exceeds the per-notification cap,
+                // drop the whole in-flight accumulation rather than grow
+                // without limit.
+                if entry.accumulated_len() > MAX_OSC99_NOTIFICATION_BYTES {
+                    self.abandon_notification(id, done);
                     tracing::debug!(
                         "OSC 99: dropping notification; accumulated payload exceeds {} bytes",
                         MAX_OSC99_NOTIFICATION_BYTES
@@ -305,34 +487,35 @@ impl TerminalHandler {
                     return None;
                 }
 
-                let entry = self.pending_notifications.entry(id.clone()).or_default();
-
-                // Append the chunk's payload bytes to the matching accumulator.
-                append_payload(entry, chunk.payload_type, &chunk.payload);
-
                 // Latest metadata wins (payload bytes are accumulated above, not here).
                 // Move (not clone) the payload out of the chunk before storing
                 // metadata, so a large final icon/body chunk is not retained
                 // twice (once in the accumulator, once in `meta`).
-                let done = chunk.done;
                 let mut chunk = chunk;
                 chunk.payload = Vec::new();
                 entry.meta = Some(chunk);
 
                 if done {
                     // Remove from the map and build the finalized notification.
-                    let entry = self.pending_notifications.remove(&id)?;
+                    let Some(PendingEntry::Accumulating(mut entry)) =
+                        self.pending_notifications.remove(&id)
+                    else {
+                        return None;
+                    };
                     // SAFETY: we just set entry.meta = Some(chunk) before inserting,
                     // so this is always Some when we removed a live entry.
-                    let meta = entry.meta?;
+                    let meta = entry.meta.take()?;
 
-                    Some(build_finalized(
-                        &entry.title,
-                        &entry.body,
-                        entry.icon,
-                        &entry.buttons,
-                        meta,
-                    ))
+                    match entry.finish_payloads() {
+                        Ok(payloads) => Some(build_finalized(payloads, meta)),
+                        Err(err) => {
+                            tracing::debug!(
+                                "OSC 99: dropping notification {:?}: {err}",
+                                lossy_sequence_for_log_bounded(id.as_bytes())
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 }
@@ -341,47 +524,11 @@ impl TerminalHandler {
     }
 }
 
-/// Append `payload` bytes to the accumulator field selected by `payload_type`.
-///
-/// For `Close`, `Alive`, and `Query` payload types, the payload bytes are NOT
-/// accumulated into title/body/icon/buttons (they are not chunked content
-/// payloads); only the metadata is updated (done by the caller).
-fn append_payload(entry: &mut PendingNotification, payload_type: Osc99PayloadType, payload: &[u8]) {
-    match payload_type {
-        Osc99PayloadType::Title => entry.title.extend_from_slice(payload),
-        Osc99PayloadType::Body => entry.body.extend_from_slice(payload),
-        Osc99PayloadType::Icon => entry.icon.extend_from_slice(payload),
-        Osc99PayloadType::Buttons => entry.buttons.extend_from_slice(payload),
-        // Non-accumulating types: Close, Alive, Query.
-        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {}
-    }
-}
-
-/// Convert a standalone chunk's payload into the four accumulator vecs
-/// `(title, body, icon, buttons)` based on `payload_type`.
-///
-/// For non-content payload types, the payload goes to no accumulator
-/// (all four vecs stay empty; the meta carries the data).
-fn payload_into_accumulators(
-    payload_type: Osc99PayloadType,
-    payload: Vec<u8>,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
-    match payload_type {
-        Osc99PayloadType::Title => (payload, Vec::new(), Vec::new(), Vec::new()),
-        Osc99PayloadType::Body => (Vec::new(), payload, Vec::new(), Vec::new()),
-        Osc99PayloadType::Icon => (Vec::new(), Vec::new(), payload, Vec::new()),
-        Osc99PayloadType::Buttons => (Vec::new(), Vec::new(), Vec::new(), payload),
-        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use freminal_common::buffer_states::osc_notify_99::Osc99Actions;
+    use freminal_common::buffer_states::osc_notify_99::{Osc99Actions, parse_osc_99};
 
     /// Build a default `Osc99Command` for use in mapping tests.
     fn default_cmd() -> Osc99Command {
@@ -390,6 +537,7 @@ mod tests {
             payload_type: Osc99PayloadType::Title,
             done: true,
             payload: Vec::new(),
+            payload_encoding: Osc99PayloadEncoding::Plain,
             actions: Osc99Actions::default(),
             close_report: false,
             app_name: None,
@@ -731,7 +879,8 @@ mod tests {
             ..default_cmd()
         };
         assert!(handler.reassemble_osc99(chunk2).is_none());
-        assert!(!handler.pending_notifications.contains_key(&id));
+        // The id stays as a tombstone until the terminating chunk.
+        assert!(is_dropped(&handler, &id));
     }
 
     #[test]
@@ -750,14 +899,402 @@ mod tests {
 
         // The stored metadata must not keep a copy of the payload bytes: they
         // live only in the body accumulator now.
-        let entry = handler
-            .pending_notifications
-            .get(&id)
-            .expect("entry should be pending");
-        assert_eq!(entry.body, b"hello");
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_notifications.get(&id) else {
+            panic!("entry should be accumulating");
+        };
+        assert_eq!(entry.body.len(), 5);
         assert!(
             entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()),
             "meta.payload must be cleared after accumulation"
         );
+
+        // And the accumulated bytes are the payload itself.
+        let done = Osc99Command {
+            id: Some(id),
+            payload_type: Osc99PayloadType::Body,
+            done: true,
+            payload: Vec::new(),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(done)
+            .expect("terminating chunk finalizes");
+        assert_eq!(finalized.body.as_deref(), Some("hello"));
+    }
+
+    // ── 129.12: stream decoding through the real wire path ───────────────────
+
+    /// Feed one OSC 99 sequence (`metadata`, `payload`) through
+    /// `parse_osc_99` and the reassembler, exactly as the handler does.
+    fn feed(
+        handler: &mut TerminalHandler,
+        metadata: &str,
+        payload: &[u8],
+    ) -> Option<FinalizedNotification> {
+        let cmd = parse_osc_99(metadata.as_bytes(), payload).expect("sequence must parse");
+        handler.reassemble_osc99(cmd)
+    }
+
+    /// Reassemble a two-chunk `p=title` notification whose payload slices are
+    /// `first` and `second`, both declared base64.
+    fn two_base64_title_chunks(first: &[u8], second: &[u8]) -> Option<FinalizedNotification> {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=x:d=0:e=1", first).is_none());
+        feed(&mut handler, "i=x:e=1", second)
+    }
+
+    const SAMPLE_TITLE: &str = "Build finished: 42 tests passed (naïve ✓)";
+
+    /// One base64 encoding of the title, split into two chunks at every
+    /// offset (including mid-quantum), must reassemble exactly.
+    #[test]
+    fn base64_title_split_at_every_offset_reassembles() {
+        let encoded = freminal_common::base64::encode(SAMPLE_TITLE.as_bytes());
+        for at in 0..=encoded.len() {
+            let (a, b) = encoded.as_bytes().split_at(at);
+            let finalized = two_base64_title_chunks(a, b)
+                .unwrap_or_else(|| panic!("split at {at} must finalize"));
+            assert_eq!(
+                finalized.title.as_deref(),
+                Some(SAMPLE_TITLE),
+                "split at {at}"
+            );
+        }
+    }
+
+    /// The final chunk may omit padding; every split offset must still work.
+    #[test]
+    fn unpadded_base64_title_split_at_every_offset_reassembles() {
+        let encoded = freminal_common::base64::encode_unpadded(SAMPLE_TITLE.as_bytes());
+        for at in 0..=encoded.len() {
+            let (a, b) = encoded.as_bytes().split_at(at);
+            let finalized = two_base64_title_chunks(a, b)
+                .unwrap_or_else(|| panic!("split at {at} must finalize"));
+            assert_eq!(
+                finalized.title.as_deref(),
+                Some(SAMPLE_TITLE),
+                "split at {at}"
+            );
+        }
+    }
+
+    /// Chunk-then-encode: each plaintext slice is encoded (and padded) on its
+    /// own, so padding appears mid-stream.
+    #[test]
+    fn chunk_then_encode_with_padding_in_every_chunk_reassembles() {
+        let plain = b"Hello, notification world";
+        let mut handler = TerminalHandler::new(80, 24);
+        // Slice lengths 5, 4, 7, 9 leave remainders 2, 1, 1, 0 so most
+        // chunks end in padding.
+        let mut rest = &plain[..];
+        let mut result = None;
+        for len in [5usize, 4, 7, 9] {
+            let (head, tail) = rest.split_at(len);
+            rest = tail;
+            let done = rest.is_empty();
+            let metadata = if done { "i=x:e=1" } else { "i=x:d=0:e=1" };
+            result = feed(
+                &mut handler,
+                metadata,
+                freminal_common::base64::encode(head).as_bytes(),
+            );
+        }
+        let finalized = result.expect("last chunk must finalize");
+        assert_eq!(
+            finalized.title.as_deref(),
+            Some("Hello, notification world")
+        );
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// A `Plain` chunk, then a `Base64` chunk ending on a quantum boundary,
+    /// then a `Plain` chunk: each is decoded by its own declared encoding.
+    #[test]
+    fn body_mixing_plain_and_base64_chunks_reassembles() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=m:p=body:d=0", b"Hello, ").is_none());
+        // "world" -> "d29ybGQ=" (padded, so the quantum is complete).
+        assert!(feed(&mut handler, "i=m:p=body:d=0:e=1", b"d29ybGQ=").is_none());
+        let finalized = feed(&mut handler, "i=m:p=body", b"!").expect("final chunk must finalize");
+        assert_eq!(finalized.body.as_deref(), Some("Hello, world!"));
+    }
+
+    /// A `Plain` chunk arriving while a base64 quantum is incomplete is an
+    /// error for the whole notification.
+    #[test]
+    fn plain_chunk_mid_quantum_drops_notification() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=q:p=body:d=0:e=1", b"d29y").is_none());
+        assert!(feed(&mut handler, "i=q:p=body:d=0:e=1", b"bG").is_none());
+        assert!(feed(&mut handler, "i=q:p=body:d=0", b"!").is_none());
+        assert!(is_dropped(&handler, "q"));
+    }
+
+    /// Each payload type decodes its own stream: a title may stop
+    /// mid-quantum while a body chunk is interleaved.
+    #[test]
+    fn interleaved_payload_types_keep_independent_streams() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // "Hello" -> "SGVsbG8=": split mid-quantum around the body chunk.
+        assert!(feed(&mut handler, "i=t:d=0:e=1", b"SGVs").is_none());
+        assert!(feed(&mut handler, "i=t:p=body:d=0", b"plain body").is_none());
+        let finalized = feed(&mut handler, "i=t:e=1", b"bG8=").expect("must finalize");
+        assert_eq!(finalized.title.as_deref(), Some("Hello"));
+        assert_eq!(finalized.body.as_deref(), Some("plain body"));
+    }
+
+    /// Invalid base64 in a middle chunk drops the whole in-flight
+    /// notification immediately.
+    #[test]
+    fn invalid_base64_in_middle_chunk_drops_notification() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=bad:d=0:e=1", b"SGVs").is_none());
+        assert!(handler.pending_notifications.contains_key("bad"));
+        assert!(feed(&mut handler, "i=bad:d=0:e=1", b"!!!!").is_none());
+        assert!(
+            is_dropped(&handler, "bad"),
+            "the invalid chunk must drop the pending notification"
+        );
+    }
+
+    /// A stream left mid-quantum at finalisation (dangling character) drops
+    /// the notification instead of emitting a truncated one.
+    #[test]
+    fn dangling_base64_character_at_finalisation_drops_notification() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=d:d=0:e=1", b"SGVs").is_none());
+        assert!(feed(&mut handler, "i=d:e=1", b"b").is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Standalone (no id) base64 payload still decodes.
+    #[test]
+    fn standalone_base64_title_decodes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let finalized = feed(&mut handler, "e=1", b"SGVsbG8=").expect("must finalize");
+        assert_eq!(finalized.title.as_deref(), Some("Hello"));
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Standalone base64 without trailing padding still decodes.
+    #[test]
+    fn standalone_unpadded_base64_title_decodes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let finalized = feed(&mut handler, "e=1", b"SGVsbG8").expect("must finalize");
+        assert_eq!(finalized.title.as_deref(), Some("Hello"));
+    }
+
+    /// Standalone invalid base64 drops the notification.
+    #[test]
+    fn standalone_invalid_base64_is_dropped() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "e=1", b"not base64!").is_none());
+        // A lone dangling character is invalid too.
+        assert!(feed(&mut handler, "e=1", b"SGVsb").is_none());
+    }
+
+    /// An id'd base64 notification that fits one sequence still decodes.
+    #[test]
+    fn single_chunk_base64_body_with_id_decodes() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let finalized = feed(&mut handler, "i=one:p=body:e=1", b"SGVsbG8=").expect("must finalize");
+        assert_eq!(finalized.body.as_deref(), Some("Hello"));
+        assert_eq!(
+            finalized.meta.payload_encoding,
+            Osc99PayloadEncoding::Base64
+        );
+    }
+
+    /// The notification cap applies to the decoded length: two chunks whose
+    /// decoded bytes together pass 1 MiB are dropped.
+    #[test]
+    fn base64_notification_exceeding_decoded_cap_is_dropped() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let id = "huge";
+        // Each chunk is under the per-sequence cap and decodes to ~786 KB;
+        // together they exceed the 1 MiB notification cap.
+        let chunk = vec![b'A'; 1_048_572 - 100];
+        assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
+        assert!(handler.pending_notifications.contains_key(id));
+        assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
+        assert!(is_dropped(&handler, id));
+    }
+
+    /// PR #536 review: the combined cap must also hold for the bytes a pending
+    /// base64 tail adds when the accumulators are finished.
+    #[test]
+    fn base64_tail_flushed_at_finish_cannot_exceed_the_combined_cap() {
+        let half = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let mut handler = TerminalHandler::new(80, 24);
+        // Exactly 1 MiB of plain title: at the cap, still accepted.
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        // `YQ` decodes to one byte, but only when the stream is finished.
+        assert!(feed(&mut handler, "i=cap:d=1:p=body:e=1", b"YQ").is_none());
+        assert!(!handler.pending_notifications.contains_key("cap"));
+
+        // The same shape one byte smaller finalises with both parts intact.
+        let mut handler = TerminalHandler::new(80, 24);
+        let short = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", &short).is_none());
+        let done = feed(&mut handler, "i=ok:d=1:p=body:e=1", b"YQ").expect("within the cap");
+        assert_eq!(done.body.as_deref(), Some("a"));
+        assert_eq!(
+            done.title.map(|t| t.len()),
+            Some(MAX_OSC99_NOTIFICATION_BYTES - 1)
+        );
+    }
+
+    // ── Tombstones for notifications dropped mid-transfer ────────────────────
+
+    /// Whether `id` is currently held as a [`PendingEntry::Dropped`] tombstone.
+    fn is_dropped(handler: &TerminalHandler, id: &str) -> bool {
+        matches!(
+            handler.pending_notifications.get(id),
+            Some(PendingEntry::Dropped)
+        )
+    }
+
+    /// The reviewer's repro: invalid base64 mid-transfer, then a plain
+    /// terminating chunk for the same id, must not yield a notification
+    /// built from the tail fragment.
+    #[test]
+    fn dropped_notification_tail_chunk_emits_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(is_dropped(&handler, "1"));
+        assert!(feed(&mut handler, "i=1:d=1:p=title", b"TAILONLY").is_none());
+        assert!(
+            handler.pending_notifications.is_empty(),
+            "the terminating chunk must remove the tombstone"
+        );
+    }
+
+    /// After the tombstone is consumed by `d=1`, the same id starts a fresh,
+    /// valid notification that finalizes normally.
+    #[test]
+    fn id_is_reusable_after_dropped_notification_terminates() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=1:p=title", b"TAILONLY").is_none());
+
+        assert!(feed(&mut handler, "i=1:d=0:p=title", b"Fresh ").is_none());
+        let finalized = feed(&mut handler, "i=1:d=1:p=title", b"start").expect("must finalize");
+        assert_eq!(finalized.title.as_deref(), Some("Fresh start"));
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Intermediate chunks of a dropped transfer are ignored and keep the
+    /// tombstone; they never accumulate.
+    #[test]
+    fn dropped_notification_ignores_intermediate_chunks() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=title", b"more").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=body", b"more").is_none());
+        assert!(is_dropped(&handler, "1"));
+        assert_eq!(handler.pending_notifications.len(), 1);
+    }
+
+    /// If the offending chunk is itself the terminating one, the notification
+    /// is over: no tombstone is left behind.
+    #[test]
+    fn invalid_terminating_chunk_leaves_no_tombstone() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"SGVs").is_none());
+        assert!(feed(&mut handler, "i=1:d=1:p=title:e=1", b"@@@@").is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// A combined-cap breach tombstones the id: further chunks and the
+    /// terminating chunk emit nothing.
+    #[test]
+    fn combined_cap_breach_then_tail_chunks_emit_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Title and body each fit their own accumulator, but together they
+        // exceed the per-notification cap.
+        let half = vec![b'a'; MAX_OSC99_NOTIFICATION_BYTES / 2 + 1];
+        assert!(feed(&mut handler, "i=big:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=big:d=0:p=body", &half).is_none());
+        assert!(is_dropped(&handler, "big"));
+
+        assert!(feed(&mut handler, "i=big:d=0:p=title", b"tail").is_none());
+        assert!(feed(&mut handler, "i=big:d=1:p=title", b"tail").is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Tombstones occupy slots in the pending map like any other entry, so
+    /// the 128-entry cap bounds them too.
+    #[test]
+    fn tombstones_count_toward_pending_cap() {
+        let mut handler = TerminalHandler::new(80, 24);
+        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
+            let metadata = format!("i=id-{i}:d=0:p=title:e=1");
+            assert!(feed(&mut handler, &metadata, b"@@@@").is_none());
+        }
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+        assert!(
+            handler
+                .pending_notifications
+                .values()
+                .all(|e| matches!(e, PendingEntry::Dropped))
+        );
+
+        // A new id is refused: the map does not grow past the cap.
+        assert!(feed(&mut handler, "i=overflow:d=0:p=title", b"x").is_none());
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+        assert!(!handler.pending_notifications.contains_key("overflow"));
+
+        // Terminating a tombstoned id frees its slot.
+        assert!(feed(&mut handler, "i=id-0:d=1:p=title", b"x").is_none());
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS - 1
+        );
+    }
+
+    /// A control request for a tombstoned id is handled as if the id had no
+    /// entry: a done `p=close` finalizes as a control notification and the
+    /// tombstone is gone.
+    #[test]
+    fn close_for_tombstoned_id_behaves_as_if_no_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(is_dropped(&handler, "1"));
+
+        let finalized = feed(&mut handler, "i=1:p=close", b"").expect("close must finalize");
+        assert_eq!(finalized.meta.payload_type, Osc99PayloadType::Close);
+        assert_eq!(finalized.meta.id.as_deref(), Some("1"));
+        assert!(finalized.title.is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Same for `p=alive` and `p=?`, and a non-final control chunk leaves a
+    /// normal accumulating entry (not a tombstone), as with no prior entry.
+    #[test]
+    fn alive_and_query_for_tombstoned_id_behave_as_if_no_entry() {
+        for (metadata, kind) in [
+            ("i=1:p=alive", Osc99PayloadType::Alive),
+            ("i=1:p=?", Osc99PayloadType::Query),
+        ] {
+            let mut handler = TerminalHandler::new(80, 24);
+            assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+            let finalized = feed(&mut handler, metadata, b"").expect("must finalize");
+            assert_eq!(finalized.meta.payload_type, kind);
+            assert!(handler.pending_notifications.is_empty());
+        }
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=close", b"").is_none());
+        assert!(!is_dropped(&handler, "1"));
+        assert!(handler.pending_notifications.contains_key("1"));
     }
 }
