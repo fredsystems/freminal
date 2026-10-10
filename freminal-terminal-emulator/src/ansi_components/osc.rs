@@ -177,6 +177,13 @@ impl AnsiOscParser {
                     self.params
                         .truncate(self.params.len().saturating_sub(terminator_len));
 
+                    // A body ending in ESC held that ESC uncounted while it
+                    // might have been the start of `ESC \`; if BEL then made
+                    // it body, the finished body can be one byte over the cap.
+                    if self.finished_body_exceeds_cap() {
+                        return self.drop_finished_over_cap();
+                    }
+
                     return ParserOutcome::Finished;
                 }
 
@@ -203,6 +210,33 @@ impl AnsiOscParser {
                 ParserOutcome::Invalid("Invalid OSC sequence terminated".to_string())
             }
         }
+    }
+
+    /// Whether a just-terminated body is longer than its cap. Only the BEL
+    /// terminator after an uncounted trailing ESC can make this true.
+    fn finished_body_exceeds_cap(&mut self) -> bool {
+        if self.params.len() <= self.limit.max_bytes() {
+            return false;
+        }
+        if self.limit == OscLimit::Default {
+            self.limit = OscLimit::for_body(&self.params);
+        }
+        self.params.len() > self.limit.max_bytes()
+    }
+
+    /// Drop a terminated body that is over its cap, exactly as an overflowed
+    /// sequence is dropped: no output, one payload-free warn, buffer released.
+    fn drop_finished_over_cap(&mut self) -> ParserOutcome {
+        // The stored length plus the one-byte BEL terminator.
+        let total = self.params.len().saturating_add(1);
+        tracing::warn!(
+            "OSC sequence over the {}-byte cap dropped: total length {total} bytes",
+            self.limit.max_bytes()
+        );
+        self.params = Vec::new();
+        self.intermediates = Vec::new();
+        self.state = AnsiOscParserState::OverflowFinished;
+        ParserOutcome::Finished
     }
 
     /// Called only once the accumulated body is longer than the current cap and
@@ -1543,6 +1577,42 @@ mod tests {
             assert_eq!(outcome, ParserOutcome::Finished);
             assert_eq!(output, []);
         }
+    }
+
+    #[test]
+    fn cap_body_ending_in_esc_terminated_by_bel_is_dropped() {
+        // A body, then ESC (held uncounted), then BEL: the ESC
+        // becomes body. A MAX-byte body plus ESC is one over; MAX - 1 plus ESC
+        // is exactly at the cap.
+        let mut over = body_of_len(b"2;", MAX_OSC_BYTES);
+        over.extend_from_slice(b"\x1b\x07");
+        let (output, outcome) = feed_osc_with_outcome(&over);
+        assert_eq!(outcome, ParserOutcome::Finished);
+        assert_eq!(output, [], "a MAX + 1 body must not be dispatched");
+
+        let mut at_cap = body_of_len(b"2;", MAX_OSC_BYTES - 1);
+        at_cap.extend_from_slice(b"\x1b\x07");
+        let (output, outcome) = feed_osc_with_outcome(&at_cap);
+        assert_eq!(outcome, ParserOutcome::Finished);
+        let [TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(title))] = output.as_slice()
+        else {
+            panic!("a MAX body must be dispatched, got {output:?}");
+        };
+        assert_eq!(title.len(), MAX_OSC_BYTES - 2);
+        assert!(title.ends_with('\u{1b}'));
+    }
+
+    #[test]
+    fn cap_body_ending_in_esc_terminated_by_bel_warns_without_payload() {
+        let mut over = body_of_len(b"2;SECRETMARK", MAX_OSC_BYTES);
+        over.extend_from_slice(b"\x1b\x07");
+        let events = crate::log_capture::capture(|| {
+            let (output, _) = feed_osc_with_outcome(&over);
+            assert_eq!(output, []);
+        });
+        let warns = crate::log_capture::warnings(&events);
+        assert_eq!(warns.len(), 1, "{events:?}");
+        assert!(warns[0].1.contains("OSC") && !warns[0].1.contains("SECRETMARK"));
     }
 
     #[test]
