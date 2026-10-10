@@ -1,5 +1,26 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-09 — Task 129 (kitty wire infrastructure) — wire-level
+bugs fixed; no gap row closes because none was itemised here (they were
+recorded in the `PLAN_VERSION_130.md` audit under "Pre-existing bugs outside
+the kitty surface"). Closed: (129.4) an OSC payload ending in `\` lost it
+(`OSC 0;C:\ BEL` set the title `C:`); only the terminator is stripped now.
+(129.5–129.8) a non-UTF-8 byte anywhere invalidated every OSC; every target now
+gets its raw body and only the token targets (4, 10, 11, 12, 22, 52, 104) still
+reject non-UTF-8. (129.6) OSC 0/1/2 titles and OSC 7 URIs containing `;` were
+truncated; they now take the full remainder. (129.7) OSC 8 URIs containing `;`
+closed the hyperlink and `id=` was stored as the whole params field; both are
+fixed. (129.9, 129.11) OSC, APC, DCS and the kitty and iTerm2 chunk
+accumulators were unbounded; they are capped (OSC 1 MiB, OSC 52 / 1337 64 MiB,
+APC 1 MiB, DCS 64 MiB, kitty graphics 400 MiB total, iTerm2 multipart 64 MiB;
+over-cap input is consumed and dropped, warn-logged with its length only).
+(129.12) OSC 99 base64 payloads split mid-quantum across chunks decoded to the
+wrong bytes; they now decode as one stream. (129.13) kitty graphics replies
+ignored S8C1T; they are now 8-bit framed when it is active. (129.14) `DCS
+@kitty-*` kitten strings are consumed silently; a new not-planned row records
+them under "DCS / Graphics Gaps". Kitty graphics and OSC 99 remain not
+conformant (Tasks 135, 136, 138). See `ESCAPE_SEQUENCE_COVERAGE.md`.
+
 Last updated: 2026-10-09 — Task 128 (strict CSI dispatch) — the CSI router now
 matches on private-marker prefix, intermediate and final byte together, so the
 misroutes recorded under "CSI Gaps" are fixed: `CSI Ps + T`, `CSI Ps # P`,
@@ -425,6 +446,7 @@ v0.13.1.
 | Sixel placement under DECSDM                | ⬜         | 🚧   | —                | With sixel scrolling disabled (DECSDM, `?80` set) xterm draws the image at the top-left of the screen and does not move the text cursor. Freminal draws it at the cursor position and then restores the cursor to the image origin. The text cursor does not move in either; only the image position differs. |
 | Kitty graphics conformance                  | 🟩         | 🚧   | v0.13.1 Task 135 | About 30 deviations: replies to id-less commands, text and erase destroy image tiles, `S=`/`O=` ignored for files, `CSI 14 t` reports the OS window rectangle for every pane                                                                                                                                  |
 | Kitty graphics placement model and z-layers | 🟩         | 🚧   | v0.13.1 Task 136 | Placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                                                                                                                                                                                                           |
+| Kitty kitten transport (`DCS @kitty-…`)     | ⬜         | ⬜   | —                | Not implemented and not planned: private kitten plumbing (`@kitty-print`, `echo`, `ssh`, `ask`, `clone`, `edit`) and the `@kitty-cmd` remote-control API are out of scope (`PLAN_VERSION_130.md` Out of scope). Consumed silently since Task 129.14 (debug log with the length only, no warn).                |
 
 Task 100 added the Kitty graphics feature surface — animation,
 image-number references, relative placements, storage quotas + eviction,
@@ -440,7 +462,7 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this.
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13.
 
 ---
 
