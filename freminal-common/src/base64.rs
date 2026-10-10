@@ -255,7 +255,10 @@ pub enum StreamPosition {
 ///
 /// Like [`decode`], this ignores non-zero trailing bits.  After an error the
 /// decoder's state is unspecified and it should be discarded.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Deliberately not `Copy`: a stale copy of a stateful decoder could be reused
+/// silently and decode from a position the stream has already moved past.
+#[derive(Debug, Clone, Default)]
 pub struct StreamDecoder {
     /// The partial quantum carried over between chunks.
     quantum: Quantum,
@@ -325,12 +328,6 @@ impl StreamDecoder {
         } else {
             StreamPosition::MidQuantum
         }
-    }
-
-    /// Total number of bytes passed to [`feed`](Self::feed) so far.
-    #[must_use]
-    pub const fn bytes_fed(&self) -> usize {
-        self.consumed
     }
 
     /// Finish decoding, flushing a pending partial quantum into `out`.
@@ -731,17 +728,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_position_and_bytes_fed() {
+    fn stream_position_tracks_quantum_boundaries() {
         let mut decoder = StreamDecoder::new();
         let mut out = Vec::new();
         assert_eq!(decoder.position(), StreamPosition::Aligned);
-        assert_eq!(decoder.bytes_fed(), 0);
         decoder.feed(b"SGVsb", &mut out).unwrap();
         assert_eq!(decoder.position(), StreamPosition::MidQuantum);
-        assert_eq!(decoder.bytes_fed(), 5);
         decoder.feed(b"G8=", &mut out).unwrap();
         assert_eq!(decoder.position(), StreamPosition::Aligned);
-        assert_eq!(decoder.bytes_fed(), 8);
         // A closed quantum with one more `=` still consumable is aligned.
         decoder.feed(b"YQ=", &mut out).unwrap();
         assert_eq!(decoder.position(), StreamPosition::Aligned);

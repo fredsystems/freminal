@@ -465,18 +465,33 @@ fn log_shm_name(context: &str, name: &str) {
     );
 }
 
-/// Inflate an RFC 1950 zlib stream (kitty `o=z`). Returns the decompressed
-/// bytes or an error on malformed input.
+/// Inflate an RFC 1950 zlib stream (kitty `o=z`), producing at most `limit`
+/// bytes. Returns the decompressed bytes, or an error on malformed input or
+/// if the stream inflates to more than `limit` bytes.
+///
+/// The bound matters because zlib compresses runs of identical bytes by a
+/// factor of roughly 1000, so a payload well inside the transfer caps can
+/// otherwise inflate to a size that exhausts memory. At most `limit + 1`
+/// bytes are ever read from the decoder.
 ///
 /// This is RFC 1950 "zlib" (a two-byte header + Adler-32 trailer around raw
 /// DEFLATE data), not gzip (RFC 1952) and not raw DEFLATE — `o=z` in the
 /// kitty spec specifically means zlib-wrapped data, hence
 /// [`flate2::read::ZlibDecoder`] rather than `GzDecoder`/`DeflateDecoder`.
-fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+fn inflate_zlib(data: &[u8], limit: usize) -> Result<Vec<u8>, std::io::Error> {
     use std::io::Read as _;
-    let mut decoder = flate2::read::ZlibDecoder::new(data);
+    // One byte past the limit is enough to tell "exactly at" from "over".
+    let read_cap = u64::value_from(limit).unwrap_or(u64::MAX).saturating_add(1);
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out)?;
+    flate2::read::ZlibDecoder::new(data)
+        .take(read_cap)
+        .read_to_end(&mut out)?;
+    if out.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("decompressed data exceeds the {limit}-byte limit"),
+        ));
+    }
     Ok(out)
 }
 
@@ -596,6 +611,21 @@ unsafe fn mmap_copy_range(
     Ok(copied)
 }
 
+/// Whether `control` could belong to a continuation chunk of a chunked
+/// transfer.
+///
+/// Per the kitty graphics spec, continuation chunks carry only `m` and
+/// optionally `q`; every other key is taken from the first chunk. Comparing
+/// against a default with `more_data` and `quiet` reset is therefore exact:
+/// it stays correct as `KittyControlData` gains keys, because any key set to
+/// a non-default value makes the chunk a new command instead.
+fn is_bare_continuation(control: &KittyControlData) -> bool {
+    let mut rest = control.clone();
+    rest.more_data = false;
+    rest.quiet = 0;
+    rest == KittyControlData::default()
+}
+
 impl TerminalHandler {
     /// Dispatch a parsed Kitty graphics command.
     pub(super) fn handle_kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {
@@ -612,7 +642,9 @@ impl TerminalHandler {
                 self.handle_kitty_chunk(&cmd);
                 return;
             }
-            KittyTransfer::Discarding if cmd.control.action.is_none() => {
+            KittyTransfer::Discarding
+                if cmd.control.action.is_none() && is_bare_continuation(&cmd.control) =>
+            {
                 // Tail of a transfer that was already abandoned: drop it.
                 self.handle_kitty_discarded_chunk(&cmd);
                 return;
@@ -628,7 +660,9 @@ impl TerminalHandler {
                 self.kitty_transfer = KittyTransfer::Idle;
             }
             KittyTransfer::Discarding => {
-                // A new command ends the abandoned transfer's silent tail.
+                // A new command ends the abandoned transfer's silent tail. This
+                // includes an actionless command that carries more than a
+                // continuation chunk may (`a=t` is the default action).
                 tracing::debug!(
                     "Kitty graphics: new command (a={action:?}) ends discarded transfer"
                 );
@@ -1301,8 +1335,13 @@ impl TerminalHandler {
         use freminal_common::buffer_states::kitty_graphics::KittyFormat;
 
         // Resolve the transmission medium and apply `o=z` decompression.
-        let image_data =
-            self.resolve_and_decompress_kitty_payload(cmd, image_id_hint, placement_id, quiet)?;
+        let image_data = self.resolve_and_decompress_kitty_payload(
+            cmd,
+            image_id_hint,
+            placement_id,
+            quiet,
+            MAX_KITTY_DATA_BYTES,
+        )?;
 
         let format = cmd.control.format.unwrap_or(KittyFormat::Rgba);
 
@@ -1389,12 +1428,17 @@ impl TerminalHandler {
     /// Resolve the transmission medium and apply `o=z` (RFC 1950 zlib)
     /// decompression, producing the raw bytes ready for format
     /// interpretation (`f=24`/`f=32`/`f=100`).
+    ///
+    /// Decompressed output larger than `max_decompressed` is refused the same
+    /// way a corrupt zlib stream is (production passes
+    /// [`MAX_KITTY_DATA_BYTES`]).
     fn resolve_and_decompress_kitty_payload(
         &self,
         cmd: &KittyGraphicsCommand,
         image_id_hint: u32,
         placement_id: Option<u32>,
         quiet: u8,
+        max_decompressed: usize,
     ) -> Option<Vec<u8>> {
         use freminal_common::buffer_states::kitty_graphics::KittyCompression;
 
@@ -1405,7 +1449,7 @@ impl TerminalHandler {
             return Some(image_data);
         }
 
-        match inflate_zlib(&image_data) {
+        match inflate_zlib(&image_data, max_decompressed) {
             Ok(decompressed) => Some(decompressed),
             Err(e) => {
                 tracing::warn!("Kitty graphics: zlib decompression failed");
@@ -7775,6 +7819,114 @@ mod tests {
     }
 
     #[test]
+    fn inflate_zlib_enforces_its_limit() {
+        use super::inflate_zlib;
+
+        let zeros = |n: usize| zlib_compress(&vec![0u8; n]);
+
+        // A 64 KiB run of zeros compresses to a few dozen bytes.
+        let bomb = zeros(64 * 1024);
+        assert!(bomb.len() < 1024);
+        assert!(inflate_zlib(&bomb, 1024).is_err());
+
+        // Exactly at the limit is accepted; one over is not.
+        assert_eq!(inflate_zlib(&zeros(1024), 1024).unwrap().len(), 1024);
+        assert!(inflate_zlib(&zeros(1025), 1024).is_err());
+        assert_eq!(inflate_zlib(&zeros(0), 0).unwrap().len(), 0);
+        assert!(inflate_zlib(&zeros(1), 0).is_err());
+    }
+
+    #[test]
+    fn kitty_zlib_over_limit_is_rejected_like_a_corrupt_stream() {
+        use crate::log_capture::{capture, warnings};
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyCompression, KittyFormat, KittyTransmission,
+        };
+
+        let (handler, rx) = kitty_handler();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::Direct),
+                compression: Some(KittyCompression::Zlib),
+                src_width: Some(128),
+                src_height: Some(128),
+                image_id: Some(970),
+                ..KittyControlData::default()
+            },
+            payload: zlib_compress(&vec![0u8; 64 * 1024]),
+        };
+
+        // Under a generous limit the payload inflates.
+        assert_eq!(
+            handler
+                .resolve_and_decompress_kitty_payload(&cmd, 970, None, 0, 64 * 1024)
+                .map(|data| data.len()),
+            Some(64 * 1024)
+        );
+        assert!(rx.try_recv().is_err());
+
+        // One byte under the decompressed size it is refused.
+        let mut result = Some(Vec::new());
+        let events = capture(|| {
+            result =
+                handler.resolve_and_decompress_kitty_payload(&cmd, 970, None, 0, 64 * 1024 - 1);
+        });
+        assert!(result.is_none());
+
+        let warns = warnings(&events);
+        assert_eq!(warns.len(), 1);
+        assert!(
+            warns[0].1.contains("zlib decompression failed") && !warns[0].1.contains("65535"),
+            "warn is the corrupt-stream warn and carries no sizes: {:?}",
+            warns[0].1
+        );
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected a reply");
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("EINVAL:zlib decompression failed"),
+            "same reply as a corrupt stream, got: {text}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kitty_shared_memory_missing_object_warn_omits_the_name() {
+        use crate::log_capture::{capture, warnings};
+        use freminal_common::buffer_states::kitty_graphics::{KittyFormat, KittyTransmission};
+
+        let (mut handler, _rx) = kitty_handler();
+        let name = format!("/freminal-test-SECRETNAME-{}", std::process::id());
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(971),
+                ..KittyControlData::default()
+            },
+            payload: name.into_bytes(),
+        };
+
+        let events = capture(|| handler.handle_kitty_graphics(cmd));
+
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "a missing object must warn");
+        for (_, text) in warns {
+            assert!(
+                !text.contains("SECRETNAME"),
+                "the sender-supplied name must not reach a warn: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn kitty_file_invalid_utf8_path_sends_error() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
@@ -8646,6 +8798,174 @@ mod tests {
 
         // A new transfer (explicit action) abandons the discard and runs.
         assert_chunked_transfer_works(&mut handler, 491);
+    }
+
+    /// An actionless single-chunk transmit (`a=t` is the default action) of a
+    /// 2x2 RGBA image with `id`; it carries `i=`/`f=`/`s=`/`v=` and `m=0`.
+    fn kitty_actionless_transmit(id: u32, more: More) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::KittyFormat;
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: None,
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(id),
+                more_data: matches!(more, More::Yes),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        }
+    }
+
+    /// Put the handler in `Discarding` by overflowing the first chunk's APC cap.
+    fn kitty_start_discarding(handler: &mut TerminalHandler, id: u32) {
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            id,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+        assert!(kitty_discarding(handler));
+    }
+
+    #[test]
+    fn kitty_actionless_single_chunk_transmit_after_abandonment_is_processed() {
+        let (mut handler, _rx) = kitty_handler();
+        kitty_start_discarding(&mut handler, 500);
+
+        // The abandoned transfer's `m=0` never came; this is a new command.
+        handler.handle_kitty_graphics(kitty_actionless_transmit(501, More::No));
+
+        assert!(kitty_idle(&handler));
+        assert!(
+            handler.buffer().image_store().get(501).is_some(),
+            "an actionless command carrying i=/f=/s=/v= is not a continuation"
+        );
+    }
+
+    #[test]
+    fn kitty_actionless_first_chunk_after_abandonment_starts_a_new_transfer() {
+        let (mut handler, _rx) = kitty_handler();
+        kitty_start_discarding(&mut handler, 510);
+
+        let full = kitty_actionless_transmit(511, More::No).payload;
+        let (head, tail) = full.split_at(8);
+        let mut first = kitty_actionless_transmit(511, More::Yes);
+        first.payload = head.to_vec();
+        handler.handle_kitty_graphics(first);
+        assert!(
+            kitty_receiving(&handler),
+            "the actionless first chunk starts a transfer"
+        );
+
+        handler.handle_kitty_graphics(kitty_chunk_next(More::No, tail.to_vec()));
+        assert!(kitty_idle(&handler));
+        assert!(handler.buffer().image_store().get(511).is_some());
+    }
+
+    #[test]
+    fn kitty_bare_continuation_chunks_are_still_swallowed_while_discarding() {
+        let (mut handler, rx) = kitty_handler();
+        kitty_start_discarding(&mut handler, 520);
+
+        // Bare `m=1`.
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![1; 8]));
+        assert!(kitty_discarding(&handler));
+
+        // `m=0,q=2`: the final chunk may carry `q`.
+        let mut last = kitty_chunk_next(More::No, vec![2; 8]);
+        last.control.quiet = 2;
+        handler.handle_kitty_graphics(last);
+
+        assert!(kitty_idle(&handler));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+    }
+
+    #[test]
+    fn is_bare_continuation_accepts_only_more_and_quiet() {
+        use super::is_bare_continuation;
+
+        assert!(is_bare_continuation(&KittyControlData::default()));
+        assert!(is_bare_continuation(&KittyControlData {
+            more_data: true,
+            quiet: 2,
+            ..KittyControlData::default()
+        }));
+        assert!(!is_bare_continuation(&KittyControlData {
+            image_id: Some(1),
+            ..KittyControlData::default()
+        }));
+        assert!(!is_bare_continuation(&KittyControlData {
+            src_width: Some(2),
+            ..KittyControlData::default()
+        }));
+    }
+
+    #[test]
+    fn kitty_chunk_limits_are_the_documented_values() {
+        use super::{
+            ChunkLimits, KITTY_CHUNK_LIMITS, MAX_APC_BYTES, MAX_KITTY_DATA_BYTES,
+            MAX_KITTY_FILE_BYTES,
+        };
+
+        assert_eq!(
+            KITTY_CHUNK_LIMITS,
+            ChunkLimits {
+                max_chunk_bytes: MAX_APC_BYTES,
+                max_total_bytes: 400 * 1024 * 1024,
+            }
+        );
+        assert_eq!(MAX_KITTY_FILE_BYTES, MAX_KITTY_DATA_BYTES);
+    }
+
+    #[test]
+    fn kitty_put_unknown_id_logs_a_bounded_message() {
+        use crate::log_capture::{capture, warnings};
+
+        let (mut handler, _rx) = kitty_handler();
+        for id in 1..=20 {
+            handler.handle_kitty_graphics(kitty_actionless_transmit(id, More::No));
+        }
+        assert_eq!(handler.buffer().image_store().len(), 20);
+
+        let events = capture(|| {
+            handler.handle_kitty_graphics(KittyGraphicsCommand {
+                control: KittyControlData {
+                    action: Some(KittyAction::Put),
+                    image_id: Some(9999),
+                    ..KittyControlData::default()
+                },
+                payload: Vec::new(),
+            });
+        });
+
+        let warns = warnings(&events);
+        assert_eq!(warns.len(), 1, "exactly one warn: {warns:?}");
+        let warn = &warns[0].1;
+        assert!(warn.contains("9999"), "warn names the requested id: {warn}");
+        assert!(warn.contains("20"), "warn carries the store size: {warn}");
+        assert!(
+            !warn.contains('[') && !warn.contains("stored image ids"),
+            "warn must not list the stored ids: {warn}"
+        );
+
+        let debug = events
+            .iter()
+            .find(|(_, text)| text.contains("stored image ids"))
+            .map(|(_, text)| text.as_str())
+            .expect("a debug line lists the stored ids");
+        let list = debug
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| list)
+            .expect("a bracketed id list");
+        assert_eq!(list.split(',').count(), 16, "at most 16 ids: {debug}");
+        assert!(
+            debug.trim_end_matches('"').ends_with("(4 more)"),
+            "debug line reports the omitted ids: {debug}"
+        );
     }
 
     #[test]

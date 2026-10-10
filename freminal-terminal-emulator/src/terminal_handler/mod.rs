@@ -118,6 +118,11 @@ struct KittyImageState {
 /// swallows its remaining continuation chunks instead of letting them be
 /// misread as new transmit commands, which would start a bogus transfer or
 /// produce an error reply for a transfer the terminal already dropped.
+///
+/// Only a *bare continuation* is swallowed: per the kitty graphics spec a
+/// continuation chunk carries nothing but `m` and optionally `q`.  An actionless
+/// command carrying any other key (`i=`, `f=`, `s=`, `v=`, ...) is a new
+/// command (`a=t` is the default action) and ends the discard.
 #[derive(Debug, Default)]
 enum KittyTransfer {
     /// No chunked transfer in progress.
@@ -127,8 +132,9 @@ enum KittyTransfer {
     ///
     /// Boxed: the state is much larger than the other variants.
     Receiving(Box<KittyImageState>),
-    /// The transfer was abandoned; continuation chunks (those with no
-    /// explicit `a=`) are dropped silently until the final `m=0` chunk.
+    /// The transfer was abandoned; bare continuation chunks (no explicit `a=`
+    /// and no key besides `m` and `q`) are dropped silently until the final
+    /// `m=0` chunk.  Any other command ends the discard and is processed.
     Discarding,
 }
 

@@ -16,7 +16,9 @@ use freminal_common::base64::{Base64Error, StreamDecoder, StreamPosition};
 /// Size caps applied by a [`BoundedChunkAssembler`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkLimits {
-    /// Largest single chunk accepted, measured as received (encoded length).
+    /// Largest single chunk accepted, measured as the chunk passed to
+    /// [`BoundedChunkAssembler::push`].  For `Raw` chunks that are already
+    /// decoded upstream (kitty graphics, iTerm2) this is the decoded length.
     pub max_chunk_bytes: usize,
     /// Largest assembled payload accepted, measured after decoding.
     pub max_total_bytes: usize,
@@ -58,6 +60,9 @@ pub enum ChunkError {
 /// An error poisons the assembler: the buffer is released and every later
 /// [`push`](Self::push) and [`finish`](Self::finish) returns the same error.
 /// Abandoning a transfer is the owner's job: it drops the assembler.
+///
+/// The total cap bounds the *length* of the assembled data, not its allocation:
+/// `Vec` growth can transiently reserve up to about twice the total cap.
 #[derive(Debug)]
 pub struct BoundedChunkAssembler {
     /// The caps this assembler enforces.
@@ -66,6 +71,8 @@ pub struct BoundedChunkAssembler {
     data: Vec<u8>,
     /// The one base64 stream shared by every `Base64` chunk.
     decoder: StreamDecoder,
+    /// Total base64 bytes fed so far, reported by a mid-quantum `Raw` push.
+    base64_fed: usize,
     /// The error that poisoned the assembler, if any.
     failure: Option<ChunkError>,
 }
@@ -78,6 +85,7 @@ impl BoundedChunkAssembler {
             limits,
             data: Vec::new(),
             decoder: StreamDecoder::new(),
+            base64_fed: 0,
             failure: None,
         }
     }
@@ -154,10 +162,13 @@ impl BoundedChunkAssembler {
             ChunkEncoding::Raw => {
                 if self.decoder.position() == StreamPosition::MidQuantum {
                     return Err(Base64Error::InvalidLength {
-                        len: self.decoder.bytes_fed(),
+                        len: self.base64_fed,
                     }
                     .into());
                 }
+                // Any padding slot still open on the base64 stream must not
+                // outlive the raw bytes that now sit between it and later input.
+                self.decoder = StreamDecoder::new();
                 if self.data.len().saturating_add(chunk.len()) > self.limits.max_total_bytes {
                     return Err(self.total_too_large());
                 }
@@ -166,6 +177,7 @@ impl BoundedChunkAssembler {
             ChunkEncoding::Base64 => {
                 // The chunk is at most `max_chunk_bytes` long, so decoding it
                 // overshoots the total cap by a bounded amount before the check.
+                self.base64_fed = self.base64_fed.saturating_add(chunk.len());
                 self.decoder.feed(chunk, &mut self.data)?;
                 if self.data.len() > self.limits.max_total_bytes {
                     return Err(self.total_too_large());
@@ -384,6 +396,19 @@ mod tests {
         a.push(b"YQ=", ChunkEncoding::Base64).unwrap();
         a.push(b"!", ChunkEncoding::Raw).unwrap();
         assert_eq!(a.finish().unwrap(), b"a!");
+    }
+
+    #[test]
+    fn raw_after_pending_padding_closes_the_padding_slot() {
+        let mut a = assembler();
+        a.push(b"YQ=", ChunkEncoding::Base64).unwrap();
+        a.push(b"!", ChunkEncoding::Raw).unwrap();
+        assert_eq!(
+            a.push(b"=", ChunkEncoding::Base64),
+            Err(ChunkError::Base64(Base64Error::MisplacedPadding {
+                offset: 0
+            }))
+        );
     }
 
     #[test]
