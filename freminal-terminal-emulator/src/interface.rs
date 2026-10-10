@@ -431,9 +431,10 @@ impl TerminalEmulator {
     /// Return a clone of the PTY write sender.
     ///
     /// Used by `main.rs` to pass the real write channel to the GUI before the
-    /// emulator is moved into the PTY consumer thread.  The GUI uses it to
-    /// send `PtyWrite::Write` responses for Report* window manipulation
-    /// commands without going through the emulator lock.
+    /// emulator is moved into the PTY consumer thread.  The GUI uses it only
+    /// to inject layout startup commands as `PtyWrite::Write`.  Replies to
+    /// terminal queries do not use it: the GUI sends them through
+    /// `InputEvent::Reply` (Task 130), so the PTY thread frames them.
     #[must_use]
     pub fn clone_write_tx(&self) -> crossbeam_channel::Sender<PtyWrite> {
         self.write_tx.clone()

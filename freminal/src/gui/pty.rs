@@ -424,7 +424,7 @@ pub struct PtyTabInitialState {
     /// issue #406).
     pub cursor_style: freminal_common::cursor::CursorVisualStyle,
     /// Host-dependent capability facts, resolved from the config via
-    /// `notifications::host_capabilities`
+    /// `host_capabilities::host_capabilities`
     /// (`InputEvent::HostCapabilitiesChange` is the live-apply equivalent;
     /// Task 130.4).
     pub host_capabilities: freminal_common::host_capabilities::HostCapabilities,

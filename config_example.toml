@@ -421,6 +421,10 @@ limit = 10000
 # routing_osc_text = "toast"
 
 # Routing for OSC 99 (kitty stateful) notifications.
+# When notifications are disabled (`enabled = false`), `osc_99 = false`, or
+# `routing_osc99 = "disabled"`, freminal does not speak the kitty OSC 99
+# protocol at all: requests are ignored and the `p=?` capability query goes
+# unanswered, so applications detect it as unsupported.
 # routing_osc99 = "both"
 
 # routing_command_finished = "system_when_unfocused"

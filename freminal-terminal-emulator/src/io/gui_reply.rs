@@ -16,8 +16,8 @@
 //! The bodies the serialiser produces are byte-identical to the GUI's former
 //! hand-formatted strings, minus their 7-bit framing.
 
-/// Whether the window is minimized, as reported in answer to `CSI 18 t`-family
-/// window-state queries.
+/// Whether the window is minimized, as reported in answer to the `CSI 11 t`
+/// window-state query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowStateReport {
     /// The window is not minimized. Serialised as `CSI 1 t`.

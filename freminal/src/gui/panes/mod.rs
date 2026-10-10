@@ -1815,6 +1815,61 @@ mod tests {
         assert_eq!(pane2.view_state.scroll_offset, 0);
     }
 
+    // ── reply handle liveness (Task 130.8) ───────────────────────────
+
+    /// A `Pane` built by `from_channels` holds the only strong handles on its
+    /// input channel (`input_tx` and `reply_tx`). Dropping the pane must
+    /// therefore disconnect the channel and kill the `reply_tx` weak handles,
+    /// so a notification thread can never keep the PTY thread's input channel
+    /// alive after its pane is gone. The test keeps no clone of the sender.
+    #[test]
+    fn dropping_a_pane_releases_every_strong_input_sender() {
+        use crossbeam_channel::RecvTimeoutError;
+        use std::time::Duration;
+
+        let (input_tx, input_rx) = crossbeam_channel::unbounded::<InputEvent>();
+        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
+        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
+
+        let channels = crate::gui::pty::TabChannels {
+            arc_swap: Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            command_event_rx,
+            echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+        };
+        let window_post = Arc::new(Mutex::new(crate::gui::renderer::WindowPostRenderer::new()));
+        let pane = Pane::from_channels(PaneId(0), channels, window_post, "p".to_owned());
+
+        let weak = Arc::downgrade(&pane.reply_tx);
+        assert!(weak.upgrade().is_some(), "handle is live while the pane is");
+
+        drop(pane);
+
+        assert!(
+            matches!(
+                input_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Disconnected)
+            ),
+            "a strong Sender<InputEvent> outlived the pane"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "the reply handle must not outlive the pane"
+        );
+    }
+
     // ── recent_commands ring buffer (Task 72.9) ──────────────────────
 
     #[test]
