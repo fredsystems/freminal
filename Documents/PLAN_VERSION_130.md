@@ -3006,6 +3006,75 @@ Prohibitions: do NOT touch code.
   `freminal-common/tests/mode_boilerplate_tests.rs`.
 - **Verification:** `CSI ? 4 $ p` yields `CSI ? 4 ; 4 $ y` whatever the set/reset history.
 - **Scheduling:** in the Task 130 worktree, before the adversarial review.
+- **Scope widened (maintainer, 2026-10-10):** the C1 implementer found that `CSI ? 4 $ p` is
+  never answered at all. `Mode::Decsclm(_)` falls into the "not acted on" arms of both
+  `TerminalHandler` and `TerminalState::sync_mode`, so `Decsclm::report` is unreachable. The
+  fix adds a `Mode::Decsclm(Decsclm::Query)` arm in `terminal_handler/mod.rs` that answers via
+  `write_csi_response`.
+
+#### 130.C3 — Title, icon-label and OSC 52 replies echo control bytes
+
+- **Surfaced:** orchestrator re-review of 130.6 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - An application can set the title `A ESC [6n B`; the OSC parser keeps an ESC that is not
+    followed by `\` (129.C5). `CSI 21 t` then echoes that ESC back into the application's
+    input, the title-report injection class (CVE-2003-0063).
+  - `OSC 52 ; c ESC [6n ; ?` likewise echoes the selection parameter verbatim.
+  - Reproduced: the title is stored as `"A\u{1b}[6nB"` and the selection as `"c\u{1b}[6n"`.
+- **Scope of fix:**
+  - `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` (`write_gui_reply`), the
+    single point every GUI reply passes through;
+  - its tests.
+- **Approach:**
+  - `IconLabel` / `WindowTitle`: drop every C0 control, DEL and C1 control (U+0080–U+009F)
+    before framing.
+  - `Clipboard`: keep only the characters xterm defines for `Pc` (`c p q s 0`–`7`), dropping
+    everything else. An empty result is sent as empty; xterm's "empty means `s0`" rule
+    concerns the request, not the reply.
+- **Verification:** a title or selection carrying ESC, BEL, `0x9B` (as U+009B) and DEL produces
+  a reply containing none of them, in 7-bit and 8-bit mode; ordinary titles are unchanged.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
+#### 130.C4 — OSC 99 report flags cross the thread boundary as `bool`
+
+- **Surfaced:** orchestrator re-review of 130.7 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Notification99Data::{report_activation, focus_on_activation, close_report}` and the
+    parser state in `osc_notify_99.rs` are raw `bool`s, carried from the PTY thread to the GUI.
+  - `osc99_action_report` and `Osc99LiveEntry` take or store the same `bool`s.
+  - This violates `freminal-state-representation` for transported state.
+- **Scope of fix:** the OSC 99 data model across `freminal-common`
+  (`window_manipulation.rs`, `osc_notify_99.rs`), `terminal_handler/notify_99.rs` and
+  `freminal/src/gui/notifications.rs`.
+- **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
+  avoids changing it twice. Not scheduled in Task 130.
+
+### 130 Orchestrator re-review (2026-10-10)
+
+The maintainer found that 130.2–130.8 had been committed after a partial review: diffs read
+truncated, new untracked files never opened, verification steps taken on trust. Every
+commit was then re-read in full. Results:
+
+- **130.2:** pass. One gap, R2a: no test pins that an _incomplete_ inner tmux sequence is
+  discarded by the fresh parser instead of leaking into the outer stream.
+- **130.3:** pass. The 33 `ReportMode` diffs were checked mechanically; every change is the
+  `ESC [` removal or its rustfmt re-wrap.
+- **130.4:** pass. The `apply_new_config` broadcast has no test, as no existing broadcast does:
+  there is no `FreminalGui` test harness, and extracting a helper only to test it is what
+  `freminal-extend-or-extract` forbids. Accepted.
+- **130.5:** pass.
+- **130.6:** pass, but surfaced 130.C3.
+- **130.7:** pass, but surfaced 130.C4, plus R7: stale comments that still route `p=?` to
+  the GUI (`Osc99Control` doc in `notifications.rs`, `osc99_controls` doc in
+  `frame_drain.rs`).
+- **130.8:** three findings:
+  - R8a: `handle_window_manipulation` takes both `reply_tx: &Sender` and
+    `reply_handle: &Arc<Sender>` for the same channel; keep only the `Arc`.
+  - R8b: the new tests exercise `std`'s `Arc`/`Weak`, not freminal; add a test that the
+    handles `handle_window_manipulation` collects stop upgrading once the pane's handles drop.
+  - R8c: an over-long doc line in `show_system_osc99`.
+
+R2a, R7 and R8a–c are fixed with 130.C2 and 130.C3 before the adversarial review.
 
 ---
 
