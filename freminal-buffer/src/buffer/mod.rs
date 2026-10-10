@@ -590,6 +590,17 @@ impl Buffer {
         self
     }
 
+    /// Which screen is currently active: [`BufferType::Primary`] or
+    /// [`BufferType::Alternate`].
+    ///
+    /// The buffer is the single source of truth for the active screen; callers
+    /// that keep per-screen state should index it with this value rather than
+    /// tracking their own copy.
+    #[must_use]
+    pub const fn kind(&self) -> BufferType {
+        self.kind
+    }
+
     /// The maximum number of off-screen rows retained above the visible area.
     #[must_use]
     pub const fn scrollback_limit(&self) -> usize {
@@ -8121,6 +8132,16 @@ mod resize_and_insert_tests {
         // Row 10 doesn't exist (only 0-4).
         buf.set_image_cell_at(10, 0, make_placement(1), FormatTag::default());
         assert_eq!(buf.image_cell_count, 0);
+    }
+
+    #[test]
+    fn kind_reports_the_active_screen() {
+        let mut buf = Buffer::new(10, 5);
+        assert_eq!(buf.kind(), BufferType::Primary);
+        buf.enter_alternate(0);
+        assert_eq!(buf.kind(), BufferType::Alternate);
+        buf.leave_alternate();
+        assert_eq!(buf.kind(), BufferType::Primary);
     }
 
     // ── `enter_alternate` when already alternate ──

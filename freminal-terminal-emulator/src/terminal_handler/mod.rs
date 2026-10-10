@@ -81,6 +81,7 @@ mod osc;
 mod osc_colors;
 mod pty_writer;
 mod reports;
+mod screen_scoped;
 mod scroll_ops;
 mod sgr;
 mod shell_integration;
