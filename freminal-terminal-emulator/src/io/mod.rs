@@ -3,6 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+pub mod gui_reply;
+pub use gui_reply::{GuiReply, Osc99CloseTracking, WindowStateReport};
 pub mod pty;
 pub use pty::{FreminalPtyInputOutput, PtySpawnConfig};
 
@@ -123,6 +125,14 @@ pub enum InputEvent {
     /// at pane-spawn time. It changes nothing visible, so it requests no
     /// repaint.
     HostCapabilitiesChange(freminal_common::host_capabilities::HostCapabilities),
+    /// A reply only the GUI can produce (window geometry, title, clipboard,
+    /// OSC 99 reports), carried as data so the PTY thread frames it in the
+    /// application's S8C1T mode (Task 130.6).
+    ///
+    /// The PTY thread serialises it with `TerminalEmulator::write_gui_reply`.
+    /// It writes only to the child fd, so it requests no repaint, and it is not
+    /// recorded to FREC.
+    Reply(GuiReply),
 }
 
 /// The full buffer as one `TChar` corpus, tagged with the rows it was cut from.

@@ -16,6 +16,8 @@
 
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, pty_write::PtyWrite};
 
+use crate::io::{GuiReply, Osc99CloseTracking, WindowStateReport};
+
 use super::TerminalHandler;
 
 impl TerminalHandler {
@@ -129,6 +131,59 @@ impl TerminalHandler {
         buf.extend_from_slice(self.st_response());
         self.write_bytes_to_pty(&buf);
     }
+
+    /// Serialise a GUI-originated reply and write it to the PTY.
+    ///
+    /// Builds the reply body and frames it through [`Self::write_csi_response`]
+    /// or [`Self::write_osc_response`], so the introducer and terminator follow
+    /// the current S8C1T mode. Absent OSC 99 ids default to `0`.
+    pub fn write_gui_reply(&self, reply: &GuiReply) {
+        match reply {
+            GuiReply::WindowState(state) => {
+                let body = match state {
+                    WindowStateReport::Normal => "1t",
+                    WindowStateReport::Iconified => "2t",
+                };
+                self.write_csi_response(body);
+            }
+            GuiReply::WindowPosition { x, y } => {
+                self.write_csi_response(&format!("3;{x};{y}t"));
+            }
+            GuiReply::WindowSizePixels { height, width } => {
+                self.write_csi_response(&format!("4;{height};{width}t"));
+            }
+            GuiReply::ScreenSizePixels { height, width } => {
+                self.write_csi_response(&format!("5;{height};{width}t"));
+            }
+            GuiReply::IconLabel(label) => self.write_osc_response(&format!("L{label}")),
+            GuiReply::WindowTitle(title) => self.write_osc_response(&format!("l{title}")),
+            GuiReply::Clipboard {
+                selection,
+                base64_payload,
+            } => self.write_osc_response(&format!("52;{selection};{base64_payload}")),
+            GuiReply::Osc99Activation { id, button } => {
+                let id = id.as_deref().unwrap_or("0");
+                let button = button.as_deref().unwrap_or("");
+                self.write_osc_response(&format!("99;i={id};{button}"));
+            }
+            GuiReply::Osc99Closed { id, tracking } => {
+                let id = id.as_deref().unwrap_or("0");
+                let payload = match tracking {
+                    Osc99CloseTracking::Tracked => "",
+                    Osc99CloseTracking::Untracked => "untracked",
+                };
+                self.write_osc_response(&format!("99;i={id}:p=close;{payload}"));
+            }
+            GuiReply::Osc99Alive {
+                request_id,
+                live_ids,
+            } => {
+                let id = request_id.as_deref().unwrap_or("0");
+                let list = live_ids.join(",");
+                self.write_osc_response(&format!("99;i={id}:p=alive;{list}"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +191,7 @@ impl TerminalHandler {
 mod tests {
     use freminal_common::{buffer_states::modes::s8c1t::S8c1t, pty_write::PtyWrite};
 
+    use crate::io::{GuiReply, Osc99CloseTracking, WindowStateReport};
     use crate::terminal_handler::TerminalHandler;
 
     /// Build a handler wired to a channel and in the given S8C1T mode.
@@ -226,5 +282,209 @@ mod tests {
             !resp_str.starts_with("\x1bPtmux;"),
             "Direct query should NOT produce tmux-wrapped response"
         );
+    }
+
+    /// One row of the `GuiReply` serialisation table: the reply, its exact
+    /// 7-bit bytes (copied from the GUI's former hand-formatted strings), and
+    /// its exact 8-bit bytes.
+    struct ReplyCase {
+        reply: GuiReply,
+        seven_bit: &'static [u8],
+        eight_bit: &'static [u8],
+    }
+
+    fn s(text: &str) -> String {
+        text.to_owned()
+    }
+
+    fn reply_cases() -> Vec<ReplyCase> {
+        let mut cases = window_reply_cases();
+        cases.extend(osc99_reply_cases());
+        cases
+    }
+
+    /// CSI window reports, title/label reports and OSC 52 answers.
+    fn window_reply_cases() -> Vec<ReplyCase> {
+        vec![
+            ReplyCase {
+                reply: GuiReply::WindowState(WindowStateReport::Normal),
+                seven_bit: b"\x1b[1t",
+                eight_bit: b"\x9b1t",
+            },
+            ReplyCase {
+                reply: GuiReply::WindowState(WindowStateReport::Iconified),
+                seven_bit: b"\x1b[2t",
+                eight_bit: b"\x9b2t",
+            },
+            ReplyCase {
+                reply: GuiReply::WindowPosition { x: 10, y: 20 },
+                seven_bit: b"\x1b[3;10;20t",
+                eight_bit: b"\x9b3;10;20t",
+            },
+            ReplyCase {
+                reply: GuiReply::WindowSizePixels {
+                    height: 600,
+                    width: 800,
+                },
+                seven_bit: b"\x1b[4;600;800t",
+                eight_bit: b"\x9b4;600;800t",
+            },
+            ReplyCase {
+                reply: GuiReply::ScreenSizePixels {
+                    height: 1080,
+                    width: 1920,
+                },
+                seven_bit: b"\x1b[5;1080;1920t",
+                eight_bit: b"\x9b5;1080;1920t",
+            },
+            ReplyCase {
+                reply: GuiReply::IconLabel(s("Label")),
+                seven_bit: b"\x1b]LLabel\x1b\\",
+                eight_bit: b"\x9dLLabel\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::WindowTitle(s("Title")),
+                seven_bit: b"\x1b]lTitle\x1b\\",
+                eight_bit: b"\x9dlTitle\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Clipboard {
+                    selection: s("c"),
+                    base64_payload: s("aGk="),
+                },
+                seven_bit: b"\x1b]52;c;aGk=\x1b\\",
+                eight_bit: b"\x9d52;c;aGk=\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Clipboard {
+                    selection: s("c"),
+                    base64_payload: String::new(),
+                },
+                seven_bit: b"\x1b]52;c;\x1b\\",
+                eight_bit: b"\x9d52;c;\x9c",
+            },
+        ]
+    }
+
+    /// OSC 99 activation, close and alive reports.
+    fn osc99_reply_cases() -> Vec<ReplyCase> {
+        vec![
+            ReplyCase {
+                reply: GuiReply::Osc99Activation {
+                    id: Some(s("abc")),
+                    button: None,
+                },
+                seven_bit: b"\x1b]99;i=abc;\x1b\\",
+                eight_bit: b"\x9d99;i=abc;\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Activation {
+                    id: Some(s("abc")),
+                    button: Some(s("2")),
+                },
+                seven_bit: b"\x1b]99;i=abc;2\x1b\\",
+                eight_bit: b"\x9d99;i=abc;2\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Activation {
+                    id: None,
+                    button: None,
+                },
+                seven_bit: b"\x1b]99;i=0;\x1b\\",
+                eight_bit: b"\x9d99;i=0;\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Closed {
+                    id: Some(s("abc")),
+                    tracking: Osc99CloseTracking::Tracked,
+                },
+                seven_bit: b"\x1b]99;i=abc:p=close;\x1b\\",
+                eight_bit: b"\x9d99;i=abc:p=close;\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Closed {
+                    id: Some(s("abc")),
+                    tracking: Osc99CloseTracking::Untracked,
+                },
+                seven_bit: b"\x1b]99;i=abc:p=close;untracked\x1b\\",
+                eight_bit: b"\x9d99;i=abc:p=close;untracked\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Closed {
+                    id: None,
+                    tracking: Osc99CloseTracking::Untracked,
+                },
+                seven_bit: b"\x1b]99;i=0:p=close;untracked\x1b\\",
+                eight_bit: b"\x9d99;i=0:p=close;untracked\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Alive {
+                    request_id: Some(s("q1")),
+                    live_ids: vec![s("a"), s("b")],
+                },
+                seven_bit: b"\x1b]99;i=q1:p=alive;a,b\x1b\\",
+                eight_bit: b"\x9d99;i=q1:p=alive;a,b\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Alive {
+                    request_id: Some(s("q1")),
+                    live_ids: vec![],
+                },
+                seven_bit: b"\x1b]99;i=q1:p=alive;\x1b\\",
+                eight_bit: b"\x9d99;i=q1:p=alive;\x9c",
+            },
+            ReplyCase {
+                reply: GuiReply::Osc99Alive {
+                    request_id: None,
+                    live_ids: vec![s("x")],
+                },
+                seven_bit: b"\x1b]99;i=0:p=alive;x\x1b\\",
+                eight_bit: b"\x9d99;i=0:p=alive;x\x9c",
+            },
+        ]
+    }
+
+    #[test]
+    fn write_gui_reply_seven_bit_bytes_for_every_variant() {
+        for case in reply_cases() {
+            let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+            handler.write_gui_reply(&case.reply);
+            assert_eq!(
+                recv_bytes(&rx),
+                case.seven_bit.to_vec(),
+                "7-bit bytes for {:?}",
+                case.reply
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "exactly one write for {:?}",
+                case.reply
+            );
+        }
+    }
+
+    #[test]
+    fn write_gui_reply_eight_bit_bytes_for_every_variant() {
+        for case in reply_cases() {
+            let (handler, rx) = handler_with_rx(S8c1t::EightBit);
+            handler.write_gui_reply(&case.reply);
+            assert_eq!(
+                recv_bytes(&rx),
+                case.eight_bit.to_vec(),
+                "8-bit bytes for {:?}",
+                case.reply
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "exactly one write for {:?}",
+                case.reply
+            );
+        }
+    }
+
+    #[test]
+    fn write_gui_reply_without_channel_is_silent() {
+        let handler = TerminalHandler::new(80, 24);
+        handler.write_gui_reply(&GuiReply::WindowState(WindowStateReport::Normal));
     }
 }

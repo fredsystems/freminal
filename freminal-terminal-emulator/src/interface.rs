@@ -50,7 +50,7 @@ pub use crate::input::{
 use conv2::ValueFrom;
 
 use crate::error::InterfaceError;
-use crate::io::{FreminalPtyInputOutput, PtySpawnConfig};
+use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
@@ -639,6 +639,14 @@ impl TerminalEmulator {
         self.write_tx
             .send(PtyWrite::Write(bytes.to_vec()))
             .map_err(|e| InterfaceError::PtySendFailed(format!("write_raw_bytes: {e}")))
+    }
+
+    /// Serialise a GUI-originated reply and write it to the PTY.
+    ///
+    /// The handler frames the reply in the application's current S8C1T mode.
+    /// Silently dropped when the handler has no write channel.
+    pub fn write_gui_reply(&self, reply: &GuiReply) {
+        self.internal.handler.write_gui_reply(reply);
     }
 
     /// Return a shared handle to the atomic flag that tracks whether the PTY
@@ -1555,6 +1563,19 @@ mod tests {
         assert_eq!(emu.requested_scroll_offset, 7);
         emu.reset_scroll_offset();
         assert_eq!(emu.requested_scroll_offset, 0);
+    }
+
+    // ── write_gui_reply ───────────────────────────────────────────────────────
+
+    #[test]
+    fn write_gui_reply_delivers_framed_bytes_on_write_channel() {
+        let (emu, rx) = TerminalEmulator::new_headless(None);
+        emu.write_gui_reply(&GuiReply::WindowPosition { x: 10, y: 20 });
+        match rx.try_recv() {
+            Ok(PtyWrite::Write(bytes)) => assert_eq!(bytes, b"\x1b[3;10;20t".to_vec()),
+            other => panic!("expected PtyWrite::Write, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     // ── clone_write_tx / write_raw_bytes ──────────────────────────────────────

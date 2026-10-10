@@ -132,7 +132,8 @@ const MAX_PTY_READ_BATCH: usize = 64;
 ///   change — the echo arrives later via `pty_read_rx`, which requests its own
 ///   repaint); `ExtractSelection` (read-only; the GUI blocks on `clipboard_rx`
 ///   in the SAME frame, so no future wake is needed); `HostCapabilitiesChange`
-///   (updates a handler field no snapshot carries).
+///   (updates a handler field no snapshot carries); `Reply` (a GUI-originated
+///   reply serialised to the child fd; no emulator state change).
 /// - `Repaint`: `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
 ///   `AutoDetectUrls`, `ThemeModeUpdate`, `ClearScrollback` (all mutate
 ///   snapshot-visible state), and `RequestSearchBuffer` (read-only, but the GUI
@@ -165,6 +166,8 @@ enum InputOutcome {
 ///   SAME frame that requested it, so no future wake is needed.
 /// - `HostCapabilitiesChange`: updates a handler field that no snapshot
 ///   carries; it only changes how later protocol queries are answered.
+/// - `Reply`: a GUI-originated reply written to the child fd; no emulator
+///   state change, nothing for the GUI to render.
 ///
 /// `true` (repaint needed):
 /// - `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
@@ -179,7 +182,8 @@ const fn input_event_needs_repaint(event: &InputEvent) -> bool {
         InputEvent::Key(_)
         | InputEvent::FocusChange(_)
         | InputEvent::ExtractSelection { .. }
-        | InputEvent::HostCapabilitiesChange(_) => false,
+        | InputEvent::HostCapabilitiesChange(_)
+        | InputEvent::Reply(_) => false,
         InputEvent::Resize(..)
         | InputEvent::ScrollOffset { .. }
         | InputEvent::ThemeChange(_)
@@ -856,6 +860,13 @@ fn spawn_pty_consumer_thread(
                         InputEvent::HostCapabilitiesChange(caps) => {
                             emulator.internal.handler.set_host_capabilities(caps);
                         }
+                        InputEvent::Reply(reply) => {
+                            // Child-fd write only, framed by the handler in the
+                            // application's S8C1T mode. Deliberately not recorded
+                            // to FREC: the recording captures user input
+                            // (`PtyInput`), not terminal-to-application replies.
+                            emulator.write_gui_reply(&reply);
+                        }
                         InputEvent::AutoDetectUrls(enabled) => {
                             emulator
                                 .internal
@@ -1206,6 +1217,7 @@ mod tests {
     use freminal_common::host_capabilities::{
         HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
     };
+    use freminal_terminal_emulator::io::{GuiReply, WindowStateReport};
 
     /// Helper: build a fresh `CommandBlock` with the given fid.
     fn block_with_fid(fid: &str) -> CommandBlock {
@@ -1465,6 +1477,10 @@ mod tests {
         assert!(!input_event_needs_repaint(
             &InputEvent::HostCapabilitiesChange(HostCapabilities::default())
         ));
+        // Reply is a child-fd write only.
+        assert!(!input_event_needs_repaint(&InputEvent::Reply(
+            GuiReply::WindowState(WindowStateReport::Normal)
+        )));
 
         // Repaint: everything that mutates snapshot-visible state, plus
         // RequestSearchBuffer (polled on a later frame -> needs a guaranteed
