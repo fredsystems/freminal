@@ -3133,8 +3133,9 @@ hand-maintained lists. Activated and decomposed on 2026-10-10 against `2862acb9`
 - **Clearing** installs a fresh alternate `RowStore` at the old store's `next_number()`.
   Row numbers stay unique, so no mark, placement or horizon can alias the blank rows. Clearing
   also empties the alternate image store and drops alternate-namespace marks. The handler
-  drops the alternate screen's placement maps on clear. Blank cells are default-attributed,
-  as today's fresh alternate is; BCE on this clear is not changed.
+  drops the alternate screen's placement maps on clear. Blank cells were first
+  default-attributed; **superseded by adversarial-review finding 15:** the clear applies the
+  current background (BCE), as xterm and Ghostty do.
 - **Marks.** Alternate-namespace prompt marks and command blocks are still dropped on every
   leave (`drop_alternate_marks`). The GUI never shows gutters on the alternate screen, and
   keeping them would resurrect stale marks.
@@ -3529,6 +3530,63 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
     (~16–18 µs).
   - For 131.7: the comment in `handle_leave_alternate` still says the alternate rows "are
     gone"; 131.7 rewrites that code.
+
+### 131 Adversarial review (2026-10-10)
+
+The adversarial review of `b6230618..b115cdce` found no blocker or major issue and 19
+minor/nit/uncertain findings. Disposition, all addressed before merge:
+
+1. **DECSCUSR `0` used the compiled default, not the configured style.** kitty (`screen.c`
+   `screen_set_cursor`: `mode 0` → `NO_CURSOR_SHAPE`), Ghostty (`.default` →
+   `default_style`) and WezTerm (`CursorStyle::Default`) use the configured style; xterm
+   maps `0` to a blinking block (its configured style is `Ps 7`). Consensus: `CSI 0 SP q`
+   restores the configured style, and `1` stays a blinking block. **Fixed.**
+2. **An open OSC 8 hyperlink leaked across a screen switch.** kitty
+   (`screen_toggle_screen_buffer` sets `active_hyperlink_id = 0`) and Ghostty
+   (`switchScreen` ends the hyperlink) end it. **Fixed:** a real switch ends the live
+   hyperlink.
+3. **Image placement on the alternate screen scrolls the whole screen, ignoring DECSTBM.**
+   This is consistent with the primary path, which pushes rows into scrollback regardless
+   of margins. **Routed to Task 135**, which owns the cursor-after-placement and scrolling
+   rules. Recorded in the 131.C5 entry.
+4. **A parked alternate keeps its image store and placements indefinitely** under `?47`
+   use. This is the decided persistence (kitty keeps its alternate graphics manager across
+   toggles too). **Documented** in the kitty reference.
+5. **131.9 lacked the URL / selection snapshot coverage.** **Added** a URL test. Selection is
+   GUI-side: alternate rows are in a different row namespace, so a primary selection becomes
+   `Foreign` and is cleared (Task 125).
+6. **RIS tests were missing** for the handler's DECANM mirror and the sixel shared palette.
+   **Added.**
+7. **`debug_assert_parked_screens` was thinner than planned.** **Extended:** parked row
+   widths, row namespace, `reflow_anchor` bound, and parked block `live_rows`.
+8. **The benchmark comparison is not like-for-like.** The old bench measured deallocation,
+   and the switch API changed, so no valid pre-change baseline exists in the new shape.
+   **Stated** in the status note, and its "±2% / −16%" contradiction corrected.
+9. **Stale docs:** `restore_cursor` and `SavedCursor` (per-screen slots) and the `soft_reset`
+   "Saved character set" section. **Fixed.**
+10. **Other stale text** (`?1047` test comment, `AltScreen1047` doc, the `kind` field doc,
+    plan-note order and counts, the reset-table note on `placement_prune_base`).
+    **Fixed.** `resize_saved_primary` keeps its name, as planned.
+11. **A `bool` closure parameter in `reset_table.rs`.** **Fixed.**
+12. **`ResetKind` and `KittyKeyboardStack` are `pub`, not `pub(crate)`.** **Accepted:** both
+    live in private modules, and clippy's `redundant_pub_crate` (denied) rejects
+    `pub(crate)` there.
+13. **`drop_alternate_marks` is O(marks) on every clear and switch.** **Fixed** with an O(1)
+    guard where the mark lists are ordered.
+14. **A first-ever entry builds two stores.** Already accepted (131.5 status).
+15. **The alternate clear used default attributes.** xterm (`ClearScreen`, BCE) and Ghostty
+    (`eraseDisplay` with the cursor background) apply the current background; kitty and
+    WezTerm use the default. A 2–2 split, so the maintainer's tie-break (xterm + Ghostty)
+    applies. **Fixed:** the clear is BCE. This supersedes the 131 decision bullet "BCE on
+    this clear is not changed".
+16. **`prev_placeholder` survived a screen switch.** **Fixed:** a real switch clears it.
+17. **Bytes after a RIS in the same read are parsed under the pre-RIS DECANM/S8C1T mode.**
+    This predates Task 131 and is the same limit as any mode change mid-read. **Recorded**
+    as a GAPS row, and the COVERAGE RIS row qualified.
+18. **Marks on popped padding rows of a parked primary.** **Accepted:** marks sit on the
+    cursor row, and a padding pop never removes the cursor row, so this is unreachable.
+19. **Prettier reflows whole tables in COVERAGE.** **Accepted:** the hook realigns tables, so
+    this is unavoidable.
 
 ### 131 Reset table
 
