@@ -1793,7 +1793,8 @@ Deliverable:
     with a Latin-1 byte, for example), and each handler's own validation decides the
     outcome;
   - each tokenising target with a non-UTF-8 byte still yields `TerminalOutput::Invalid`;
-  - an empty or non-numeric OSC number still yields `Invalid`;
+  - an empty or non-UTF-8 OSC number still yields `Invalid` (a non-numeric UTF-8 number was
+    and remains `OscTarget::Unknown`, consumed with a warn; corrected at review);
 - every existing OSC test passes unchanged.
 
 Benchmarks: `bench_parse_osc9`, `bench_parse_plain_text` and `bench_parse_bursty`, before and
@@ -2205,14 +2206,55 @@ MINOR findings, each confirmed by reproduction:
   `OscLimit` now compares the parsed number (`45d254fe`).
 - Smaller fixes in the same commits: the dead `Osc99ParseError::InvalidBase64` variant is
   deleted, a bool test-helper parameter became an enum, the bench's `as u64` cast is gone, and
-  `freminal-bench-table` lists `bench_parse_kitty_apc_chunks`. `log_capture` now rebuilds the
-  callsite interest cache itself, so a callsite first hit by a parallel test cannot hide
-  events from it.
+  `freminal-bench-table` lists `bench_parse_kitty_apc_chunks`.
 
-Accepted as is: the kitty total-cap tests swap in a small-limit assembler rather than
-exercising the 400 MiB constant; `Vec` doubling can transiently hold up to about twice a
-total cap; `decode_strict` and `encode_unpadded` have no production caller yet (Tasks 102 and
-146 are their consumers).
+**Process failure and second pass (2026-10-10).** Three commits (`5fa526c5`, `a8b00442`,
+`45d254fe`) were salvaged from sub-agents that died mid-task ("endpoint unavailable") and
+were committed after only a partial review. `45d254fe` shipped flaky log-capture tests
+(7 failures in 200 runs) with a `rebuild_interest_cache` patch that could not work. Remedy:
+every 129 commit was re-audited against its subtask text by read-only agents, a confirmation
+review re-checked the three fixes, and each remaining finding was fixed or routed:
+
+- **Flaky log capture, root-caused** (`8a297acf`). With at most one dispatcher registered,
+  `tracing-core` computes a callsite's interest from the calling thread's default
+  dispatcher and caches it process-wide, so a parallel test thread with no subscriber cached
+  `never` for a callsite a capturing thread later used. `log_capture` (now its own
+  `#[cfg(test)]` module, `src/log_capture.rs`) installs one global always-interested
+  subscriber that routes events to a thread-local sink. 0 failures in 300 runs; a barrier
+  test reproduces the old race.
+- **Kitty** (`4e955a38`). `Discarding` swallows only a bare continuation (nothing but `m`/`q`),
+  so an actionless new command after an abandonment whose `m=0` never came is processed;
+  `o=z` inflation is capped (129.C4); a `Raw` push resets the assembler's base64 stream so a
+  stale padding slot cannot absorb a later `=`; `StreamDecoder` is no longer `Copy` and
+  `bytes_fed` is gone; tests for the bounded unknown-id log, the real chunk-limit constants
+  and the shared-memory warn.
+- **Parsers** (`1bbb6af3`, `912ab185`, `39544320`). `OscLimit` classifies the OSC number with
+  the same `parse_param_as` dispatch uses (`+52` too); an OSC body made one over the cap by
+  BEL after a held ESC is dropped; the parsed-output trace is bounded (129.C6); overflow-warn
+  content tests for OSC, APC and DCS; the raw-target tests now prove the handler ran; stale
+  line-number comments repaired.
+- **Test gaps** (`fd597840`): OSC 99 accumulated content, the dedicated `@kitty-` debug line,
+  FTCS non-UTF-8 duplicate values.
+- **Docs**: COVERAGE/GAPS wording (OSC 52 cap "introduced", not "raised"; `DCS received`
+  still logs a bounded body; GAPS DCS intro), the 1-mod-4 / excess-padding base64 change,
+  `KITTY_PROTOCOL_REFERENCE.md` function name, the 129.5 non-numeric-number sentence, and
+  the Task 131 stub's `kitty_state` references.
+
+Accepted as is, with reasons:
+
+- The kitty and iTerm2 total-cap tests swap in a small-limit assembler; the 400 MiB and
+  64 MiB constants are pinned by a value test instead of a 400 MiB push.
+- `Vec` doubling can transiently reserve about twice a total cap (documented on the type).
+- `decode_strict` and `encode_unpadded` have no production caller; Tasks 102 and 146 are
+  their consumers.
+- The 129.5 and 129.9 benchmark tables live in the status notes, not in the commits.
+- The unknown-id `a=p` warn is bounded but not rate-limited (one per command).
+- One DCS test pushes 64 MiB through the full parser (about 1.2 s in debug).
+
+Routed to later tasks: animation-frame (`a=f`) continuation chunks end `Discarding`
+(Task 135); `full_reset` leaves `kitty_transfer` live (Task 131, recorded in its stub); a
+saturated 128-id OSC 99 map refuses even complete single-chunk notifications, and tombstones
+keep unbounded id strings (Task 138).
 
 ### 129 Cleanup entries
 
@@ -2241,7 +2283,9 @@ total cap; `decode_strict` and `encode_unpadded` have no production caller yet (
 - **Suggested approach:** inflate through `Read::take(MAX_KITTY_DATA_BYTES + 1)` and fail
   over the cap, mirroring `read_capped`; when `S=`/`s`/`v` give an expected size, cap at it.
 - **Verification:** a zlib bomb test fails cleanly without allocating past the cap.
-- **Scheduling:** Task 135 (graphics conformance), or earlier as an independent fix.
+- **Status: Resolved (2026-10-10), commit `4e955a38`.** `inflate_zlib` takes a limit
+  (`MAX_KITTY_DATA_BYTES` in production) and an over-limit stream takes the corrupt-stream
+  reply path.
 
 #### 129.C5 — An invalid byte inside an OSC leaks the rest of the sequence as text
 
@@ -2266,7 +2310,8 @@ total cap; `decode_strict` and `encode_unpadded` have no production caller yet (
 - **Scope of fix:** `freminal-terminal-emulator/src/state/internal.rs`.
 - **Suggested approach:** log the variant and a bounded rendering, or drop the payload.
 - **Verification:** a log-capture test at trace level.
-- **Scheduling:** independent.
+- **Status: Resolved (2026-10-10), commit `1bbb6af3`.** The output is rendered through
+  `lossy_sequence_for_log_bounded`; the test fails with a 102 KB event when reverted.
 
 ---
 
@@ -2323,8 +2368,9 @@ hand-maintained list.
   main stack (B15): the call site does not guard double entry, while `Buffer::enter_alternate`
   does.
 - **Graphics.** Placement maps are handler-global, while image stores are swapped per screen.
-  `kitty_state` is not cleared on RIS. Neither are the iTerm2 `multipart_state` nor the
-  `tmux_reparse_queue` (found by the Task 129 activation recon).
+  The kitty chunked-transfer state (`kitty_transfer`, formerly `kitty_state`) is not cleared
+  on RIS. Neither are the iTerm2 `multipart_state` nor the `tmux_reparse_queue` (found by
+  the Task 129 activation recon and review).
 - **Pointer-shape stack.** OSC 22 needs per-screen stacks (Task 139). Multiple cursors clear
   on screen switch (Task 103). XTSAVE needs one global slot (Task 141).
 - **Reset lists are scattered.** `full_reset` (`mod.rs:602-640`) and `soft_reset`
@@ -2337,7 +2383,7 @@ hand-maintained list.
 - A `ScreenScoped<T>` holder with idempotent enter/leave.
 - A per-protocol `reset(kind: ResetKind)` with `ResetKind { Hard, Soft }`.
 - Migrate the keyboard stack and graphics placement maps.
-- Fix B15 and the RIS `kitty_state` leak.
+- Fix B15 and the RIS `kitty_transfer` / `multipart_state` / `tmux_reparse_queue` leaks.
 - An e2e `?1049`/`?47` test suite.
 
 **Open questions.**
