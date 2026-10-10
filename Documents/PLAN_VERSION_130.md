@@ -3489,6 +3489,26 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
     map is pruned against `Buffer::parked_row_span`.
   - A clear empties the alternate maps; a switch touches neither.
   - Surfaced 131.C5.
+- **131.8 — Complete (2026-10-10), commits `998ee131` (131.8a, handler) and `4ea250fc` (131.8b,
+  `TerminalState` and 131.C3).**
+  - `TerminalHandler::reset(ResetKind)` destructures the handler with no `..`, so every field
+    is classified at compile time.
+  - RIS and DECSTR follow the reset table. The new `configured_cursor_visual_style` is the
+    baseline RIS and DECSTR restore.
+  - RIS in `TerminalState` keeps the parser's in-flight sequence, the UTF-8 tail, the theme
+    state and queued commands.
+  - The orchestrator deleted the now-unused `set_cursor_visual_style` and pointed the #406
+    regression test at the configured-style seam.
+- **Cleanups:**
+  - 131.C1 and 131.C2: `57b657b6`. DECSC/DECRC save SGR and DECOM; DECRC without a save homes
+    with defaults. The orchestrator added that an open OSC 8 hyperlink is not part of the
+    save (xterm, kitty and Ghostty), with a test.
+  - 131.C3: `4ea250fc`.
+  - 131.C4: `1d7f22a3`.
+  - 131.C5: `193fd200`.
+- **131.9 — Complete (2026-10-10), commit `4071e616`.** 43 end-to-end tests through
+  `build_snapshot`.
+- **131.10 — Complete (2026-10-10), commit `9d0dae4d`.** COVERAGE, GAPS and the kitty reference.
 - **131.5 — Complete (2026-10-10), commit `b320677d`.**
   - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
   - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
