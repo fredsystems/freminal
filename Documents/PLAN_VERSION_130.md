@@ -3160,7 +3160,7 @@ The verification, standing prohibitions and stop condition are as for Task 130. 
 2. 131.2, then 131.3.
 3. 131.4.
 4. 131.5, then 131.6, then 131.7.
-5. 131.8, which comes after 131.1.
+5. 131.C4, then 131.8 together with 131.C3.
 6. The cleanup entries 131.C1 and 131.C2.
 7. 131.9, then 131.10.
 
@@ -3458,7 +3458,48 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
 
 ### 131 Reset table
 
-Filled in from 131.1 before 131.8 starts.
+From the 131.1 audit (2026-10-10). The references are:
+
+- xterm `charproc.c` `ReallyReset`: the `if (full)` block is RIS and the `else` block is
+  DECSTR; the lines above it apply to both.
+- kitty `screen.c` `do_screen_reset`, for kitty-protocol state.
+- Ghostty `Terminal.zig` `softReset` and WezTerm `Device::SoftReset`, as tie-breakers.
+
+The **maintainer rule** is to follow the consensus. Where they split, xterm wins for non-kitty
+state and kitty wins for kitty state. Only rows that change behaviour, or that were in doubt,
+are listed. Every other field keeps today's behaviour, and 131.8's exhaustive destructuring
+records each one with its reason.
+
+| State                                                                 | RIS                                              | DECSTR             | Source                               | Today                              |
+| --------------------------------------------------------------------- | ------------------------------------------------ | ------------------ | ------------------------------------ | ---------------------------------- |
+| DECCOLM restore (`pre_deccolm_width`)                                 | restore **only if** DECCOLM changed the width    | –                  | xterm 14534                          | always forces 80 cols + PTY resize |
+| `cursor_visual_style`                                                 | configured default                               | configured default | xterm 14379-83, Ghostty              | compiled default / untouched       |
+| `insert_mode`, `nrc_mode`                                             | off                                              | off (unchanged)    | xterm 14510                          | not reset on RIS                   |
+| `reverse_wrap`, `xt_rev_wrap2`                                        | default                                          | default            | xterm 14510/14549, Ghostty, WezTerm  | never reset                        |
+| `s8c1t_mode`, `vt52_mode` (handler mirrors)                           | 7-bit / ANSI                                     | –                  | xterm 14500                          | not reset; diverge from parser     |
+| `sixel_display_mode`, `private_color_registers`, sixel shared palette | default                                          | –                  | xterm 14474-87                       | not reset                          |
+| `in_band_resize_enabled`                                              | off                                              | –                  | convention                           | not reset                          |
+| `kitty_transfer`, `multipart_state`                                   | idle / none                                      | –                  | plan decision                        | not reset                          |
+| `modify_other_keys_level`                                             | 0                                                | **0**              | xterm 14420, Ghostty, WezTerm        | DECSTR keeps it                    |
+| `palette` (OSC 4)                                                     | reset                                            | **reset**          | xterm 14404, Ghostty, kitty          | DECSTR keeps it                    |
+| DECAWM                                                                | on                                               | **on**             | xterm 14549, Ghostty, WezTerm, kitty | DECSTR sets off                    |
+| kitty keyboard stacks                                                 | cleared                                          | **cleared**        | kitty 226-227                        | DECSTR keeps them                  |
+| `pointer_shape`                                                       | default                                          | **default**        | kitty 216-217                        | DECSTR keeps it                    |
+| `window_commands`, `pending_command_events`                           | **kept** (already-emitted events in transit)     | kept               | freminal-internal                    | cleared on RIS                     |
+| OSC 7 cwd, `$HISTFILE`                                                | **kept** (maintainer)                            | kept               | describes the process                | cleared on RIS                     |
+| `TerminalModes::theme_mode`, `theming`                                | **kept** (config and OS state)                   | kept               | freminal-internal                    | wiped by `TerminalModes::default`  |
+| parser state, `leftover_data`                                         | reset only the parser's `vt52_mode`/`s8c1t_mode` | –                  | the chunk is already parsed          | parser replaced, leftover dropped  |
+| DECSC slot                                                            | empty slot behaves as "home, defaults" (131.C2)  | home (unchanged)   | xterm 14546-47, Ghostty              | `None` (DECRC no-op)               |
+
+Notes:
+
+- The DECSTR DECAWM row follows xterm, Ghostty, WezTerm and kitty against the literal VT510
+  Table 5-9. xterm's own comment records the deviation.
+- RIS keeps the colour overrides it resets today (OSC 10/11/12: kitty, Ghostty and WezTerm
+  reset them). DECSTR keeps them (xterm).
+- The pure transport and cache fields (`write_tx`, `placement_prune_base`,
+  `row_epoch_counter`, `cell_pixel_*`, `theme`, `tmux_passthrough_queue`) are kept, as is
+  `allow_alt_screen` (xterm does not reset it).
 
 ### 131 Cleanup entries
 
@@ -3498,6 +3539,42 @@ Filled in from 131.1 before 131.8 starts.
 - **Suggested approach:** treat an empty slot as a saved default cursor at home.
 - **Verification:** a DECRC-with-no-save test homes the cursor and resets SGR.
 - **Scheduling:** after 131.C1.
+
+#### 131.C3 — Dead `TerminalState` mirrors of handler state
+
+- **Surfaced:** 131.1 audit (2026-10-10). Predates Task 131.
+- **Impact:** three fields are written but never read in production. RIS resets them while
+  the authoritative handler copies survive, so they misdocument the reset behaviour.
+  - `TerminalState::cursor_visual_style` (the snapshot reads the handler's copy);
+  - `TerminalModes::reverse_wrap_around` (the authority is `TerminalHandler::reverse_wrap`);
+  - `TerminalModes::cursor_blinking` (the blink state lives in the handler's cursor style).
+- **Scope of fix:**
+  - `freminal-terminal-emulator/src/state/internal.rs`;
+  - `freminal-common/src/buffer_states/mode.rs` (`TerminalModes`);
+  - the tests that read the mirrors.
+- **Suggested approach:** delete the three mirrors and route any test reads to the handler.
+- **Verification:** `rg` finds no remaining reader; the suite passes.
+- **Scheduling:** with 131.8.
+
+#### 131.C4 — Reverse-wrap (`?45`) defaults to on, unlike xterm
+
+- **Surfaced:** 131.1 audit (2026-10-10). Predates Task 131.
+- **Impact:**
+  - `ReverseWrapAround::default()` is `WrapAround`, and its doc claims that matches xterm.
+  - It does not: xterm's `reverseWrap` resource defaults to false, Ghostty defaults off, and
+    WezTerm resets it to off.
+  - RIS and DECSTR reset the mode to its default after 131.8, so the default becomes
+    observable.
+- **Maintainer decision (2026-10-10):** change the default to off.
+- **Scope of fix:**
+  - `freminal-common/src/buffer_states/modes/reverse_wrap_around.rs` and its tests;
+  - tests that assume reverse wrap is on by default (`rg` for `ReverseWrapAround` and
+    reverse-wrap backspace tests);
+  - the DECRQM `?45` default expectation.
+- **Verification:**
+  - `CSI ? 45 $ p` on a fresh terminal reports reset (`2`);
+  - BS at column 0 does not wrap until `CSI ? 45 h`.
+- **Scheduling:** before 131.8.
 
 ---
 
