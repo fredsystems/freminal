@@ -2953,6 +2953,60 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
 
 Prohibitions: do NOT touch code.
 
+### 130 Status notes
+
+- **130.1 — Complete (2026-10-10), commit `d45d9389`.**
+  - `TerminalState::process_parsed_outputs` runs handler, mode sync and the RIS state reset
+    per output.
+  - Three new regression tests were confirmed failing against the old code.
+  - Benchmarks within ±5% of `before_130_1`.
+- **130.2 — Complete (2026-10-10), commit `7b869c20`.**
+  - The handler queues each un-doubled tmux payload, and `TerminalState` parses it with a
+    fresh, seeded parser right after the producing output, up to depth 4.
+  - `dispatch_tmux_csi`, `wrap_tmux_passthrough`, `double_esc` and `in_tmux_passthrough` are
+    deleted.
+  - A table-driven test proves every old direct-dispatch and fall-through shape behaves
+    identically wrapped and direct.
+  - Seven new tests were confirmed failing against the old code. One of them shows reparsed
+    OSCs used to miss the same batch's window-command drain.
+  - The orchestrator rewrote the mid-sequence splice test to use a sequence the old code
+    actually reparsed.
+  - Benchmarks within +1.2% of `before_130_1`.
+- **130.3 — Complete (2026-10-10), commit `6bb4e529`.**
+  - `ReportMode::report()` returns the body.
+  - All DECRPM (handler and `TerminalState`) and `CSI ? u` replies go through
+    `write_csi_response`, and `send_decrpm` is deleted.
+  - Only VT52 `ESC / Z` and ENQ still call `write_to_pty`.
+  - Two pre-existing reply-content bugs surfaced: 130.C1 and 130.C2.
+
+### 130 Cleanup entries
+
+#### 130.C1 — DECRQM for LNM (ANSI mode 20) answers in the DEC-private form
+
+- **Surfaced:** 130.3 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Lnm::report` returns `?20;Ps$y`. LNM is an ANSI mode, so `CSI 20 $ p` must be answered
+    with `CSI 20 ; Ps $ y`, without `?`; IRM (`4;Ps$y`) already does this correctly.
+  - An application parsing the reply can treat it as an answer about DEC private mode 20.
+- **Scope of fix:** `freminal-common/src/buffer_states/modes/lnm.rs` and its tests; any
+  emulator test that pins the `?20` form.
+- **Verification:** `CSI 20 $ p` yields `CSI 20 ; 2 $ y` by default and `CSI 20 ; 1 $ y` after
+  `CSI 20 h`.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
+#### 130.C2 — DECRQM for DECSCLM answers "not recognised"
+
+- **Surfaced:** 130.3 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Decsclm::report` always returns `?4;0$y` ("not recognised"), although freminal parses
+    DECSCLM and deliberately does not implement smooth scrolling.
+  - The DECRPM value for a recognised mode that can never be set is `4` ("permanently
+    reset"), as `?2027` already uses `3` for permanently set.
+- **Scope of fix:** `freminal-common/src/buffer_states/modes/decsclm.rs` and its tests;
+  `freminal-common/tests/mode_boilerplate_tests.rs`.
+- **Verification:** `CSI ? 4 $ p` yields `CSI ? 4 ; 4 $ y` whatever the set/reset history.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
 ---
 
 ## Task 131 — Screen-Scoped State & Reset Lifecycle
