@@ -258,6 +258,34 @@ mod tests {
     }
 
     #[test]
+    fn overflow_warns_with_introducer_and_length_but_not_payload() {
+        let mut parser = ApcParser::new();
+        let mut output = Vec::new();
+        let events = crate::log_capture::capture(|| {
+            push_all(&mut parser, b"SECRETMARK", &mut output);
+            push_all(
+                &mut parser,
+                &vec![b'x'; MAX_APC_BYTES - b"SECRETMARK".len()],
+                &mut output,
+            );
+            // The stored length is now MAX + 1 (introducer included): over.
+            parser.apc_parser_inner(0x1b, &mut output);
+            let outcome = parser.apc_parser_inner(b'\\', &mut output);
+            assert!(matches!(outcome, ParserOutcome::Finished));
+        });
+        assert_eq!(output, []);
+        let warns = crate::log_capture::warnings(&events);
+        assert_eq!(warns.len(), 1, "{events:?}");
+        let total = MAX_APC_BYTES + 3;
+        assert!(warns[0].1.contains("APC"), "{warns:?}");
+        assert!(
+            warns[0].1.contains(&format!("total length {total} bytes")),
+            "{warns:?}"
+        );
+        assert!(!warns[0].1.contains("SECRETMARK"), "{warns:?}");
+    }
+
+    #[test]
     fn overflow_ends_only_at_a_real_st() {
         let mut parser = ApcParser::new();
         let mut output = Vec::new();

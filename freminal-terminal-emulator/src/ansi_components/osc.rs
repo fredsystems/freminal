@@ -1235,10 +1235,19 @@ mod tests {
 
     #[test]
     fn osc9_with_latin1_byte_reaches_handler() {
-        // The OSC 9 handler validates UTF-8 itself and drops the payload.
-        let (output, outcome) = feed_osc_with_outcome(b"9;naiv\xe9\x07");
-        assert_no_invalid(&output, &outcome);
-        assert_eq!(output, []);
+        // The OSC 9 handler validates UTF-8 itself and drops the payload. It
+        // emits nothing, so its own debug line is the proof it ran.
+        let events = crate::log_capture::capture(|| {
+            let (output, outcome) = feed_osc_with_outcome(b"9;naiv\xe9\x07");
+            assert_no_invalid(&output, &outcome);
+            assert_eq!(output, []);
+        });
+        assert!(
+            events
+                .iter()
+                .any(|(_, m)| m.contains("OSC notification: non-UTF-8 payload")),
+            "the OSC 9 handler did not run: {events:?}"
+        );
     }
 
     #[test]
@@ -1254,21 +1263,34 @@ mod tests {
 
     #[test]
     fn osc777_with_latin1_byte_reaches_handler() {
-        let (output, outcome) = feed_osc_with_outcome(b"777;notify;t\xe9;body\x07");
-        assert_no_invalid(&output, &outcome);
-        assert_eq!(output, []);
+        // The handler emits nothing for a non-UTF-8 payload, so its own
+        // debug line is the proof it ran.
+        let events = crate::log_capture::capture(|| {
+            let (output, outcome) = feed_osc_with_outcome(b"777;notify;t\xe9;body\x07");
+            assert_no_invalid(&output, &outcome);
+            assert_eq!(output, []);
+        });
+        assert!(
+            events
+                .iter()
+                .any(|(_, m)| m.contains("OSC notification: non-UTF-8 payload")),
+            "the OSC 777 handler did not run: {events:?}"
+        );
     }
 
     #[test]
     fn osc99_with_latin1_byte_reaches_handler() {
-        // The OSC 99 handler decides; whatever it emits, the sequence is not Invalid.
-        let (output, outcome) = feed_osc_with_outcome(b"99;i=1:d=0;naiv\xe9\x07");
+        // A Latin-1 byte inside the value of an unknown metadata key does not
+        // make the sequence Invalid, and the OSC 99 handler still emits its
+        // command (a plain, complete payload).
+        let (output, outcome) = feed_osc_with_outcome(b"99;i=1:d=1:z=naiv\xe9;hello\x07");
         assert_no_invalid(&output, &outcome);
         assert!(
-            output
-                .iter()
-                .all(|o| matches!(o, TerminalOutput::OscResponse(AnsiOscType::Notify99(_)))),
-            "unexpected output {output:?}"
+            matches!(
+                output.as_slice(),
+                [TerminalOutput::OscResponse(AnsiOscType::Notify99(_))]
+            ),
+            "the OSC 99 handler did not emit a command: {output:?}"
         );
     }
 
@@ -1287,9 +1309,19 @@ mod tests {
 
     #[test]
     fn osc1338_with_latin1_byte_reaches_handler() {
-        let (output, outcome) = feed_osc_with_outcome(b"1338;HISTFILE=/home/\xe9/h\x07");
-        assert_no_invalid(&output, &outcome);
-        assert_eq!(output, []);
+        // The handler emits nothing for a non-UTF-8 path, so its own warn is
+        // the proof it ran.
+        let events = crate::log_capture::capture(|| {
+            let (output, outcome) = feed_osc_with_outcome(b"1338;HISTFILE=/home/\xe9/h\x07");
+            assert_no_invalid(&output, &outcome);
+            assert_eq!(output, []);
+        });
+        assert!(
+            crate::log_capture::warnings(&events)
+                .iter()
+                .any(|(_, m)| m.contains("OSC 1338 HISTFILE=: non-UTF-8 path")),
+            "the OSC 1338 handler did not run: {events:?}"
+        );
     }
 
     #[test]
@@ -1613,6 +1645,26 @@ mod tests {
         let warns = crate::log_capture::warnings(&events);
         assert_eq!(warns.len(), 1, "{events:?}");
         assert!(warns[0].1.contains("OSC") && !warns[0].1.contains("SECRETMARK"));
+    }
+
+    #[test]
+    fn overflow_warns_with_introducer_and_length_but_not_payload() {
+        // A body at the cap carrying the marker, then one more byte (over the
+        // cap) and BEL: the terminator is part of the reported total.
+        let mut parser = parser_with_body(body_of_len(b"2;SECRETMARK", MAX_OSC_BYTES));
+        let events = crate::log_capture::capture(|| {
+            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+            assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+        });
+        let warns = crate::log_capture::warnings(&events);
+        assert_eq!(warns.len(), 1, "{events:?}");
+        let total = MAX_OSC_BYTES + 2;
+        assert!(warns[0].1.contains("OSC"), "{warns:?}");
+        assert!(
+            warns[0].1.contains(&format!("total length {total} bytes")),
+            "{warns:?}"
+        );
+        assert!(!warns[0].1.contains("SECRETMARK"), "{warns:?}");
     }
 
     #[test]

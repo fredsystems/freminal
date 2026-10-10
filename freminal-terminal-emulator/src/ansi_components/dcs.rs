@@ -380,6 +380,42 @@ mod tests {
         assert_eq!(output, []);
     }
 
+    /// Drive `parser` (already at the cap) over it and through `ESC \`, and
+    /// assert the single warn names `DCS` and the total length but not the
+    /// marker.
+    fn assert_overflow_warn_is_payload_free(mut parser: DcsParser) {
+        let mut output = Vec::new();
+        let events = crate::log_capture::capture(|| {
+            push_all(&mut parser, b"x", &mut output);
+            parser.dcs_parser_inner(0x1b, &mut output);
+            let outcome = parser.dcs_parser_inner(b'\\', &mut output);
+            assert!(matches!(outcome, ParserOutcome::Finished));
+        });
+        assert_eq!(output, []);
+        let warns = crate::log_capture::warnings(&events);
+        assert_eq!(warns.len(), 1, "{events:?}");
+        let total = MAX_DCS_BYTES + 3;
+        assert!(warns[0].1.contains("DCS"), "{warns:?}");
+        assert!(
+            warns[0].1.contains(&format!("total length {total} bytes")),
+            "{warns:?}"
+        );
+        assert!(!warns[0].1.contains("SECRETMARK"), "{warns:?}");
+    }
+
+    #[test]
+    fn overflow_warns_with_introducer_and_length_but_not_payload() {
+        assert_overflow_warn_is_payload_free(parser_with_stored_len(b"PSECRETMARK", MAX_DCS_BYTES));
+    }
+
+    #[test]
+    fn tmux_overflow_warns_with_introducer_and_length_but_not_payload() {
+        assert_overflow_warn_is_payload_free(parser_with_stored_len(
+            b"Ptmux;SECRETMARK",
+            MAX_DCS_BYTES,
+        ));
+    }
+
     #[test]
     fn overflowed_plain_dcs_ends_only_at_a_real_st() {
         let mut parser = parser_with_stored_len(b"P", MAX_DCS_BYTES);
