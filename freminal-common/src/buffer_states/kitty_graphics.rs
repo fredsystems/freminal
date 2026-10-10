@@ -521,9 +521,13 @@ pub struct KittyResponseId {
     pub placement_id: Option<u32>,
 }
 
-/// Format a Kitty graphics response to be sent back to the PTY.
+/// Format the body of a Kitty graphics response to be sent back to the PTY.
 ///
-/// The response format is: `ESC _ G i=<id>[,I=<number>][,p=<placement_id>] ; <message> ESC \`
+/// The body format is: `G i=<id>[,I=<number>][,p=<placement_id>] ; <message>`
+///
+/// The result carries **no framing**: neither the APC introducer nor the
+/// string terminator is included. The caller frames it through
+/// `write_apc_response`, which picks the 7-bit or 8-bit (S8C1T) C1 forms.
 ///
 /// If `ok` is true, the message is `OK`. Otherwise it is the provided error string.
 ///
@@ -532,7 +536,7 @@ pub struct KittyResponseId {
 /// originating request specified a non-zero placement id; `None` and
 /// `Some(0)` (for the placement id) both omit it.
 #[must_use]
-pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> String {
+pub fn format_kitty_response_body(id: KittyResponseId, ok: bool, message: &str) -> String {
     use std::fmt::Write as _;
 
     let msg = if ok { "OK" } else { message };
@@ -546,7 +550,7 @@ pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> St
     {
         let _ = write!(key, ",p={pid}");
     }
-    format!("\x1b_G{key};{msg}\x1b\\")
+    format!("G{key};{msg}")
 }
 
 #[cfg(test)]
@@ -752,7 +756,7 @@ mod tests {
 
     #[test]
     fn format_response_ok() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -761,12 +765,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+        assert_eq!(resp, "Gi=42;OK");
     }
 
     #[test]
     fn format_response_error() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -775,12 +779,12 @@ mod tests {
             false,
             "ENOENT:file not found",
         );
-        assert_eq!(resp, "\x1b_Gi=42;ENOENT:file not found\x1b\\");
+        assert_eq!(resp, "Gi=42;ENOENT:file not found");
     }
 
     #[test]
     fn format_response_with_nonzero_placement_id_includes_p() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -789,12 +793,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42,p=7;OK\x1b\\");
+        assert_eq!(resp, "Gi=42,p=7;OK");
     }
 
     #[test]
     fn format_response_with_zero_placement_id_omits_p() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 42,
                 image_number: None,
@@ -803,12 +807,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+        assert_eq!(resp, "Gi=42;OK");
     }
 
     #[test]
     fn format_response_with_image_number_includes_i_field() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 99,
                 image_number: Some(13),
@@ -817,12 +821,12 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=99,I=13;OK\x1b\\");
+        assert_eq!(resp, "Gi=99,I=13;OK");
     }
 
     #[test]
     fn format_response_with_image_number_and_placement_locks_field_order() {
-        let resp = format_kitty_response(
+        let resp = format_kitty_response_body(
             KittyResponseId {
                 image_id: 99,
                 image_number: Some(13),
@@ -831,7 +835,7 @@ mod tests {
             true,
             "",
         );
-        assert_eq!(resp, "\x1b_Gi=99,I=13,p=7;OK\x1b\\");
+        assert_eq!(resp, "Gi=99,I=13,p=7;OK");
     }
 
     #[test]

@@ -24,7 +24,8 @@ use std::collections::HashSet;
 
 use conv2::ValueFrom;
 use freminal_common::buffer_states::kitty_graphics::{
-    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
+    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId,
+    format_kitty_response_body,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
@@ -672,12 +673,12 @@ impl TerminalHandler {
 
         let id = kitty_id_no_number(image_id, None);
         let response = if supported {
-            format_kitty_response(id, true, "")
+            format_kitty_response_body(id, true, "")
         } else {
-            format_kitty_response(id, false, "ENOTSUP:unsupported format")
+            format_kitty_response_body(id, false, "ENOTSUP:unsupported format")
         };
 
-        self.write_to_pty(&response);
+        self.write_apc_response(&response);
     }
 
     /// Start a chunked Kitty graphics transfer (first chunk, `m=1`).
@@ -1115,7 +1116,7 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && id > 0 {
             let response_id = u32::value_from(id).unwrap_or(0);
-            let response = format_kitty_response(
+            let response = format_kitty_response_body(
                 KittyResponseId {
                     image_id: response_id,
                     image_number,
@@ -1124,7 +1125,7 @@ impl TerminalHandler {
                 true,
                 "",
             );
-            self.write_to_pty(&response);
+            self.write_apc_response(&response);
         }
     }
 
@@ -1852,7 +1853,7 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && assigned_id > 0 {
             let response_id = u32::value_from(assigned_id).unwrap_or(0);
-            let response = format_kitty_response(
+            let response = format_kitty_response_body(
                 KittyResponseId {
                     image_id: response_id,
                     image_number: control.image_number,
@@ -1861,7 +1862,7 @@ impl TerminalHandler {
                 true,
                 "",
             );
-            self.write_to_pty(&response);
+            self.write_apc_response(&response);
         }
     }
 
@@ -2081,8 +2082,8 @@ impl TerminalHandler {
         }
 
         if quiet < 1 {
-            let response = format_kitty_response(response_id, true, "");
-            self.write_to_pty(&response);
+            let response = format_kitty_response_body(response_id, true, "");
+            self.write_apc_response(&response);
         }
     }
 
@@ -2614,7 +2615,7 @@ impl TerminalHandler {
 
         if quiet < 1 {
             let response_id = u32::value_from(id).unwrap_or(image_id_hint);
-            let response = format_kitty_response(
+            let response = format_kitty_response_body(
                 KittyResponseId {
                     image_id: response_id,
                     image_number,
@@ -2623,7 +2624,7 @@ impl TerminalHandler {
                 true,
                 "",
             );
-            self.write_to_pty(&response);
+            self.write_apc_response(&response);
         }
     }
 
@@ -2845,9 +2846,12 @@ impl TerminalHandler {
             .insert_protocol_retained(stored_image);
 
         if quiet < 1 {
-            let response =
-                format_kitty_response(kitty_id_no_number(image_id_hint, placement_id), true, "");
-            self.write_to_pty(&response);
+            let response = format_kitty_response_body(
+                kitty_id_no_number(image_id_hint, placement_id),
+                true,
+                "",
+            );
+            self.write_apc_response(&response);
         }
     }
 
@@ -2861,8 +2865,8 @@ impl TerminalHandler {
             );
             return;
         }
-        let response = format_kitty_response(id, false, message);
-        self.write_to_pty(&response);
+        let response = format_kitty_response_body(id, false, message);
+        self.write_apc_response(&response);
     }
 
     /// Handle `a=d` — delete images.
@@ -10953,5 +10957,81 @@ mod tests {
             Some(expected),
             "w=0 should default to the full remaining width from x"
         );
+    }
+
+    /// A bare `a=q,i=31` query command: the simplest reply-producing request.
+    fn kitty_query_command() -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                format: Some(KittyFormat::Rgb),
+                image_id: Some(31),
+                ..KittyControlData::default()
+            },
+            payload: vec![0, 0, 0],
+        }
+    }
+
+    #[test]
+    fn kitty_query_reply_seven_bit_framing_is_esc_underscore_esc_backslash() {
+        let (mut handler, rx) = kitty_handler();
+        handler.handle_kitty_graphics(kitty_query_command());
+
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert_eq!(bytes, b"\x1b_Gi=31;OK\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn kitty_query_reply_eight_bit_framing_is_c1_apc_and_st() {
+        use freminal_common::buffer_states::modes::s8c1t::S8c1t;
+
+        let (mut handler, rx) = kitty_handler();
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+        handler.handle_kitty_graphics(kitty_query_command());
+
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert_eq!(bytes, b"\x9fGi=31;OK\x9c".to_vec());
+        assert!(!bytes.contains(&0x1b), "8-bit reply must carry no ESC");
+    }
+
+    #[test]
+    fn kitty_query_reply_is_tmux_wrapped_with_doubled_escs() {
+        let (mut handler, rx) = kitty_handler();
+        handler.in_tmux_passthrough = true;
+        handler.handle_kitty_graphics(kitty_query_command());
+
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert_eq!(
+            bytes,
+            b"\x1bPtmux;\x1b\x1b_Gi=31;OK\x1b\x1b\\\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn kitty_error_reply_eight_bit_framing_is_c1_apc_and_st() {
+        use freminal_common::buffer_states::modes::s8c1t::S8c1t;
+
+        let (mut handler, rx) = kitty_handler();
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+        handler.send_kitty_error(
+            super::kitty_id_no_number(7, None),
+            0,
+            "ENOENT:file not found",
+        );
+
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert_eq!(bytes, b"\x9fGi=7;ENOENT:file not found\x9c".to_vec());
     }
 }
