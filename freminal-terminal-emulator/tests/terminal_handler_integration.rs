@@ -6,11 +6,22 @@
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
+use freminal_common::buffer_states::modes::xtextscrn::XtExtscrn;
 use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::ansi_components::csi_commands::ed::EraseDisplayMode;
 use freminal_terminal_emulator::ansi_components::csi_commands::el::EraseLineMode;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
+
+/// Set `?1049` (save cursor, switch to the alternate screen, clear it).
+fn enter_alternate_1049(handler: &mut TerminalHandler) {
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+}
+
+/// Reset `?1049` (switch to the primary screen, restore the cursor).
+fn leave_alternate_1049(handler: &mut TerminalHandler) {
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
+}
 
 /// Helper to convert a string slice to TChar representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
@@ -174,13 +185,13 @@ fn test_alternate_buffer_switching() {
     let primary_cursor_x = handler.buffer().cursor().pos.x;
 
     // Enter alternate buffer
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Write different content
     handler.handle_data(&text_to_bytes("Alternate content"));
 
     // Leave alternate buffer
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Should restore primary buffer state
     assert_eq!(handler.buffer().cursor().pos.x, primary_cursor_x);
@@ -397,13 +408,13 @@ fn test_mixed_operations_workflow() {
     handler.handle_data(&text_to_bytes("vim"));
 
     // Simulate entering vim (alternate screen)
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_data(&text_to_bytes("~ VIM - Vi IMproved"));
 
     // Exit vim
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Back to shell - cursor position is restored from primary buffer
     // The cursor should be where we left it before entering alternate
@@ -579,7 +590,7 @@ fn test_process_outputs_delete_lines() {
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     let mut handler = TerminalHandler::new(10, 5);
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Fill 5 visible rows
     let outputs = vec![
@@ -634,7 +645,7 @@ fn ind_scrolls_at_bottom_margin() {
     let mut handler = TerminalHandler::new(10, 5);
 
     // Enter alternate screen so IND scrolls rather than growing scrollback.
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Fill all 5 rows with content.
     for _ in 0..5 {
@@ -667,7 +678,7 @@ fn ind_scrolls_at_bottom_margin() {
     );
 
     // Leave alternate buffer to restore state.
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 }
 
 #[test]
@@ -2669,7 +2680,7 @@ fn test_ris_via_process_outputs_does_not_panic() {
     // Set up various state.
     fill_lines(&mut handler, 24);
     handler.handle_set_scroll_region(5, 20);
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     handler.handle_data(&text_to_bytes("Alternate content"));
 
     // Full reset — should return to primary, clean state.
@@ -2880,7 +2891,7 @@ fn test_decstr_preserves_queued_window_title_command() {
 fn test_decstr_does_not_exit_alternate_screen() {
     let mut handler = TerminalHandler::new(40, 10);
 
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     assert!(handler.is_alternate_screen());
 
     handler.process_outputs(&[TerminalOutput::SoftReset]);
@@ -3538,7 +3549,7 @@ fn test_tab_stops_shared_across_alternate_screen() {
     handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
 
     // Enter alternate screen
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Verify the custom stop is visible in alternate screen
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -3551,13 +3562,13 @@ fn test_tab_stop_changes_in_alternate_persist_to_primary() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Enter alternate screen
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Clear all tab stops while in alternate
     handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Leave alternate — return to primary
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Tab stops should be cleared in primary too (shared, not per-buffer)
     handler.handle_cursor_pos(Some(1), Some(1));

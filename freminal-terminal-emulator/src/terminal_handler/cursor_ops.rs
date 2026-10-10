@@ -88,15 +88,21 @@ impl TerminalHandler {
     }
 
     /// Handle DECSC — save the current cursor position, SGR state, and character set.
+    ///
+    /// The save goes into the *active* screen's slot, for both the buffer's
+    /// cursor state and the character set.
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
-        self.saved_character_replace = Some(self.character_replace.clone());
+        *self.saved_character_replace.get_mut(self.buffer.kind()) =
+            Some(self.character_replace.clone());
     }
 
     /// Handle DECRC — restore the cursor position, SGR state, and character set saved by the most recent DECSC.
+    ///
+    /// Reads the *active* screen's slot.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
-        if let Some(saved) = &self.saved_character_replace {
+        if let Some(saved) = self.saved_character_replace.get(self.buffer.kind()) {
             self.character_replace = saved.clone();
         }
     }

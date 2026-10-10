@@ -60,6 +60,7 @@ use freminal_common::{
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
 use screen_scoped::ScreenScoped;
+use scroll_ops::{AltScreenAction, AltScreenMode};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -229,12 +230,14 @@ pub struct TerminalHandler {
     cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
-    /// Saved `character_replace` state from the most recent DECSC.
+    /// Saved `character_replace` state from the most recent DECSC, one slot
+    /// per screen (indexed by `buffer.kind()`), mirroring the buffer's own
+    /// per-screen DECSC slot.
     ///
     /// The VT100 spec requires DECSC to save the character set designators
     /// (G0/G1) and GL invocation.  Freminal uses a simplified single-flag
     /// model, so we save just `character_replace` here.
-    saved_character_replace: Option<DecSpecialGraphics>,
+    saved_character_replace: ScreenScoped<Option<DecSpecialGraphics>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
@@ -464,7 +467,7 @@ impl TerminalHandler {
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
-            saved_character_replace: None,
+            saved_character_replace: ScreenScoped::default(),
             write_tx: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
@@ -638,7 +641,9 @@ impl TerminalHandler {
         self.show_cursor = Dectcem::default();
         self.cursor_visual_style = CursorVisualStyle::default();
         self.character_replace = DecSpecialGraphics::default();
-        self.saved_character_replace = None;
+        for slot in self.saved_character_replace.both_mut() {
+            *slot = None;
+        }
         self.window_commands.clear();
         self.pending_command_events.clear();
         self.last_graphic_char = None;
@@ -764,7 +769,8 @@ impl TerminalHandler {
         // this codebase mutates them outside a save/restore round trip).
         self.buffer.set_decom(Decom::NormalCursor);
         self.buffer.save_cursor();
-        self.saved_character_replace = Some(DecSpecialGraphics::default());
+        *self.saved_character_replace.get_mut(self.buffer.kind()) =
+            Some(DecSpecialGraphics::default());
 
         // DECSTBM -> top = 1, bottom = page length. Also homes the cursor;
         // restored below along with DECOM's homing.
@@ -1610,18 +1616,46 @@ impl TerminalHandler {
             }
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
-                | Mode::AltScreen47(AltScreen47::Alternate)
-                | Mode::AltScreen1047(AltScreen1047::Alternate)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
-                    self.handle_enter_alternate();
+                    self.handle_alternate_screen(
+                        AltScreenMode::SaveClear1049,
+                        AltScreenAction::Enter,
+                    );
                 }
                 Mode::XtExtscrn(XtExtscrn::Primary)
-                | Mode::AltScreen47(AltScreen47::Primary)
-                | Mode::AltScreen1047(AltScreen1047::Primary)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
-                    self.handle_leave_alternate();
+                    self.handle_alternate_screen(
+                        AltScreenMode::SaveClear1049,
+                        AltScreenAction::Leave,
+                    );
+                }
+                Mode::AltScreen47(AltScreen47::Alternate)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+                }
+                Mode::AltScreen47(AltScreen47::Primary)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+                }
+                Mode::AltScreen1047(AltScreen1047::Alternate)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(
+                        AltScreenMode::Clearing1047,
+                        AltScreenAction::Enter,
+                    );
+                }
+                Mode::AltScreen1047(AltScreen1047::Primary)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(
+                        AltScreenMode::Clearing1047,
+                        AltScreenAction::Leave,
+                    );
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
@@ -2483,11 +2517,11 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         handler.handle_data(b"Primary");
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         handler.handle_data(b"Alternate");
 
         // Verify we're in alternate buffer
-        handler.handle_leave_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
 
         // Should restore primary buffer
         // (exact verification requires exposing buffer state)
@@ -4607,9 +4641,9 @@ mod tests {
     fn is_alternate_screen_accessor() {
         let mut handler = TerminalHandler::new(80, 24);
         assert!(!handler.is_alternate_screen());
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         assert!(handler.is_alternate_screen());
-        handler.handle_leave_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
         assert!(!handler.is_alternate_screen());
     }
 

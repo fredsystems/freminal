@@ -163,7 +163,7 @@ fn alternate_screen_gets_independent_stack() {
     assert_eq!(handler.kitty_keyboard_flags(), 5);
 
     // Enter alternate screen -- it has its own (empty) stack.
-    handler.handle_enter_alternate();
+    feed(&mut handler, b"\x1b[?1049h");
     assert_eq!(handler.kitty_keyboard_flags(), 0);
 
     // Push flags on the alternate screen.
@@ -171,11 +171,11 @@ fn alternate_screen_gets_independent_stack() {
     assert_eq!(handler.kitty_keyboard_flags(), 3);
 
     // Leave alternate screen -- the main stack is what it was.
-    handler.handle_leave_alternate();
+    feed(&mut handler, b"\x1b[?1049l");
     assert_eq!(handler.kitty_keyboard_flags(), 5);
 
     // The alternate stack is NOT discarded on leave: it persists.
-    handler.handle_enter_alternate();
+    feed(&mut handler, b"\x1b[?1049h");
     assert_eq!(handler.kitty_keyboard_flags(), 3);
 }
 

@@ -3770,7 +3770,9 @@ mod tests {
     use freminal_buffer::cell::Cell;
     use freminal_buffer::row::Row;
 
-    use super::super::{KittyImageState, KittyTransfer, TerminalHandler};
+    use super::super::{
+        AltScreenAction, AltScreenMode, KittyImageState, KittyTransfer, TerminalHandler,
+    };
     use freminal_common::buffer_states::row_number::RowNumber;
 
     // ------------------------------------------------------------------
@@ -5768,7 +5770,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         handler.set_write_tx(tx);
 
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         place_at_cursor(&mut handler, &rx, 74);
         let parent = handler.real_placements[&(74, 0)];
         // Entering clears the alternate screen into a fresh store, so the
@@ -6044,7 +6046,7 @@ mod tests {
         handler.handle_kitty_graphics(primary);
         assert!(handler.real_placements.contains_key(&(65, 0)));
 
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         let mut alt = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
         alt.control.image_id = Some(66);
         alt.control.display_cols = Some(1);
@@ -6057,7 +6059,7 @@ mod tests {
             .expect("alt placement recorded");
         assert!(alt_placement.origin_row.is_alternate());
 
-        handler.handle_leave_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
 
         assert!(
             !handler.real_placements.contains_key(&(66, 0)),
