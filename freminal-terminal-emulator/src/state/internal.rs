@@ -331,6 +331,7 @@ impl TerminalState {
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
             | Mode::AltScreen47(_)
+            | Mode::AltScreen1047(_)
             | Mode::SaveCursor1048(_)
             | Mode::Decawm(_)
             | Mode::Dectem(_)

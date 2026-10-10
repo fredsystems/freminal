@@ -33,7 +33,7 @@ use freminal_common::buffer_states::modes::{
     theme::Theming,
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
-    xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+    xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
 };
 
@@ -963,6 +963,99 @@ mod altscreen47_tests {
     #[test]
     fn display_query_variant() {
         assert_eq!(format!("{}", AltScreen47::Query), "AltScreen47 (QUERY)");
+    }
+}
+
+// ===========================================================================
+// AltScreen1047 (?1047): default=Primary, Set=Alternate, Reset=Primary
+// ===========================================================================
+mod altscreen1047_tests {
+    use super::*;
+
+    #[test]
+    fn default_value() {
+        assert_eq!(AltScreen1047::default(), AltScreen1047::Primary);
+    }
+
+    #[test]
+    fn new_dec_set() {
+        assert_eq!(
+            AltScreen1047::new(&SetMode::DecSet),
+            AltScreen1047::Alternate
+        );
+    }
+
+    #[test]
+    fn new_dec_rst() {
+        assert_eq!(AltScreen1047::new(&SetMode::DecRst), AltScreen1047::Primary);
+    }
+
+    #[test]
+    fn new_dec_query() {
+        assert_eq!(AltScreen1047::new(&SetMode::DecQuery), AltScreen1047::Query);
+    }
+
+    // report(None)
+    #[test]
+    fn report_none_alternate_variant() {
+        assert_eq!(AltScreen1047::Alternate.report(None), "?1047;1$y");
+    }
+
+    #[test]
+    fn report_none_primary_variant() {
+        assert_eq!(AltScreen1047::Primary.report(None), "?1047;2$y");
+    }
+
+    #[test]
+    fn report_none_query_variant() {
+        assert_eq!(AltScreen1047::Query.report(None), "?1047;0$y");
+    }
+
+    // report(Some(_))
+    #[test]
+    fn report_override_dec_set() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecSet)),
+            "?1047;1$y"
+        );
+    }
+
+    #[test]
+    fn report_override_dec_rst() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecRst)),
+            "?1047;2$y"
+        );
+    }
+
+    #[test]
+    fn report_override_dec_query() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecQuery)),
+            "?1047;0$y"
+        );
+    }
+
+    // Display
+    #[test]
+    fn display_alternate_variant() {
+        assert_eq!(
+            format!("{}", AltScreen1047::Alternate),
+            "AltScreen1047 (SET) Alternate Screen"
+        );
+    }
+
+    #[test]
+    fn display_primary_variant() {
+        assert_eq!(
+            format!("{}", AltScreen1047::Primary),
+            "AltScreen1047 (RESET) Primary Screen"
+        );
+    }
+
+    #[test]
+    fn display_query_variant() {
+        assert_eq!(format!("{}", AltScreen1047::Query), "AltScreen1047 (QUERY)");
     }
 }
 

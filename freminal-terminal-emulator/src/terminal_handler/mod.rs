@@ -39,7 +39,7 @@ use freminal_common::{
         modes::s8c1t::S8c1t,
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
-        modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+        modes::xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
         progress::ProgressReport,
@@ -1611,11 +1611,14 @@ impl TerminalHandler {
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
                 | Mode::AltScreen47(AltScreen47::Alternate)
+                | Mode::AltScreen1047(AltScreen1047::Alternate)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
                     self.handle_enter_alternate();
                 }
-                Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary)
+                Mode::XtExtscrn(XtExtscrn::Primary)
+                | Mode::AltScreen47(AltScreen47::Primary)
+                | Mode::AltScreen1047(AltScreen1047::Primary)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
                     self.handle_leave_alternate();
@@ -1658,6 +1661,14 @@ impl TerminalHandler {
                         SetMode::DecRst
                     };
                     self.write_csi_response(&AltScreen47::Alternate.report(Some(mode)));
+                }
+                Mode::AltScreen1047(AltScreen1047::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_csi_response(&AltScreen1047::Alternate.report(Some(mode)));
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Query) => {
                     // Report based on whether a cursor has actually been saved
@@ -1893,6 +1904,7 @@ impl TerminalHandler {
                 // allow_column_mode_switch permission, are also silently ignored.
                 Mode::XtExtscrn(XtExtscrn::Alternate | XtExtscrn::Primary)
                 | Mode::AltScreen47(AltScreen47::Alternate | AltScreen47::Primary)
+                | Mode::AltScreen1047(AltScreen1047::Alternate | AltScreen1047::Primary)
                 | Mode::Deccolm(Deccolm::Column132 | Deccolm::Column80)
                 | Mode::Decckm(_)
                 | Mode::BracketedPaste(_)

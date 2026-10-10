@@ -3787,19 +3787,19 @@ fn alt_screen_47_enter_clears_and_leave_restores() {
 
 #[test]
 fn alt_screen_1047_enter_clears_and_leave_restores() {
-    // ?1047 is an alias for ?47 — same behavior.
+    // ?1047 has its own mode variant but currently behaves like ?47.
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
-        modes::xtextscrn::AltScreen47,
+        modes::xtextscrn::AltScreen1047,
     };
 
     let mut handler = TerminalHandler::new(20, 5);
     handler.handle_data(b"hello");
 
-    // Enter alternate — via terminal_mode_from_params, ?1047 maps to AltScreen47.
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
-        &SetMode::DecSet,
-    )))]);
+    // Enter alternate via ?1047.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen1047(
+        AltScreen1047::new(&SetMode::DecSet),
+    ))]);
 
     let alt_rows = handler.buffer().visible_rows(0);
     let alt_text = row_text(&alt_rows[0]);
@@ -3808,9 +3808,9 @@ fn alt_screen_1047_enter_clears_and_leave_restores() {
         "alternate screen via ?1047 should be blank"
     );
 
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
-        &SetMode::DecRst,
-    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen1047(
+        AltScreen1047::new(&SetMode::DecRst),
+    ))]);
 
     let restored = handler.buffer().visible_rows(0);
     let text = row_text(&restored[0]);
@@ -3860,26 +3860,29 @@ fn save_cursor_1048_saves_and_restores() {
 }
 
 #[test]
-fn mode_from_params_maps_47_and_1047_to_alt_screen_47() {
+fn mode_from_params_maps_47_and_1047_to_distinct_alt_screen_modes() {
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
-        modes::xtextscrn::AltScreen47,
+        modes::xtextscrn::{AltScreen47, AltScreen1047},
     };
 
     let mode_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecSet);
     assert_eq!(mode_47, Mode::AltScreen47(AltScreen47::Alternate));
 
     let mode_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecSet);
-    assert_eq!(mode_1047, Mode::AltScreen47(AltScreen47::Alternate));
+    assert_eq!(mode_1047, Mode::AltScreen1047(AltScreen1047::Alternate));
 
     let rst_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecRst);
     assert_eq!(rst_47, Mode::AltScreen47(AltScreen47::Primary));
 
     let rst_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecRst);
-    assert_eq!(rst_1047, Mode::AltScreen47(AltScreen47::Primary));
+    assert_eq!(rst_1047, Mode::AltScreen1047(AltScreen1047::Primary));
 
     let query_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecQuery);
     assert_eq!(query_47, Mode::AltScreen47(AltScreen47::Query));
+
+    let query_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecQuery);
+    assert_eq!(query_1047, Mode::AltScreen1047(AltScreen1047::Query));
 }
 
 #[test]

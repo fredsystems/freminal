@@ -58,7 +58,7 @@ impl fmt::Display for XtExtscrn {
     }
 }
 
-/// Legacy alternate screen (?47 / ?1047) — switch buffer without explicit
+/// Legacy alternate screen (?47) — switch buffer without explicit
 /// cursor save/restore.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum AltScreen47 {
@@ -103,6 +103,56 @@ impl fmt::Display for AltScreen47 {
             Self::Primary => f.write_str("AltScreen47 (RESET) Primary Screen"),
             Self::Alternate => f.write_str("AltScreen47 (SET) Alternate Screen"),
             Self::Query => f.write_str("AltScreen47 (QUERY)"),
+        }
+    }
+}
+
+/// Alternate screen (?1047) — switch buffer without explicit cursor
+/// save/restore.  Distinct from [`AltScreen47`] so DECRQM replies carry the
+/// queried mode number.
+#[derive(Debug, Eq, PartialEq, Default, Clone)]
+pub enum AltScreen1047 {
+    #[default]
+    Primary,
+    Alternate,
+    Query,
+}
+
+impl AltScreen1047 {
+    #[must_use]
+    pub const fn new(mode: &SetMode) -> Self {
+        match mode {
+            SetMode::DecSet => Self::Alternate,
+            SetMode::DecRst => Self::Primary,
+            SetMode::DecQuery => Self::Query,
+        }
+    }
+}
+
+impl ReportMode for AltScreen1047 {
+    fn report(&self, override_mode: Option<SetMode>) -> String {
+        let param = "1047";
+        override_mode.map_or_else(
+            || match self {
+                Self::Primary => format!("?{param};2$y"),
+                Self::Alternate => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
+            },
+            |override_mode| match override_mode {
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
+            },
+        )
+    }
+}
+
+impl fmt::Display for AltScreen1047 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => f.write_str("AltScreen1047 (RESET) Primary Screen"),
+            Self::Alternate => f.write_str("AltScreen1047 (SET) Alternate Screen"),
+            Self::Query => f.write_str("AltScreen1047 (QUERY)"),
         }
     }
 }

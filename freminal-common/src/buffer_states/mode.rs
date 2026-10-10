@@ -41,7 +41,7 @@ use crate::buffer_states::modes::{
     unknown::{ModeNamespace, UnknownMode},
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
-    xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+    xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
 };
 
@@ -129,6 +129,7 @@ pub enum Mode {
     XtCBlink(XtCBlink),
     XtExtscrn(XtExtscrn),
     AltScreen47(AltScreen47),
+    AltScreen1047(AltScreen1047),
     SaveCursor1048(SaveCursor1048),
     XtMseWin(XtMseWin),
     BracketedPaste(RlBracket),
@@ -205,7 +206,8 @@ impl Mode {
             b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
-            b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
+            b"?47" => Self::AltScreen47(AltScreen47::new(&mode)),
+            b"?1047" => Self::AltScreen1047(AltScreen1047::new(&mode)),
             b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
             b"?1070" => Self::PrivateColorRegisters(PrivateColorRegisters::new(&mode)),
             b"?2004" => Self::BracketedPaste(RlBracket::new(&mode)),
@@ -266,6 +268,7 @@ impl ReportMode for Mode {
             Self::XtCBlink(xt_cblink) => xt_cblink.report(override_mode),
             Self::XtExtscrn(xt_extscrn) => xt_extscrn.report(override_mode),
             Self::AltScreen47(alt47) => alt47.report(override_mode),
+            Self::AltScreen1047(alt1047) => alt1047.report(override_mode),
             Self::SaveCursor1048(sc1048) => sc1048.report(override_mode),
             Self::XtMseWin(xt_mse_win) => xt_mse_win.report(override_mode),
             Self::BracketedPaste(rl_bracket) => rl_bracket.report(override_mode),
@@ -326,6 +329,7 @@ impl fmt::Display for Mode {
             Self::XtMseWin(xt_mse_win) => write!(f, "{xt_mse_win}"),
             Self::XtExtscrn(xt_extscrn) => write!(f, "{xt_extscrn}"),
             Self::AltScreen47(alt47) => write!(f, "{alt47}"),
+            Self::AltScreen1047(alt1047) => write!(f, "{alt1047}"),
             Self::SaveCursor1048(sc1048) => write!(f, "{sc1048}"),
             Self::BracketedPaste(bracketed_paste) => write!(f, "{bracketed_paste}"),
             Self::ReverseWrapAround(reverse_wrap_around) => write!(f, "{reverse_wrap_around}"),
@@ -1010,6 +1014,48 @@ mod tests {
         use super::super::modes::xtextscrn::XtExtscrn;
         let s = format!("{}", Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet)));
         assert_ne!(s, "");
+    }
+
+    #[test]
+    fn report_alt_screen1047() {
+        use super::super::modes::xtextscrn::AltScreen1047;
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecSet));
+        assert_eq!(mode.report(None), "?1047;1$y");
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecRst));
+        assert_eq!(mode.report(None), "?1047;2$y");
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecQuery));
+        assert_eq!(mode.report(None), "?1047;0$y");
+    }
+
+    #[test]
+    fn display_alt_screen1047() {
+        use super::super::modes::xtextscrn::AltScreen1047;
+        let s = format!(
+            "{}",
+            Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecSet))
+        );
+        assert_eq!(s, "AltScreen1047 (SET) Alternate Screen");
+    }
+
+    #[test]
+    fn parse_1047_is_distinct_from_47() {
+        use super::super::modes::xtextscrn::{AltScreen47, AltScreen1047};
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecSet),
+            Mode::AltScreen1047(AltScreen1047::Alternate)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecRst),
+            Mode::AltScreen1047(AltScreen1047::Primary)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecQuery),
+            Mode::AltScreen1047(AltScreen1047::Query)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?47", SetMode::DecSet),
+            Mode::AltScreen47(AltScreen47::Alternate)
+        );
     }
 
     #[test]

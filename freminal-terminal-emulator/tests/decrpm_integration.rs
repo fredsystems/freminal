@@ -476,3 +476,40 @@ fn decrpm_on_disconnected_channel_does_not_panic() {
     // Handler-owned, state-owned and ?2031 replies must all be dropped quietly.
     state.handle_incoming_data(b"\x1b[?7$p\x1b[?2004$p\x1b[?2031$p");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Alternate screen: ?47 / ?1047 report their own mode number
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_alt_screen_1047_reports_own_mode_number() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?1047$p");
+    assert_eq!(resp, "\x1b[?1047;2$y", "?1047 on primary → Ps=2");
+
+    state.handle_incoming_data(b"\x1b[?1047h");
+    assert!(
+        state.handler.is_alternate_screen(),
+        "?1047h must still enter the alternate screen"
+    );
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?1047$p");
+    assert_eq!(resp, "\x1b[?1047;1$y", "?1047 on alternate → Ps=1");
+
+    state.handle_incoming_data(b"\x1b[?1047l");
+    assert!(
+        !state.handler.is_alternate_screen(),
+        "?1047l must still leave the alternate screen"
+    );
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?1047$p");
+    assert_eq!(resp, "\x1b[?1047;2$y");
+}
+
+#[test]
+fn decrpm_alt_screen_47_still_reports_47() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?47$p");
+    assert_eq!(resp, "\x1b[?47;2$y");
+    state.handle_incoming_data(b"\x1b[?47h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?47$p");
+    assert_eq!(resp, "\x1b[?47;1$y");
+}
