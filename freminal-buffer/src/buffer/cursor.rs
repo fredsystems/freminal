@@ -256,13 +256,7 @@ impl Buffer {
     /// other.
     pub fn restore_cursor(&mut self) {
         if let Some(saved) = self.saved_cursor.clone() {
-            let screen_y = saved.cursor.pos.y.min(self.height.saturating_sub(1));
-            let buffer_y = self.visible_window_start(0) + screen_y;
-
-            // Ensure rows exist up to the target position, as CUP does.
-            while buffer_y >= self.rows.len() {
-                self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
-            }
+            let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
 
             self.cursor = saved.cursor;
             // Clamp to current dimensions after restore.
@@ -273,6 +267,22 @@ impl Buffer {
             self.debug_assert_invariants();
         }
         // No saved cursor → silent no-op.
+    }
+
+    /// Index into `self.rows` of the live-window row at `screen_y`, clamped to
+    /// the screen height, growing the store with `ScrollFill` rows until that
+    /// row exists (as CUP does).
+    ///
+    /// Shared by DECRC and the alternate-screen switch, which both place the
+    /// cursor at a screen row recorded on another store.
+    pub(in crate::buffer) fn buffer_row_for_screen_row(&mut self, screen_y: usize) -> usize {
+        let screen_y = screen_y.min(self.height.saturating_sub(1));
+        let buffer_y = self.visible_window_start(0) + screen_y;
+
+        while buffer_y >= self.rows.len() {
+            self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
+        }
+        buffer_y
     }
 
     /// Cursor Y expressed in "screen coordinates" (0..height-1).

@@ -486,6 +486,10 @@ fn alt_screen_primary_content_preserved() {
     h.assert_row(0, "");
     h.assert_row(1, "");
 
+    // The cursor keeps its screen position across the switch (xterm,
+    // Ghostty, WezTerm), so home it before writing at the top.
+    h.feed(b"\x1b[H");
+
     // Write something to the alternate screen.
     h.feed_str("Alternate content\r\n");
     h.assert_row(0, "Alternate content");

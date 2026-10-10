@@ -340,7 +340,10 @@ fn scroll_region_in_alternate_buffer() {
     let mut buf = Buffer::new(10, 5);
     tag_rows(&mut buf, 5);
 
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
+    buf.clear_alternate_screen();
+    // A switch keeps the cursor where it was; start drawing from the top.
+    buf.set_cursor_pos(Some(0), Some(0));
 
     // Tag alternate buffer rows
     for i in 0..5 {
@@ -370,24 +373,27 @@ fn scroll_region_in_alternate_buffer() {
 }
 
 #[test]
-fn scroll_region_state_not_restored_from_alternate() {
+fn scroll_region_is_shared_across_alternate_switch() {
     let mut buf = Buffer::new(10, 8);
     tag_rows(&mut buf, 8);
 
     // Set scroll region in primary
     buf.set_scroll_region(3, 6);
-    let primary_cursor_y = buf.cursor().pos.y;
+    assert_eq!(buf.scroll_region(), (2, 5));
 
-    buf.enter_alternate(0);
+    // A switch does not touch the margins: the alternate screen sees the
+    // region the primary set.
+    buf.switch_to_alternate();
+    assert_eq!(buf.scroll_region(), (2, 5));
 
-    // Set different scroll region in alternate
+    // Set a different scroll region in alternate
     buf.set_scroll_region(2, 5);
+    assert_eq!(buf.scroll_region(), (1, 4));
 
-    let _restored_offset = buf.leave_alternate();
-
-    // Primary cursor should be restored, but does scroll region get restored?
-    // Based on the code, scroll_region is NOT saved/restored
-    assert_eq!(buf.cursor().pos.y, primary_cursor_y);
+    // The margins are shared, so the primary now has the alternate's region
+    // rather than the one it set (the old code parked and restored it).
+    buf.switch_to_primary();
+    assert_eq!(buf.scroll_region(), (1, 4));
 }
 
 // ============================================================================

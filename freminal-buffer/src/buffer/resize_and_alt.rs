@@ -22,7 +22,8 @@ use crate::row::{Row, RowJoin, RowOrigin};
 
 use super::command_block_log::CommandBlockLog;
 use super::reflow_remap::{OldRowMeta, ReflowRemap};
-use super::{Buffer, RowStore, SavedPrimaryState};
+use super::{Buffer, ParkedScreen, RowStore};
+use crate::image_store::ImageStore;
 
 impl Buffer {
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
@@ -36,6 +37,15 @@ impl Buffer {
         if !width_changed && !height_changed {
             return scroll_offset;
         }
+
+        let (old_width, old_height) = (self.width, self.height);
+
+        // The parked screens are resized last, from the old dimensions. They
+        // are taken out for the duration so that the invariant checks run by
+        // the steps below never see a parked store whose size has not caught
+        // up with `self.width` / `self.height` yet.
+        let parked_primary = self.parked_primary.take();
+        let parked_alternate = self.parked_alternate.take();
 
         // ---- NO BLANKET DECOMPACT NEEDED (Task 118.3 fix / 118.x follow-up) ----
         // An earlier version of this function force-decompacted every row
@@ -91,7 +101,7 @@ impl Buffer {
             // `self.height` is still the OLD height here (updated at line 785).
             //
             // If the scroll region covered the entire old screen (which is the
-            // default after DECSTBM reset or after `enter_alternate`), expand it
+            // default after a DECSTBM reset), expand it
             // to cover the entire NEW screen.  Without this, growing the buffer
             // (e.g. from 29→58 rows when a split pane is closed) leaves the
             // scroll region at the old height.  Full-screen TUIs like nvim that
@@ -168,25 +178,37 @@ impl Buffer {
         // idle tick.
         let final_offset = self.enforce_scrollback_limit(after_resize);
 
-        // When on the alternate screen, also resize the saved primary buffer
-        // so that `leave_alternate` restores a buffer that matches the current
-        // terminal dimensions.  Without this, exiting a full-screen TUI (e.g.
-        // nvim) after a pane resize restores the primary buffer at the old
-        // dimensions, causing immediate rendering artifacts.
-        if self.kind == BufferType::Alternate
-            && let Some(saved) = self.saved_primary.take()
-        {
-            let (saved, remap) =
-                Self::resize_saved_primary(saved, new_width, new_height, self.scrollback_limit);
+        // Resize whichever screen is parked, so every store matches the
+        // buffer's dimensions and a later switch installs a screen of the
+        // current size. Without this, leaving a full-screen TUI (e.g. nvim)
+        // after a pane resize would restore a screen at the old dimensions,
+        // causing immediate rendering artifacts.
+        if let Some(parked) = parked_primary {
+            let (parked, remap) = Self::resize_saved_primary(
+                parked,
+                (old_width, old_height),
+                (new_width, new_height),
+                self.scrollback_limit,
+            );
             // The primary marks held in `self` belong to the store that was
             // just reflowed / trimmed; translate them with it (primary marks
             // were otherwise left pointing at pre-resize rows, Task 125.14).
-            let primary_base = saved.rows.base();
-            self.saved_primary = Some(saved);
+            let primary_base = parked.rows.base();
+            self.parked_primary = Some(parked);
             if let Some(remap) = remap {
                 self.record_reflow_remap(remap);
             }
             self.prune_marks_below(primary_base);
+        }
+        if let Some(parked) = parked_alternate {
+            // The alternate screen never reflows and its marks are dropped
+            // whenever it is left, so there is no remap and nothing to prune.
+            self.parked_alternate = Some(Self::resize_parked_alternate(
+                parked,
+                (old_width, old_height),
+                (new_width, new_height),
+                self.scrollback_limit,
+            ));
         }
 
         self.debug_assert_invariants();
@@ -237,34 +259,73 @@ impl Buffer {
         self.release_unreferenced_cell_owned_images(touched);
     }
 
-    /// Resize a saved primary buffer to new dimensions.
+    /// Resize the parked primary screen to new dimensions.
     ///
     /// Builds a temporary primary `Buffer`, applies `set_size`, and extracts
-    /// the updated state back into a `SavedPrimaryState`.  This reuses all
-    /// the existing resize logic (reflow, height adjust, scroll region
-    /// validation, cursor clamping, scrollback limit enforcement) instead of
-    /// duplicating it.
+    /// the updated state back into a [`ParkedScreen`].  This reuses all
+    /// the existing resize logic (reflow, height adjust, cursor clamping,
+    /// scrollback limit enforcement) instead of duplicating it.
     ///
     /// Also returns the [`ReflowRemap`] of the reflow, if one happened, so the
     /// caller can translate the primary-screen row references it holds
     /// (prompt marks, command blocks, kitty placements) the same way.
     fn resize_saved_primary(
-        saved: SavedPrimaryState,
-        new_width: usize,
-        new_height: usize,
+        parked: ParkedScreen,
+        old_size: (usize, usize),
+        new_size: (usize, usize),
         scrollback_limit: usize,
-    ) -> (SavedPrimaryState, Option<ReflowRemap>) {
-        // Reconstruct a temporary primary Buffer from the saved state.
-        let old_width = saved.rows.first().map_or(new_width, Row::max_width);
-        let old_height = saved.height;
+    ) -> (ParkedScreen, Option<ReflowRemap>) {
+        Self::resize_parked_screen(
+            parked,
+            BufferType::Primary,
+            old_size,
+            new_size,
+            scrollback_limit,
+        )
+    }
 
+    /// Resize the parked alternate screen to new dimensions.
+    ///
+    /// The same mechanism as [`Self::resize_saved_primary`], with the
+    /// temporary `Buffer` of kind `Alternate`, so `set_size` takes its
+    /// no-reflow branch (clip to the new width, reconcile the row count with
+    /// the new height).
+    fn resize_parked_alternate(
+        parked: ParkedScreen,
+        old_size: (usize, usize),
+        new_size: (usize, usize),
+        scrollback_limit: usize,
+    ) -> ParkedScreen {
+        Self::resize_parked_screen(
+            parked,
+            BufferType::Alternate,
+            old_size,
+            new_size,
+            scrollback_limit,
+        )
+        .0
+    }
+
+    /// Shared body of [`Self::resize_saved_primary`] and
+    /// [`Self::resize_parked_alternate`]: run `set_size` on a throwaway
+    /// `Buffer` of the given `kind` that holds the parked screen's state.
+    ///
+    /// The temporary buffer's cursor is the screen's `reflow_anchor`, which is
+    /// what a reflow or height shrink anchors on; the margins are full-screen
+    /// and are discarded (margins are shared and live on the real buffer).
+    fn resize_parked_screen(
+        parked: ParkedScreen,
+        kind: BufferType,
+        (old_width, old_height): (usize, usize),
+        (new_width, new_height): (usize, usize),
+        scrollback_limit: usize,
+    ) -> (ParkedScreen, Option<ReflowRemap>) {
         let mut tmp = Self {
-            rows: saved.rows,
-            // This is a throwaway temporary `Buffer` reconstructed fresh
-            // from `SavedPrimaryState` on every call (`SavedPrimaryState`
-            // has no `merge_cache` field of its own to restore), so there
-            // is no stale merge to invalidate — it starts `None` like any
-            // other freshly constructed `Buffer`.
+            rows: parked.rows,
+            // A throwaway temporary `Buffer` reconstructed fresh from the
+            // `ParkedScreen` on every call (it has no `merge_cache` field of
+            // its own to restore), so there is no stale merge to invalidate:
+            // it starts `None` like any other freshly constructed `Buffer`.
             merge_cache: None,
             // Nothing ever flattens this throwaway buffer, so no epoch stamp
             // is ever issued from it and it cannot collide with the real
@@ -274,54 +335,50 @@ impl Buffer {
             row_epoch_counter: 0,
             width: old_width,
             height: old_height,
-            cursor: saved.cursor,
+            cursor: parked.reflow_anchor,
             current_tag: FormatTag::default(),
             // The caller's configured limit, not the compiled-in default: this
             // buffer's `enforce_scrollback_limit` evicts whatever exceeds it,
             // so a lower default here would silently discard primary
-            // scrollback on an alt-screen resize.
+            // scrollback on a resize while the alternate screen is up.
             scrollback_limit,
             auto_detect_urls: true,
-            kind: BufferType::Primary,
-            saved_primary: None,
+            kind,
+            parked_primary: None,
+            parked_alternate: None,
             next_alt_base: RowNumber::ALTERNATE_BASE,
             pending_reflow_remap: None,
-            saved_cursor: saved.saved_cursor,
+            saved_cursor: parked.saved_cursor,
             lnm_enabled: Lnm::LineFeed,
             wrap_enabled: Decawm::AutoWrap,
             preserve_scrollback_anchor: false,
-            scroll_region_top: saved.scroll_region_top,
-            scroll_region_bottom: saved.scroll_region_bottom,
-            scroll_region_left: saved.scroll_region_left,
-            scroll_region_right: saved.scroll_region_right,
+            scroll_region_top: 0,
+            scroll_region_bottom: old_height.saturating_sub(1),
+            scroll_region_left: 0,
+            scroll_region_right: old_width.saturating_sub(1),
             declrmm_enabled: Declrmm::Disabled,
             tab_stops: Self::default_tab_stops(old_width),
             decom_enabled: Decom::NormalCursor,
-            image_store: saved.image_store,
-            image_cell_count: saved.image_cell_count,
+            image_store: parked.image_store,
+            image_cell_count: parked.image_cell_count,
             prompt_rows: Vec::new(),
             command_blocks: CommandBlockLog::new(),
-            // Task 119: carried through so a resize while on the alternate
-            // screen (which reflows/enforces-scrollback-limit against this
+            // Task 119: carried through so a resize while the other screen is
+            // up (which reflows/enforces-scrollback-limit against this
             // throwaway `Buffer`, not `self`) keeps any compressed primary
             // scrollback blocks correctly in lockstep.
-            blocks: saved.blocks,
-            next_block_id: saved.next_block_id,
+            blocks: parked.blocks,
+            next_block_id: parked.next_block_id,
             decompress_scratch: Vec::new(),
         };
 
-        let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);
+        // A parked screen has no scroll offset: the view is not tied to it.
+        tmp.set_size(new_width, new_height, 0);
         let remap = tmp.pending_reflow_remap.take();
 
-        let resized = SavedPrimaryState {
+        let resized = ParkedScreen {
             rows: tmp.rows,
-            cursor: tmp.cursor,
-            scroll_offset: new_offset,
-            height: new_height,
-            scroll_region_top: tmp.scroll_region_top,
-            scroll_region_bottom: tmp.scroll_region_bottom,
-            scroll_region_left: tmp.scroll_region_left,
-            scroll_region_right: tmp.scroll_region_right,
+            reflow_anchor: tmp.cursor,
             saved_cursor: tmp.saved_cursor,
             image_store: tmp.image_store,
             image_cell_count: tmp.image_cell_count,
@@ -1197,138 +1254,147 @@ impl Buffer {
         self.set_cursor_pos(Some(0), Some(0));
     }
 
-    /// Switch to the alternate screen buffer.
+    /// Switch to the alternate screen.
     ///
-    /// Enter the alternate screen buffer.
+    /// Idempotent: a no-op when the alternate screen is already active. The
+    /// primary screen is parked (rows, DECSC slot, image store, compressed
+    /// blocks) and the alternate screen is installed from where it was last
+    /// parked, so its contents persist across sessions; a first-ever (or
+    /// post-RIS) alternate screen is a blank `height`-row store. This does
+    /// **not** clear: callers that want a blank alternate screen follow with
+    /// [`Self::clear_alternate_screen`].
     ///
-    /// Saves the primary buffer state (rows, cursor, scroll region, image store)
-    /// so it can be restored by [`Self::leave_alternate`]. Tab stops are NOT saved —
-    /// they are shared between primary and alternate screens (matching xterm).
-    ///
-    /// The caller must pass the current `scroll_offset` from `ViewState` so it can
-    /// be saved and restored later.  The alternate screen always starts at offset 0;
-    /// the caller should set `ViewState::scroll_offset = 0` after this call.
-    pub fn enter_alternate(&mut self, scroll_offset: usize) {
-        // If we're already in the alternate buffer, do nothing.
+    /// The cursor keeps its **screen** position and every cursor field (the
+    /// alternate screen has no scrollback, so the row index on it is the
+    /// screen row). The scroll margins are shared by both screens and are not
+    /// touched. Tab stops are shared too, matching xterm.
+    pub fn switch_to_alternate(&mut self) {
         if self.kind == BufferType::Alternate {
             return;
         }
 
-        // Save primary state (rows + cursor + scroll_offset + cache).
-        // Task 119: also move `blocks` over verbatim (the per-row block
-        // references travel inside the `RowStore`) — the alternate screen
-        // never accumulates scrollback and so never compresses anything, so
-        // it starts (and stays) with an empty `blocks` map and an all-`None`
-        // block map.
-        // `next_block_id` is a buffer-wide monotonic counter, not something
-        // that is meaningfully "primary" or "alternate"; it is saved here
-        // purely so `resize_saved_primary`'s reconstructed temporary
-        // `Buffer` has a value to use, not because the alternate screen
-        // ever advances it (it can't: `compress_scrollback_block` always
-        // no-ops there — no scrollback exists to compress).
-        // The primary rows (with their cache entries and block references) are
-        // *moved* into the saved state and replaced by a fresh blank screen of
-        // exactly `height` rows, all dirty (`None` cache entries) and none
-        // compressed. Moving rather than cloning is unobservable: the live
-        // store is overwritten with the blank screen regardless, so the old
-        // clone was only ever the saved copy's source.
-        //
-        // The alternate screen's rows are numbered in their own namespace,
-        // continuing past every earlier alternate session (Task 125.14), so a
-        // primary-screen row number can never alias an alternate row.
-        let blank_screen = RowStore::from_rows_at(
-            self.next_alt_base,
-            (0..self.height).map(|_| Row::new(self.width)),
-        );
-        let saved = SavedPrimaryState {
-            rows: std::mem::replace(&mut self.rows, blank_screen),
-            cursor: self.cursor.clone(),
-            scroll_offset,
-            height: self.height,
-            scroll_region_top: self.scroll_region_top,
-            scroll_region_bottom: self.scroll_region_bottom,
-            scroll_region_left: self.scroll_region_left,
-            scroll_region_right: self.scroll_region_right,
-            saved_cursor: self.saved_cursor.clone(),
-            image_store: self.image_store.clone(),
-            image_cell_count: self.image_cell_count,
-            blocks: std::mem::take(&mut self.blocks),
-            next_block_id: self.next_block_id,
-        };
-        self.saved_primary = Some(saved);
+        let screen_y = self.cursor_screen_pos().y;
 
-        // Switch to alternate buffer.
+        let incoming = self.parked_alternate.take().unwrap_or_else(|| {
+            // The alternate screen's rows are numbered in their own
+            // namespace (Task 125.14), so a primary row number can never
+            // alias an alternate row.
+            ParkedScreen {
+                rows: RowStore::from_rows_at(
+                    self.next_alt_base,
+                    (0..self.height).map(|_| Row::new(self.width)),
+                ),
+                reflow_anchor: CursorState::default(),
+                saved_cursor: None,
+                image_store: ImageStore::new(),
+                image_cell_count: 0,
+                blocks: std::collections::HashMap::new(),
+                next_block_id: self.next_block_id,
+            }
+        });
+        self.parked_primary = Some(self.swap_active_screen(incoming));
         self.kind = BufferType::Alternate;
 
-        // Fresh screen: exactly `height` empty rows, all dirty (None cache
-        // entries) — installed above via the `mem::replace` into
-        // `saved.rows`.
-        //
-        // Task 121 Part C: the row cache was just replaced wholesale with a
-        // fresh, blank alternate screen — the primary screen's stale
-        // `merge_cache` must not be reused against it (a matching `fp` here
-        // would be entirely coincidental).
+        // Task 121 Part C: the row cache was just replaced wholesale — the
+        // outgoing screen's `merge_cache` must not be reused against it (a
+        // matching `fp` here would be entirely coincidental).
         self.merge_cache = None;
 
-        // Alternate screen has no images.
+        self.cursor.pos.y = self.buffer_row_for_screen_row(screen_y);
+
+        self.debug_assert_invariants();
+        self.debug_assert_screen_parking();
+    }
+
+    /// Switch to the primary screen.
+    ///
+    /// Idempotent: a no-op when the primary screen is already active. The
+    /// alternate screen is parked intact (its contents persist) and the
+    /// primary screen is restored, with its rows, DECSC slot, image store and
+    /// compressed blocks.
+    ///
+    /// Marks in the alternate namespace are dropped: the GUI never shows
+    /// gutters on the alternate screen, and keeping them would resurrect stale
+    /// marks on a later session.
+    ///
+    /// The cursor keeps its screen position and every cursor field, and the
+    /// scroll margins are not touched (see [`Self::switch_to_alternate`]).
+    pub fn switch_to_primary(&mut self) {
+        if self.kind == BufferType::Primary {
+            return;
+        }
+
+        let Some(incoming) = self.parked_primary.take() else {
+            // Impossible by the parking invariant (the alternate screen is
+            // only ever entered through `switch_to_alternate`, which parks
+            // the primary).
+            debug_assert!(false, "alternate screen active without a parked primary");
+            return;
+        };
+
+        let screen_y = self.cursor_screen_pos().y;
+
+        self.parked_alternate = Some(self.swap_active_screen(incoming));
+        self.kind = BufferType::Primary;
+        self.drop_alternate_marks();
+
+        // As in `switch_to_alternate`: the row cache was replaced wholesale.
+        self.merge_cache = None;
+
+        self.cursor.pos.y = self.buffer_row_for_screen_row(screen_y);
+
+        self.debug_assert_invariants();
+        self.debug_assert_screen_parking();
+    }
+
+    /// Blank the alternate screen.
+    ///
+    /// Valid only while the alternate screen is active; on the primary screen
+    /// it is a no-op. The rows are replaced by a fresh `height`-row store
+    /// numbered from the old store's `next_number`, so every blank row has a
+    /// number no earlier alternate row had: a mark, placement or horizon
+    /// referring to the old rows can never alias the new ones. The alternate
+    /// image store is emptied and alternate-namespace marks are dropped.
+    ///
+    /// The cursor is not moved: its row index stays valid because the
+    /// alternate store always holds exactly `height` rows. Blank cells carry
+    /// default attributes (not the current background; BCE is not applied to
+    /// this clear).
+    pub fn clear_alternate_screen(&mut self) {
+        if self.kind != BufferType::Alternate {
+            return;
+        }
+
+        self.rows = RowStore::from_rows_at(
+            self.rows.next_number(),
+            (0..self.height).map(|_| Row::new(self.width)),
+        );
         self.image_store.clear();
         self.image_cell_count = 0;
-
-        // Reset cursor for the alternate screen.
-        self.cursor = CursorState::default();
-
-        // Alternate screen starts with a full-screen scroll region.
-        self.reset_scroll_region_to_full();
+        self.drop_alternate_marks();
+        self.merge_cache = None;
 
         self.debug_assert_invariants();
     }
 
-    /// Leave the alternate screen and restore the primary buffer.
+    /// Exchange the active screen's per-screen state with `incoming`'s,
+    /// returning the outgoing screen as a [`ParkedScreen`] whose
+    /// `reflow_anchor` is the current cursor.
     ///
-    /// Restores rows, cursor, scroll region, and image store from the saved
-    /// primary state. Tab stops are NOT restored — they are shared between
-    /// primary and alternate screens, so any changes made in the alternate
-    /// screen persist (matching xterm behavior).
-    ///
-    /// Returns the `scroll_offset` that was saved when `enter_alternate` was
-    /// called.  The caller should store this back into `ViewState::scroll_offset`.
-    /// Returns `0` if there was no saved primary state.
-    pub fn leave_alternate(&mut self) -> usize {
-        // Already in the primary buffer — nothing to do.
-        if self.kind == BufferType::Primary {
-            return 0;
-        }
-
-        self.kind = BufferType::Primary;
-
-        if let Some(saved) = self.saved_primary.take() {
-            // Restore saved primary state.
-            let restored_offset = saved.scroll_offset;
-            // The next alternate session continues past this one's rows, and
-            // every mark taken during this one is dropped with its rows.
-            self.next_alt_base = self.rows.next_number();
-            self.rows = saved.rows;
-            self.drop_alternate_marks();
-            // Task 121 Part C: the row cache was just replaced wholesale with
-            // the restored primary screen's cache — the alternate screen's
-            // stale `merge_cache` must not be reused against it.
-            self.merge_cache = None;
-            self.cursor = saved.cursor;
-            self.scroll_region_top = saved.scroll_region_top;
-            self.scroll_region_bottom = saved.scroll_region_bottom;
-            self.scroll_region_left = saved.scroll_region_left;
-            self.scroll_region_right = saved.scroll_region_right;
-            self.saved_cursor = saved.saved_cursor;
-            self.image_store = saved.image_store;
-            self.image_cell_count = saved.image_cell_count;
-            self.blocks = saved.blocks;
-            self.next_block_id = saved.next_block_id;
-
-            self.debug_assert_invariants();
-            restored_offset
-        } else {
-            self.debug_assert_invariants();
-            0
+    /// Moves, never clones (`mem::replace` / `mem::take`), so a screen with
+    /// images or compressed scrollback costs the same to park as an empty one.
+    fn swap_active_screen(&mut self, incoming: ParkedScreen) -> ParkedScreen {
+        ParkedScreen {
+            rows: std::mem::replace(&mut self.rows, incoming.rows),
+            reflow_anchor: self.cursor.clone(),
+            saved_cursor: std::mem::replace(&mut self.saved_cursor, incoming.saved_cursor),
+            image_store: std::mem::replace(&mut self.image_store, incoming.image_store),
+            image_cell_count: std::mem::replace(
+                &mut self.image_cell_count,
+                incoming.image_cell_count,
+            ),
+            blocks: std::mem::replace(&mut self.blocks, incoming.blocks),
+            next_block_id: std::mem::replace(&mut self.next_block_id, incoming.next_block_id),
         }
     }
 }

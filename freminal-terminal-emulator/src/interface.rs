@@ -216,7 +216,7 @@ pub struct TerminalEmulator {
     /// it. So instead of dropping the cache on a switch, we **swap** it with
     /// the stashed cache for the buffer we are switching *to* (issue #405,
     /// alt/primary one-frame tax). The very next flatten then compares
-    /// against the correct same-buffer baseline, and `leave_alternate` restoring
+    /// against the correct same-buffer baseline, and `switch_to_primary` restoring
     /// byte-identical primary rows no longer forces a full-flatten redraw.
     ///
     /// `previous_visible_snap` always holds the cache for the buffer identified
@@ -735,7 +735,7 @@ impl TerminalEmulator {
         // after a switch, so it must not be reused directly. But dropping it
         // outright forces the next flatten to needlessly re-run even when the
         // buffer we switched *to* was restored byte-identical to what we last
-        // rendered on it (the common `leave_alternate` case). Instead we
+        // rendered on it (the common `switch_to_primary` case). Instead we
         // swap the active cache with the stashed cache for the buffer we are
         // switching to: `previous_visible_snap` becomes that buffer's last-seen
         // baseline (or `None` if we've never rendered it), and the buffer we
@@ -1716,6 +1716,57 @@ mod tests {
         assert_eq!(snap2.max_scroll_offset, 0);
     }
 
+    /// The visible text of a snapshot: every ASCII glyph, in order, with row
+    /// breaks and padding dropped.
+    fn visible_text(snap: &TerminalSnapshot) -> String {
+        snap.visible_chars
+            .iter()
+            .filter_map(|c| match c {
+                freminal_common::buffer_states::tchar::TChar::Ascii(b) if *b != b' ' => {
+                    Some(char::from(*b))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_snapshot_reentered_alternate_screen_is_blank_and_primary_survives() {
+        // Task 131.5: the alternate screen's contents persist while parked, so
+        // the blank screen a second `?1049h` shows is the *clear*, and no
+        // per-buffer snapshot cache (which still holds the previous alternate
+        // session's flattened "ALT") may mask it.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"primary");
+        let _ = emu.build_snapshot();
+
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        emu.handle_incoming_data(b"ALT");
+        let first_alt = emu.build_snapshot();
+        assert!(first_alt.is_alternate_screen);
+        assert!(visible_text(&first_alt).contains("ALT"));
+
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let back = emu.build_snapshot();
+        assert!(!back.is_alternate_screen);
+        assert_eq!(visible_text(&back), "primary", "primary text intact");
+
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let second_alt = emu.build_snapshot();
+        assert!(second_alt.is_alternate_screen);
+        assert_eq!(
+            visible_text(&second_alt),
+            "",
+            "a re-entered alternate screen is blank: the clear must not be \
+             masked by the stashed alternate snapshot cache"
+        );
+
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let primary_again = emu.build_snapshot();
+        assert!(!primary_again.is_alternate_screen);
+        assert_eq!(visible_text(&primary_again), "primary");
+    }
+
     #[test]
     fn build_snapshot_alternate_screen_switch_invalidates_cache() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
@@ -1740,7 +1791,7 @@ mod tests {
         // `visible_chars` Arc allocation (proving the per-buffer cache swap in
         // `interface.rs` preserves the primary baseline across the alt-screen
         // excursion), even though `row_epochs` cannot make the same claim —
-        // `enter_alternate`/`leave_alternate` unconditionally clear
+        // `switch_to_alternate`/`switch_to_primary` unconditionally clear
         // `freminal_buffer::Buffer::merge_cache`, an independent cache with no
         // per-buffer stash, so `row_epochs` conservatively takes the "no
         // cached merge covers this window" fallback and re-stamps every row.
@@ -1763,7 +1814,7 @@ mod tests {
         let alt_snap = emu.build_snapshot();
         assert!(alt_snap.is_alternate_screen);
 
-        // Leave the alternate screen — `leave_alternate` restores the primary
+        // Leave the alternate screen — `switch_to_primary` restores the primary
         // rows exactly as they were. The restored content is byte-identical to
         // what we last rendered on primary, so the returning snapshot must
         // reuse the same `visible_chars` Arc (the fix; previously verified via
@@ -1824,7 +1875,7 @@ mod tests {
         // GUI side.
         //
         // `row_epochs` is asserted to re-stamp on every bounce rather than
-        // asserted unchanged: `enter_alternate`/`leave_alternate`
+        // asserted unchanged: `switch_to_alternate`/`switch_to_primary`
         // unconditionally clear `freminal_buffer::Buffer::merge_cache`
         // (an independent cache with no per-buffer stash), so the epoch
         // conservatively over-reports change on every alt-screen round trip

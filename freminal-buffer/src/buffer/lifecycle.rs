@@ -60,7 +60,8 @@ impl Buffer {
             scrollback_limit: 10_000,
             auto_detect_urls: true,
             kind: BufferType::Primary,
-            saved_primary: None,
+            parked_primary: None,
+            parked_alternate: None,
             next_alt_base: RowNumber::ALTERNATE_BASE,
             pending_reflow_remap: None,
             saved_cursor: None,
@@ -103,27 +104,34 @@ impl Buffer {
     pub fn full_reset(&mut self) {
         // The primary namespace continues past the primary content being
         // discarded (which, on the alternate screen, is parked in
-        // `saved_primary`); the alternate counter continues past the live
-        // alternate screen.
+        // `parked_primary`); the alternate namespace continues past whichever
+        // alternate store is being discarded, the live one or the parked one,
+        // so alternate numbering stays monotonic across the reset.
         //
-        // `enter_alternate` always parks the primary store in `saved_primary`
-        // and `leave_alternate` is the only thing that takes it back, so on
-        // the alternate screen it is always present. If that invariant were
-        // ever broken the primary numbering is unrecoverable; the fallback
+        // The alternate screen is only ever entered through
+        // `switch_to_alternate`, which parks the primary store, so on the
+        // alternate screen it is always present. If that invariant were ever
+        // broken the primary numbering is unrecoverable; the fallback
         // restarts it at zero, which can alias only numbers held outside the
         // buffer, and RIS clears every such holder (the marks below, the
         // handler's kitty placements).
-        debug_assert!(
-            self.kind == BufferType::Primary || self.saved_primary.is_some(),
-            "alternate screen active without a parked primary store"
-        );
-        let primary_next = match (self.kind, self.saved_primary.as_ref()) {
-            (BufferType::Alternate, Some(saved)) => saved.rows.next_number(),
-            (BufferType::Alternate, None) => RowNumber::ZERO,
-            (BufferType::Primary, _) => self.rows.next_number(),
+        self.debug_assert_screen_parking();
+        let primary_next = match self.kind {
+            BufferType::Alternate => self
+                .parked_primary
+                .as_ref()
+                .map_or(RowNumber::ZERO, |parked| parked.rows.next_number()),
+            BufferType::Primary => self.rows.next_number(),
         };
-        if self.kind == BufferType::Alternate {
-            self.next_alt_base = self.rows.next_number();
+        let discarded_alternate_next = match self.kind {
+            BufferType::Alternate => Some(self.rows.next_number()),
+            BufferType::Primary => self
+                .parked_alternate
+                .as_ref()
+                .map(|parked| parked.rows.next_number()),
+        };
+        if let Some(next) = discarded_alternate_next {
+            self.next_alt_base = self.next_alt_base.max(next);
         }
         self.rows = RowStore::from_rows_at(primary_next, [Row::new(self.width)]);
         // Task 121 Part C: the row cache above was just replaced wholesale
@@ -140,7 +148,8 @@ impl Buffer {
         self.cursor = CursorState::default();
         self.current_tag = FormatTag::default();
         self.kind = BufferType::Primary;
-        self.saved_primary = None;
+        self.parked_primary = None;
+        self.parked_alternate = None;
         self.saved_cursor = None;
         self.lnm_enabled = Lnm::LineFeed;
         self.wrap_enabled = Decawm::AutoWrap;
@@ -488,6 +497,8 @@ impl Buffer {
             );
         }
 
+        self.debug_assert_parked_screens();
+
         // Scrollback invariants by buffer kind.
         match self.kind {
             BufferType::Primary => {
@@ -562,6 +573,70 @@ impl Buffer {
         self.debug_assert_image_horizons();
     }
 
+    /// The active screen is never also parked, and each parked store is
+    /// internally consistent and the size of the screen it will become.
+    ///
+    /// Checked per parked screen: the flatten cache and block map are
+    /// index-parallel to the rows, `image_cell_count` matches the image cells
+    /// actually present, and the alternate store holds exactly `height` rows.
+    /// (That a parked primary is *present* while the alternate is active is
+    /// checked by [`Self::debug_assert_screen_parking`] at the switch points;
+    /// the throwaway buffers `set_size` builds to resize a parked screen are
+    /// alternate-kind with nothing parked, so it cannot live here.)
+    #[cfg(debug_assertions)]
+    fn debug_assert_parked_screens(&self) {
+        match self.kind {
+            BufferType::Primary => debug_assert!(
+                self.parked_primary.is_none(),
+                "primary screen is active but also parked"
+            ),
+            BufferType::Alternate => debug_assert!(
+                self.parked_alternate.is_none(),
+                "alternate screen is active but also parked"
+            ),
+        }
+
+        for (name, parked) in [
+            ("primary", self.parked_primary.as_ref()),
+            ("alternate", self.parked_alternate.as_ref()),
+        ] {
+            let Some(parked) = parked else { continue };
+            debug_assert_eq!(
+                parked.rows.cache().len(),
+                parked.rows.len(),
+                "parked {name} row cache length != rows length"
+            );
+            debug_assert_eq!(
+                parked.rows.block_map().len(),
+                parked.rows.len(),
+                "parked {name} row block map length != rows length"
+            );
+            let actual_image_cells: usize = parked.rows.iter().map(Row::count_image_cells).sum();
+            debug_assert_eq!(
+                parked.image_cell_count, actual_image_cells,
+                "parked {name} image_cell_count != actual image cells"
+            );
+        }
+        if let Some(parked) = &self.parked_alternate {
+            debug_assert_eq!(
+                parked.rows.len(),
+                self.height,
+                "parked alternate store must have exactly `height` rows"
+            );
+        }
+    }
+
+    /// The alternate screen is active exactly when the primary screen is
+    /// parked. Called where a screen is switched or discarded.
+    #[cfg(debug_assertions)]
+    pub(in crate::buffer) fn debug_assert_screen_parking(&self) {
+        debug_assert_eq!(
+            self.kind == BufferType::Alternate,
+            self.parked_primary.is_some(),
+            "the primary screen must be parked exactly while the alternate is active"
+        );
+    }
+
     /// Every compressed block's `live_rows` equals the number of block-map
     /// entries naming it, and every block-map entry names a stored block
     /// (Task 125.15). O(rows).
@@ -632,6 +707,10 @@ impl Buffer {
     #[cfg(not(debug_assertions))]
     #[inline]
     pub(in crate::buffer) fn debug_assert_invariants(&self) {}
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub(in crate::buffer) fn debug_assert_screen_parking(&self) {}
 
     pub(in crate::buffer) fn push_row(&mut self, origin: RowOrigin, join: RowJoin) {
         let row = Row::new_with_origin(self.width, origin, join);

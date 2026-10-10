@@ -72,6 +72,9 @@ mod resize_and_alt_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod row_number_tests;
 mod row_store;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod screen_switch_tests;
 mod scroll;
 mod tabs;
 
@@ -108,7 +111,7 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
 /// field's doc).
 ///
 /// The type is `pub` only so it can appear in the (also `pub`)
-/// [`SavedPrimaryState::blocks`] field without a private-type-in-public-interface
+/// [`ParkedScreen::blocks`] field without a private-type-in-public-interface
 /// error; its field stays private, so nothing outside `crate::buffer` can
 /// construct, inspect, or match on one — it is an opaque handle everywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,7 +207,8 @@ pub struct Buffer {
     ///      *identity* differs from what a stale, fp-matching `MergeCache`
     ///      was built from, without marking every affected row dirty or
     ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
-    ///      [`Buffer::enter_alternate`], and [`Buffer::leave_alternate`].
+    ///      [`Buffer::switch_to_alternate`], [`Buffer::switch_to_primary`], and
+    ///      [`Buffer::clear_alternate_screen`].
     ///    - **Confined in-place row rotation**: `scroll_slice_up` and
     ///      `scroll_slice_down` (`scroll.rs`). These relocate already-clean,
     ///      non-`None` cache entries between row indices (a moved row keeps
@@ -315,19 +319,31 @@ pub struct Buffer {
     ///   - Switching back restores primary buffer's saved state
     pub(in crate::buffer) kind: BufferType,
 
-    /// Saved primary buffer content, cursor, and `scroll_offset`,
-    /// used when switching to and from alternate buffer.
-    /// The scroll offset is owned by the caller (`ViewState`) and passed
-    /// in / returned from `enter_alternate` / `leave_alternate`.
-    pub(in crate::buffer) saved_primary: Option<SavedPrimaryState>,
+    /// The primary screen, parked while the alternate screen is active.
+    ///
+    /// Invariant: `None` while [`Self::kind`] is `Primary`; `Some` while it
+    /// is `Alternate`.
+    pub(in crate::buffer) parked_primary: Option<ParkedScreen>,
 
-    /// First row number of the *next* alternate-screen session (Task 125.14).
+    /// The alternate screen, parked while the primary screen is active.
+    ///
+    /// Alternate contents persist across sessions, so this is `Some` once the
+    /// alternate screen has been entered and left (and stays so until RIS).
+    /// `None` while on the primary screen means "never entered, or reset".
+    /// Always `None` while [`Self::kind`] is `Alternate`.
+    pub(in crate::buffer) parked_alternate: Option<ParkedScreen>,
+
+    /// First row number of a first-ever (or post-RIS) alternate screen
+    /// (Task 125.14).
     ///
     /// The alternate screen's rows are numbered in their own namespace
-    /// starting at [`RowNumber::ALTERNATE_BASE`], and this counter advances
-    /// past every alternate session's rows when it ends, so an alternate row
-    /// number is never re-issued across sessions (a mark left over from an
-    /// earlier session can never alias a row of a later one).
+    /// starting at [`RowNumber::ALTERNATE_BASE`]. Alternate contents persist
+    /// across sessions now ([`Buffer::clear_alternate_screen`] re-issues rows
+    /// from the old store's `next_number`), so this seed is consulted only
+    /// when no alternate store exists yet. [`Buffer::full_reset`] advances it
+    /// past every discarded alternate store, so an alternate row number is
+    /// never re-issued (a mark or placement left over from an earlier screen
+    /// can never alias a row of a later one).
     pub(in crate::buffer) next_alt_base: RowNumber,
 
     /// Row translation produced by width-changing reflows since the last
@@ -336,7 +352,8 @@ pub struct Buffer {
     pub(in crate::buffer) pending_reflow_remap: Option<ReflowRemap>,
 
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
-    /// Independent of the alternate-screen save (`saved_primary`).
+    /// Per screen: parked alongside the rows in [`ParkedScreen::saved_cursor`]
+    /// when the screen is switched away, so each screen has its own slot.
     ///
     /// The saved position is screen-relative (xterm's `CursorSave`), not
     /// attached to any stored row; see [`cursor::SavedCursor`] (Task 125.C6).
@@ -443,53 +460,47 @@ pub struct Buffer {
     /// avoiding a fresh allocation on every block decompression inside
     /// `Buffer::ensure_decompressed`. Purely a transient perf buffer with no
     /// observable state, so it is *not* carried across alternate-screen
-    /// save/restore (`SavedPrimaryState` has no equivalent field) — each
+    /// parking (`ParkedScreen` has no equivalent field) — each
     /// side just uses (and regrows) its own.
     pub(in crate::buffer) decompress_scratch: Vec<u8>,
 }
 
-/// Snapshot of the primary buffer state saved when entering the alternate screen.
+/// One screen's state, parked while the other screen is active.
 ///
-/// Restored verbatim by [`Buffer::leave_alternate`].
+/// The primary screen is parked while the alternate is up, and the alternate
+/// is parked while the primary is up (its contents persist across sessions).
+/// A parked screen is moved in and out of the [`Buffer`], never cloned.
+///
+/// The cursor and the scroll margins are *not* part of a parked screen: the
+/// cursor keeps its screen position across a switch, and the margins are
+/// shared by both screens.
 ///
 /// Every field is crate-private: nothing outside `freminal-buffer` reads or
-/// builds one (verified across the workspace for Task 125.13); it is `pub`
-/// only because it names the type of the `pub(in crate::buffer)`
-/// `Buffer::saved_primary` field.
+/// builds one; it is `pub` only because it names the type of the
+/// `pub(in crate::buffer)` `Buffer::parked_primary` / `parked_alternate`
+/// fields.
 #[derive(Debug, Clone)]
-pub struct SavedPrimaryState {
-    /// All primary-buffer rows (scrollback + visible region) at the time of the
-    /// switch, with their flat-representation cache entries and
-    /// compressed-block references. The alternate screen never accumulates
-    /// scrollback and so never compresses anything; the block references here
-    /// are restored verbatim on `leave_alternate`.
+pub struct ParkedScreen {
+    /// All of the screen's rows (scrollback + visible region), with their
+    /// flat-representation cache entries and compressed-block references.
+    /// The alternate screen never accumulates scrollback and so never
+    /// compresses anything.
     pub(in crate::buffer) rows: RowStore,
-    /// Cursor state (position, attributes) at the time of the switch.
-    pub(in crate::buffer) cursor: CursorState,
-    /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
-    pub(in crate::buffer) scroll_offset: usize,
-    /// Visible height of the terminal grid at the time of the switch.
-    pub(in crate::buffer) height: usize,
-    /// Top of the DECSTBM scroll region at the time of the switch.
-    pub(in crate::buffer) scroll_region_top: usize,
-    /// Bottom of the DECSTBM scroll region at the time of the switch.
-    pub(in crate::buffer) scroll_region_bottom: usize,
-    /// Left margin (DECSLRM) at the time of the switch.
-    pub(in crate::buffer) scroll_region_left: usize,
-    /// Right margin (DECSLRM) at the time of the switch.
-    pub(in crate::buffer) scroll_region_right: usize,
-    /// Saved DECSC cursor carried across alternate-screen round-trips.
+    /// The cursor the screen had when it was parked. Used **only** to anchor
+    /// reflow and height-shrink trimming while the parked screen is resized
+    /// (`resize_saved_primary` / `resize_parked_alternate` feed it to the
+    /// temporary buffer); it is never restored.
+    pub(in crate::buffer) reflow_anchor: CursorState,
+    /// The screen's own DECSC slot.
     pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
-    /// Saved image store from the primary buffer.
+    /// The screen's image store.
     pub(in crate::buffer) image_store: ImageStore,
-    /// Saved image cell count from the primary buffer.
+    /// The screen's image cell count.
     pub(in crate::buffer) image_cell_count: usize,
-    /// Saved compressed scrollback blocks from the primary buffer (Task
-    /// 119). The alternate screen never accumulates scrollback and so never
-    /// compresses anything; this is empty for as long as the alternate
-    /// screen is active and is restored verbatim on `leave_alternate`.
+    /// The screen's compressed scrollback blocks (Task 119). Always empty for
+    /// the alternate screen.
     pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
-    /// Saved [`Buffer::next_block_id`] counter from the primary buffer.
+    /// The [`Buffer::next_block_id`] counter at the time the screen was parked.
     pub(in crate::buffer) next_block_id: u32,
 }
 
@@ -1066,6 +1077,25 @@ pub(in crate::buffer) fn tags_same_format(a: &FormatTag, b: &FormatTag) -> bool 
 // Unit Tests for Buffer
 // ============================================================================
 
+/// Test fixtures shared by every buffer test module.
+#[cfg(test)]
+impl Buffer {
+    /// Put the buffer on a blank alternate screen with the cursor at home and
+    /// a full-screen scroll region.
+    ///
+    /// This is the shape `enter_alternate(0)` had before Task 131.5 (every
+    /// entry blanked the screen, homed the cursor and reset the margins). The
+    /// switch primitives no longer do any of that, so the many tests that
+    /// merely need a clean alternate screen to draw on use this fixture; tests
+    /// of the switch semantics call the primitives directly.
+    pub(in crate::buffer) fn enter_fresh_alternate(&mut self) {
+        self.switch_to_alternate();
+        self.clear_alternate_screen();
+        self.cursor = CursorState::default();
+        self.reset_scroll_region_to_full();
+    }
+}
+
 #[cfg(test)]
 mod basic_tests {
     use super::*;
@@ -1143,7 +1173,7 @@ mod basic_tests {
     #[test]
     fn alt_buffer_has_no_scrollback() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         assert_eq!(buf.rows.len(), 3);
         assert_eq!(buf.kind, BufferType::Alternate);
@@ -1152,7 +1182,7 @@ mod basic_tests {
     #[test]
     fn alt_buffer_lf_scrolls_screen() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         buf.handle_lf();
         buf.handle_lf();
@@ -1165,27 +1195,29 @@ mod basic_tests {
     }
 
     #[test]
-    fn leaving_alt_restores_primary() {
+    fn leaving_alt_restores_primary_rows() {
         let mut buf = Buffer::new(6, 4);
 
         // create scrollback + move cursor
         buf.handle_lf();
         buf.handle_lf();
-        let saved_y = buf.cursor.pos.y;
         let saved_rows = buf.rows.len();
 
         // Enter alternate buffer via API
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Do some things in alternate screen (optional)
         buf.handle_lf();
 
         // Leave alternate, restoring primary
-        let _restored_offset = buf.leave_alternate();
+        buf.switch_to_primary();
 
         assert_eq!(buf.kind, BufferType::Primary);
         assert_eq!(buf.rows.len(), saved_rows);
-        assert_eq!(buf.cursor.pos.y, saved_y);
+        // The cursor keeps its screen position across the switch (it was
+        // homed by the fixture, then moved down one row by the LF), rather
+        // than being restored to where the primary left it.
+        assert_eq!(buf.cursor_screen_pos().y, 1);
     }
 
     #[test]
@@ -1244,7 +1276,7 @@ mod basic_tests {
     #[test]
     fn no_scrollback_in_alternate_buffer() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         for _ in 0..10 {
             buf.handle_lf(); // scrolls but no scrollback
@@ -1947,7 +1979,7 @@ mod resize_tests {
     #[test]
     fn grow_alternate_expands_full_screen_scroll_region() {
         let mut buf = Buffer::new(80, 29);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Scroll region should be full-screen for the old height.
         assert_eq!(buf.scroll_region(), (0, 28));
@@ -1979,7 +2011,7 @@ mod resize_tests {
     #[test]
     fn grow_alternate_preserves_partial_scroll_region() {
         let mut buf = Buffer::new(80, 29);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Set a partial scroll region (rows 5–20, 1-based: 6–21).
         buf.set_scroll_region(6, 21);
@@ -2001,7 +2033,7 @@ mod resize_tests {
     #[test]
     fn shrink_then_grow_alternate_restores_full_screen_region() {
         let mut buf = Buffer::new(189, 58);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         assert_eq!(buf.scroll_region(), (0, 57));
 
@@ -2041,11 +2073,11 @@ mod resize_tests {
     }
 
     /// Regression test: resizing while on the alternate screen must also resize
-    /// the saved primary buffer.  Without this, `leave_alternate` restores the
+    /// the parked primary screen.  Without this, `switch_to_primary` restores the
     /// primary buffer at the old dimensions, causing an immediate mismatch
     /// between buffer size and terminal geometry.
     #[test]
-    fn resize_on_alternate_updates_saved_primary() {
+    fn resize_on_alternate_updates_parked_primary() {
         let mut buf = Buffer::new(80, 24);
 
         // Write some content in primary so it's non-trivial.
@@ -2054,34 +2086,31 @@ mod resize_tests {
         buf.insert_text(&to_tchars("line two"));
 
         // Enter alternate screen (saves primary state).
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert_eq!(buf.rows.len(), 24);
 
         // Resize while on alternate (simulates pane close).
         buf.set_size(120, 48, 0);
 
-        // The saved primary should have been resized too.
-        let saved = buf
-            .saved_primary
+        // The parked primary should have been resized too.
+        let parked = buf
+            .parked_primary
             .as_ref()
-            .expect("saved_primary should exist while on alternate screen");
+            .expect("parked_primary should exist while on alternate screen");
         // Rows should have the new width.
-        for row in &saved.rows {
+        for row in &parked.rows {
             assert_eq!(
                 row.max_width(),
                 120,
-                "Saved primary rows should be reflowed to new width"
+                "Parked primary rows should be reflowed to new width"
             );
         }
-        // Scroll region should match new height.
-        assert_eq!(
-            saved.scroll_region_bottom, 47,
-            "Saved primary scroll_region_bottom should match new height - 1"
-        );
+        // The margins are shared by both screens, so the one set of margins
+        // follows the new height.
+        assert_eq!(buf.scroll_region(), (0, 47));
 
         // Leave alternate → primary should be at new dimensions.
-        let restored_offset = buf.leave_alternate();
-        assert_eq!(restored_offset, 0);
+        buf.switch_to_primary();
         assert_eq!(buf.width, 120);
         assert_eq!(buf.height, 48);
         assert_eq!(buf.scroll_region(), (0, 47));
@@ -3253,7 +3282,7 @@ mod alt_buffer_visible_rows_tests {
     fn alt_buffer_visible_rows_always_height() {
         let mut b = Buffer::new(5, 4);
 
-        b.enter_alternate(0);
+        b.enter_fresh_alternate();
         let vis = b.visible_rows(0);
 
         assert_eq!(vis.len(), 4);
@@ -3271,10 +3300,11 @@ mod alt_buffer_visible_rows_tests {
         let scroll_offset = b.scroll_back(0, 2);
         let before = b.visible_rows(scroll_offset)[0].characters().clone();
 
-        b.enter_alternate(scroll_offset);
-        let restored_offset = b.leave_alternate();
+        b.switch_to_alternate();
+        b.switch_to_primary();
 
-        let after = b.visible_rows(restored_offset)[0].characters().clone();
+        // The scroll offset is owned by the caller, not the buffer.
+        let after = b.visible_rows(scroll_offset)[0].characters().clone();
         assert_eq!(before, after);
     }
 }
@@ -3377,29 +3407,6 @@ mod scroll_up_scrollback_tests {
         b.scroll_up(); // remove row 0
         // External scroll_offset is unchanged by scroll_up; caller manages it
         assert_eq!(scroll_offset, 5, "external scroll_offset must not change");
-    }
-}
-
-#[cfg(test)]
-mod alt_primary_scroll_offset_restore_tests {
-    use super::*;
-
-    #[test]
-    fn leaving_alt_restores_scrollback_offset() {
-        let mut b = Buffer::new(10, 5);
-
-        for _ in 0..20 {
-            b.handle_lf();
-        }
-        let scroll_offset = b.scroll_back(0, 3);
-        assert_eq!(scroll_offset, 3);
-
-        b.enter_alternate(scroll_offset);
-        b.handle_lf();
-        b.handle_lf();
-
-        let restored = b.leave_alternate();
-        assert_eq!(restored, 3);
     }
 }
 
@@ -4121,14 +4128,14 @@ mod image_tests {
         assert!(buf.image_store().contains(img_id));
 
         // Enter alternate screen — primary images should be saved.
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert!(
             buf.image_store().is_empty(),
             "alternate screen should have no images"
         );
 
         // Leave alternate screen — primary images should be restored.
-        buf.leave_alternate();
+        buf.switch_to_primary();
         assert!(
             buf.image_store().contains(img_id),
             "image should be restored after leaving alternate screen"
@@ -4148,8 +4155,8 @@ mod image_tests {
         assert!(buf.rows[0].cells()[0].has_image());
 
         // Round-trip through alternate screen.
-        buf.enter_alternate(0);
-        buf.leave_alternate();
+        buf.enter_fresh_alternate();
+        buf.switch_to_primary();
 
         // Cell should still have the image placement.
         let cell = &buf.rows[0].cells()[0];
@@ -5531,7 +5538,7 @@ mod declrmm_tests {
     /// margins [2, 7] (0-based).
     fn alt_buf_full_grid_with_margins() -> Buffer {
         let mut buf = Buffer::new(10, 5);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         for row in 0..5 {
             let ch = match row {
                 0 => '0',
@@ -6197,7 +6204,7 @@ mod softwrap_scrollback_tests {
         let width = 10;
         let height = 5;
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Fill the screen.
         for _ in 0..height {
@@ -6691,7 +6698,7 @@ mod erase_operations_tests {
         let mut buf = Buffer::new(10, 5);
 
         write_line(&mut buf, "AAAAAAAAAA");
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         buf.insert_text(&t("BBBBBBBBBB"));
 
@@ -6809,7 +6816,7 @@ mod lf_ri_il_dl_tests {
     /// Create an alternate buffer of the given dimensions.
     fn make_alt_buffer(width: usize, height: usize) -> Buffer {
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf
     }
 
@@ -7645,7 +7652,7 @@ mod column_scroll_and_misc_tests {
         let width = 10;
         let height = 5;
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         fill_alt_rows(&mut buf);
 
         // Enable DECLRMM with margins at cols 2..6 (1-based: 3..7)
@@ -7678,7 +7685,7 @@ mod column_scroll_and_misc_tests {
         let width = 10;
         let height = 5;
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         fill_alt_rows(&mut buf);
 
         buf.set_declrmm(Declrmm::Enabled);
@@ -7908,7 +7915,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn scroll_region_up_n_basic() {
         let mut buf = Buffer::new(10, 5);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         fill_alt_rows(&mut buf);
 
         buf.scroll_region_up_n(2);
@@ -7923,7 +7930,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn scroll_region_down_n_basic() {
         let mut buf = Buffer::new(10, 5);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         fill_alt_rows(&mut buf);
 
         buf.scroll_region_down_n(2);
@@ -7978,7 +7985,7 @@ mod resize_and_insert_tests {
     #[test]
     fn resize_height_alt_shrink_drains_top_rows() {
         let mut buf = Buffer::new(10, 5);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Fill rows with distinct chars: row 0='A', row 1='B', ...
         for r in 0..5 {
@@ -8003,7 +8010,7 @@ mod resize_and_insert_tests {
     #[test]
     fn resize_height_alt_shrink_adjusts_image_count() {
         let mut buf = Buffer::new(10, 4);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Place image cells in rows 0 and 1 (which will be drained on shrink).
         buf.set_image_cell_at(0, 0, make_placement(1), FormatTag::default());
@@ -8138,46 +8145,10 @@ mod resize_and_insert_tests {
     fn kind_reports_the_active_screen() {
         let mut buf = Buffer::new(10, 5);
         assert_eq!(buf.kind(), BufferType::Primary);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert_eq!(buf.kind(), BufferType::Alternate);
-        buf.leave_alternate();
+        buf.switch_to_primary();
         assert_eq!(buf.kind(), BufferType::Primary);
-    }
-
-    // ── `enter_alternate` when already alternate ──
-
-    #[test]
-    fn enter_alternate_twice_is_noop() {
-        let mut buf = Buffer::new(10, 5);
-        buf.enter_alternate(0);
-        let rows_before = buf.rows.len();
-        let cursor_before = buf.cursor.clone();
-        buf.enter_alternate(0);
-        assert_eq!(buf.rows.len(), rows_before);
-        assert_eq!(buf.cursor.pos, cursor_before.pos);
-    }
-
-    // ── `leave_alternate` when already primary ──
-
-    #[test]
-    fn leave_alternate_on_primary_returns_zero() {
-        let mut buf = Buffer::new(10, 5);
-        assert_eq!(buf.kind, BufferType::Primary);
-        let offset = buf.leave_alternate();
-        assert_eq!(offset, 0);
-    }
-
-    // ── `leave_alternate` with no saved state ──
-
-    #[test]
-    fn leave_alternate_no_saved_state_returns_zero() {
-        let mut buf = Buffer::new(10, 5);
-        // Manually set to alternate without going through enter_alternate.
-        buf.kind = BufferType::Alternate;
-        assert!(buf.saved_primary.is_none());
-        let offset = buf.leave_alternate();
-        assert_eq!(offset, 0);
-        assert_eq!(buf.kind, BufferType::Primary);
     }
 
     // ── `visible_as_tchars_and_tags` multi-row with NewLine separators ──
@@ -8185,7 +8156,7 @@ mod resize_and_insert_tests {
     #[test]
     fn visible_as_tchars_and_tags_newline_separators() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate(0); // Creates exactly 3 rows.
+        buf.enter_fresh_alternate(); // Creates exactly 3 rows.
 
         buf.cursor.pos.y = 0;
         buf.cursor.pos.x = 0;
@@ -8214,7 +8185,7 @@ mod resize_and_insert_tests {
     #[test]
     fn visible_as_tchars_and_tags_empty_buffer() {
         let mut buf = Buffer::new(5, 3);
-        buf.enter_alternate(0); // Creates exactly 3 empty rows.
+        buf.enter_fresh_alternate(); // Creates exactly 3 empty rows.
         let (_chars, tags, _row_offsets, _url_indices) = buf.visible_as_tchars_and_tags(0);
 
         // Even empty rows produce Space cells (no — empty cells vec produces no chars).
@@ -8301,7 +8272,7 @@ mod image_clearing_tests {
     /// Create an alternate buffer with exactly `height` rows — guaranteed row access.
     fn alt_buf(width: usize, height: usize) -> Buffer {
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf
     }
 
@@ -8590,7 +8561,7 @@ mod coverage_gap_tests {
     /// Helper: create an alternate-screen buffer with given dimensions
     fn alt_buf(width: usize, height: usize) -> Buffer {
         let mut buf = Buffer::new(width, height);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf
     }
 
@@ -9850,9 +9821,9 @@ mod scrollback_compaction_tests {
             .map(Row::is_compact)
             .collect();
 
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf.insert_text(&text("alt screen content"));
-        let _ = buf.leave_alternate();
+        buf.switch_to_primary();
 
         let visible_start_after = buf.visible_window_start(0);
         assert_eq!(
@@ -9869,8 +9840,8 @@ mod scrollback_compaction_tests {
             "scrollback content must be preserved exactly across the round-trip"
         );
 
-        // The clone in `enter_alternate` and the plain move-back in
-        // `leave_alternate` should preserve each row's storage
+        // Parking and re-installing a screen in `switch_to_alternate` /
+        // `switch_to_primary` should preserve each row's storage
         // representation — confirming the round-trip didn't force an
         // unnecessary full decompaction of scrollback.
         let compact_flags_after: Vec<bool> = buf.rows[..visible_start_after]

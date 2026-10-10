@@ -4747,7 +4747,7 @@ fn alt_buffer_resize_shrink_maintains_row_count_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     assert_eq!(buf.rows().len(), 24, "pre-condition");
 
@@ -4767,7 +4767,7 @@ fn alt_buffer_resize_grow_maintains_row_count_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     assert_eq!(buf.rows().len(), 24, "pre-condition");
 
@@ -4790,7 +4790,7 @@ fn alt_buffer_lf_scrolls_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Set scroll region to full screen (1-based inclusive: 1..24)
     buf.set_scroll_region(1, 24);
@@ -4841,7 +4841,7 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4888,7 +4888,7 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4934,7 +4934,7 @@ fn alt_buffer_ri_scrolls_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4978,7 +4978,7 @@ fn alt_buffer_resize_multiple_cycles_maintain_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Shrink → grow → shrink → grow
     for &new_height in &[20_usize, 30, 15, 24] {
@@ -5000,7 +5000,7 @@ fn alt_buffer_tmux_resize_scenario() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // tmux sets DECSTBM to (1, height-1) for the top pane, leaving the
     // bottom row for the status bar.  set_scroll_region takes 1-based
@@ -5077,7 +5077,7 @@ fn alt_buffer_width_shrink_maintains_row_count_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill every row to full width so reflow would have split them.
     for row in 0..24 {
@@ -5104,7 +5104,7 @@ fn alt_buffer_width_grow_maintains_row_count_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows with content
     for row in 0..24 {
@@ -5133,7 +5133,7 @@ fn alt_buffer_width_and_height_shrink_maintains_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows with full-width content
     for row in 0..24 {
@@ -5161,7 +5161,7 @@ fn alt_buffer_lf_works_after_width_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows
     for row in 0..24 {

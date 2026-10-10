@@ -5771,9 +5771,15 @@ mod tests {
         handler.handle_enter_alternate();
         place_at_cursor(&mut handler, &rx, 74);
         let parent = handler.real_placements[&(74, 0)];
-        assert_eq!(parent.origin_row, RowNumber::ALTERNATE_BASE);
+        // Entering clears the alternate screen into a fresh store, so the
+        // first alternate row is the store's base, not `ALTERNATE_BASE`.
+        assert_eq!(parent.origin_row, handler.buffer().row_base());
+        assert!(parent.origin_row.is_alternate());
 
-        let response = place_relative_child(&mut handler, &rx, 75, 74, -1);
+        // The clear on entry issued 24 rows (numbers `ALTERNATE_BASE..+24`)
+        // ahead of the store, so the parent's offset must reach 25 rows up to
+        // cross out of the alternate namespace.
+        let response = place_relative_child(&mut handler, &rx, 75, 74, -25);
         assert!(response.contains("OK"), "accepted, got {response:?}");
         assert!(
             !handler.real_placements.contains_key(&(75, 0)),

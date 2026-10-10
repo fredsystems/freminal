@@ -91,16 +91,17 @@ impl TerminalHandler {
 
     /// Handle entering alternate screen
     pub fn handle_enter_alternate(&mut self) {
-        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
-        // always passes 0 when entering the alternate screen.
-        self.buffer.enter_alternate(0);
+        // The `?1049` shape for every mode until 131.6: DECSC on the primary,
+        // switch, then blank the alternate screen.
+        self.buffer.save_cursor();
+        self.buffer.switch_to_alternate();
+        self.buffer.clear_alternate_screen();
     }
 
     /// Handle leaving alternate screen
     pub fn handle_leave_alternate(&mut self) {
-        // Returns the saved scroll_offset from the primary screen; discarded here
-        // because scroll_offset is owned by ViewState on the GUI side.
-        let _restored_offset = self.buffer.leave_alternate();
+        self.buffer.switch_to_primary();
+        self.buffer.restore_cursor();
         // The alternate screen's rows are gone, and so are the placements
         // that were recorded against them (the buffer drops its own
         // alternate-screen marks the same way).

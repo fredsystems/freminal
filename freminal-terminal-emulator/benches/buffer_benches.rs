@@ -717,12 +717,12 @@ fn bench_sustained_output_at_capacity(c: &mut Criterion) {
 //
 // Issue #405 Part C item 4: the existing `bench_alternate_screen_switch` in
 // `freminal-buffer/benches/buffer_row_bench.rs` measures only the raw
-// `Buffer::enter_alternate` / `leave_alternate` row-vec swap in isolation. It
+// `Buffer::switch_to_alternate` / `switch_to_primary` screen swap in isolation. It
 // does NOT drive the full pipeline (parse `?1049h`/`?1049l` -> handler ->
 // `build_snapshot`), so it cannot see the one-frame cache-invalidation tax
 // that `interface.rs` pays on the alt/primary transition: entering or
 // leaving the alternate screen clears/swaps `previous_visible_snap` (see
-// `interface.rs` around the `enter_alternate`/`leave_alternate` handling),
+// `interface.rs` around the alternate-screen enter/leave handling),
 // forcing the next `build_snapshot()` to rebuild rather than reuse the
 // cached visible-row vectors. This group quantifies that end-to-end cost.
 //

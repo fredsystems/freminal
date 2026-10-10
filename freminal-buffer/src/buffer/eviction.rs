@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn scroll_up_on_the_alternate_screen_frees_an_image_whose_row_left() {
         let mut buf = Buffer::new(10, 3);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf.cursor.pos.y = 0;
         let id = place(&mut buf, ImageProtocol::Sixel, 1, 1);
         assert!(buf.image_store().contains(id));
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn alternate_screen_height_shrink_evicts_images_through_the_same_path() {
         let mut buf = Buffer::new(10, 4);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         buf.cursor.pos.y = 0;
         let id = place(&mut buf, ImageProtocol::Sixel, 1, 1);
         assert!(buf.image_store().contains(id));
@@ -450,9 +450,9 @@ mod tests {
         let horizon = buf.image_store().horizon_of(id);
         assert!(horizon.is_some());
 
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert!(buf.image_store().is_empty(), "alt screen has its own store");
-        let _ = buf.leave_alternate();
+        buf.switch_to_primary();
 
         assert_eq!(buf.image_store().horizon_of(id), horizon);
         buf.debug_assert_invariants();
@@ -754,11 +754,11 @@ mod tests {
         let mut buf = Buffer::new(10, 4).with_scrollback_limit(50);
         push_lines(&mut buf, 3);
         let id = place(&mut buf, ImageProtocol::Sixel, 2, 2);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
 
         // Reflows the parked primary screen, renumbering its rows.
         let _ = buf.set_size(6, 4, 0);
-        let _ = buf.leave_alternate();
+        buf.switch_to_primary();
 
         let horizon = buf.image_store().horizon_of(id).expect("image kept");
         let index = buf.rows.index_of(horizon).expect("names a retained row");
