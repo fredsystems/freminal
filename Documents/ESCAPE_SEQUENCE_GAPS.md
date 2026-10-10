@@ -484,7 +484,7 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition.
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (unscheduled; recorded by the Task 130 adversarial review).
 
 ---
 

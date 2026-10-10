@@ -140,7 +140,7 @@ claims to verify, not as evidence.
 | Underlines            | Complete                                            | Mostly compliant. SGR 21 means bold-off where kitty means double underline; `4:N>5` clears instead of clamping; underline geometry untested and unclamped; default colour wrong under SGR 7 + DECSCNM                                                | 140           |
 | Graphics              | "Fully implemented", "graphics surface is complete" | ~30 deviations, 5 high. Replies to id-less commands; `t=t` deletes arbitrary files; text and erase destroy image tiles; placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                          | 126, 135, 136 |
 | Keyboard              | "Substantially compliant, remainder tracked"        | Encoder machinery sound, but the GUI layer feeding it is not. Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable | 137           |
-| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; `p=?` answered after DA1                                                 | 138           |
+| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; ~~`p=?` answered after DA1~~ (fixed by 130)                              | 138           |
 | Pointer shapes        | Undocumented                                        | Plain set works. Push, pop and query (and `=`) all reset the shape to default instead; a query gets no reply; no stack                                                                                                                               | 139           |
 | Clipboard (OSC 5522)  | Not mentioned                                       | Entirely missing; payloads would be warn-logged by the unknown-OSC path                                                                                                                                                                              | 146           |
 | Color control         | Not mentioned                                       | OSC 21 and colour stack missing. OSC 10/11 "set" never reaches rendering. `CSI # P` deletes characters. `parse_color_spec` panics on non-ASCII input                                                                                                 | 126, 132, 144 |
@@ -198,7 +198,7 @@ foundation tasks result. Each one has at least three consumers.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | **128** CSI dispatch                      | Route on (private prefix, intermediate, final). Fixes 6+ live misroutes                                                                                                                              | 103, 137, 141, 142, 143, 144                |
 | **129** Wire infrastructure               | One bounded `key=value` metadata tokenizer; strict, streaming and unpadded base64; a bounded chunk accumulator; parser size caps; raw-params OSC dispatch; payload-safe logging; APC response helper | 102, 104, 105, 135, 138, 139, 144, 145, 146 |
-| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T, tmux wrap); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality                       | 102, 135, 138, 139, 144, 146, 105           |
+| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T; never tmux-wrapped); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality              | 102, 135, 138, 139, 144, 146, 105           |
 | **131** Screen-scoped state & resets      | One registry for per-screen state (alt-screen enter/leave idempotent) and an explicit reset table (RIS vs DECSTR) per protocol                                                                       | 103, 135, 136, 137, 139, 141                |
 | **132** Colour foundation                 | Spec-complete colour-spec parser; a reusable SGR-style colour extractor; dynamic colours that actually render                                                                                        | 103, 140, 144, 136 (placeholder ids)        |
 | **133** Shared consent prompt             | One consent overlay component, registered once with modal-input suppression and dismissible-presence                                                                                                 | 102, 146, 105                               |
@@ -2979,6 +2979,27 @@ Prohibitions: do NOT touch code.
     `write_csi_response`, and `send_decrpm` is deleted.
   - Only VT52 `ESC / Z` and ENQ still call `write_to_pty`.
   - Two pre-existing reply-content bugs surfaced: 130.C1 and 130.C2.
+- **130.4 — Complete (2026-10-10), commit `790a77e6`.**
+  - `HostCapabilities` (`freminal-common`) is seeded through `PtyTabInitialState` at all five
+    spawn sites and re-sent with `InputEvent::HostCapabilitiesChange` from `apply_new_config`.
+  - The resolver later moved to `freminal/src/gui/host_capabilities.rs` (review finding 15).
+- **130.5 — Complete (2026-10-10), commit `ebd361e8`.**
+  - `p=?` is answered in `dispatch_finalized_osc99` with conditional `a=report` / `c=1`;
+    `Osc99ControlKind::Query` and the GUI query path are deleted.
+  - Review finding 14 later extended the gate so every OSC 99 request is dropped while
+    unsupported.
+- **130.6 — Complete (2026-10-10), commit `8b5b165e`.** `GuiReply`, `InputEvent::Reply` and the
+  handler serialiser `write_gui_reply`, with byte-identical 7-bit output.
+- **130.7 — Complete (2026-10-10), commit `165cd17f`.** Window, title, OSC 52 and OSC 99
+  replies are sent as `GuiReply`; the GUI byte builders and `send_pty_response` are deleted.
+- **130.8 — Complete (2026-10-10), commit `630469cf`.** `Pane::reply_tx` (`Arc`) with `Weak`
+  handles for OSC 99 consumers; review fixes in `120d90fa` (single reply handle) and
+  `dede495e` (a liveness test on a real `Pane`).
+- **130.9 — Complete (2026-10-10), commit `1e03dd31`.** COVERAGE, GAPS and the kitty reference.
+- **Cleanups:**
+  - 130.C1 (`ce0e8cad`), 130.C2 and 130.C3 (`120d90fa`), and 130.C5 and 130.C6 (`74149b30`)
+    are resolved.
+  - 130.C4 is routed to Task 138.
 
 ### 130 Cleanup entries
 
@@ -3939,8 +3960,14 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - **Reverse path.**
   - Buttons are reported **0-based**; the spec says 1-based.
   - The close report is lost after activation (notify-rust `FnOnce`).
-  - `p=?` is answered after DA1 (Task 130).
-  - Capabilities are advertised while notifications are disabled.
+  - ~~`p=?` is answered after DA1~~: fixed by Task 130 (answered on the PTY thread in stream
+    order).
+  - ~~Capabilities are advertised while notifications are disabled~~: fixed by Task 130 (every
+    OSC 99 request is dropped while unsupported; `a=report` / `c=1` follow platform and
+    routing).
+  - Ids, buttons and live-id lists are sanitised at the reply serialiser since Task 130; the
+    transported `report_activation` / `focus_on_activation` / `close_report` bools are
+    130.C4, routed here.
   - The `p=alive` map is global across panes, unbounded and never pruned on user dismissal.
 - **Lifecycle.**
   - No update-in-place for a repeated `i=`.
