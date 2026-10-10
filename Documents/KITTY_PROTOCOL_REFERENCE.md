@@ -1,5 +1,10 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
+Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
+(131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
+see "freminal current-state deltas: keyboard" and "freminal current-state:
+graphics". No other section changed.
+
 Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stubs
 renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
@@ -629,6 +634,15 @@ implementation choice.
   transmit-only `a=t` images and lowercase-deleted images referenced again by
   id — PR #382 review fix.)
 
+- **Placements are per screen (Task 131.7).** `virtual_placements`,
+  `real_placements` and the scrollback-prune base are kept per screen, as kitty's
+  per-screen graphics manager does. `a=d` with `d=a`/`d=A` and the pruners act on
+  the active screen only; a screen switch touches neither map, and a clear of the
+  alternate screen (`?1049h`, or `?1047l` on the alternate) empties the alternate
+  map. RIS clears both screens' maps. Placing an image at the alternate screen's
+  bottom row scrolls the screen as a line feed would, instead of growing the
+  store (Task 131.C5).
+
 **Closed after Task 100:**
 
 - **`t=f`/`t=t` file-path security** — Task 100 left `read_kitty_file`
@@ -818,8 +832,16 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
 - **✅ Done (101.3):** F3 is normalized to `13 ~` under KKP (was `ESC O R` SS3,
   which collides with CPR). The legacy (non-KKP) path keeps `ESC O R` for xterm
   terminfo compatibility.
-- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`,
-  separate main/alt-screen stacks (all tested). All 5 flag bits defined.
+- **✅ Done (Task 131.3, fixes B15): one stack per screen.** The primary and
+  alternate screens each keep their own mode stack (`ScreenScoped<KittyKeyboardStack>`),
+  and the active screen's stack is the one `CSI > u`, `CSI < u`, `CSI = u` and
+  `CSI ? u` act on. The alternate stack persists between alternate-screen
+  sessions, as kitty's `alt_key_encoding_flags` does, instead of being replaced by
+  a fresh one on entry. Before, a second `?1049h` moved the alternate stack over
+  the parked main stack and the main stack was lost. RIS **and DECSTR** clear both
+  stacks, as kitty's `do_screen_reset` does (DECSTR previously left them).
+- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`
+  (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).
 - DA1 does not advertise kitty keyboard (correct — detection is via `CSI ? u`).
 

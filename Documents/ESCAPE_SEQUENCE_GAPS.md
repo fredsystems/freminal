@@ -1,5 +1,15 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-10 — Task 131 (screen-scoped state and reset lifecycle).
+Closed and removed from "Buffer Semantics Gaps": the DECSC save slot per screen
+(131.5, 131.6) and DECRC with nothing saved (131.C2). Narrowed: "DECRC and DECOM"
+and "DECSC saved state" (131.C1 — DECOM, the SGR rendition and the character set
+are now saved and restored; the DECOM scroll-region re-clamp and the pending-wrap
+flag remain). No other gap row was itemised for the alternate-screen modes
+(`?47`/`?1047`/`?1049`), the RIS and DECSTR resets, `?45`'s default, the
+per-screen kitty keyboard stack (B15) or per-screen kitty placements; they are
+recorded as fixed in `ESCAPE_SEQUENCE_COVERAGE.md`.
+
 Last updated: 2026-10-10 — 129.C5 closed: a C0 byte inside an OSC made the
 parser emit `Invalid` and print the rest of the payload as text. Control bytes
 now follow ECMA-48 / DEC VT500 (CAN/SUB cancel silently; other C0 and DEL are
@@ -245,9 +255,9 @@ not conformant (Task 138, v0.13.0). The remaining gaps are:
   and an IRM query clears insert mode (issue #528)
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
   hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
-  five narrow xterm divergences in cursor save/restore (DECSC per-screen slots,
-  DECRC with nothing saved, DECOM re-clamp, saved attribute set, resize with the
-  alternate screen active) and Sixel placement under DECSDM (see below)
+  three narrow xterm divergences in cursor save/restore (DECOM scroll-region
+  re-clamp, the pending-wrap flag, resize with the alternate screen active) and
+  Sixel placement under DECSDM (see below)
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
   storage, navigation, fold/copy/hover/duration all complete under Task 72)
 
@@ -295,16 +305,17 @@ from xterm in **cursor save/restore**, found while verifying DECSC's
 screen-relative position (Task 125.C6). They apply equally to DECSC/DECRC
 (`ESC 7` / `ESC 8`), SCOSC/SCORC (`CSI s` / `CSI u`) and `?1048`, which share
 one machinery. The saved position itself is correct (screen-relative, clamped
-to the screen on restore). Reference: xterm `cursor.c` (`CursorSave`,
-`CursorRestore`, `CursorSave2`, `AdjustSavedCursor`) and `screen.c`.
+to the screen on restore). Since Task 131 the save slot is per screen, DECSC
+saves the SGR rendition, DECOM and the character set, and DECRC with nothing
+saved homes the cursor with default state, so the earlier entries for those are
+gone. Reference: xterm `cursor.c` (`CursorSave`, `CursorRestore`, `CursorSave2`,
+`AdjustSavedCursor`) and `screen.c`.
 
-| Behaviour                                | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                                                                      |
-| ---------------------------------------- | ---------- | ---- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DECSC save slot per screen               | ⬜         | 🚧   | —       | xterm keeps one saved-cursor slot per screen (main and alternate) that persist independently. Freminal has one slot: entering the alternate screen leaves the primary's save visible to the alternate screen, and the slot is replaced by the primary's copy on leaving it, so a DECSC made on the alternate screen is discarded when it is left.          |
-| DECRC with nothing saved                 | ⬜         | 🚧   | —       | xterm homes the cursor and resets the saved attributes (SGR, origin mode, character sets) to their power-up values. Freminal treats it as a silent no-op.                                                                                                                                                                                                  |
-| DECRC and DECOM                          | ⬜         | 🚧   | —       | xterm saves the origin-mode flag with the cursor (`DECSC_FLAGS`) and restores it, then clamps the restored position to the scroll region when origin mode is on. Freminal neither saves nor restores DECOM and clamps to the screen only, so a position saved under a different DECOM/DECSTBM state can land outside the region it would be in xterm.      |
-| DECSC saved state                        | ⬜         | 🚧   | —       | Besides the position, xterm saves its `DECSC_FLAGS` (attribute flags, origin mode, DECSCA protection) and the pending-wrap flag (`do_wrap`). Freminal saves the position, the SGR state carried by `CursorState` (weight, decorations, colours, hyperlink) and the character set; it does not save DECOM or the pending-wrap flag (DECSCA is unsupported). |
-| Saved cursor on resize, alternate active | ⬜         | 🚧   | —       | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                    |
+| Behaviour                                | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECRC scroll-region clamp                | ⬜         | 🚧   | —       | xterm clamps the position restored by DECRC to the scroll region when the restored origin mode is on. Freminal saves and restores DECOM itself (Task 131.C1) but clamps to the screen only, so a position saved under a different DECSTBM state can land outside the region it would be in xterm.                                                                                                        |
+| DECSC saved state                        | ⬜         | 🚧   | —       | Besides the position, xterm saves the pending-wrap flag (`do_wrap`) and DECSCA protection in its `DECSC_FLAGS`. Freminal saves the position, the SGR rendition (weight, decorations, colours), DECOM and the character set per screen (Task 131.C1), and keeps an open OSC 8 hyperlink out of the save (as xterm, kitty and Ghostty do); it does not save the pending-wrap flag (DECSCA is unsupported). |
+| Saved cursor on resize, alternate active | ⬜         | 🚧   | —       | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
 
 One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
 (Soft Terminal Reset, issue #507) audit:
@@ -499,7 +510,7 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | ------------------------ | --------------------------------------------------- | ------- |
 | SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | —       |
 | SRM standard mode        | Extremely rare in modern terminal output            | —       |
-| DECSC/DECRC xterm parity | Five narrow divergences; see Buffer Semantics Gaps  | —       |
+| DECSC/DECRC xterm parity | Three narrow divergences; see Buffer Semantics Gaps | —       |
 | Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | —       |
 | KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | —       |
 | ?1001 hilite tracking    | Obsolete mouse mode                                 | —       |
