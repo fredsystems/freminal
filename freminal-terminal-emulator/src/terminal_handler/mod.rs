@@ -9,6 +9,7 @@ use crate::io::SearchCorpus;
 use crate::snapshot::BufferExtent;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
+use cursor_ops::SavedDecscState;
 use freminal_common::{
     buffer_states::{
         buffer_type::BufferType,
@@ -241,14 +242,17 @@ pub struct TerminalHandler {
     configured_cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
-    /// Saved `character_replace` state from the most recent DECSC, one slot
-    /// per screen (indexed by `buffer.kind()`), mirroring the buffer's own
-    /// per-screen DECSC slot.
+    /// The handler-owned half of the most recent DECSC (the charset and the
+    /// SGR rendition), one slot per screen (indexed by `buffer.kind()`),
+    /// mirroring the buffer's own per-screen DECSC slot, which holds the
+    /// position and DECOM.
     ///
     /// The VT100 spec requires DECSC to save the character set designators
     /// (G0/G1) and GL invocation.  Freminal uses a simplified single-flag
-    /// model, so we save just `character_replace` here.
-    saved_character_replace: ScreenScoped<Option<DecSpecialGraphics>>,
+    /// model, so `character_replace` stands in for them; the SGR rendition is
+    /// saved alongside it.  `None` means no DECSC has run on that screen;
+    /// DECRC then homes with default attributes.
+    saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
@@ -485,7 +489,7 @@ impl TerminalHandler {
             cursor_visual_style: CursorVisualStyle::default(),
             configured_cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
-            saved_character_replace: ScreenScoped::default(),
+            saved_decsc: ScreenScoped::default(),
             write_tx: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),

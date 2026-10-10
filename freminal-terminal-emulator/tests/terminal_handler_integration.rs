@@ -895,9 +895,10 @@ fn save_restore_position() {
 }
 
 #[test]
-fn restore_without_save_is_noop() {
-    // RestoreCursor without a prior SaveCursor must not panic and must leave
-    // the cursor at its current position.
+fn restore_without_save_homes_the_cursor() {
+    // RestoreCursor without a prior SaveCursor must not panic; it behaves as
+    // if a default cursor at home had been saved (131.C2, xterm
+    // `CursorRestoreFlags` with nothing saved).
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     let mut handler = TerminalHandler::new(20, 10);
@@ -907,22 +908,14 @@ fn restore_without_save_is_noop() {
         x: Some(4),
         y: Some(3),
     }]);
-    let x_before = handler.buffer().cursor().pos.x;
-    let y_before = handler.buffer().cursor().pos.y;
+    assert_ne!(handler.buffer().cursor_screen_pos().x, 0);
 
-    // Restore without a prior save — must be a no-op.
+    // Restore without a prior save: home.
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
 
-    assert_eq!(
-        handler.buffer().cursor().pos.x,
-        x_before,
-        "x must not change on restore without save"
-    );
-    assert_eq!(
-        handler.buffer().cursor().pos.y,
-        y_before,
-        "y must not change on restore without save"
-    );
+    let pos = handler.buffer().cursor_screen_pos();
+    assert_eq!(pos.x, 0, "x must be home on restore without save");
+    assert_eq!(pos.y, 0, "y must be home on restore without save");
 }
 
 #[test]

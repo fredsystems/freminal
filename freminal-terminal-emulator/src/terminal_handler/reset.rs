@@ -35,7 +35,9 @@ use freminal_common::buffer_states::{
     unicode_placeholder::VirtualPlacement,
 };
 
-use super::{KittyTransfer, RealPlacement, ScreenScoped, TerminalHandler};
+use super::{
+    KittyTransfer, RealPlacement, ScreenScoped, TerminalHandler, cursor_ops::SavedDecscState,
+};
 
 /// Which reset [`TerminalHandler::reset`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,10 +70,7 @@ fn clear_kitty_placements(
 ///
 /// Every step that touches DECOM or a margin homes the cursor as a side
 /// effect, so the live position is captured first and restored last.
-fn soft_reset_buffer(
-    buffer: &mut Buffer,
-    saved_character_replace: &mut ScreenScoped<Option<DecSpecialGraphics>>,
-) {
+fn soft_reset_buffer(buffer: &mut Buffer, saved_decsc: &mut ScreenScoped<Option<SavedDecscState>>) {
     let live_pos = buffer.cursor_screen_pos();
 
     // DECOM -> Absolute (off).  `Buffer::set_decom` homes the cursor; that
@@ -80,7 +79,10 @@ fn soft_reset_buffer(
     // and the saved cursor's attributes are already default.
     buffer.set_decom(Decom::NormalCursor);
     buffer.save_cursor();
-    *saved_character_replace.get_mut(buffer.kind()) = Some(DecSpecialGraphics::default());
+    *saved_decsc.get_mut(buffer.kind()) = Some(SavedDecscState {
+        character_replace: DecSpecialGraphics::default(),
+        format: FormatTag::default(),
+    });
 
     // DECSTBM -> top = 1, bottom = page length.
     buffer.reset_scroll_region_to_full();
@@ -110,7 +112,7 @@ impl TerminalHandler {
             cursor_visual_style,
             configured_cursor_visual_style,
             character_replace,
-            saved_character_replace,
+            saved_decsc,
             write_tx: _,               // transport: survives both
             window_commands: _,        // already-emitted events in transit: survives both
             pending_command_events: _, // already-emitted events in transit: survives both
@@ -177,7 +179,7 @@ impl TerminalHandler {
         match kind {
             ResetKind::Hard => {
                 buffer.full_reset();
-                for slot in saved_character_replace.both_mut() {
+                for slot in saved_decsc.both_mut() {
                     *slot = None;
                 }
                 *last_graphic_char = None;
@@ -205,7 +207,7 @@ impl TerminalHandler {
                 // DECAWM -> on: xterm's own resource default, and what kitty,
                 // Ghostty and WezTerm do, against the literal VT510 Table 5-9.
                 buffer.set_wrap(Decawm::AutoWrap);
-                soft_reset_buffer(buffer, saved_character_replace);
+                soft_reset_buffer(buffer, saved_decsc);
                 // Soft keeps (today's behaviour, no table row): the REP
                 // character, FTCS state, the colour overrides, ?40, the
                 // sixel and S8C1T/DECANM state, ?7727, ?2048, OSC 99

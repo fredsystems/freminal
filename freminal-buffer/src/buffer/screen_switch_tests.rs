@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use freminal_common::buffer_states::{
-    buffer_type::BufferType, fonts::FontWeight, row_number::RowNumber, tchar::TChar,
+    buffer_type::BufferType, fonts::FontWeight, modes::decom::Decom, row_number::RowNumber,
+    tchar::TChar,
 };
 
 use crate::{
@@ -331,7 +332,7 @@ fn the_decsc_slot_is_per_screen() {
 }
 
 #[test]
-fn decrc_with_nothing_saved_on_the_other_screen_is_a_no_op() {
+fn decrc_with_nothing_saved_on_the_other_screen_homes_the_cursor() {
     let mut buf = Buffer::new(20, 8);
     buf.set_cursor_pos(Some(2), Some(3));
     buf.save_cursor();
@@ -341,7 +342,46 @@ fn decrc_with_nothing_saved_on_the_other_screen_is_a_no_op() {
     buf.restore_cursor();
 
     let pos = buf.cursor_screen_pos();
-    assert_eq!((pos.x, pos.y), (9, 1), "the alt slot is empty");
+    assert_eq!(
+        (pos.x, pos.y),
+        (0, 0),
+        "the alt slot is empty, so DECRC homes the cursor (131.C2)"
+    );
+}
+
+#[test]
+fn decrc_with_nothing_saved_turns_decom_off_without_a_save() {
+    let mut buf = Buffer::new(20, 8);
+    buf.set_scroll_region(3, 6);
+    buf.set_decom(Decom::OriginMode);
+    buf.set_cursor_pos(Some(4), Some(1));
+
+    buf.restore_cursor();
+
+    assert_eq!(buf.is_decom_enabled(), Decom::NormalCursor);
+    let pos = buf.cursor_screen_pos();
+    assert_eq!(
+        (pos.x, pos.y),
+        (0, 0),
+        "home is screen home, not the margin"
+    );
+}
+
+#[test]
+fn decrc_restores_the_saved_decom_state_without_homing() {
+    let mut buf = Buffer::new(20, 8);
+    buf.set_scroll_region(3, 6);
+    buf.set_decom(Decom::OriginMode);
+    buf.set_cursor_pos(Some(4), Some(1));
+    buf.save_cursor();
+    let saved = buf.cursor_screen_pos();
+
+    buf.set_decom(Decom::NormalCursor);
+    buf.set_cursor_pos(Some(0), Some(7));
+    buf.restore_cursor();
+
+    assert_eq!(buf.is_decom_enabled(), Decom::OriginMode);
+    assert_eq!(buf.cursor_screen_pos(), saved, "DECRC did not home");
 }
 
 // ── Idempotence ──────────────────────────────────────────────────────────

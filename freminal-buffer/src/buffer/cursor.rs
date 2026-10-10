@@ -39,6 +39,9 @@ pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
     /// coordinates.
     pub(in crate::buffer) cursor: CursorState,
+    /// The origin-mode (DECOM) state at the time of the save. xterm's
+    /// `DECSC_FLAGS` include `ORIGIN`, so DECRC restores it.
+    pub(in crate::buffer) decom: Decom,
 }
 
 impl Buffer {
@@ -253,17 +256,26 @@ impl Buffer {
     /// Implements DECSC – Save Cursor.
     ///
     /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
-    /// with its associated `CursorState`.
+    /// with its associated `CursorState` and the DECOM (origin mode) state.
     pub fn save_cursor(&mut self) {
         let mut cursor = self.cursor.clone();
         cursor.pos = self.cursor_screen_pos();
-        self.saved_cursor = Some(SavedCursor { cursor });
+        self.saved_cursor = Some(SavedCursor {
+            cursor,
+            decom: self.decom_enabled,
+        });
     }
 
     /// Implements DECRC – Restore Cursor.
     ///
-    /// Restores the previously saved cursor. If no cursor has been saved, this
-    /// is a no-op.
+    /// Restores the previously saved cursor and the saved DECOM state. DECOM
+    /// is restored directly, **without** the homing that [`Self::set_decom`]
+    /// performs, because the saved position is the one that must win.
+    ///
+    /// If nothing has been saved on the active screen, this behaves as if a
+    /// default cursor at screen home had been saved, with DECOM off: the
+    /// cursor goes home with default cursor state (xterm `CursorRestoreFlags`
+    /// with `sc->saved == False`, Ghostty `restoreCursor`).
     ///
     /// The saved position is screen-relative, so the cursor returns to the
     /// same screen row and column however much output has scrolled, evicted
@@ -276,18 +288,20 @@ impl Buffer {
     /// DECRC runs, so a save made on one screen restores sensibly on the
     /// other.
     pub fn restore_cursor(&mut self) {
-        if let Some(saved) = self.saved_cursor.clone() {
-            let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
+        let saved = self.saved_cursor.clone().unwrap_or_else(|| SavedCursor {
+            cursor: CursorState::default(),
+            decom: Decom::NormalCursor,
+        });
+        let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
 
-            self.cursor = saved.cursor;
-            // Clamp to current dimensions after restore.
-            if self.width > 0 {
-                self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
-            }
-            self.cursor.pos.y = buffer_y;
-            self.debug_assert_invariants();
+        self.cursor = saved.cursor;
+        self.decom_enabled = saved.decom;
+        // Clamp to current dimensions after restore.
+        if self.width > 0 {
+            self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
         }
-        // No saved cursor → silent no-op.
+        self.cursor.pos.y = buffer_y;
+        self.debug_assert_invariants();
     }
 
     /// Index into `self.rows` of the live-window row at `screen_y`, clamped to
