@@ -312,14 +312,18 @@ pub struct Buffer {
     /// so subsequent snapshots reflect the new setting.
     pub(in crate::buffer) auto_detect_urls: bool,
 
-    /// Whether this is the primary or alternate buffer mode.
+    /// Which screen is active.
     ///
     /// Primary:
     ///   - Has scrollback
     ///
     /// Alternate:
     ///   - No scrollback
-    ///   - Switching back restores primary buffer's saved state
+    ///
+    /// The other screen is not discarded on a switch: it is *parked* intact
+    /// in [`Self::parked_primary`] / [`Self::parked_alternate`] (rows, DECSC
+    /// slot, image store, compressed blocks) and swapped back in when it
+    /// becomes active again.
     pub(in crate::buffer) kind: BufferType,
 
     /// The primary screen, parked while the alternate screen is active.

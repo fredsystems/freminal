@@ -12,7 +12,7 @@
 
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
-    cursor::CursorState,
+    cursor::{CursorState, StateColors},
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
     row_number::RowNumber,
@@ -1295,6 +1295,11 @@ impl Buffer {
         self.parked_primary = Some(self.swap_active_screen(incoming));
         self.kind = BufferType::Alternate;
 
+        // No mark names an alternate row yet (they are all dropped when the
+        // alternate screen is left), so `drop_alternate_marks` can skip its
+        // scan of the command blocks if none are recorded during this visit.
+        self.command_blocks.checkpoint();
+
         // Task 121 Part C: the row cache was just replaced wholesale — the
         // outgoing screen's `merge_cache` must not be reused against it (a
         // matching `fp` here would be entirely coincidental).
@@ -1357,17 +1362,34 @@ impl Buffer {
     /// image store is emptied and alternate-namespace marks are dropped.
     ///
     /// The cursor is not moved: its row index stays valid because the
-    /// alternate store always holds exactly `height` rows. Blank cells carry
-    /// default attributes (not the current background; BCE is not applied to
-    /// this clear).
+    /// alternate store always holds exactly `height` rows.
+    ///
+    /// The blank cells apply the current background (BCE), as xterm's
+    /// `ClearScreen` and Ghostty's `eraseDisplay(.complete)` do: they carry the
+    /// background colour of the current format and nothing else (no
+    /// foreground, weight, decoration, hyperlink or blink). That is stored the
+    /// way ED does ([`Row::clear_with_tag`]): with a default background the
+    /// rows stay sparse, otherwise every cell is an explicit blank.
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;
         }
 
+        let blank_tag = FormatTag {
+            colors: StateColors::default()
+                .with_background_color(self.current_tag.colors.background_color),
+            ..FormatTag::default()
+        };
+        let width = self.width;
         self.rows = RowStore::from_rows_at(
             self.rows.next_number(),
-            (0..self.height).map(|_| Row::new(self.width)),
+            (0..self.height).map(|_| {
+                let mut row = Row::new(width);
+                if !blank_tag.is_visually_default() {
+                    row.clear_with_tag(&blank_tag);
+                }
+                row
+            }),
         );
         self.image_store.clear();
         self.image_cell_count = 0;

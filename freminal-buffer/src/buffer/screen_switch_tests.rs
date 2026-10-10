@@ -14,13 +14,16 @@
 
 use std::sync::Arc;
 
-use freminal_common::buffer_states::{
-    buffer_type::BufferType, fonts::FontWeight, modes::decom::Decom, row_number::RowNumber,
-    tchar::TChar,
+use freminal_common::{
+    buffer_states::{
+        buffer_type::BufferType, cursor::StateColors, fonts::FontWeight, format_tag::FormatTag,
+        modes::decom::Decom, row_number::RowNumber, tchar::TChar, url::Url,
+    },
+    colors::TerminalColor,
 };
 
 use crate::{
-    buffer::{Buffer, PlaceImageResult},
+    buffer::{Buffer, PlaceImageResult, RowStore},
     cell::Cell,
     image_store::{AnimationControl, ImageProtocol, ImageSizeMode, InlineImage, next_image_id},
     row::Row,
@@ -226,6 +229,79 @@ fn clear_alternate_screen_drops_alternate_marks_but_not_primary_ones() {
 
     assert_eq!(buf.prompt_rows().len(), 1);
     assert!(!buf.prompt_rows()[0].is_alternate());
+}
+
+/// A blue-background, red-foreground, bold format that also carries a
+/// hyperlink: everything BCE must *not* copy except the background.
+fn loud_tag() -> FormatTag {
+    FormatTag {
+        colors: StateColors::default()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue),
+        font_weight: FontWeight::Bold,
+        url: Some(Arc::new(Url {
+            id: None,
+            url: "https://example.com".to_owned(),
+        })),
+        ..FormatTag::default()
+    }
+}
+
+#[test]
+fn clear_alternate_screen_applies_the_current_background_and_nothing_else() {
+    let mut buf = Buffer::new(6, 3);
+    buf.switch_to_alternate();
+    buf.set_format(loud_tag());
+
+    buf.clear_alternate_screen();
+
+    assert_eq!(buf.rows().len(), 3);
+    for (index, row) in buf.rows().iter().enumerate() {
+        assert_eq!(row.cells().len(), 6, "row {index} has explicit blank cells");
+        for cell in row.cells() {
+            let tag = cell.tag();
+            assert_eq!(tag.colors.background_color, TerminalColor::Blue);
+            assert_eq!(tag.colors.color, TerminalColor::Default, "no foreground");
+            assert_eq!(tag.font_weight, FontWeight::Normal, "no weight");
+            assert!(tag.url.is_none(), "no hyperlink");
+            assert_eq!(cell.into_utf8(), " ");
+        }
+    }
+    assert_eq!(
+        buf.format(),
+        &loud_tag(),
+        "the clear does not touch the current format"
+    );
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn clear_alternate_screen_with_the_default_format_leaves_sparse_default_rows() {
+    let mut buf = Buffer::new(6, 3);
+    buf.switch_to_alternate();
+    buf.insert_text(&text("junk"));
+
+    buf.clear_alternate_screen();
+
+    for row in buf.rows() {
+        assert!(row.cells().is_empty(), "implicit blanks, as before BCE");
+    }
+}
+
+#[test]
+fn clear_alternate_screen_ignores_a_foreground_only_format() {
+    let mut buf = Buffer::new(6, 2);
+    buf.switch_to_alternate();
+    buf.set_format(FormatTag {
+        colors: StateColors::default().with_color(TerminalColor::Red),
+        ..FormatTag::default()
+    });
+
+    buf.clear_alternate_screen();
+
+    for row in buf.rows() {
+        assert!(row.cells().is_empty(), "no background, so nothing to erase");
+    }
 }
 
 #[test]
@@ -448,6 +524,152 @@ fn alternate_marks_are_dropped_on_leave_even_though_the_rows_persist() {
     buf.switch_to_alternate();
     assert_eq!(screen_text(&buf, 0), "kept", "the rows persisted");
     assert_eq!(buf.prompt_rows().len(), 1, "stale mark not resurrected");
+}
+
+/// Open a block on the current screen: prompt mark plus a running block.
+fn open_block(buf: &mut Buffer, fid: &str) {
+    buf.mark_prompt_row();
+    let _ = buf.start_command_block(None, fid.to_owned());
+}
+
+#[test]
+fn leaving_the_alternate_screen_clears_alternate_fields_of_an_older_block() {
+    // "old" opens on the primary and is still running when a newer, finished
+    // block follows it; the command start of "old" then fires on the
+    // alternate screen. The alternate mark sits on a block that is not the
+    // last, so a check of the newest block alone would miss it.
+    let mut buf = Buffer::new(30, 4);
+    open_block(&mut buf, "old");
+    open_block(&mut buf, "new");
+    let _ = buf.finish_command_block(Some(0), "new");
+    buf.switch_to_alternate();
+    buf.mark_command_start_row("old");
+    assert!(
+        buf.command_blocks()[0]
+            .command_start_row
+            .is_some_and(RowNumber::is_alternate),
+        "setup: the older block holds an alternate row"
+    );
+
+    buf.switch_to_primary();
+
+    assert_eq!(buf.command_blocks().len(), 2, "both blocks survive");
+    assert_eq!(buf.command_blocks()[0].command_start_row, None);
+    assert!(!buf.command_blocks()[0].prompt_start_row.is_alternate());
+    buf.debug_assert_invariants();
+}
+
+#[test]
+fn marks_of_both_namespaces_are_handled_on_a_clear_and_on_leaving() {
+    let mut buf = Buffer::new(30, 4);
+    open_block(&mut buf, "p");
+    buf.switch_to_alternate();
+    open_block(&mut buf, "a1");
+    buf.clear_alternate_screen();
+    assert_eq!(buf.command_blocks().len(), 1, "clear dropped the alt block");
+    assert_eq!(buf.prompt_rows().len(), 1, "clear dropped the alt prompt");
+    open_block(&mut buf, "a2");
+    assert_eq!(buf.command_blocks().len(), 2);
+
+    buf.switch_to_primary();
+
+    assert_eq!(buf.command_blocks().len(), 1);
+    assert_eq!(buf.command_blocks()[0].fid, "p");
+    assert_eq!(buf.prompt_rows().len(), 1);
+    assert!(!buf.prompt_rows()[0].is_alternate());
+}
+
+#[test]
+fn a_visit_that_records_no_marks_does_not_touch_the_command_block_log() {
+    // `retain_mut` advances the log's generation, which discards the
+    // snapshot's cached copy of every block, so a switch or clear with
+    // nothing to drop must not call it.
+    let mut buf = Buffer::new(30, 4);
+    open_block(&mut buf, "p");
+    let before = buf.command_blocks_generation();
+
+    buf.switch_to_alternate();
+    buf.clear_alternate_screen();
+    buf.switch_to_primary();
+
+    assert_eq!(buf.command_blocks_generation(), before);
+    assert_eq!(buf.command_blocks().len(), 1);
+}
+
+#[test]
+fn dropping_alternate_prompt_marks_keeps_the_primary_ones_in_order() {
+    // Both namespaces' marks can sit in `prompt_rows` at once (primary ones
+    // first); dropping the alternate ones leaves the primary ones in order.
+    let mut buf = Buffer::new(30, 4);
+    buf.mark_prompt_row();
+    line(&mut buf, "x");
+    buf.mark_prompt_row();
+    let primary = buf.prompt_rows().to_vec();
+    buf.switch_to_alternate();
+    buf.mark_prompt_row();
+    buf.mark_prompt_row();
+    assert_eq!(buf.prompt_rows().len(), 4);
+
+    buf.switch_to_primary();
+
+    assert_eq!(buf.prompt_rows(), primary.as_slice());
+}
+
+// ── Parked-screen invariants (debug builds) ─────────────────────────────
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "width != buffer width")]
+fn a_parked_row_of_the_wrong_width_trips_the_invariant_check() {
+    let (mut buf, _) = buffer_with_parked_alternate();
+    let parked = buf.parked_alternate.as_mut().unwrap();
+    parked.rows[0].set_max_width(99);
+
+    buf.debug_assert_invariants();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "wrong namespace")]
+fn a_parked_row_in_the_wrong_namespace_trips_the_invariant_check() {
+    let (mut buf, _) = buffer_with_parked_alternate();
+    let parked = buf.parked_alternate.as_mut().unwrap();
+    parked.rows = RowStore::from_rows_at(RowNumber::ZERO, (0..4).map(|_| Row::new(20)));
+    parked.image_cell_count = 0;
+
+    buf.debug_assert_invariants();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reflow_anchor.y")]
+fn a_parked_anchor_below_the_rows_trips_the_invariant_check() {
+    let (mut buf, _) = buffer_with_parked_alternate();
+    let parked = buf.parked_alternate.as_mut().unwrap();
+    parked.reflow_anchor.pos.y = 99;
+
+    buf.debug_assert_invariants();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "reflow_anchor.x")]
+fn a_parked_anchor_right_of_the_width_trips_the_invariant_check() {
+    let (mut buf, _) = buffer_with_parked_alternate();
+    let parked = buf.parked_alternate.as_mut().unwrap();
+    parked.reflow_anchor.pos.x = 99;
+
+    buf.debug_assert_invariants();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "alternate-namespace mark survives")]
+fn an_alternate_mark_surviving_on_the_primary_screen_trips_the_invariant_check() {
+    let mut buf = Buffer::new(20, 4);
+    buf.prompt_rows.push(RowNumber::ALTERNATE_BASE);
+
+    buf.debug_assert_invariants();
 }
 
 // ── Resizing a parked screen ─────────────────────────────────────────────

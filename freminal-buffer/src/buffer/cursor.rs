@@ -34,6 +34,11 @@ use crate::buffer::Buffer;
 /// retained rows. Because the saved row never names a stored row, scrolling,
 /// eviction, reflow and a switch between the primary and alternate screens
 /// cannot invalidate it; a resize only matters through the clamp on restore.
+///
+/// Each screen has its own slot (`Buffer::saved_cursor` for the active screen,
+/// `ParkedScreen::saved_cursor` for the parked one), so a switch parks the
+/// outgoing screen's slot with it rather than carrying it across; a DECSC on
+/// one screen is never restored by a DECRC on the other.
 #[derive(Debug, Clone)]
 pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
@@ -284,9 +289,11 @@ impl Buffer {
     /// between save and restore never produces an out-of-bounds cursor, and
     /// the cursor is never placed in off-screen scrollback.
     ///
-    /// The same screen position is used on whichever screen is active when
-    /// DECRC runs, so a save made on one screen restores sensibly on the
-    /// other.
+    /// The slot is per screen: each screen has its own DECSC slot, parked and
+    /// restored with the screen (xterm `sc[]`, Ghostty `saved_cursor` per
+    /// screen). A save made on one screen is therefore **not** visible on the
+    /// other, and a DECRC on a screen that has not saved behaves as above even
+    /// if the other screen has.
     pub fn restore_cursor(&mut self) {
         let saved = self.saved_cursor.clone().unwrap_or_else(|| SavedCursor {
             cursor: CursorState::default(),
