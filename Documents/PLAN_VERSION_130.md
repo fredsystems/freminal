@@ -3476,6 +3476,19 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
   DECRQM reports 1047. Two test files outside the stated scope
   (`mode_dispatch_tests.rs`, `terminal_handler_integration.rs`) needed mechanical assertion
   updates that the parse split forced; accepted.
+- **131.6 — Complete (2026-10-10), commit `91a663f8`.**
+  - `handle_alternate_screen(mode, action)` implements the `?47` / `?1047` / `?1049`
+    decisions exactly.
+  - The DECSC charset slot is `ScreenScoped`.
+  - 17 new tests in `tests/alt_screen_modes.rs`.
+  - The DECSTR active-screen charset slot has no dedicated test yet; 131.8 adds one.
+- **131.7 — Complete (2026-10-10), commit `70b9bfcb`.**
+  - The virtual and real placement maps and the prune base are `ScreenScoped`, and every
+    operation acts on the active screen.
+  - The reflow remap translates the primary map whichever screen is active, and the parked
+    map is pruned against `Buffer::parked_row_span`.
+  - A clear empties the alternate maps; a switch touches neither.
+  - Surfaced 131.C5.
 - **131.5 — Complete (2026-10-10), commit `b320677d`.**
   - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
   - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
@@ -3616,6 +3629,31 @@ Notes:
   - `CSI ? 45 $ p` on a fresh terminal reports reset (`2`);
   - BS at column 0 does not wrap until `CSI ? 45 h`.
 - **Scheduling:** before 131.8.
+
+#### 131.C5 — Placing an image on the alternate screen's last row grows the store
+
+- **Surfaced:** 131.7 implementation (2026-10-10), reproduced by the orchestrator on the
+  integration branch before any Task 131 change, so it predates Task 131.
+- **Impact:**
+  - `Buffer::place_image` makes room below an image, and for the cursor after it, with
+    `push_row`, then trims only on the primary screen (`enforce_scrollback_limit`).
+  - On the alternate screen the store grows to `height + 1` rows. A debug build panics on
+    the "alternate buffer must have exactly `height` rows" invariant. A release build keeps
+    an oversized alternate store, which 131.5's parked-screen invariants assume cannot
+    happen.
+  - Reproduced with `?1049h`, then CUP to the last row, then `APC G a=T,…,r=1`.
+- **Fix:** on the alternate screen, after each growth, evict the excess front rows with the
+  alternate screen's own scroll path (`evict_front_rows`), so the content scrolls up exactly
+  as a line feed at the bottom would. Then re-derive the image's base row from its stable
+  origin row number, as the primary path does.
+- **Scope:** `freminal-buffer/src/buffer/images.rs` (`place_image`) and tests.
+- **Verification:**
+  - Placing a 1-row and a 3-row image on the alternate screen's last row keeps
+    `rows.len() == height`.
+  - The image's cells sit on the expected scrolled rows, and the cursor is on the row below
+    the image (or the last row).
+  - The primary behaviour is unchanged.
+- **Scheduling:** within Task 131, after 131.7.
 
 ---
 
