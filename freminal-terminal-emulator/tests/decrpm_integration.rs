@@ -338,3 +338,141 @@ fn theming_set_then_query_auto_mode() {
         "After DECRST in Auto mode → Ps=4 (temporarily reset / dark)"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C1 framing of replies (S8C1T / S7C1T)
+//
+// Every DECRPM and the `CSI ? u` reply is framed by the handler, so the
+// introducer follows the S8C1T state regardless of which layer owns the mode.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Feed raw bytes and return the concatenated PTY response as raw bytes
+/// (8-bit replies contain `0x9B`, which is not valid UTF-8 on its own).
+fn feed_and_collect_bytes(
+    state: &mut TerminalState,
+    rx: &Receiver<PtyWrite>,
+    input: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let PtyWrite::Write(bytes) = msg {
+            buf.extend_from_slice(&bytes);
+        }
+    }
+    buf.clear();
+    state.handle_incoming_data(input);
+    while let Ok(msg) = rx.try_recv() {
+        if let PtyWrite::Write(bytes) = msg {
+            buf.extend_from_slice(&bytes);
+        }
+    }
+    buf
+}
+
+/// `true` if `haystack` contains the two-byte 7-bit CSI introducer `ESC [`.
+fn contains_7bit_csi(haystack: &[u8]) -> bool {
+    haystack.windows(2).any(|w| w == b"\x1b[")
+}
+
+/// DECRQM queries covering a handler-owned mode (`?7`), a `TerminalState`-owned
+/// mode (`?2004`) and `?2031`, with the 7-bit replies they must produce.
+const FRAMING_QUERIES: [(&[u8], &[u8]); 3] = [
+    (b"\x1b[?7$p", b"\x1b[?7;1$y"),
+    (b"\x1b[?2004$p", b"\x1b[?2004;2$y"),
+    (b"\x1b[?2031$p", b"\x1b[?2031;2$y"),
+];
+
+#[test]
+fn decrpm_in_8bit_mode_uses_0x9b_and_no_esc_bracket() {
+    for (query, seven_bit) in FRAMING_QUERIES {
+        let (mut state, rx) = make_state();
+        state.handle_incoming_data(b"\x1b G"); // S8C1T
+        let resp = feed_and_collect_bytes(&mut state, &rx, query);
+
+        // The 8-bit reply is the 7-bit reply with `ESC [` collapsed to 0x9B.
+        let mut expected = vec![0x9B];
+        expected.extend_from_slice(&seven_bit[2..]);
+        assert_eq!(
+            resp,
+            expected,
+            "query {:?}: expected 8-bit framed reply, got {resp:?}",
+            String::from_utf8_lossy(query)
+        );
+        assert_eq!(resp.first(), Some(&0x9B));
+        assert!(
+            !contains_7bit_csi(&resp),
+            "query {:?}: reply must not contain ESC [, got {resp:?}",
+            String::from_utf8_lossy(query)
+        );
+    }
+}
+
+#[test]
+fn decrpm_in_7bit_mode_is_byte_identical_to_legacy_framing() {
+    for (query, seven_bit) in FRAMING_QUERIES {
+        let (mut state, rx) = make_state();
+        let resp = feed_and_collect_bytes(&mut state, &rx, query);
+        assert_eq!(
+            resp,
+            seven_bit,
+            "query {:?}: 7-bit reply changed",
+            String::from_utf8_lossy(query)
+        );
+    }
+}
+
+#[test]
+fn decrpm_returns_to_7bit_framing_after_s7c1t() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    state.handle_incoming_data(b"\x1b F"); // S7C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?2004$p");
+    assert_eq!(resp, b"\x1b[?2004;2$y");
+}
+
+#[test]
+fn decrpm_mouse_query_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?1006$p");
+    assert_eq!(resp, b"\x9b?1006;2$y");
+}
+
+#[test]
+fn decrpm_unknown_mode_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?9999$p");
+    assert_eq!(resp, b"\x9b?9999;0$y");
+    assert!(!contains_7bit_csi(&resp));
+}
+
+#[test]
+fn decrpm_unknown_mode_in_7bit_mode_is_unchanged() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?9999$p");
+    assert_eq!(resp, b"\x1b[?9999;0$y");
+}
+
+#[test]
+fn kitty_keyboard_query_in_8bit_mode_is_0x9b_question_flags_u() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?u");
+    assert_eq!(resp, b"\x9b?0u");
+}
+
+#[test]
+fn kitty_keyboard_query_in_7bit_mode_is_unchanged() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?u");
+    assert_eq!(resp, b"\x1b[?0u");
+}
+
+#[test]
+fn decrpm_on_disconnected_channel_does_not_panic() {
+    let (mut state, rx) = make_state();
+    drop(rx);
+    // Handler-owned, state-owned and ?2031 replies must all be dropped quietly.
+    state.handle_incoming_data(b"\x1b[?7$p\x1b[?2004$p\x1b[?2031$p");
+}

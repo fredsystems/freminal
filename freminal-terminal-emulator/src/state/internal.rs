@@ -30,7 +30,6 @@ use freminal_common::{
     },
     config::ThemeMode,
     cursor::CursorVisualStyle,
-    send_or_log,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
 
@@ -390,13 +389,13 @@ impl TerminalState {
         match mode {
             Mode::Decckm(Decckm::Query) => {
                 let resp = self.modes.cursor_key.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::BracketedPaste(
                 freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
             ) => {
                 let resp = self.modes.bracketed_paste.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::MouseMode(MouseTrack::Query(report_mode)) => {
                 let ps = match *report_mode {
@@ -421,39 +420,40 @@ impl TerminalState {
                         }
                     }
                 };
-                let resp = format!("\x1b[?{report_mode};{ps}$y");
-                self.send_decrpm(&resp);
+                let resp = format!("?{report_mode};{ps}$y");
+                self.handler.write_csi_response(&resp);
             }
             Mode::XtMseWin(XtMseWin::Query) => {
                 let resp = self.modes.focus_reporting.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query) => {
                 let resp = self.modes.invert_screen.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decarm(Decarm::Query) => {
                 let resp = self.modes.repeat_keys.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
                 let resp = self.modes.synchronized_updates.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decnkm(Decnkm::Query) => {
                 let override_mode = match self.modes.keypad_mode {
                     KeypadMode::Application => SetMode::DecSet,
                     KeypadMode::Numeric => SetMode::DecRst,
                 };
-                self.send_decrpm(&Decnkm::Application.report(Some(override_mode)));
+                self.handler
+                    .write_csi_response(&Decnkm::Application.report(Some(override_mode)));
             }
             Mode::Decbkm(Decbkm::Query) => {
                 let resp = self.modes.backarrow_key_mode.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::AlternateScroll(AlternateScroll::Query) => {
                 let resp = self.modes.alternate_scroll.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             // ── ?2031 Theming query ─────────────────────────────────────────
             //
@@ -470,14 +470,14 @@ impl TerminalState {
             //                        (dynamically follows OS preference; app can override)
             Mode::Theming(Theming::Query) => {
                 let resp = match self.modes.theme_mode {
-                    ThemeMode::Light => String::from("\x1b[?2031;1$y"),
-                    ThemeMode::Dark => String::from("\x1b[?2031;2$y"),
+                    ThemeMode::Light => String::from("?2031;1$y"),
+                    ThemeMode::Dark => String::from("?2031;2$y"),
                     ThemeMode::Auto => match self.modes.theming {
-                        Theming::Light => String::from("\x1b[?2031;3$y"),
-                        Theming::Dark | Theming::Query => String::from("\x1b[?2031;4$y"),
+                        Theming::Light => String::from("?2031;3$y"),
+                        Theming::Dark | Theming::Query => String::from("?2031;4$y"),
                     },
                 };
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             _ => {}
         }
@@ -755,18 +755,6 @@ impl TerminalState {
 
         Ok(())
     }
-
-    /// Send a DECRPM response string directly to the PTY.
-    ///
-    /// This bypasses the `TerminalInput` encoding path — the response is an
-    /// escape sequence that must be sent verbatim.
-    fn send_decrpm(&self, response: &str) {
-        send_or_log!(
-            self.write_tx,
-            PtyWrite::Write(response.as_bytes().to_vec()),
-            "Failed to send DECRPM response"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -1016,31 +1004,6 @@ mod tests {
             PtyWrite::Write(bytes) => assert_eq!(bytes, vec![b'\r']),
             PtyWrite::Resize(_) => panic!("unexpected Resize"),
         }
-    }
-
-    // ── send_decrpm ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn send_decrpm_sends_response_to_channel() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let state = TerminalState::new(tx, None);
-        let resp = "\x1b[?1;2$y";
-        state.send_decrpm(resp);
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            PtyWrite::Write(bytes) => assert_eq!(bytes, resp.as_bytes().to_vec()),
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
-        }
-    }
-
-    #[test]
-    fn send_decrpm_on_disconnected_channel_does_not_panic() {
-        // Drop the receiver → send will silently fail but must not panic.
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        let state = TerminalState::new(tx, None);
-        drop(rx);
-        // Must not panic
-        state.send_decrpm("\x1b[?1;2$y");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

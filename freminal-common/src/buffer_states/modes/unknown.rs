@@ -13,10 +13,10 @@ use crate::buffer_states::{mode::SetMode, modes::ReportMode};
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum ModeNamespace {
     /// DEC private mode — params were prefixed with `?` (e.g. `\x1b[?999h`).
-    /// Report format: `\x1b[?{N};0$y`
+    /// Report format: `?{N};0$y`
     Dec,
     /// Standard ANSI mode — no `?` prefix (e.g. `\x1b[42h`).
-    /// Report format: `\x1b[{N};0$y`
+    /// Report format: `{N};0$y`
     Ansi,
 }
 
@@ -52,8 +52,8 @@ impl UnknownMode {
 impl ReportMode for UnknownMode {
     fn report(&self, _override_mode: Option<SetMode>) -> String {
         match self.namespace {
-            ModeNamespace::Dec => format!("\x1b[?{};0$y", self.params),
-            ModeNamespace::Ansi => format!("\x1b[{};0$y", self.params),
+            ModeNamespace::Dec => format!("?{};0$y", self.params),
+            ModeNamespace::Ansi => format!("{};0$y", self.params),
         }
     }
 }
@@ -76,25 +76,25 @@ mod tests {
     #[test]
     fn dec_unknown_mode_report_includes_question_mark_prefix() {
         let mode = UnknownMode::new(b"999", SetMode::DecRst, ModeNamespace::Dec);
-        assert_eq!(mode.report(None), "\x1b[?999;0$y");
+        assert_eq!(mode.report(None), "?999;0$y");
     }
 
     #[test]
     fn ansi_unknown_mode_report_has_no_question_mark_prefix() {
         let mode = UnknownMode::new(b"42", SetMode::DecRst, ModeNamespace::Ansi);
-        assert_eq!(mode.report(None), "\x1b[42;0$y");
+        assert_eq!(mode.report(None), "42;0$y");
     }
 
     #[test]
     fn dec_unknown_mode_report_with_override_still_emits_dec_prefix() {
         let mode = UnknownMode::new(b"1234", SetMode::DecSet, ModeNamespace::Dec);
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?1234;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?1234;0$y");
     }
 
     #[test]
     fn ansi_unknown_mode_report_with_override_still_omits_dec_prefix() {
         let mode = UnknownMode::new(b"20", SetMode::DecSet, ModeNamespace::Ansi);
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[20;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "20;0$y");
     }
 
     #[test]

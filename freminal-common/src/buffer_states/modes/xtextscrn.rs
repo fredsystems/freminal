@@ -35,14 +35,14 @@ impl ReportMode for XtExtscrn {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Primary => String::from("\x1b[?1049;2$y"),
-                Self::Alternate => String::from("\x1b[?1049;1$y"),
-                Self::Query => String::from("\x1b[?1049;0$y"),
+                Self::Primary => String::from("?1049;2$y"),
+                Self::Alternate => String::from("?1049;1$y"),
+                Self::Query => String::from("?1049;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?1049;1$y"),
-                SetMode::DecRst => String::from("\x1b[?1049;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?1049;0$y"),
+                SetMode::DecSet => String::from("?1049;1$y"),
+                SetMode::DecRst => String::from("?1049;2$y"),
+                SetMode::DecQuery => String::from("?1049;0$y"),
             },
         )
     }
@@ -84,14 +84,14 @@ impl ReportMode for AltScreen47 {
         let param = "47";
         override_mode.map_or_else(
             || match self {
-                Self::Primary => format!("\x1b[?{param};2$y"),
-                Self::Alternate => format!("\x1b[?{param};1$y"),
-                Self::Query => format!("\x1b[?{param};0$y"),
+                Self::Primary => format!("?{param};2$y"),
+                Self::Alternate => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => format!("\x1b[?{param};1$y"),
-                SetMode::DecRst => format!("\x1b[?{param};2$y"),
-                SetMode::DecQuery => format!("\x1b[?{param};0$y"),
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
             },
         )
     }
@@ -132,14 +132,14 @@ impl ReportMode for SaveCursor1048 {
         let param = "1048";
         override_mode.map_or_else(
             || match self {
-                Self::Restore => format!("\x1b[?{param};2$y"),
-                Self::Save => format!("\x1b[?{param};1$y"),
-                Self::Query => format!("\x1b[?{param};0$y"),
+                Self::Restore => format!("?{param};2$y"),
+                Self::Save => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => format!("\x1b[?{param};1$y"),
-                SetMode::DecRst => format!("\x1b[?{param};2$y"),
-                SetMode::DecQuery => format!("\x1b[?{param};0$y"),
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
             },
         )
     }

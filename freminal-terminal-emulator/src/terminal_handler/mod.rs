@@ -1613,7 +1613,7 @@ impl TerminalHandler {
                 // Query variants: report current mode state via DECRPM response
                 Mode::Dectem(Dectcem::Query) => {
                     let current = &self.show_cursor;
-                    self.write_to_pty(&current.report(None));
+                    self.write_csi_response(&current.report(None));
                 }
                 Mode::Decawm(Decawm::Query) => {
                     let mode = if self.buffer.is_wrap_enabled() == Decawm::AutoWrap {
@@ -1621,7 +1621,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decawm::AutoWrap.report(Some(mode)));
+                    self.write_csi_response(&Decawm::AutoWrap.report(Some(mode)));
                 }
                 Mode::LineFeedMode(Lnm::Query) => {
                     let mode = if self.buffer.is_lnm_enabled() == Lnm::NewLine {
@@ -1629,7 +1629,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Lnm::NewLine.report(Some(mode)));
+                    self.write_csi_response(&Lnm::NewLine.report(Some(mode)));
                 }
                 Mode::XtExtscrn(XtExtscrn::Query) => {
                     let mode = if self.is_alternate_screen() {
@@ -1637,7 +1637,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtExtscrn::Alternate.report(Some(mode)));
+                    self.write_csi_response(&XtExtscrn::Alternate.report(Some(mode)));
                 }
                 Mode::AltScreen47(AltScreen47::Query) => {
                     let mode = if self.is_alternate_screen() {
@@ -1645,7 +1645,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&AltScreen47::Alternate.report(Some(mode)));
+                    self.write_csi_response(&AltScreen47::Alternate.report(Some(mode)));
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Query) => {
                     // Report based on whether a cursor has actually been saved
@@ -1655,7 +1655,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&SaveCursor1048::Save.report(Some(mode)));
+                    self.write_csi_response(&SaveCursor1048::Save.report(Some(mode)));
                 }
                 Mode::XtCBlink(XtCBlink::Query) => {
                     let is_blinking = matches!(
@@ -1669,7 +1669,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtCBlink::Blinking.report(Some(mode)));
+                    self.write_csi_response(&XtCBlink::Blinking.report(Some(mode)));
                 }
                 Mode::UnknownQuery(params) => {
                     // Unknown mode — respond with Ps=0 (not recognized)
@@ -1692,7 +1692,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decom::OriginMode.report(Some(mode)));
+                    self.write_csi_response(&Decom::OriginMode.report(Some(mode)));
                 }
                 Mode::Deccolm(Deccolm::Column132)
                     if self.allow_column_mode_switch
@@ -1726,7 +1726,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Deccolm::Column132.report(Some(mode)));
+                    self.write_csi_response(&Deccolm::Column132.report(Some(mode)));
                 }
                 // ── DECLRMM — Left/Right Margin Mode (?69) ───────
                 Mode::Declrmm(Declrmm::Enabled) => {
@@ -1742,7 +1742,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Declrmm::Enabled.report(Some(mode)));
+                    self.write_csi_response(&Declrmm::Enabled.report(Some(mode)));
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch) => {
                     self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
@@ -1758,7 +1758,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(
+                    self.write_csi_response(
                         &AllowColumnModeSwitch::AllowColumnModeSwitch.report(Some(mode)),
                     );
                 }
@@ -1775,7 +1775,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decsdm::DisplayMode.report(Some(mode)));
+                    self.write_csi_response(&Decsdm::DisplayMode.report(Some(mode)));
                 }
                 // ── Allow Alternate Screen Switching (?1046) ──────────
                 Mode::AllowAltScreen(AllowAltScreen::Allow) => {
@@ -1790,7 +1790,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&AllowAltScreen::Allow.report(Some(mode)));
+                    self.write_csi_response(&AllowAltScreen::Allow.report(Some(mode)));
                 }
                 // ── Private Color Registers for Sixel (?1070) ────────
                 Mode::PrivateColorRegisters(PrivateColorRegisters::Private) => {
@@ -1807,7 +1807,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&PrivateColorRegisters::Private.report(Some(mode)));
+                    self.write_csi_response(&PrivateColorRegisters::Private.report(Some(mode)));
                 }
                 // ── DECNRCM — National Replacement Character Set (?42) ─
                 Mode::Decnrcm(Decnrcm::NrcEnabled) => {
@@ -1822,7 +1822,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decnrcm::NrcEnabled.report(Some(mode)));
+                    self.write_csi_response(&Decnrcm::NrcEnabled.report(Some(mode)));
                 }
                 // ── Reverse Wrap Around (?45) ─────────────────────
                 Mode::ReverseWrapAround(ReverseWrapAround::WrapAround) => {
@@ -1837,7 +1837,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&ReverseWrapAround::WrapAround.report(Some(mode)));
+                    self.write_csi_response(&ReverseWrapAround::WrapAround.report(Some(mode)));
                 }
                 // ── Extended Reverse Wrap (?1045) ─────────────────
                 Mode::XtRevWrap2(XtRevWrap2::Enabled) => {
@@ -1852,7 +1852,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtRevWrap2::Enabled.report(Some(mode)));
+                    self.write_csi_response(&XtRevWrap2::Enabled.report(Some(mode)));
                 }
                 // ── DECANM — ANSI/VT52 Mode (?2) ─────────────────
                 Mode::Decanm(Decanm::Vt52) => {
@@ -1867,7 +1867,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecSet
                     };
-                    self.write_to_pty(&Decanm::Ansi.report(Some(mode)));
+                    self.write_csi_response(&Decanm::Ansi.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
@@ -1911,7 +1911,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&ApplicationEscapeKey::Set.report(Some(mode)));
+                    self.write_csi_response(&ApplicationEscapeKey::Set.report(Some(mode)));
                 }
 
                 // ── In-Band Resize Notifications (?2048) ──────────────
@@ -1929,7 +1929,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&InBandResizeMode::Set.report(Some(mode)));
+                    self.write_csi_response(&InBandResizeMode::Set.report(Some(mode)));
                 }
 
                 // ── Grapheme Clustering (?2027) — permanently on ────
@@ -1937,7 +1937,7 @@ impl TerminalHandler {
                 // graphemes(true), so Query always reports ";3$y"
                 // (permanently set). Set/Reset are in the catch-all above.
                 Mode::GraphemeClustering(GraphemeClustering::Query) => {
-                    self.write_to_pty(&GraphemeClustering::Unicode.report(None));
+                    self.write_csi_response(&GraphemeClustering::Unicode.report(None));
                 }
 
                 // ── Insert/Replace Mode (IRM, ANSI mode 4) ───────────
@@ -2079,7 +2079,7 @@ impl TerminalHandler {
             TerminalOutput::KittyKeyboardQuery => {
                 let flags = self.kitty_keyboard_flags();
                 tracing::debug!("KittyKeyboardQuery received, flags={flags}");
-                self.write_to_pty(&format!("\x1b[?{flags}u"));
+                self.write_csi_response(&format!("?{flags}u"));
             }
             TerminalOutput::KittyKeyboardPush(flags) => {
                 if self.kitty_keyboard_stack.len() >= KittyKeyboardFlags::MAX_STACK_DEPTH {

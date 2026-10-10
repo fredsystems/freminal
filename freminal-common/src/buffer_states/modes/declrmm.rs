@@ -39,14 +39,14 @@ impl ReportMode for Declrmm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Disabled => String::from("\x1b[?69;2$y"),
-                Self::Enabled => String::from("\x1b[?69;1$y"),
-                Self::Query => String::from("\x1b[?69;0$y"),
+                Self::Disabled => String::from("?69;2$y"),
+                Self::Enabled => String::from("?69;1$y"),
+                Self::Query => String::from("?69;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?69;1$y"),
-                SetMode::DecRst => String::from("\x1b[?69;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?69;0$y"),
+                SetMode::DecSet => String::from("?69;1$y"),
+                SetMode::DecRst => String::from("?69;2$y"),
+                SetMode::DecQuery => String::from("?69;0$y"),
             },
         )
     }
@@ -87,41 +87,32 @@ mod tests {
 
     #[test]
     fn report_enabled_no_override() {
-        assert_eq!(Declrmm::Enabled.report(None), "\x1b[?69;1$y");
+        assert_eq!(Declrmm::Enabled.report(None), "?69;1$y");
     }
 
     #[test]
     fn report_disabled_no_override() {
-        assert_eq!(Declrmm::Disabled.report(None), "\x1b[?69;2$y");
+        assert_eq!(Declrmm::Disabled.report(None), "?69;2$y");
     }
 
     #[test]
     fn report_query_no_override() {
-        assert_eq!(Declrmm::Query.report(None), "\x1b[?69;0$y");
+        assert_eq!(Declrmm::Query.report(None), "?69;0$y");
     }
 
     #[test]
     fn report_with_dec_set_override() {
-        assert_eq!(
-            Declrmm::Disabled.report(Some(SetMode::DecSet)),
-            "\x1b[?69;1$y"
-        );
+        assert_eq!(Declrmm::Disabled.report(Some(SetMode::DecSet)), "?69;1$y");
     }
 
     #[test]
     fn report_with_dec_rst_override() {
-        assert_eq!(
-            Declrmm::Enabled.report(Some(SetMode::DecRst)),
-            "\x1b[?69;2$y"
-        );
+        assert_eq!(Declrmm::Enabled.report(Some(SetMode::DecRst)), "?69;2$y");
     }
 
     #[test]
     fn report_with_dec_query_override() {
-        assert_eq!(
-            Declrmm::Enabled.report(Some(SetMode::DecQuery)),
-            "\x1b[?69;0$y"
-        );
+        assert_eq!(Declrmm::Enabled.report(Some(SetMode::DecQuery)), "?69;0$y");
     }
 
     // ── Display ──────────────────────────────────────────────────────

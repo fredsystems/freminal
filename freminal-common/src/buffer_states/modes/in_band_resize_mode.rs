@@ -43,14 +43,14 @@ impl ReportMode for InBandResizeMode {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Reset => String::from("\x1b[?2048;2$y"),
-                Self::Set => String::from("\x1b[?2048;1$y"),
-                Self::Query => String::from("\x1b[?2048;0$y"),
+                Self::Reset => String::from("?2048;2$y"),
+                Self::Set => String::from("?2048;1$y"),
+                Self::Query => String::from("?2048;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?2048;1$y"),
-                SetMode::DecRst => String::from("\x1b[?2048;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?2048;0$y"),
+                SetMode::DecSet => String::from("?2048;1$y"),
+                SetMode::DecRst => String::from("?2048;2$y"),
+                SetMode::DecQuery => String::from("?2048;0$y"),
             },
         )
     }
@@ -107,17 +107,17 @@ mod tests {
 
     #[test]
     fn report_reset_no_override() {
-        assert_eq!(InBandResizeMode::Reset.report(None), "\x1b[?2048;2$y");
+        assert_eq!(InBandResizeMode::Reset.report(None), "?2048;2$y");
     }
 
     #[test]
     fn report_set_no_override() {
-        assert_eq!(InBandResizeMode::Set.report(None), "\x1b[?2048;1$y");
+        assert_eq!(InBandResizeMode::Set.report(None), "?2048;1$y");
     }
 
     #[test]
     fn report_query_no_override() {
-        assert_eq!(InBandResizeMode::Query.report(None), "\x1b[?2048;0$y");
+        assert_eq!(InBandResizeMode::Query.report(None), "?2048;0$y");
     }
 
     // ── ReportMode (with override) ──────────────────────────────────
@@ -127,7 +127,7 @@ mod tests {
         // Regardless of self, override DecSet → mode 1
         assert_eq!(
             InBandResizeMode::Reset.report(Some(SetMode::DecSet)),
-            "\x1b[?2048;1$y"
+            "?2048;1$y"
         );
     }
 
@@ -136,7 +136,7 @@ mod tests {
         // Regardless of self, override DecRst → mode 2
         assert_eq!(
             InBandResizeMode::Reset.report(Some(SetMode::DecRst)),
-            "\x1b[?2048;2$y"
+            "?2048;2$y"
         );
     }
 
@@ -145,7 +145,7 @@ mod tests {
         // Regardless of self, override DecQuery → mode 0
         assert_eq!(
             InBandResizeMode::Set.report(Some(SetMode::DecQuery)),
-            "\x1b[?2048;0$y"
+            "?2048;0$y"
         );
     }
 

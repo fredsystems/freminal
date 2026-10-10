@@ -31,14 +31,14 @@ impl ReportMode for Decnrcm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NrcEnabled => String::from("\x1b[?42;1$y"),
-                Self::NrcDisabled => String::from("\x1b[?42;2$y"),
-                Self::Query => String::from("\x1b[?42;0$y"),
+                Self::NrcEnabled => String::from("?42;1$y"),
+                Self::NrcDisabled => String::from("?42;2$y"),
+                Self::Query => String::from("?42;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?42;1$y"),
-                SetMode::DecRst => String::from("\x1b[?42;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?42;0$y"),
+                SetMode::DecSet => String::from("?42;1$y"),
+                SetMode::DecRst => String::from("?42;2$y"),
+                SetMode::DecQuery => String::from("?42;0$y"),
             },
         )
     }
@@ -91,33 +91,30 @@ mod tests {
 
     #[test]
     fn decnrcm_report_enabled() {
-        assert_eq!(Decnrcm::NrcEnabled.report(None), "\x1b[?42;1$y");
+        assert_eq!(Decnrcm::NrcEnabled.report(None), "?42;1$y");
     }
 
     #[test]
     fn decnrcm_report_disabled() {
-        assert_eq!(Decnrcm::NrcDisabled.report(None), "\x1b[?42;2$y");
+        assert_eq!(Decnrcm::NrcDisabled.report(None), "?42;2$y");
     }
 
     #[test]
     fn decnrcm_report_query() {
-        assert_eq!(Decnrcm::Query.report(None), "\x1b[?42;0$y");
+        assert_eq!(Decnrcm::Query.report(None), "?42;0$y");
     }
 
     #[test]
     fn decnrcm_report_override_set() {
         assert_eq!(
             Decnrcm::NrcDisabled.report(Some(SetMode::DecSet)),
-            "\x1b[?42;1$y"
+            "?42;1$y"
         );
     }
 
     #[test]
     fn decnrcm_report_override_rst() {
-        assert_eq!(
-            Decnrcm::NrcEnabled.report(Some(SetMode::DecRst)),
-            "\x1b[?42;2$y"
-        );
+        assert_eq!(Decnrcm::NrcEnabled.report(Some(SetMode::DecRst)), "?42;2$y");
     }
 
     #[test]
@@ -125,7 +122,7 @@ mod tests {
         // Exercises the `SetMode::DecQuery` arm in the override_mode match (line 41).
         assert_eq!(
             Decnrcm::NrcEnabled.report(Some(SetMode::DecQuery)),
-            "\x1b[?42;0$y"
+            "?42;0$y"
         );
     }
 

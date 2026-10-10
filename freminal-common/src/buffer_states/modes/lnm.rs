@@ -20,14 +20,14 @@ impl ReportMode for Lnm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NewLine => String::from("\x1b[?20;1$y"),
-                Self::LineFeed => String::from("\x1b[?20;2$y"),
-                Self::Query => String::from("\x1b[?20;0$y"),
+                Self::NewLine => String::from("?20;1$y"),
+                Self::LineFeed => String::from("?20;2$y"),
+                Self::Query => String::from("?20;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?20;1$y"),
-                SetMode::DecRst => String::from("\x1b[?20;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?20;0$y"),
+                SetMode::DecSet => String::from("?20;1$y"),
+                SetMode::DecRst => String::from("?20;2$y"),
+                SetMode::DecQuery => String::from("?20;0$y"),
             },
         )
     }

@@ -74,7 +74,7 @@ impl TerminalHandler {
     }
 
     /// Write raw bytes back to the PTY.  Silently drops if no channel is set.
-    pub(super) fn write_bytes_to_pty(&self, data: &[u8]) {
+    fn write_bytes_to_pty(&self, data: &[u8]) {
         if let Some(tx) = &self.write_tx
             && let Err(e) = tx.send(PtyWrite::Write(data.to_vec()))
         {
@@ -99,7 +99,7 @@ impl TerminalHandler {
     ///
     /// Sends `CSI {body}` where CSI is `0x9B` (8-bit) or `ESC [` (7-bit)
     /// depending on the current S8C1T mode.
-    pub(super) fn write_csi_response(&self, body: &str) {
+    pub(crate) fn write_csi_response(&self, body: &str) {
         let mut buf = Vec::with_capacity(2 + body.len());
         buf.extend_from_slice(self.csi_response());
         buf.extend_from_slice(body.as_bytes());

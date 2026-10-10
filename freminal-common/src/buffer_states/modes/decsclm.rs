@@ -21,7 +21,7 @@ pub enum Decsclm {
 
 impl ReportMode for Decsclm {
     fn report(&self, _override_mode: Option<SetMode>) -> String {
-        String::from("\x1b[?4;0$y")
+        String::from("?4;0$y")
     }
 }
 
