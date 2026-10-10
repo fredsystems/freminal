@@ -443,8 +443,9 @@ fn handle_osc_ftcs(raw_params: &[u8], output: &mut Vec<TerminalOutput>) {
         // variant we do not handle, or a program sent something
         // malformed. Log it at warn with the full raw sequence so the
         // unhandled surface can be audited.
-        tracing::warn!(
-            "OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P); raw sequence: \"{}\"",
+        tracing::warn!("OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P)");
+        tracing::debug!(
+            "OSC 133: unrecognised or malformed FTCS marker; raw sequence: \"{}\"",
             escape_sequence_for_log_bounded(raw_params)
         );
     }
@@ -561,20 +562,31 @@ fn dispatch_osc_target(
 /// Warn about a recognised-but-unimplemented OSC target, with the full raw
 /// sequence so the unhandled surface can be audited.
 fn warn_unimplemented_osc(osc_target: &OscTarget, raw_params: &[u8]) {
-    tracing::warn!(
-        "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}; raw sequence: \"{}\"",
+    tracing::warn!("Recognised but unimplemented OSC (silently consumed): target={osc_target:?}");
+    tracing::debug!(
+        "Recognised but unimplemented OSC; raw sequence: \"{}\"",
         escape_sequence_for_log_bounded(raw_params)
     );
 }
 
-/// Unknown OSC sequences are silently consumed (like xterm/VTE) but logged at
-/// warn with the full raw sequence for auditing. The OSC number is the text
-/// before the first `;`; the rest of the body is not tokenised here.
+/// Unknown OSC sequences are silently consumed (like xterm/VTE). The warn
+/// carries only the OSC number, and only when the text before the first `;`
+/// parses as a number (an unmapped OSC number); a non-numeric first token is
+/// attacker text and is reported as "non-numeric". The raw sequence goes to an
+/// adjacent bounded `debug!` for auditing.
 fn warn_unknown_osc(raw_params: &[u8]) {
-    let number = raw_params.split(|b| *b == b';').next().unwrap_or_default();
-    tracing::warn!(
-        "Unknown OSC Target (silently consumed): type_number='{}'; raw sequence: \"{}\"",
-        lossy_sequence_for_log_bounded(number),
+    let number_bytes = raw_params.split(|b| *b == b';').next().unwrap_or_default();
+    let number = std::str::from_utf8(number_bytes)
+        .ok()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok());
+    if let Some(n) = number {
+        tracing::warn!("Unknown OSC Target (silently consumed): OSC {n}");
+    } else {
+        tracing::warn!("Unknown OSC Target (silently consumed): non-numeric OSC number");
+    }
+    tracing::debug!(
+        "Unknown OSC; raw sequence: \"{}\"",
         escape_sequence_for_log_bounded(raw_params)
     );
 }

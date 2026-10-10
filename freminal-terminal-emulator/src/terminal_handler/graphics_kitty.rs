@@ -39,6 +39,7 @@ use super::RealPlacement;
 use super::TerminalHandler;
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkLimits};
 use crate::ansi_components::apc::MAX_APC_BYTES;
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 /// Default gap (ms) kitty applies to a newly-created animation frame when
 /// `z=` is absent or `0`. The root frame's default gap remains `0`
@@ -450,6 +451,18 @@ const fn kitty_id_no_number(image_id: u32, placement_id: Option<u32>) -> KittyRe
         image_number: None,
         placement_id,
     }
+}
+
+/// Log a shared-memory object name at debug level, bounded.
+///
+/// The name is sender-supplied, so it must never appear in a warn-level line;
+/// the warn carries the failure, and this adjacent debug carries the name.
+#[cfg(any(unix, windows))]
+fn log_shm_name(context: &str, name: &str) {
+    tracing::debug!(
+        "Kitty graphics: {context}: object {:?}",
+        lossy_sequence_for_log_bounded(name.as_bytes())
+    );
 }
 
 /// Inflate an RFC 1950 zlib stream (kitty `o=z`). Returns the decompressed
@@ -1304,7 +1317,8 @@ impl TerminalHandler {
                     Some((rgba_img.into_raw(), w, h))
                 }
                 Err(e) => {
-                    tracing::warn!("Kitty PNG decode failed: {e}");
+                    tracing::warn!("Kitty PNG decode failed");
+                    tracing::debug!("Kitty PNG decode failed: {e}");
                     self.send_kitty_error(
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
@@ -1338,7 +1352,8 @@ impl TerminalHandler {
         match inflate_zlib(&image_data) {
             Ok(decompressed) => Some(decompressed),
             Err(e) => {
-                tracing::warn!("Kitty graphics: zlib decompression failed: {e}");
+                tracing::warn!("Kitty graphics: zlib decompression failed");
+                tracing::debug!("Kitty graphics: zlib decompression failed: {e}");
                 self.send_kitty_error(
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
@@ -1496,7 +1511,8 @@ impl TerminalHandler {
         };
 
         if !shm_name_is_safe(name) {
-            tracing::warn!("Kitty graphics: refusing shared memory object name: {name:?}");
+            tracing::warn!("Kitty graphics: refusing shared memory object name");
+            log_shm_name("refusing shared memory object name", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1508,7 +1524,8 @@ impl TerminalHandler {
         let fd = match shm_open(name, OFlag::O_RDONLY, Mode::empty()) {
             Ok(fd) => fd,
             Err(e) => {
-                tracing::warn!("Kitty graphics: shared memory object {name:?} not found: {e}");
+                tracing::warn!("Kitty graphics: shared memory object not found: {e}");
+                log_shm_name("shared memory object not found", name);
                 self.send_kitty_error(
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
@@ -1522,7 +1539,8 @@ impl TerminalHandler {
             .ok()
             .and_then(|stat| u64::value_from(stat.st_size).ok())
         else {
-            tracing::warn!("Kitty graphics: shared memory object {name:?} has an invalid size");
+            tracing::warn!("Kitty graphics: shared memory object has an invalid size");
+            log_shm_name("shared memory object has an invalid size", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1535,8 +1553,9 @@ impl TerminalHandler {
         let offset = u64::from(data_offset.unwrap_or(0));
         let Some((offset, read_len)) = shm_read_bounds(object_len, offset, data_size) else {
             tracing::warn!(
-                "Kitty graphics: shared memory read out of bounds for object {name:?} (offset={offset}, object_len={object_len})"
+                "Kitty graphics: shared memory read out of bounds (offset={offset}, object_len={object_len})"
             );
+            log_shm_name("shared memory read out of bounds", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1548,7 +1567,8 @@ impl TerminalHandler {
 
         let result = read_kitty_shm_range(&fd, object_len, offset, read_len).map_or_else(
             |e| {
-                tracing::warn!("Kitty graphics: failed to map shared memory object {name:?}: {e}");
+                tracing::warn!("Kitty graphics: failed to map shared memory object: {e}");
+                log_shm_name("failed to map shared memory object", name);
                 self.send_kitty_error(
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
@@ -1564,7 +1584,8 @@ impl TerminalHandler {
         // A failure here is logged but does not fail an otherwise-successful
         // read (the data has already been copied out).
         if let Err(e) = shm_unlink(name) {
-            tracing::warn!("Kitty graphics: failed to unlink shared memory object {name:?}: {e}");
+            tracing::warn!("Kitty graphics: failed to unlink shared memory object: {e}");
+            log_shm_name("failed to unlink shared memory object", name);
         }
 
         result
@@ -1621,7 +1642,8 @@ impl TerminalHandler {
         };
 
         if !shm_name_is_safe(name) {
-            tracing::warn!("Kitty graphics: refusing shared memory object name: {name:?}");
+            tracing::warn!("Kitty graphics: refusing shared memory object name");
+            log_shm_name("refusing shared memory object name", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1635,7 +1657,11 @@ impl TerminalHandler {
         // how much to read.
         let Some(data_size) = data_size.filter(|&size| size > 0) else {
             tracing::warn!(
-                "Kitty graphics: shared memory read on Windows requires an explicit S= size (object {name:?})"
+                "Kitty graphics: shared memory read on Windows requires an explicit S= size"
+            );
+            log_shm_name(
+                "shared memory read on Windows requires an explicit S= size",
+                name,
             );
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
@@ -1648,8 +1674,9 @@ impl TerminalHandler {
         let offset = u64::from(data_offset.unwrap_or(0));
         let Some((offset, read_len)) = shm_read_bounds(u64::MAX, offset, Some(data_size)) else {
             tracing::warn!(
-                "Kitty graphics: shared memory read range overflows for object {name:?} (offset={offset}, data_size={data_size})"
+                "Kitty graphics: shared memory read range overflows (offset={offset}, data_size={data_size})"
             );
+            log_shm_name("shared memory read range overflows", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1664,7 +1691,8 @@ impl TerminalHandler {
         // just above and is kept alive for the duration of this call.
         let handle = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
         if handle.is_null() {
-            tracing::warn!("Kitty graphics: shared memory object {name:?} not found");
+            tracing::warn!("Kitty graphics: shared memory object not found");
+            log_shm_name("shared memory object not found", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
@@ -1686,7 +1714,8 @@ impl TerminalHandler {
         // handle from `OpenFileMappingW` above and has not been closed.
         let base = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, map_len) };
         if base.is_null() {
-            tracing::warn!("Kitty graphics: failed to map shared memory object {name:?}");
+            tracing::warn!("Kitty graphics: failed to map shared memory object");
+            log_shm_name("failed to map shared memory object", name);
             self.send_kitty_error(
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,

@@ -21,6 +21,7 @@ use freminal_common::buffer_states::window_manipulation::{Notification99Data, Os
 
 use super::TerminalHandler;
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkError, ChunkLimits};
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 // ── Accumulator ──────────────────────────────────────────────────────────────
 
@@ -385,7 +386,10 @@ impl TerminalHandler {
                     entry.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
                 {
                     self.pending_notifications.remove(&id);
-                    tracing::debug!("OSC 99: dropping notification {id:?}: {err}");
+                    tracing::debug!(
+                        "OSC 99: dropping notification {:?}: {err}",
+                        lossy_sequence_for_log_bounded(id.as_bytes())
+                    );
                     return None;
                 }
 
@@ -421,7 +425,10 @@ impl TerminalHandler {
                     match entry.finish_payloads() {
                         Ok(payloads) => Some(build_finalized(payloads, meta)),
                         Err(err) => {
-                            tracing::debug!("OSC 99: dropping notification {id:?}: {err}");
+                            tracing::debug!(
+                                "OSC 99: dropping notification {:?}: {err}",
+                                lossy_sequence_for_log_bounded(id.as_bytes())
+                            );
                             None
                         }
                     }

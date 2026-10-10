@@ -216,6 +216,90 @@ pub trait SequenceTraceable {
     }
 }
 
+/// A minimal thread-local log-capture helper for tests that assert what a
+/// sequence handler does and does not write to the log.
+///
+/// Built on the `tracing` crate alone: [`capture`] installs a [`Subscriber`]
+/// with [`tracing::subscriber::with_default`], so it is scoped to the calling
+/// thread and safe under parallel tests.
+///
+/// [`Subscriber`]: tracing::Subscriber
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    /// One captured log event: its level and its formatted fields.
+    pub type Captured = (Level, String);
+
+    struct Collector {
+        events: Arc<Mutex<Vec<Captured>>>,
+        next_span: AtomicU64,
+    }
+
+    struct FieldText(String);
+
+    impl Visit for FieldText {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            let _ = write!(self.0, "{}={value:?}", field.name());
+        }
+    }
+
+    impl Subscriber for Collector {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut text = FieldText(String::new());
+            event.record(&mut text);
+            if let Ok(mut events) = self.events.lock() {
+                events.push((*event.metadata().level(), text.0));
+            }
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Run `f` with every `tracing` event on this thread captured, and return
+    /// the events in emission order.
+    pub fn capture(f: impl FnOnce()) -> Vec<Captured> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let collector = Collector {
+            events: Arc::clone(&events),
+            next_span: AtomicU64::new(0),
+        };
+        tracing::subscriber::with_default(collector, f);
+        events.lock().map_or_else(|_| Vec::new(), |e| e.clone())
+    }
+
+    /// The captured events at `warn` or `error` level.
+    pub fn warnings(events: &[Captured]) -> Vec<&Captured> {
+        events
+            .iter()
+            .filter(|(level, _)| *level == Level::WARN || *level == Level::ERROR)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

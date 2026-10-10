@@ -23,6 +23,7 @@ use freminal_buffer::image_store::{
 
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkLimits};
 use super::{MultipartImageState, TerminalHandler};
+use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 /// Maximum size of an iTerm2 multipart transfer, per `FilePart=` chunk and in
 /// total.
@@ -55,7 +56,8 @@ impl TerminalHandler {
         let img = match image::load_from_memory(&data.data) {
             Ok(img) => img.to_rgba8(),
             Err(e) => {
-                tracing::warn!("OSC 1337 File=: image decode failed: {e}");
+                tracing::warn!("OSC 1337 File=: image decode failed");
+                tracing::debug!("OSC 1337 File=: image decode failed: {e}");
                 return;
             }
         };
@@ -187,7 +189,9 @@ impl TerminalHandler {
 
         tracing::debug!(
             "OSC 1337 MultipartFile=: started transfer (name={:?}, size={:?})",
-            data.name,
+            data.name
+                .as_deref()
+                .map(|n| lossy_sequence_for_log_bounded(n.as_bytes())),
             data.size,
         );
     }

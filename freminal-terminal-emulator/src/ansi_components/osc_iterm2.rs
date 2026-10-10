@@ -38,7 +38,8 @@ pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutp
     //
     // Find the first ';' to skip past "1337".
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::warn!(
+        tracing::warn!("OSC 1337: missing sub-command");
+        tracing::debug!(
             "OSC 1337: missing sub-command: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -72,7 +73,8 @@ pub(super) fn handle_osc_iterm2(raw_params: &[u8], output: &mut Vec<TerminalOutp
     }
 
     // Not a recognised sub-command — silently consume, like xterm/VTE.
-    tracing::warn!(
+    tracing::warn!("OSC 1337: unrecognised sub-command");
+    tracing::debug!(
         "OSC 1337: unrecognised sub-command; raw sequence: \"{}\"",
         escape_sequence_for_log_bounded(raw_params)
     );
@@ -133,7 +135,12 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
                     do_not_move_cursor = value == "1";
                 }
                 _ => {
-                    tracing::warn!("OSC 1337 File args: unknown arg: {key}={value}");
+                    tracing::warn!("OSC 1337 File args: unknown arg ignored");
+                    tracing::debug!(
+                        "OSC 1337 File args: unknown arg: {}={}",
+                        lossy_sequence_for_log_bounded(key.as_bytes()),
+                        lossy_sequence_for_log_bounded(value.as_bytes())
+                    );
                 }
             }
         }
@@ -156,7 +163,8 @@ fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec
     // `after_file` is: b"inline=1;width=auto:BASE64DATA"
     // Split on ':' to separate key=value args from the base64 payload.
     let Some(colon_pos) = after_file.iter().position(|&b| b == b':') else {
-        tracing::warn!(
+        tracing::warn!("OSC 1337 File=: missing ':' separator");
+        tracing::debug!(
             "OSC 1337 File=: missing ':' separator: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -213,7 +221,8 @@ fn handle_osc_iterm2_multipart_begin(
     };
 
     if args_str.is_empty() {
-        tracing::warn!(
+        tracing::warn!("OSC 1337 MultipartFile=: empty args");
+        tracing::debug!(
             "OSC 1337 MultipartFile=: empty args: recent='{}'",
             lossy_sequence_for_log_bounded(raw_params)
         );
@@ -241,7 +250,8 @@ fn handle_osc_iterm2_file_part(
     let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::warn!(
+            tracing::warn!("OSC 1337 FilePart=: base64 decode failed: {e}");
+            tracing::debug!(
                 "OSC 1337 FilePart=: base64 decode failed: {e}: recent='{}'",
                 lossy_sequence_for_log_bounded(raw_params)
             );
