@@ -355,7 +355,7 @@ pub(super) struct WindowManipulationEvents {
         freminal_common::buffer_states::window_manipulation::Notification99Data,
         std::sync::Weak<crossbeam_channel::Sender<InputEvent>>,
     )>,
-    /// OSC 99 app→terminal control sequences (p=close/p=alive/p=?) collected
+    /// OSC 99 app→terminal control sequences (p=close/p=alive) collected
     /// from every pane this frame (Task 99.5c), answered after the drain
     /// loop.
     pub(super) osc99_controls: Vec<(
@@ -439,7 +439,6 @@ pub(super) fn drain_window_manipulation_commands(
                 let shell_set = rendering::handle_window_manipulation(
                     ui,
                     &pane.window_cmd_rx,
-                    &pane.input_tx,
                     &pane.reply_tx,
                     font_width,
                     font_height,

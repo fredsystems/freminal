@@ -137,6 +137,11 @@ impl TerminalHandler {
     /// Builds the reply body and frames it through [`Self::write_csi_response`]
     /// or [`Self::write_osc_response`], so the introducer and terminator follow
     /// the current S8C1T mode. Absent OSC 99 ids default to `0`.
+    ///
+    /// Text an application chose and the terminal merely stores (the title,
+    /// the icon label, the OSC 52 selection parameter) is sanitised before it
+    /// is framed, so a reply can never smuggle a control sequence back into
+    /// the application's own input.
     pub fn write_gui_reply(&self, reply: &GuiReply) {
         match reply {
             GuiReply::WindowState(state) => {
@@ -155,12 +160,19 @@ impl TerminalHandler {
             GuiReply::ScreenSizePixels { height, width } => {
                 self.write_csi_response(&format!("5;{height};{width}t"));
             }
-            GuiReply::IconLabel(label) => self.write_osc_response(&format!("L{label}")),
-            GuiReply::WindowTitle(title) => self.write_osc_response(&format!("l{title}")),
+            GuiReply::IconLabel(label) => {
+                self.write_osc_response(&format!("L{}", sanitize_reported_text(label)));
+            }
+            GuiReply::WindowTitle(title) => {
+                self.write_osc_response(&format!("l{}", sanitize_reported_text(title)));
+            }
             GuiReply::Clipboard {
                 selection,
                 base64_payload,
-            } => self.write_osc_response(&format!("52;{selection};{base64_payload}")),
+            } => self.write_osc_response(&format!(
+                "52;{};{base64_payload}",
+                sanitize_selection(selection)
+            )),
             GuiReply::Osc99Activation { id, button } => {
                 let id = id.as_deref().unwrap_or("0");
                 let button = button.as_deref().unwrap_or("");
@@ -184,6 +196,33 @@ impl TerminalHandler {
             }
         }
     }
+}
+
+/// Strip every control character from application-chosen text before it is
+/// echoed back in a title or icon-label report.
+///
+/// An application can store a title containing ESC, and a report that echoes
+/// it verbatim lets the application inject arbitrary input into itself (the
+/// title-report injection class, CVE-2003-0063). [`char::is_control`] is true
+/// for the Unicode general category `Cc`: C0 (U+0000–U+001F), DEL (U+007F) and
+/// C1 (U+0080–U+009F), which is exactly the set that must not be echoed.
+fn sanitize_reported_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Keep only the characters xterm defines for the OSC 52 `Pc` parameter
+/// (`c`, `p`, `q`, `s` and `0`–`7`, see xterm's ctlseqs) when echoing the
+/// selection parameter of a clipboard report.
+///
+/// The parameter is application-supplied; echoing it verbatim would allow the
+/// same injection as an unsanitised title (CVE-2003-0063). An empty result is
+/// reported as empty: xterm's "empty means `s0`" rule concerns the request,
+/// not the reply.
+fn sanitize_selection(selection: &str) -> String {
+    selection
+        .chars()
+        .filter(|c| "cpqs01234567".contains(*c))
+        .collect()
 }
 
 #[cfg(test)]
@@ -480,6 +519,76 @@ mod tests {
                 case.reply
             );
         }
+    }
+
+    /// Title / label carrying ESC, BEL, U+009B (C1 CSI) and DEL around ordinary text.
+    const HOSTILE_TEXT: &str = "A\u{1b}[6nB\u{7}\u{9b}\u{7f}Z";
+
+    #[test]
+    fn window_title_reply_drops_control_characters() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::WindowTitle(HOSTILE_TEXT.to_string()));
+        assert_eq!(recv_bytes(&rx), b"\x1b]lA[6nBZ\x1b\\".to_vec());
+
+        let (handler, rx) = handler_with_rx(S8c1t::EightBit);
+        handler.write_gui_reply(&GuiReply::WindowTitle(HOSTILE_TEXT.to_string()));
+        assert_eq!(recv_bytes(&rx), b"\x9dlA[6nBZ\x9c".to_vec());
+    }
+
+    #[test]
+    fn icon_label_reply_drops_control_characters() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::IconLabel(HOSTILE_TEXT.to_string()));
+        assert_eq!(recv_bytes(&rx), b"\x1b]LA[6nBZ\x1b\\".to_vec());
+
+        let (handler, rx) = handler_with_rx(S8c1t::EightBit);
+        handler.write_gui_reply(&GuiReply::IconLabel(HOSTILE_TEXT.to_string()));
+        assert_eq!(recv_bytes(&rx), b"\x9dLA[6nBZ\x9c".to_vec());
+    }
+
+    #[test]
+    fn plain_title_reply_is_unchanged() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::WindowTitle("vim: main.rs".to_string()));
+        assert_eq!(recv_bytes(&rx), b"\x1b]lvim: main.rs\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn clipboard_reply_keeps_only_selection_characters() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::Clipboard {
+            selection: "c\u{1b}[6n".to_string(),
+            base64_payload: "aGk=".to_string(),
+        });
+        // `6` is a valid `Pc` digit, so it survives; ESC, `[` and `n` do not.
+        assert_eq!(recv_bytes(&rx), b"\x1b]52;c6;aGk=\x1b\\".to_vec());
+
+        let (handler, rx) = handler_with_rx(S8c1t::EightBit);
+        handler.write_gui_reply(&GuiReply::Clipboard {
+            selection: "c\u{1b}[Hn\u{9b}".to_string(),
+            base64_payload: "aGk=".to_string(),
+        });
+        assert_eq!(recv_bytes(&rx), b"\x9d52;c;aGk=\x9c".to_vec());
+    }
+
+    #[test]
+    fn clipboard_reply_valid_selection_is_unchanged() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::Clipboard {
+            selection: "cps07".to_string(),
+            base64_payload: String::new(),
+        });
+        assert_eq!(recv_bytes(&rx), b"\x1b]52;cps07;\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn clipboard_reply_empty_selection_stays_empty() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::Clipboard {
+            selection: String::new(),
+            base64_payload: "aGk=".to_string(),
+        });
+        assert_eq!(recv_bytes(&rx), b"\x1b]52;;aGk=\x1b\\".to_vec());
     }
 
     #[test]

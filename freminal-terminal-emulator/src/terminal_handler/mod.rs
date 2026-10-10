@@ -28,6 +28,7 @@ use freminal_common::{
         modes::declrmm::Declrmm,
         modes::decnrcm::Decnrcm,
         modes::decom::Decom,
+        modes::decsclm::Decsclm,
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
@@ -1965,8 +1966,18 @@ impl TerminalHandler {
                     self.insert_mode = *irm;
                 }
 
+                // ── Scroll Mode (DECSCLM, ?4) — recognised, never settable ──
+                // Freminal does not implement smooth scrolling, so Set/Reset
+                // are not acted on (below), but DECRQM is answered: the mode
+                // is permanently reset (Ps=4) whatever the history.
+                Mode::Decsclm(Decsclm::Query) => {
+                    self.write_csi_response(&Decsclm::Query.report(None));
+                }
+
                 // ── Modes parsed but not yet acted on ─────────────────
-                Mode::NoOp | Mode::Decsclm(_) | Mode::Unknown(_) => {
+                Mode::NoOp
+                | Mode::Decsclm(Decsclm::SmoothScroll | Decsclm::FastScroll)
+                | Mode::Unknown(_) => {
                     tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },

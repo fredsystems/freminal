@@ -622,8 +622,9 @@ pub(super) fn osc99_action_report(
 /// An OSC 99 app→terminal control sequence collected from
 /// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
 /// (Task 99.5c). Paired with a `Weak` handle to the pane's reply sender in
-/// `app_impl::update()`'s post-loop routing, where it is answered:
-/// Task 99.6 (close/alive) and Task 99.7 (query).
+/// `app_impl::update()`'s post-loop routing, where it is answered
+/// (Task 99.6: close/alive). `p=?` never reaches the GUI: the PTY thread
+/// answers it itself (Task 130.5).
 #[derive(Debug, Clone)]
 pub(super) struct Osc99Control {
     /// Notification id (`i=`) the control refers to, if any.
@@ -1013,9 +1014,9 @@ impl NotificationRouter {
     /// immediately in the `untracked` form and no activation reports are
     /// sent. `reply_tx` is a `Weak` handle upgraded per send, so this
     /// long-lived thread never keeps a closed pane's PTY consumer alive; a
-    /// reply for a closed pane is dropped. The icon temp file (if any) is removed on a best-effort basis
-    /// once the daemon has read it; cleanup failure never fails the
-    /// notification.
+    /// reply for a closed pane is dropped. The icon temp file (if any) is
+    /// removed on a best-effort basis once the daemon has read it; cleanup
+    /// failure never fails the notification.
     fn show_system_osc99(
         data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,

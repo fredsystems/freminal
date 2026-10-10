@@ -585,6 +585,37 @@ fn tmux_payload_after_a_partial_outer_sequence_leaves_both_intact() {
     assert_eq!(cursor(&state), (5, 2));
 }
 
+#[test]
+fn incomplete_inner_sequence_is_discarded_and_does_not_join_the_outer_stream() {
+    // The payload is only the start of a CUP (`ESC [ 5`).  The inner parser is
+    // fresh per payload, so the fragment must die with the payload; if it
+    // leaked into the outer parser, the direct `;1H` that follows in the same
+    // buffer would complete it into `CUP 5;1` and `X` would land on row 5.
+    let mut wire = tmux_wrap(b"\x1b[5");
+    wire.extend_from_slice(b";1HX");
+
+    let (mut wrapped, wrapped_rx) = make_state();
+    wrapped.handle_incoming_data(&wire);
+
+    // Reference: the payload absent, only the direct bytes.
+    let (mut direct, direct_rx) = make_state();
+    direct.handle_incoming_data(b";1HX");
+
+    assert_eq!(
+        screen_text(&wrapped)[0],
+        ";1HX",
+        "the direct bytes are plain text on row 1"
+    );
+    assert!(
+        screen_text(&wrapped)[4].is_empty(),
+        "no CUP may be formed across the payload boundary"
+    );
+    assert_eq!(screen_text(&wrapped), screen_text(&direct));
+    assert_eq!(cursor(&wrapped), cursor(&direct));
+    assert_eq!(cursor(&wrapped), (4, 0));
+    assert_eq!(replies(&wrapped_rx), replies(&direct_rx));
+}
+
 // ─── malformed payloads ─────────────────────────────────────────────────────
 
 #[test]

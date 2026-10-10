@@ -350,7 +350,8 @@ impl TerminalState {
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
-            | Mode::Decanm(Decanm::Query) => {}
+            | Mode::Decanm(Decanm::Query)
+            | Mode::Decsclm(freminal_common::buffer_states::modes::decsclm::Decsclm::Query) => {}
             // DECANM — toggle the parser between VT52 and ANSI modes.
             // The handler owns the authoritative `vt52_mode` flag, but
             // the parser also needs to know so it routes ESC bytes to

@@ -199,10 +199,11 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 /// 4. **Report queries** — the function measures the current viewport
 ///    geometry from `ui.ctx()` (pixel positions, sizes) and the font metrics
 ///    (`font_width`, `font_height`), then sends the answer to the pane's PTY
-///    thread as a structured [`GuiReply`] on `reply_tx` (the pane's
-///    `input_tx`, wrapped in [`InputEvent::Reply`]).  The PTY thread
-///    serialises the reply and frames it per the application's S8C1T mode;
-///    the GUI never formats escape-sequence bytes.  Covered variants:
+///    thread as a structured [`GuiReply`] on `reply_tx` (the pane's shared
+///    handle to its input channel, wrapped in [`InputEvent::Reply`]).  The
+///    PTY thread serialises the reply and frames it per the application's
+///    S8C1T mode; the GUI never formats escape-sequence bytes.  Covered
+///    variants:
 ///    - `ReportWindowState` → `GuiReply::WindowState` (`CSI 1 t` / `CSI 2 t`)
 ///    - `ReportWindowPosition*` → `GuiReply::WindowPosition` (`CSI 3 ; x ; y t`)
 ///    - `ReportWindowSize*` → `GuiReply::WindowSizePixels` (`CSI 4 ; h ; w t`)
@@ -234,8 +235,7 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 pub(super) fn handle_window_manipulation(
     ui: &egui::Ui,
     window_cmd_rx: &Receiver<WindowCommand>,
-    reply_tx: &Sender<InputEvent>,
-    reply_handle: &Arc<Sender<InputEvent>>,
+    reply_tx: &Arc<Sender<InputEvent>>,
     font_width: usize,
     font_height: usize,
     window_width: egui::Rect,
@@ -618,13 +618,13 @@ pub(super) fn handle_window_manipulation(
             // consumer alive: a strong `Sender` clone would hold the input
             // channel open after the pane closed.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push(((*data).clone(), Arc::downgrade(reply_handle)));
+                osc99_notifications.push(((*data).clone(), Arc::downgrade(reply_tx)));
             }
             // OSC 99 app→terminal control sequence (Task 99.5c). Collected
             // alongside a `Weak` reply handle for the originating pane and
             // answered after the drain loop.
             WindowManipulation::Osc99Control { id, kind } => {
-                osc99_controls.push((Osc99Control { id, kind }, Arc::downgrade(reply_handle)));
+                osc99_controls.push((Osc99Control { id, kind }, Arc::downgrade(reply_tx)));
             }
         }
     }
@@ -662,23 +662,36 @@ mod osc52_toast_text_tests {
 #[cfg(test)]
 mod window_manipulation_reply_tests {
     use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
-    use std::sync::Arc;
+    use crate::gui::notifications::Osc99Control;
+    use std::sync::{Arc, Weak};
 
-    use crossbeam_channel::{Receiver, unbounded};
-    use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+    use crossbeam_channel::{Receiver, Sender, unbounded};
+    use freminal_common::buffer_states::window_manipulation::{
+        Notification99Data, Osc99ControlKind, WindowManipulation,
+    };
     use freminal_common::config::BellMode;
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
+    /// Everything [`handle_window_manipulation`] produced for one frame, plus
+    /// the pane's reply handle so a test controls its lifetime.
+    struct Drained {
+        replies: Vec<GuiReply>,
+        osc52_events: Vec<Osc52ToastEvent>,
+        osc99_notifications: Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
+        osc99_controls: Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
+        /// The pane's only strong sender; dropping it models the pane closing.
+        pane_handle: Arc<Sender<InputEvent>>,
+    }
+
     /// Run [`handle_window_manipulation`] once over `commands` inside a real
-    /// (headless) egui frame and return everything received on the reply
-    /// channel, plus the OSC 52 toast events the drain collected.
+    /// (headless) egui frame.
     ///
     /// Clipboard reads are denied (`allow_clipboard_read: false`, the default),
     /// so no test depends on the host clipboard.
-    fn run_commands(commands: Vec<WindowManipulation>) -> (Vec<GuiReply>, Vec<Osc52ToastEvent>) {
+    fn drain_commands(commands: Vec<WindowManipulation>) -> Drained {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
-        let reply_handle = Arc::new(reply_tx.clone());
+        let reply_tx = Arc::new(reply_tx);
         for cmd in commands {
             if let Err(e) = window_cmd_tx.send(WindowCommand::Report(cmd)) {
                 panic!("send window command: {e}");
@@ -708,7 +721,6 @@ mod window_manipulation_reply_tests {
                 ui,
                 &window_cmd_rx,
                 &reply_tx,
-                &reply_handle,
                 8,
                 16,
                 ui.max_rect(),
@@ -733,7 +745,71 @@ mod window_manipulation_reply_tests {
                 other => panic!("expected InputEvent::Reply, got {other:?}"),
             })
             .collect();
-        (replies, osc52_events)
+        Drained {
+            replies,
+            osc52_events,
+            osc99_notifications,
+            osc99_controls,
+            pane_handle: reply_tx,
+        }
+    }
+
+    /// The replies and OSC 52 toast events from one frame.
+    fn run_commands(commands: Vec<WindowManipulation>) -> (Vec<GuiReply>, Vec<Osc52ToastEvent>) {
+        let drained = drain_commands(commands);
+        (drained.replies, drained.osc52_events)
+    }
+
+    fn sample_notification() -> Notification99Data {
+        Notification99Data {
+            id: Some("n1".to_owned()),
+            title: Some("Title".to_owned()),
+            body: None,
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            button_labels: Vec::new(),
+            report_activation: false,
+            focus_on_activation: true,
+            close_report: false,
+            urgency: None,
+            occasion: None,
+            sound: None,
+            app_name: None,
+            notification_type: Vec::new(),
+            expire_ms: None,
+        }
+    }
+
+    #[test]
+    fn osc99_handles_stop_upgrading_once_the_pane_handle_drops() {
+        let drained = drain_commands(vec![
+            WindowManipulation::Notification99(Box::new(sample_notification())),
+            WindowManipulation::Osc99Control {
+                id: Some("n1".to_owned()),
+                kind: Osc99ControlKind::Alive,
+            },
+        ]);
+        assert_eq!(drained.osc99_notifications.len(), 1);
+        assert_eq!(drained.osc99_controls.len(), 1);
+        assert!(
+            drained.replies.is_empty(),
+            "OSC 99 commands are routed, not answered, here"
+        );
+
+        let notification_handle = Weak::clone(&drained.osc99_notifications[0].1);
+        let control_handle = Weak::clone(&drained.osc99_controls[0].1);
+
+        // While the pane lives, the collected handles reach its input channel.
+        assert!(notification_handle.upgrade().is_some());
+        assert!(control_handle.upgrade().is_some());
+
+        // The pane closing drops its only strong handle: a collected handle
+        // must not keep the PTY consumer's channel open.
+        let Drained { pane_handle, .. } = drained;
+        drop(pane_handle);
+        assert!(notification_handle.upgrade().is_none());
+        assert!(control_handle.upgrade().is_none());
     }
 
     #[test]

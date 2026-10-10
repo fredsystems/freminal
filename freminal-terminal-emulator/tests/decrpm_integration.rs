@@ -504,3 +504,49 @@ fn decrpm_lnm_after_reset_is_reset() {
     let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
     assert_eq!(resp, "\x1b[20;2$y");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DECSCLM (?4) — recognised but never settable: always "permanently reset"
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_decsclm_default_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y", "exactly one Ps=4 reply, nothing else");
+}
+
+#[test]
+fn decrpm_decsclm_after_set_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[?4h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y");
+}
+
+#[test]
+fn decrpm_decsclm_after_reset_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[?4h");
+    state.handle_incoming_data(b"\x1b[?4l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y");
+}
+
+#[test]
+fn decsclm_set_and_reset_produce_no_reply() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4h\x1b[?4l");
+    assert_eq!(
+        resp, "",
+        "DECSET/DECRST of ?4 are not acted on and not answered"
+    );
+}
+
+#[test]
+fn decrpm_decsclm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, b"\x9b?4;4$y");
+}
