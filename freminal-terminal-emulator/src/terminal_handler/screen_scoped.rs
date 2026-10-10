@@ -23,8 +23,6 @@ pub struct ScreenScoped<T> {
 }
 
 impl<T> ScreenScoped<T> {
-    // TODO(131.7): consumed by the per-screen state that needs distinct initial values
-    #[cfg_attr(not(test), expect(dead_code))]
     /// Build from the primary-screen and alternate-screen values.
     #[must_use]
     pub const fn new(primary: T, alternate: T) -> Self {

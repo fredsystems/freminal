@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 
 use conv2::ValueFrom;
+use freminal_common::buffer_states::buffer_type::BufferType;
 use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId,
     format_kitty_response_body,
@@ -1054,7 +1055,8 @@ impl TerminalHandler {
             // stamped after this new registration.
             placement_instance: next_placement_instance_id(),
         };
-        self.virtual_placements.insert((image_id, placement_id), vp);
+        self.active_virtual_placements_mut()
+            .insert((image_id, placement_id), vp);
     }
 
     /// Record a plain (non-relative) real (cell-stamped) placement's origin
@@ -1113,7 +1115,7 @@ impl TerminalHandler {
         v_offset: i32,
         placement_instance: u64,
     ) {
-        self.real_placements.insert(
+        self.active_real_placements_mut().insert(
             (image_id, placement_id),
             crate::terminal_handler::RealPlacement {
                 image_id,
@@ -2184,7 +2186,7 @@ impl TerminalHandler {
         let v_offset = control.v_offset.unwrap_or(0);
         let z_index = control.z_index.unwrap_or(0);
 
-        if let Some(parent_real) = self.real_placements.get(&parent_key).copied() {
+        if let Some(parent_real) = self.active_real_placements().get(&parent_key).copied() {
             self.stamp_relative_placement_at_real_parent(
                 control,
                 child_image_id,
@@ -2256,7 +2258,8 @@ impl TerminalHandler {
             // Nothing of this placement exists on screen, so a stale entry
             // left by an earlier placement under the same key must not survive
             // to name rows this one does not occupy.
-            self.real_placements.remove(&(child_image_id, child_pid));
+            self.active_real_placements_mut()
+                .remove(&(child_image_id, child_pid));
             return;
         };
         let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
@@ -2380,20 +2383,21 @@ impl TerminalHandler {
     /// or virtual) for that image id.
     fn resolve_kitty_parent_key(&self, parent_img: u64, parent_pid: u32) -> Option<(u64, u32)> {
         let exact = (parent_img, parent_pid);
-        if self.real_placements.contains_key(&exact) || self.virtual_placements.contains_key(&exact)
+        if self.active_real_placements().contains_key(&exact)
+            || self.active_virtual_placements().contains_key(&exact)
         {
             return Some(exact);
         }
         if parent_pid == 0 {
             if let Some(&key) = self
-                .real_placements
+                .active_real_placements()
                 .keys()
                 .find(|&&(img, _)| img == parent_img)
             {
                 return Some(key);
             }
             if let Some(&key) = self
-                .virtual_placements
+                .active_virtual_placements()
                 .keys()
                 .find(|&&(img, _)| img == parent_img)
             {
@@ -2419,7 +2423,10 @@ impl TerminalHandler {
                 break;
             }
             chain.push(key);
-            current = self.real_placements.get(&key).and_then(|rp| rp.parent);
+            current = self
+                .active_real_placements()
+                .get(&key)
+                .and_then(|rp| rp.parent);
         }
         chain
     }
@@ -2439,7 +2446,7 @@ impl TerminalHandler {
         while i < to_delete.len() {
             let key = to_delete[i];
             let children: Vec<(u64, u32)> = self
-                .real_placements
+                .active_real_placements()
                 .iter()
                 .filter(|(_, rp)| rp.parent == Some(key))
                 .map(|(&k, _)| k)
@@ -2454,22 +2461,35 @@ impl TerminalHandler {
 
         for key in &to_delete {
             self.buffer.clear_image_placements_by_id(key.0);
-            self.real_placements.remove(key);
+            self.active_real_placements_mut().remove(key);
         }
     }
 
-    /// Translate the row numbers in `real_placements` through any reflow the
-    /// buffer has just performed (a resize, DECCOLM).
+    /// Translate the row numbers in the primary screen's `real_placements`
+    /// through any reflow the buffer has just performed (a resize, DECCOLM),
+    /// then prune both screens' maps against their stores.
     ///
     /// Reflow renumbers every row, so an untranslated placement origin would
-    /// fall below the buffer's row base and stop resolving to its row. A
-    /// placement whose origin row the remap cannot translate (its row was
+    /// fall below the buffer's row base and stop resolving to its row. Only the
+    /// primary screen reflows (the alternate never does), and a resize while
+    /// the alternate screen is active reflows the *parked* primary, so the
+    /// remap always translates the primary map, whichever screen is active.
+    /// A placement whose origin row the remap cannot translate (its row was
     /// already evicted) is left as is -- it is already below the base and
-    /// resolves to nothing -- and is then pruned by
-    /// [`Self::prune_evicted_real_placements`].
+    /// resolves to nothing -- and is then pruned.
+    ///
+    /// The active screen's map is pruned by
+    /// [`Self::prune_evicted_real_placements`] and
+    /// [`Self::prune_unissued_real_placements`]; the parked screen's map is
+    /// pruned by [`Self::prune_parked_real_placements`], because a resize
+    /// can trim or evict rows of the parked store too.
     pub(super) fn apply_buffer_reflow_remap(&mut self) {
         if let Some(remap) = self.buffer.take_reflow_remap() {
-            for placement in self.real_placements.values_mut() {
+            for placement in self
+                .real_placements
+                .get_mut(BufferType::Primary)
+                .values_mut()
+            {
                 if let Some(row) = remap.map_start(placement.origin_row) {
                     placement.origin_row = row;
                 }
@@ -2481,46 +2501,46 @@ impl TerminalHandler {
         // A reflow installs its rows at a new base, so placements the remap
         // could not translate now sit below it.
         self.prune_evicted_real_placements();
+        self.prune_parked_real_placements();
     }
 
-    /// Drop `real_placements` entries whose origin row has been evicted.
+    /// Drop the active screen's `real_placements` entries whose origin row has
+    /// been evicted.
     ///
     /// An entry below the buffer's row base resolves to nothing -- its cells
     /// are gone -- but nothing else removes it, so a long session of image
     /// placements under scrollback eviction would grow the map without bound.
     ///
     /// **Cost and trigger.** Pruning is `O(placements)`, and it runs only when
-    /// the buffer's row base has moved since the last prune and the map is not
-    /// empty: at most once per input batch (and once per reflow), never per
-    /// line feed, and for a terminal that shows no images it is a single
-    /// comparison. The map holds only live placements plus those evicted
-    /// during one batch, so the cost is bounded by the number of placements
-    /// currently on screen or in scrollback. An ordering-based `O(pruned)`
-    /// scheme was rejected: entries are keyed by `(image_id, placement_id)`,
-    /// are overwritten in place, are renumbered by reflow, and relative
-    /// children sit at parent origin plus an offset, so insertion order is
-    /// not row order and there is no sorted prefix to pop.
+    /// the buffer's row base has moved since the last prune of this screen's
+    /// map and the map is not empty: at most once per input batch (and once per
+    /// reflow), never per line feed, and for a terminal that shows no images it
+    /// is a single comparison. The map holds only live placements plus those
+    /// evicted during one batch, so the cost is bounded by the number of
+    /// placements currently on screen or in scrollback. An ordering-based
+    /// `O(pruned)` scheme was rejected: entries are keyed by
+    /// `(image_id, placement_id)`, are overwritten in place, are renumbered by
+    /// reflow, and relative children sit at parent origin plus an offset, so
+    /// insertion order is not row order and there is no sorted prefix to pop.
     ///
-    /// Only entries in the active screen's row namespace are judged (the other
-    /// namespace's base is not the one that just moved). An entry registered
-    /// against a virtual (Unicode placeholder) parent carries a placeholder
-    /// origin that is never read, so it is kept: it is positioned from the
-    /// parent's live placeholder cells instead. Children of a pruned entry
-    /// keep their own rows; their dangling `parent` link already ends the
-    /// ancestor walk.
+    /// The maps are per screen, so every entry is already in the active
+    /// screen's row namespace. An entry registered against a virtual (Unicode
+    /// placeholder) parent carries a placeholder origin that is never read, so
+    /// it is kept: it is positioned from the parent's live placeholder cells
+    /// instead. Children of a pruned entry keep their own rows; their dangling
+    /// `parent` link already ends the ancestor walk.
     pub(super) fn prune_evicted_real_placements(&mut self) {
         let base = self.buffer.row_base();
-        if base == self.placement_prune_base {
+        let prune_base = self.placement_prune_base.get_mut(self.buffer.kind());
+        if base == *prune_base {
             return;
         }
-        self.placement_prune_base = base;
-        self.retain_real_placements(|origin| {
-            !(origin.is_alternate() == base.is_alternate() && origin < base)
-        });
+        *prune_base = base;
+        self.retain_real_placements(|origin| origin >= base);
     }
 
-    /// Drop `real_placements` entries whose origin row does not exist yet:
-    /// at or past the number the buffer will issue next.
+    /// Drop the active screen's `real_placements` entries whose origin row does
+    /// not exist yet: at or past the number the buffer will issue next.
     ///
     /// Shrinking the buffer's tail (a height grow reclaims blank padding rows)
     /// removes rows whose numbers are then issued again to unrelated new rows,
@@ -2529,21 +2549,48 @@ impl TerminalHandler {
     /// not gated.
     pub(super) fn prune_unissued_real_placements(&mut self) {
         let next = self.buffer.next_row_number();
-        self.retain_real_placements(|origin| {
-            !(origin.is_alternate() == next.is_alternate() && origin >= next)
-        });
+        self.retain_real_placements(|origin| origin < next);
     }
 
-    /// Keep the `real_placements` entries whose origin row satisfies `keep`,
-    /// except that an entry registered against a virtual (Unicode placeholder)
-    /// parent is always kept: its origin is a placeholder that is never read
-    /// (see [`Self::register_relative_placement_against_virtual_parent`]).
+    /// Prune the parked screen's `real_placements` against the live row span
+    /// of its parked store.
+    ///
+    /// A resize while the other screen is active can trim the parked store's
+    /// tail or evict its head (a height shrink pushes rows into scrollback and
+    /// past the limit), so a parked placement survives iff its origin row still
+    /// lies in `base <= origin < next`. A screen that is not parked (never
+    /// entered) has no map entries worth judging and is skipped. The virtual-
+    /// parent exemption of [`Self::retain_real_placements`] applies.
+    fn prune_parked_real_placements(&mut self) {
+        let parked = match self.buffer.kind() {
+            BufferType::Primary => BufferType::Alternate,
+            BufferType::Alternate => BufferType::Primary,
+        };
+        let Some((base, next)) = self.buffer.parked_row_span(parked) else {
+            return;
+        };
+        *self.placement_prune_base.get_mut(parked) = base;
+        self.retain_real_placements_on(parked, |origin| origin >= base && origin < next);
+    }
+
+    /// Keep the active screen's `real_placements` entries whose origin row
+    /// satisfies `keep`; see [`Self::retain_real_placements_on`].
     fn retain_real_placements(&mut self, keep: impl Fn(RowNumber) -> bool) {
-        if self.real_placements.is_empty() {
+        self.retain_real_placements_on(self.buffer.kind(), keep);
+    }
+
+    /// Keep `screen`'s `real_placements` entries whose origin row satisfies
+    /// `keep`, except that an entry registered against a virtual (Unicode
+    /// placeholder) parent is always kept: its origin is a placeholder that is
+    /// never read (see
+    /// [`Self::register_relative_placement_against_virtual_parent`]).
+    fn retain_real_placements_on(&mut self, screen: BufferType, keep: impl Fn(RowNumber) -> bool) {
+        let real_placements = self.real_placements.get_mut(screen);
+        if real_placements.is_empty() {
             return;
         }
-        let virtual_placements = &self.virtual_placements;
-        self.real_placements.retain(|_, placement| {
+        let virtual_placements = self.virtual_placements.get(screen);
+        real_placements.retain(|_, placement| {
             placement
                 .parent
                 .is_some_and(|parent| virtual_placements.contains_key(&parent))
@@ -2557,7 +2604,7 @@ impl TerminalHandler {
     /// arms (Task 100.4a).
     fn cascade_delete_real_placements_for_image(&mut self, image_id: u64) {
         let roots: Vec<(u64, u32)> = self
-            .real_placements
+            .active_real_placements()
             .keys()
             .filter(|&&(img_id, _)| img_id == image_id)
             .copied()
@@ -3037,8 +3084,8 @@ impl TerminalHandler {
         // not tracked per visible row, so `d=a`/`d=A` clears it in full —
         // only the CELL clear above is scoped to the visible window, per
         // spec.
-        self.virtual_placements.clear();
-        self.real_placements.clear();
+        self.active_virtual_placements_mut().clear();
+        self.active_real_placements_mut().clear();
         if free_data.frees_data() {
             for id in ids {
                 self.free_image_if_unreferenced(id);
@@ -3073,7 +3120,7 @@ impl TerminalHandler {
                 self.buffer.clear_image_placements_by_id(id);
             }
         }
-        self.virtual_placements
+        self.active_virtual_placements_mut()
             .retain(|&(img_id, _), _| img_id != id);
         if free_data.frees_data() {
             self.free_image_if_unreferenced(id);
@@ -3096,7 +3143,7 @@ impl TerminalHandler {
         // `clear_image_placements_by_number` only clears cell placements,
         // not the virtual-placement table.
         if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
-            self.virtual_placements
+            self.active_virtual_placements_mut()
                 .retain(|&(img_id, _), _| img_id != id);
             if free_data.frees_data() {
                 self.free_image_if_unreferenced(id);
@@ -3278,7 +3325,7 @@ impl TerminalHandler {
             .collect();
         for id in ids {
             self.buffer.clear_image_placements_by_id(id);
-            self.virtual_placements
+            self.active_virtual_placements_mut()
                 .retain(|&(img_id, _), _| img_id != id);
             if free_data.frees_data() {
                 self.free_image_if_unreferenced(id);
@@ -3382,7 +3429,7 @@ impl TerminalHandler {
         });
         if !still_referenced {
             self.buffer.image_store_mut().remove(id);
-            self.virtual_placements
+            self.active_virtual_placements_mut()
                 .retain(|&(img_id, _), _| img_id != id);
             // Cascade-delete this image's real placements and their
             // relative children (Task 100.4a) — safe now that no cell
@@ -3770,9 +3817,12 @@ mod tests {
     use freminal_buffer::cell::Cell;
     use freminal_buffer::row::Row;
 
+    use super::super::RealPlacement;
     use super::super::{
         AltScreenAction, AltScreenMode, KittyImageState, KittyTransfer, TerminalHandler,
     };
+    use freminal_common::buffer_states::buffer_type::BufferType;
+    use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
     use freminal_common::buffer_states::row_number::RowNumber;
 
     // ------------------------------------------------------------------
@@ -4884,11 +4934,11 @@ mod tests {
 
         // Virtual placement should be stored.
         assert!(
-            !handler.virtual_placements.is_empty(),
+            !handler.active_virtual_placements().is_empty(),
             "Virtual placements table should have an entry"
         );
         assert!(
-            handler.virtual_placements.contains_key(&(42, 0)),
+            handler.active_virtual_placements().contains_key(&(42, 0)),
             "Should have virtual placement for (image_id=42, placement_id=0)"
         );
     }
@@ -5103,7 +5153,7 @@ mod tests {
         // Create a virtual placement.
         let cmd = kitty_virtual_2x2_cmd();
         handler.handle_kitty_graphics(cmd);
-        assert!(!handler.virtual_placements.is_empty());
+        assert!(!handler.active_virtual_placements().is_empty());
 
         // Delete all.
         let delete_cmd = KittyGraphicsCommand {
@@ -5117,7 +5167,7 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         assert!(
-            handler.virtual_placements.is_empty(),
+            handler.active_virtual_placements().is_empty(),
             "Delete all should clear virtual placements"
         );
     }
@@ -5131,7 +5181,7 @@ mod tests {
         // Create a virtual placement for image_id=42.
         let cmd = kitty_virtual_2x2_cmd();
         handler.handle_kitty_graphics(cmd);
-        assert!(handler.virtual_placements.contains_key(&(42, 0)));
+        assert!(handler.active_virtual_placements().contains_key(&(42, 0)));
 
         // Delete by ID = 42.
         let delete_cmd = KittyGraphicsCommand {
@@ -5146,7 +5196,7 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         assert!(
-            handler.virtual_placements.is_empty(),
+            handler.active_virtual_placements().is_empty(),
             "Delete by ID=42 should clear the virtual placement"
         );
     }
@@ -5228,7 +5278,7 @@ mod tests {
         handler.handle_kitty_graphics(cmd);
 
         let placement = handler
-            .real_placements
+            .active_real_placements()
             .get(&(42, 0))
             .copied()
             .expect("expected a RealPlacement for (42, 0)");
@@ -5341,7 +5391,7 @@ mod tests {
         // Exactly one entry in real_placements for (42, 5), pointing at
         // the NEW origin.
         let placement = handler
-            .real_placements
+            .active_real_placements()
             .get(&(42, 5))
             .copied()
             .expect("expected a RealPlacement for (42, 5)");
@@ -5365,7 +5415,7 @@ mod tests {
         handler.handle_kitty_graphics(cmd_a);
         let _ = recv_response(&rx); // A's OK response.
         let parent = handler
-            .real_placements
+            .active_real_placements()
             .get(&(42, 0))
             .copied()
             .expect("parent A registered");
@@ -5394,7 +5444,7 @@ mod tests {
         );
 
         let child = handler
-            .real_placements
+            .active_real_placements()
             .get(&(99, 0))
             .copied()
             .expect("child B registered in real_placements");
@@ -5473,7 +5523,7 @@ mod tests {
         handler.handle_kitty_graphics(cmd);
 
         let placement = handler
-            .real_placements
+            .active_real_placements()
             .get(&(77, 0))
             .copied()
             .expect("expected a RealPlacement for (77, 0)");
@@ -5557,7 +5607,7 @@ mod tests {
         cmd.control.display_rows = Some(1);
         handler.handle_kitty_graphics(cmd);
         let placement = handler
-            .real_placements
+            .active_real_placements()
             .get(&(61, 0))
             .copied()
             .expect("expected a RealPlacement for (61, 0)");
@@ -5574,7 +5624,7 @@ mod tests {
         );
 
         let placement_after = handler
-            .real_placements
+            .active_real_placements()
             .get(&(61, 0))
             .copied()
             .expect("placement still recorded");
@@ -5609,7 +5659,7 @@ mod tests {
         handler.handle_kitty_graphics(cmd_a);
         let _ = recv_response(&rx);
         let parent = handler
-            .real_placements
+            .active_real_placements()
             .get(&(62, 0))
             .copied()
             .expect("parent registered");
@@ -5632,7 +5682,7 @@ mod tests {
         let _ = recv_response(&rx);
 
         let child = handler
-            .real_placements
+            .active_real_placements()
             .get(&(63, 0))
             .copied()
             .expect("child registered");
@@ -5722,7 +5772,7 @@ mod tests {
 
         // Parent on the very first row of a fresh primary buffer (number 0).
         place_at_cursor(&mut handler, &rx, 70);
-        let parent = handler.real_placements[&(70, 0)];
+        let parent = handler.active_real_placements()[&(70, 0)];
         assert_eq!(parent.origin_row, RowNumber::ZERO, "setup: parent on row 0");
 
         let response = place_relative_child(&mut handler, &rx, 71, 70, -1);
@@ -5731,7 +5781,7 @@ mod tests {
             "the placement is accepted, got {response:?}"
         );
         assert!(
-            !handler.real_placements.contains_key(&(71, 0)),
+            !handler.active_real_placements().contains_key(&(71, 0)),
             "no row exists above row 0, so nothing is registered"
         );
         assert!(
@@ -5751,12 +5801,12 @@ mod tests {
         handler.handle_carriage_return();
         place_at_cursor(&mut handler, &rx, 72);
         assert_eq!(
-            handler.real_placements[&(72, 0)].origin_row,
+            handler.active_real_placements()[&(72, 0)].origin_row,
             RowNumber::new(1)
         );
 
         let _ = place_relative_child(&mut handler, &rx, 73, 72, -1);
-        let child = handler.real_placements[&(73, 0)];
+        let child = handler.active_real_placements()[&(73, 0)];
         assert_eq!(child.origin_row, RowNumber::ZERO);
         assert!(handler.buffer().rows()[0].cells()[0].has_image());
     }
@@ -5772,7 +5822,7 @@ mod tests {
 
         handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         place_at_cursor(&mut handler, &rx, 74);
-        let parent = handler.real_placements[&(74, 0)];
+        let parent = handler.active_real_placements()[&(74, 0)];
         // Entering clears the alternate screen into a fresh store, so the
         // first alternate row is the store's base, not `ALTERNATE_BASE`.
         assert_eq!(parent.origin_row, handler.buffer().row_base());
@@ -5784,7 +5834,7 @@ mod tests {
         let response = place_relative_child(&mut handler, &rx, 75, 74, -25);
         assert!(response.contains("OK"), "accepted, got {response:?}");
         assert!(
-            !handler.real_placements.contains_key(&(75, 0)),
+            !handler.active_real_placements().contains_key(&(75, 0)),
             "an entry saturated to the last primary number would alias a primary row"
         );
         assert!(!any_cell_shows_image(&handler, 75));
@@ -5802,7 +5852,7 @@ mod tests {
         handler.handle_carriage_return();
         place_at_cursor(&mut handler, &rx, 76);
         let _ = place_relative_child(&mut handler, &rx, 77, 76, 0);
-        assert!(handler.real_placements.contains_key(&(77, 0)));
+        assert!(handler.active_real_placements().contains_key(&(77, 0)));
 
         handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
             image_id: Some(77),
@@ -5811,7 +5861,7 @@ mod tests {
             ..KittyControlData::default()
         }));
         let _ = recv_response(&rx);
-        assert!(!handler.real_placements.contains_key(&(77, 0)));
+        assert!(!handler.active_real_placements().contains_key(&(77, 0)));
     }
 
     // ── Pruning placements whose origin was evicted (review NIT) ────────────
@@ -5831,7 +5881,7 @@ mod tests {
         handler.set_write_tx(tx);
 
         place_at_cursor(&mut handler, &rx, 80);
-        let origin = handler.real_placements[&(80, 0)].origin_row;
+        let origin = handler.active_real_placements()[&(80, 0)].origin_row;
 
         // A batch that scrolls but does not reach the origin keeps the entry.
         push_newlines(&mut handler, 3);
@@ -5839,7 +5889,7 @@ mod tests {
             handler.buffer().row_base() <= origin,
             "setup: origin still retained"
         );
-        assert!(handler.real_placements.contains_key(&(80, 0)));
+        assert!(handler.active_real_placements().contains_key(&(80, 0)));
 
         // Enough further output evicts the origin row.
         push_newlines(&mut handler, 20);
@@ -5848,7 +5898,7 @@ mod tests {
             "setup: origin evicted"
         );
         assert!(
-            !handler.real_placements.contains_key(&(80, 0)),
+            !handler.active_real_placements().contains_key(&(80, 0)),
             "an evicted origin must not stay in the map forever"
         );
     }
@@ -5864,11 +5914,11 @@ mod tests {
         // Placed late: its origin is inside the retained window.
         place_at_cursor(&mut handler, &rx, 82);
         push_newlines(&mut handler, 1);
-        let late = handler.real_placements[&(82, 0)].origin_row;
+        let late = handler.active_real_placements()[&(82, 0)].origin_row;
         assert!(handler.buffer().row_base() <= late);
 
-        assert!(!handler.real_placements.contains_key(&(81, 0)));
-        assert!(handler.real_placements.contains_key(&(82, 0)));
+        assert!(!handler.active_real_placements().contains_key(&(81, 0)));
+        assert!(handler.active_real_placements().contains_key(&(82, 0)));
     }
 
     /// A child of a virtual parent carries a placeholder origin of row 0 that
@@ -5889,7 +5939,7 @@ mod tests {
         cmd.control.display_rows = Some(2);
         handler.handle_kitty_graphics(cmd);
         let _ = recv_response(&rx);
-        assert!(handler.virtual_placements.contains_key(&(90, 1)));
+        assert!(handler.active_virtual_placements().contains_key(&(90, 1)));
         transmit_only(&mut handler, 91);
         let _ = recv_response(&rx);
         handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
@@ -5900,7 +5950,7 @@ mod tests {
             ..KittyControlData::default()
         }));
         let _ = recv_response(&rx);
-        let child = handler.real_placements[&(91, 0)];
+        let child = handler.active_real_placements()[&(91, 0)];
         assert_eq!(
             child.origin_row,
             RowNumber::ZERO,
@@ -5910,7 +5960,7 @@ mod tests {
         push_newlines(&mut handler, 30);
         assert!(handler.buffer().row_base() > RowNumber::ZERO);
         assert!(
-            handler.real_placements.contains_key(&(91, 0)),
+            handler.active_real_placements().contains_key(&(91, 0)),
             "a virtual-parent child must survive eviction of row 0"
         );
     }
@@ -5925,12 +5975,12 @@ mod tests {
         handler.set_write_tx(tx);
 
         place_at_cursor(&mut handler, &rx, 85);
-        let kept = handler.real_placements[&(85, 0)];
+        let kept = handler.active_real_placements()[&(85, 0)];
         // A placement recorded on a padding row three rows down (no cells: the
         // padding row must stay pristine for the grow to pop it).
         handler.buffer_mut().set_cursor_pos(Some(0), Some(3));
         let padding_row = handler.buffer().cursor_row_number();
-        handler.real_placements.insert(
+        handler.active_real_placements_mut().insert(
             (86, 0),
             crate::terminal_handler::RealPlacement {
                 image_id: 86,
@@ -5952,11 +6002,11 @@ mod tests {
             "setup: the padding row was popped"
         );
         assert!(
-            !handler.real_placements.contains_key(&(86, 0)),
+            !handler.active_real_placements().contains_key(&(86, 0)),
             "a placement on a popped row would alias the row issued next"
         );
         assert!(
-            handler.real_placements.contains_key(&(85, 0)),
+            handler.active_real_placements().contains_key(&(85, 0)),
             "a placement on a surviving row stays"
         );
     }
@@ -5970,17 +6020,19 @@ mod tests {
         // Tamper: an entry below the base that pruning WOULD remove; with the
         // base unchanged since the last prune it must be left alone (the
         // gate is what keeps the per-batch cost at one comparison).
-        handler.real_placements.insert(
+        let template = handler.active_real_placements()[&(83, 0)];
+        handler.active_real_placements_mut().insert(
             (84, 0),
             crate::terminal_handler::RealPlacement {
                 origin_row: RowNumber::ZERO,
-                ..handler.real_placements[&(83, 0)]
+                ..template
             },
         );
-        handler.placement_prune_base = handler.buffer().row_base();
+        let base = handler.buffer().row_base();
+        *handler.placement_prune_base.get_mut(BufferType::Primary) = base;
         push_newlines(&mut handler, 1);
-        assert!(handler.real_placements.contains_key(&(84, 0)));
-        assert!(handler.real_placements.contains_key(&(83, 0)));
+        assert!(handler.active_real_placements().contains_key(&(84, 0)));
+        assert!(handler.active_real_placements().contains_key(&(83, 0)));
     }
 
     /// Task 125.14: a width-changing reflow renumbers every row; the handler
@@ -6002,7 +6054,7 @@ mod tests {
         cmd.control.display_rows = Some(1);
         handler.handle_kitty_graphics(cmd);
         let before = handler
-            .real_placements
+            .active_real_placements()
             .get(&(64, 0))
             .copied()
             .expect("placement recorded");
@@ -6014,7 +6066,7 @@ mod tests {
             "reflow renumbers rows, so the old number no longer resolves"
         );
         let after = handler
-            .real_placements
+            .active_real_placements()
             .get(&(64, 0))
             .copied()
             .expect("placement still recorded");
@@ -6033,42 +6085,351 @@ mod tests {
         );
     }
 
-    /// Task 125.14: placements recorded against the alternate screen are
-    /// dropped when it is left; primary-screen placements survive.
-    #[test]
-    fn leaving_the_alternate_screen_drops_alt_placements_only() {
-        let (mut handler, _rx) = kitty_handler();
+    // ── Placement maps are per screen (Task 131.7) ──────────────────────────
 
-        let mut primary = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        primary.control.image_id = Some(65);
-        primary.control.display_cols = Some(1);
-        primary.control.display_rows = Some(1);
-        handler.handle_kitty_graphics(primary);
-        assert!(handler.real_placements.contains_key(&(65, 0)));
+    /// Place a 1x1 real image `id` at the cursor of the active screen.
+    fn place_real(handler: &mut TerminalHandler, id: u32) {
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(id);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+    }
+
+    /// Whether `screen`'s real-placement map holds `(id, 0)`, active or not.
+    fn real_on(handler: &TerminalHandler, screen: BufferType, id: u64) -> bool {
+        handler.real_placements.get(screen).contains_key(&(id, 0))
+    }
+
+    /// Whether the active screen's visible window shows a cell of image `id`.
+    fn visible_shows_image(handler: &TerminalHandler, id: u64) -> bool {
+        handler
+            .visible_image_placements_extended(0, 0)
+            .iter()
+            .any(|p| p.as_ref().is_some_and(|p| p.image_id == id))
+    }
+
+    fn delete_all_cmd() -> KittyGraphicsCommand {
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        }
+    }
+
+    /// Alternate-screen placements persist across a `?47` leave and re-entry,
+    /// and are never visible on the primary screen in between.
+    #[test]
+    fn alternate_placements_persist_across_47_leave_and_enter() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        assert!(real_on(&handler, BufferType::Alternate, 66));
+        assert!(
+            handler.active_real_placements()[&(66, 0)]
+                .origin_row
+                .is_alternate()
+        );
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        assert!(real_on(&handler, BufferType::Alternate, 66), "parked");
+        assert!(handler.active_real_placements().contains_key(&(65, 0)));
+        assert!(!handler.active_real_placements().contains_key(&(66, 0)));
+        assert!(!visible_shows_image(&handler, 66));
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        assert!(handler.active_real_placements().contains_key(&(66, 0)));
+        assert!(!handler.active_real_placements().contains_key(&(65, 0)));
+        assert!(any_cell_shows_image(&handler, 66));
+        assert!(visible_shows_image(&handler, 66));
+        assert!(real_on(&handler, BufferType::Primary, 65), "parked");
+    }
+
+    /// `?1049` enter blanks the alternate screen, so it drops the placements
+    /// (real and virtual) recorded against it; the primary's are untouched.
+    #[test]
+    fn entering_1049_clears_the_alternate_placements() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
 
         handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
-        let mut alt = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        alt.control.image_id = Some(66);
-        alt.control.display_cols = Some(1);
-        alt.control.display_rows = Some(1);
-        handler.handle_kitty_graphics(alt);
-        let alt_placement = handler
-            .real_placements
-            .get(&(66, 0))
-            .copied()
-            .expect("alt placement recorded");
-        assert!(alt_placement.origin_row.is_alternate());
+        place_real(&mut handler, 66);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        assert!(real_on(&handler, BufferType::Alternate, 66));
+        assert!(handler.active_virtual_placements().contains_key(&(42, 0)));
 
         handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
+        assert!(
+            real_on(&handler, BufferType::Alternate, 66),
+            "leaving does not clear the parked alternate screen"
+        );
 
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
+        assert!(handler.active_real_placements().is_empty());
+        assert!(handler.active_virtual_placements().is_empty());
+        assert!(!any_cell_shows_image(&handler, 66));
+        assert!(real_on(&handler, BufferType::Primary, 65));
+    }
+
+    /// `?1047` leave clears the alternate screen, and with it the placements.
+    #[test]
+    fn leaving_1047_clears_the_alternate_placements() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
+
+        handler.handle_alternate_screen(AltScreenMode::Clearing1047, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        handler.handle_alternate_screen(AltScreenMode::Clearing1047, AltScreenAction::Leave);
+
+        assert!(!real_on(&handler, BufferType::Alternate, 66));
         assert!(
-            !handler.real_placements.contains_key(&(66, 0)),
-            "the alternate screen's placement must be dropped on leave"
+            handler
+                .virtual_placements
+                .get(BufferType::Alternate)
+                .is_empty()
         );
+        assert!(handler.active_real_placements().contains_key(&(65, 0)));
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        assert!(handler.active_real_placements().is_empty());
+        assert!(!visible_shows_image(&handler, 66));
+    }
+
+    /// RIS clears the placement maps of both screens, parked or not.
+    #[test]
+    fn full_reset_clears_the_placements_of_both_screens() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+
+        handler.full_reset();
+
+        for screen in [BufferType::Primary, BufferType::Alternate] {
+            assert!(handler.real_placements.get(screen).is_empty());
+            assert!(handler.virtual_placements.get(screen).is_empty());
+        }
+    }
+
+    /// A `?1047` leave while already on the primary screen is a no-op, so it
+    /// must not clear a parked alternate screen's placements.
+    #[test]
+    fn leaving_1047_from_the_primary_keeps_the_parked_alternate_placements() {
+        let (mut handler, _rx) = kitty_handler();
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+
+        handler.handle_alternate_screen(AltScreenMode::Clearing1047, AltScreenAction::Leave);
+
+        assert!(real_on(&handler, BufferType::Alternate, 66));
+    }
+
+    /// `d=a` acts on the active screen's placements only, in both directions.
+    #[test]
+    fn delete_all_on_the_alternate_leaves_primary_placements_alone() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.handle_kitty_graphics(delete_all_cmd());
+        assert!(handler.active_real_placements().is_empty());
+        assert!(!any_cell_shows_image(&handler, 66));
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        assert!(handler.active_real_placements().contains_key(&(65, 0)));
+        assert!(handler.active_virtual_placements().contains_key(&(42, 0)));
+        assert!(any_cell_shows_image(&handler, 65));
+    }
+
+    #[test]
+    fn delete_all_on_the_primary_leaves_alternate_placements_alone() {
+        let (mut handler, _rx) = kitty_handler();
+        place_real(&mut handler, 65);
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+
+        handler.handle_kitty_graphics(delete_all_cmd());
+        assert!(handler.active_real_placements().is_empty());
+
+        assert!(real_on(&handler, BufferType::Alternate, 66));
         assert!(
-            handler.real_placements.contains_key(&(65, 0)),
-            "the primary screen's placement must survive"
+            handler
+                .virtual_placements
+                .get(BufferType::Alternate)
+                .contains_key(&(42, 0))
         );
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        assert!(any_cell_shows_image(&handler, 66));
+    }
+
+    /// A virtual placement made on the alternate screen is neither visible nor
+    /// resolvable on the primary screen, and resolves again on re-entry.
+    #[test]
+    fn alternate_virtual_placement_is_not_resolvable_on_the_primary() {
+        let (mut handler, _rx) = kitty_handler();
+        handler.set_format(format_for_placeholder(42, 0));
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        assert!(handler.active_virtual_placements().contains_key(&(42, 0)));
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+
+        assert!(handler.active_virtual_placements().is_empty());
+        handler.handle_data(&placeholder_with_row_col(0, 0));
+        assert!(
+            !handler.buffer().rows()[0].cells()[0].has_image(),
+            "the primary has no virtual placement, so a placeholder stays text"
+        );
+        assert!(!visible_shows_image(&handler, 42));
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        handler.handle_data(&placeholder_with_row_col(0, 0));
+        assert!(
+            handler.buffer().rows()[0].cells()[0].has_image(),
+            "the alternate screen's own virtual placement resolves"
+        );
+    }
+
+    /// A width reflow of the primary screen leaves the parked alternate
+    /// screen's placements (and their row numbers) untouched.
+    #[test]
+    fn reflow_on_the_primary_does_not_touch_parked_alternate_placements() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(40, 6);
+        handler.set_write_tx(tx);
+        handler.handle_data(&[b'x'; 70]);
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        place_real(&mut handler, 64);
+        let primary_before = handler.active_real_placements()[&(64, 0)];
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        let alt_before = handler.active_real_placements()[&(66, 0)];
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+
+        handler.handle_resize(20, 6, 0, 0);
+
+        let primary_after = handler.active_real_placements()[&(64, 0)];
+        assert_ne!(
+            primary_after.origin_row, primary_before.origin_row,
+            "the primary placement was remapped"
+        );
+        let alt_after = handler.real_placements.get(BufferType::Alternate)[&(66, 0)];
+        assert_eq!(
+            alt_after.origin_row, alt_before.origin_row,
+            "the alternate never reflows, so its placement keeps its row"
+        );
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        let index = handler
+            .buffer()
+            .row_index_of(alt_after.origin_row)
+            .expect("the parked alternate placement still resolves to a row");
+        assert!(handler.buffer().rows()[index].cells()[alt_after.origin_col].has_image());
+    }
+
+    /// A resize while the alternate screen is active reflows the parked
+    /// primary: its placements are remapped, not lost.
+    #[test]
+    fn resize_on_the_alternate_remaps_parked_primary_placements() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(40, 6);
+        handler.set_write_tx(tx);
+        handler.handle_data(&[b'x'; 70]);
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        place_real(&mut handler, 64);
+        let before = handler.active_real_placements()[&(64, 0)];
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.handle_resize(20, 6, 0, 0);
+
+        let after = handler.real_placements.get(BufferType::Primary)[&(64, 0)];
+        assert_ne!(after.origin_row, before.origin_row, "origin was remapped");
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        let index = handler
+            .buffer()
+            .row_index_of(after.origin_row)
+            .expect("the remapped origin resolves to a retained row");
+        assert!(
+            handler.buffer().rows()[index].cells()[after.origin_col].has_image(),
+            "the remapped origin names the row now holding the image"
+        );
+    }
+
+    /// A parked primary placement whose row a resize on the alternate screen
+    /// trimmed is pruned; one on a surviving row stays.
+    #[test]
+    fn resize_on_the_alternate_prunes_trimmed_parked_primary_placements() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 5);
+        handler.set_write_tx(tx);
+        place_real(&mut handler, 85);
+        let kept = handler.active_real_placements()[&(85, 0)];
+        // A placement on a blank padding row three rows down: growing the
+        // window reclaims it.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(3));
+        let padding_row = handler.buffer().cursor_row_number();
+        handler.active_real_placements_mut().insert(
+            (86, 0),
+            RealPlacement {
+                image_id: 86,
+                origin_row: padding_row,
+                ..kept
+            },
+        );
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.handle_resize(80, 8, 0, 0);
+
+        assert!(!real_on(&handler, BufferType::Primary, 86));
+        assert!(real_on(&handler, BufferType::Primary, 85));
+    }
+
+    /// Shrinking the height while the primary is active prunes a parked
+    /// alternate placement whose row the resize evicted from the parked store.
+    #[test]
+    fn shrinking_height_prunes_parked_alternate_placements_on_evicted_rows() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 6);
+        handler.set_write_tx(tx);
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
+        place_real(&mut handler, 66);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(4));
+        place_real(&mut handler, 67);
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        assert!(real_on(&handler, BufferType::Alternate, 66));
+        assert!(real_on(&handler, BufferType::Alternate, 67));
+
+        handler.handle_resize(80, 3, 0, 0);
+
+        let (base, next) = handler
+            .buffer()
+            .parked_row_span(BufferType::Alternate)
+            .expect("the alternate screen is parked");
+        assert!(
+            !real_on(&handler, BufferType::Alternate, 66),
+            "its row left the parked store"
+        );
+        assert!(real_on(&handler, BufferType::Alternate, 67));
+        let survivor = handler.real_placements.get(BufferType::Alternate)[&(67, 0)];
+        assert!(base <= survivor.origin_row && survivor.origin_row < next);
     }
 
     #[test]
@@ -6266,8 +6627,8 @@ mod tests {
         handler.handle_kitty_graphics(put_cmd);
         let _ = recv_response(&rx);
 
-        assert!(handler.real_placements.contains_key(&(42, 0)));
-        assert!(handler.real_placements.contains_key(&(99, 0)));
+        assert!(handler.active_real_placements().contains_key(&(42, 0)));
+        assert!(handler.active_real_placements().contains_key(&(99, 0)));
 
         // Delete A by id, uppercase `I` — the cascade to relative children
         // (real_placements pruning + child cell clearing) only fires on the
@@ -6286,11 +6647,11 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         assert!(
-            !handler.real_placements.contains_key(&(42, 0)),
+            !handler.active_real_placements().contains_key(&(42, 0)),
             "deleted parent must be removed from real_placements"
         );
         assert!(
-            !handler.real_placements.contains_key(&(99, 0)),
+            !handler.active_real_placements().contains_key(&(99, 0)),
             "cascade-deleted child must be removed from real_placements"
         );
 
@@ -6313,7 +6674,7 @@ mod tests {
         let cmd_a = kitty_virtual_2x2_cmd();
         handler.handle_kitty_graphics(cmd_a);
         let _ = recv_response(&rx);
-        assert!(handler.virtual_placements.contains_key(&(42, 0)));
+        assert!(handler.active_virtual_placements().contains_key(&(42, 0)));
 
         // Child B (id=99) relative to virtual A.
         transmit_only(&mut handler, 99);
@@ -6335,7 +6696,7 @@ mod tests {
         );
 
         let child = handler
-            .real_placements
+            .active_real_placements()
             .get(&(99, 0))
             .copied()
             .expect("child B registered against virtual parent");
@@ -6449,7 +6810,7 @@ mod tests {
         grow_buffer_rows(&mut handler, 5);
 
         // Parent virtual placement (42, 0), 2x2 tile.
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (42, 0),
             VirtualPlacement {
                 image_id: 42,
@@ -6482,7 +6843,7 @@ mod tests {
         let (mut handler, _rx) = kitty_handler();
         grow_buffer_rows(&mut handler, 5);
 
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (42, 0),
             VirtualPlacement {
                 image_id: 42,
@@ -6516,7 +6877,7 @@ mod tests {
         // Register the virtual parent, but never stamp any placeholder
         // cells for it — simulates it having scrolled entirely out of the
         // visible window.
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (42, 0),
             VirtualPlacement {
                 image_id: 42,
@@ -6581,7 +6942,7 @@ mod tests {
         let (mut handler, _rx) = kitty_handler();
         grow_buffer_rows(&mut handler, 10);
 
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (42, 0),
             VirtualPlacement {
                 image_id: 42,
@@ -10115,7 +10476,7 @@ mod tests {
 
         // Should have a virtual placement registered
         assert!(
-            !handler.virtual_placements.is_empty(),
+            !handler.active_virtual_placements().is_empty(),
             "Expected virtual placement to be created"
         );
     }
@@ -10158,7 +10519,7 @@ mod tests {
         handler.handle_kitty_graphics(put_cmd);
 
         assert!(
-            !handler.virtual_placements.is_empty(),
+            !handler.active_virtual_placements().is_empty(),
             "Expected virtual placement from Put"
         );
     }
@@ -11279,7 +11640,9 @@ mod tests {
         let assigned_id = extract_assigned_id(&rx);
 
         assert!(
-            handler.virtual_placements.contains_key(&(assigned_id, 0)),
+            handler
+                .active_virtual_placements()
+                .contains_key(&(assigned_id, 0)),
             "virtual placement should exist for the transmitted image"
         );
 
@@ -11295,7 +11658,9 @@ mod tests {
         handler.handle_kitty_graphics(delete_cmd);
 
         assert!(
-            !handler.virtual_placements.contains_key(&(assigned_id, 0)),
+            !handler
+                .active_virtual_placements()
+                .contains_key(&(assigned_id, 0)),
             "d=n should prune the virtual placement for the resolved image"
         );
     }

@@ -2115,6 +2115,29 @@ mod resize_tests {
         assert_eq!(buf.height, 48);
         assert_eq!(buf.scroll_region(), (0, 47));
     }
+
+    #[test]
+    fn parked_row_span_reports_the_parked_store_only() {
+        let mut buf = Buffer::new(10, 4);
+        // Primary active, alternate never used: nothing is parked.
+        assert_eq!(buf.parked_row_span(BufferType::Primary), None);
+        assert_eq!(buf.parked_row_span(BufferType::Alternate), None);
+
+        let primary_span = (buf.row_base(), buf.next_row_number());
+        buf.enter_fresh_alternate();
+        let alt_span = (buf.row_base(), buf.next_row_number());
+
+        // The active screen is never reported; the parked one matches the
+        // span it had while it was active.
+        assert_eq!(buf.parked_row_span(BufferType::Alternate), None);
+        assert_eq!(buf.parked_row_span(BufferType::Primary), Some(primary_span));
+
+        buf.switch_to_primary();
+        assert_eq!(buf.parked_row_span(BufferType::Primary), None);
+        assert_eq!(buf.parked_row_span(BufferType::Alternate), Some(alt_span));
+        assert!(alt_span.0.is_alternate());
+        assert!(!primary_span.0.is_alternate());
+    }
 }
 
 #[cfg(test)]

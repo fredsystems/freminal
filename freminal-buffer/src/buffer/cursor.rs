@@ -10,6 +10,7 @@
 //! (`get_cursor_screen_pos`, `cursor_screen_y`), and DECSC/DECRC save/restore.
 
 use freminal_common::buffer_states::{
+    buffer_type::BufferType,
     cursor::{CursorPos, CursorState},
     modes::{declrmm::Declrmm, decom::Decom},
     row_number::RowNumber,
@@ -55,6 +56,26 @@ impl Buffer {
     #[must_use]
     pub fn next_row_number(&self) -> RowNumber {
         self.rows.next_number()
+    }
+
+    /// The live row-number span `(base, next_number)` of the *parked* store of
+    /// `screen`, or `None` when `screen` is the active screen or has never been
+    /// parked (the alternate screen before its first use).
+    ///
+    /// A row of the parked screen is numbered `n` and still retained iff
+    /// `base <= n < next_number`. This lets a caller that keeps state anchored
+    /// to a parked screen's rows (the kitty placement maps) judge that state
+    /// after a resize that trimmed or evicted rows of the parked store.
+    #[must_use]
+    pub fn parked_row_span(&self, screen: BufferType) -> Option<(RowNumber, RowNumber)> {
+        if screen == self.kind {
+            return None;
+        }
+        let parked = match screen {
+            BufferType::Primary => self.parked_primary.as_ref(),
+            BufferType::Alternate => self.parked_alternate.as_ref(),
+        }?;
+        Some((parked.rows.base(), parked.rows.next_number()))
     }
 
     /// Logical number of the row at retained index `index` of the active screen.

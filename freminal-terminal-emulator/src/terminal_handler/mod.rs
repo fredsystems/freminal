@@ -11,6 +11,7 @@ use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
     buffer_states::{
+        buffer_type::BufferType,
         command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
@@ -327,20 +328,26 @@ pub struct TerminalHandler {
     /// subsequent `m=1` chunks, and consumed by a final `m=0` chunk. A cap
     /// error moves it to `Discarding` until the transfer's final chunk.
     kitty_transfer: KittyTransfer,
-    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands.
+    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands,
+    /// one map per screen.
     ///
     /// Keyed by `(image_id, placement_id)`.  When U+10EEEE placeholder characters
     /// appear in the text stream, these are looked up to determine image tile
-    /// dimensions.
-    virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
-    /// First-class real (cell-stamped) placements, keyed by (`image_id`,
-    /// `placement_id`). Enables relative placements (parent link) and
-    /// cascade delete (Task 100.4a).
-    real_placements: HashMap<(u64, u32), RealPlacement>,
-    /// The buffer's row base when `real_placements` was last pruned of entries
-    /// whose origin row has been evicted. Pruning only runs when the base has
-    /// moved off this value; see `TerminalHandler::prune_evicted_real_placements`.
-    placement_prune_base: RowNumber,
+    /// dimensions.  Like kitty's per-screen graphics manager, every operation
+    /// acts on the active screen's map; the other screen's map is parked with
+    /// its image store and persists until that screen is cleared.
+    virtual_placements: ScreenScoped<HashMap<(u64, u32), VirtualPlacement>>,
+    /// First-class real (cell-stamped) placements, one map per screen, keyed by
+    /// (`image_id`, `placement_id`). Enables relative placements (parent link)
+    /// and cascade delete (Task 100.4a).  Per screen for the same reason as
+    /// `virtual_placements`.
+    real_placements: ScreenScoped<HashMap<(u64, u32), RealPlacement>>,
+    /// Per screen, the buffer's row base when that screen's `real_placements`
+    /// map was last pruned of entries whose origin row has been evicted.
+    /// Pruning only runs when the active screen's base has moved off this
+    /// value; see `TerminalHandler::prune_evicted_real_placements`.  Starts at
+    /// each screen's namespace origin.
+    placement_prune_base: ScreenScoped<RowNumber>,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -489,9 +496,9 @@ impl TerminalHandler {
             progress_updated_at: None,
             multipart_state: None,
             kitty_transfer: KittyTransfer::Idle,
-            virtual_placements: HashMap::new(),
-            real_placements: HashMap::new(),
-            placement_prune_base: RowNumber::ZERO,
+            virtual_placements: ScreenScoped::default(),
+            real_placements: ScreenScoped::default(),
+            placement_prune_base: ScreenScoped::new(RowNumber::ZERO, RowNumber::ALTERNATE_BASE),
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
@@ -659,8 +666,13 @@ impl TerminalHandler {
         self.progress = ProgressReport::default();
         self.progress_updated_at = None;
         self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
-        self.virtual_placements.clear();
-        self.real_placements.clear();
+        for placements in self.virtual_placements.both_mut() {
+            placements.clear();
+        }
+        for placements in self.real_placements.both_mut() {
+            placements.clear();
+        }
+        self.placement_prune_base = ScreenScoped::new(RowNumber::ZERO, RowNumber::ALTERNATE_BASE);
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;
@@ -846,7 +858,7 @@ impl TerminalHandler {
         };
 
         // Fast path: if no virtual placements exist, no placeholder can resolve.
-        if self.virtual_placements.is_empty() {
+        if self.active_virtual_placements().is_empty() {
             if let Some(last) = text.last() {
                 self.last_graphic_char = Some(*last);
             }
@@ -946,12 +958,12 @@ impl TerminalHandler {
 
         // Look up a matching virtual placement.
         let vp = self
-            .virtual_placements
+            .active_virtual_placements()
             .get(&(full_image_id, placement_id))
             .or_else(|| {
                 // Fall back to placement_id=0 (any virtual placement for this image).
                 if placement_id != 0 {
-                    self.virtual_placements.get(&(full_image_id, 0))
+                    self.active_virtual_placements().get(&(full_image_id, 0))
                 } else {
                     None
                 }
@@ -1314,6 +1326,53 @@ impl TerminalHandler {
         self.buffer.visible_image_placements(scroll_offset)
     }
 
+    /// The active screen's virtual (Unicode placeholder) placements.
+    ///
+    /// The kitty placement maps are per screen (kitty keeps one graphics
+    /// manager per screen), so every placement operation goes through the
+    /// active screen's map, selected by the buffer's own notion of which
+    /// screen is active.
+    const fn active_virtual_placements(&self) -> &HashMap<(u64, u32), VirtualPlacement> {
+        self.virtual_placements.get(self.buffer.kind())
+    }
+
+    /// Mutable form of [`Self::active_virtual_placements`].
+    const fn active_virtual_placements_mut(
+        &mut self,
+    ) -> &mut HashMap<(u64, u32), VirtualPlacement> {
+        self.virtual_placements.get_mut(self.buffer.kind())
+    }
+
+    /// The active screen's real (cell-stamped) placements; see
+    /// [`Self::active_virtual_placements`].
+    const fn active_real_placements(&self) -> &HashMap<(u64, u32), RealPlacement> {
+        self.real_placements.get(self.buffer.kind())
+    }
+
+    /// Mutable form of [`Self::active_real_placements`].
+    const fn active_real_placements_mut(&mut self) -> &mut HashMap<(u64, u32), RealPlacement> {
+        self.real_placements.get_mut(self.buffer.kind())
+    }
+
+    /// Blank the alternate screen and drop the kitty placements recorded
+    /// against it.
+    ///
+    /// The buffer clear empties the alternate image store, so a placement map
+    /// entry that survived would name an image that no longer exists.  Both
+    /// alternate-screen clears (`?1049` enter, `?1047` leave) go through here.
+    /// Valid only while the alternate screen is active, like the buffer's own
+    /// clear; on the primary screen it does nothing.
+    pub(super) fn clear_alternate_screen(&mut self) {
+        if self.buffer.kind() != BufferType::Alternate {
+            return;
+        }
+        self.buffer.clear_alternate_screen();
+        self.virtual_placements
+            .get_mut(BufferType::Alternate)
+            .clear();
+        self.real_placements.get_mut(BufferType::Alternate).clear();
+    }
+
     /// Like [`Self::visible_image_placements`] but extends the window upward by
     /// `extra_rows` (command-block fold support). The returned vector matches
     /// the extended `visible_chars` layout.
@@ -1334,7 +1393,7 @@ impl TerminalHandler {
             .buffer
             .visible_image_placements_extended(scroll_offset, extra_rows);
         let term_width = self.win_size().0;
-        if term_width > 0 && !self.real_placements.is_empty() {
+        if term_width > 0 && !self.active_real_placements().is_empty() {
             self.inject_virtual_parent_relatives(&mut placements, term_width);
         }
         placements
@@ -1369,11 +1428,11 @@ impl TerminalHandler {
             return;
         }
 
-        for (&(child_img, child_pid), child) in &self.real_placements {
+        for (&(child_img, child_pid), child) in self.active_real_placements() {
             let Some(parent_key) = child.parent else {
                 continue;
             };
-            if !self.virtual_placements.contains_key(&parent_key) {
+            if !self.active_virtual_placements().contains_key(&parent_key) {
                 // Real-parent child — already stamped into the buffer by
                 // Task 100.4a; nothing to derive here.
                 continue;
@@ -5294,7 +5353,7 @@ mod tests {
 
         let mut handler = TerminalHandler::new(80, 24);
         // Add a virtual placement so the placeholder path is taken
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (1, 0),
             VirtualPlacement {
                 image_id: 1,
@@ -5322,7 +5381,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Create a virtual placement
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (1, 0),
             VirtualPlacement {
                 image_id: 1,

@@ -139,51 +139,36 @@ impl TerminalHandler {
     /// while already on the primary screen performs a DECRC from the primary
     /// slot.
     ///
-    /// Whenever this actually moves from the alternate screen to the primary
-    /// one, the kitty real-placement map is filtered of alternate-screen
-    /// placements and re-pruned (replaced by per-screen maps in 131.7).
+    /// The kitty placement maps are per screen, so a switch does not touch
+    /// them: the alternate screen's placements persist with its image store
+    /// across `?47` and `?1047` re-entry.  They are cleared together with the
+    /// screen ([`Self::clear_alternate_screen`]), and a resize prunes the
+    /// parked screen's map against its parked store.
     pub(super) fn handle_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction) {
         match (mode, action) {
             (AltScreenMode::Legacy47 | AltScreenMode::Clearing1047, AltScreenAction::Enter) => {
                 self.buffer.switch_to_alternate();
             }
             (AltScreenMode::Legacy47, AltScreenAction::Leave) => {
-                self.switch_to_primary_screen();
+                self.buffer.switch_to_primary();
             }
             (AltScreenMode::Clearing1047, AltScreenAction::Leave) => {
                 // `clear_alternate_screen` is only valid while the alternate
                 // screen is active; leaving from the primary is a no-op.
                 if self.buffer.kind() == BufferType::Alternate {
-                    self.buffer.clear_alternate_screen();
-                    self.switch_to_primary_screen();
+                    self.clear_alternate_screen();
+                    self.buffer.switch_to_primary();
                 }
             }
             (AltScreenMode::SaveClear1049, AltScreenAction::Enter) => {
                 self.handle_save_cursor();
                 self.buffer.switch_to_alternate();
-                self.buffer.clear_alternate_screen();
+                self.clear_alternate_screen();
             }
             (AltScreenMode::SaveClear1049, AltScreenAction::Leave) => {
-                self.switch_to_primary_screen();
+                self.buffer.switch_to_primary();
                 self.handle_restore_cursor();
             }
-        }
-    }
-
-    /// Switch to the primary screen (idempotent) and, if the alternate
-    /// screen was actually active, drop the placements recorded against it.
-    fn switch_to_primary_screen(&mut self) {
-        let was_alternate = self.buffer.kind() == BufferType::Alternate;
-        self.buffer.switch_to_primary();
-        if was_alternate {
-            // The alternate screen's placements are dropped on leave (the
-            // buffer drops its own alternate-screen marks the same way).
-            self.real_placements
-                .retain(|_, placement| !placement.origin_row.is_alternate());
-            // A resize while the alternate screen was up may have trimmed the
-            // parked primary store's tail; judge the primary placements
-            // against the primary store now that it is active again.
-            self.prune_unissued_real_placements();
         }
     }
 
