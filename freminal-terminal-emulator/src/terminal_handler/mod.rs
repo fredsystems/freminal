@@ -509,7 +509,7 @@ impl TerminalHandler {
             sixel_display_mode: Decsdm::ScrollingMode,
             private_color_registers: PrivateColorRegisters::Private,
             nrc_mode: Decnrcm::NrcDisabled,
-            reverse_wrap: ReverseWrapAround::WrapAround,
+            reverse_wrap: ReverseWrapAround::default(),
             xt_rev_wrap2: XtRevWrap2::Disabled,
             vt52_mode: Decanm::Ansi,
             insert_mode: Irm::Replace,

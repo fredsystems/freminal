@@ -193,12 +193,12 @@ test_mode_type!(
     "Query Line Mode (LNM)"
 );
 
-// ReverseWrapAround (?45): default=WrapAround, Set=WrapAround, Reset=DontWrap
+// ReverseWrapAround (?45): default=DontWrap, Set=WrapAround, Reset=DontWrap
 test_mode_type!(
     reverse_wrap_around_tests,
     ReverseWrapAround,
     45,
-    ReverseWrapAround::WrapAround,
+    ReverseWrapAround::DontWrap,
     ReverseWrapAround::WrapAround,
     ReverseWrapAround::DontWrap,
     ReverseWrapAround::Query,

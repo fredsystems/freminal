@@ -6092,7 +6092,7 @@ fn decrpm_xt_rev_wrap2_after_set_then_reset() {
 // ── Reverse Wrap (?45) — DECRPM via handler ───────────────────────────
 
 #[test]
-fn decrpm_reverse_wrap_default_is_enabled() {
+fn decrpm_reverse_wrap_default_is_disabled() {
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
         modes::reverse_wrap_around::ReverseWrapAround,
@@ -6106,8 +6106,8 @@ fn decrpm_reverse_wrap_default_is_enabled() {
         ))),
     );
     assert_eq!(
-        resp, "\x1b[?45;1$y",
-        "Reverse wrap default (WrapAround/enabled) → Ps=1"
+        resp, "\x1b[?45;2$y",
+        "Reverse wrap default (DontWrap/disabled) → Ps=2"
     );
 }
 

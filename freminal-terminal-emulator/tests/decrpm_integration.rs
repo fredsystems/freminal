@@ -152,12 +152,41 @@ fn decrpm_xtmsewin_default_is_reset() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn decrpm_reverse_wrap_around_default_is_set() {
+fn decrpm_reverse_wrap_around_default_is_reset() {
     let (mut state, rx) = make_state();
     let resp = feed_and_collect(&mut state, &rx, b"\x1b[?45$p");
     assert_eq!(
-        resp, "\x1b[?45;1$y",
-        "Reverse wrap around default → Ps=1 (set)"
+        resp, "\x1b[?45;2$y",
+        "Reverse wrap around default (xterm `reverseWrap` = false) → Ps=2 (reset)"
+    );
+}
+
+#[test]
+fn backspace_at_column_zero_does_not_wrap_until_mode_45_is_set() {
+    let (mut state, _rx) = make_state();
+    let last_col = state.handler.win_size().0 - 1;
+
+    // "AB" on the first row, then CR LF: cursor at column 0 of the second row.
+    state.handle_incoming_data(b"AB\r\n");
+    let before = state.handler.cursor_pos();
+    assert_eq!((before.x, before.y), (0, 1));
+
+    // BS at column 0 with reverse wrap off (the default): the cursor stays put.
+    state.handle_incoming_data(b"\x08");
+    let after = state.handler.cursor_pos();
+    assert_eq!(
+        (after.x, after.y),
+        (0, 1),
+        "BS at column 0 must not reverse-wrap by default"
+    );
+
+    // After CSI ? 45 h the same BS wraps to the last column of the previous row.
+    state.handle_incoming_data(b"\x1b[?45h\x08");
+    let wrapped = state.handler.cursor_pos();
+    assert_eq!(
+        (wrapped.x, wrapped.y),
+        (last_col, 0),
+        "BS at column 0 must reverse-wrap once ?45 is set"
     );
 }
 

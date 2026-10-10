@@ -338,17 +338,16 @@ fn mode_reverse_wrap_around_set() {
     let mut state = make_state();
     assert_eq!(
         state.modes.reverse_wrap_around,
-        ReverseWrapAround::WrapAround,
-        "default should be WrapAround"
+        ReverseWrapAround::DontWrap,
+        "default should be DontWrap"
     );
-    // Reset first, then set to verify the toggle
-    state.handle_incoming_data(b"\x1b[?45l"); // reset to DontWrap
-    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
-    state.handle_incoming_data(b"\x1b[?45h"); // set back to WrapAround
+    state.handle_incoming_data(b"\x1b[?45h"); // set to WrapAround
     assert_eq!(
         state.modes.reverse_wrap_around,
         ReverseWrapAround::WrapAround
     );
+    state.handle_incoming_data(b"\x1b[?45l"); // reset back to DontWrap
+    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
 }
 
 #[test]
