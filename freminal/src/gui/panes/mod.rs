@@ -130,7 +130,9 @@ pub struct Pane {
     /// Channel sender for input events (key, resize, focus) to this pane's PTY thread.
     pub input_tx: Sender<InputEvent>,
 
-    /// Sender for raw bytes back to this pane's PTY (for Report* responses).
+    /// Sender for raw bytes to this pane's PTY, for layout startup-command
+    /// injection only. GUI-originated replies (window reports, OSC 52, OSC 99)
+    /// go through `input_tx` as `InputEvent::Reply`.
     pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window manipulation commands from this pane's PTY thread.

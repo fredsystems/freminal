@@ -11,9 +11,8 @@ use egui_glow::CallbackFn;
 use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
-use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
-use freminal_terminal_emulator::io::InputEvent;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use freminal_windowing::{GlContextState, WindowId};
 use tracing::{debug, error, trace, warn};
 
@@ -4449,10 +4448,10 @@ impl FreminalGui {
                     window_focused: window_focus.is_focused(),
                     window_minimized,
                 };
-                // `tx` (the originating pane's `pty_write_tx` clone) is
-                // threaded into the reverse-write path (Task 99.6): the
-                // notification thread uses it to write activation/close
-                // reports back to the pane that produced this OSC 99
+                // `tx` (the originating pane's `input_tx` clone) is
+                // threaded into the reverse-reply path (Task 99.6): the
+                // notification thread uses it to send activation/close
+                // replies back to the pane that produced this OSC 99
                 // sequence.
                 for (data, tx) in &events.osc99_notifications {
                     crate::gui::notifications::NotificationRouter::route_osc99(
@@ -4478,13 +4477,12 @@ impl FreminalGui {
                     // Answer the poll with the current live notification ids.
                     if let Ok(live) = self.osc99_live.try_borrow() {
                         let ids = crate::gui::notifications::live_ids_sorted(&live);
-                        let bytes = crate::gui::notifications::osc99_alive_report(
-                            control.id.as_deref(),
-                            &ids,
-                        );
                         send_or_log!(
                             tx,
-                            PtyWrite::Write(bytes),
+                            InputEvent::Reply(GuiReply::Osc99Alive {
+                                request_id: control.id.clone(),
+                                live_ids: ids,
+                            }),
                             "Failed to send OSC 99 alive report"
                         );
                     }

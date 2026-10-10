@@ -166,6 +166,7 @@ pub enum WindowCommand {
     /// `ctx.send_viewport_cmd(…)`.
     Viewport(freminal_common::buffer_states::window_manipulation::WindowManipulation),
     /// A query that requires the GUI to read viewport geometry and write a
-    /// response back to the PTY via its `Sender<PtyWrite>`.
+    /// reply back to the PTY thread as an `InputEvent::Reply` carrying a
+    /// [`GuiReply`] (sent on the pane's `input_tx`).
     Report(freminal_common::buffer_states::window_manipulation::WindowManipulation),
 }

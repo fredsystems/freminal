@@ -330,7 +330,9 @@ pub struct TabChannels {
     /// Sender for input events (key, resize, focus) to the PTY thread.
     pub input_tx: Sender<InputEvent>,
 
-    /// Sender for raw bytes back to the PTY (Report* responses).
+    /// Sender for raw bytes to the PTY, for layout startup-command injection
+    /// only. GUI-originated replies go through `input_tx` as
+    /// `InputEvent::Reply`.
     pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window commands from the PTY thread.
@@ -756,8 +758,8 @@ fn spawn_pty_consumer_thread(
                             | WindowManipulation::ReportIconLabel
                             | WindowManipulation::ReportTitle
                             | WindowManipulation::QueryClipboard(_)
-                            // OSC 99 display and control requests drive reverse writes
-                            // back to the originating pane's pty_write_tx (Tasks
+                            // OSC 99 display and control requests drive reverse replies
+                            // back to the originating pane's input_tx (Tasks
                             // 99.5c/99.6/99.7), so they are classified as Report like
                             // the other PTY-response-producing variants above.
                             | WindowManipulation::Notification99(_)

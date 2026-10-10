@@ -13,10 +13,9 @@ use freminal_common::base64::encode;
 use freminal_common::buffer_states::window_manipulation::{Notification99Data, WindowManipulation};
 use freminal_common::config::BellMode;
 use freminal_common::gui_theme::GuiTheme;
-use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
-use freminal_terminal_emulator::io::WindowCommand;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
 use crate::gui::chrome_style;
 use crate::gui::notifications::{NotificationRequest, Osc99Control};
@@ -73,15 +72,16 @@ fn apply_chrome_visuals(
     });
 }
 
-/// Send a raw PTY response string via the write channel.
+/// Send a structured GUI reply to the pane's PTY thread.
 ///
-/// Used by `handle_window_manipulation` to respond to Report* queries without
-/// going through the emulator.
-pub(super) fn send_pty_response(pty_write_tx: &Sender<PtyWrite>, response: &str) {
+/// Used by `handle_window_manipulation` to answer Report* and OSC 52 queries.
+/// The PTY thread serialises the reply and frames it according to the
+/// application's S8C1T mode, so the GUI never formats escape-sequence bytes.
+fn send_gui_reply(reply_tx: &Sender<InputEvent>, reply: GuiReply) {
     send_or_log!(
-        pty_write_tx,
-        PtyWrite::Write(response.as_bytes().to_vec()),
-        "Failed to send PTY response"
+        reply_tx,
+        InputEvent::Reply(reply),
+        "Failed to send GUI reply to the PTY thread"
     );
 }
 
@@ -197,14 +197,18 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 ///
 /// 4. **Report queries** — the function measures the current viewport
 ///    geometry from `ui.ctx()` (pixel positions, sizes) and the font metrics
-///    (`font_width`, `font_height`), then builds the appropriate escape
-///    sequence response string and sends it directly to the PTY via
-///    `pty_write_tx` using `send_pty_response()`.  The emulator is never
-///    involved.  Covered variants:
-///    - `ReportWindowState` → `ESC [ 1 t` or `ESC [ 2 t`
-///    - `ReportWindowPosition*` → `ESC [ 3 ; x ; y t`
-///    - `ReportWindowSize*` and `ReportRootWindowSize*` → `ESC [ 4/5/6/7 ; h ; w t`
-///    - `ReportIconLabel` and `ReportTitle` → `ESC ] 0 / 1 / 2 ; <title> ST`
+///    (`font_width`, `font_height`), then sends the answer to the pane's PTY
+///    thread as a structured [`GuiReply`] on `reply_tx` (the pane's
+///    `input_tx`, wrapped in [`InputEvent::Reply`]).  The PTY thread
+///    serialises the reply and frames it per the application's S8C1T mode;
+///    the GUI never formats escape-sequence bytes.  Covered variants:
+///    - `ReportWindowState` → `GuiReply::WindowState` (`CSI 1 t` / `CSI 2 t`)
+///    - `ReportWindowPosition*` → `GuiReply::WindowPosition` (`CSI 3 ; x ; y t`)
+///    - `ReportWindowSize*` → `GuiReply::WindowSizePixels` (`CSI 4 ; h ; w t`)
+///    - `ReportRootWindowSizeInPixels` → `GuiReply::ScreenSizePixels`
+///      (`CSI 5 ; h ; w t`)
+///    - `ReportIconLabel` → `GuiReply::IconLabel` (`OSC L <label> ST`)
+///    - `ReportTitle` → `GuiReply::WindowTitle` (`OSC l <title> ST`)
 ///
 ///    **Not handled here** (no-ops in this function):
 ///    - `ReportCharacterSizeInPixels`, `ReportTerminalSizeInCharacters`,
@@ -222,14 +226,14 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 ///    clipboard via `arboard` when `allow_clipboard_read` is `true`; otherwise
 ///    it responds with an empty payload (the safe/secure default).
 // Inherently large: handles all `WindowCommand` variants — viewport commands, Report* PTY
-// responses, title stack, clipboard. Each variant requires distinct context (ui, pty_write_tx,
+// responses, title stack, clipboard. Each variant requires distinct context (ui, reply_tx,
 // title_stack). Splitting further would scatter a cohesive protocol handler.
 // All arguments are required context that cannot be easily grouped without obscuring intent.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn handle_window_manipulation(
     ui: &egui::Ui,
     window_cmd_rx: &Receiver<WindowCommand>,
-    pty_write_tx: &Sender<PtyWrite>,
+    reply_tx: &Sender<InputEvent>,
     font_width: usize,
     font_height: usize,
     window_width: egui::Rect,
@@ -240,8 +244,8 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
-    osc99_notifications: &mut Vec<(Notification99Data, Sender<PtyWrite>)>,
-    osc99_controls: &mut Vec<(Osc99Control, Sender<PtyWrite>)>,
+    osc99_notifications: &mut Vec<(Notification99Data, Sender<InputEvent>)>,
+    osc99_controls: &mut Vec<(Osc99Control, Sender<InputEvent>)>,
     osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
@@ -354,8 +358,12 @@ pub(super) fn handle_window_manipulation(
             }
             WindowManipulation::ReportWindowState => {
                 let minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-                let response = if minimized { "\x1b[2t" } else { "\x1b[1t" };
-                send_pty_response(pty_write_tx, response);
+                let state = if minimized {
+                    WindowStateReport::Iconified
+                } else {
+                    WindowStateReport::Normal
+                };
+                send_gui_reply(reply_tx, GuiReply::WindowState(state));
             }
             WindowManipulation::ReportWindowPositionWholeWindow => {
                 let position = ui
@@ -377,7 +385,7 @@ pub(super) fn handle_window_manipulation(
                     0
                 });
 
-                send_pty_response(pty_write_tx, &format!("\x1b[3;{pos_x};{pos_y}t"));
+                send_gui_reply(reply_tx, GuiReply::WindowPosition { x: pos_x, y: pos_y });
             }
             WindowManipulation::ReportWindowPositionTextArea => {
                 let position = ui
@@ -407,7 +415,7 @@ pub(super) fn handle_window_manipulation(
                         0
                     });
 
-                send_pty_response(pty_write_tx, &format!("\x1b[3;{pos_x};{pos_y}t"));
+                send_gui_reply(reply_tx, GuiReply::WindowPosition { x: pos_x, y: pos_y });
             }
             WindowManipulation::ReportWindowSizeInPixels => {
                 let rect = ui.ctx().input(|i| {
@@ -430,7 +438,7 @@ pub(super) fn handle_window_manipulation(
                         0
                     });
 
-                send_pty_response(pty_write_tx, &format!("\x1b[4;{height};{width}t"));
+                send_gui_reply(reply_tx, GuiReply::WindowSizePixels { height, width });
             }
             WindowManipulation::ReportWindowTextAreaSizeInPixels => {
                 let size = ui.ctx().content_rect().max;
@@ -443,7 +451,7 @@ pub(super) fn handle_window_manipulation(
                     0
                 });
 
-                send_pty_response(pty_write_tx, &format!("\x1b[4;{height};{width}t"));
+                send_gui_reply(reply_tx, GuiReply::WindowSizePixels { height, width });
             }
             WindowManipulation::ReportRootWindowSizeInPixels => {
                 let rect = ui.ctx().input(|i| {
@@ -466,7 +474,7 @@ pub(super) fn handle_window_manipulation(
                         0
                     });
 
-                send_pty_response(pty_write_tx, &format!("\x1b[5;{height};{width}t"));
+                send_gui_reply(reply_tx, GuiReply::ScreenSizePixels { height, width });
             }
             // ReportCharacterSizeInPixels, ReportTerminalSizeInCharacters, and
             // ReportRootWindowSizeInCharacters are handled synchronously by the
@@ -481,7 +489,7 @@ pub(super) fn handle_window_manipulation(
                     error!("Failed to get viewport title. Using Freminal");
                     "Freminal".to_string()
                 });
-                send_pty_response(pty_write_tx, &format!("\x1b]L{title}\x1b\\"));
+                send_gui_reply(reply_tx, GuiReply::IconLabel(title));
             }
             WindowManipulation::ReportTitle => {
                 let title = ui.ctx().input(|r| r.raw.viewport().title.clone());
@@ -489,7 +497,7 @@ pub(super) fn handle_window_manipulation(
                     error!("Failed to get viewport title. Using Freminal");
                     "Freminal".to_string()
                 });
-                send_pty_response(pty_write_tx, &format!("\x1b]l{title}\x1b\\"));
+                send_gui_reply(reply_tx, GuiReply::WindowTitle(title));
             }
             WindowManipulation::SetTitleBarText(title) => {
                 // Update the tab title for the tab bar display.
@@ -546,7 +554,13 @@ pub(super) fn handle_window_manipulation(
                     osc52_events.push(Osc52ToastEvent::ReadBlocked);
                     String::new()
                 };
-                send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
+                send_gui_reply(
+                    reply_tx,
+                    GuiReply::Clipboard {
+                        selection: sel,
+                        base64_payload: payload,
+                    },
+                );
             }
 
             // Terminal bell: dispatch to the visual and/or audio paths based
@@ -596,18 +610,18 @@ pub(super) fn handle_window_manipulation(
             // post-loop routing in `app_impl::update()`, where `self.config`,
             // the toast stack, and the OSC 99 session maps on `FreminalGui`
             // are all borrowable. The reverse-path reports (activation/close
-            // to the PTY) land in Task 99.6. `pty_write_tx` is cloned
+            // to the PTY) land in Task 99.6. `reply_tx` is cloned
             // alongside the data (Task 99.5c Gap 2) so the post-loop router
-            // can write reverse reports back to the originating pane.
+            // can send reverse reports back to the originating pane.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push(((*data).clone(), pty_write_tx.clone()));
+                osc99_notifications.push(((*data).clone(), reply_tx.clone()));
             }
             // OSC 99 app→terminal control sequence (Task 99.5c). Inert
-            // placeholder: collected alongside a cloned `pty_write_tx` for
+            // placeholder: collected alongside a cloned `reply_tx` for
             // the originating pane, but not yet answered — close/alive/query
             // handling lands in Tasks 99.6/99.7.
             WindowManipulation::Osc99Control { id, kind } => {
-                osc99_controls.push((Osc99Control { id, kind }, pty_write_tx.clone()));
+                osc99_controls.push((Osc99Control { id, kind }, reply_tx.clone()));
             }
         }
     }
@@ -639,5 +653,134 @@ mod osc52_toast_text_tests {
         let (title, detail) = osc52_toast_text(&Osc52ToastEvent::ReadBlocked);
         assert_eq!(title, "Clipboard read blocked");
         assert!(detail.is_some());
+    }
+}
+
+#[cfg(test)]
+mod window_manipulation_reply_tests {
+    use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
+    use crossbeam_channel::{Receiver, unbounded};
+    use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+    use freminal_common::config::BellMode;
+    use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
+
+    /// Run [`handle_window_manipulation`] once over `commands` inside a real
+    /// (headless) egui frame and return everything received on the reply
+    /// channel, plus the OSC 52 toast events the drain collected.
+    ///
+    /// Clipboard reads are denied (`allow_clipboard_read: false`, the default),
+    /// so no test depends on the host clipboard.
+    fn run_commands(commands: Vec<WindowManipulation>) -> (Vec<GuiReply>, Vec<Osc52ToastEvent>) {
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
+        for cmd in commands {
+            if let Err(e) = window_cmd_tx.send(WindowCommand::Report(cmd)) {
+                panic!("send window command: {e}");
+            }
+        }
+
+        let flags = WindowManipFlags {
+            allow_clipboard_read: false,
+            is_active: true,
+            window_focused: true,
+            is_only_pane: true,
+        };
+        let mut title_stack = Vec::new();
+        let mut tab_title = String::new();
+        let mut bell_active = false;
+        let mut bell_since = None;
+        let mut notifications = Vec::new();
+        let mut osc99_notifications = Vec::new();
+        let mut osc99_controls = Vec::new();
+        let mut osc52_events = Vec::new();
+
+        let ctx = egui::Context::default();
+        // No painter here, so the egui `TexturesDelta` drop-bomb must be
+        // defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            handle_window_manipulation(
+                ui,
+                &window_cmd_rx,
+                &reply_tx,
+                8,
+                16,
+                ui.max_rect(),
+                &mut title_stack,
+                &mut tab_title,
+                &mut bell_active,
+                &mut bell_since,
+                BellMode::None,
+                &flags,
+                &mut notifications,
+                &mut osc99_notifications,
+                &mut osc99_controls,
+                &mut osc52_events,
+            );
+        });
+        full_output.textures_delta.clear();
+
+        let replies = reply_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Reply(reply) => reply,
+                other => panic!("expected InputEvent::Reply, got {other:?}"),
+            })
+            .collect();
+        (replies, osc52_events)
+    }
+
+    #[test]
+    fn report_title_replies_through_input_channel() {
+        let (replies, _) = run_commands(vec![WindowManipulation::ReportTitle]);
+        // A default egui context has no viewport title, so the handler falls
+        // back to "Freminal".
+        assert_eq!(replies, vec![GuiReply::WindowTitle("Freminal".to_owned())]);
+    }
+
+    #[test]
+    fn report_icon_label_replies_through_input_channel() {
+        let (replies, _) = run_commands(vec![WindowManipulation::ReportIconLabel]);
+        assert_eq!(replies, vec![GuiReply::IconLabel("Freminal".to_owned())]);
+    }
+
+    #[test]
+    fn report_window_state_replies_normal_when_not_minimized() {
+        let (replies, _) = run_commands(vec![WindowManipulation::ReportWindowState]);
+        assert_eq!(
+            replies,
+            vec![GuiReply::WindowState(WindowStateReport::Normal)]
+        );
+    }
+
+    #[test]
+    fn query_clipboard_denied_replies_with_empty_payload_and_toast_event() {
+        let (replies, events) =
+            run_commands(vec![WindowManipulation::QueryClipboard("c".to_owned())]);
+        assert_eq!(
+            replies,
+            vec![GuiReply::Clipboard {
+                selection: "c".to_owned(),
+                base64_payload: String::new(),
+            }]
+        );
+        assert!(
+            matches!(events.as_slice(), [Osc52ToastEvent::ReadBlocked]),
+            "a denied read must still surface the blocked toast: {events:?}"
+        );
+    }
+
+    #[test]
+    fn replies_arrive_in_command_order() {
+        let (replies, _) = run_commands(vec![
+            WindowManipulation::ReportWindowState,
+            WindowManipulation::ReportTitle,
+        ]);
+        assert_eq!(
+            replies,
+            vec![
+                GuiReply::WindowState(WindowStateReport::Normal),
+                GuiReply::WindowTitle("Freminal".to_owned()),
+            ]
+        );
     }
 }

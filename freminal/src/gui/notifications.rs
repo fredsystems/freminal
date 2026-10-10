@@ -35,8 +35,8 @@ use freminal_common::config::{
 use freminal_common::host_capabilities::{
     HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
 };
-use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 use super::command_blocks::format_command_duration;
 use super::toast::{ToastKind, ToastStack};
@@ -539,45 +539,6 @@ pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str)
     live.remove(id).is_some()
 }
 
-/// Build an OSC 99 activation report: `ESC ] 99 ; i=<id> ; <button> ST`.
-///
-/// `id` defaults to `0` when absent; `button` is the (0-based) action-id
-/// string freminal registered for the button, or `None` for
-/// whole-notification activation (empty button field).
-///
-/// Only reachable from non-test code on Linux/BSD, where `notify-rust`'s
-/// D-Bus backend exposes an observable handle (see `show_system_osc99`).
-/// macOS/Windows have no background-thread activation callback, so this
-/// builder has no non-test caller there — but it is still exercised by
-/// unit tests on every platform, so it is compiled (not `cfg`'d out); the
-/// dead-code allow is scoped to exactly the platforms that lack a caller.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
-pub(super) fn osc99_activation_report(id: Option<&str>, button: Option<&str>) -> Vec<u8> {
-    let id = id.unwrap_or("0");
-    let button = button.unwrap_or("");
-    format!("\x1b]99;i={id};{button}\x1b\\").into_bytes()
-}
-
-/// Build an OSC 99 close report: `ESC ] 99 ; i=<id> : p=close ; [untracked] ST`.
-///
-/// `untracked` marks a close freminal could not directly observe (macOS /
-/// Windows, where the background thread cannot watch for a close event).
-pub(super) fn osc99_close_report(id: Option<&str>, untracked: bool) -> Vec<u8> {
-    let id = id.unwrap_or("0");
-    let payload = if untracked { "untracked" } else { "" };
-    format!("\x1b]99;i={id}:p=close;{payload}\x1b\\").into_bytes()
-}
-
-/// Build an OSC 99 alive report: `ESC ] 99 ; i=<req-id> : p=alive ; id1,id2 ST`.
-///
-/// `req_id` defaults to `0` when the poll carried no id; `live_ids` is
-/// comma-joined verbatim (empty list -> empty payload).
-pub(super) fn osc99_alive_report(req_id: Option<&str>, live_ids: &[String]) -> Vec<u8> {
-    let req_id = req_id.unwrap_or("0");
-    let list = live_ids.join(",");
-    format!("\x1b]99;i={req_id}:p=alive;{list}\x1b\\").into_bytes()
-}
-
 /// Collect the live notification ids in sorted order (deterministic for the
 /// `p=alive` response and for testing).
 pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<String> {
@@ -587,14 +548,15 @@ pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<Str
 }
 
 /// Map a `notify-rust` xdg action id observed by `wait_for_action` to the
-/// OSC 99 reverse-path report bytes to send, if any.
+/// OSC 99 reverse-path [`GuiReply`] to send, if any.
 ///
 /// `action` is `"__closed"` (dismissed without action), `"default"`
 /// (whole-notification activation), or the button's registered id string
 /// (the 0-based `enumerate` index used when registering `.action(...)`).
 /// Returns `None` when the source notification didn't request a report for
 /// this event (`report_activation` / `close_report` both gate their
-/// respective branches).
+/// respective branches). The PTY thread serialises the reply and frames it
+/// per the application's S8C1T mode.
 ///
 /// Only called from non-test code on Linux/BSD (the `wait_for_action`
 /// callback in `show_system_osc99`); macOS/Windows emit an untracked close
@@ -607,17 +569,24 @@ pub(super) fn osc99_action_report(
     id: Option<&str>,
     report_activation: bool,
     close_report: bool,
-) -> Option<Vec<u8>> {
+) -> Option<GuiReply> {
+    let id = id.map(str::to_owned);
     match action {
-        "__closed" => close_report.then(|| osc99_close_report(id, false)),
-        "default" => report_activation.then(|| osc99_activation_report(id, None)),
-        other => report_activation.then(|| osc99_activation_report(id, Some(other))),
+        "__closed" => close_report.then_some(GuiReply::Osc99Closed {
+            id,
+            tracking: Osc99CloseTracking::Tracked,
+        }),
+        "default" => report_activation.then_some(GuiReply::Osc99Activation { id, button: None }),
+        other => report_activation.then(|| GuiReply::Osc99Activation {
+            id,
+            button: Some(other.to_owned()),
+        }),
     }
 }
 
 /// An OSC 99 app→terminal control sequence collected from
 /// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
-/// (Task 99.5c). Paired with a cloned `pty_write_tx` in
+/// (Task 99.5c). Paired with a cloned `reply_tx` (the pane's `input_tx`) in
 /// `app_impl::update()`'s post-loop routing, where it is answered:
 /// Task 99.6 (close/alive) and Task 99.7 (query).
 #[derive(Debug, Clone)]
@@ -669,7 +638,7 @@ impl NotificationRouter {
         toasts: &mut ToastStack,
         icon_cache: &mut HashMap<String, Vec<u8>>,
         live: &mut HashMap<String, Osc99LiveEntry>,
-        pty_write_tx: &Sender<PtyWrite>,
+        reply_tx: &Sender<InputEvent>,
     ) {
         if !config.enabled {
             return;
@@ -720,7 +689,7 @@ impl NotificationRouter {
         }
 
         if wants_system {
-            Self::show_system_osc99(data, resolved_icon, pty_write_tx.clone());
+            Self::show_system_osc99(data, resolved_icon, reply_tx.clone());
         }
 
         // Only track this notification in `live` if the SYSTEM leg fired.
@@ -996,13 +965,13 @@ impl NotificationRouter {
 
     /// Show an OS notification for an OSC 99 notification, retaining the
     /// handle where the platform allows it so activation/close can be
-    /// reported back to the originating pane's PTY (Task 99.5b + 99.6).
+    /// reported back to the originating pane's PTY thread (Task 99.5b + 99.6).
     ///
     /// On Linux/BSD (`notify-rust`'s D-Bus backend), the handle's
     /// `wait_for_action` blocks the spawned thread for the notification's
     /// lifetime, observing whole-notification activation, button
     /// activation, and dismissal ("closed") — each writes the matching
-    /// report to `pty_write_tx` when the source notification requested it
+    /// [`GuiReply`] to `reply_tx` when the source notification requested it
     /// (`a=report` / `c=1`). On macOS/Windows, `notify-rust` does not expose
     /// an observable handle from a background thread (the macOS callback
     /// needs the main run loop), so a `c=1` close report is emitted
@@ -1013,13 +982,13 @@ impl NotificationRouter {
     fn show_system_osc99(
         data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,
-        pty_write_tx: Sender<PtyWrite>,
+        reply_tx: Sender<InputEvent>,
     ) {
         // See `show_system`: the OS notification call aborts in test binaries
         // on macOS (uncatchable foreign ObjC exception in a non-bundled
         // process). The OSC 99 unit tests assert only on the `live` map and
         // toast state — both settled before this point — and never read the
-        // `pty_write_tx` close/activation reports, so skipping the spawn under
+        // `reply_tx` close/activation replies, so skipping the spawn under
         // test loses no coverage.
         if cfg!(test) {
             return;
@@ -1063,15 +1032,15 @@ impl NotificationRouter {
                         Self::remove_icon_temp_file(&path);
                     }
                     handle.wait_for_action(move |action| {
-                        if let Some(bytes) = osc99_action_report(
+                        if let Some(reply) = osc99_action_report(
                             action,
                             id.as_deref(),
                             report_activation,
                             close_report,
                         ) {
                             send_or_log!(
-                                pty_write_tx,
-                                PtyWrite::Write(bytes),
+                                reply_tx,
+                                InputEvent::Reply(reply),
                                 "Failed to send OSC 99 activation/close report"
                             );
                         }
@@ -1096,10 +1065,13 @@ impl NotificationRouter {
                 }
                 let _ = report_activation;
                 if close_report {
-                    let bytes = osc99_close_report(id.as_deref(), true);
+                    let reply = GuiReply::Osc99Closed {
+                        id: id.clone(),
+                        tracking: Osc99CloseTracking::Untracked,
+                    };
                     send_or_log!(
-                        pty_write_tx,
-                        PtyWrite::Write(bytes),
+                        reply_tx,
+                        InputEvent::Reply(reply),
                         "Failed to send OSC 99 untracked close report"
                     );
                 }
@@ -2397,78 +2369,60 @@ mod tests {
         assert!(!removed);
     }
 
-    // ── 99.5b + 99.6: reverse-path report builders ────────────────────────
+    // ── 99.5b + 99.6: reverse-path reply selection ────────────────────────
 
     #[test]
-    fn osc99_activation_report_with_id_no_button() {
+    fn osc99_action_report_default_activates_whole_notification() {
         assert_eq!(
-            osc99_activation_report(Some("abc"), None),
-            b"\x1b]99;i=abc;\x1b\\".to_vec()
+            osc99_action_report("default", Some("abc"), true, false),
+            Some(GuiReply::Osc99Activation {
+                id: Some("abc".to_owned()),
+                button: None,
+            })
         );
     }
 
     #[test]
-    fn osc99_activation_report_with_id_and_button() {
+    fn osc99_action_report_button_carries_action_id() {
         assert_eq!(
-            osc99_activation_report(Some("abc"), Some("2")),
-            b"\x1b]99;i=abc;2\x1b\\".to_vec()
+            osc99_action_report("2", Some("abc"), true, true),
+            Some(GuiReply::Osc99Activation {
+                id: Some("abc".to_owned()),
+                button: Some("2".to_owned()),
+            })
         );
     }
 
     #[test]
-    fn osc99_activation_report_no_id_defaults_to_zero() {
+    fn osc99_action_report_activation_without_id() {
         assert_eq!(
-            osc99_activation_report(None, None),
-            b"\x1b]99;i=0;\x1b\\".to_vec()
+            osc99_action_report("default", None, true, false),
+            Some(GuiReply::Osc99Activation {
+                id: None,
+                button: None,
+            })
         );
     }
 
     #[test]
-    fn osc99_close_report_tracked() {
+    fn osc99_action_report_closed_is_tracked() {
         assert_eq!(
-            osc99_close_report(Some("abc"), false),
-            b"\x1b]99;i=abc:p=close;\x1b\\".to_vec()
+            osc99_action_report("__closed", Some("abc"), false, true),
+            Some(GuiReply::Osc99Closed {
+                id: Some("abc".to_owned()),
+                tracking: Osc99CloseTracking::Tracked,
+            })
         );
     }
 
     #[test]
-    fn osc99_close_report_untracked() {
+    fn osc99_action_report_gated_by_requested_reports() {
         assert_eq!(
-            osc99_close_report(Some("abc"), true),
-            b"\x1b]99;i=abc:p=close;untracked\x1b\\".to_vec()
+            osc99_action_report("__closed", Some("a"), true, false),
+            None
         );
-    }
-
-    #[test]
-    fn osc99_close_report_no_id_defaults_to_zero() {
-        assert_eq!(
-            osc99_close_report(None, false),
-            b"\x1b]99;i=0:p=close;\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_with_req_id_and_ids() {
-        assert_eq!(
-            osc99_alive_report(Some("q1"), &["a".to_owned(), "b".to_owned()]),
-            b"\x1b]99;i=q1:p=alive;a,b\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_empty_live_list() {
-        assert_eq!(
-            osc99_alive_report(Some("q1"), &[]),
-            b"\x1b]99;i=q1:p=alive;\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_no_req_id_defaults_to_zero() {
-        assert_eq!(
-            osc99_alive_report(None, &["x".to_owned()]),
-            b"\x1b]99;i=0:p=alive;x\x1b\\".to_vec()
-        );
+        assert_eq!(osc99_action_report("default", Some("a"), false, true), None);
+        assert_eq!(osc99_action_report("1", Some("a"), false, true), None);
     }
 
     #[test]
