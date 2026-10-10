@@ -56,7 +56,7 @@ pub(super) fn handle_osc_clipboard(
 #[cfg(test)]
 mod tests {
     use super::super::osc::AnsiOscParser;
-    use crate::ansi_components::tracer::log_capture::{capture, warnings};
+    use crate::log_capture::{capture, warnings};
     use freminal_common::buffer_states::osc::AnsiOscType;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 

@@ -313,7 +313,7 @@ fn decode_utf8(bytes: &[u8], raw_params: &[u8]) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
-    use crate::ansi_components::tracer::log_capture::capture;
+    use crate::log_capture::capture;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
         Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,

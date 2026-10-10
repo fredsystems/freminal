@@ -782,7 +782,7 @@ mod tests {
     // ── Warn lines must not carry payload bytes ─────────────────────────────
 
     fn assert_decode_warn_has_no_byte_dump(payload: &[u8]) {
-        use crate::ansi_components::tracer::log_capture::{capture, warnings};
+        use crate::log_capture::{capture, warnings};
         let events = capture(|| {
             let output = feed_osc(payload);
             assert_eq!(output, []);

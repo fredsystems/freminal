@@ -293,7 +293,7 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::TerminalHandler;
-    use crate::ansi_components::tracer::log_capture::{Captured, capture, warnings};
+    use crate::log_capture::{Captured, capture, warnings};
     use crate::state::internal::TerminalState;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{

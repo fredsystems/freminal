@@ -793,7 +793,7 @@ mod tests {
     };
 
     use super::TerminalHandler;
-    use crate::ansi_components::tracer::log_capture::{Captured, capture, warnings};
+    use crate::log_capture::{Captured, capture, warnings};
     use crate::state::internal::TerminalState;
     use tracing::Level;
 
