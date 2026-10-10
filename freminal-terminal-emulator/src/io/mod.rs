@@ -109,10 +109,11 @@ pub enum InputEvent {
     ///
     /// Sent by the Settings Modal when `cursor.shape` / `cursor.blink`
     /// change on Apply (or a config reload). The PTY thread calls
-    /// `handler.set_cursor_visual_style()`, exactly like the initial seed
-    /// applied at pane-spawn time. Like DECSCUSR, this is a plain
-    /// overwrite: a program's own subsequent DECSCUSR / `XTCBlink` request
-    /// still takes over normally afterward.
+    /// `handler.set_configured_cursor_visual_style()`, exactly like the
+    /// initial seed applied at pane-spawn time: it sets the current style and
+    /// the configured baseline RIS and DECSTR restore. A program's own
+    /// subsequent DECSCUSR / `XTCBlink` request still takes over the current
+    /// style normally afterward.
     CursorConfigChange(freminal_common::cursor::CursorVisualStyle),
 }
 

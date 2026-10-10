@@ -1589,8 +1589,8 @@ fn cursor_visual_style_set() {
 }
 
 #[test]
-fn set_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
-    // Regression test for issue #406: `set_cursor_visual_style` is the seam
+fn set_configured_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
+    // Regression test for issue #406: `set_configured_cursor_visual_style` is the seam
     // used to apply `config.cursor` at pane-spawn time and on a live
     // Settings change. It must take effect immediately (like `set_theme`),
     // and a subsequent DECSCUSR output from the running program must still
@@ -1608,11 +1608,11 @@ fn set_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
         "sanity: bare TerminalHandler::new starts at the type default"
     );
 
-    handler.set_cursor_visual_style(CursorVisualStyle::VerticalLineCursorBlink);
+    handler.set_configured_cursor_visual_style(CursorVisualStyle::VerticalLineCursorBlink);
     assert_eq!(
         handler.cursor_visual_style(),
         CursorVisualStyle::VerticalLineCursorBlink,
-        "set_cursor_visual_style must take effect immediately"
+        "set_configured_cursor_visual_style must take effect immediately"
     );
 
     // A running program's own DECSCUSR request still wins afterward.
@@ -2731,13 +2731,16 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
 
     let mut handler = TerminalHandler::new(40, 10);
 
-    // Move SGR, DECOM, DECTCEM and the scroll region away from their
-    // defaults. DECAWM is deliberately left at `AutoWrap`, the enum's
-    // `Default`: DECSTR resets it to `NoAutoWrap`, so the assertion below
-    // can only pass if DECSTR actually changed it, not if it was left alone
-    // or reset to `Default`.
+    // Move SGR, DECOM, DECAWM, DECTCEM and the scroll region away from their
+    // defaults. DECSTR resets DECAWM to `AutoWrap` (xterm, Ghostty, WezTerm
+    // and kitty, against the literal VT510 Table 5-9), so DECAWM starts at
+    // `NoAutoWrap`: the assertion below can only pass if DECSTR actually
+    // changed it, not if it was left alone.
     handler.process_outputs(&[
         TerminalOutput::Sgr(freminal_common::sgr::SelectGraphicRendition::Bold),
+        TerminalOutput::Mode(Mode::Decawm(
+            freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap,
+        )),
         TerminalOutput::Mode(Mode::Decom(Decom::OriginMode)),
         TerminalOutput::Mode(Mode::Dectem(Dectcem::Hide)),
     ]);
@@ -2747,6 +2750,10 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
     assert_eq!(handler.buffer().is_decom_enabled(), Decom::OriginMode);
     assert!(!handler.show_cursor());
     assert_eq!(handler.buffer().scroll_region(), (2, 7));
+    assert_eq!(
+        handler.buffer().is_wrap_enabled(),
+        freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap
+    );
 
     // DECSTR.
     handler.process_outputs(&[TerminalOutput::SoftReset]);
@@ -2763,8 +2770,8 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
     );
     assert_eq!(
         handler.buffer().is_wrap_enabled(),
-        freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap,
-        "DECSTR must reset DECAWM to No Autowrap (not the enum default AutoWrap)"
+        freminal_common::buffer_states::modes::decawm::Decawm::AutoWrap,
+        "DECSTR must reset DECAWM to autowrap on (xterm resource default)"
     );
     assert!(
         handler.show_cursor(),

@@ -433,8 +433,9 @@ fn apply_initial_state(handler: &mut TerminalHandler, initial_state: PtyTabIniti
     // Seed the cursor's initial shape/blink from `config.cursor` (issue
     // #406). Like `theme`, this is only the *starting* state: a running
     // program's own DECSCUSR / XTCBlink request still overrides it
-    // normally, exactly as on a real terminal.
-    handler.set_cursor_visual_style(initial_state.cursor_style);
+    // normally, exactly as on a real terminal. It is also the baseline RIS
+    // and DECSTR restore the cursor style to.
+    handler.set_configured_cursor_visual_style(initial_state.cursor_style);
 }
 
 /// Per-pane configuration forwarded to the PTY child process.
@@ -838,7 +839,10 @@ fn spawn_pty_consumer_thread(
                             emulator.internal.handler.set_theme(theme);
                         }
                         InputEvent::CursorConfigChange(style) => {
-                            emulator.internal.handler.set_cursor_visual_style(style);
+                            emulator
+                                .internal
+                                .handler
+                                .set_configured_cursor_visual_style(style);
                         }
                         InputEvent::AutoDetectUrls(enabled) => {
                             emulator
@@ -1398,6 +1402,25 @@ mod tests {
         assert_eq!(
             handler.cursor_visual_style(),
             CursorVisualStyle::VerticalLineCursorBlink
+        );
+
+        // The seed is also the configured baseline: a program's own DECSCUSR
+        // overrides the current style, but RIS restores the seeded one
+        // rather than the compiled default.
+        handler.process_outputs(&[
+            freminal_common::buffer_states::terminal_output::TerminalOutput::CursorVisualStyle(
+                CursorVisualStyle::UnderlineCursorSteady,
+            ),
+        ]);
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::UnderlineCursorSteady
+        );
+        handler.full_reset();
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::VerticalLineCursorBlink,
+            "RIS must restore the configured cursor style, not the compiled default"
         );
     }
 

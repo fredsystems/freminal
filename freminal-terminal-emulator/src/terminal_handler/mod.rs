@@ -60,6 +60,7 @@ use freminal_common::{
     themes::ThemePalette,
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
+use reset::ResetKind;
 use screen_scoped::ScreenScoped;
 use scroll_ops::{AltScreenAction, AltScreenMode};
 use std::borrow::Cow;
@@ -85,6 +86,7 @@ mod osc;
 mod osc_colors;
 mod pty_writer;
 mod reports;
+mod reset;
 mod screen_scoped;
 mod scroll_ops;
 mod sgr;
@@ -229,6 +231,14 @@ pub struct TerminalHandler {
     show_cursor: Dectcem,
     /// The current cursor shape and blink state.
     cursor_visual_style: CursorVisualStyle,
+    /// The cursor shape and blink state the user configured
+    /// (`config.cursor`).
+    ///
+    /// The baseline RIS and DECSTR restore [`Self::cursor_visual_style`] to,
+    /// as xterm and Ghostty do.  Set only through
+    /// [`Self::set_configured_cursor_visual_style`]; DECSCUSR changes the
+    /// current style alone.
+    configured_cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
     /// Saved `character_replace` state from the most recent DECSC, one slot
@@ -473,6 +483,7 @@ impl TerminalHandler {
             current_format: FormatTag::default(),
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
+            configured_cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
             saved_character_replace: ScreenScoped::default(),
             write_tx: None,
@@ -626,60 +637,52 @@ impl TerminalHandler {
         Some(Self::PROGRESS_STALE_TIMEOUT.saturating_sub(updated_at.elapsed()))
     }
 
+    /// Set the configured cursor shape / blink style, and apply it.
+    ///
+    /// Used to seed the style from `config.cursor` when a pane is spawned and
+    /// to apply a live Settings change (issue #406).  Sets both the current
+    /// style and the configured baseline that [`Self::full_reset`] (RIS) and
+    /// [`Self::soft_reset`] (DECSTR) restore the current style to.  A
+    /// program's own DECSCUSR / `XTCBlink` request changes only the current
+    /// style, so it takes over normally afterwards and the next reset puts
+    /// the configured style back.
+    pub fn set_configured_cursor_visual_style(&mut self, style: CursorVisualStyle) {
+        self.configured_cursor_visual_style = style.clone();
+        self.cursor_visual_style = style;
+    }
+
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
-    /// Restores the handler and buffer to initial startup state.
-    /// Preserves the PTY write channel and terminal geometry/scrollback config.
+    /// Restores the handler and buffer to initial startup state, following
+    /// the reset table (`terminal_handler/reset.rs`): [`ResetKind::Hard`].
+    /// Preserves the PTY write channel and terminal geometry/scrollback
+    /// config.
     ///
-    /// If DECCOLM had changed the column width to 132, this resets it back
-    /// to 80 columns and sends a PTY resize notification.
+    /// The cursor style returns to the configured one
+    /// ([`Self::set_configured_cursor_visual_style`]), not the compiled
+    /// default.
+    ///
+    /// The following survive, because they describe the process or are
+    /// already-emitted events in transit, not the screen: queued window
+    /// commands, pending OSC 133 command events, the OSC 7 working directory
+    /// and the reported `$HISTFILE`.  The theme, font metrics, `?1046`
+    /// and the tmux passthrough queue survive as configuration or transport.
+    ///
+    /// If DECCOLM had changed the column width, this restores the width it
+    /// had before and sends a PTY resize notification.  If DECCOLM never
+    /// changed the width, the width is left alone (xterm resets the column
+    /// mode only `if c132 && IN132COLUMNS`).
     pub fn full_reset(&mut self) {
-        // If DECCOLM switched us to a different width, restore the pre-DECCOLM
-        // width.  Fall back to 80 if no prior width was saved.
         let prev_width = self.buffer.terminal_width();
-        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
-        self.buffer.full_reset();
-        if prev_width != restore_width {
+        let deccolm_restore_width = self.pre_deccolm_width.take();
+        self.reset(ResetKind::Hard);
+        if let Some(restore_width) = deccolm_restore_width
+            && prev_width != restore_width
+        {
             self.buffer.set_column_mode(restore_width);
             self.apply_buffer_reflow_remap();
             self.send_pty_resize(restore_width);
         }
-        self.current_format = FormatTag::default();
-        self.show_cursor = Dectcem::default();
-        self.cursor_visual_style = CursorVisualStyle::default();
-        self.character_replace = DecSpecialGraphics::default();
-        for slot in self.saved_character_replace.both_mut() {
-            *slot = None;
-        }
-        self.window_commands.clear();
-        self.pending_command_events.clear();
-        self.last_graphic_char = None;
-        self.current_working_directory = None;
-        self.shell_histfile = None;
-        self.ftcs_state = FtcsState::default();
-        self.last_exit_code = None;
-        self.palette.reset_all();
-        self.fg_color_override = None;
-        self.bg_color_override = None;
-        self.cursor_color_override = None;
-        self.pointer_shape = PointerShape::Default;
-        self.progress = ProgressReport::default();
-        self.progress_updated_at = None;
-        self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
-        for placements in self.virtual_placements.both_mut() {
-            placements.clear();
-        }
-        for placements in self.real_placements.both_mut() {
-            placements.clear();
-        }
-        self.placement_prune_base = ScreenScoped::new(RowNumber::ZERO, RowNumber::ALTERNATE_BASE);
-        self.prev_placeholder = None;
-        self.modify_other_keys_level = 0;
-        self.application_escape_key = ApplicationEscapeKey::Reset;
-        for stack in self.kitty_keyboard_stack.both_mut() {
-            stack.clear();
-        }
-        self.pending_notifications.clear();
     }
 
     /// Soft terminal reset (DECSTR — `CSI ! p`).
@@ -687,25 +690,27 @@ impl TerminalHandler {
     /// Resets the subset of modes, margins, and attributes listed in
     /// Table 5-9 of the VT510 Programmer Reference
     /// (<https://vt100.net/docs/vt510-rm/DECSTR.html>) to their power-on
-    /// defaults. Unlike [`Self::full_reset`] (RIS), this does **not** clear
-    /// screen content, scrollback, images, the palette, colour overrides,
-    /// the window title, the working directory, command blocks, tab stops,
-    /// or the alternate-screen flag — and it does **not** move the live
-    /// cursor.
+    /// defaults ([`ResetKind::Soft`], see `terminal_handler/reset.rs`).
+    /// Unlike [`Self::full_reset`] (RIS), this does **not** clear screen
+    /// content, scrollback, images, colour overrides, the window title,
+    /// the working directory, command blocks, tab stops, or the
+    /// alternate-screen flag — and it does **not** move the live cursor.
     ///
     /// ## Table 5-9 items implemented here
     /// - DECTCEM (text cursor enable) → cursor enabled
     /// - IRM (insert/replace) → replace mode
     /// - DECOM (origin mode) → absolute (off), without moving the live cursor
-    /// - DECAWM (autowrap) → **no** autowrap — note this is *not* the
-    ///   `Decawm` enum's `Default` (which is `AutoWrap`)
+    /// - DECAWM (autowrap) → autowrap **on**.  Table 5-9 literally says "no
+    ///   autowrap", but xterm (which notes the deviation), Ghostty, `WezTerm`
+    ///   and kitty all reset it to the default, which is on
     /// - DECNRCM (national replacement character sets) → disabled
     /// - DECSTBM (top/bottom margins) → top = row 1, bottom = page length
     /// - G0 DEC Special Graphics → default (off)
     /// - SGR (select graphic rendition) → normal rendition, for
     ///   subsequently-written characters
     /// - DECSC (saved cursor state) → home position, so a subsequent DECRC
-    ///   restores there
+    ///   restores there; only the **active** screen's saved cursor and
+    ///   saved charset are touched
     ///
     /// KAM (keyboard action mode, unlocked) has no representation in
     /// freminal and is a no-op (see the list below). DECCKM (cursor keys)
@@ -730,7 +735,7 @@ impl TerminalHandler {
     /// - Full G1/G2/G3 character-set designation — freminal only models a
     ///   single G0 DEC-special-graphics toggle, not independent G0–G3 slots
     ///
-    /// ## Deliberate deviation from Table 5-9
+    /// ## Deliberate deviations from Table 5-9
     /// Table 5-9 predates DECSLRM (left/right margins). freminal
     /// additionally resets DECLRMM to `Disabled` and the left/right
     /// margins to full width here. This is *not* required by Table 5-9;
@@ -741,15 +746,20 @@ impl TerminalHandler {
     /// vertical scroll region resets would be an inconsistent margin
     /// state.
     ///
-    /// Table 5-9 also predates the kitty keyboard protocol.  freminal
-    /// additionally clears **both** kitty keyboard stacks (main and
-    /// alternate) here, following kitty's `do_screen_reset`; this is not
-    /// mandated by Table 5-9.
-    ///
-    /// Table 5-9 also predates OSC 9;4 progress reporting. freminal
-    /// additionally clears the OSC 9;4 progress state here — this is
-    /// freminal-private state with no VT510 representation at all, cleared
-    /// because issue #507 requires it, not because Table 5-9 mandates it.
+    /// Table 5-9 also predates these, which freminal resets because the
+    /// reference terminals do (the reset table in
+    /// `Documents/PLAN_VERSION_130.md` records each source):
+    /// - the cursor style → the configured one
+    ///   ([`Self::set_configured_cursor_visual_style`]) (xterm, Ghostty);
+    /// - `modifyOtherKeys` → level 0 (xterm, Ghostty, `WezTerm`);
+    /// - the OSC 4 palette overrides → the theme's palette (xterm, Ghostty,
+    ///   kitty);
+    /// - reverse wrap (`?45`) and extended reverse wrap (`?1045`) → off
+    ///   (xterm, Ghostty, `WezTerm`);
+    /// - the OSC 22 pointer shape → default, and **both** kitty keyboard
+    ///   stacks (main and alternate) → empty (kitty's `do_screen_reset`);
+    /// - the OSC 9;4 progress state, which is freminal-private (issue
+    ///   #507).
     ///
     /// ## Saved character set
     /// Table 5-9 resets the DECSC state to home position with default
@@ -763,58 +773,7 @@ impl TerminalHandler {
     /// with nothing saved is tracked separately in
     /// `Documents/ESCAPE_SEQUENCE_GAPS.md`.
     pub fn soft_reset(&mut self) {
-        self.show_cursor = Dectcem::Show;
-        self.insert_mode = Irm::Replace;
-        self.buffer.set_wrap(Decawm::NoAutoWrap);
-        self.nrc_mode = Decnrcm::NrcDisabled;
-
-        // Capture the live cursor's current screen position up front — every
-        // step below that touches DECOM or the scroll region homes the
-        // cursor as a side effect, and DECSTR must not move the live cursor.
-        let live_pos = self.buffer.cursor_screen_pos();
-
-        // DECOM -> Absolute (off). `Buffer::set_decom` homes the cursor as a
-        // side effect; capture that homed position into the *saved* cursor
-        // (DECSC state) via `save_cursor()` before undoing the side effect —
-        // Table 5-9 wants DECSC to be at home position after DECSTR, and the
-        // saved cursor's attributes are already default (nothing else in
-        // this codebase mutates them outside a save/restore round trip).
-        self.buffer.set_decom(Decom::NormalCursor);
-        self.buffer.save_cursor();
-        *self.saved_character_replace.get_mut(self.buffer.kind()) =
-            Some(DecSpecialGraphics::default());
-
-        // DECSTBM -> top = 1, bottom = page length. Also homes the cursor;
-        // restored below along with DECOM's homing.
-        self.buffer.reset_scroll_region_to_full();
-
-        // Deliberate deviation from Table 5-9 (see doc comment above):
-        // disabling DECLRMM also resets the left/right margins to full
-        // width, for consistency with the DECSTBM reset just above.
-        self.buffer.set_declrmm(Declrmm::Disabled);
-
-        // Restore the live cursor to exactly where it was.
-        self.buffer
-            .set_cursor_pos(Some(live_pos.x), Some(live_pos.y));
-
-        // SGR -> normal rendition, for subsequently-written characters.
-        self.current_format = FormatTag::default();
-        self.buffer.set_format(FormatTag::default());
-
-        // G0 DEC Special Graphics -> default (off).
-        self.character_replace = DecSpecialGraphics::default();
-
-        // Not on VT510 Table 5-9 — this is freminal-private state (OSC 9;4
-        // progress, issue #507), cleared here because issue #507 requires
-        // DECSTR to reset it, not because the spec mandates it.
-        self.progress = ProgressReport::default();
-        self.progress_updated_at = None;
-
-        // Not on VT510 Table 5-9 either: DECSTR clears the kitty keyboard
-        // stack of both screens (kitty's `do_screen_reset`).
-        for stack in self.kitty_keyboard_stack.both_mut() {
-            stack.clear();
-        }
+        self.reset(ResetKind::Soft);
     }
 
     /// Get a reference to the underlying buffer
@@ -4608,14 +4567,19 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_shell_histfile() {
+    fn reset_keeps_shell_histfile() {
+        // `$HISTFILE` describes the process, not the screen (maintainer
+        // decision, Task 131 reset table), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
             "/home/user/.zsh_history",
         )));
         assert!(handler.shell_histfile().is_some());
         handler.full_reset();
-        assert!(handler.shell_histfile().is_none());
+        assert_eq!(
+            handler.shell_histfile(),
+            Some(Path::new("/home/user/.zsh_history"))
+        );
     }
 
     // ------------------------------------------------------------------
