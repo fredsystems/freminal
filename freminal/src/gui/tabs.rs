@@ -519,6 +519,7 @@ mod tests {
         let pane = Pane {
             id: PaneId::first(),
             arc_swap,
+            reply_tx: Arc::new(input_tx.clone()),
             input_tx,
             pty_write_tx,
             window_cmd_rx,

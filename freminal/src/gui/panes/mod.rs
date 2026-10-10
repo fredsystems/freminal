@@ -130,6 +130,19 @@ pub struct Pane {
     /// Channel sender for input events (key, resize, focus) to this pane's PTY thread.
     pub input_tx: Sender<InputEvent>,
 
+    /// Strong handle to a clone of [`Self::input_tx`], existing purely so
+    /// that long-lived off-frame consumers can hold a `Weak` reference.
+    ///
+    /// The PTY consumer thread exits when every `Sender<InputEvent>` for the
+    /// channel is dropped. A consumer that outlives the frame (the OSC 99
+    /// desktop-notification thread blocks for the notification's whole
+    /// lifetime) must therefore never own a strong sender, or it would keep a
+    /// closed pane's consumer thread (and shell) alive. The pane is the only
+    /// strong owner of this `Arc`; only `Weak` handles are given out, so
+    /// dropping the pane drops the last strong sender and the consumer sees
+    /// the channel disconnect.
+    pub reply_tx: Arc<Sender<InputEvent>>,
+
     /// Sender for raw bytes to this pane's PTY, for layout startup-command
     /// injection only. GUI-originated replies (window reports, OSC 52, OSC 99)
     /// go through `input_tx` as `InputEvent::Reply`.
@@ -309,6 +322,7 @@ impl Pane {
         Self {
             id: pane_id,
             arc_swap: channels.arc_swap,
+            reply_tx: Arc::new(channels.input_tx.clone()),
             input_tx: channels.input_tx,
             pty_write_tx: channels.pty_write_tx,
             window_cmd_rx: channels.window_cmd_rx,
@@ -1740,6 +1754,7 @@ mod tests {
         Pane {
             id,
             arc_swap,
+            reply_tx: Arc::new(input_tx.clone()),
             input_tx,
             pty_write_tx,
             window_cmd_rx,

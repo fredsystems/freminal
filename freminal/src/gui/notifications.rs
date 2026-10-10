@@ -20,6 +20,7 @@
 //! intended sink; the toast leg never spawns a thread.
 
 use std::collections::HashMap;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use conv2::ValueInto;
@@ -539,6 +540,40 @@ pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str)
     live.remove(id).is_some()
 }
 
+/// Send `reply` to the originating pane's PTY consumer through a `Weak`
+/// handle to its input sender.
+///
+/// OSC 99 replies can be produced long after the frame that collected the
+/// request (the desktop-notification thread blocks for the notification's
+/// lifetime), so they must never hold a strong `Sender<InputEvent>`: that
+/// would keep the closed pane's PTY consumer thread -- and its shell --
+/// alive until the notification is dismissed. The handle is upgraded per
+/// send; if the pane is gone the upgrade fails and the reply is dropped
+/// (nobody is left to read it).
+pub(super) fn send_reply_weak(reply_tx: &Weak<Sender<InputEvent>>, reply: GuiReply) {
+    let Some(tx) = reply_tx.upgrade() else {
+        tracing::debug!("dropping OSC 99 reply: originating pane is closed");
+        return;
+    };
+    send_or_log!(tx, InputEvent::Reply(reply), "Failed to send OSC 99 reply");
+}
+
+/// Answer an OSC 99 `p=alive` poll with the current live notification ids
+/// (sorted), through the originating pane's `Weak` reply handle.
+pub(super) fn send_osc99_alive(
+    live: &HashMap<String, Osc99LiveEntry>,
+    request_id: Option<String>,
+    reply_tx: &Weak<Sender<InputEvent>>,
+) {
+    send_reply_weak(
+        reply_tx,
+        GuiReply::Osc99Alive {
+            request_id,
+            live_ids: live_ids_sorted(live),
+        },
+    );
+}
+
 /// Collect the live notification ids in sorted order (deterministic for the
 /// `p=alive` response and for testing).
 pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<String> {
@@ -586,7 +621,7 @@ pub(super) fn osc99_action_report(
 
 /// An OSC 99 app→terminal control sequence collected from
 /// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
-/// (Task 99.5c). Paired with a cloned `reply_tx` (the pane's `input_tx`) in
+/// (Task 99.5c). Paired with a `Weak` handle to the pane's reply sender in
 /// `app_impl::update()`'s post-loop routing, where it is answered:
 /// Task 99.6 (close/alive) and Task 99.7 (query).
 #[derive(Debug, Clone)]
@@ -638,7 +673,7 @@ impl NotificationRouter {
         toasts: &mut ToastStack,
         icon_cache: &mut HashMap<String, Vec<u8>>,
         live: &mut HashMap<String, Osc99LiveEntry>,
-        reply_tx: &Sender<InputEvent>,
+        reply_tx: &Weak<Sender<InputEvent>>,
     ) {
         if !config.enabled {
             return;
@@ -689,7 +724,7 @@ impl NotificationRouter {
         }
 
         if wants_system {
-            Self::show_system_osc99(data, resolved_icon, reply_tx.clone());
+            Self::show_system_osc99(data, resolved_icon, Weak::clone(reply_tx));
         }
 
         // Only track this notification in `live` if the SYSTEM leg fired.
@@ -971,18 +1006,20 @@ impl NotificationRouter {
     /// `wait_for_action` blocks the spawned thread for the notification's
     /// lifetime, observing whole-notification activation, button
     /// activation, and dismissal ("closed") — each writes the matching
-    /// [`GuiReply`] to `reply_tx` when the source notification requested it
+    /// [`GuiReply`] through `reply_tx` when the source notification requested it
     /// (`a=report` / `c=1`). On macOS/Windows, `notify-rust` does not expose
     /// an observable handle from a background thread (the macOS callback
     /// needs the main run loop), so a `c=1` close report is emitted
     /// immediately in the `untracked` form and no activation reports are
-    /// sent. The icon temp file (if any) is removed on a best-effort basis
+    /// sent. `reply_tx` is a `Weak` handle upgraded per send, so this
+    /// long-lived thread never keeps a closed pane's PTY consumer alive; a
+    /// reply for a closed pane is dropped. The icon temp file (if any) is removed on a best-effort basis
     /// once the daemon has read it; cleanup failure never fails the
     /// notification.
     fn show_system_osc99(
         data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,
-        reply_tx: Sender<InputEvent>,
+        reply_tx: Weak<Sender<InputEvent>>,
     ) {
         // See `show_system`: the OS notification call aborts in test binaries
         // on macOS (uncatchable foreign ObjC exception in a non-bundled
@@ -1038,11 +1075,7 @@ impl NotificationRouter {
                             report_activation,
                             close_report,
                         ) {
-                            send_or_log!(
-                                reply_tx,
-                                InputEvent::Reply(reply),
-                                "Failed to send OSC 99 activation/close report"
-                            );
+                            send_reply_weak(&reply_tx, reply);
                         }
                     });
                 }
@@ -1069,11 +1102,7 @@ impl NotificationRouter {
                         id: id.clone(),
                         tracking: Osc99CloseTracking::Untracked,
                     };
-                    send_or_log!(
-                        reply_tx,
-                        InputEvent::Reply(reply),
-                        "Failed to send OSC 99 untracked close report"
-                    );
+                    send_reply_weak(&reply_tx, reply);
                 }
                 if let Some(path) = icon_temp_path.take() {
                     Self::remove_icon_temp_file(&path);
@@ -1828,7 +1857,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -1857,7 +1886,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -1880,7 +1909,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99(); // occasion: None => Always
 
         NotificationRouter::route_osc99(
@@ -1912,7 +1941,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1933,7 +1962,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1962,7 +1991,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1982,7 +2011,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -2009,7 +2038,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
 
         NotificationRouter::route_osc99(
             &data,
@@ -2087,7 +2116,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n1".to_owned()),
             report_activation: true,
@@ -2116,7 +2145,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99(); // id: None
 
         NotificationRouter::route_osc99(
@@ -2138,7 +2167,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2163,7 +2192,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n2".to_owned()),
             occasion: Some("unfocused".to_owned()),
@@ -2196,7 +2225,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n3".to_owned()),
             ..default_n99()
@@ -2225,7 +2254,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2256,7 +2285,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("toast-only".to_owned()),
             ..default_n99()
@@ -2291,7 +2320,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("tracked".to_owned()),
             ..default_n99()
@@ -2325,7 +2354,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2597,5 +2626,114 @@ mod tests {
             host_capabilities(&Config::default()),
             HostCapabilities::default()
         );
+    }
+
+    // ── Weak reply handle (Task 130.8) ───────────────────────────────
+
+    fn reply_channel() -> (
+        std::sync::Arc<Sender<InputEvent>>,
+        crossbeam_channel::Receiver<InputEvent>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (std::sync::Arc::new(tx), rx)
+    }
+
+    #[test]
+    fn send_reply_weak_delivers_while_the_pane_handle_is_alive() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+
+        send_reply_weak(
+            &weak,
+            GuiReply::Osc99Closed {
+                id: Some("n1".to_owned()),
+                tracking: Osc99CloseTracking::Untracked,
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(InputEvent::Reply(GuiReply::Osc99Closed { id, tracking })) => {
+                assert_eq!(id.as_deref(), Some("n1"));
+                assert_eq!(tracking, Osc99CloseTracking::Untracked);
+            }
+            other => panic!("expected an OSC 99 closed reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_reply_weak_drops_the_reply_after_the_pane_handle_is_gone() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        // Must not panic and must not deliver anything.
+        send_reply_weak(
+            &weak,
+            GuiReply::Osc99Closed {
+                id: None,
+                tracking: Osc99CloseTracking::Untracked,
+            },
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn weak_reply_handle_does_not_keep_the_input_channel_connected() {
+        // Mirrors `Pane::reply_tx`: the pane's `input_tx` clone is wrapped in
+        // an `Arc`, and only `Weak` handles escape. Dropping the pane's
+        // strong handles must disconnect the channel so the PTY consumer
+        // (blocked in `recv`) exits even while a `Weak` is still held by a
+        // notification thread.
+        let (tx, rx) = crossbeam_channel::unbounded::<InputEvent>();
+        let arc = std::sync::Arc::new(tx);
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        ));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn send_osc99_alive_reports_sorted_live_ids() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        let mut live = HashMap::new();
+        for id in ["b", "c", "a"] {
+            live.insert(
+                id.to_owned(),
+                Osc99LiveEntry {
+                    report_activation: false,
+                    close_report: false,
+                },
+            );
+        }
+
+        send_osc99_alive(&live, Some("req".to_owned()), &weak);
+
+        match rx.try_recv() {
+            Ok(InputEvent::Reply(GuiReply::Osc99Alive {
+                request_id,
+                live_ids,
+            })) => {
+                assert_eq!(request_id.as_deref(), Some("req"));
+                assert_eq!(live_ids, ["a", "b", "c"]);
+            }
+            other => panic!("expected an OSC 99 alive reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_osc99_alive_is_silent_for_a_closed_pane() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        send_osc99_alive(&HashMap::new(), None, &weak);
+
+        assert!(rx.try_recv().is_err());
     }
 }

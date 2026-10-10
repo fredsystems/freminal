@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -234,6 +235,7 @@ pub(super) fn handle_window_manipulation(
     ui: &egui::Ui,
     window_cmd_rx: &Receiver<WindowCommand>,
     reply_tx: &Sender<InputEvent>,
+    reply_handle: &Arc<Sender<InputEvent>>,
     font_width: usize,
     font_height: usize,
     window_width: egui::Rect,
@@ -244,8 +246,8 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
-    osc99_notifications: &mut Vec<(Notification99Data, Sender<InputEvent>)>,
-    osc99_controls: &mut Vec<(Osc99Control, Sender<InputEvent>)>,
+    osc99_notifications: &mut Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
+    osc99_controls: &mut Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
     osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
@@ -609,19 +611,20 @@ pub(super) fn handle_window_manipulation(
             // OSC 99 stateful notification (Task 99.5a). Collect for
             // post-loop routing in `app_impl::update()`, where `self.config`,
             // the toast stack, and the OSC 99 session maps on `FreminalGui`
-            // are all borrowable. The reverse-path reports (activation/close
-            // to the PTY) land in Task 99.6. `reply_tx` is cloned
-            // alongside the data (Task 99.5c Gap 2) so the post-loop router
-            // can send reverse reports back to the originating pane.
+            // are all borrowable. A `Weak` handle to the pane's reply sender
+            // travels alongside the data so the post-loop router (and the
+            // long-lived desktop-notification thread) can send reverse
+            // reports back to the originating pane WITHOUT keeping its PTY
+            // consumer alive: a strong `Sender` clone would hold the input
+            // channel open after the pane closed.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push(((*data).clone(), reply_tx.clone()));
+                osc99_notifications.push(((*data).clone(), Arc::downgrade(reply_handle)));
             }
-            // OSC 99 app→terminal control sequence (Task 99.5c). Inert
-            // placeholder: collected alongside a cloned `reply_tx` for
-            // the originating pane, but not yet answered — close/alive/query
-            // handling lands in Tasks 99.6/99.7.
+            // OSC 99 app→terminal control sequence (Task 99.5c). Collected
+            // alongside a `Weak` reply handle for the originating pane and
+            // answered after the drain loop.
             WindowManipulation::Osc99Control { id, kind } => {
-                osc99_controls.push((Osc99Control { id, kind }, reply_tx.clone()));
+                osc99_controls.push((Osc99Control { id, kind }, Arc::downgrade(reply_handle)));
             }
         }
     }
@@ -659,6 +662,8 @@ mod osc52_toast_text_tests {
 #[cfg(test)]
 mod window_manipulation_reply_tests {
     use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
+    use std::sync::Arc;
+
     use crossbeam_channel::{Receiver, unbounded};
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::BellMode;
@@ -673,6 +678,7 @@ mod window_manipulation_reply_tests {
     fn run_commands(commands: Vec<WindowManipulation>) -> (Vec<GuiReply>, Vec<Osc52ToastEvent>) {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
+        let reply_handle = Arc::new(reply_tx.clone());
         for cmd in commands {
             if let Err(e) = window_cmd_tx.send(WindowCommand::Report(cmd)) {
                 panic!("send window command: {e}");
@@ -702,6 +708,7 @@ mod window_manipulation_reply_tests {
                 ui,
                 &window_cmd_rx,
                 &reply_tx,
+                &reply_handle,
                 8,
                 16,
                 ui.max_rect(),

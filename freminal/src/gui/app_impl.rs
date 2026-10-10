@@ -12,7 +12,7 @@ use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::send_or_log;
-use freminal_terminal_emulator::io::{GuiReply, InputEvent};
+use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{GlContextState, WindowId};
 use tracing::{debug, error, trace, warn};
 
@@ -4448,11 +4448,11 @@ impl FreminalGui {
                     window_focused: window_focus.is_focused(),
                     window_minimized,
                 };
-                // `tx` (the originating pane's `input_tx` clone) is
-                // threaded into the reverse-reply path (Task 99.6): the
-                // notification thread uses it to send activation/close
-                // replies back to the pane that produced this OSC 99
-                // sequence.
+                // `tx` (a `Weak` handle to the originating pane's reply
+                // sender) is threaded into the reverse-reply path: the
+                // notification thread upgrades it per send to deliver
+                // activation/close replies to the pane that produced this
+                // OSC 99 sequence, without keeping that pane alive.
                 for (data, tx) in &events.osc99_notifications {
                     crate::gui::notifications::NotificationRouter::route_osc99(
                         data,
@@ -4476,15 +4476,7 @@ impl FreminalGui {
                 Osc99ControlKind::Alive => {
                     // Answer the poll with the current live notification ids.
                     if let Ok(live) = self.osc99_live.try_borrow() {
-                        let ids = crate::gui::notifications::live_ids_sorted(&live);
-                        send_or_log!(
-                            tx,
-                            InputEvent::Reply(GuiReply::Osc99Alive {
-                                request_id: control.id.clone(),
-                                live_ids: ids,
-                            }),
-                            "Failed to send OSC 99 alive report"
-                        );
+                        crate::gui::notifications::send_osc99_alive(&live, control.id.clone(), tx);
                     }
                 }
                 Osc99ControlKind::Close => {
