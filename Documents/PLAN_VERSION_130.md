@@ -2236,8 +2236,8 @@ review re-checked the three fixes, and each remaining finding was fixed or route
 - **Test gaps** (`fd597840`): OSC 99 accumulated content, the dedicated `@kitty-` debug line,
   FTCS non-UTF-8 duplicate values.
 - **Docs**: COVERAGE/GAPS wording (OSC 52 cap "introduced", not "raised"; `DCS received`
-  still logs a bounded body; GAPS DCS intro), the 1-mod-4 / excess-padding base64 change,
-  `KITTY_PROTOCOL_REFERENCE.md` function name, the 129.5 non-numeric-number sentence, and
+  still logs a bounded body; GAPS DCS intro; the `o=z` inflation cap), the 1-mod-4 /
+  excess-padding base64 change (`dba627cb`), `KITTY_PROTOCOL_REFERENCE.md` function name, the 129.5 non-numeric-number sentence, and
   the Task 131 stub's `kitty_state` references.
 
 Accepted as is, with reasons:
@@ -2251,8 +2251,14 @@ Accepted as is, with reasons:
 - The unknown-id `a=p` warn is bounded but not rate-limited (one per command).
 - One DCS test pushes 64 MiB through the full parser (about 1.2 s in debug).
 
-Routed to later tasks: animation-frame (`a=f`) continuation chunks end `Discarding`
-(Task 135); `full_reset` leaves `kitty_transfer` live (Task 131, recorded in its stub); a
+- `is_bare_continuation` applies only while `Discarding`. While `Receiving`, any actionless
+  command is still a continuation, which tolerates clients that repeat `i=`/`f=` on every
+  chunk (kitty is equally lenient). After an abandonment, such a client's tail is read as a
+  new command and can draw an error reply; spec-compliant clients are unaffected.
+
+Routed to later tasks: `a=f` continuation chunks carry `a=`, so they never accumulate and
+an `a=f` chunk ends a discard (pre-existing, Task 135); `o=z` is capped at
+`MAX_KITTY_DATA_BYTES` only, not at the size implied by `s`/`v`/`f` (Task 135); `full_reset` leaves `kitty_transfer` live (Task 131, recorded in its stub); a
 saturated 128-id OSC 99 map refuses even complete single-chunk notifications, and tombstones
 keep unbounded id strings (Task 138).
 

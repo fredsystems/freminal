@@ -1635,6 +1635,25 @@ mod tests {
     }
 
     #[test]
+    fn large_cap_body_ending_in_esc_terminated_by_bel_is_dropped_only_over_the_cap() {
+        // The held-ESC rule also applies under the large cap (OSC 52 / 1337).
+        // Pre-filled so the test does not push 64 MiB byte by byte.
+        let mut at_cap = parser_with_body(body_of_len(b"52;c;", MAX_OSC_LARGE_BYTES - 1));
+        at_cap.limit = OscLimit::Large;
+        assert_eq!(at_cap.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(at_cap.push(0x07), ParserOutcome::Finished);
+        assert_eq!(at_cap.state, AnsiOscParserState::Finished);
+        assert_eq!(at_cap.params.len(), MAX_OSC_LARGE_BYTES);
+
+        let mut over = parser_with_body(body_of_len(b"52;c;", MAX_OSC_LARGE_BYTES));
+        over.limit = OscLimit::Large;
+        assert_eq!(over.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(over.push(0x07), ParserOutcome::Finished);
+        assert_eq!(over.state, AnsiOscParserState::OverflowFinished);
+        assert_eq!(over.params.capacity(), 0);
+    }
+
+    #[test]
     fn cap_body_ending_in_esc_terminated_by_bel_warns_without_payload() {
         let mut over = body_of_len(b"2;SECRETMARK", MAX_OSC_BYTES);
         over.extend_from_slice(b"\x1b\x07");
