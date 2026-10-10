@@ -33,7 +33,6 @@ use freminal_common::{
         modes::grapheme::GraphemeClustering,
         modes::in_band_resize_mode::InBandResizeMode,
         modes::irm::Irm,
-        modes::kitty_keyboard::KittyKeyboardFlags,
         modes::lnm::Lnm,
         modes::private_color_registers::PrivateColorRegisters,
         modes::reverse_wrap_around::ReverseWrapAround,
@@ -59,6 +58,8 @@ use freminal_common::{
     pty_write::PtyWrite,
     themes::ThemePalette,
 };
+use kitty_keyboard_stack::KittyKeyboardStack;
+use screen_scoped::ScreenScoped;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,7 @@ mod graphics_iterm2;
 mod graphics_kitty;
 use graphics_kitty::signed_cell_offset;
 mod graphics_sixel;
+mod kitty_keyboard_stack;
 mod notify_99;
 mod osc;
 mod osc_colors;
@@ -433,18 +435,15 @@ pub struct TerminalHandler {
     /// `0x90` instead of `ESC P`, OSC uses `0x9D` instead of `ESC ]`, and ST
     /// uses `0x9C` instead of `ESC \`.  Default is `SevenBit`.
     s8c1t_mode: S8c1t,
-    /// Kitty keyboard protocol mode stack.
+    /// Kitty keyboard protocol mode stack, one per screen.
     ///
-    /// Each entry is a `u32` bitmask.  Programs push on entry via `CSI > flags u`
-    /// and pop on exit via `CSI < number u`.  The active flags are
-    /// `kitty_keyboard_stack.last().copied().unwrap_or(0)`.
-    /// Bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`] (256) entries.
-    kitty_keyboard_stack: Vec<u32>,
-    /// Saved main-screen KKP stack when alternate screen is active.
-    ///
-    /// The spec requires main and alternate screens to maintain independent
-    /// keyboard mode stacks.
-    saved_kitty_keyboard_stack: Option<Vec<u32>>,
+    /// Programs push on entry via `CSI > flags u` and pop on exit via
+    /// `CSI < number u`.  The active flags are the top entry of the stack for
+    /// the screen the buffer currently shows (`buffer.kind()`).  The two
+    /// stacks are independent and each persists across screen switches, so
+    /// neither entering nor leaving the alternate screen touches either one.
+    /// Each is bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`](freminal_common::buffer_states::modes::kitty_keyboard::KittyKeyboardFlags::MAX_STACK_DEPTH) (256) entries.
+    kitty_keyboard_stack: ScreenScoped<KittyKeyboardStack>,
     /// In-flight OSC 99 notification accumulators, keyed by the `i=` id.
     ///
     /// Multi-chunk notifications arrive with `d=0` chunks that must be
@@ -506,8 +505,7 @@ impl TerminalHandler {
             insert_mode: Irm::Replace,
             sixel_shared_palette: None,
             s8c1t_mode: S8c1t::SevenBit,
-            kitty_keyboard_stack: Vec::new(),
-            saved_kitty_keyboard_stack: None,
+            kitty_keyboard_stack: ScreenScoped::default(),
             pending_notifications: notify_99::PendingNotifications::new(),
         }
     }
@@ -661,8 +659,9 @@ impl TerminalHandler {
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;
-        self.kitty_keyboard_stack.clear();
-        self.saved_kitty_keyboard_stack = None;
+        for stack in self.kitty_keyboard_stack.both_mut() {
+            stack.clear();
+        }
         self.pending_notifications.clear();
     }
 
@@ -674,8 +673,8 @@ impl TerminalHandler {
     /// defaults. Unlike [`Self::full_reset`] (RIS), this does **not** clear
     /// screen content, scrollback, images, the palette, colour overrides,
     /// the window title, the working directory, command blocks, tab stops,
-    /// the Kitty keyboard stack, or the alternate-screen flag — and it does
-    /// **not** move the live cursor.
+    /// or the alternate-screen flag — and it does **not** move the live
+    /// cursor.
     ///
     /// ## Table 5-9 items implemented here
     /// - DECTCEM (text cursor enable) → cursor enabled
@@ -724,6 +723,11 @@ impl TerminalHandler {
     /// the page borders — leaving a horizontal margin active while the
     /// vertical scroll region resets would be an inconsistent margin
     /// state.
+    ///
+    /// Table 5-9 also predates the kitty keyboard protocol.  freminal
+    /// additionally clears **both** kitty keyboard stacks (main and
+    /// alternate) here, following kitty's `do_screen_reset`; this is not
+    /// mandated by Table 5-9.
     ///
     /// Table 5-9 also predates OSC 9;4 progress reporting. freminal
     /// additionally clears the OSC 9;4 progress state here — this is
@@ -787,6 +791,12 @@ impl TerminalHandler {
         // DECSTR to reset it, not because the spec mandates it.
         self.progress = ProgressReport::default();
         self.progress_updated_at = None;
+
+        // Not on VT510 Table 5-9 either: DECSTR clears the kitty keyboard
+        // stack of both screens (kitty's `do_screen_reset`).
+        for stack in self.kitty_keyboard_stack.both_mut() {
+            stack.clear();
+        }
     }
 
     /// Get a reference to the underlying buffer
@@ -1132,10 +1142,11 @@ impl TerminalHandler {
 
     /// Returns the currently active Kitty keyboard protocol flags.
     ///
-    /// Returns `0` when the stack is empty (protocol not active).
+    /// Reads the stack for the screen the buffer currently shows.  Returns `0`
+    /// when that stack is empty (protocol not active).
     #[must_use]
     pub fn kitty_keyboard_flags(&self) -> u32 {
-        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
+        self.kitty_keyboard_stack.get(self.buffer.kind()).current()
     }
 
     /// Return the complete GUI data set: visible and scrollback content as
@@ -2083,34 +2094,19 @@ impl TerminalHandler {
                 self.write_csi_response(&format!("?{flags}u"));
             }
             TerminalOutput::KittyKeyboardPush(flags) => {
-                if self.kitty_keyboard_stack.len() >= KittyKeyboardFlags::MAX_STACK_DEPTH {
-                    // Evict the oldest entry (bottom of the stack) per the spec.
-                    self.kitty_keyboard_stack.remove(0);
-                }
-                self.kitty_keyboard_stack.push(*flags);
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .push(*flags);
             }
             TerminalOutput::KittyKeyboardPop(n) => {
-                // u32 → usize is lossless on 32/64-bit Freminal targets.
-                let n = usize::value_from(*n)
-                    .unwrap_or(0)
-                    .min(self.kitty_keyboard_stack.len());
-                let new_len = self.kitty_keyboard_stack.len() - n;
-                self.kitty_keyboard_stack.truncate(new_len);
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .pop(*n);
             }
             TerminalOutput::KittyKeyboardSet { flags, mode } => {
-                let current = self.kitty_keyboard_flags();
-                let new_flags = match mode {
-                    1 => *flags,
-                    2 => current | *flags,
-                    3 => current & !*flags,
-                    _ => current,
-                };
-                if self.kitty_keyboard_stack.is_empty() {
-                    self.kitty_keyboard_stack.push(new_flags);
-                } else {
-                    let top = self.kitty_keyboard_stack.len() - 1;
-                    self.kitty_keyboard_stack[top] = new_flags;
-                }
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .set(*flags, *mode);
             }
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
@@ -2203,6 +2199,7 @@ mod tests {
     use freminal_common::{
         buffer_states::{
             fonts::{BlinkState, FontWeight},
+            modes::kitty_keyboard::KittyKeyboardFlags,
             osc::{AnsiOscType, UrlResponse},
             terminal_output::TerminalOutput,
             url::Url,
@@ -3895,7 +3892,7 @@ mod tests {
             handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(i)]);
         }
         // Stack should be at max depth, oldest entry evicted
-        assert!(handler.kitty_keyboard_stack.len() <= KittyKeyboardFlags::MAX_STACK_DEPTH);
+        assert_eq!(handler.kitty_keyboard_flags(), max_depth);
     }
 
     // ------------------------------------------------------------------
@@ -5220,7 +5217,7 @@ mod tests {
     fn kitty_keyboard_set_unknown_mode_preserves_current() {
         let mut handler = TerminalHandler::new(80, 24);
         // Push initial flags
-        handler.kitty_keyboard_stack.push(0b0000_0101); // flags = 5
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(0b0000_0101)]); // flags = 5
         // Mode=99 is not 1/2/3, so should keep current
         handler.process_outputs(&[TerminalOutput::KittyKeyboardSet {
             flags: 0xFF,

@@ -9,6 +9,7 @@
 use freminal_common::buffer_states::modes::kitty_keyboard::KittyKeyboardFlags;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::pty_write::PtyWrite;
+use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 
 /// Create a handler with a write channel and return `(handler, receiver)`.
@@ -161,7 +162,7 @@ fn alternate_screen_gets_independent_stack() {
     handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(5)]);
     assert_eq!(handler.kitty_keyboard_flags(), 5);
 
-    // Enter alternate screen — main stack is saved, fresh stack starts.
+    // Enter alternate screen -- it has its own (empty) stack.
     handler.handle_enter_alternate();
     assert_eq!(handler.kitty_keyboard_flags(), 0);
 
@@ -169,7 +170,78 @@ fn alternate_screen_gets_independent_stack() {
     handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(3)]);
     assert_eq!(handler.kitty_keyboard_flags(), 3);
 
-    // Leave alternate screen — alternate stack is discarded, main stack restored.
+    // Leave alternate screen -- the main stack is what it was.
     handler.handle_leave_alternate();
     assert_eq!(handler.kitty_keyboard_flags(), 5);
+
+    // The alternate stack is NOT discarded on leave: it persists.
+    handler.handle_enter_alternate();
+    assert_eq!(handler.kitty_keyboard_flags(), 3);
+}
+
+/// Feed raw bytes through the parser into the handler.
+fn feed(handler: &mut TerminalHandler, bytes: &[u8]) {
+    let mut parser = FreminalAnsiParser::default();
+    let outputs = parser.push(bytes);
+    handler.process_outputs(&outputs);
+}
+
+#[test]
+fn b15_reentering_alternate_does_not_clobber_main_stack() {
+    let mut handler = TerminalHandler::new(80, 24);
+    feed(&mut handler, b"\x1b[>1u");
+    assert_eq!(handler.kitty_keyboard_flags(), 1);
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[>5u");
+    // A redundant second entry must not swap anything.
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[?1049l");
+    assert_eq!(handler.kitty_keyboard_flags(), 1);
+}
+
+#[test]
+fn alternate_stack_persists_between_alternate_sessions() {
+    let mut handler = TerminalHandler::new(80, 24);
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[>3u");
+    feed(&mut handler, b"\x1b[?1049l");
+    feed(&mut handler, b"\x1b[?1049h");
+    assert_eq!(handler.kitty_keyboard_flags(), 3);
+}
+
+#[test]
+fn main_stack_is_unaffected_by_alternate_pushes() {
+    let mut handler = TerminalHandler::new(80, 24);
+    feed(&mut handler, b"\x1b[>2u");
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[>4u\x1b[>8u\x1b[<1u");
+    assert_eq!(handler.kitty_keyboard_flags(), 4);
+    feed(&mut handler, b"\x1b[?1049l");
+    assert_eq!(handler.kitty_keyboard_flags(), 2);
+}
+
+#[test]
+fn decstr_clears_both_stacks() {
+    let mut handler = TerminalHandler::new(80, 24);
+    feed(&mut handler, b"\x1b[>1u");
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[>2u");
+    feed(&mut handler, b"\x1b[!p");
+    assert_eq!(handler.kitty_keyboard_flags(), 0);
+    feed(&mut handler, b"\x1b[?1049l");
+    assert_eq!(handler.kitty_keyboard_flags(), 0);
+}
+
+#[test]
+fn ris_clears_both_stacks() {
+    let mut handler = TerminalHandler::new(80, 24);
+    feed(&mut handler, b"\x1b[>1u");
+    feed(&mut handler, b"\x1b[?1049h");
+    feed(&mut handler, b"\x1b[>2u");
+    feed(&mut handler, b"\x1bc");
+    assert_eq!(handler.kitty_keyboard_flags(), 0);
+    feed(&mut handler, b"\x1b[?1049h");
+    assert_eq!(handler.kitty_keyboard_flags(), 0);
+    feed(&mut handler, b"\x1b[?1049l");
+    assert_eq!(handler.kitty_keyboard_flags(), 0);
 }

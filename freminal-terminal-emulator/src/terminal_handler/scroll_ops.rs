@@ -94,9 +94,6 @@ impl TerminalHandler {
         // scroll_offset is owned by ViewState on the GUI side; the PTY thread
         // always passes 0 when entering the alternate screen.
         self.buffer.enter_alternate(0);
-        // Save and reset the KKP stack — the spec requires main and alternate
-        // screens to maintain independent keyboard mode stacks.
-        self.saved_kitty_keyboard_stack = Some(std::mem::take(&mut self.kitty_keyboard_stack));
     }
 
     /// Handle leaving alternate screen
@@ -113,10 +110,6 @@ impl TerminalHandler {
         // parked primary store's tail; judge the primary placements against
         // the primary store now that it is active again.
         self.prune_unissued_real_placements();
-        // Restore the main-screen KKP stack.
-        if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
-            self.kitty_keyboard_stack = saved;
-        }
     }
 
     /// Handle DECAWM — enable or disable soft-wrapping.
