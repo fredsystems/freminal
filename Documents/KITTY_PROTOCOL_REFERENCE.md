@@ -1,5 +1,10 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
+Last updated: 2026-10-10 — Task 130 — the OSC 99 `p=?` capability query is
+now answered on the PTY thread in stream order, gated on configuration and
+platform (see "Capability handshake" under the current-state deltas); the
+rest of this file is unchanged.
+
 Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stubs
 renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
@@ -157,8 +162,10 @@ Unknown `p=` values must be ignored (forward compat).
 
 ### Reports written back to the application (reverse PTY path)
 
-All reports go back through the reverse-write path (`Pane::pty_write_tx` /
-`write_to_pty`), the same channel DSR/DA/OSC 52 responses use.
+The GUI sends each report to the originating pane's PTY thread as a structured
+`GuiReply` (`InputEvent::Reply`), and the handler frames it like every other
+reply, honouring S8C1T (Task 130). The `p=?` handshake never reaches the GUI:
+the PTY thread answers it itself.
 
 Activation (only when `a=report` was set):
 
@@ -255,21 +262,40 @@ OSC 99 routing landed across Tasks 99.1–99.8:
 - Chunk reassembly: `reassemble_osc99` accumulates multi-escape payloads
   (`pending_notifications` on `TerminalHandler`, cleared in `full_reset()`)
   before a fully-formed `Notification99Data` reaches the GUI.
-- App→terminal control payloads (close/alive/`p=?` query) are split into
+- App→terminal control payloads (`p=close` / `p=alive`) are split into
   `Osc99Control` / `Osc99ControlKind` rather than folded into the display
-  path.
+  path. The `p=?` query is no longer forwarded to the GUI: the handler
+  answers it itself (Task 130.5, below).
 - Display: `NotificationRouter::route_osc99` (`freminal/src/gui/notifications.rs`)
   pushes the toast leg and/or a `notify-rust` desktop notification, honouring
   the `o=` occasion gate, urgency, sound, auto-expiry, buttons, and the `g=`
   icon-by-data cache (`icon_cache: HashMap<String, Vec<u8>>`).
-- Reverse reports: activation, close, and alive reports are written back via
-  the originating pane's `pty_write_tx` (Linux/BSD observes real
+- Reverse reports: activation, close, and alive reports are sent as `GuiReply`
+  values through a `Weak` handle to the originating pane's input channel, so a
+  displayed notification never keeps a closed pane alive (Task 130.8), and the
+  PTY thread frames them (Linux/BSD observes real
   activation/close through `wait_for_action`; macOS/Windows emit the
   `untracked` close form immediately, since no observable handle is available
   from a background thread there).
-- Capability handshake: `p=?` is answered with `osc99_query_response`,
-  truthfully advertising only what's implemented (see `OSC99_CAPABILITIES` in
-  `notifications.rs`).
+- Capability handshake (Task 130.5, replacing the Task 99 GUI-side reply):
+  `p=?` is answered on the PTY thread by `TerminalHandler`, in byte-stream
+  order, so the reply precedes the answer to a DA1 sent after it in the same
+  write (the detection handshake above works). The reply is framed by the
+  handler and honours S8C1T, and is never tmux-wrapped. What it advertises
+  comes from `HostCapabilities` (`freminal-common`), which the GUI computes
+  from the config and platform, seeds at pane spawn and re-sends on config
+  change:
+  - **Unsupported** — `[notifications] enabled` is false, `osc_99` is false,
+    or `routing_osc99` is `disabled`. `p=?` is not answered at all, so the
+    application sees a terminal that does not speak OSC 99; `p=alive` is
+    likewise ignored.
+  - **Supported** — `a=report` is advertised only on Linux/BSD with a
+    system-capable routing (`system`, `both`, `system_when_unfocused`);
+    `c=1` only with a system-capable routing (a toast-only routing has no
+    desktop notification whose close could be reported). The remaining keys
+    (`o`, `p`, `s`, `u`, `w`) are fixed. With no supported action the `a`
+    key is omitted, per the spec.
+  - Conformance of the advertised set against the spec is still Task 138.
 - Config: `[notifications] osc_99` (added in 110.0, wired through
   `ConfigPartial`/`apply_partial`) is enforced at the `route_osc99` drain site
   (Task 99.8) as a kill-switch alongside the master `enabled` gate.
