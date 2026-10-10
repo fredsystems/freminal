@@ -2,6 +2,11 @@
 
 ## Last updated
 
+Last updated: 2026-10-10 — 129.C5: control bytes inside an OSC follow ECMA-48 /
+DEC VT500 (CAN/SUB cancel with no output; other C0 and DEL are ignored), so a
+control byte no longer spills the rest of the payload onto the screen. See
+"OSC parsing rules".
+
 Last updated: 2026-10-09 — Task 129 (kitty wire infrastructure). OSC
 terminator handling, dispatch and size limits changed; no status icon moves
 (graphics and OSC 99 stay 🚧 pending Tasks 135 and 138). (129.4) Only the
@@ -481,6 +486,13 @@ Rows below marked "recognised and ignored" are in that state.
 - **Size caps:** 1 MiB per OSC sequence; 64 MiB for OSC 52 and OSC 1337
   (129.9). An over-cap sequence is consumed through its terminator, produces
   no output, and is warn-logged with its introducer, cap and length only.
+- **Control bytes (129.C5):** ECMA-48 and the DEC VT500 state machine, as
+  xterm. CAN (0x18) and SUB (0x1A) cancel the OSC with no output, and the bytes
+  that follow are ordinary data. Every other C0 byte except BEL and ESC, and
+  DEL, is dropped and does not end the OSC, so `ESC LF \` is still ST. Before,
+  any such byte made the OSC `Invalid` and the rest of its payload was printed
+  as text. (kitty keeps every byte up to the terminator; no kitty protocol
+  carries raw C0 in an OSC, so compliant clients are unaffected.)
 
 ---
 

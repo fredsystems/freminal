@@ -80,8 +80,9 @@ impl OscLimit {
 pub(crate) enum AnsiOscParserState {
     Params,
     Finished,
-    Invalid,
-    InvalidFinished,
+    /// CAN or SUB cancelled the sequence (ECMA-48 / DEC VT500). It produces no
+    /// output, and the bytes that follow are ordinary data.
+    Cancelled,
     /// The body went over its cap; the buffer was released and only what
     /// terminator detection needs is kept.
     Overflow {
@@ -136,31 +137,30 @@ impl AnsiOscParser {
     /// Push a byte into the parser
     ///
     /// # Errors
-    /// Will return an error if the parser is in the `Finished` or `InvalidFinished` state
+    /// Will return an error if the parser is in the `Finished`, `Cancelled` or
+    /// `OverflowFinished` state
+    ///
+    /// Control bytes follow ECMA-48 and the DEC VT500 state machine (as xterm
+    /// does): CAN and SUB cancel the sequence with no output; every other C0
+    /// byte except BEL and ESC, and DEL, is ignored and does not end it.
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn push(&mut self, b: u8) -> ParserOutcome {
         if let AnsiOscParserState::Finished
-        | AnsiOscParserState::InvalidFinished
+        | AnsiOscParserState::Cancelled
         | AnsiOscParserState::OverflowFinished = &self.state
         {
             return ParserOutcome::Invalid("Parsed Pushed To Once Finished".to_string());
         }
 
+        match osc_byte_class(b) {
+            OscByteClass::Cancel => return self.cancel(b),
+            OscByteClass::Ignored => return ParserOutcome::Continue,
+            OscByteClass::Body => {}
+        }
+
         match self.state {
             AnsiOscParserState::Params => {
-                if is_valid_osc_param(b) {
-                    self.params.push(b);
-                } else {
-                    debug!("Invalid OSC param: {:x}", b);
-                    {
-                        self.state = AnsiOscParserState::Invalid;
-
-                        self.params.clear();
-                        self.intermediates.clear();
-
-                        return ParserOutcome::Invalid("Invalid OSC param encountered".to_string());
-                    };
-                }
+                self.params.push(b);
 
                 if is_osc_terminator(&self.params) {
                     self.state = AnsiOscParserState::Finished;
@@ -195,21 +195,27 @@ impl AnsiOscParser {
             }
             AnsiOscParserState::Overflow { .. } => self.push_overflowed(b),
             AnsiOscParserState::Finished
-            | AnsiOscParserState::InvalidFinished
+            | AnsiOscParserState::Cancelled
             | AnsiOscParserState::OverflowFinished => {
                 // Guarded by the early-return at the top of `push`, but surface
                 // explicitly as an invalid outcome rather than panicking if the
                 // invariant ever breaks.
                 ParserOutcome::Invalid("OSC parser received byte after termination".to_string())
             }
-            AnsiOscParserState::Invalid => {
-                if is_osc_terminator(&self.params) {
-                    self.state = AnsiOscParserState::InvalidFinished;
-                }
-
-                ParserOutcome::Invalid("Invalid OSC sequence terminated".to_string())
-            }
         }
+    }
+
+    /// Cancel the sequence on CAN or SUB: no output, buffer released, and the
+    /// top-level parser returns to ground so following bytes are data.
+    fn cancel(&mut self, b: u8) -> ParserOutcome {
+        debug!(
+            "OSC cancelled by 0x{b:02x} after {} body bytes",
+            self.params.len()
+        );
+        self.params = Vec::new();
+        self.intermediates = Vec::new();
+        self.state = AnsiOscParserState::Cancelled;
+        ParserOutcome::Finished
     }
 
     /// Whether a just-terminated body is longer than its cap. Only the BEL
@@ -266,19 +272,13 @@ impl AnsiOscParser {
         self.intermediates = Vec::new();
     }
 
-    /// Consume one byte of an overflowed sequence. Bytes that are invalid in an
-    /// OSC body still invalidate it, exactly as when within the cap; BEL and
-    /// `ESC \` end it with no output.
+    /// Consume one body byte of an overflowed sequence (control bytes were
+    /// already handled by `push`, exactly as within the cap); BEL and `ESC \`
+    /// end it with no output.
     fn push_overflowed(&mut self, b: u8) -> ParserOutcome {
         let AnsiOscParserState::Overflow { total, prev } = &mut self.state else {
             return ParserOutcome::Continue;
         };
-
-        if !is_valid_osc_param(b) {
-            debug!("Invalid OSC param: {:x}", b);
-            self.state = AnsiOscParserState::Invalid;
-            return ParserOutcome::Invalid("Invalid OSC param encountered".to_string());
-        }
 
         *total = total.saturating_add(1);
         let terminated = b == 0x07 || (*prev == PrevByte::Esc && b == 0x5c);
@@ -328,13 +328,12 @@ impl AnsiOscParser {
 
                 dispatch_osc_target(&osc_target, &self.params, output)
             }
-            AnsiOscParserState::Invalid => ParserOutcome::Invalid("Invalid OSC State".to_string()),
-            // An overflowed sequence emits nothing; report exactly what `push`
-            // decided (`Continue`, or `Finished` on its terminator).
-            AnsiOscParserState::Overflow { .. } | AnsiOscParserState::OverflowFinished => {
-                push_result
-            }
-            _ => ParserOutcome::Continue,
+            // An overflowed or cancelled sequence emits nothing; report exactly
+            // what `push` decided (`Continue`, or `Finished` on its end).
+            AnsiOscParserState::Overflow { .. }
+            | AnsiOscParserState::OverflowFinished
+            | AnsiOscParserState::Cancelled => push_result,
+            AnsiOscParserState::Params => ParserOutcome::Continue,
         }
     }
 }
@@ -635,9 +634,27 @@ const fn is_osc_terminator(b: &[u8]) -> bool {
     matches!(b, [.., 0x07] | [.., 0x1b, 0x5c])
 }
 
-fn is_valid_osc_param(b: u8) -> bool {
-    // if the character is a printable character, or is 0x1b or 0x5c then it is valid
-    (0x20..=0x7E).contains(&b) || (0x80..=0xff).contains(&b) || b == 0x1b || b == 0x07
+/// How a byte inside an OSC string is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OscByteClass {
+    /// Stored in the body (printable, 0x80–0xFF, and the BEL / ESC that the
+    /// terminator check needs).
+    Body,
+    /// Dropped without ending the sequence: every C0 byte other than BEL, ESC,
+    /// CAN and SUB, plus DEL (ECMA-48 command strings exclude them; xterm and
+    /// the DEC VT500 parser ignore them).
+    Ignored,
+    /// CAN (0x18) or SUB (0x1A): cancels the sequence.
+    Cancel,
+}
+
+const fn osc_byte_class(b: u8) -> OscByteClass {
+    match b {
+        0x18 | 0x1a => OscByteClass::Cancel,
+        0x07 | 0x1b => OscByteClass::Body,
+        0x00..=0x1f | 0x7f => OscByteClass::Ignored,
+        _ => OscByteClass::Body,
+    }
 }
 
 /// # Errors
@@ -675,15 +692,6 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn push_invalid_byte_transitions_to_invalid() {
-        let mut parser = AnsiOscParser::new();
-        // 0x01 is not a valid OSC param byte
-        let result = parser.push(0x01);
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
-    }
-
-    #[test]
     fn push_after_finished_returns_invalid() {
         let mut parser = AnsiOscParser::new();
         let mut output = Vec::new();
@@ -694,17 +702,6 @@ mod tests {
         assert_eq!(parser.state, AnsiOscParserState::Finished);
         // Pushing after finish should return Invalid
         let result = parser.push(b'x');
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-    }
-
-    #[test]
-    fn push_in_invalid_state_continues_until_terminator() {
-        let mut parser = AnsiOscParser::new();
-        // Drive parser into Invalid state
-        parser.push(0x01);
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
-        // Continue pushing — should return Invalid but not crash
-        let result = parser.push(b'A');
         assert!(matches!(result, ParserOutcome::Invalid(_)));
     }
 
@@ -872,19 +869,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // ansiparser_inner_osc in Invalid state
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn ansiparser_inner_osc_invalid_byte_returns_invalid() {
-        let mut parser = AnsiOscParser::new();
-        let mut output = Vec::new();
-        // 0x01 is not valid → immediate Invalid
-        let result = parser.ansiparser_inner_osc(0x01, &mut output);
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-    }
-
-    // ------------------------------------------------------------------
     // trace_str coverage
     // ------------------------------------------------------------------
 
@@ -912,41 +896,6 @@ mod tests {
         let mut parser = AnsiOscParser::new();
         let mut output = Vec::new();
         let result = parser.ansiparser_inner_osc(0x07, &mut output);
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-    }
-
-    // ── Invalid state + terminator → InvalidFinished ────────────────────────
-    // NOTE: `self.state = AnsiOscParserState::InvalidFinished` is
-    // effectively unreachable through `push()`: transitioning to Invalid
-    // clears `self.params` and the Invalid arm never pushes bytes
-    // into params, so `is_osc_terminator(&self.params)` always sees an empty
-    // slice and returns false.  We test the reachable Invalid-state behavior
-    // instead: push returns Invalid and state stays Invalid.
-    #[test]
-    fn invalid_state_stays_invalid_on_further_push() {
-        let mut parser = AnsiOscParser::new();
-        // Drive to Invalid with a control byte outside valid param range
-        parser.push(0x01);
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
-        // Push BEL — state stays Invalid because params is empty
-        let result = parser.push(0x07);
-        assert!(matches!(result, ParserOutcome::Invalid(_)));
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
-    }
-
-    // ── ansiparser_inner_osc in Invalid state (non-terminator) ──────────────
-    #[test]
-    fn ansiparser_inner_osc_invalid_state_non_terminator() {
-        let mut parser = AnsiOscParser::new();
-        let mut output = Vec::new();
-        // Drive to Invalid
-        parser.push(0x01);
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
-        // Feed a non-terminator printable byte through ansiparser_inner_osc
-        // push() returns Invalid while the state is Invalid, and
-        // ansiparser_inner_osc returns that result early, so its own
-        // `AnsiOscParserState::Invalid` match arm is not reached here.
-        let result = parser.ansiparser_inner_osc(b'A', &mut output);
         assert!(matches!(result, ParserOutcome::Invalid(_)));
     }
 
@@ -1792,13 +1741,104 @@ mod tests {
         assert_eq!(parser.push(0x07), ParserOutcome::Finished);
     }
 
+    // ------------------------------------------------------------------
+    // Control bytes inside an OSC (129.C5): ECMA-48 / DEC VT500, as xterm
+    // ------------------------------------------------------------------
+
     #[test]
-    fn overflowed_osc_still_rejects_invalid_bytes() {
+    fn c0_bytes_inside_an_osc_are_ignored_and_do_not_end_it() {
+        // LF, CR, TAB, NUL, other C0 and DEL are dropped; the title survives
+        // and nothing leaks out as text.
+        for control in [0x0a, 0x0d, 0x09, 0x00, 0x01, 0x1f, 0x7f] {
+            let mut bytes = b"\x1b]2;ab".to_vec();
+            bytes.push(control);
+            bytes.extend_from_slice(b"cd\x07after");
+            let output = FreminalAnsiParser::new().push(&bytes);
+            assert_eq!(
+                output,
+                vec![
+                    TerminalOutput::OscResponse(AnsiOscType::SetTitleBar("abcd".to_owned())),
+                    TerminalOutput::Data(b"after".to_vec()),
+                ],
+                "control 0x{control:02x}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_c0_between_esc_and_backslash_still_terminates() {
+        // VT500 executes C0 in the escape state without leaving it, so
+        // `ESC LF \` is still ST.
+        let output = FreminalAnsiParser::new().push(b"\x1b]2;t\x1b\x0a\\x");
+        assert_eq!(
+            output,
+            vec![
+                TerminalOutput::OscResponse(AnsiOscType::SetTitleBar("t".to_owned())),
+                TerminalOutput::Data(b"x".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn can_and_sub_cancel_an_osc_with_no_output() {
+        for cancel in [0x18, 0x1a] {
+            let mut parser = AnsiOscParser::new();
+            let mut output = Vec::new();
+            for &b in b"2;secret" {
+                assert_eq!(
+                    parser.ansiparser_inner_osc(b, &mut output),
+                    ParserOutcome::Continue
+                );
+            }
+            assert_eq!(
+                parser.ansiparser_inner_osc(cancel, &mut output),
+                ParserOutcome::Finished
+            );
+            assert_eq!(parser.state, AnsiOscParserState::Cancelled);
+            assert_eq!(output, []);
+            assert_eq!(parser.params.capacity(), 0);
+            assert!(matches!(parser.push(b'x'), ParserOutcome::Invalid(_)));
+        }
+    }
+
+    #[test]
+    fn bytes_after_can_are_ordinary_data() {
+        // The spec-defined outcome: the cancelled sequence emits nothing and
+        // what follows the CAN is data, not an OSC (so the BEL rings).
+        let output = FreminalAnsiParser::new().push(b"\x1b]2;a\x18bc\x07");
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Data(b"bc".to_vec()), TerminalOutput::Bell]
+        );
+    }
+
+    #[test]
+    fn control_bytes_in_an_overflowed_osc_follow_the_same_rules() {
         let mut parser = parser_with_body(body_of_len(b"2;", MAX_OSC_BYTES));
         assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
-        // 0x01 is not a valid OSC body byte; same handling as within the cap.
-        assert!(matches!(parser.push(0x01), ParserOutcome::Invalid(_)));
-        assert_eq!(parser.state, AnsiOscParserState::Invalid);
+        assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+        // Ignored: the sequence continues.
+        assert_eq!(parser.push(0x0a), ParserOutcome::Continue);
+        assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+        // An ignored byte between ESC and `\` does not break ST.
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(0x0d), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+
+        let mut cancelled = parser_with_body(body_of_len(b"2;", MAX_OSC_BYTES));
+        assert_eq!(cancelled.push(b'x'), ParserOutcome::Continue);
+        assert_eq!(cancelled.push(0x1a), ParserOutcome::Finished);
+        assert_eq!(cancelled.state, AnsiOscParserState::Cancelled);
+    }
+
+    #[test]
+    fn overflowed_osc_cancelled_by_can_is_followed_by_text() {
+        let mut bytes = b"\x1b]2;".to_vec();
+        bytes.extend(std::iter::repeat_n(b'T', MAX_OSC_BYTES + 10));
+        bytes.extend_from_slice(b"\x18hello");
+        let output = FreminalAnsiParser::new().push(&bytes);
+        assert_eq!(output, vec![TerminalOutput::Data(b"hello".to_vec())]);
     }
 
     #[test]

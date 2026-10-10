@@ -1,5 +1,10 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-10 — 129.C5 closed: a C0 byte inside an OSC made the
+parser emit `Invalid` and print the rest of the payload as text. Control bytes
+now follow ECMA-48 / DEC VT500 (CAN/SUB cancel silently; other C0 and DEL are
+ignored). No gap row was itemised for it.
+
 Last updated: 2026-10-09 — Task 129 (kitty wire infrastructure) — wire-level
 bugs fixed; no gap row closes because none was itemised here (they were
 recorded in the `PLAN_VERSION_130.md` audit under "Pre-existing bugs outside

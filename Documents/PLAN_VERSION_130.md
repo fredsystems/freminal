@@ -2306,7 +2306,16 @@ keep unbounded id strings (Task 138).
   kitty's handling first; do not infer.
 - **Verification:** tests for LF, CAN and SUB inside an OSC, at both in-cap and over-cap
   sizes.
-- **Scheduling:** independent; needs the semantics confirmed against the spec first.
+- **Status: Resolved (2026-10-10).** Semantics checked first: kitty (`vt-parser.c`
+  `find_st_terminator`) keeps every byte up to BEL or `ESC \` and never aborts; xterm and
+  the DEC VT500 parser ignore C0 inside a string and let CAN/SUB cancel it. **Maintainer
+  decision: xterm/VT500.** `osc_byte_class` classifies each byte: CAN/SUB cancel (new
+  `Cancelled` state, no output, buffer released); other C0 except BEL/ESC, and DEL, are
+  ignored without touching the ESC-before-`\` tracking; the old `Invalid`/`InvalidFinished`
+  states are gone. Applies identically within the cap and after overflow. No kitty protocol
+  carries raw C0 in an OSC, so compliant clients are unaffected. `bench_parse_osc9` and
+  `bench_parse_plain_text` are within noise. ESC handling is unchanged (an ESC not followed
+  by `\` stays in the body, as in kitty; VT500 would end the string).
 
 #### 129.C6 — `parsed terminal output` trace log is unbounded
 
