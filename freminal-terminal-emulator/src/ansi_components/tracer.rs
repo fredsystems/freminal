@@ -287,7 +287,13 @@ pub(crate) mod log_capture {
             events: Arc::clone(&events),
             next_span: AtomicU64::new(0),
         };
-        tracing::subscriber::with_default(collector, f);
+        tracing::subscriber::with_default(collector, || {
+            // A callsite first hit by a parallel test while no subscriber was
+            // installed may have cached a "never" interest; re-evaluate every
+            // callsite against this subscriber before running `f`.
+            tracing::callsite::rebuild_interest_cache();
+            f();
+        });
         events.lock().map_or_else(|_| Vec::new(), |e| e.clone())
     }
 

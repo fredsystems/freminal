@@ -190,7 +190,14 @@ fn handle_osc_iterm2_file(after_file: &[u8], raw_params: &[u8], output: &mut Vec
     let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::warn!("OSC 1337 File=: base64 decode failed: {e}");
+            tracing::warn!(
+                "OSC 1337 File=: base64 decode failed ({} bytes)",
+                b64_bytes.len()
+            );
+            tracing::debug!(
+                "OSC 1337 File=: base64 decode failed: {e}: recent='{}'",
+                lossy_sequence_for_log_bounded(raw_params)
+            );
             return;
         }
     };
@@ -250,7 +257,10 @@ fn handle_osc_iterm2_file_part(
     let data = match freminal_common::base64::decode(b64_str.as_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::warn!("OSC 1337 FilePart=: base64 decode failed: {e}");
+            tracing::warn!(
+                "OSC 1337 FilePart=: base64 decode failed ({} bytes)",
+                after_part.len()
+            );
             tracing::debug!(
                 "OSC 1337 FilePart=: base64 decode failed: {e}: recent='{}'",
                 lossy_sequence_for_log_bounded(raw_params)
@@ -767,5 +777,30 @@ mod tests {
         let mut output = Vec::new();
         super::handle_osc_iterm2_file_part(b"!!!invalid!!!", b"1337;test", &mut output);
         assert_eq!(output, []);
+    }
+
+    // ── Warn lines must not carry payload bytes ─────────────────────────────
+
+    fn assert_decode_warn_has_no_byte_dump(payload: &[u8]) {
+        use crate::ansi_components::tracer::log_capture::{capture, warnings};
+        let events = capture(|| {
+            let output = feed_osc(payload);
+            assert_eq!(output, []);
+        });
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(!text.contains("0x"), "{level} line dumped a byte: {text}");
+        }
+    }
+
+    #[test]
+    fn file_bad_base64_warn_carries_no_payload_byte() {
+        assert_decode_warn_has_no_byte_dump(b"1337;File=inline=1:YW!j\x07");
+    }
+
+    #[test]
+    fn file_part_bad_base64_warn_carries_no_payload_byte() {
+        assert_decode_warn_has_no_byte_dump(b"1337;FilePart=YW!j\x07");
     }
 }

@@ -65,8 +65,14 @@ impl OscLimit {
     /// Only here is the OSC number examined, so the common path stays a single
     /// length comparison.
     fn for_body(params: &[u8]) -> Self {
-        match params.split(|b| *b == b';').next() {
-            Some(b"52" | b"1337") => Self::Large,
+        // Dispatch parses the OSC number numerically, so `052` is OSC 52 and
+        // must get the same cap; compare the parsed value, not the bytes.
+        let number = params.split(|b| *b == b';').next().unwrap_or_default();
+        if number.is_empty() || !number.iter().all(u8::is_ascii_digit) {
+            return Self::Default;
+        }
+        match std::str::from_utf8(number).map(str::parse::<u32>) {
+            Ok(Ok(52 | 1337)) => Self::Large,
             _ => Self::Default,
         }
     }
@@ -615,7 +621,7 @@ fn split_params_into_semicolon_delimited_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::{AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES};
+    use super::{AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES, OscLimit};
     use crate::ansi::{FreminalAnsiParser, ParserOutcome};
     use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
@@ -1690,5 +1696,34 @@ mod tests {
             TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(_))
         ));
         assert_eq!(output[1], TerminalOutput::Data(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn osc_limit_large_for_numerically_equal_osc_numbers() {
+        for body in [
+            &b"52;c;x"[..],
+            b"052;c;x",
+            b"0052",
+            b"1337;File=x",
+            b"01337;File=x",
+        ] {
+            assert_eq!(OscLimit::for_body(body), OscLimit::Large, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn osc_limit_default_for_other_osc_numbers() {
+        let overlong = "99999999999999999999;x".to_string();
+        for body in [
+            &b"2;title"[..],
+            b"52x;c;x",
+            b"5;c;x",
+            b"+52;c;x",
+            b";52",
+            b"",
+            overlong.as_bytes(),
+        ] {
+            assert_eq!(OscLimit::for_body(body), OscLimit::Default, "{body:?}");
+        }
     }
 }

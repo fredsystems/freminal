@@ -271,7 +271,9 @@ fn bench_parse_kitty_apc_chunks(c: &mut Criterion) {
     let payload = kitty_apc_chunks_payload();
 
     let mut group = c.benchmark_group("bench_parse_kitty_apc_chunks");
-    group.throughput(Throughput::Bytes(payload.len() as u64));
+    group.throughput(Throughput::Bytes(
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+    ));
 
     group.bench_function(BenchmarkId::new("parser_push", payload.len()), |b| {
         b.iter_batched(
