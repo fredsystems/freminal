@@ -3146,6 +3146,30 @@ Disposition, all addressed before merge:
       bool field or parameter.
     - Already routed: the bool fields in the new tests (130.C4).
 
+### 130 Confirmation review (2026-10-10)
+
+A second read-only review re-checked every adversarial-review finding against the fix
+commits. All were FIXED except items 10 and R7, which were PARTIAL. It also found eight new
+items, all addressed in `5d5fba25` and the follow-up docs commit:
+
+- **N1:** two OSC 99 tests ran with OSC 99 unsupported and passed vacuously. They now use
+  supported capabilities and carry positive controls.
+- **N2:** an IRM DECRQM stored `Irm::Query`, switching insert mode off, and sent no reply.
+  It is now answered `CSI 4 ; Ps $ y` without touching the state. This closes the IRM half
+  of issue #528.
+- **N3:** the docs still said only `p=alive` was ignored while unsupported, and did not
+  record 130.C5 or 130.C6. Corrected.
+- **N4:** the `Osc99Control` doc still mentioned `p=?`. Corrected.
+- **N5:** the `Unsupported` gate ran after reassembly, so a transfer begun while unsupported
+  could complete after support was enabled. The gate now runs before reassembly, and
+  `set_host_capabilities` discards pending transfers when support is turned off.
+- **N6 (accepted):** XTGETTCAP answers each name separately, like kitty, so two invalid names
+  give two identical bare replies. That matches kitty's per-name behaviour.
+- **N7 (accepted, recorded in GAPS):** in S8C1T mode a UTF-8 title reply can contain bytes in
+  0x80–0x9F. This predates Task 130 and is niche.
+- **N8:** a cosmetic doc wrap in `window_ops.rs`. The `MASTER_PLAN.md` mention of
+  `write_to_pty` / `pty_write_tx` is a historical v0.11.0 dependency note and stays.
+
 ### 130 Orchestrator re-review (2026-10-10)
 
 The maintainer found that 130.2–130.8 had been committed after a partial review: diffs read

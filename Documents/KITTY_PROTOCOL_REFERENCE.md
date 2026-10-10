@@ -287,8 +287,9 @@ OSC 99 routing landed across Tasks 99.1–99.8:
   change:
   - **Unsupported** — `[notifications] enabled` is false, `osc_99` is false,
     or `routing_osc99` is `disabled`. `p=?` is not answered at all, so the
-    application sees a terminal that does not speak OSC 99; `p=alive` is
-    likewise ignored.
+    application sees a terminal that does not speak OSC 99. Every other OSC 99
+    request is ignored too, before reassembly, and an in-flight transfer is
+    discarded when support is turned off.
   - **Supported** — `a=report` is advertised only on Linux/BSD with a
     system-capable routing (`system`, `both`, `system_when_unfocused`);
     `c=1` only with a system-capable routing (a toast-only routing has no

@@ -6,7 +6,9 @@ answers `CSI 20 ; Ps $ y`, 130.C1) and the DECSCLM no-reply case (`CSI ? 4 $ p`
 now answers `CSI ? 4 ; 4 $ y`, 130.C2); the IRM and unknown-ANSI-mode halves
 stay open (issue #528). Closes the OSC 99 `p=?` "answered after DA1" defect
 (130.5): it is answered in stream order, gated on configuration and platform,
-and `p=alive` is ignored while OSC 99 is unsupported. Also recorded (no gap
+and every OSC 99 request is ignored while OSC 99 is unsupported. The IRM half of
+issue #528 is also closed: `CSI 4 $ p` answers `CSI 4 ; Ps $ y` and no longer
+switches insert mode off. Also recorded (no gap
 rows were itemised for them): DECRPM, `CSI ? u` and every GUI-originated reply
 now honour S8C1T (130.3, 130.6, 130.7); replies are produced in byte-stream
 order and RIS applies at its stream position (130.1); tmux DCS passthrough runs
@@ -256,9 +258,8 @@ not conformant (Task 138, v0.13.0). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **DECRQM for ANSI modes:** an IRM query clears insert mode, and a query for
-  an unknown ANSI mode is answered in the DEC-private form (issue #528); LNM
-  is correct since Task 130.C1
+- **DECRQM for ANSI modes:** a query for an unknown ANSI mode is answered in
+  the DEC-private form (issue #528); LNM and IRM are correct since Task 130
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
   hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
   five narrow xterm divergences in cursor save/restore (DECSC per-screen slots,
@@ -428,13 +429,13 @@ LNM (mode 20) and IRM (mode 4) are implemented.
 
 Part of the ANSI-mode form of DECRQM is still handled incorrectly (issue #528).
 It should be answered `CSI Pa ; Ps $ y`, without the `?` that the DEC-private
-form (`CSI ? Pd ; Ps $ y`) carries. LNM (`CSI 20 $ p`) is correct since Task
-130.C1.
+form (`CSI ? Pd ; Ps $ y`) carries. LNM (`CSI 20 $ p`, 130.C1) and IRM
+(`CSI 4 $ p`, Task 130 review) are correct, and a query no longer overwrites the
+stored mode.
 
-| Behaviour               | Importance | Type | Planned | Notes                                                                                                                                                                                |
-| ----------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| IRM query (`CSI 4 $ p`) | 🟨         | 🚧   | —       | No reply, and the query is stored as the live insert mode, so it switches insert mode off. `TerminalHandler` assigns `Mode::Irm(irm)` directly, including `Irm::Query` (issue #528). |
-| ANSI-form reply prefix  | ⬜         | 🚧   | —       | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.)                                    |
+| Behaviour              | Importance | Type | Planned | Notes                                                                                                                                             |
+| ---------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ANSI-form reply prefix | ⬜         | 🚧   | —       | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.) |
 
 ---
 
@@ -484,7 +485,7 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (unscheduled; recorded by the Task 130 adversarial review).
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (unscheduled; recorded by the Task 130 adversarial review). Also, in S8C1T mode a reply that echoes UTF-8 text (a title or icon label) can contain bytes in 0x80–0x9F as continuation bytes of a multi-byte character (e.g. `Ĝ` is `C4 9C`), which a strict 8-bit consumer could misread as a C1 control; unscheduled.
 
 ---
 
@@ -508,7 +509,7 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | Item                            | Rationale                                                                                                                                                                    | Planned    |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | An IRM query silently clears insert mode, and unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                 | issue #528 |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                               | issue #528 |
 
 ### Priority 3 — Low priority / optional
 
