@@ -38,6 +38,7 @@ use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
+    ansi_components::tracer::lossy_sequence_for_log_bounded,
     input::{KeyEventMeta, TerminalInput, TerminalInputPayload},
     io::PtyWrite,
 };
@@ -610,7 +611,13 @@ impl TerminalState {
         let parsed = self.parser.push(&incoming);
 
         for output in &parsed {
-            trace!(%output, "parsed terminal output");
+            // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
+            // logged. The rendering sits inside the macro arguments, which
+            // `tracing` evaluates only when the event is enabled.
+            trace!(
+                output = %lossy_sequence_for_log_bounded(output.to_string().as_bytes()),
+                "parsed terminal output"
+            );
         }
 
         self.handler.process_outputs(&parsed);
@@ -723,6 +730,38 @@ impl TerminalState {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // ── Bounded trace logging (129.C6) ──────────────────────────────────────
+
+    #[test]
+    fn parsed_output_trace_is_bounded_for_a_large_dcs() {
+        let mut bytes = b"\x1bPz".to_vec();
+        bytes.extend(std::iter::repeat_n(b'~', 100 * 1024));
+        bytes.extend_from_slice(b"\x1b\\");
+
+        let mut state = TerminalState::default();
+        let events = crate::log_capture::capture(|| state.handle_incoming_data(&bytes));
+
+        let traced: Vec<_> = events
+            .iter()
+            .filter(|(level, text)| {
+                *level == tracing::Level::TRACE && text.contains("parsed terminal output")
+            })
+            .collect();
+        assert!(
+            traced
+                .iter()
+                .any(|(_, text)| text.contains("DeviceControlString")),
+            "the DCS output must have been traced: {traced:?}"
+        );
+        for (_, text) in &traced {
+            assert!(
+                text.len() <= 1024,
+                "unbounded trace event: {} bytes",
+                text.len()
+            );
+        }
+    }
 
     // ── hex_preview ─────────────────────────────────────────────────────────
 

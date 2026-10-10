@@ -65,14 +65,12 @@ impl OscLimit {
     /// Only here is the OSC number examined, so the common path stays a single
     /// length comparison.
     fn for_body(params: &[u8]) -> Self {
-        // Dispatch parses the OSC number numerically, so `052` is OSC 52 and
-        // must get the same cap; compare the parsed value, not the bytes.
+        // Classify the number exactly as `ansiparser_inner_osc` does before
+        // dispatch (`parse_param_as::<AnsiOscToken>`), so a body is never
+        // dispatched as OSC 52 / 1337 under the default cap (`052`, `+52`).
         let number = params.split(|b| *b == b';').next().unwrap_or_default();
-        if number.is_empty() || !number.iter().all(u8::is_ascii_digit) {
-            return Self::Default;
-        }
-        match std::str::from_utf8(number).map(str::parse::<u32>) {
-            Ok(Ok(52 | 1337)) => Self::Large,
+        match parse_param_as::<AnsiOscToken>(number) {
+            Ok(Some(AnsiOscToken::OscValue(52 | 1337))) => Self::Large,
             _ => Self::Default,
         }
     }
@@ -871,13 +869,10 @@ mod tests {
     // Coverage-gap tests
     // =========================================================================
 
-    // ── Line 114: empty params after stripping terminator ────────────────────
-    // The `if !self.params.is_empty()` guard at line 106 is entered when params
-    // are not empty and the terminator bytes are stripped. Line 114 is the closing
-    // brace. This is already covered by any test that feeds a complete OSC
+    // ── Empty body after stripping the terminator ───────────────────────────
     // BEL alone terminates the OSC, but after stripping the terminator byte
-    // the params are empty. `extract_param(0, ...)` returns `None`, so the
-    // outer `ansiparser_inner_osc` reports `Invalid`.
+    // the body is empty, so there is no OSC number and `ansiparser_inner_osc`
+    // reports `Invalid`.
     #[test]
     fn empty_osc_just_bel_terminator() {
         let mut parser = AnsiOscParser::new();
@@ -886,10 +881,10 @@ mod tests {
         assert!(matches!(result, ParserOutcome::Invalid(_)));
     }
 
-    // ── Line 126: Invalid state + terminator → InvalidFinished ──────────────
-    // NOTE: Line 126 (`self.state = AnsiOscParserState::InvalidFinished`) is
+    // ── Invalid state + terminator → InvalidFinished ────────────────────────
+    // NOTE: `self.state = AnsiOscParserState::InvalidFinished` is
     // effectively unreachable through `push()`: transitioning to Invalid
-    // clears `self.params` (line 94) and the Invalid arm never pushes bytes
+    // clears `self.params` and the Invalid arm never pushes bytes
     // into params, so `is_osc_terminator(&self.params)` always sees an empty
     // slice and returns false.  We test the reachable Invalid-state behavior
     // instead: push returns Invalid and state stays Invalid.
@@ -905,7 +900,7 @@ mod tests {
         assert_eq!(parser.state, AnsiOscParserState::Invalid);
     }
 
-    // ── Line 185: ansiparser_inner_osc in Invalid state (non-terminator) ────
+    // ── ansiparser_inner_osc in Invalid state (non-terminator) ──────────────
     #[test]
     fn ansiparser_inner_osc_invalid_state_non_terminator() {
         let mut parser = AnsiOscParser::new();
@@ -914,17 +909,14 @@ mod tests {
         parser.push(0x01);
         assert_eq!(parser.state, AnsiOscParserState::Invalid);
         // Feed a non-terminator printable byte through ansiparser_inner_osc
-        // The push returns Invalid (because state is Invalid), so line 148 returns early.
-        // We need to reach line 185 where state is Invalid but push returned Continue/Finished.
-        // Actually, looking at the code: line 147 checks push_result for Invalid and returns
-        // early. So line 185 is only reached if push() returns something OTHER than Invalid
-        // while state is Invalid. That means the Invalid state always returns Invalid from push().
-        // This line may be dead code in practice. Let's confirm by feeding data:
+        // push() returns Invalid while the state is Invalid, and
+        // ansiparser_inner_osc returns that result early, so its own
+        // `AnsiOscParserState::Invalid` match arm is not reached here.
         let result = parser.ansiparser_inner_osc(b'A', &mut output);
         assert!(matches!(result, ParserOutcome::Invalid(_)));
     }
 
-    // ── Lines 245-259: OSC 133 (FTCS) ───────────────────────────────────────
+    // ── OSC 133 (FTCS) ──────────────────────────────────────────────────────
     #[test]
     fn osc133_ftcs_prompt_start() {
         // OSC 133 ; A ; freminal=1 ; fid=t1 BEL — FTCS prompt start (freminal format)
@@ -1019,7 +1011,7 @@ mod tests {
         }
     }
 
-    // ── Lines 272-276: OSC 7 (RemoteHost) ───────────────────────────────────
+    // ── OSC 7 (RemoteHost) ──────────────────────────────────────────────────
     #[test]
     fn osc7_remote_host() {
         // OSC 7 ; file:///home/user BEL
@@ -1032,7 +1024,7 @@ mod tests {
         );
     }
 
-    // ── Lines 281-293: Reset color OSCs ─────────────────────────────────────
+    // ── Reset color OSCs ────────────────────────────────────────────────────
     #[test]
     fn osc112_reset_cursor_color() {
         // OSC 112 BEL — reset cursor color
@@ -1706,6 +1698,8 @@ mod tests {
             b"0052",
             b"1337;File=x",
             b"01337;File=x",
+            b"+52;c;x",
+            b"+1337;File=x",
         ] {
             assert_eq!(OscLimit::for_body(body), OscLimit::Large, "{body:?}");
         }
@@ -1718,7 +1712,6 @@ mod tests {
             &b"2;title"[..],
             b"52x;c;x",
             b"5;c;x",
-            b"+52;c;x",
             b";52",
             b"",
             overlong.as_bytes(),
