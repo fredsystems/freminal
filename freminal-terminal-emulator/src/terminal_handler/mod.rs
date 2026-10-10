@@ -56,6 +56,7 @@ use freminal_common::{
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
+    host_capabilities::HostCapabilities,
     pty_write::PtyWrite,
     themes::ThemePalette,
 };
@@ -277,6 +278,9 @@ pub struct TerminalHandler {
     pre_deccolm_width: Option<usize>,
     /// Active color theme for default palette lookups.
     theme: &'static ThemePalette,
+    /// Host-dependent capability facts (configuration and platform) the GUI
+    /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
+    host_capabilities: HostCapabilities,
     /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
     ///
     /// When `Some`, responses to OSC 10 queries use this value instead of the
@@ -478,6 +482,7 @@ impl TerminalHandler {
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            host_capabilities: HostCapabilities::default(),
             fg_color_override: None,
             bg_color_override: None,
             cursor_color_override: None,
@@ -528,6 +533,21 @@ impl TerminalHandler {
     /// Set the active theme palette.
     pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
         self.theme = theme;
+    }
+
+    /// Get the host-dependent capability facts.
+    #[must_use]
+    pub const fn host_capabilities(&self) -> HostCapabilities {
+        self.host_capabilities
+    }
+
+    /// Set the host-dependent capability facts.
+    ///
+    /// Called with the GUI's value at pane spawn and again whenever a config
+    /// change alters it. Not touched by a terminal reset: these are facts about
+    /// the host, not terminal state.
+    pub const fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
+        self.host_capabilities = host_capabilities;
     }
 
     /// Get the current S8C1T mode.
@@ -4216,6 +4236,26 @@ mod tests {
         handler.handle_data(b"q");
         // Cursor should advance
         assert_eq!(handler.buffer().cursor().pos.x, 1);
+    }
+
+    #[test]
+    fn host_capabilities_default_then_set_and_get() {
+        use freminal_common::host_capabilities::{
+            Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.host_capabilities(), HostCapabilities::default());
+        assert_eq!(handler.host_capabilities().osc99, Osc99Support::Unsupported);
+
+        let caps = HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::NotReported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        };
+        handler.set_host_capabilities(caps);
+        assert_eq!(handler.host_capabilities(), caps);
     }
 
     #[test]

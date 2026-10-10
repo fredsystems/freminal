@@ -114,6 +114,15 @@ pub enum InputEvent {
     /// overwrite: a program's own subsequent DECSCUSR / `XTCBlink` request
     /// still takes over normally afterward.
     CursorConfigChange(freminal_common::cursor::CursorVisualStyle),
+    /// The host-dependent capability facts changed while a pane was already
+    /// running (Task 130.4).
+    ///
+    /// Sent by the GUI when a config change alters what the host can do (for
+    /// example the OSC 99 routing). The PTY thread calls
+    /// `handler.set_host_capabilities()`, exactly like the initial seed applied
+    /// at pane-spawn time. It changes nothing visible, so it requests no
+    /// repaint.
+    HostCapabilitiesChange(freminal_common::host_capabilities::HostCapabilities),
 }
 
 /// The full buffer as one `TChar` corpus, tagged with the rows it was cut from.
