@@ -112,6 +112,26 @@ struct KittyImageState {
     data: BoundedChunkAssembler,
 }
 
+/// Where a Kitty graphics chunked transfer currently stands.
+///
+/// `Discarding` exists so that a transfer abandoned part-way (a cap error)
+/// swallows its remaining continuation chunks instead of letting them be
+/// misread as new transmit commands, which would start a bogus transfer or
+/// produce an error reply for a transfer the terminal already dropped.
+#[derive(Debug, Default)]
+enum KittyTransfer {
+    /// No chunked transfer in progress.
+    #[default]
+    Idle,
+    /// Accumulating chunks of a live transfer.
+    ///
+    /// Boxed: the state is much larger than the other variants.
+    Receiving(Box<KittyImageState>),
+    /// The transfer was abandoned; continuation chunks (those with no
+    /// explicit `a=`) are dropped silently until the final `m=0` chunk.
+    Discarding,
+}
+
 /// Tracked state for diacritic inheritance between consecutive placeholder cells.
 ///
 /// When a U+10EEEE placeholder character omits some or all diacritics, the
@@ -289,11 +309,12 @@ pub struct TerminalHandler {
     /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
     /// and cleared by `ITerm2FileEnd`.
     multipart_state: Option<MultipartImageState>,
-    /// In-progress Kitty graphics chunked transfer, if any.
+    /// Kitty graphics chunked-transfer state.
     ///
-    /// Set by a Kitty graphics command with `m=1`, appended by subsequent
-    /// `m=1` chunks, consumed and cleared by a final `m=0` chunk.
-    kitty_state: Option<KittyImageState>,
+    /// `Receiving` is set by a Kitty graphics command with `m=1`, appended by
+    /// subsequent `m=1` chunks, and consumed by a final `m=0` chunk. A cap
+    /// error moves it to `Discarding` until the transfer's final chunk.
+    kitty_transfer: KittyTransfer,
     /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands.
     ///
     /// Keyed by `(image_id, placement_id)`.  When U+10EEEE placeholder characters
@@ -463,7 +484,7 @@ impl TerminalHandler {
             progress: ProgressReport::default(),
             progress_updated_at: None,
             multipart_state: None,
-            kitty_state: None,
+            kitty_transfer: KittyTransfer::Idle,
             virtual_placements: HashMap::new(),
             real_placements: HashMap::new(),
             placement_prune_base: RowNumber::ZERO,

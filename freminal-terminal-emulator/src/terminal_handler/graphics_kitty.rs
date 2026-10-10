@@ -34,10 +34,10 @@ use freminal_buffer::image_store::{
     SubCellOffset, next_image_id, next_placement_instance_id,
 };
 
-use super::KittyImageState;
 use super::RealPlacement;
 use super::TerminalHandler;
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkLimits};
+use super::{KittyImageState, KittyTransfer};
 use crate::ansi_components::apc::MAX_APC_BYTES;
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
@@ -606,20 +606,35 @@ impl TerminalHandler {
         // carry ONLY `m` and optionally `q` — no explicit `a=` key.  If the
         // incoming command explicitly sets `a=`, it is a new command and any
         // stale chunked state must be discarded.
-        if self.kitty_state.is_some() {
-            if cmd.control.action.is_none() {
+        match &self.kitty_transfer {
+            KittyTransfer::Receiving(_) if cmd.control.action.is_none() => {
                 // No explicit action → this is a continuation chunk.
                 self.handle_kitty_chunk(&cmd);
                 return;
             }
-            // Explicit action on a new command while a chunked transfer is in
-            // progress — discard the stale accumulator.
-            tracing::warn!(
-                "Kitty graphics: discarding incomplete chunked transfer \
-                 (id={:?}) due to new command (a={action:?})",
-                self.kitty_state.as_ref().map(|s| s.control.image_id),
-            );
-            self.kitty_state = None;
+            KittyTransfer::Discarding if cmd.control.action.is_none() => {
+                // Tail of a transfer that was already abandoned: drop it.
+                self.handle_kitty_discarded_chunk(&cmd);
+                return;
+            }
+            KittyTransfer::Receiving(state) => {
+                // Explicit action on a new command while a chunked transfer is
+                // in progress — discard the stale accumulator.
+                tracing::warn!(
+                    "Kitty graphics: discarding incomplete chunked transfer \
+                     (id={:?}) due to new command (a={action:?})",
+                    state.control.image_id,
+                );
+                self.kitty_transfer = KittyTransfer::Idle;
+            }
+            KittyTransfer::Discarding => {
+                // A new command ends the abandoned transfer's silent tail.
+                tracing::debug!(
+                    "Kitty graphics: new command (a={action:?}) ends discarded transfer"
+                );
+                self.kitty_transfer = KittyTransfer::Idle;
+            }
+            KittyTransfer::Idle => {}
         }
 
         tracing::debug!(
@@ -696,7 +711,7 @@ impl TerminalHandler {
 
     /// Start a chunked Kitty graphics transfer (first chunk, `m=1`).
     fn handle_kitty_chunk_start(&mut self, cmd: KittyGraphicsCommand) {
-        if self.kitty_state.is_some() {
+        if matches!(self.kitty_transfer, KittyTransfer::Receiving(_)) {
             tracing::warn!(
                 "Kitty graphics: new chunked transfer started while previous was in progress; \
                  discarding incomplete transfer"
@@ -707,34 +722,60 @@ impl TerminalHandler {
         // assembler grows only as bytes actually arrive.
         let mut data = BoundedChunkAssembler::new(KITTY_CHUNK_LIMITS);
         if let Err(err) = data.push(&cmd.payload, ChunkEncoding::Raw) {
+            // The first chunk is `m=1`, so more chunks follow: swallow them.
             tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
-            self.kitty_state = None;
+            self.kitty_transfer = KittyTransfer::Discarding;
             return;
         }
 
-        self.kitty_state = Some(KittyImageState {
-            control: cmd.control,
-            data,
-        });
-
         tracing::debug!(
             "Kitty graphics: started chunked transfer (id={:?})",
-            self.kitty_state.as_ref().map(|s| s.control.image_id),
+            cmd.control.image_id,
         );
+        self.kitty_transfer = KittyTransfer::Receiving(Box::new(KittyImageState {
+            control: cmd.control,
+            data,
+        }));
+    }
+
+    /// Drop a continuation chunk of an abandoned transfer, silently.
+    ///
+    /// The final chunk (`m=0`) ends the transfer, returning to `Idle`.
+    fn handle_kitty_discarded_chunk(&mut self, cmd: &KittyGraphicsCommand) {
+        tracing::trace!(
+            "Kitty graphics: dropping chunk of abandoned transfer ({} bytes, more={})",
+            cmd.payload.len(),
+            cmd.control.more_data,
+        );
+        if !cmd.control.more_data {
+            self.kitty_transfer = KittyTransfer::Idle;
+        }
+    }
+
+    /// Abandon the in-progress transfer after a chunk error, with no reply.
+    ///
+    /// If the offending chunk was not the final one, the remaining chunks are
+    /// swallowed (`Discarding`); if it was the final chunk the transfer is over.
+    fn abandon_kitty_transfer(&mut self, cmd: &KittyGraphicsCommand) {
+        self.kitty_transfer = if cmd.control.more_data {
+            KittyTransfer::Discarding
+        } else {
+            KittyTransfer::Idle
+        };
     }
 
     /// Append a chunk to the in-progress Kitty graphics transfer.
     ///
     /// If `m=0` (final chunk), finalise the transfer and dispatch.
     fn handle_kitty_chunk(&mut self, cmd: &KittyGraphicsCommand) {
-        let Some(state) = &mut self.kitty_state else {
+        let KittyTransfer::Receiving(state) = &mut self.kitty_transfer else {
             tracing::warn!("Kitty graphics: chunk received with no active transfer; ignoring");
             return;
         };
 
         if let Err(err) = state.data.push(&cmd.payload, ChunkEncoding::Raw) {
             tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
-            self.kitty_state = None;
+            self.abandon_kitty_transfer(cmd);
             return;
         }
 
@@ -746,8 +787,9 @@ impl TerminalHandler {
             );
         } else {
             // Final chunk — take ownership and dispatch.
-            let Some(final_state) = self.kitty_state.take() else {
-                // Unreachable: `state` above borrowed `kitty_state` as `Some`.
+            let KittyTransfer::Receiving(final_state) = std::mem::take(&mut self.kitty_transfer)
+            else {
+                // Unreachable: `state` above borrowed the transfer as `Receiving`.
                 return;
             };
 
@@ -755,6 +797,7 @@ impl TerminalHandler {
             let payload = match final_state.data.finish() {
                 Ok(payload) => payload,
                 Err(err) => {
+                    // Final chunk: the transfer is over (state is already Idle).
                     tracing::warn!("Kitty graphics: chunked transfer abandoned: {err}");
                     return;
                 }
@@ -1061,6 +1104,9 @@ impl TerminalHandler {
     /// any display-size overrides (`c=`/`r=`) from the control data, and
     /// places the image into the buffer.
     fn handle_kitty_put(&mut self, cmd: &KittyGraphicsCommand, image_id: u32, quiet: u8) {
+        /// Most stored image ids listed in the unknown-id debug log.
+        const MAX_LISTED_IDS: usize = 16;
+
         let image_number = cmd.control.image_number;
 
         let Some(id) = self.resolve_kitty_reference_id(
@@ -1076,13 +1122,23 @@ impl TerminalHandler {
         let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
             tracing::warn!(
                 "Kitty graphics: a=p for unknown image id={image_id} \
-                 (store has {} images: {:?})",
+                 (store has {} images)",
                 self.buffer.image_store().len(),
+            );
+            let store_len = self.buffer.image_store().len();
+            tracing::debug!(
+                "Kitty graphics: stored image ids: {:?}{}",
                 self.buffer
                     .image_store()
                     .iter()
                     .map(|(k, _)| k)
+                    .take(MAX_LISTED_IDS)
                     .collect::<Vec<_>>(),
+                if store_len > MAX_LISTED_IDS {
+                    format!(" … ({} more)", store_len - MAX_LISTED_IDS)
+                } else {
+                    String::new()
+                },
             );
             self.send_kitty_error(
                 KittyResponseId {
@@ -3670,7 +3726,7 @@ mod tests {
     use freminal_buffer::cell::Cell;
     use freminal_buffer::row::Row;
 
-    use super::super::TerminalHandler;
+    use super::super::{KittyImageState, KittyTransfer, TerminalHandler};
     use freminal_common::buffer_states::row_number::RowNumber;
 
     // ------------------------------------------------------------------
@@ -8175,7 +8231,7 @@ mod tests {
         };
         handler.handle_kitty_graphics(chunk1);
         assert!(
-            handler.kitty_state.is_some(),
+            kitty_receiving(&handler),
             "Chunked transfer should be in progress"
         );
 
@@ -8185,7 +8241,7 @@ mod tests {
 
         // Stale chunked transfer should be gone
         assert!(
-            handler.kitty_state.is_none(),
+            kitty_idle(&handler),
             "Stale chunked transfer should be discarded"
         );
         // New image should be stored
@@ -8287,7 +8343,7 @@ mod tests {
             payload: vec![255, 0, 0, 255, 0, 255, 0, 255],
         };
         handler.handle_kitty_graphics(chunk1);
-        assert!(handler.kitty_state.is_some());
+        assert!(kitty_receiving(&handler));
 
         // Second chunk (continuation, more_data=true)
         let chunk2 = KittyGraphicsCommand {
@@ -8299,7 +8355,7 @@ mod tests {
             payload: vec![0, 0, 255, 255, 255, 255, 0, 255],
         };
         handler.handle_kitty_graphics(chunk2);
-        assert!(handler.kitty_state.is_some());
+        assert!(kitty_receiving(&handler));
 
         // Final chunk (more_data=false)
         let chunk3 = KittyGraphicsCommand {
@@ -8311,10 +8367,7 @@ mod tests {
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(chunk3);
-        assert!(
-            handler.kitty_state.is_none(),
-            "Chunked transfer should be complete"
-        );
+        assert!(kitty_idle(&handler), "Chunked transfer should be complete");
         assert!(handler.buffer().image_store().get(300).is_some());
     }
 
@@ -8342,12 +8395,51 @@ mod tests {
         }
     }
 
+    /// Whether a continuation chunk is followed by more chunks (`m=1`) or is
+    /// the final one (`m=0`).
+    #[derive(Clone, Copy)]
+    enum More {
+        Yes,
+        No,
+    }
+
+    /// True while a chunked transfer is being accumulated.
+    fn kitty_receiving(handler: &TerminalHandler) -> bool {
+        matches!(handler.kitty_transfer, KittyTransfer::Receiving(_))
+    }
+
+    /// True when no chunked transfer is in progress and none is being discarded.
+    fn kitty_idle(handler: &TerminalHandler) -> bool {
+        matches!(handler.kitty_transfer, KittyTransfer::Idle)
+    }
+
+    /// True while the tail of an abandoned transfer is being swallowed.
+    fn kitty_discarding(handler: &TerminalHandler) -> bool {
+        matches!(handler.kitty_transfer, KittyTransfer::Discarding)
+    }
+
+    /// The live transfer state; panics if no transfer is being received.
+    fn kitty_receiving_mut(handler: &mut TerminalHandler) -> &mut KittyImageState {
+        match &mut handler.kitty_transfer {
+            KittyTransfer::Receiving(state) => state,
+            other => panic!("transfer in progress expected, got {other:?}"),
+        }
+    }
+
+    /// Shared-reference form of [`kitty_receiving_mut`].
+    fn kitty_receiving_ref(handler: &TerminalHandler) -> &KittyImageState {
+        match &handler.kitty_transfer {
+            KittyTransfer::Receiving(state) => state,
+            other => panic!("transfer in progress expected, got {other:?}"),
+        }
+    }
+
     /// A continuation chunk (no explicit action) with the given `m` value.
-    fn kitty_chunk_next(more_data: bool, payload: Vec<u8>) -> KittyGraphicsCommand {
+    fn kitty_chunk_next(more: More, payload: Vec<u8>) -> KittyGraphicsCommand {
         KittyGraphicsCommand {
             control: KittyControlData {
                 action: None,
-                more_data,
+                more_data: matches!(more, More::Yes),
                 ..KittyControlData::default()
             },
             payload,
@@ -8359,10 +8451,10 @@ mod tests {
     fn assert_chunked_transfer_works(handler: &mut TerminalHandler, id: u32) {
         handler.handle_kitty_graphics(kitty_chunk_first(id, vec![255, 0, 0, 255, 0, 255, 0, 255]));
         handler.handle_kitty_graphics(kitty_chunk_next(
-            false,
+            More::No,
             vec![0, 0, 255, 255, 255, 255, 0, 255],
         ));
-        assert!(handler.kitty_state.is_none());
+        assert!(kitty_idle(handler));
         assert!(handler.buffer().image_store().get(u64::from(id)).is_some());
     }
 
@@ -8373,15 +8465,15 @@ mod tests {
         // Start through the real path, then swap the assembler for one with
         // small limits so the cap can be crossed cheaply.
         handler.handle_kitty_graphics(kitty_chunk_first(400, vec![0; 8]));
-        let state = handler.kitty_state.as_mut().expect("transfer in progress");
+        let state = kitty_receiving_mut(&mut handler);
         let mut small = super::BoundedChunkAssembler::new(SMALL_KITTY_LIMITS);
         small.push(&[0; 8], super::ChunkEncoding::Raw).unwrap();
         state.data = small;
 
         // 8 + 8 = 16 > 12: over the total cap.
-        handler.handle_kitty_graphics(kitty_chunk_next(true, vec![0; 8]));
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![0; 8]));
 
-        assert!(handler.kitty_state.is_none(), "transfer must be abandoned");
+        assert!(kitty_discarding(&handler), "transfer must be abandoned");
         assert!(handler.buffer().image_store().get(400).is_none());
         assert!(!handler.buffer().has_any_image_cell());
         assert!(rx.try_recv().is_err(), "no reply may be written");
@@ -8393,14 +8485,14 @@ mod tests {
     fn kitty_chunked_transfer_at_total_cap_is_accepted() {
         let (mut handler, _rx) = kitty_handler();
         handler.handle_kitty_graphics(kitty_chunk_first(410, vec![0; 8]));
-        let state = handler.kitty_state.as_mut().expect("transfer in progress");
+        let state = kitty_receiving_mut(&mut handler);
         let mut small = super::BoundedChunkAssembler::new(SMALL_KITTY_LIMITS);
         small.push(&[0; 8], super::ChunkEncoding::Raw).unwrap();
         state.data = small;
 
         // 8 + 4 = 12 == cap: still accepted.
-        handler.handle_kitty_graphics(kitty_chunk_next(true, vec![0; 4]));
-        assert!(handler.kitty_state.is_some());
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![0; 4]));
+        assert!(kitty_receiving(&handler));
     }
 
     #[test]
@@ -8412,7 +8504,7 @@ mod tests {
             vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
         ));
 
-        assert!(handler.kitty_state.is_none());
+        assert!(kitty_discarding(&handler));
         assert!(!handler.buffer().has_any_image_cell());
         assert!(rx.try_recv().is_err(), "no reply may be written");
 
@@ -8428,18 +8520,132 @@ mod tests {
             430,
             vec![0; crate::ansi_components::apc::MAX_APC_BYTES],
         ));
-        assert!(handler.kitty_state.is_some());
+        assert!(kitty_receiving(&handler));
 
         // One byte over is not.
         handler.handle_kitty_graphics(kitty_chunk_next(
-            true,
+            More::Yes,
             vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
         ));
-        assert!(handler.kitty_state.is_none());
+        assert!(kitty_discarding(&handler));
         assert!(!handler.buffer().has_any_image_cell());
         assert!(rx.try_recv().is_err(), "no reply may be written");
 
         assert_chunked_transfer_works(&mut handler, 431);
+    }
+
+    /// Swap the live transfer's assembler for a small-limit one holding 8 bytes.
+    fn shrink_kitty_limits(handler: &mut TerminalHandler) {
+        let state = kitty_receiving_mut(handler);
+        let mut small = super::BoundedChunkAssembler::new(SMALL_KITTY_LIMITS);
+        small.push(&[0; 8], super::ChunkEncoding::Raw).unwrap();
+        state.data = small;
+    }
+
+    #[test]
+    fn kitty_tail_chunks_after_total_cap_abandonment_are_dropped_silently() {
+        let (mut handler, rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(450, vec![0; 8]));
+        shrink_kitty_limits(&mut handler);
+
+        // 8 + 8 = 16 > 12: abandoned, but more chunks are still coming.
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![0; 8]));
+        assert!(kitty_discarding(&handler));
+
+        // Further `m=1` tail chunks must not start a new transfer.
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![1; 8]));
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![2; 8]));
+        assert!(kitty_discarding(&handler));
+
+        // The final `m=0` chunk must not be dispatched as a transmit either.
+        handler.handle_kitty_graphics(kitty_chunk_next(More::No, vec![3; 4]));
+
+        assert!(kitty_idle(&handler), "final chunk returns to Idle");
+        assert!(handler.buffer().image_store().get(450).is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_chunked_transfer_works(&mut handler, 451);
+    }
+
+    #[test]
+    fn kitty_tail_chunks_after_first_chunk_over_apc_cap_are_dropped_silently() {
+        let (mut handler, rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            460,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+        assert!(kitty_discarding(&handler));
+
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![0; 8]));
+        handler.handle_kitty_graphics(kitty_chunk_next(More::Yes, vec![0; 8]));
+        assert!(kitty_discarding(&handler));
+        handler.handle_kitty_graphics(kitty_chunk_next(More::No, vec![0; 8]));
+
+        assert!(kitty_idle(&handler));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+
+        assert_chunked_transfer_works(&mut handler, 461);
+    }
+
+    #[test]
+    fn kitty_final_chunk_over_cap_returns_to_idle() {
+        let (mut handler, rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(470, vec![0; 8]));
+        shrink_kitty_limits(&mut handler);
+
+        // The abandoning chunk is itself the last one: nothing left to swallow.
+        handler.handle_kitty_graphics(kitty_chunk_next(More::No, vec![0; 8]));
+
+        assert!(kitty_idle(&handler));
+        assert!(rx.try_recv().is_err(), "no reply may be written");
+    }
+
+    #[test]
+    fn kitty_explicit_action_while_discarding_is_processed_normally() {
+        let (mut handler, rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            480,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+        assert!(kitty_discarding(&handler));
+
+        // A query with an explicit action gets its normal reply.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                image_id: Some(481),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+        assert!(kitty_idle(&handler));
+        match rx.try_recv().expect("query must be answered") {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("i=481") && s.contains("OK"), "got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_fresh_transfer_while_discarding_completes() {
+        let (mut handler, _rx) = kitty_handler();
+
+        handler.handle_kitty_graphics(kitty_chunk_first(
+            490,
+            vec![0; crate::ansi_components::apc::MAX_APC_BYTES + 1],
+        ));
+        assert!(kitty_discarding(&handler));
+
+        // A new transfer (explicit action) abandons the discard and runs.
+        assert_chunked_transfer_works(&mut handler, 491);
     }
 
     #[test]
@@ -8450,7 +8656,7 @@ mod tests {
         first.control.data_size = Some(u32::MAX);
         handler.handle_kitty_graphics(first);
 
-        let state = handler.kitty_state.as_ref().expect("transfer in progress");
+        let state = kitty_receiving_ref(&handler);
         assert_eq!(state.data.len(), 0);
         assert_eq!(state.data.capacity(), 0, "S= must not size an allocation");
     }
@@ -9808,7 +10014,7 @@ mod tests {
         };
         handler.handle_kitty_graphics(chunk1);
         assert!(
-            handler.kitty_state.is_some(),
+            kitty_receiving(&handler),
             "Should have in-progress chunked state"
         );
 
@@ -9826,7 +10032,7 @@ mod tests {
         };
         handler.handle_kitty_graphics(new_cmd);
         assert!(
-            handler.kitty_state.is_none(),
+            kitty_idle(&handler),
             "Stale state should have been discarded"
         );
     }
