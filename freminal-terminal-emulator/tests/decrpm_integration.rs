@@ -550,3 +550,85 @@ fn decrpm_decsclm_in_8bit_mode_uses_0x9b() {
     let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?4$p");
     assert_eq!(resp, b"\x9b?4;4$y");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A DECRQM must never overwrite the stored state (Task 130.C6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn lnm_query_after_set_leaves_line_feed_mode_set() {
+    use freminal_common::buffer_states::modes::lnm::Lnm;
+
+    let (mut state, rx) = make_state();
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[20h");
+    assert_eq!(state.modes.line_feed_mode, Lnm::NewLine);
+
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;1$y", "LNM is set, so DECRQM reports Ps=1");
+    assert_eq!(
+        state.modes.line_feed_mode,
+        Lnm::NewLine,
+        "a DECRQM must not overwrite the stored LNM state"
+    );
+}
+
+#[test]
+fn lnm_query_on_default_state_leaves_line_feed_mode_reset() {
+    use freminal_common::buffer_states::modes::lnm::Lnm;
+
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y");
+    assert_eq!(state.modes.line_feed_mode, Lnm::LineFeed);
+}
+
+/// Every `TerminalState`-owned mode whose enum has a `Query` variant (or whose
+/// query is routed through one): moving the mode off its default and then
+/// querying it must leave the stored `TerminalModes` byte-for-byte unchanged.
+#[test]
+fn querying_a_terminal_state_mode_never_changes_stored_modes() {
+    // (label, sequence that moves the mode off its default, DECRQM sequence)
+    let cases: &[(&str, &[u8], &[u8])] = &[
+        ("DECCKM ?1", b"\x1b[?1h", b"\x1b[?1$p"),
+        ("DECSCNM ?5", b"\x1b[?5h", b"\x1b[?5$p"),
+        ("DECARM ?8", b"\x1b[?8l", b"\x1b[?8$p"),
+        ("X10 mouse ?9", b"\x1b[?9h", b"\x1b[?9$p"),
+        ("LNM 20", b"\x1b[20h", b"\x1b[20$p"),
+        ("ReverseWrapAround ?45", b"\x1b[?45l", b"\x1b[?45$p"),
+        ("DECNKM ?66", b"\x1b[?66h", b"\x1b[?66$p"),
+        ("DECBKM ?67", b"\x1b[?67h", b"\x1b[?67$p"),
+        ("X11 mouse ?1000", b"\x1b[?1000h", b"\x1b[?1000$p"),
+        ("Button mouse ?1002", b"\x1b[?1002h", b"\x1b[?1002$p"),
+        ("Any mouse ?1003", b"\x1b[?1003h", b"\x1b[?1003$p"),
+        ("XtMseWin ?1004", b"\x1b[?1004h", b"\x1b[?1004$p"),
+        ("UTF-8 mouse ?1005", b"\x1b[?1005h", b"\x1b[?1005$p"),
+        ("SGR mouse ?1006", b"\x1b[?1006h", b"\x1b[?1006$p"),
+        ("AlternateScroll ?1007", b"\x1b[?1007h", b"\x1b[?1007$p"),
+        ("SGR-pixels mouse ?1016", b"\x1b[?1016h", b"\x1b[?1016$p"),
+        ("BracketedPaste ?2004", b"\x1b[?2004h", b"\x1b[?2004$p"),
+        ("SynchronizedUpdates ?2026", b"\x1b[?2026h", b"\x1b[?2026$p"),
+        ("Theming ?2031", b"\x1b[?2031l", b"\x1b[?2031$p"),
+    ];
+
+    for (label, change, query) in cases {
+        let (mut state, rx) = make_state();
+        // ?2031 is only honoured when the theme mode is Auto.
+        state.modes.theme_mode = ThemeMode::Auto;
+        let default_modes = format!("{:?}", state.modes);
+
+        let _ = feed_and_collect(&mut state, &rx, change);
+        let changed = format!("{:?}", state.modes);
+        assert_ne!(
+            changed, default_modes,
+            "{label}: the change sequence must move the stored state off its default"
+        );
+
+        let resp = feed_and_collect(&mut state, &rx, query);
+        assert!(!resp.is_empty(), "{label}: the query must be answered");
+        assert_eq!(
+            format!("{:?}", state.modes),
+            changed,
+            "{label}: a DECRQM must not change the stored state"
+        );
+    }
+}

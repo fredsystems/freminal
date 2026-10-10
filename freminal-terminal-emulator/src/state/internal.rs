@@ -17,7 +17,9 @@ use freminal_common::{
             decbkm::Decbkm,
             decckm::Decckm,
             decnkm::Decnkm,
+            decsclm::Decsclm,
             keypad::KeypadMode,
+            lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
             reverse_wrap_around::ReverseWrapAround,
             s8c1t::S8c1t,
@@ -319,7 +321,12 @@ impl TerminalState {
                 v @ (ReverseWrapAround::WrapAround | ReverseWrapAround::DontWrap),
             ) => self.modes.reverse_wrap_around = *v,
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-            Mode::LineFeedMode(v) => self.modes.line_feed_mode = *v,
+            // `Lnm::Query` is excluded by the handler-owned arm below: a DECRQM
+            // for LNM must not overwrite the stored state that input encoding
+            // reads.
+            Mode::LineFeedMode(v @ (Lnm::NewLine | Lnm::LineFeed)) => {
+                self.modes.line_feed_mode = *v;
+            }
             Mode::Decnkm(Decnkm::Application) => {
                 self.modes.keypad_mode = KeypadMode::Application;
             }
@@ -350,8 +357,9 @@ impl TerminalState {
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
+            | Mode::LineFeedMode(Lnm::Query)
             | Mode::Decanm(Decanm::Query)
-            | Mode::Decsclm(freminal_common::buffer_states::modes::decsclm::Decsclm::Query) => {}
+            | Mode::Decsclm(Decsclm::Query) => {}
             // DECANM — toggle the parser between VT52 and ANSI modes.
             // The handler owns the authoritative `vt52_mode` flag, but
             // the parser also needs to know so it routes ESC bytes to
@@ -529,7 +537,9 @@ impl TerminalState {
             if matches!(output, TerminalOutput::ResetDevice) {
                 // RIS replaces the parser mid-iteration.  The outputs that
                 // follow in this same chunk were already parsed by the old
-                // parser; only the next chunk sees the fresh parser.
+                // parser; only the next chunk sees the fresh parser.  The
+                // replacement also drops any in-flight sequence and a trailing
+                // split UTF-8 character (see `apply_state_reset`; Task 131.8).
                 self.apply_state_reset();
             }
             self.process_tmux_passthrough_queue(depth);
@@ -568,6 +578,13 @@ impl TerminalState {
     /// `ResetDevice`.  This resets modes, parser, leftover data, cursor visual
     /// style and pending window commands.  `write_tx` is preserved (user
     /// configuration).
+    ///
+    /// Two side effects are known to be too coarse: replacing the parser
+    /// discards any sequence the old parser was part-way through at the end of
+    /// the chunk, and clearing `leftover_data` drops a trailing split UTF-8
+    /// character that belongs *after* the RIS.  Both predate Task 130 and are
+    /// fixed by Task 131.8's reset table (row "parser state, `leftover_data`");
+    /// the behaviour is deliberately unchanged here.
     fn apply_state_reset(&mut self) {
         self.modes = TerminalModes::default();
         self.parser = FreminalAnsiParser::new();
@@ -1127,20 +1144,6 @@ mod tests {
             }
             PtyWrite::Resize(_) => panic!("unexpected Resize"),
         }
-    }
-
-    // ── tmux passthrough queue is drained in-line ───────────────────────────
-    #[test]
-    fn tmux_passthrough_queue_is_drained_by_handle_incoming_data() {
-        let mut state = TerminalState::default();
-        // A tmux DCS passthrough containing an OSC title-set sequence:
-        // ESC P tmux; ESC ESC ] 0 ; hello BEL ESC \   (inner ESC is doubled)
-        state.handle_incoming_data(b"\x1bPtmux;\x1b\x1b]0;hello\x07\x1b\\");
-        // The queue must be empty again once the batch has been processed.
-        assert!(
-            state.handler.take_tmux_passthrough_queue().is_empty(),
-            "tmux passthrough queue should be drained after handle_incoming_data"
-        );
     }
 
     /// Wrap `inner` in `levels` nested `ESC P tmux; ... ESC \` envelopes.

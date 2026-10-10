@@ -16,6 +16,7 @@ use freminal_common::config::BellMode;
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
+use freminal_terminal_emulator::ansi_components::tracer::escape_sequence_for_log_bounded;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
 use crate::gui::chrome_style;
@@ -550,8 +551,10 @@ pub(super) fn handle_window_manipulation(
                 let payload = if flags.allow_clipboard_read {
                     read_clipboard_base64()
                 } else {
+                    // `sel` is application-supplied: escape and bound it.
                     tracing::debug!(
-                        "OSC 52 query for selection '{sel}' — blocked by security config"
+                        "OSC 52 query for selection '{}' — blocked by security config",
+                        escape_sequence_for_log_bounded(sel.as_bytes())
                     );
                     osc52_events.push(Osc52ToastEvent::ReadBlocked);
                     String::new()

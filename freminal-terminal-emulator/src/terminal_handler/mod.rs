@@ -1467,6 +1467,13 @@ impl TerminalHandler {
     ///
     /// This is the main entry point for integrating with the parser.
     /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
+    ///
+    /// A tmux DCS passthrough payload is only **queued** here
+    /// (see [`Self::take_tmux_passthrough_queue`]); the handler never executes
+    /// it. The payload runs only when `TerminalState` drives processing, which
+    /// drains the queue after each output and processes every payload through a
+    /// fresh parser. A caller that feeds a handler directly must drain the queue
+    /// itself, or a tmux payload has no effect.
     pub fn process_outputs(&mut self, outputs: &[TerminalOutput]) {
         for output in outputs {
             self.process_output_in_batch(output);

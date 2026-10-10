@@ -217,11 +217,13 @@ impl TerminalHandler {
             }
 
             // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
-            // reassembly machine; on finalize, branch on the payload type:
-            // - `p=?` is answered here from the host capabilities (Task 130.5) and
-            //   never reaches the GUI; while OSC 99 is unsupported it is not answered;
-            // - `p=alive` is dropped while OSC 99 is unsupported, else forwarded;
-            // - `p=close` is always forwarded;
+            // reassembly machine; on finalize, `dispatch_finalized_osc99` acts on it:
+            // - while OSC 99 is unsupported EVERY finalized request (display payloads,
+            //   `p=close`, `p=alive`, `p=?`) is dropped, so the terminal looks like one
+            //   that does not speak the protocol;
+            // - while supported, `p=?` is answered here from the host capabilities
+            //   (Task 130.5) and never reaches the GUI;
+            // - `p=alive` / `p=close` are forwarded as `Osc99Control`;
             // - display payloads (title/body/icon/buttons) push Notification99 (Task 99.4).
             AnsiOscType::Notify99(cmd) => {
                 if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
@@ -567,13 +569,26 @@ mod tests {
         );
     }
 
+    /// A handler whose host supports OSC 99: while it does not, every OSC 99
+    /// request is dropped (130 adversarial review finding 14).
+    fn osc99_supported_handler() -> TerminalHandler {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
+        handler
+    }
+
     // ── OSC 99 emit tests (Task 99.4) ─────────────────────────────────────────
 
     /// A single done title-only notification finalizes and pushes exactly one
     /// `Notification99` window command with defaults mapped correctly.
     #[test]
     fn osc_notify99_single_done_title_pushes_window_command() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         assert_eq!(handler.window_commands, []);
 
         let cmd = Osc99Command {
@@ -600,7 +615,7 @@ mod tests {
     fn osc_notify99_base64_title_split_mid_quantum_pushes_decoded_command() {
         use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         // "Hello" -> "SGVsbG8=", split after "SGV" (mid-quantum).
         let first = parse_osc_99(b"i=s:d=0:e=1", b"SGV").unwrap();
         let second = parse_osc_99(b"i=s:e=1", b"sbG8=").unwrap();
@@ -633,7 +648,7 @@ mod tests {
     /// correctly into the `Notification99Data` shell.
     #[test]
     fn osc_notify99_full_fields_map_correctly() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("notif-1".to_owned()),
@@ -694,7 +709,7 @@ mod tests {
     /// misrouted as empty display notifications).
     #[test]
     fn osc_notify99_close_pushes_osc99_control_close() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("close-1".to_owned()),
@@ -773,7 +788,7 @@ mod tests {
     /// `Osc99Control` — the display path is unchanged by the 99.5c branch.
     #[test]
     fn osc_notify99_title_still_pushes_notification99_not_control() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             payload_type: Osc99PayloadType::Title,
@@ -813,6 +828,24 @@ mod tests {
                 "{level} line leaked payload: {text}"
             );
         }
+    }
+
+    #[test]
+    fn osc99_request_dropped_while_unsupported_logs_a_payload_free_debug() {
+        // `TerminalState::default()` carries the default host capabilities:
+        // OSC 99 unsupported.
+        let events = feed_and_capture(b"\x1b]99;i=1;SECRETPAYLOAD\x1b\\");
+        assert!(
+            events
+                .iter()
+                .all(|(_, text)| !text.contains("SECRETPAYLOAD")),
+            "a log line leaked the payload: {events:?}"
+        );
+        let drops = events
+            .iter()
+            .filter(|(_, text)| text.contains("OSC 99 request dropped"))
+            .count();
+        assert_eq!(drops, 1, "exactly one drop line, got: {events:?}");
     }
 
     #[test]

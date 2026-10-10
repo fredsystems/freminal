@@ -26,6 +26,7 @@ use freminal_common::host_capabilities::{
 
 use super::TerminalHandler;
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkError, ChunkLimits};
+use super::pty_writer::osc99_reply_id;
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 // ── Accumulator ──────────────────────────────────────────────────────────────
@@ -594,42 +595,34 @@ impl TerminalHandler {
     }
 
     /// Act on a finalized OSC 99 request, branching on its payload type
-    /// (Tasks 99.5c and 130.5).
+    /// (Tasks 99.5c and 130.5, 130 adversarial review finding 14).
     ///
-    /// - `p=?` is answered here, from [`TerminalHandler::host_capabilities`],
-    ///   and never reaches the GUI. While OSC 99 is unsupported it is not
-    ///   answered at all, so the application sees a terminal that does not
-    ///   speak the protocol.
-    /// - `p=alive` is dropped while OSC 99 is unsupported (no notification
-    ///   can be live), and forwarded to the GUI otherwise.
-    /// - `p=close` is always forwarded.
-    /// - Display payloads push `Notification99` as before.
+    /// While OSC 99 is unsupported by the host
+    /// ([`TerminalHandler::host_capabilities`]) **every** finalized request is
+    /// dropped here, with one payload-free debug line: display payloads,
+    /// `p=close`, `p=alive` and `p=?` alike. The application sees a terminal
+    /// that does not speak the protocol, and nothing reaches the GUI (which
+    /// would otherwise cache icons even though notification routing is off).
+    ///
+    /// While supported:
+    ///
+    /// - `p=?` is answered here, from the host capabilities, and never
+    ///   reaches the GUI.
+    /// - `p=alive` and `p=close` are forwarded as `Osc99Control`.
+    /// - Display payloads push `Notification99`.
     pub(in crate::terminal_handler) fn dispatch_finalized_osc99(
         &mut self,
         finalized: FinalizedNotification,
     ) {
-        let support = self.host_capabilities().osc99;
+        let Osc99Support::Supported(features) = self.host_capabilities().osc99 else {
+            tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
+            return;
+        };
 
         if finalized.meta.payload_type == Osc99PayloadType::Query {
-            match support {
-                Osc99Support::Supported(features) => {
-                    // The id was validated by the OSC 99 parser (plain
-                    // identifier characters only), so it is safe to echo.
-                    let id = finalized.meta.id.as_deref().unwrap_or("0");
-                    let caps = osc99_query_reply_body(features);
-                    self.write_osc_response(&format!("99;i={id}:p=?;{caps}"));
-                }
-                Osc99Support::Unsupported => {
-                    tracing::debug!("OSC 99 p=? query ignored: OSC 99 is unsupported");
-                }
-            }
-            return;
-        }
-
-        if finalized.meta.payload_type == Osc99PayloadType::Alive
-            && support == Osc99Support::Unsupported
-        {
-            tracing::debug!("OSC 99 p=alive ignored: OSC 99 is unsupported");
+            let id = osc99_reply_id(finalized.meta.id.as_deref());
+            let caps = osc99_query_reply_body(features);
+            self.write_osc_response(&format!("99;i={id}:p=?;{caps}"));
             return;
         }
 

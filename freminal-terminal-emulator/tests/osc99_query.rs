@@ -174,3 +174,75 @@ fn alive_while_supported_pushes_one_alive_control() {
         other => panic!("expected Osc99Control, got: {other:?}"),
     }
 }
+
+// ── While unsupported, every request is dropped (130 review finding 14) ──────
+
+#[test]
+fn display_notification_while_unsupported_pushes_no_window_command() {
+    let (mut state, rx) = make_state(HostCapabilities::default());
+    state.handle_incoming_data(b"\x1b]99;i=1;hello\x1b\\");
+    assert!(state.window_commands.is_empty());
+    assert!(drain(&rx).is_empty());
+}
+
+#[test]
+fn display_notification_while_supported_pushes_one_notification() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=1;hello\x1b\\");
+    assert_eq!(state.window_commands.len(), 1);
+    match &state.window_commands[0] {
+        WindowManipulation::Notification99(data) => {
+            assert_eq!(data.title.as_deref(), Some("hello"));
+        }
+        other => panic!("expected Notification99, got: {other:?}"),
+    }
+}
+
+#[test]
+fn close_while_unsupported_pushes_no_window_command() {
+    let (mut state, _rx) = make_state(HostCapabilities::default());
+    state.handle_incoming_data(b"\x1b]99;i=abc:p=close;\x1b\\");
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn close_while_supported_pushes_one_close_control() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=abc:p=close;\x1b\\");
+    assert_eq!(state.window_commands.len(), 1);
+    match &state.window_commands[0] {
+        WindowManipulation::Osc99Control { id, kind } => {
+            assert_eq!(id.as_deref(), Some("abc"));
+            assert_eq!(*kind, Osc99ControlKind::Close);
+        }
+        other => panic!("expected Osc99Control, got: {other:?}"),
+    }
+}
+
+// ── p=? edge cases ───────────────────────────────────────────────────────────
+
+#[test]
+fn query_with_empty_id_replies_with_id_zero() {
+    let (mut state, rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=:p=?;\x1b\\");
+    let reply = drain(&rx);
+    assert!(
+        reply.starts_with(b"\x1b]99;i=0:p=?;"),
+        "unexpected reply: {reply:?}"
+    );
+}
+
+#[test]
+fn query_for_a_tombstoned_id_is_answered_while_supported() {
+    let (mut state, rx) = make_state(full_caps());
+    // A non-final title chunk with invalid base64 drops the transfer and
+    // leaves a tombstone for id `1`.
+    state.handle_incoming_data(b"\x1b]99;i=1:d=0:p=title:e=1;@@@@\x1b\\");
+    assert!(drain(&rx).is_empty());
+    assert!(state.window_commands.is_empty());
+
+    state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
+    let expected = format!("\x1b]99;i=1:p=?;a=report:c=1:{TAIL}\x1b\\");
+    assert_eq!(drain(&rx), expected.into_bytes());
+    assert!(state.window_commands.is_empty());
+}

@@ -152,15 +152,23 @@ const fn case(label: &'static str, inner: &'static [u8]) -> Case {
     }
 }
 
-/// Run one case, delivering `inner` directly or wrapped in tmux.
-fn run_case(case: &Case, wrapped: bool) -> Observed {
+/// How a test delivers the inner sequence.
+#[derive(Clone, Copy)]
+enum Delivery {
+    /// Straight to the terminal, as if the application had sent it.
+    Direct,
+    /// Wrapped in `ESC P tmux; ... ESC \`.
+    TmuxWrapped,
+}
+
+/// Run one case, delivering `inner` according to `delivery`.
+fn run_case(case: &Case, delivery: Delivery) -> Observed {
     let (mut state, rx) = make_state();
     feed_setup(&mut state);
     state.handle_incoming_data(case.pre);
-    if wrapped {
-        state.handle_incoming_data(&tmux_wrap(case.inner));
-    } else {
-        state.handle_incoming_data(case.inner);
+    match delivery {
+        Delivery::TmuxWrapped => state.handle_incoming_data(&tmux_wrap(case.inner)),
+        Delivery::Direct => state.handle_incoming_data(case.inner),
     }
     state.handle_incoming_data(case.post);
     state.handle_incoming_data(QUERIES);
@@ -261,8 +269,8 @@ fn equivalence_cases() -> Vec<Case> {
 #[test]
 fn inner_sequence_matches_direct_delivery() {
     for case in equivalence_cases() {
-        let direct = run_case(&case, false);
-        let wrapped = run_case(&case, true);
+        let direct = run_case(&case, Delivery::Direct);
+        let wrapped = run_case(&case, Delivery::TmuxWrapped);
         assert_eq!(
             direct, wrapped,
             "case `{}`: tmux-wrapped delivery differs from direct delivery",
@@ -613,6 +621,97 @@ fn incomplete_inner_sequence_is_discarded_and_does_not_join_the_outer_stream() {
     assert_eq!(screen_text(&wrapped), screen_text(&direct));
     assert_eq!(cursor(&wrapped), cursor(&direct));
     assert_eq!(cursor(&wrapped), (4, 0));
+    assert_eq!(replies(&wrapped_rx), replies(&direct_rx));
+}
+
+// ─── the fresh parser inherits the outer parser's modes ─────────────────────
+
+/// An inner payload that starts with ESC (the handler rejects any other
+/// start), then carries an 8-bit C1 CSI `0x9B 5 n` (DSR).
+const INNER_WITH_8BIT_CSI: &[u8] = b"\x1b[H\x9b5n";
+
+#[test]
+fn inner_8bit_csi_after_s8c1t_matches_direct_delivery() {
+    // After S8C1T the outer parser recognises 0x9B as CSI; the fresh parser
+    // that handles a tmux payload must too, or the payload is read as text.
+    let (mut direct, direct_rx) = make_state();
+    direct.handle_incoming_data(b"\x1b G");
+    direct.handle_incoming_data(INNER_WITH_8BIT_CSI);
+    let expected = replies(&direct_rx);
+    assert_eq!(expected, vec![b"\x9b0n".to_vec()], "direct DSR reply");
+
+    let (mut wrapped, wrapped_rx) = make_state();
+    wrapped.handle_incoming_data(b"\x1b G");
+    wrapped.handle_incoming_data(&tmux_wrap(INNER_WITH_8BIT_CSI));
+    assert_eq!(replies(&wrapped_rx), expected);
+    assert!(
+        screen_text(&wrapped).iter().all(String::is_empty),
+        "the 8-bit CSI must not be printed as text"
+    );
+}
+
+#[test]
+fn inner_8bit_csi_set_in_the_same_read_matches_direct_delivery() {
+    // S8C1T and the tmux payload share one read: the outer parser parsed the
+    // whole read in 7-bit mode, but the payload is processed after S8C1T took
+    // effect, so its fresh parser must be seeded with the new mode.
+    let mut wire = b"\x1b G".to_vec();
+    wire.extend_from_slice(&tmux_wrap(INNER_WITH_8BIT_CSI));
+    let (mut wrapped, wrapped_rx) = make_state();
+    wrapped.handle_incoming_data(&wire);
+
+    let (mut direct, direct_rx) = make_state();
+    direct.handle_incoming_data(b"\x1b G");
+    direct.handle_incoming_data(INNER_WITH_8BIT_CSI);
+
+    assert_eq!(replies(&wrapped_rx), replies(&direct_rx));
+}
+
+#[test]
+fn inner_da1_reply_is_8bit_framed_after_s8c1t() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    state.handle_incoming_data(&tmux_wrap(b"\x1b[c"));
+    let got = replies(&rx);
+    assert_eq!(got.len(), 1, "one DA1 reply, got {got:?}");
+    assert_eq!(
+        got[0].first(),
+        Some(&0x9b),
+        "DA1 reply must start with the 8-bit CSI, got {:?}",
+        got[0]
+    );
+    assert!(got[0].ends_with(b"c"));
+}
+
+#[test]
+fn inner_vt52_sequence_matches_direct_delivery() {
+    // The outer parser cannot carry a DCS while in VT52 mode (VT52 has no
+    // DCS), and ANSI -> VT52 only takes effect after a read has been parsed.
+    // So the way to reach a VT52 payload is a read holding two payloads: the
+    // first enters VT52, the second is a VT52 sequence.  The fresh parser
+    // that handles the second must be seeded with VT52 mode.
+    //
+    // `ESC Y` is direct cursor addressing: row 2, column 5 (zero-based) are
+    // sent as byte + 0x20.
+    let vt52_cup: &[u8] = b"\x1bY\"%";
+    let mut wire = tmux_wrap(b"\x1b[?2l");
+    wire.extend_from_slice(&tmux_wrap(vt52_cup));
+    let (mut wrapped, wrapped_rx) = make_state();
+    feed_setup(&mut wrapped);
+    wrapped.handle_incoming_data(&wire);
+
+    let (mut direct, direct_rx) = make_state();
+    feed_setup(&mut direct);
+    direct.handle_incoming_data(b"\x1b[?2l");
+    direct.handle_incoming_data(vt52_cup);
+
+    assert_eq!(
+        cursor(&wrapped),
+        (5, 2),
+        "ESC Y must address row 2, column 5"
+    );
+    assert_eq!(cursor(&wrapped), cursor(&direct));
+    assert_eq!(screen_text(&wrapped), screen_text(&direct));
     assert_eq!(replies(&wrapped_rx), replies(&direct_rx));
 }
 

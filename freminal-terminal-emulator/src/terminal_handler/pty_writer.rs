@@ -136,7 +136,7 @@ impl TerminalHandler {
     ///
     /// Builds the reply body and frames it through [`Self::write_csi_response`]
     /// or [`Self::write_osc_response`], so the introducer and terminator follow
-    /// the current S8C1T mode. Absent OSC 99 ids default to `0`.
+    /// the current S8C1T mode. Absent or empty OSC 99 ids default to `0`.
     ///
     /// Text an application chose and the terminal merely stores (the title,
     /// the icon label, the OSC 52 selection parameter) is sanitised before it
@@ -174,12 +174,12 @@ impl TerminalHandler {
                 sanitize_selection(selection)
             )),
             GuiReply::Osc99Activation { id, button } => {
-                let id = id.as_deref().unwrap_or("0");
-                let button = button.as_deref().unwrap_or("");
+                let id = osc99_reply_id(id.as_deref());
+                let button = sanitize_osc99_identifier(button.as_deref().unwrap_or(""));
                 self.write_osc_response(&format!("99;i={id};{button}"));
             }
             GuiReply::Osc99Closed { id, tracking } => {
-                let id = id.as_deref().unwrap_or("0");
+                let id = osc99_reply_id(id.as_deref());
                 let payload = match tracking {
                     Osc99CloseTracking::Tracked => "",
                     Osc99CloseTracking::Untracked => "untracked",
@@ -190,8 +190,15 @@ impl TerminalHandler {
                 request_id,
                 live_ids,
             } => {
-                let id = request_id.as_deref().unwrap_or("0");
-                let list = live_ids.join(",");
+                let id = osc99_reply_id(request_id.as_deref());
+                // An id that sanitises to nothing is not a usable identifier;
+                // drop it rather than emit an empty list entry.
+                let list = live_ids
+                    .iter()
+                    .map(|live| sanitize_osc99_identifier(live))
+                    .filter(|live| !live.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 self.write_osc_response(&format!("99;i={id}:p=alive;{list}"));
             }
         }
@@ -208,6 +215,31 @@ impl TerminalHandler {
 /// C1 (U+0080–U+009F), which is exactly the set that must not be echoed.
 fn sanitize_reported_text(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Keep only the characters the kitty notification protocol allows in an
+/// identifier (`[A-Za-z0-9_+.-]`) when echoing an OSC 99 id, button number or
+/// live-id list back to the application.
+///
+/// The spec requires this: "Terminals must sanitize ids received from client
+/// programs before sending them back". The ids are validated when parsed, but
+/// that is in another crate; sanitising at the serialiser means a reply cannot
+/// carry a control byte whatever a future caller passes in.
+pub(in crate::terminal_handler) fn sanitize_osc99_identifier(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '.' | '-'))
+        .collect()
+}
+
+/// The `i=` value for an OSC 99 reply: the sanitised id, or `0` when the id is
+/// absent or sanitises to nothing.
+pub(in crate::terminal_handler) fn osc99_reply_id(id: Option<&str>) -> String {
+    let sanitized = id.map(sanitize_osc99_identifier).unwrap_or_default();
+    if sanitized.is_empty() {
+        "0".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 /// Keep only the characters xterm defines for the OSC 52 `Pc` parameter
@@ -589,6 +621,102 @@ mod tests {
             base64_payload: "aGk=".to_string(),
         });
         assert_eq!(recv_bytes(&rx), b"\x1b]52;;aGk=\x1b\\".to_vec());
+    }
+
+    /// An id carrying ESC, BEL, a C1 CSI, spaces and the separators `:`/`;`/`,`
+    /// around a valid identifier.
+    const HOSTILE_ID: &str = "a\u{1b}[6nb\u{7}\u{9b}:;, c_+.-9";
+    /// What [`HOSTILE_ID`] reduces to under `[A-Za-z0-9_+.-]`.
+    const CLEAN_ID: &str = "a6nbc_+.-9";
+
+    #[test]
+    fn osc99_activation_reply_sanitises_id_and_button() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::Osc99Activation {
+            id: Some(HOSTILE_ID.to_string()),
+            button: Some("2\u{1b}[6n".to_string()),
+        });
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b]99;i={CLEAN_ID};26n\x1b\\").into_bytes()
+        );
+    }
+
+    #[test]
+    fn osc99_closed_reply_sanitises_id() {
+        let (handler, rx) = handler_with_rx(S8c1t::EightBit);
+        handler.write_gui_reply(&GuiReply::Osc99Closed {
+            id: Some(HOSTILE_ID.to_string()),
+            tracking: Osc99CloseTracking::Tracked,
+        });
+        let mut expected = vec![0x9d];
+        expected.extend_from_slice(format!("99;i={CLEAN_ID}:p=close;").as_bytes());
+        expected.push(0x9c);
+        assert_eq!(recv_bytes(&rx), expected);
+    }
+
+    #[test]
+    fn osc99_alive_reply_sanitises_request_id_and_live_ids() {
+        let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+        handler.write_gui_reply(&GuiReply::Osc99Alive {
+            request_id: Some(HOSTILE_ID.to_string()),
+            live_ids: vec![
+                HOSTILE_ID.to_string(),
+                "\u{1b}\u{7}".to_string(),
+                "ok".to_string(),
+            ],
+        });
+        // The id that sanitises to nothing is dropped, not sent as an empty entry.
+        assert_eq!(
+            recv_bytes(&rx),
+            format!("\x1b]99;i={CLEAN_ID}:p=alive;{CLEAN_ID},ok\x1b\\").into_bytes()
+        );
+    }
+
+    #[test]
+    fn osc99_empty_or_all_hostile_id_is_sent_as_zero() {
+        for id in [
+            None,
+            Some(String::new()),
+            Some("\u{1b}\u{7} :;".to_string()),
+        ] {
+            let (handler, rx) = handler_with_rx(S8c1t::SevenBit);
+            handler.write_gui_reply(&GuiReply::Osc99Activation {
+                id: id.clone(),
+                button: None,
+            });
+            assert_eq!(recv_bytes(&rx), b"\x1b]99;i=0;\x1b\\".to_vec(), "{id:?}");
+
+            handler.write_gui_reply(&GuiReply::Osc99Closed {
+                id: id.clone(),
+                tracking: Osc99CloseTracking::Tracked,
+            });
+            assert_eq!(
+                recv_bytes(&rx),
+                b"\x1b]99;i=0:p=close;\x1b\\".to_vec(),
+                "{id:?}"
+            );
+
+            handler.write_gui_reply(&GuiReply::Osc99Alive {
+                request_id: id.clone(),
+                live_ids: vec![],
+            });
+            assert_eq!(
+                recv_bytes(&rx),
+                b"\x1b]99;i=0:p=alive;\x1b\\".to_vec(),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_osc99_identifier_keeps_exactly_the_identifier_set() {
+        assert_eq!(super::sanitize_osc99_identifier(HOSTILE_ID), CLEAN_ID);
+        assert_eq!(super::sanitize_osc99_identifier("Az09_+.-"), "Az09_+.-");
+        assert_eq!(super::sanitize_osc99_identifier(""), "");
+        assert_eq!(super::osc99_reply_id(Some("\u{1b}")), "0");
+        assert_eq!(super::osc99_reply_id(Some("x1")), "x1");
+        assert_eq!(super::osc99_reply_id(None), "0");
     }
 
     #[test]

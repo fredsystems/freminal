@@ -202,7 +202,14 @@ impl TerminalHandler {
     /// prefix.  Multiple capability names may be separated by `;` in the hex payload.
     ///
     /// Response: `DCS 1 + r <hex-name> = <hex-value> ST` for known capabilities,
-    ///           `DCS 0 + r <hex-name> ST` for unknown ones.
+    ///           `DCS 0 + r <hex-name> ST` for unknown ones, and a bare
+    ///           `DCS 0 + r ST` for a name that is not valid hex (xterm's
+    ///           ctlseqs: "`DCS 0 + r ST` for invalid requests").
+    ///
+    /// The raw request is never echoed for an invalid name: it can carry
+    /// control bytes, and echoing it would let an application inject input
+    /// into itself.  A well-formed hex name that is merely unknown is safe to
+    /// echo, since hex digits cannot carry a control.
     fn handle_xtgettcap(&self, hex_payload: &[u8]) {
         tracing::debug!(
             "XTGETTCAP query: \"{}\"",
@@ -222,7 +229,13 @@ impl TerminalHandler {
                     "XTGETTCAP: invalid hex encoding: {}",
                     lossy_sequence_for_log_bounded(hex_name.as_bytes())
                 );
-                self.write_dcs_response(&format!("0+r{hex_name}"));
+                if Self::is_well_formed_hex(hex_name) {
+                    // Valid hex that does not decode to text: hex digits only,
+                    // so the echo cannot carry a control byte.
+                    self.write_dcs_response(&format!("0+r{hex_name}"));
+                } else {
+                    self.write_dcs_response("0+r");
+                }
                 continue;
             };
 
@@ -246,6 +259,11 @@ impl TerminalHandler {
                 self.write_dcs_response(&format!("0+r{hex_name}"));
             }
         }
+    }
+
+    /// `true` when `hex` is an even-length run of ASCII hex digits.
+    fn is_well_formed_hex(hex: &str) -> bool {
+        hex.len().is_multiple_of(2) && hex.bytes().all(|b| Self::hex_nibble(b).is_some())
     }
 
     /// Decode a hex-encoded ASCII string (e.g., "524742" → "RGB").
@@ -1360,12 +1378,76 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        // "ZZ" is valid hex (but 'Z' is an invalid hex nibble)
+        // 'Z' is not a hex nibble: invalid request, so no echo.
         let dcs = build_dcs_payload(b"+qZZ");
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        assert_eq!(response, "\x1bP0+rZZ\x1b\\");
+        assert_eq!(response, "\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_invalid_name_with_controls_is_not_echoed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // The reproduction from the 130 adversarial review: a "name" carrying
+        // a DSR request and a BEL, followed by a non-hex tail.
+        let dcs = build_dcs_payload(b"+q\x1b[6n\x07zz");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        assert_eq!(response, "\x1bP0+r\x1b\\");
+        let body = &response.as_bytes()[2..response.len() - 2];
+        assert!(
+            !body.contains(&0x1b) && !body.contains(&0x07),
+            "the reply body must carry no control byte: {body:?}"
+        );
+        assert!(rx.try_recv().is_err(), "exactly one reply");
+    }
+
+    #[test]
+    fn xtgettcap_odd_length_name_is_not_echoed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"+q524");
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(recv_pty_response(&rx), "\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_invalid_name_among_valid_ones_keeps_the_others() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // RGB, an invalid name, then an unknown but well-formed hex name.
+        let dcs = build_dcs_payload(b"+q524742;zz;554E4B4E");
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(recv_pty_response(&rx), "\x1bP1+r524742=382F382F38\x1b\\");
+        assert_eq!(recv_pty_response(&rx), "\x1bP0+r\x1b\\");
+        assert_eq!(recv_pty_response(&rx), "\x1bP0+r554E4B4E\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_invalid_name_reply_uses_8bit_framing_after_s8c1t() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+
+        let dcs = build_dcs_payload(b"+qzz");
+        handler.handle_device_control_string(&dcs);
+
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected a reply");
+        };
+        assert_eq!(bytes, b"\x900+r\x9c".to_vec());
     }
 
     #[test]
