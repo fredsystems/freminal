@@ -476,3 +476,31 @@ fn decrpm_on_disconnected_channel_does_not_panic() {
     // Handler-owned, state-owned and ?2031 replies must all be dropped quietly.
     state.handle_incoming_data(b"\x1b[?7$p\x1b[?2004$p\x1b[?2031$p");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LNM (ANSI mode 20) — answered in the ANSI form `20;Ps$y`, without `?`
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_lnm_default_is_reset_in_ansi_form() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y", "LNM default → Ps=2, no `?` prefix");
+}
+
+#[test]
+fn decrpm_lnm_after_set_is_set() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[20h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;1$y");
+}
+
+#[test]
+fn decrpm_lnm_after_reset_is_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[20h");
+    state.handle_incoming_data(b"\x1b[20l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y");
+}

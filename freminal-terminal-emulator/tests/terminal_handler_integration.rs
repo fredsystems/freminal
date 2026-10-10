@@ -4072,7 +4072,7 @@ fn decrpm_lnm_default_is_line_feed() {
         TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(&SetMode::DecQuery))),
     );
     // Default LNM is LineFeed (disabled) → Ps=2 (reset)
-    assert_eq!(resp, "\x1b[?20;2$y", "LNM default (LineFeed mode) → Ps=2");
+    assert_eq!(resp, "\x1b[20;2$y", "LNM default (LineFeed mode) → Ps=2");
 }
 
 // ── DECOM (Origin Mode ?6) ────────────────────────────────────────────────────
