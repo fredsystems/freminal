@@ -66,24 +66,17 @@ impl TerminalHandler {
 
     /// Send a raw string response to the PTY.  Silently drops if no channel is set.
     ///
-    /// When [`Self::in_tmux_passthrough`] is `true`, the response is wrapped in
-    /// a DCS tmux passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`)
-    /// so that tmux can relay it back to the requesting client.
+    /// Replies are written verbatim.  They are never wrapped in a DCS tmux
+    /// passthrough envelope, even when the query that provoked them arrived
+    /// inside one: tmux does not unwrap application-bound passthrough.
     pub(super) fn write_to_pty(&self, text: &str) {
         self.write_bytes_to_pty(text.as_bytes());
     }
 
-    /// Write raw bytes back to the PTY, wrapping in a tmux passthrough
-    /// envelope if required.
+    /// Write raw bytes back to the PTY.  Silently drops if no channel is set.
     pub(super) fn write_bytes_to_pty(&self, data: &[u8]) {
-        let bytes = if self.in_tmux_passthrough {
-            Self::wrap_tmux_passthrough(data)
-        } else {
-            data.to_vec()
-        };
-
         if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(PtyWrite::Write(bytes))
+            && let Err(e) = tx.send(PtyWrite::Write(data.to_vec()))
         {
             tracing::error!("Failed to write to PTY: {e}");
         }
@@ -93,7 +86,7 @@ impl TerminalHandler {
     ///
     /// Sends `APC {body} ST` where APC and ST use 8-bit or 7-bit forms
     /// depending on the current S8C1T mode.  Goes through
-    /// [`Self::write_bytes_to_pty`], so tmux passthrough wrapping applies.
+    /// [`Self::write_bytes_to_pty`].
     pub(super) fn write_apc_response(&self, body: &str) {
         let mut buf = Vec::with_capacity(4 + body.len());
         buf.extend_from_slice(self.apc_response());

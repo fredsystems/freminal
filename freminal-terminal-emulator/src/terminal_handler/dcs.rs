@@ -10,17 +10,13 @@
 //! - [`TerminalHandler::handle_device_control_string`] — main entry point
 //! - DECRQSS (`$ q`) — Request Selection or Setting
 //! - XTGETTCAP (`+ q`) — xterm termcap/terminfo capability query
-//! - tmux DCS passthrough (`tmux;`) — un-doubles ESC bytes and dispatches the
-//!   inner escape sequence to the appropriate handler
-//! - CSI direct dispatch for tmux passthrough ordering correctness
+//! - tmux DCS passthrough (`tmux;`) — un-doubles ESC bytes and queues the
+//!   whole inner payload for `TerminalState`, which runs it through a fresh
+//!   instance of the real parser (see `state/internal.rs`)
 
-use conv2::ValueFrom;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualStyle};
 
 use super::TerminalHandler;
-use crate::ansi::split_params_into_semicolon_delimited_usize;
-use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
-use crate::ansi_components::csi_commands::el::EraseLineMode;
 use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
@@ -35,7 +31,9 @@ impl TerminalHandler {
     /// - **DECRQSS** (`$ q <Pt> ST`): Request Selection or Setting.
     /// - **XTGETTCAP** (`+ q <hex> ST`): xterm termcap/terminfo query.
     /// - **tmux passthrough** (`tmux; <inner> ST`): un-doubles ESC bytes and
-    ///   dispatches the inner escape sequence to the appropriate handler.
+    ///   queues the whole inner payload on `tmux_passthrough_queue`.
+    ///   `TerminalState` drains the queue right after this output, parsing
+    ///   the payload with a fresh parser and processing the result in order.
     ///
     /// A DCS whose body starts with `@kitty-` (kitty's `@kitty-cmd`,
     /// `@kitty-print` and friends) is consumed with a single debug line
@@ -94,56 +92,22 @@ impl TerminalHandler {
         out
     }
 
-    /// Double every ESC byte in `data`.
-    ///
-    /// This is the inverse of [`undouble_esc`]: each `0x1b` in the input
-    /// becomes `0x1b 0x1b` in the output.  Used when wrapping a response
-    /// in a DCS tmux passthrough envelope.
-    fn double_esc(data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(data.len() + data.len() / 4);
-        for &b in data {
-            if b == 0x1b {
-                out.push(0x1b);
-            }
-            out.push(b);
-        }
-        out
-    }
-
-    /// Wrap raw response bytes in a DCS tmux passthrough envelope.
-    ///
-    /// Format: `ESC P tmux; <payload-with-doubled-ESCs> ESC \`
-    pub(super) fn wrap_tmux_passthrough(data: &[u8]) -> Vec<u8> {
-        let doubled = Self::double_esc(data);
-        // \x1bPtmux; ... \x1b\\
-        let mut out = Vec::with_capacity(8 + doubled.len() + 2);
-        out.extend_from_slice(b"\x1bPtmux;");
-        out.extend_from_slice(&doubled);
-        out.extend_from_slice(b"\x1b\\");
-        out
-    }
-
     /// Handle a tmux DCS passthrough payload.
     ///
     /// The `payload` is the content after the `tmux;` prefix, with ESC bytes
-    /// still doubled.  This method un-doubles the ESC bytes, identifies the
-    /// inner escape sequence type from its introducer byte, and dispatches to
-    /// the appropriate handler.
+    /// still doubled.  This method un-doubles the ESC bytes and queues the
+    /// **whole** inner payload (starting with its `ESC` introducer) on
+    /// `tmux_passthrough_queue`, whatever kind of sequence it is.  It
+    /// dispatches nothing itself: the ANSI parser lives in `TerminalState`,
+    /// which takes the queue immediately after the output that produced it,
+    /// parses each payload with a fresh [`FreminalAnsiParser`] and processes
+    /// the result in event order.  A tmux payload is therefore handled by
+    /// exactly the code that handles the same bytes sent directly.
     ///
-    /// Supported inner sequence types:
-    /// - **APC** (`ESC _`): dispatched to [`Self::handle_application_program_command`]
-    ///   (e.g. Kitty graphics protocol).
-    /// - **DCS** (`ESC P`): dispatched to [`Self::handle_device_control_string`]
-    ///   (recursive — the inner DCS is itself unwrapped).
-    /// - **OSC** (`ESC ]`): queued on `tmux_reparse_queue` and re-parsed by
-    ///   the main parser after the current DCS batch.
-    /// - **CSI** (`ESC [`): plain cursor-movement and erase commands are
-    ///   dispatched directly (see [`Self::dispatch_tmux_csi`]) to preserve
-    ///   ordering; anything else, including every sequence with a private
-    ///   marker prefix or an intermediate byte, is queued on
-    ///   `tmux_reparse_queue` for the main parser.
+    /// A payload that is empty, shorter than two bytes, or does not start
+    /// with `ESC` after un-doubling is logged (lengths only) and dropped.
     ///
-    /// Any other introducer byte is logged at warn level.
+    /// [`FreminalAnsiParser`]: crate::ansi::FreminalAnsiParser
     pub(super) fn handle_tmux_passthrough(&mut self, payload: &[u8]) {
         if payload.is_empty() {
             tracing::warn!("DCS tmux passthrough: empty payload");
@@ -164,405 +128,11 @@ impl TerminalHandler {
             return;
         }
 
-        // Set the flag so write_to_pty wraps responses in DCS tmux passthrough.
-        self.in_tmux_passthrough = true;
-
-        // The byte after ESC determines the sequence type.
-        match inner[1] {
-            // APC: ESC _ <content> ESC \   →  pass `_<content>ESC \` to APC handler
-            b'_' => {
-                tracing::debug!(
-                    "DCS tmux passthrough: dispatching APC ({} bytes)",
-                    inner.len()
-                );
-                // The APC handler expects the raw sequence starting with `_`
-                // (strip_apc_envelope will remove the `_` prefix and `ESC \` suffix).
-                self.handle_application_program_command(&inner[1..]);
-            }
-            // DCS: ESC P <content> ESC \   →  pass `P<content>ESC \` to DCS handler
-            b'P' => {
-                tracing::debug!(
-                    "DCS tmux passthrough: dispatching DCS ({} bytes)",
-                    inner.len()
-                );
-                // The DCS handler expects the raw sequence starting with `P`
-                // (strip_dcs_envelope will remove the `P` prefix and `ESC \` suffix).
-                self.handle_device_control_string(&inner[1..]);
-            }
-            // OSC: ESC ] <content> ESC \   →  queue for re-parsing
-            b']' => {
-                tracing::debug!(
-                    "DCS tmux passthrough: queuing OSC for re-parse ({} bytes)",
-                    inner.len()
-                );
-                self.tmux_reparse_queue.push(inner);
-            }
-            // CSI: ESC [ <params> <terminator>
-            //
-            // We dispatch common CSI commands (cursor movement, erase, etc.)
-            // directly to avoid ordering issues.  When a DCS-wrapped CUP and
-            // a DCS-wrapped APC Kitty Put arrive in the same PTY frame, the
-            // CUP must execute before the Put so the cursor is at the correct
-            // position.  If the CUP were queued to the reparse queue it would
-            // only run *after* all DCS items in the current batch, which is
-            // too late.
-            //
-            // Mode-setting commands (CSI ? ... h/l) and SGR (CSI ... m) are
-            // still queued because they need the full parser or
-            // TerminalState-level sync.
-            b'[' => {
-                // inner[0] = ESC, inner[1] = '[', CSI body starts at [2].
-                if !self.dispatch_tmux_csi(&inner[2..]) {
-                    // Unhandled CSI — fall back to the reparse queue.
-                    self.tmux_reparse_queue.push(inner);
-                }
-            }
-            other => {
-                tracing::warn!(
-                    "DCS tmux passthrough: unknown inner sequence type ({} bytes)",
-                    inner.len()
-                );
-                tracing::debug!(
-                    "DCS tmux passthrough: unknown inner sequence type 0x{other:02x}: \"{}\"",
-                    escape_sequence_for_log_bounded(&inner)
-                );
-            }
-        }
-
-        // Clear the flag after dispatch so subsequent direct writes are not wrapped.
-        self.in_tmux_passthrough = false;
-    }
-
-    /// Directly dispatch a CSI sequence from inside a tmux DCS passthrough.
-    ///
-    /// `csi_body` is the bytes *after* `ESC [` — i.e. the parameter bytes and
-    /// the terminator.  Returns `true` if the command was handled directly,
-    /// `false` if the caller should fall back to the reparse queue.
-    ///
-    /// Only a body whose every byte before the terminator is a digit or `;`
-    /// is dispatched directly.  Any other byte (private marker, intermediate,
-    /// `:`, C0 control, a byte in `0x40..=0x7E`, or a byte `>= 0x7F`) makes
-    /// the strict main parser's reading differ from a direct dispatch, so
-    /// such a body falls through to the reparse queue.
-    ///
-    /// This handles the subset of CSI commands that are purely buffer-level
-    /// (cursor movement, erase) so they execute immediately — critical for
-    /// correct ordering when a CUP precedes a Kitty Put in the same frame.
-    // Inherently large: tmux-passthrough CSI dispatch table. Each arm handles a distinct CSI
-    // sequence. Splitting would scatter related escape-sequence handling.
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn dispatch_tmux_csi(&mut self, csi_body: &[u8]) -> bool {
-        if csi_body.is_empty() {
-            return false;
-        }
-
-        // Find the terminator: the last byte in 0x40..=0x7E range.
-        let Some(&terminator) = csi_body.last() else {
-            return false;
-        };
-        if !(0x40..=0x7e).contains(&terminator) {
-            return false;
-        }
-
-        let body = &csi_body[..csi_body.len() - 1];
-
-        // Direct-dispatch only a body made entirely of digits and `;`
-        // (0x30..=0x39, 0x3B). Anything else is left to the strict main
-        // parser via the reparse queue, because the main parser would not
-        // treat it as one plain CSI sequence:
-        //
-        // - a byte in 0x40..=0x7E before the last byte ends the sequence
-        //   there (`1H2J` is CUP followed by text and ED, not one ED);
-        // - a C0 control (< 0x20) is executed inline mid-sequence, and ESC
-        //   aborts it;
-        // - a byte >= 0x7F is invalid;
-        // - an intermediate (0x20..=0x2F) or a private marker (`<=>?`)
-        //   gives the sequence a different identity from the plain command
-        //   that shares its final byte (`CSI > 0 T` is not SD);
-        // - `:` is a sub-parameter separator that the direct handlers do not
-        //   interpret; the main parser's handlers decide what it means.
-        //
-        // A body that passes this check cannot carry a prefix or an
-        // intermediate, so no classification is needed.
-        if !body.iter().all(|b| b.is_ascii_digit() || *b == b';') {
-            tracing::debug!(
-                "DCS tmux passthrough: queuing CSI with non-parameter bytes for re-parse"
-            );
-            return false;
-        }
-
-        // Parse semicolon-delimited numeric parameters with the same parser
-        // the main CSI handlers use. A field it rejects (e.g. a value that
-        // overflows `usize`) makes the main parser reject the sequence, so
-        // leave it to the main parser rather than silently defaulting it.
-        let Ok(numeric_params) = split_params_into_semicolon_delimited_usize(body) else {
-            tracing::debug!("DCS tmux passthrough: queuing unparsable CSI params for re-parse");
-            return false;
-        };
-
-        match terminator {
-            // CUP — Cursor Position: ESC [ row ; col H  (or f)
-            b'H' | b'f' => {
-                let row = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                let col = numeric_params
-                    .get(1)
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                tracing::debug!(
-                    "DCS tmux passthrough: CSI CUP row={row} col={col} (direct dispatch)"
-                );
-                self.handle_cursor_pos(Some(col), Some(row));
-                true
-            }
-            // CUU — Cursor Up: ESC [ n A
-            b'A' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_up(n);
-                true
-            }
-            // CUD — Cursor Down: ESC [ n B
-            b'B' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_down(n);
-                true
-            }
-            // CUF — Cursor Forward: ESC [ n C
-            b'C' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_forward(n);
-                true
-            }
-            // CUB — Cursor Backward: ESC [ n D
-            b'D' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_backward(n);
-                true
-            }
-            // CNL — Cursor Next Line: ESC [ n E
-            b'E' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                let n_i32 = i32::value_from(n).unwrap_or(i32::MAX);
-                self.handle_cursor_relative(0, n_i32);
-                self.handle_cursor_pos(Some(1), None);
-                true
-            }
-            // CPL — Cursor Previous Line: ESC [ n F
-            b'F' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                let n_i32 = i32::value_from(n).unwrap_or(i32::MAX);
-                self.handle_cursor_relative(0, -n_i32);
-                self.handle_cursor_pos(Some(1), None);
-                true
-            }
-            // CHA/HPA — Cursor Horizontal Absolute: ESC [ n G  (or `)
-            b'G' | b'`' => {
-                let col = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_pos(Some(col), None);
-                true
-            }
-            // VPA — Vertical Position Absolute: ESC [ n d
-            b'd' => {
-                let row = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_cursor_pos(None, Some(row));
-                true
-            }
-            // ED — Erase in Display: ESC [ n J
-            b'J' => {
-                let mode = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(0))
-                    .unwrap_or(0);
-                if let Ok(m) = EraseDisplayMode::try_from(mode) {
-                    self.handle_erase_in_display(m);
-                } else {
-                    tracing::warn!("DCS tmux passthrough: unknown ED mode {mode}");
-                    tracing::debug!(
-                        "DCS tmux passthrough: unknown ED mode {mode}; raw CSI: \"\\x1b[{}\"",
-                        escape_sequence_for_log_bounded(csi_body)
-                    );
-                }
-                true
-            }
-            // EL — Erase in Line: ESC [ n K
-            b'K' => {
-                let mode = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(0))
-                    .unwrap_or(0);
-                if let Ok(m) = EraseLineMode::try_from(mode) {
-                    self.handle_erase_in_line(m);
-                } else {
-                    tracing::warn!("DCS tmux passthrough: unknown EL mode {mode}");
-                    tracing::debug!(
-                        "DCS tmux passthrough: unknown EL mode {mode}; raw CSI: \"\\x1b[{}\"",
-                        escape_sequence_for_log_bounded(csi_body)
-                    );
-                }
-                true
-            }
-            // IL — Insert Lines: ESC [ n L
-            b'L' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_insert_lines(n);
-                true
-            }
-            // DL — Delete Lines: ESC [ n M
-            b'M' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_delete_lines(n);
-                true
-            }
-            // DCH — Delete Characters: ESC [ n P
-            b'P' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_delete_chars(n);
-                true
-            }
-            // ECH — Erase Characters: ESC [ n X
-            b'X' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_erase_chars(n);
-                true
-            }
-            // ICH — Insert Characters: ESC [ n @
-            b'@' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_insert_spaces(n);
-                true
-            }
-            // SU — Scroll Up: ESC [ n S
-            b'S' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_scroll_up(n);
-                true
-            }
-            // SD — Scroll Down: ESC [ n T
-            b'T' => {
-                let n = numeric_params
-                    .first()
-                    .copied()
-                    .unwrap_or(Some(1))
-                    .unwrap_or(1)
-                    .max(1);
-                self.handle_scroll_down(n);
-                true
-            }
-            // DECSTBM — Set Top and Bottom Margins: ESC [ top ; bottom r
-            b'r' => {
-                let top = numeric_params
-                    .first()
-                    .copied()
-                    .flatten()
-                    .unwrap_or(1)
-                    .max(1);
-                let bottom = numeric_params
-                    .get(1)
-                    .copied()
-                    .flatten()
-                    .unwrap_or(usize::MAX);
-                self.handle_set_scroll_region(top, bottom);
-                true
-            }
-            // SCOSC — Save Cursor: ESC [ s
-            b's' if body.is_empty() => {
-                self.buffer.save_cursor();
-                true
-            }
-            // SCORC — Restore Cursor: ESC [ u
-            b'u' if body.is_empty() => {
-                self.buffer.restore_cursor();
-                true
-            }
-            // SGR and mode-setting (h/l) fall through to the reparse queue.
-            // SGR (m) needs the full SGR parser; mode set/reset (h/l) needs
-            // TerminalState-level sync.
-            _ => {
-                tracing::debug!(
-                    "DCS tmux passthrough: queuing unhandled CSI '{}'(0x{terminator:02x}) for re-parse",
-                    terminator as char,
-                );
-                false
-            }
-        }
+        tracing::debug!(
+            "DCS tmux passthrough: queuing inner sequence ({} bytes)",
+            inner.len()
+        );
+        self.tmux_passthrough_queue.push(inner);
     }
 
     /// Handle DECRQSS — Request Selection or Setting.
@@ -842,8 +412,8 @@ mod tests {
         handler.set_write_tx(tx);
 
         // Apply bold + italic
-        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Bold));
-        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Italic));
+        handler.process_outputs(&[TerminalOutput::Sgr(SelectGraphicRendition::Bold)]);
+        handler.process_outputs(&[TerminalOutput::Sgr(SelectGraphicRendition::Italic)]);
 
         let dcs = build_dcs_payload(b"$qm");
         handler.handle_device_control_string(&dcs);
@@ -858,9 +428,9 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+        handler.process_outputs(&[TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
             TerminalColor::Red,
-        )));
+        ))]);
 
         let dcs = build_dcs_payload(b"$qm");
         handler.handle_device_control_string(&dcs);
@@ -875,9 +445,9 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+        handler.process_outputs(&[TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
             TerminalColor::Custom(255, 128, 0),
-        )));
+        ))]);
 
         let dcs = build_dcs_payload(b"$qm");
         handler.handle_device_control_string(&dcs);
@@ -892,7 +462,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        handler.process_output(&TerminalOutput::Sgr(SelectGraphicRendition::ReverseVideo));
+        handler.process_outputs(&[TerminalOutput::Sgr(SelectGraphicRendition::ReverseVideo)]);
 
         let dcs = build_dcs_payload(b"$qm");
         handler.handle_device_control_string(&dcs);
@@ -952,9 +522,9 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
-        handler.process_output(&TerminalOutput::CursorVisualStyle(
+        handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
             CursorVisualStyle::UnderlineCursorBlink,
-        ));
+        )]);
 
         let dcs = build_dcs_payload(b"$q q");
         handler.handle_device_control_string(&dcs);
@@ -1066,236 +636,145 @@ mod tests {
         assert_eq!(result, b"\x1b\x1b");
     }
 
-    // ── double_esc tests ──────────────────────────────────────────────────
+    // ── tmux passthrough: handler side queues the whole inner payload ─────
 
-    #[test]
-    fn double_esc_no_esc_bytes() {
-        let data = b"hello world";
-        let result = TerminalHandler::double_esc(data);
-        assert_eq!(result, b"hello world");
-    }
-
-    #[test]
-    fn double_esc_single_esc() {
-        let data = b"\x1b";
-        let result = TerminalHandler::double_esc(data);
-        assert_eq!(result, b"\x1b\x1b");
-    }
-
-    #[test]
-    fn double_esc_apc_sequence() {
-        // ESC _ G i=1;OK ESC \  → ESC ESC _ G i=1;OK ESC ESC backslash
-        let data = b"\x1b_Gi=1;OK\x1b\\";
-        let result = TerminalHandler::double_esc(data);
-        assert_eq!(result, b"\x1b\x1b_Gi=1;OK\x1b\x1b\\");
-    }
-
-    #[test]
-    fn double_esc_empty() {
-        let result = TerminalHandler::double_esc(b"");
-        assert_eq!(result, []);
-    }
-
-    #[test]
-    fn double_esc_roundtrip() {
-        // undouble(double(x)) == x for any input
-        let original = b"\x1b_Ga=q,i=1;\x1b\\";
-        let doubled = TerminalHandler::double_esc(original);
-        let undoubled = TerminalHandler::undouble_esc(&doubled);
-        assert_eq!(undoubled, original.to_vec());
-    }
-
-    // ── wrap_tmux_passthrough tests ───────────────────────────────────────
-
-    #[test]
-    fn wrap_tmux_passthrough_kitty_response() {
-        // A Kitty OK response should be wrapped correctly
-        let response = b"\x1b_Gi=1;OK\x1b\\";
-        let wrapped = TerminalHandler::wrap_tmux_passthrough(response);
-        // Expected: ESC P tmux; ESC ESC _ G i=1;OK ESC ESC \ ESC \
-        let expected = b"\x1bPtmux;\x1b\x1b_Gi=1;OK\x1b\x1b\\\x1b\\";
-        assert_eq!(wrapped, expected.to_vec());
-    }
-
-    #[test]
-    fn wrap_tmux_passthrough_plain_text() {
-        // Plain text (no ESC) should pass through with just the envelope
-        let data = b"hello";
-        let wrapped = TerminalHandler::wrap_tmux_passthrough(data);
-        assert_eq!(wrapped, b"\x1bPtmux;hello\x1b\\".to_vec());
-    }
-
-    // ── tmux passthrough dispatch tests ───────────────────────────────────
-
-    #[test]
-    fn tmux_passthrough_empty_payload_does_not_panic() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_tmux_passthrough(b"");
-        // Success = no panic
-    }
-
-    #[test]
-    fn tmux_passthrough_no_esc_prefix_does_not_panic() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Payload that does not start with doubled ESC
-        handler.handle_tmux_passthrough(b"junk data");
-        // Success = no panic
-    }
-
-    #[test]
-    fn tmux_passthrough_too_short_does_not_panic() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Payload is just a doubled ESC with no type byte
-        handler.handle_tmux_passthrough(b"\x1b\x1b");
-        // After un-doubling: [0x1b] — length < 2 → warn and return
-    }
-
-    #[test]
-    fn tmux_passthrough_dispatches_apc_kitty_query() {
-        // Build a tmux-wrapped Kitty graphics query:
-        //   Inner (un-doubled): ESC _ G a=q,i=1; ESC \
-        //   Doubled for tmux:   ESC ESC _ G a=q,i=1; ESC ESC \
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        // The tmux payload (after "tmux;" prefix has been stripped):
-        // doubled-ESC _ G a=q,i=1; doubled-ESC backslash
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"\x1b\x1b_Ga=q,i=1;\x1b\x1b\\");
-
-        handler.handle_tmux_passthrough(&payload);
-
-        // The Kitty query handler should respond with a tmux-wrapped APC response
-        let response = rx.try_recv();
-        assert!(
-            response.is_ok(),
-            "Expected a Kitty graphics query response via PTY write"
-        );
-        let PtyWrite::Write(bytes) = response.unwrap() else {
-            panic!("expected PtyWrite::Write");
-        };
-        let resp_str = String::from_utf8_lossy(&bytes);
-        // Response should be wrapped in DCS tmux passthrough
-        assert!(
-            resp_str.starts_with("\x1bPtmux;"),
-            "Expected tmux-wrapped response, got: {resp_str}"
-        );
-        // The inner content (after un-doubling) should be a Kitty APC response
-        let inner = resp_str
-            .strip_prefix("\x1bPtmux;")
-            .and_then(|s| s.strip_suffix("\x1b\\"))
-            .expect("Expected DCS tmux envelope");
-        let inner_bytes = TerminalHandler::undouble_esc(inner.as_bytes());
-        let inner_str = String::from_utf8_lossy(&inner_bytes);
-        assert!(
-            inner_str.starts_with("\x1b_G"),
-            "Expected inner Kitty APC response, got: {inner_str}"
-        );
-
-        // The passthrough flag should be cleared after dispatch
-        assert!(
-            !handler.in_tmux_passthrough,
-            "in_tmux_passthrough should be false after dispatch"
-        );
-    }
-
-    #[test]
-    fn tmux_passthrough_dispatches_nested_dcs() {
-        // Build a tmux-wrapped DCS DECRQSS query for SGR:
-        //   Inner (un-doubled): ESC P $ q m ESC \
-        //   Doubled for tmux:   ESC ESC P $ q m ESC ESC \
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"\x1b\x1bP$qm\x1b\x1b\\");
-
-        handler.handle_tmux_passthrough(&payload);
-
-        // The DECRQSS handler should respond with a tmux-wrapped DCS response
-        let response = rx.try_recv();
-        assert!(
-            response.is_ok(),
-            "Expected a DECRQSS response via PTY write"
-        );
-        let PtyWrite::Write(bytes) = response.unwrap() else {
-            panic!("expected PtyWrite::Write");
-        };
-        let resp_str = String::from_utf8_lossy(&bytes);
-        // Response should be wrapped in DCS tmux passthrough
-        assert!(
-            resp_str.starts_with("\x1bPtmux;"),
-            "Expected tmux-wrapped response, got: {resp_str}"
-        );
-        // The inner content should be a DECRQSS response
-        let inner = resp_str
-            .strip_prefix("\x1bPtmux;")
-            .and_then(|s| s.strip_suffix("\x1b\\"))
-            .expect("Expected DCS tmux envelope");
-        let inner_bytes = TerminalHandler::undouble_esc(inner.as_bytes());
-        let inner_str = String::from_utf8_lossy(&inner_bytes);
-        assert!(
-            inner_str.contains("$r"),
-            "Expected DECRQSS response, got: {inner_str}"
-        );
-    }
-
-    #[test]
-    fn tmux_passthrough_unknown_type_does_not_panic() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Inner: ESC Z (unknown type)
-        let payload = b"\x1b\x1bZ";
-        handler.handle_tmux_passthrough(payload);
-        // Success = no panic; flag should be cleared
-        assert!(!handler.in_tmux_passthrough);
-    }
-
-    #[test]
-    fn tmux_passthrough_via_full_dcs_handler() {
-        // End-to-end: feed a complete DCS tmux passthrough through
-        // handle_device_control_string (the normal entry point).
-        //
-        // Format: P tmux; <doubled-payload> ESC \
-        // Payload: Kitty graphics query: ESC ESC _ G a=q,i=1; ESC ESC \
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        let mut dcs = vec![b'P'];
-        dcs.extend_from_slice(b"tmux;");
-        dcs.extend_from_slice(b"\x1b\x1b_Ga=q,i=1;\x1b\x1b\\");
+    /// Wrap `inner` as the DCS body the handler sees: `P tmux; <doubled> ESC \`.
+    fn tmux_dcs(inner: &[u8]) -> Vec<u8> {
+        let mut dcs = b"Ptmux;".to_vec();
+        for &b in inner {
+            if b == 0x1b {
+                dcs.push(0x1b);
+            }
+            dcs.push(b);
+        }
         dcs.extend_from_slice(b"\x1b\\");
+        dcs
+    }
 
-        handler.handle_device_control_string(&dcs);
+    #[test]
+    fn tmux_passthrough_empty_payload_pushes_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"");
+        assert_eq!(handler.take_tmux_passthrough_queue(), Vec::<Vec<u8>>::new());
+    }
 
-        // Should have dispatched to the Kitty query handler with tmux wrapping
-        let response = rx.try_recv();
-        assert!(
-            response.is_ok(),
-            "Expected a Kitty graphics query response from full DCS tmux passthrough"
-        );
-        let PtyWrite::Write(bytes) = response.unwrap() else {
-            panic!("expected PtyWrite::Write");
-        };
-        let resp_str = String::from_utf8_lossy(&bytes);
-        // Response should be wrapped in DCS tmux passthrough
-        assert!(
-            resp_str.starts_with("\x1bPtmux;"),
-            "Expected tmux-wrapped response, got: {resp_str}"
+    #[test]
+    fn tmux_passthrough_no_esc_prefix_pushes_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Payload that does not start with ESC after un-doubling.
+        handler.handle_tmux_passthrough(b"junk data");
+        assert_eq!(handler.take_tmux_passthrough_queue(), Vec::<Vec<u8>>::new());
+    }
+
+    #[test]
+    fn tmux_passthrough_too_short_pushes_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // A doubled ESC with no type byte: un-doubled it is one byte.
+        handler.handle_tmux_passthrough(b"\x1b\x1b");
+        assert_eq!(handler.take_tmux_passthrough_queue(), Vec::<Vec<u8>>::new());
+        // A lone, undoubled ESC is one byte as well.
+        handler.handle_tmux_passthrough(b"\x1b");
+        assert_eq!(handler.take_tmux_passthrough_queue(), Vec::<Vec<u8>>::new());
+    }
+
+    #[test]
+    fn tmux_passthrough_queues_apc_payload_whole() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b_Ga=q,i=1;\x1b\x1b\\");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b_Ga=q,i=1;\x1b\\".to_vec()]
         );
     }
 
     #[test]
-    fn tmux_passthrough_flag_cleared_after_early_return() {
-        // Even when the payload is invalid and we return early,
-        // the flag should not be left set.
+    fn tmux_passthrough_queues_dcs_payload_whole() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_tmux_passthrough(b"");
-        assert!(!handler.in_tmux_passthrough);
-        handler.handle_tmux_passthrough(b"junk");
-        assert!(!handler.in_tmux_passthrough);
+        handler.handle_tmux_passthrough(b"\x1b\x1bP$qm\x1b\x1b\\");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1bP$qm\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_queues_osc_payload_whole() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b]0;title\x1b\x1b\\");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b]0;title\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_queues_csi_payload_whole_and_does_not_run_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1b[5;10H");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b[5;10H".to_vec()]
+        );
+        // The handler itself no longer executes inner CSI.
+        let cursor = handler.buffer.cursor().pos;
+        assert_eq!((cursor.x, cursor.y), (0, 0));
+    }
+
+    #[test]
+    fn tmux_passthrough_queues_any_introducer() {
+        // The introducer no longer matters to the handler: the real parser
+        // decides what `ESC Z` is.
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_tmux_passthrough(b"\x1b\x1bZ");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1bZ".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_queue_preserves_arrival_order_and_is_taken_once() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_device_control_string(&tmux_dcs(b"\x1b[1m"));
+        handler.handle_device_control_string(&tmux_dcs(b"\x1b[2m"));
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b[1m".to_vec(), b"\x1b[2m".to_vec()]
+        );
+        assert_eq!(handler.take_tmux_passthrough_queue(), Vec::<Vec<u8>>::new());
+    }
+
+    #[test]
+    fn tmux_passthrough_via_full_dcs_handler_queues_without_replying() {
+        // The normal entry point: the handler queues the payload and writes
+        // nothing; replies come from the real parser's processing of it.
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.handle_device_control_string(&tmux_dcs(b"\x1b_Ga=q,i=1;\x1b\\"));
+
+        assert!(rx.try_recv().is_err(), "the handler must not reply itself");
+        assert_eq!(
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b_Ga=q,i=1;\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_early_return_warns_without_payload() {
+        let events = capture(|| {
+            let mut handler = TerminalHandler::new(80, 24);
+            handler.handle_tmux_passthrough(b"SECRETPAYLOAD");
+        });
+        let warns = warnings(&events);
+        assert!(!warns.is_empty(), "expected a warn, got: {events:?}");
+        for (level, text) in warns {
+            assert!(
+                !text.contains("SECRETPAYLOAD"),
+                "{level} line leaked payload: {text}"
+            );
+        }
     }
 
     // ── XTGETTCAP tests ──────────────────────────────────────────────────
@@ -1707,446 +1186,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // dispatch_tmux_csi unit tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn tmux_csi_cup_dispatches_directly() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI 5;10H → move cursor to row 5, col 10 (1-based)
-        let dispatched = handler.dispatch_tmux_csi(b"5;10H");
-        assert!(dispatched, "CUP should be handled directly");
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 9, "col should be 10 - 1 = 9 (0-based)");
-        assert_eq!(cursor.y, 4, "row should be 5 - 1 = 4 (0-based)");
-    }
-
-    #[test]
-    fn tmux_csi_cup_default_params() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI H → move cursor to row 1, col 1 (default)
-        let dispatched = handler.dispatch_tmux_csi(b"H");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 0);
-        assert_eq!(cursor.y, 0);
-    }
-
-    #[test]
-    fn tmux_csi_cup_with_f_terminator() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI 3;7f → same as H
-        let dispatched = handler.dispatch_tmux_csi(b"3;7f");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 6);
-        assert_eq!(cursor.y, 2);
-    }
-
-    #[test]
-    fn tmux_csi_cursor_up() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(10));
-        let dispatched = handler.dispatch_tmux_csi(b"3A");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.y, 6, "should move up 3 from row 9 → row 6");
-    }
-
-    #[test]
-    fn tmux_csi_cursor_down() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(1), Some(5));
-        let dispatched = handler.dispatch_tmux_csi(b"2B");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.y, 6, "should move down 2 from row 4 → row 6");
-    }
-
-    #[test]
-    fn tmux_csi_cursor_forward() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"5C");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 14, "should move forward 5 from col 9 → col 14");
-    }
-
-    #[test]
-    fn tmux_csi_cursor_backward() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"3D");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 6, "should move backward 3 from col 9 → col 6");
-    }
-
-    #[test]
-    fn tmux_csi_cha() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(1), Some(5));
-        let dispatched = handler.dispatch_tmux_csi(b"20G");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 19, "CHA should set col to 20 - 1 = 19");
-        assert_eq!(cursor.y, 4, "CHA should not change row");
-    }
-
-    #[test]
-    fn tmux_csi_vpa() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"15d");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.y, 14, "VPA should set row to 15 - 1 = 14");
-    }
-
-    #[test]
-    fn tmux_csi_dec_private_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI ? 1049 h — DEC private mode, should not be handled directly
-        let dispatched = handler.dispatch_tmux_csi(b"?1049h");
-        assert!(
-            !dispatched,
-            "DEC private modes should fall through to reparse queue"
-        );
-    }
-
-    #[test]
-    fn tmux_csi_sgr_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI 1;32 m — SGR bold green, should fall through
-        let dispatched = handler.dispatch_tmux_csi(b"1;32m");
-        assert!(!dispatched, "SGR should fall through to reparse queue");
-    }
-
-    #[test]
-    fn tmux_csi_erase_in_display() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Write some text first
-        handler.handle_data(b"Hello");
-        // CSI 2 J — erase display
-        let dispatched = handler.dispatch_tmux_csi(b"2J");
-        assert!(dispatched, "ED should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_erase_in_line() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"Hello");
-        let dispatched = handler.dispatch_tmux_csi(b"0K");
-        assert!(dispatched, "EL should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_empty_body_returns_false() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(!handler.dispatch_tmux_csi(b""));
-    }
-
-    #[test]
-    fn tmux_csi_intermediates_fall_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI with intermediate byte (space + p = DECRQM)
-        assert!(!handler.dispatch_tmux_csi(b"?1049$p"));
-    }
-
-    #[test]
-    fn tmux_csi_intermediate_mid_body_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(5));
-        let before = handler.buffer.cursor().pos;
-        // The space sits between parameter bytes, not just before the final
-        // byte. It is still an intermediate, so this is not a plain CUP.
-        assert!(
-            !handler.dispatch_tmux_csi(b"1 ;2H"),
-            "an intermediate anywhere in the body must fall through"
-        );
-        assert_eq!(handler.buffer.cursor().pos, before);
-    }
-
-    #[test]
-    fn tmux_csi_greater_prefix_falls_through_instead_of_scrolling() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"Hello");
-        let before = handler.buffer.cursor().pos;
-        // CSI > 0 T is xterm title-mode reset, not SD (CSI 0 T).
-        assert!(
-            !handler.dispatch_tmux_csi(b">0T"),
-            "CSI > 0 T must fall through to the main parser"
-        );
-        assert_eq!(handler.buffer.cursor().pos, before);
-        assert_eq!(
-            handler.buffer.cursor().pos.y,
-            0,
-            "no scroll may have happened"
-        );
-    }
-
-    #[test]
-    fn tmux_csi_plus_intermediate_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI 3 + T has an intermediate; it is not SD (CSI 3 T).
-        assert!(!handler.dispatch_tmux_csi(b"3+T"));
-    }
-
-    #[test]
-    fn tmux_csi_embedded_final_byte_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(5));
-        let before = handler.buffer.cursor().pos;
-        // `H` ends the sequence in the main parser; `2J` is then text.
-        assert!(!handler.dispatch_tmux_csi(b"1H2J"));
-        assert_eq!(handler.buffer.cursor().pos, before, "nothing may run");
-    }
-
-    #[test]
-    fn tmux_csi_c0_control_in_body_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(5));
-        let before = handler.buffer.cursor().pos;
-        // BS is executed inline by the main parser, mid-sequence.
-        assert!(!handler.dispatch_tmux_csi(b"1\x082H"));
-        assert_eq!(handler.buffer.cursor().pos, before);
-    }
-
-    #[test]
-    fn tmux_csi_byte_above_7e_in_body_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(!handler.dispatch_tmux_csi(b"1\x7f2H"));
-        assert!(!handler.dispatch_tmux_csi(b"1\xc32H"));
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
-    }
-
-    #[test]
-    fn tmux_csi_colon_sub_parameter_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(5));
-        let before = handler.buffer.cursor().pos;
-        // `:` is a sub-parameter separator the direct handlers do not
-        // interpret; the main parser decides what it means.
-        assert!(!handler.dispatch_tmux_csi(b"5:2H"));
-        assert_eq!(handler.buffer.cursor().pos, before);
-    }
-
-    #[test]
-    fn tmux_csi_overflowing_param_falls_through() {
-        // The main parser rejects a parameter that overflows `usize`; the
-        // direct path must not silently default it to CUP(1, 1).
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(5), Some(5));
-        let before = handler.buffer.cursor().pos;
-        assert!(!handler.dispatch_tmux_csi(b"99999999999999999999999;2H"));
-        assert_eq!(handler.buffer.cursor().pos, before);
-    }
-
-    #[test]
-    fn tmux_csi_plain_bodies_still_dispatch_directly() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(handler.dispatch_tmux_csi(b"5;10H"));
-        assert!(handler.dispatch_tmux_csi(b"3A"));
-        assert!(handler.dispatch_tmux_csi(b"2J"));
-        assert!(handler.dispatch_tmux_csi(b"K"));
-    }
-
-    #[test]
-    fn tmux_passthrough_embedded_final_byte_is_queued_for_reparse() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_tmux_passthrough(b"\x1b\x1b[1H2J");
-        assert_eq!(handler.tmux_reparse_queue, vec![b"\x1b[1H2J".to_vec()]);
-    }
-
-    #[test]
-    fn tmux_csi_less_prefix_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(!handler.dispatch_tmux_csi(b"<1H"));
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
-    }
-
-    #[test]
-    fn tmux_csi_equals_prefix_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(!handler.dispatch_tmux_csi(b"=1H"));
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
-    }
-
-    #[test]
-    fn tmux_csi_misplaced_private_marker_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(!handler.dispatch_tmux_csi(b"1?2H"));
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!((cursor.x, cursor.y), (0, 0), "CUP must not have run");
-    }
-
-    #[test]
-    fn tmux_passthrough_prefixed_csi_is_queued_for_reparse() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // ESC bytes are doubled inside the tmux envelope.
-        handler.handle_tmux_passthrough(b"\x1b\x1b[>0T");
-        assert_eq!(handler.tmux_reparse_queue, vec![b"\x1b[>0T".to_vec()]);
-    }
-
-    #[test]
-    fn tmux_passthrough_plain_cup_is_not_queued() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_tmux_passthrough(b"\x1b\x1b[5;10H");
-        assert_eq!(handler.tmux_reparse_queue, Vec::<Vec<u8>>::new());
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!((cursor.x, cursor.y), (9, 4));
-    }
-
-    // ------------------------------------------------------------------
-    // dispatch_tmux_csi — remaining CSI commands
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn tmux_csi_cnl_cursor_next_line() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(5));
-        // CSI 2 E → cursor next line, move down 2 and to col 1
-        let dispatched = handler.dispatch_tmux_csi(b"2E");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 0, "CNL should reset col to 0");
-        assert_eq!(cursor.y, 6, "CNL should move down 2 from row 4 → row 6");
-    }
-
-    #[test]
-    fn tmux_csi_cpl_cursor_previous_line() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(10));
-        // CSI 3 F → cursor previous line, move up 3 and to col 1
-        let dispatched = handler.dispatch_tmux_csi(b"3F");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 0, "CPL should reset col to 0");
-        assert_eq!(cursor.y, 6, "CPL should move up 3 from row 9 → row 6");
-    }
-
-    #[test]
-    fn tmux_csi_il_insert_lines() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(1), Some(5));
-        let dispatched = handler.dispatch_tmux_csi(b"2L");
-        assert!(dispatched, "IL should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_dl_delete_lines() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(1), Some(5));
-        let dispatched = handler.dispatch_tmux_csi(b"2M");
-        assert!(dispatched, "DL should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_dch_delete_chars() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"Hello World");
-        handler.handle_cursor_pos(Some(1), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"3P");
-        assert!(dispatched, "DCH should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_ech_erase_chars() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"Hello World");
-        handler.handle_cursor_pos(Some(1), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"5X");
-        assert!(dispatched, "ECH should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_ich_insert_chars() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_data(b"Hello");
-        handler.handle_cursor_pos(Some(1), Some(1));
-        let dispatched = handler.dispatch_tmux_csi(b"2@");
-        assert!(dispatched, "ICH should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_su_scroll_up() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let dispatched = handler.dispatch_tmux_csi(b"3S");
-        assert!(dispatched, "SU should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_sd_scroll_down() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let dispatched = handler.dispatch_tmux_csi(b"2T");
-        assert!(dispatched, "SD should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_decstbm_set_scroll_region() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI 5;20 r → set scroll region rows 5..20
-        let dispatched = handler.dispatch_tmux_csi(b"5;20r");
-        assert!(dispatched, "DECSTBM should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_scosc_save_cursor() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(5));
-        // CSI s (no params) → save cursor
-        let dispatched = handler.dispatch_tmux_csi(b"s");
-        assert!(dispatched, "SCOSC should be handled directly");
-    }
-
-    #[test]
-    fn tmux_csi_scorc_restore_cursor() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(10), Some(5));
-        handler.buffer.save_cursor();
-        handler.handle_cursor_pos(Some(1), Some(1));
-        // CSI u (no params) → restore cursor
-        let dispatched = handler.dispatch_tmux_csi(b"u");
-        assert!(dispatched, "SCORC should be handled directly");
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 9, "should restore col to 9");
-        assert_eq!(cursor.y, 4, "should restore row to 4");
-    }
-
-    #[test]
-    fn tmux_csi_unknown_terminator_falls_through() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // CSI n — DSR, not in the direct dispatch table
-        let dispatched = handler.dispatch_tmux_csi(b"6n");
-        assert!(
-            !dispatched,
-            "Unknown CSI should fall through to reparse queue"
-        );
-    }
-
-    #[test]
-    fn tmux_csi_invalid_terminator_byte() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Terminator 0x3F ('?') is below 0x40 range
-        assert!(!handler.dispatch_tmux_csi(b"1;2?"));
-    }
-
-    #[test]
-    fn tmux_csi_hpa_backtick() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_cursor_pos(Some(1), Some(5));
-        // CSI 30 ` → HPA, set col to 30
-        let dispatched = handler.dispatch_tmux_csi(b"30`");
-        assert!(dispatched, "HPA should be handled directly");
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 29, "HPA should set col to 30 - 1 = 29");
-    }
-
-    // ------------------------------------------------------------------
     // DECRQSS — cursor style and DECSCL queries
     // ------------------------------------------------------------------
 
@@ -2391,79 +1430,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // tmux passthrough — OSC queuing
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn tmux_passthrough_osc_queued_to_reparse() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Inner (un-doubled): ESC ] 0;title ESC \
-        // Doubled for tmux: ESC ESC ] 0;title ESC ESC \
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"\x1b\x1b]0;title\x1b\x1b\\");
-
-        handler.handle_tmux_passthrough(&payload);
-
-        // The inner sequence should be in the reparse queue
-        assert!(
-            !handler.tmux_reparse_queue.is_empty(),
-            "OSC should be queued for re-parse"
-        );
-    }
-
-    #[test]
-    fn tmux_passthrough_csi_handled_queued_to_reparse() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Inner (un-doubled): ESC [ 1 ; 32 m  (SGR — should NOT be direct-dispatched)
-        // Doubled for tmux: ESC ESC [ 1 ; 32 m
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"\x1b\x1b[1;32m");
-
-        handler.handle_tmux_passthrough(&payload);
-
-        // SGR falls through dispatch_tmux_csi, so gets queued to reparse
-        assert!(
-            !handler.tmux_reparse_queue.is_empty(),
-            "Unhandled CSI should be queued for re-parse"
-        );
-    }
-
-    #[test]
-    fn tmux_passthrough_csi_cup_direct_dispatch() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Inner (un-doubled): ESC [ 5 ; 10 H  (CUP — should be direct-dispatched)
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"\x1b\x1b[5;10H");
-
-        handler.handle_tmux_passthrough(&payload);
-
-        // CUP is directly dispatched, should NOT be in reparse queue
-        assert!(
-            handler.tmux_reparse_queue.is_empty(),
-            "CUP should be directly dispatched, not queued"
-        );
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 9);
-        assert_eq!(cursor.y, 4);
-    }
-
-    #[test]
-    fn tmux_passthrough_inner_no_esc_prefix() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Payload that un-doubles to "junk" (no ESC prefix)
-        handler.handle_tmux_passthrough(b"junk");
-        assert!(!handler.in_tmux_passthrough);
-    }
-
-    #[test]
-    fn tmux_passthrough_inner_too_short() {
-        let mut handler = TerminalHandler::new(80, 24);
-        // Payload that un-doubles to just ESC (one byte, too short)
-        handler.handle_tmux_passthrough(b"\x1b");
-        assert!(!handler.in_tmux_passthrough);
-    }
-
-    // ------------------------------------------------------------------
     // DCS dispatch — unrecognized sub-command
     // ------------------------------------------------------------------
 
@@ -2474,33 +1440,6 @@ mod tests {
         let dcs = build_dcs_payload(b"UNKNOWN");
         handler.handle_device_control_string(&dcs);
         // Should just log a warning and not panic
-    }
-
-    /// Integration test: simulate the exact nvim tmux passthrough scenario
-    /// where CUP and Kitty Put arrive as separate DCS tmux items in the same
-    /// `process_outputs()` batch.  With the direct CSI dispatch, the CUP
-    /// should execute immediately so the Put reads the correct cursor position.
-    #[test]
-    fn tmux_passthrough_cup_then_kitty_put_ordering() {
-        let mut handler = TerminalHandler::new(80, 24);
-
-        // Start cursor at 0,0
-        assert_eq!(handler.buffer.cursor().pos.x, 0);
-        assert_eq!(handler.buffer.cursor().pos.y, 0);
-
-        // Simulate: DCS tmux passthrough containing CSI 1;42H (CUP row 1, col 42)
-        // The tmux DCS wrapper has already been stripped; the inner content is
-        // ESC [ 1 ; 4 2 H with doubled ESC bytes.
-        // undouble_esc would produce: ESC [ 1 ; 4 2 H
-        // handle_tmux_passthrough would match inner[1] == '[' and call dispatch_tmux_csi
-        // with "1;42H".
-        let dispatched = handler.dispatch_tmux_csi(b"1;42H");
-        assert!(dispatched);
-        let cursor = handler.buffer.cursor().pos;
-        assert_eq!(cursor.x, 41, "col should be 42 - 1 = 41 (0-based)");
-        assert_eq!(cursor.y, 0, "row should be 1 - 1 = 0 (0-based)");
-
-        // Now the APC Kitty Put would execute, reading cursor.pos correctly.
     }
 
     // ------------------------------------------------------------------

@@ -11558,17 +11558,22 @@ mod tests {
     }
 
     #[test]
-    fn kitty_query_reply_is_tmux_wrapped_with_doubled_escs() {
+    fn kitty_query_inside_tmux_is_queued_for_the_real_parser_and_not_answered_here() {
+        // The handler no longer dispatches tmux payloads itself, and replies
+        // are never tmux-wrapped, so a kitty query arriving inside a tmux DCS
+        // produces no reply at this level.  It is queued, un-doubled, for
+        // `TerminalState` (the unwrapped reply is asserted in
+        // `tests/tmux_passthrough.rs`).
         let (mut handler, rx) = kitty_handler();
-        handler.in_tmux_passthrough = true;
-        handler.handle_kitty_graphics(kitty_query_command());
+        handler.handle_device_control_string(b"Ptmux;\x1b\x1b_Ga=q,i=31;\x1b\x1b\\\x1b\\");
 
-        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
-            panic!("expected PtyWrite::Write");
-        };
+        assert!(
+            rx.try_recv().is_err(),
+            "the handler must not answer a tmux payload itself"
+        );
         assert_eq!(
-            bytes,
-            b"\x1bPtmux;\x1b\x1b_Gi=31;OK\x1b\x1b\\\x1b\\".to_vec()
+            handler.take_tmux_passthrough_queue(),
+            vec![b"\x1b_Ga=q,i=31;\x1b\\".to_vec()]
         );
     }
 

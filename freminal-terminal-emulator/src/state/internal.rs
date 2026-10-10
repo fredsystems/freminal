@@ -45,6 +45,16 @@ use crate::{
 
 use crate::terminal_handler::TerminalHandler as NewHandler;
 
+/// Deepest tmux DCS passthrough nesting `TerminalState` will process.
+///
+/// Top-level PTY outputs are depth 0; the payload of a top-level tmux DCS is
+/// depth 1, a tmux DCS inside that is depth 2, and so on.  A payload that
+/// would be processed at a depth above this limit is dropped (with a
+/// payload-free debug line), so four levels of nesting work and a fifth does
+/// not.  The cap bounds recursion on hostile input; real use is one level
+/// (tmux inside the terminal) or two (tmux inside tmux).
+const MAX_TMUX_PASSTHROUGH_DEPTH: usize = 4;
+
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///
 /// Returns a `String` like `"48 65 6c 6c 6f"`. If `data` is longer than
@@ -479,10 +489,40 @@ impl TerminalState {
     /// mode flags, then (for `ResetDevice`) to the `TerminalState` RIS reset,
     /// before the next output is looked at.  This keeps every side effect that
     /// reads or writes state (replies, mode queries, RIS) in the order the
-    /// application sent the sequences.  The handler's end-of-batch housekeeping
-    /// runs once after the last output.
+    /// application sent the sequences.
+    ///
+    /// Any tmux DCS passthrough payload an output queued is processed right
+    /// after that output, before the next one, so an inner sequence takes
+    /// effect at the position its wrapper occupied on the wire.  The handler's
+    /// end-of-batch housekeeping runs once, after the last output (see
+    /// [`Self::process_outputs_at_depth`] for why not per nested batch).
     fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput]) {
-        for output in parsed {
+        self.process_outputs_at_depth(parsed, 0);
+        self.handler.finish_output_batch();
+    }
+
+    /// Apply `outputs` in event order at tmux nesting `depth`.
+    ///
+    /// Top-level PTY outputs are depth 0.  The payload of a tmux DCS found at
+    /// depth `d` is processed at depth `d + 1`.  A payload that would be
+    /// processed at a depth above [`MAX_TMUX_PASSTHROUGH_DEPTH`] is dropped
+    /// with a payload-free debug line.
+    ///
+    /// For each output: (a) the handler applies it, (b) the `TerminalState`
+    /// mode flags are synced, (c) `ResetDevice` applies the `TerminalState`
+    /// RIS reset, and only then (d) the tmux payloads the handler queued while
+    /// applying it are drained.  Each payload is parsed with a **fresh**
+    /// [`FreminalAnsiParser`] seeded with the outer parser's `vt52_mode` and
+    /// `s8c1t_mode`: a payload is a complete sequence, so it must neither
+    /// splice into nor leave residue in whatever sequence the outer parser is
+    /// part-way through.
+    ///
+    /// The end-of-batch housekeeping (`finish_output_batch`) is deliberately
+    /// **not** run here: it is a per-PTY-read cost (see
+    /// `prune_evicted_real_placements`), and nested payloads are part of the
+    /// same read.  [`Self::process_parsed_outputs`] runs it once at the top.
+    fn process_outputs_at_depth(&mut self, outputs: &[TerminalOutput], depth: usize) {
+        for output in outputs {
             self.handler.process_output_in_batch(output);
             self.sync_mode_flags(output);
             if matches!(output, TerminalOutput::ResetDevice) {
@@ -491,8 +531,34 @@ impl TerminalState {
                 // parser; only the next chunk sees the fresh parser.
                 self.apply_state_reset();
             }
+            self.process_tmux_passthrough_queue(depth);
         }
-        self.handler.finish_output_batch();
+    }
+
+    /// Drain the handler's tmux passthrough queue and process each payload
+    /// through a fresh parser, one nesting level below `depth`.
+    ///
+    /// See [`Self::process_outputs_at_depth`] for the depth semantics.
+    fn process_tmux_passthrough_queue(&mut self, depth: usize) {
+        let queued = self.handler.take_tmux_passthrough_queue();
+        for payload in queued {
+            let payload_depth = depth + 1;
+            if payload_depth > MAX_TMUX_PASSTHROUGH_DEPTH {
+                debug!(
+                    "tmux passthrough payload dropped: nesting depth {payload_depth} exceeds {MAX_TMUX_PASSTHROUGH_DEPTH} ({} bytes)",
+                    payload.len()
+                );
+                continue;
+            }
+            let mut parser = FreminalAnsiParser::new();
+            parser.vt52_mode = self.parser.vt52_mode;
+            parser.s8c1t_mode = self.parser.s8c1t_mode;
+            let inner = parser.push(&payload);
+            for output in &inner {
+                trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+            }
+            self.process_outputs_at_depth(&inner, payload_depth);
+        }
     }
 
     /// RIS (ESC c) — reset the state that lives in `TerminalState`.
@@ -507,24 +573,6 @@ impl TerminalState {
         self.leftover_data = None;
         self.cursor_visual_style = CursorVisualStyle::default();
         self.window_commands.clear();
-    }
-
-    /// Drain the tmux reparse queue, parsing and processing any queued
-    /// raw bytes (CSI/OSC sequences from DCS tmux passthrough).
-    fn drain_tmux_reparse_queue(&mut self) {
-        loop {
-            let reparse = self.handler.take_tmux_reparse_queue();
-            if reparse.is_empty() {
-                break;
-            }
-            for raw in reparse {
-                let reparsed = self.parser.push(&raw);
-                for output in &reparsed {
-                    trace!(%output, "reparsed tmux passthrough output");
-                }
-                self.process_parsed_outputs(&reparsed);
-            }
-        }
     }
 
     /// Process one chunk of raw PTY bytes through the full terminal pipeline.
@@ -548,18 +596,17 @@ impl TerminalState {
     ///    the buffer (text insertion, cursor movement, erase operations, mode
     ///    changes, replies, etc.); the `TerminalState`-owned mode flags are
     ///    synced (mouse tracking, bracketed paste, focus reporting, DECANM,
-    ///    etc.); and, if the item is `ResetDevice` (ESC c), the
-    ///    `TerminalState` RIS reset runs at that point (modes, parser,
-    ///    `leftover_data`, cursor style, window commands).  The handler's
-    ///    end-of-batch housekeeping runs once after the last item.
+    ///    etc.); if the item is `ResetDevice` (ESC c), the `TerminalState` RIS
+    ///    reset runs at that point (modes, parser, `leftover_data`, cursor
+    ///    style, window commands); and finally any DCS tmux passthrough
+    ///    payload the item queued is parsed with a fresh parser and processed
+    ///    the same way, recursively, up to `MAX_TMUX_PASSTHROUGH_DEPTH` levels,
+    ///    before the next item is looked at.  The handler's end-of-batch
+    ///    housekeeping runs once after the last top-level item.
     ///
     /// 5. **Window commands** — drains the handler's `window_commands` queue
     ///    into `self.window_commands` so the GUI's `handle_window_manipulation`
     ///    drain loop can pick them up on the next frame.
-    ///
-    /// 6. **tmux reparse** — drains any raw bytes queued by the DCS tmux
-    ///    passthrough handler, re-runs them through the parser and handler,
-    ///    and loops until the queue is empty.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
         trace!(
@@ -656,17 +703,6 @@ impl TerminalState {
         // can consume them.
         self.window_commands
             .extend(self.handler.take_window_commands());
-
-        // ── tmux passthrough reparse queue ─────────────────────────────
-        //
-        // tmux DCS passthrough can contain inner CSI or OSC sequences that
-        // the handler cannot parse (the ANSI parser lives here, not in the
-        // handler).  After process_outputs() returns, we drain any queued
-        // raw bytes, feed them through the parser, and process the resulting
-        // TerminalOutput items.  This loop runs until the queue is empty
-        // (inner sequences are unlikely to produce more reparse items, but
-        // we handle it for correctness).
-        self.drain_tmux_reparse_queue();
 
         let elapsed = now.elapsed();
         if elapsed.as_millis() > 0 {
@@ -1129,34 +1165,77 @@ mod tests {
         }
     }
 
-    // ── drain_tmux_reparse_queue via DCS tmux passthrough ───────────────────
+    // ── tmux passthrough queue is drained in-line ───────────────────────────
     #[test]
-    fn drain_tmux_reparse_queue_processes_osc_passthrough() {
+    fn tmux_passthrough_queue_is_drained_by_handle_incoming_data() {
         let mut state = TerminalState::default();
-        // Feed a tmux DCS passthrough containing an OSC title-set sequence:
-        // DCS tmux ; ESC ] 0 ; hello BEL ST
-        // In tmux passthrough, ESCs inside are doubled, so:
-        // ESC P tmux ; ESC ESC ] 0 ; h e l l o BEL ESC \
-        let mut data: Vec<u8> = Vec::new();
-        data.push(0x1b); // ESC
-        data.push(b'P'); // DCS
-        data.extend_from_slice(b"tmux;");
-        data.push(0x1b); // Doubled ESC
-        data.push(0x1b); // (second ESC — tmux doubles them)
-        data.push(b']'); // OSC
-        data.extend_from_slice(b"0;hello");
-        data.push(0x07); // BEL terminator for inner OSC
-        data.push(0x1b); // ESC
-        data.push(b'\\'); // ST to end DCS
-        // Process through the full pipeline — this should queue the OSC
-        // in the tmux reparse queue, and drain_tmux_reparse_queue should
-        // process it.
-        state.handle_incoming_data(&data);
-        // The tmux reparse queue should be drained (empty after processing)
-        let remaining = state.handler.take_tmux_reparse_queue();
+        // A tmux DCS passthrough containing an OSC title-set sequence:
+        // ESC P tmux; ESC ESC ] 0 ; hello BEL ESC \   (inner ESC is doubled)
+        state.handle_incoming_data(b"\x1bPtmux;\x1b\x1b]0;hello\x07\x1b\\");
+        // The queue must be empty again once the batch has been processed.
         assert!(
-            remaining.is_empty(),
-            "tmux reparse queue should be drained after handle_incoming_data"
+            state.handler.take_tmux_passthrough_queue().is_empty(),
+            "tmux passthrough queue should be drained after handle_incoming_data"
+        );
+    }
+
+    /// Wrap `inner` in `levels` nested `ESC P tmux; ... ESC \` envelopes.
+    fn tmux_nest(inner: &[u8], levels: usize) -> Vec<u8> {
+        let mut bytes = inner.to_vec();
+        for _ in 0..levels {
+            let mut wrapped = b"\x1bPtmux;".to_vec();
+            for &b in &bytes {
+                if b == 0x1b {
+                    wrapped.push(0x1b);
+                }
+                wrapped.push(b);
+            }
+            wrapped.extend_from_slice(b"\x1b\\");
+            bytes = wrapped;
+        }
+        bytes
+    }
+
+    #[test]
+    fn tmux_passthrough_beyond_the_depth_cap_is_dropped_with_a_payload_free_debug() {
+        let inner = b"\x1b]0;SECRETPAYLOAD\x07";
+        let mut state = TerminalState::default();
+        let events = crate::log_capture::capture(|| {
+            state.handle_incoming_data(&tmux_nest(inner, MAX_TMUX_PASSTHROUGH_DEPTH + 1));
+        });
+        assert!(
+            state.window_commands.is_empty(),
+            "a dropped payload must not be processed"
+        );
+        let dropped: Vec<_> = events
+            .iter()
+            .filter(|(_, text)| text.contains("tmux passthrough payload dropped"))
+            .collect();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "expected exactly one drop line: {events:?}"
+        );
+        let (level, text) = dropped[0];
+        assert_eq!(*level, tracing::Level::DEBUG);
+        assert!(!text.contains("SECRETPAYLOAD"), "drop line leaked: {text}");
+        assert!(
+            text.contains("depth 5"),
+            "drop line must carry the depth: {text}"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_at_the_depth_cap_is_processed() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(&tmux_nest(b"\x1b]0;hello\x07", MAX_TMUX_PASSTHROUGH_DEPTH));
+        assert!(
+            state
+                .window_commands
+                .iter()
+                .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "hello")),
+            "got {:?}",
+            state.window_commands
         );
     }
 

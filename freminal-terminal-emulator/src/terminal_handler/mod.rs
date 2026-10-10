@@ -352,21 +352,16 @@ pub struct TerminalHandler {
     /// dimensions to cell counts.  Defaults to 16 until the first resize
     /// event provides real font metrics.
     cell_pixel_height: u32,
-    /// Raw bytes queued for re-parsing by the emulator layer.
+    /// Un-doubled inner payloads from tmux DCS passthrough, awaiting the
+    /// real parser.
     ///
-    /// tmux DCS passthrough can contain inner CSI or OSC sequences that
-    /// `TerminalHandler` cannot parse directly (the ANSI parser lives in
-    /// the `freminal-terminal-emulator` crate).  These bytes are queued here
-    /// and drained by `TerminalState::handle_incoming_data()` after
-    /// `process_outputs()` returns, fed back through the parser, and
-    /// processed as normal terminal output.
-    tmux_reparse_queue: Vec<Vec<u8>>,
-    /// True while dispatching an inner sequence from a tmux DCS passthrough.
-    ///
-    /// When set, [`write_to_pty`] wraps the outgoing response in a DCS tmux
-    /// passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`) so
-    /// that tmux can relay it back to the requesting client.
-    in_tmux_passthrough: bool,
+    /// `TerminalHandler` has no ANSI parser (it lives in this crate's
+    /// `ansi` module and is owned by `TerminalState`), so
+    /// `handle_tmux_passthrough` queues each whole inner sequence here.
+    /// `TerminalState` takes the queue immediately after the output that
+    /// produced it, parses every payload with a fresh parser and processes
+    /// the result in event order.
+    tmux_passthrough_queue: Vec<Vec<u8>>,
     /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
     ///
     /// Set by `CSI > 4 ; Pv m`.  Level 0 is the default (disabled).
@@ -497,8 +492,7 @@ impl TerminalHandler {
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
-            tmux_reparse_queue: Vec::new(),
-            in_tmux_passthrough: false,
+            tmux_passthrough_queue: Vec::new(),
             modify_other_keys_level: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
             in_band_resize_enabled: InBandResizeMode::Reset,
@@ -1081,10 +1075,12 @@ impl TerminalHandler {
         self.write_tx = Some(tx);
     }
 
-    /// Drain and return all queued raw-byte sequences from tmux passthrough
-    /// that need to be re-parsed by the ANSI parser.
-    pub fn take_tmux_reparse_queue(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.tmux_reparse_queue)
+    /// Drain and return all inner payloads queued by tmux DCS passthrough.
+    ///
+    /// Each entry is one complete, un-doubled escape sequence (starting with
+    /// `ESC`) that the caller must run through the ANSI parser.
+    pub fn take_tmux_passthrough_queue(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.tmux_passthrough_queue)
     }
 
     /// Return the current working directory reported by the shell via OSC 7, if any.
@@ -1464,13 +1460,6 @@ impl TerminalHandler {
     /// `prune_evicted_real_placements`.
     pub(crate) fn finish_output_batch(&mut self) {
         self.prune_evicted_real_placements();
-    }
-
-    /// Test-only convenience: process one output and finish its batch.
-    #[cfg(test)]
-    fn process_output(&mut self, output: &TerminalOutput) {
-        self.process_output_in_batch(output);
-        self.finish_output_batch();
     }
 
     /// Process a single `TerminalOutput` command as part of a batch.
@@ -4639,9 +4628,9 @@ mod tests {
     }
 
     #[test]
-    fn take_tmux_reparse_queue() {
+    fn take_tmux_passthrough_queue() {
         let mut handler = TerminalHandler::new(80, 24);
-        let queue = handler.take_tmux_reparse_queue();
+        let queue = handler.take_tmux_passthrough_queue();
         assert_eq!(queue, [] as [Vec<u8>; 0]);
     }
 
