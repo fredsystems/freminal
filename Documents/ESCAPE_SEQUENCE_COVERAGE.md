@@ -19,7 +19,14 @@ iTerm2 multipart at 64 MiB, and neither pre-allocates from `S=` / `size=`.
 (129.12) OSC 99 base64 payloads chunked mid-quantum now decode correctly.
 (129.13) Kitty graphics replies honour S8C1T (8-bit APC / ST). (129.14)
 `DCS @kitty-*` kitten strings are consumed silently (debug only; new row, not
-planned), and warn logs never contain payload bytes.
+planned), and warn logs never contain payload bytes. (129.1) The base64
+decoder behind OSC 52, OSC 1337 and kitty graphics payloads is stricter: a
+dangling single character (length ≡ 1 mod 4 after padding is removed) and
+padding beyond what completes the final quantum (`Zm9v=`, `YQ===`) are now
+rejected; missing padding is still accepted. A kitty graphics command whose
+payload is rejected this way is dropped as a whole, as before for other base64
+errors. (Review) The tail of a kitty chunked transfer abandoned at a cap is
+discarded silently up to its `m=0` chunk.
 
 Last updated: 2026-10-09 — Task 128 (strict CSI dispatch). The CSI router now
 selects a handler on the whole key (private-marker prefix, intermediate, final
