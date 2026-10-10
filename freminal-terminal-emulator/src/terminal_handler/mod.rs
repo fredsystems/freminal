@@ -1452,18 +1452,36 @@ impl TerminalHandler {
     /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
     pub fn process_outputs(&mut self, outputs: &[TerminalOutput]) {
         for output in outputs {
-            self.process_output(output);
+            self.process_output_in_batch(output);
         }
-        // Once per batch, not per line feed: see the method's cost note.
+        self.finish_output_batch();
+    }
+
+    /// End-of-batch housekeeping for callers that drive
+    /// [`Self::process_output_in_batch`] one output at a time.
+    ///
+    /// Runs once per batch, not per line feed: see the cost note on
+    /// `prune_evicted_real_placements`.
+    pub(crate) fn finish_output_batch(&mut self) {
         self.prune_evicted_real_placements();
     }
 
-    /// Process a single `TerminalOutput` command
+    /// Test-only convenience: process one output and finish its batch.
+    #[cfg(test)]
+    fn process_output(&mut self, output: &TerminalOutput) {
+        self.process_output_in_batch(output);
+        self.finish_output_batch();
+    }
+
+    /// Process a single `TerminalOutput` command as part of a batch.
+    ///
+    /// The caller must call [`Self::finish_output_batch`] once after the last
+    /// output of the batch.
     // Inherently large: exhaustive match over all `TerminalOutput` variants. Each arm is
     // tightly coupled to buffer state. Splitting would require passing the full handler context
     // to sub-functions without any reduction in complexity.
     #[allow(clippy::too_many_lines)]
-    fn process_output(&mut self, output: &TerminalOutput) {
+    pub(crate) fn process_output_in_batch(&mut self, output: &TerminalOutput) {
         match output {
             // === Implemented Operations ===
             TerminalOutput::Data(bytes) => {

@@ -473,6 +473,42 @@ impl TerminalState {
         }
     }
 
+    /// Apply one parsed batch in event order.
+    ///
+    /// Each output is applied to the handler, then to the `TerminalState`-owned
+    /// mode flags, then (for `ResetDevice`) to the `TerminalState` RIS reset,
+    /// before the next output is looked at.  This keeps every side effect that
+    /// reads or writes state (replies, mode queries, RIS) in the order the
+    /// application sent the sequences.  The handler's end-of-batch housekeeping
+    /// runs once after the last output.
+    fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput]) {
+        for output in parsed {
+            self.handler.process_output_in_batch(output);
+            self.sync_mode_flags(output);
+            if matches!(output, TerminalOutput::ResetDevice) {
+                // RIS replaces the parser mid-iteration.  The outputs that
+                // follow in this same chunk were already parsed by the old
+                // parser; only the next chunk sees the fresh parser.
+                self.apply_state_reset();
+            }
+        }
+        self.handler.finish_output_batch();
+    }
+
+    /// RIS (ESC c) — reset the state that lives in `TerminalState`.
+    ///
+    /// The handler has already reset all buffer-level state when it processed
+    /// `ResetDevice`.  This resets modes, parser, leftover data, cursor visual
+    /// style and pending window commands.  `write_tx` is preserved (user
+    /// configuration).
+    fn apply_state_reset(&mut self) {
+        self.modes = TerminalModes::default();
+        self.parser = FreminalAnsiParser::new();
+        self.leftover_data = None;
+        self.cursor_visual_style = CursorVisualStyle::default();
+        self.window_commands.clear();
+    }
+
     /// Drain the tmux reparse queue, parsing and processing any queued
     /// raw bytes (CSI/OSC sequences from DCS tmux passthrough).
     fn drain_tmux_reparse_queue(&mut self) {
@@ -486,10 +522,7 @@ impl TerminalState {
                 for output in &reparsed {
                     trace!(%output, "reparsed tmux passthrough output");
                 }
-                self.handler.process_outputs(&reparsed);
-                for output in &reparsed {
-                    self.sync_mode_flags(output);
-                }
+                self.process_parsed_outputs(&reparsed);
             }
         }
     }
@@ -510,22 +543,21 @@ impl TerminalState {
     /// 3. **Parser** — feeds the complete (non-trailing) bytes to
     ///    `FreminalAnsiParser::push()`, which produces a `Vec<TerminalOutput>`.
     ///
-    /// 4. **Buffer mutations** — `TerminalHandler::process_outputs()` applies
-    ///    every `TerminalOutput` item to the buffer: text insertion, cursor
-    ///    movement, erase operations, mode changes, etc.
+    /// 4. **Event-order processing** — a single pass over the parsed outputs.
+    ///    For each `TerminalOutput` item, in order: the handler applies it to
+    ///    the buffer (text insertion, cursor movement, erase operations, mode
+    ///    changes, replies, etc.); the `TerminalState`-owned mode flags are
+    ///    synced (mouse tracking, bracketed paste, focus reporting, DECANM,
+    ///    etc.); and, if the item is `ResetDevice` (ESC c), the
+    ///    `TerminalState` RIS reset runs at that point (modes, parser,
+    ///    `leftover_data`, cursor style, window commands).  The handler's
+    ///    end-of-batch housekeeping runs once after the last item.
     ///
-    /// 5. **Mode sync** — iterates the same output list a second time to update
-    ///    the mode flags that live in `TerminalState` rather than the handler
-    ///    (mouse tracking, bracketed paste, focus reporting, DECANM, etc.).
-    ///
-    /// 6. **RIS reset** — if any item is `ResetDevice` (ESC c), resets all
-    ///    `TerminalState`-owned mode fields and clears window commands.
-    ///
-    /// 7. **Window commands** — drains the handler's `window_commands` queue
+    /// 5. **Window commands** — drains the handler's `window_commands` queue
     ///    into `self.window_commands` so the GUI's `handle_window_manipulation`
     ///    drain loop can pick them up on the next frame.
     ///
-    /// 8. **tmux reparse** — drains any raw bytes queued by the DCS tmux
+    /// 6. **tmux reparse** — drains any raw bytes queued by the DCS tmux
     ///    passthrough handler, re-runs them through the parser and handler,
     ///    and loops until the queue is empty.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
@@ -617,29 +649,7 @@ impl TerminalState {
             trace!(output = %BoundedDisplay(output), "parsed terminal output");
         }
 
-        self.handler.process_outputs(&parsed);
-
-        // ── Sync mode flags that the handler doesn't own ─────────────
-        for output in &parsed {
-            self.sync_mode_flags(output);
-        }
-
-        // ── RIS (ESC c) — full terminal reset ──────────────────────────
-        //
-        // If the parsed output contains a ResetDevice, the handler has already
-        // reset all buffer-level state.  We also need to reset the state that
-        // lives in TerminalState: modes, parser, leftover data, and cursor
-        // visual style.  `write_tx` is preserved (user configuration).
-        if parsed
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::ResetDevice))
-        {
-            self.modes = TerminalModes::default();
-            self.parser = FreminalAnsiParser::new();
-            self.leftover_data = None;
-            self.cursor_visual_style = CursorVisualStyle::default();
-            self.window_commands.clear();
-        }
+        self.process_parsed_outputs(&parsed);
 
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation

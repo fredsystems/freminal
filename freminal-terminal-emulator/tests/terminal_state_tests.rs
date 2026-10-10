@@ -16,8 +16,9 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm,
-        keypad::KeypadMode, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
+        decscnm::Decscnm, keypad::KeypadMode, s8c1t::S8c1t, sync_updates::SynchronizedUpdates,
+        xtmsewin::XtMseWin,
     },
     pty_write::PtyWrite,
 };
@@ -706,4 +707,85 @@ fn test_hilite_mouse_tracking_decrqm_after_set() {
         resp, "\x1b[?1001;1$y",
         "DECRQM ?1001 after DECSET must return Ps=1 (set)"
     );
+}
+
+// ─── event-order output processing (Task 130.1) ─────────────────────────────
+
+/// Collect every `PtyWrite::Write` payload currently queued on `rx`.
+fn collect_writes(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<Vec<u8>> {
+    rx.try_iter()
+        .filter_map(|msg| match msg {
+            PtyWrite::Write(bytes) => Some(bytes),
+            PtyWrite::Resize(_) => None,
+        })
+        .collect()
+}
+
+/// A DECRQM query followed by a DA1 request in the same buffer must be
+/// answered in the order the application sent them: the DECRPM reply first,
+/// then the DA1 reply.  Before event-order processing the handler pass emitted
+/// every handler-owned reply (DA1) before the mode-sync pass emitted DECRPM.
+#[test]
+fn decrpm_reply_precedes_da1_reply_in_one_buffer() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2026$p\x1b[c");
+
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 2, "expected exactly two replies: {writes:?}");
+    assert_eq!(
+        writes[0],
+        b"\x1b[?2026;2$y".to_vec(),
+        "first reply must be the DECRPM answer"
+    );
+    assert!(
+        writes[1].starts_with(b"\x1b[?"),
+        "second reply must be the DA1 answer, got {:?}",
+        String::from_utf8_lossy(&writes[1])
+    );
+    assert!(
+        writes[1].ends_with(b"c"),
+        "DA1 reply must end with 'c', got {:?}",
+        String::from_utf8_lossy(&writes[1])
+    );
+}
+
+/// A mode set *after* RIS in the same buffer must survive: the RIS state reset
+/// applies at the `ResetDevice` position, not after the whole batch.
+#[test]
+fn decckm_set_after_ris_in_one_buffer_survives() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\x1b[?1h");
+
+    assert_eq!(state.modes.cursor_key, Decckm::Application);
+}
+
+/// A mode set *before* RIS in the same buffer is wiped by the reset.
+#[test]
+fn decckm_set_before_ris_in_one_buffer_is_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1b[?1h\x1bc");
+
+    assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+}
+
+/// S8C1T issued after RIS in the same buffer must leave the parser in 8-bit
+/// mode, and a later request gets an 8-bit CSI reply.
+#[test]
+fn s8c1t_after_ris_in_one_buffer_leaves_parser_eight_bit() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1bc\x1b G");
+
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::EightBit);
+
+    // The mode also reaches the reply path: a DA1 reply starts with 8-bit CSI.
+    state.handle_incoming_data(b"\x1b[c");
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
+    assert_eq!(writes[0][0], 0x9B, "DA1 reply must use 8-bit CSI");
 }
