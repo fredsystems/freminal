@@ -311,12 +311,42 @@ fn build_finalized(payloads: FinishedPayloads, meta: Osc99Command) -> FinalizedN
 
 // ── PendingNotifications type alias ──────────────────────────────────────────
 
+/// The state held for one `i=` identifier in [`PendingNotifications`].
+#[derive(Debug)]
+pub(in crate::terminal_handler) enum PendingEntry {
+    /// Chunks are being accumulated; the notification is still valid.
+    ///
+    /// Boxed so the tombstone variant does not pay for four assemblers.
+    Accumulating(Box<PendingNotification>),
+    /// The notification was dropped mid-transfer (invalid base64 or a cap
+    /// breach). The id is remembered as a tombstone so the remaining chunks
+    /// of the same transfer are discarded instead of starting a fresh
+    /// accumulation from a tail fragment. The terminating (`d=1`) chunk
+    /// removes it. It counts toward [`MAX_PENDING_OSC99_NOTIFICATIONS`] like
+    /// any other pending entry, so the map stays bounded.
+    Dropped,
+}
+
 /// Map of in-flight OSC 99 notifications keyed by their `i=` identifier.
-pub(in crate::terminal_handler) type PendingNotifications = HashMap<String, PendingNotification>;
+pub(in crate::terminal_handler) type PendingNotifications = HashMap<String, PendingEntry>;
 
 // ── Reassembly impl on TerminalHandler ───────────────────────────────────────
 
 impl TerminalHandler {
+    /// Abandon the in-flight notification `id` after a decode or cap failure.
+    ///
+    /// If the offending chunk was the terminating one (`done`) the
+    /// notification is over and the entry is removed. Otherwise the id is
+    /// kept as a [`PendingEntry::Dropped`] tombstone so the remaining chunks
+    /// of the same transfer cannot start a fresh, truncated notification.
+    fn abandon_notification(&mut self, id: String, done: bool) {
+        if done {
+            self.pending_notifications.remove(&id);
+        } else {
+            self.pending_notifications.insert(id, PendingEntry::Dropped);
+        }
+    }
+
     /// Feed one parsed OSC 99 chunk into the notification reassembly machine.
     ///
     /// Returns `Some(finalized)` when the chunk terminates a notification
@@ -330,6 +360,12 @@ impl TerminalHandler {
     /// standalone notification; if `done == false` (a non-final chunk with no
     /// id), it is dropped and `None` is returned.
     /// An `i=` seen again after finalize starts a fresh accumulation.
+    ///
+    /// A notification dropped mid-transfer (invalid base64, or a size cap)
+    /// leaves a tombstone for its id: further content chunks are ignored and
+    /// the terminating chunk removes the tombstone without emitting anything.
+    /// Control chunks (`p=close`/`p=alive`/`p=?`) are not swallowed by a
+    /// tombstone; they are handled as if the id had no entry.
     pub(in crate::terminal_handler) fn reassemble_osc99(
         &mut self,
         chunk: Osc99Command,
@@ -364,6 +400,28 @@ impl TerminalHandler {
             Some(id) => {
                 let id = id.clone();
 
+                let done = chunk.done;
+
+                if matches!(
+                    self.pending_notifications.get(&id),
+                    Some(PendingEntry::Dropped)
+                ) {
+                    if control_kind(chunk.payload_type).is_some() {
+                        // A control request (`p=close`/`p=alive`/`p=?`) is not
+                        // part of the dropped content transfer: forget the
+                        // tombstone and handle it as if no entry existed.
+                        self.pending_notifications.remove(&id);
+                    } else {
+                        // The rest of a dropped transfer: ignore the payload;
+                        // the terminating chunk ends the notification.
+                        if done {
+                            self.pending_notifications.remove(&id);
+                        }
+                        tracing::trace!("OSC 99: ignoring chunk of a dropped notification");
+                        return None;
+                    }
+                }
+
                 // Bound the number of concurrent in-flight notifications: a
                 // new id is refused once the map is full (existing ids may
                 // still receive their remaining chunks and finalize).
@@ -377,7 +435,14 @@ impl TerminalHandler {
                     return None;
                 }
 
-                let entry = self.pending_notifications.entry(id.clone()).or_default();
+                let PendingEntry::Accumulating(entry) = self
+                    .pending_notifications
+                    .entry(id.clone())
+                    .or_insert_with(|| PendingEntry::Accumulating(Box::default()))
+                else {
+                    // Unreachable: a tombstone was handled above.
+                    return None;
+                };
 
                 // Append the chunk's payload to the matching accumulator. An
                 // invalid base64 stream or an exceeded cap drops the whole
@@ -385,7 +450,7 @@ impl TerminalHandler {
                 if let Err(err) =
                     entry.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
                 {
-                    self.pending_notifications.remove(&id);
+                    self.abandon_notification(id.clone(), done);
                     tracing::debug!(
                         "OSC 99: dropping notification {:?}: {err}",
                         lossy_sequence_for_log_bounded(id.as_bytes())
@@ -398,7 +463,7 @@ impl TerminalHandler {
                 // drop the whole in-flight accumulation rather than grow
                 // without limit.
                 if entry.accumulated_len() > MAX_OSC99_NOTIFICATION_BYTES {
-                    self.pending_notifications.remove(&id);
+                    self.abandon_notification(id, done);
                     tracing::debug!(
                         "OSC 99: dropping notification; accumulated payload exceeds {} bytes",
                         MAX_OSC99_NOTIFICATION_BYTES
@@ -410,14 +475,17 @@ impl TerminalHandler {
                 // Move (not clone) the payload out of the chunk before storing
                 // metadata, so a large final icon/body chunk is not retained
                 // twice (once in the accumulator, once in `meta`).
-                let done = chunk.done;
                 let mut chunk = chunk;
                 chunk.payload = Vec::new();
                 entry.meta = Some(chunk);
 
                 if done {
                     // Remove from the map and build the finalized notification.
-                    let mut entry = self.pending_notifications.remove(&id)?;
+                    let Some(PendingEntry::Accumulating(mut entry)) =
+                        self.pending_notifications.remove(&id)
+                    else {
+                        return None;
+                    };
                     // SAFETY: we just set entry.meta = Some(chunk) before inserting,
                     // so this is always Some when we removed a live entry.
                     let meta = entry.meta.take()?;
@@ -795,7 +863,8 @@ mod tests {
             ..default_cmd()
         };
         assert!(handler.reassemble_osc99(chunk2).is_none());
-        assert!(!handler.pending_notifications.contains_key(&id));
+        // The id stays as a tombstone until the terminating chunk.
+        assert!(is_dropped(&handler, &id));
     }
 
     #[test]
@@ -814,10 +883,9 @@ mod tests {
 
         // The stored metadata must not keep a copy of the payload bytes: they
         // live only in the body accumulator now.
-        let entry = handler
-            .pending_notifications
-            .get(&id)
-            .expect("entry should be pending");
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_notifications.get(&id) else {
+            panic!("entry should be accumulating");
+        };
         assert_eq!(entry.body.len(), 5);
         assert!(
             entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()),
@@ -930,7 +998,7 @@ mod tests {
         assert!(feed(&mut handler, "i=q:p=body:d=0:e=1", b"d29y").is_none());
         assert!(feed(&mut handler, "i=q:p=body:d=0:e=1", b"bG").is_none());
         assert!(feed(&mut handler, "i=q:p=body:d=0", b"!").is_none());
-        assert!(!handler.pending_notifications.contains_key("q"));
+        assert!(is_dropped(&handler, "q"));
     }
 
     /// Each payload type decodes its own stream: a title may stop
@@ -955,7 +1023,7 @@ mod tests {
         assert!(handler.pending_notifications.contains_key("bad"));
         assert!(feed(&mut handler, "i=bad:d=0:e=1", b"!!!!").is_none());
         assert!(
-            !handler.pending_notifications.contains_key("bad"),
+            is_dropped(&handler, "bad"),
             "the invalid chunk must drop the pending notification"
         );
     }
@@ -1020,6 +1088,158 @@ mod tests {
         assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
         assert!(handler.pending_notifications.contains_key(id));
         assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
-        assert!(!handler.pending_notifications.contains_key(id));
+        assert!(is_dropped(&handler, id));
+    }
+
+    // ── Tombstones for notifications dropped mid-transfer ────────────────────
+
+    /// Whether `id` is currently held as a [`PendingEntry::Dropped`] tombstone.
+    fn is_dropped(handler: &TerminalHandler, id: &str) -> bool {
+        matches!(
+            handler.pending_notifications.get(id),
+            Some(PendingEntry::Dropped)
+        )
+    }
+
+    /// The reviewer's repro: invalid base64 mid-transfer, then a plain
+    /// terminating chunk for the same id, must not yield a notification
+    /// built from the tail fragment.
+    #[test]
+    fn dropped_notification_tail_chunk_emits_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(is_dropped(&handler, "1"));
+        assert!(feed(&mut handler, "i=1:d=1:p=title", b"TAILONLY").is_none());
+        assert!(
+            handler.pending_notifications.is_empty(),
+            "the terminating chunk must remove the tombstone"
+        );
+    }
+
+    /// After the tombstone is consumed by `d=1`, the same id starts a fresh,
+    /// valid notification that finalizes normally.
+    #[test]
+    fn id_is_reusable_after_dropped_notification_terminates() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=1:p=title", b"TAILONLY").is_none());
+
+        assert!(feed(&mut handler, "i=1:d=0:p=title", b"Fresh ").is_none());
+        let finalized = feed(&mut handler, "i=1:d=1:p=title", b"start").expect("must finalize");
+        assert_eq!(finalized.title.as_deref(), Some("Fresh start"));
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Intermediate chunks of a dropped transfer are ignored and keep the
+    /// tombstone; they never accumulate.
+    #[test]
+    fn dropped_notification_ignores_intermediate_chunks() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=title", b"more").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=body", b"more").is_none());
+        assert!(is_dropped(&handler, "1"));
+        assert_eq!(handler.pending_notifications.len(), 1);
+    }
+
+    /// If the offending chunk is itself the terminating one, the notification
+    /// is over: no tombstone is left behind.
+    #[test]
+    fn invalid_terminating_chunk_leaves_no_tombstone() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"SGVs").is_none());
+        assert!(feed(&mut handler, "i=1:d=1:p=title:e=1", b"@@@@").is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// A combined-cap breach tombstones the id: further chunks and the
+    /// terminating chunk emit nothing.
+    #[test]
+    fn combined_cap_breach_then_tail_chunks_emit_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // Title and body each fit their own accumulator, but together they
+        // exceed the per-notification cap.
+        let half = vec![b'a'; MAX_OSC99_NOTIFICATION_BYTES / 2 + 1];
+        assert!(feed(&mut handler, "i=big:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=big:d=0:p=body", &half).is_none());
+        assert!(is_dropped(&handler, "big"));
+
+        assert!(feed(&mut handler, "i=big:d=0:p=title", b"tail").is_none());
+        assert!(feed(&mut handler, "i=big:d=1:p=title", b"tail").is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Tombstones occupy slots in the pending map like any other entry, so
+    /// the 128-entry cap bounds them too.
+    #[test]
+    fn tombstones_count_toward_pending_cap() {
+        let mut handler = TerminalHandler::new(80, 24);
+        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
+            let metadata = format!("i=id-{i}:d=0:p=title:e=1");
+            assert!(feed(&mut handler, &metadata, b"@@@@").is_none());
+        }
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+        assert!(
+            handler
+                .pending_notifications
+                .values()
+                .all(|e| matches!(e, PendingEntry::Dropped))
+        );
+
+        // A new id is refused: the map does not grow past the cap.
+        assert!(feed(&mut handler, "i=overflow:d=0:p=title", b"x").is_none());
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+        assert!(!handler.pending_notifications.contains_key("overflow"));
+
+        // Terminating a tombstoned id frees its slot.
+        assert!(feed(&mut handler, "i=id-0:d=1:p=title", b"x").is_none());
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS - 1
+        );
+    }
+
+    /// A control request for a tombstoned id is handled as if the id had no
+    /// entry: a done `p=close` finalizes as a control notification and the
+    /// tombstone is gone.
+    #[test]
+    fn close_for_tombstoned_id_behaves_as_if_no_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(is_dropped(&handler, "1"));
+
+        let finalized = feed(&mut handler, "i=1:p=close", b"").expect("close must finalize");
+        assert_eq!(finalized.meta.payload_type, Osc99PayloadType::Close);
+        assert_eq!(finalized.meta.id.as_deref(), Some("1"));
+        assert!(finalized.title.is_none());
+        assert!(handler.pending_notifications.is_empty());
+    }
+
+    /// Same for `p=alive` and `p=?`, and a non-final control chunk leaves a
+    /// normal accumulating entry (not a tombstone), as with no prior entry.
+    #[test]
+    fn alive_and_query_for_tombstoned_id_behave_as_if_no_entry() {
+        for (metadata, kind) in [
+            ("i=1:p=alive", Osc99PayloadType::Alive),
+            ("i=1:p=?", Osc99PayloadType::Query),
+        ] {
+            let mut handler = TerminalHandler::new(80, 24);
+            assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+            let finalized = feed(&mut handler, metadata, b"").expect("must finalize");
+            assert_eq!(finalized.meta.payload_type, kind);
+            assert!(handler.pending_notifications.is_empty());
+        }
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
+        assert!(feed(&mut handler, "i=1:d=0:p=close", b"").is_none());
+        assert!(!is_dropped(&handler, "1"));
+        assert!(handler.pending_notifications.contains_key("1"));
     }
 }

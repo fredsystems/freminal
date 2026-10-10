@@ -263,7 +263,12 @@ pub(super) fn handle_osc_notify_99(raw_params: &[u8], output: &mut Vec<TerminalO
             output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd)));
         }
         Err(e) => {
-            tracing::debug!("OSC 99: parse error (ignored): {e}");
+            // `Osc99ParseError`'s Display embeds the offending token or
+            // payload verbatim, so bound it before it reaches the log.
+            tracing::debug!(
+                "OSC 99: parse error (ignored): {}",
+                lossy_sequence_for_log_bounded(e.to_string().as_bytes())
+            );
         }
     }
 }
@@ -308,6 +313,7 @@ fn decode_utf8(bytes: &[u8], raw_params: &[u8]) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
+    use crate::ansi_components::tracer::log_capture::capture;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
         Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
@@ -812,5 +818,37 @@ mod tests {
         // "foo=bar" has a multi-char key → InvalidMetadata
         super::handle_osc_notify_99(b"99;foo=bar;body", &mut output);
         assert_eq!(output, []);
+    }
+
+    /// A parse failure on an OSC 99 with a huge payload must not copy the
+    /// payload into the log: every event stays small.
+    #[test]
+    fn osc99_parse_error_log_is_bounded() {
+        let mut sequence = b"99;i=1:p=title;".to_vec();
+        // Not valid UTF-8, so the plain payload is rejected by the parser.
+        sequence.extend(std::iter::repeat_n(0xFFu8, 100_000));
+        sequence.push(0x07);
+
+        let events = capture(|| {
+            let output = feed_osc(&sequence);
+            assert!(
+                output
+                    .iter()
+                    .all(|o| !matches!(o, TerminalOutput::OscResponse(AnsiOscType::Notify99(_)))),
+                "an invalid payload must not produce a notification"
+            );
+        });
+
+        assert!(
+            events.iter().any(|(_, text)| text.contains("OSC 99")),
+            "the parse error must still be logged: {events:?}"
+        );
+        for (level, text) in &events {
+            assert!(
+                text.len() <= 1024,
+                "{level} log event is {} bytes; payload must be bounded",
+                text.len()
+            );
+        }
     }
 }

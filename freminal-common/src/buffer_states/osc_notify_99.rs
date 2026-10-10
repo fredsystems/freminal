@@ -89,11 +89,6 @@ pub enum Osc99ParseError {
     InvalidInteger(String),
     /// An `i=`/`g=` identifier contained a disallowed character.
     InvalidId(String),
-    /// The payload was declared base64 (`e=1`) but failed to decode.
-    ///
-    /// No longer produced by [`parse_osc_99`]: base64 payloads are decoded
-    /// as a stream during reassembly, where failure drops the notification.
-    InvalidBase64(String),
     /// The payload was not valid escape-safe UTF-8 (non-base64 payloads).
     InvalidPayloadUtf8(String),
     /// The metadata + payload region exceeded [`MAX_OSC99_SEQUENCE_BYTES`].
@@ -115,7 +110,6 @@ impl fmt::Display for Osc99ParseError {
             Self::InvalidValue(s) => write!(f, "invalid OSC 99 value: {s}"),
             Self::InvalidInteger(s) => write!(f, "invalid OSC 99 integer: {s}"),
             Self::InvalidId(s) => write!(f, "invalid OSC 99 id: {s}"),
-            Self::InvalidBase64(s) => write!(f, "invalid OSC 99 base64: {s}"),
             Self::InvalidPayloadUtf8(s) => write!(f, "invalid OSC 99 payload UTF-8: {s}"),
             Self::SequenceTooLarge(n) => {
                 write!(f, "OSC 99 sequence too large: {n} bytes")
@@ -1143,7 +1137,6 @@ mod tests {
             Osc99ParseError::InvalidValue("val".into()),
             Osc99ParseError::InvalidInteger("99".into()),
             Osc99ParseError::InvalidId("bad!id".into()),
-            Osc99ParseError::InvalidBase64("!!!".into()),
             Osc99ParseError::InvalidPayloadUtf8("bad".into()),
             Osc99ParseError::SequenceTooLarge(2_000_000),
             Osc99ParseError::TooManyMetadataItems { max: 64 },
