@@ -19,7 +19,6 @@ use freminal_common::buffer_states::modes::{
     keypad::KeypadMode,
     lnm::Lnm,
     mouse::{MouseEncoding, MouseTrack},
-    reverse_wrap_around::ReverseWrapAround,
     rl_bracket::RlBracket,
     sync_updates::SynchronizedUpdates,
     xtmsewin::XtMseWin,
@@ -333,29 +332,41 @@ fn mode_decarm_reset_disables_repeat() {
 
 // ── Reverse wrap around (?45) ───────────────────────────────────────
 
+/// Ask the handler (the sole owner of `?45`) for the DECRQM status of `?45`.
+fn reverse_wrap_status(
+    state: &mut TerminalState,
+    rx: &crossbeam_channel::Receiver<freminal_common::pty_write::PtyWrite>,
+) -> Vec<u8> {
+    while rx.try_recv().is_ok() {}
+    state.handle_incoming_data(b"\x1b[?45$p");
+    match rx.try_recv() {
+        Ok(freminal_common::pty_write::PtyWrite::Write(bytes)) => bytes,
+        other => panic!("expected a DECRPM reply, got {other:?}"),
+    }
+}
+
 #[test]
 fn mode_reverse_wrap_around_set() {
-    let mut state = make_state();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut state = TerminalState::new(tx, None);
     assert_eq!(
-        state.modes.reverse_wrap_around,
-        ReverseWrapAround::DontWrap,
-        "default should be DontWrap"
+        reverse_wrap_status(&mut state, &rx),
+        b"\x1b[?45;2$y",
+        "default should be DontWrap (reset)"
     );
     state.handle_incoming_data(b"\x1b[?45h"); // set to WrapAround
-    assert_eq!(
-        state.modes.reverse_wrap_around,
-        ReverseWrapAround::WrapAround
-    );
+    assert_eq!(reverse_wrap_status(&mut state, &rx), b"\x1b[?45;1$y");
     state.handle_incoming_data(b"\x1b[?45l"); // reset back to DontWrap
-    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
+    assert_eq!(reverse_wrap_status(&mut state, &rx), b"\x1b[?45;2$y");
 }
 
 #[test]
 fn mode_reverse_wrap_around_reset() {
-    let mut state = make_state();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut state = TerminalState::new(tx, None);
     state.handle_incoming_data(b"\x1b[?45h");
     state.handle_incoming_data(b"\x1b[?45l");
-    assert_eq!(state.modes.reverse_wrap_around, ReverseWrapAround::DontWrap);
+    assert_eq!(reverse_wrap_status(&mut state, &rx), b"\x1b[?45;2$y");
 }
 
 // ── Synchronized updates (?2026) ────────────────────────────────────

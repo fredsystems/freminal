@@ -69,7 +69,6 @@ pub struct TerminalModes {
     pub cursor_key: Decckm,
     pub bracketed_paste: RlBracket,
     pub focus_reporting: XtMseWin,
-    pub cursor_blinking: XtCBlink,
     pub mouse_tracking: MouseTrack,
     /// The wire format for mouse reports, set independently of `mouse_tracking`.
     ///
@@ -79,7 +78,6 @@ pub struct TerminalModes {
     pub synchronized_updates: SynchronizedUpdates,
     pub invert_screen: Decscnm,
     pub repeat_keys: Decarm,
-    pub reverse_wrap_around: ReverseWrapAround,
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,

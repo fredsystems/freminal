@@ -19,7 +19,6 @@ use freminal_common::{
             decnkm::Decnkm,
             keypad::KeypadMode,
             mouse::{MouseEncoding, MouseTrack},
-            reverse_wrap_around::ReverseWrapAround,
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
             theme::Theming,
@@ -84,7 +83,6 @@ pub struct TerminalState {
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
     pub leftover_data: Option<Vec<u8>>,
     pub window_commands: Vec<WindowManipulation>,
-    pub cursor_visual_style: CursorVisualStyle,
 
     /// The `freminal-buffer` implementation — the sole source of truth for
     /// terminal content, cursor position, and format state.
@@ -138,7 +136,6 @@ impl TerminalState {
             write_tx,
             leftover_data: None,
             window_commands: Vec::new(),
-            cursor_visual_style: CursorVisualStyle::default(),
             handler,
         }
     }
@@ -236,7 +233,9 @@ impl TerminalState {
     ///   `bracketed_paste`, `mouse_tracking`, `mouse_encoding`, `focus_reporting`
     ///   (`XtMseWin`), `repeat_keys` (DECARM), `keypad_mode` (DECPAM/DECNKM),
     ///   `invert_screen` (DECSCNM), `synchronized_updates`, `line_feed_mode`,
-    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and `reverse_wrap_around`.
+    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and the
+    ///   theme state (`theming`, `theme_mode`).  `?45` reverse wrap and the cursor
+    ///   blink state are owned by the handler alone.
     ///
     /// - **`FreminalAnsiParser.vt52_mode` (parser layer)** — DECANM must also
     ///   be mirrored into the parser so it routes ESC bytes to the correct
@@ -313,11 +312,6 @@ impl TerminalState {
             Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
             Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
             Mode::Decarm(v) => self.modes.repeat_keys = *v,
-            // ?45 set/reset: sync into TerminalModes for backwards compat.
-            // Query is answered by the handler; ignore it here.
-            Mode::ReverseWrapAround(
-                v @ (ReverseWrapAround::WrapAround | ReverseWrapAround::DontWrap),
-            ) => self.modes.reverse_wrap_around = *v,
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
             Mode::LineFeedMode(v) => self.modes.line_feed_mode = *v,
             Mode::Decnkm(Decnkm::Application) => {
@@ -527,9 +521,11 @@ impl TerminalState {
             self.handler.process_output_in_batch(output);
             self.sync_mode_flags(output);
             if matches!(output, TerminalOutput::ResetDevice) {
-                // RIS replaces the parser mid-iteration.  The outputs that
-                // follow in this same chunk were already parsed by the old
-                // parser; only the next chunk sees the fresh parser.
+                // RIS resets the parser's DECANM / S8C1T modes mid-iteration.
+                // The outputs that follow in this same chunk were already
+                // parsed, so they are applied as parsed; the parser's
+                // in-flight sequence, `leftover_data` and queued window
+                // commands belong to bytes after the RIS and survive it.
                 self.apply_state_reset();
             }
             self.process_tmux_passthrough_queue(depth);
@@ -565,15 +561,32 @@ impl TerminalState {
     /// RIS (ESC c) — reset the state that lives in `TerminalState`.
     ///
     /// The handler has already reset all buffer-level state when it processed
-    /// `ResetDevice`.  This resets modes, parser, leftover data, cursor visual
-    /// style and pending window commands.  `write_tx` is preserved (user
-    /// configuration).
+    /// `ResetDevice`.  This resets only what `TerminalState` itself owns, and
+    /// only the part of it that RIS reaches:
+    ///
+    /// - `modes` return to their defaults, **except** `theme_mode` and
+    ///   `theming`, which are config / OS-pushed state that is re-pushed only
+    ///   on the next `ThemeModeUpdate`;
+    /// - the parser's `vt52_mode` and `s8c1t_mode` return to ANSI / 7-bit.  The
+    ///   parser itself is **not** replaced: this chunk has already been parsed,
+    ///   so the parser's in-flight sequence and pending data belong to bytes
+    ///   that follow the RIS;
+    /// - `leftover_data` is kept for the same reason (it holds a split UTF-8
+    ///   character that follows the RIS);
+    /// - `window_commands` is kept: those events were already emitted and are
+    ///   in transit to the GUI.
+    ///
+    /// `write_tx` is preserved (user configuration).
     fn apply_state_reset(&mut self) {
-        self.modes = TerminalModes::default();
-        self.parser = FreminalAnsiParser::new();
-        self.leftover_data = None;
-        self.cursor_visual_style = CursorVisualStyle::default();
-        self.window_commands.clear();
+        let theme_mode = self.modes.theme_mode;
+        let theming = self.modes.theming.clone();
+        self.modes = TerminalModes {
+            theme_mode,
+            theming,
+            ..TerminalModes::default()
+        };
+        self.parser.vt52_mode = Decanm::Ansi;
+        self.parser.s8c1t_mode = S8c1t::SevenBit;
     }
 
     /// Process one chunk of raw PTY bytes through the full terminal pipeline.
@@ -598,11 +611,13 @@ impl TerminalState {
     ///    changes, replies, etc.); the `TerminalState`-owned mode flags are
     ///    synced (mouse tracking, bracketed paste, focus reporting, DECANM,
     ///    etc.); if the item is `ResetDevice` (ESC c), the `TerminalState` RIS
-    ///    reset runs at that point (modes, parser, `leftover_data`, cursor
-    ///    style, window commands); and finally any DCS tmux passthrough
-    ///    payload the item queued is parsed with a fresh parser and processed
-    ///    the same way, recursively, up to `MAX_TMUX_PASSTHROUGH_DEPTH` levels,
-    ///    before the next item is looked at.  The handler's end-of-batch
+    ///    reset runs at that point (modes other than the theme state, and the
+    ///    parser's DECANM / S8C1T modes; `leftover_data`, the parser's
+    ///    in-flight sequence and queued window commands survive); and finally
+    ///    any DCS tmux passthrough payload the item queued is parsed with a
+    ///    fresh parser and processed the same way, recursively, up to
+    ///    `MAX_TMUX_PASSTHROUGH_DEPTH` levels, before the next item is looked
+    ///    at.  The handler's end-of-batch
     ///    housekeeping runs once after the last top-level item.
     ///
     /// 5. **Window commands** — drains the handler's `window_commands` queue

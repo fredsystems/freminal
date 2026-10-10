@@ -20,6 +20,9 @@ use freminal_common::{
         decscnm::Decscnm, keypad::KeypadMode, s8c1t::S8c1t, sync_updates::SynchronizedUpdates,
         xtmsewin::XtMseWin,
     },
+    buffer_states::{tchar::TChar, window_manipulation::WindowManipulation},
+    colors::TerminalColor,
+    config::ThemeMode,
     pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
@@ -788,4 +791,118 @@ fn s8c1t_after_ris_in_one_buffer_leaves_parser_eight_bit() {
     let writes = collect_writes(&rx);
     assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
     assert_eq!(writes[0][0], 0x9B, "DA1 reply must use 8-bit CSI");
+}
+
+// ─── RIS state reset: what survives (Task 131.8b) ───────────────────────────
+
+/// The foreground colour of the first visible cell holding `needle`.
+fn foreground_of(state: &mut TerminalState, needle: TChar) -> TerminalColor {
+    let (chars, tags) = state.handler.data_and_format_data_for_gui(0);
+    let idx = chars
+        .visible
+        .iter()
+        .position(|c| *c == needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in {:?}", chars.visible));
+    tags.visible
+        .iter()
+        .find(|t| t.start <= idx && idx < t.end)
+        .map_or_else(
+            || panic!("no format tag covers index {idx}"),
+            |t| t.colors.color,
+        )
+}
+
+/// A CSI split across chunks with a RIS before it: `ESC c ESC [ 3` ends chunk
+/// one, `1 m X` starts chunk two.  The parser's in-flight sequence belongs to
+/// bytes after the RIS and must survive it, so `X` is printed in red.
+#[test]
+fn partial_csi_after_ris_survives_the_state_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\x1b[3");
+    state.handle_incoming_data(b"1mX");
+
+    assert_eq!(
+        foreground_of(&mut state, TChar::Ascii(b'X')),
+        TerminalColor::Red,
+        "the partial CSI that followed the RIS must complete as SGR 31"
+    );
+}
+
+/// A UTF-8 character split across chunks after a RIS: the leading byte kept in
+/// `leftover_data` follows the RIS and must not be discarded by it.
+#[test]
+fn split_utf8_after_ris_survives_the_state_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\xc3");
+    state.handle_incoming_data(b"\xa9");
+
+    let (chars, _) = state.handler.data_and_format_data_for_gui(0);
+    assert!(
+        chars.visible.iter().any(|c| *c == TChar::from('\u{e9}')),
+        "the split e-acute must be printed, got {:?}",
+        chars.visible
+    );
+}
+
+/// `theme_mode` and `theming` are config / OS-pushed state: RIS must not reset
+/// them, and DECRQM `?2031` keeps reporting the configured mode.
+#[test]
+fn ris_preserves_theme_mode_and_theming() {
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Light;
+    state.handle_incoming_data(b"\x1bc");
+
+    assert_eq!(state.modes.theme_mode, ThemeMode::Light);
+
+    drain(&rx);
+    state.handle_incoming_data(b"\x1b[?2031$p");
+    let resp = String::from_utf8(unwrap_write(rx.try_recv().unwrap())).unwrap();
+    assert_eq!(resp, "\x1b[?2031;1$y", "?2031 must still report Light");
+}
+
+/// RIS resets the parser's S8C1T mode: after `ESC SP G` then `ESC c`, a DA1
+/// request in the next chunk is answered with a 7-bit CSI.
+#[test]
+fn ris_resets_parser_s8c1t_to_seven_bit() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::EightBit);
+
+    state.handle_incoming_data(b"\x1bc");
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::SevenBit);
+
+    drain(&rx);
+    state.handle_incoming_data(b"\x1b[c");
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
+    assert_eq!(writes[0][0], 0x1b, "DA1 reply must use 7-bit CSI after RIS");
+}
+
+/// A window command already emitted in an earlier chunk but not yet drained by
+/// the GUI is in transit; RIS must not discard it.
+#[test]
+fn ris_keeps_queued_window_commands() {
+    let (mut state, _rx) = make_state();
+    state.handle_incoming_data(b"\x1b]0;kept\x07");
+    assert!(
+        state
+            .window_commands
+            .iter()
+            .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "kept")),
+        "precondition: title command queued, got {:?}",
+        state.window_commands
+    );
+
+    state.handle_incoming_data(b"\x1bc");
+
+    assert!(
+        state
+            .window_commands
+            .iter()
+            .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "kept")),
+        "RIS must not drop already-queued window commands, got {:?}",
+        state.window_commands
+    );
 }
