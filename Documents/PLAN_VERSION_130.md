@@ -3109,12 +3109,19 @@ hand-maintained lists. Activated and decomposed on 2026-10-10 against `2862acb9`
   result) and is deleted.
 
 - **Parked screens.**
-  - `SavedPrimaryState` becomes `ParkedScreen { rows, saved_cursor, image_store, image_cell_count, blocks }`.
+  - `SavedPrimaryState` becomes
+    `ParkedScreen { rows, reflow_anchor, saved_cursor, image_store, image_cell_count, blocks, next_block_id }`.
   - The `Buffer` holds `parked_primary: Option<ParkedScreen>` and
     `parked_alternate: Option<ParkedScreen>`.
   - Invariant: exactly the inactive screen may be parked. The alternate may also be absent
     (never entered, or reset).
-  - Cursor and margins are no longer parked.
+  - Margins are no longer parked. The cursor is not restored from a parked screen either;
+    it keeps its screen position across a switch.
+  - `ParkedScreen` does carry `reflow_anchor: CursorState`: the cursor the screen had when it
+    was parked, used **only** to anchor reflow and height-shrink trimming while a parked
+    screen is resized (`resize_saved_primary` / `resize_parked_alternate` feed it to the
+    temporary buffer). It is never restored. Without it, a home cursor would make a shrink
+    trim the wrong rows.
   - The image store is parked with `mem::take`, not cloned.
 - **The cursor across a switch** keeps its **screen** coordinates:
   1. `cursor_screen_pos()` on the source screen;
