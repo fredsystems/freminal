@@ -832,6 +832,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_non_utf8_duplicate_value_keeps_the_earlier_valid_one() {
+        // A value that is not UTF-8 skips its item; it does not clear an
+        // earlier valid value for the same key.
+        assert_eq!(
+            parse_ftcs_params(b"A;freminal=1;fid=ok;fid=\xff"),
+            Some(FtcsMarker::PromptStart {
+                fid: "ok".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn parse_duplicate_keys_last_wins() {
         assert_eq!(
             parse_ftcs_params(b"A;freminal=1;fid=one;fid=two"),

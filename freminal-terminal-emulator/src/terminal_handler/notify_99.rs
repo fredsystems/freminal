@@ -891,6 +891,19 @@ mod tests {
             entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()),
             "meta.payload must be cleared after accumulation"
         );
+
+        // And the accumulated bytes are the payload itself.
+        let done = Osc99Command {
+            id: Some(id),
+            payload_type: Osc99PayloadType::Body,
+            done: true,
+            payload: Vec::new(),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(done)
+            .expect("terminating chunk finalizes");
+        assert_eq!(finalized.body.as_deref(), Some("hello"));
     }
 
     // ── 129.12: stream decoding through the real wire path ───────────────────

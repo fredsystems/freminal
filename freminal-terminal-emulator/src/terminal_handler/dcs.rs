@@ -2537,10 +2537,9 @@ mod tests {
             "@kitty- DCS must not warn: {events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|(level, text)| *level == Level::DEBUG && text.contains("@kitty-")),
-            "expected one debug line for the @kitty- DCS: {events:?}"
+            events.iter().any(|(level, text)| *level == Level::DEBUG
+                && text.contains("DCS @kitty- sequence ignored")),
+            "expected the dedicated @kitty- debug line: {events:?}"
         );
         assert!(
             events.iter().all(|(level, text)| {
