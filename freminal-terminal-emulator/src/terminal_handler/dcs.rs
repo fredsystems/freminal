@@ -2584,9 +2584,9 @@ mod tests {
         dcs.extend(std::iter::repeat_n(b'A', 100_000));
         dcs.extend_from_slice(b"\x1b\\");
         let events = feed_and_capture(&dcs);
-        // TRACE is excluded: the per-output trace in `state/internal.rs` prints
-        // the whole parsed output and is outside this subtask's scope.
-        for (_, text) in events.iter().filter(|(level, _)| *level != Level::TRACE) {
+        // Every level, TRACE included: the per-output trace in
+        // `state/internal.rs` is bounded too (129.C6).
+        for (_, text) in &events {
             assert!(
                 text.len() < 4096,
                 "a log line carried an unbounded payload ({} bytes): {}",

@@ -152,14 +152,30 @@ impl PendingNotification {
     ///
     /// # Errors
     ///
-    /// Returns the first [`ChunkError`] from any accumulator.
+    /// Returns the first [`ChunkError`] from any accumulator, or
+    /// [`ChunkError::TotalTooLarge`] if the flushed payloads together exceed
+    /// [`MAX_OSC99_NOTIFICATION_BYTES`]. Flushing a pending 2- or 3-character
+    /// base64 tail adds bytes after the per-chunk combined check, so the
+    /// combined cap is re-checked here.
     fn finish_payloads(self) -> Result<FinishedPayloads, ChunkError> {
-        Ok(FinishedPayloads {
+        let payloads = FinishedPayloads {
             title: self.title.finish()?,
             body: self.body.finish()?,
             icon: self.icon.finish()?,
             buttons: self.buttons.finish()?,
-        })
+        };
+        let total = payloads
+            .title
+            .len()
+            .saturating_add(payloads.body.len())
+            .saturating_add(payloads.icon.len())
+            .saturating_add(payloads.buttons.len());
+        if total > MAX_OSC99_NOTIFICATION_BYTES {
+            return Err(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES,
+            });
+        }
+        Ok(payloads)
     }
 }
 
@@ -1102,6 +1118,32 @@ mod tests {
         assert!(handler.pending_notifications.contains_key(id));
         assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
         assert!(is_dropped(&handler, id));
+    }
+
+    /// PR #536 review: the combined cap must also hold for the bytes a pending
+    /// base64 tail adds when the accumulators are finished.
+    #[test]
+    fn base64_tail_flushed_at_finish_cannot_exceed_the_combined_cap() {
+        let half = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let mut handler = TerminalHandler::new(80, 24);
+        // Exactly 1 MiB of plain title: at the cap, still accepted.
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        // `YQ` decodes to one byte, but only when the stream is finished.
+        assert!(feed(&mut handler, "i=cap:d=1:p=body:e=1", b"YQ").is_none());
+        assert!(!handler.pending_notifications.contains_key("cap"));
+
+        // The same shape one byte smaller finalises with both parts intact.
+        let mut handler = TerminalHandler::new(80, 24);
+        let short = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", &half).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", &short).is_none());
+        let done = feed(&mut handler, "i=ok:d=1:p=body:e=1", b"YQ").expect("within the cap");
+        assert_eq!(done.body.as_deref(), Some("a"));
+        assert_eq!(
+            done.title.map(|t| t.len()),
+            Some(MAX_OSC99_NOTIFICATION_BYTES - 1)
+        );
     }
 
     // ── Tombstones for notifications dropped mid-transfer ────────────────────

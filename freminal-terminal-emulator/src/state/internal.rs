@@ -38,7 +38,7 @@ use std::{fmt::Write as _, time::Instant};
 
 use crate::{
     ansi::FreminalAnsiParser,
-    ansi_components::tracer::lossy_sequence_for_log_bounded,
+    ansi_components::tracer::BoundedDisplay,
     input::{KeyEventMeta, TerminalInput, TerminalInputPayload},
     io::PtyWrite,
 };
@@ -612,12 +612,9 @@ impl TerminalState {
 
         for output in &parsed {
             // Outputs can carry whole DCS/APC/OSC payloads, so bound what is
-            // logged. The rendering sits inside the macro arguments, which
-            // `tracing` evaluates only when the event is enabled.
-            trace!(
-                output = %lossy_sequence_for_log_bounded(output.to_string().as_bytes()),
-                "parsed terminal output"
-            );
+            // logged, and bound it while formatting rather than after a full
+            // `to_string()`. `tracing` formats only when the event is enabled.
+            trace!(output = %BoundedDisplay(output), "parsed terminal output");
         }
 
         self.handler.process_outputs(&parsed);

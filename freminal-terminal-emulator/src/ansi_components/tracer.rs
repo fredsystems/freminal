@@ -191,6 +191,64 @@ pub fn lossy_sequence_for_log_bounded(bytes: &[u8]) -> String {
     )
 }
 
+/// A `Display` wrapper that renders at most [`LOG_SEQUENCE_MAX_BYTES`] of the
+/// wrapped value's `Display` output, followed by `...[truncated]` when cut.
+///
+/// Unlike formatting with `to_string()` and then bounding, formatting stops as
+/// soon as the cap is reached, so a large payload is never copied in full.
+/// (A value whose own `Display` builds a large intermediate string still pays
+/// for that; this bounds everything after it.)
+pub struct BoundedDisplay<'a, T: std::fmt::Display>(pub &'a T);
+
+/// Collects up to [`LOG_SEQUENCE_MAX_BYTES`] bytes, then refuses more.
+struct CappedText {
+    text: String,
+    truncated: Truncation,
+}
+
+/// Whether [`CappedText`] had to drop output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Truncation {
+    Complete,
+    Truncated,
+}
+
+impl std::fmt::Write for CappedText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let room = LOG_SEQUENCE_MAX_BYTES.saturating_sub(self.text.len());
+        if s.len() <= room {
+            self.text.push_str(s);
+            return Ok(());
+        }
+        let mut cut = room;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.text.push_str(&s[..cut]);
+        self.truncated = Truncation::Truncated;
+        // Stop the wrapped formatter; `BoundedDisplay` swallows this error.
+        Err(std::fmt::Error)
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for BoundedDisplay<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write as _;
+        let mut capped = CappedText {
+            text: String::new(),
+            truncated: Truncation::Complete,
+        };
+        // An error here is either our own cap sentinel or the wrapped
+        // `Display` failing; both just end the rendering.
+        let _ = write!(capped, "{}", self.0);
+        f.write_str(&capped.text)?;
+        if capped.truncated == Truncation::Truncated {
+            f.write_str("...[truncated]")?;
+        }
+        Ok(())
+    }
+}
+
 /// A small helper trait that standardizes how parsers collect and present
 /// the raw bytes of the *current* sequence they are parsing.
 pub trait SequenceTraceable {
@@ -219,9 +277,37 @@ pub trait SequenceTraceable {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOG_SEQUENCE_MAX_BYTES, SequenceTraceable, SequenceTracer, escape_sequence_for_log,
-        escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+        BoundedDisplay, LOG_SEQUENCE_MAX_BYTES, SequenceTraceable, SequenceTracer,
+        escape_sequence_for_log, escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
     };
+
+    #[test]
+    fn bounded_display_passes_short_values_through() {
+        assert_eq!(BoundedDisplay(&"hello").to_string(), "hello");
+        let exact = "x".repeat(LOG_SEQUENCE_MAX_BYTES);
+        assert_eq!(BoundedDisplay(&exact).to_string(), exact);
+    }
+
+    #[test]
+    fn bounded_display_truncates_long_values() {
+        let long = "y".repeat(100 * 1024);
+        let rendered = BoundedDisplay(&long).to_string();
+        assert_eq!(
+            rendered,
+            format!("{}...[truncated]", "y".repeat(LOG_SEQUENCE_MAX_BYTES))
+        );
+    }
+
+    #[test]
+    fn bounded_display_cuts_on_a_char_boundary() {
+        // 'é' is two bytes; an odd cap position must not split it.
+        let long = format!("a{}", "é".repeat(LOG_SEQUENCE_MAX_BYTES));
+        let rendered = BoundedDisplay(&long).to_string();
+        let kept = rendered.trim_end_matches("...[truncated]");
+        assert!(kept.len() <= LOG_SEQUENCE_MAX_BYTES);
+        assert!(kept.len() >= LOG_SEQUENCE_MAX_BYTES - 1);
+        assert!(rendered.ends_with("...[truncated]"));
+    }
 
     /// Minimal `SequenceTraceable` host so the trait's default methods can be
     /// exercised directly (rather than only via real parsers).
