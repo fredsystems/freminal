@@ -3463,6 +3463,40 @@ What:
 
 Verification: the pre-commit markdownlint and prettier hooks pass on the three files.
 
+### 131 Status notes
+
+- **131.1 — Complete (2026-10-10).** Audit table folded into "131 Reset table"; surfaced
+  131.C3 and 131.C4.
+- **131.2 — Complete (2026-10-10), commit `ed74fa74`.** `ScreenScoped<T>` and `Buffer::kind`.
+- **131.3 — Complete (2026-10-10), commit `aa707bb1`.**
+  - `KittyKeyboardStack` per screen fixes B15.
+  - The alternate stack persists between sessions.
+  - RIS and DECSTR clear both stacks.
+- **131.4 — Complete (2026-10-10), commit `9157cb76`.** `?1047` is `Mode::AltScreen1047`, and
+  DECRQM reports 1047. Two test files outside the stated scope
+  (`mode_dispatch_tests.rs`, `terminal_handler_integration.rs`) needed mechanical assertion
+  updates that the parse split forced; accepted.
+- **131.5 — Complete (2026-10-10), commit `b320677d`.**
+  - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
+  - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
+    position and leave the margins alone. `clear_alternate_screen` installs a fresh store
+    at the old store's `next_number`.
+  - Parked screens are resized eagerly. `full_reset` keeps both namespaces monotonic.
+  - Every test that pinned the old semantics was updated (the list is in the commit), and
+    26 new buffer tests were added in `screen_switch_tests.rs`.
+  - Accepted nit: a first-ever entry builds a blank store and then the clear builds another.
+    That skips `height` row numbers in a 63-bit space and costs one allocation.
+  - **Benchmark finding:** `bench_alternate_screen_switch` dropped the buffer inside the
+    timed closure, so its old figures (~37 µs) measured deallocation, not the switch. Each
+    routine now returns the buffer.
+  - Against `before_131_5`, measured in the old shape before that bench fix, no change was
+    significant (every p > 0.05, medians within ±2%, `leave_alternate` −16%).
+  - Corrected measurements: `enter_alternate` ~1.0 µs, `leave_alternate` ~0.16 µs,
+    `alternate_reenter` ~0.16 µs. `bench_alt_screen_transition_e2e`: no significant change
+    (~16–18 µs).
+  - For 131.7: the comment in `handle_leave_alternate` still says the alternate rows "are
+    gone"; 131.7 rewrites that code.
+
 ### 131 Reset table
 
 From the 131.1 audit (2026-10-10). The references are:
