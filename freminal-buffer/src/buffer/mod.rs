@@ -53,6 +53,9 @@ mod eviction;
 mod flatten;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_alt_screen_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_cell_trim_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

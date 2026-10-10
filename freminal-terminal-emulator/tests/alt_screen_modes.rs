@@ -278,3 +278,22 @@ fn ris_clears_both_charset_slots() {
     assert!(screen_text(&h).contains('q'));
     assert!(!screen_text(&h).contains('─'));
 }
+
+// ---------------------------------------------------------------------------
+// Task 131.C5: image placement at the alternate screen's bottom
+// ---------------------------------------------------------------------------
+
+#[test]
+fn kitty_image_on_alternate_last_row_keeps_the_store_at_height() {
+    let mut h = TerminalHandler::new(80, 24);
+    let height = h.buffer().terminal_height();
+    feed(&mut h, "\x1b[?1049h");
+    feed(&mut h, &format!("\x1b[{height};1H"));
+    feed(&mut h, "\x1b_Ga=T,f=24,s=1,v=1,c=1,r=1,i=7,q=2;AAAA\x1b\\");
+    assert!(h.is_alternate_screen());
+    assert_eq!(
+        h.buffer().rows().len(),
+        height,
+        "the alternate store must stay exactly one screen tall"
+    );
+}
