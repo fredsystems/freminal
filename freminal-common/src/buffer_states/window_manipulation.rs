@@ -77,17 +77,17 @@ pub struct Notification99Data {
     pub expire_ms: Option<i64>,
 }
 
-/// The three OSC 99 app→terminal control payload types that are NOT display
-/// requests: they require a terminal response or state change rather than a
-/// notification banner (Task 99).
+/// The OSC 99 app→terminal control payload types the GUI acts on.
+///
+/// They require a terminal response or state change rather than a
+/// notification banner (Task 99). `p=?` is not among them: the PTY thread
+/// answers it itself (Task 130.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99ControlKind {
     /// `p=close`: the application asks to close the notification with this id.
     Close,
     /// `p=alive`: liveness poll; the terminal answers with the live-id list.
     Alive,
-    /// `p=?`: capability query; the terminal answers with its supported keys.
-    Query,
 }
 
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).

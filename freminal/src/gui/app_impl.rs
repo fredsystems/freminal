@@ -4469,7 +4469,7 @@ impl FreminalGui {
         }
 
         // Answer OSC 99 control sequences collected above (Task 99.6 for
-        // Close/Alive; the Query capability handshake is Task 99.7). Run
+        // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
         // after the display-routing block above so its `osc99_live` borrow
         // has already been released.
         for (control, tx) in &events.osc99_controls {
@@ -4502,18 +4502,6 @@ impl FreminalGui {
                     {
                         crate::gui::notifications::forget_osc99(&mut live, id);
                     }
-                }
-                Osc99ControlKind::Query => {
-                    // OSC 99 p=? capability handshake (Task 99.7): answer
-                    // with freminal's truthfully-advertised OSC 99
-                    // capabilities.
-                    let bytes =
-                        crate::gui::notifications::osc99_query_response(control.id.as_deref());
-                    send_or_log!(
-                        tx,
-                        PtyWrite::Write(bytes),
-                        "Failed to send OSC 99 capability response"
-                    );
                 }
             }
         }

@@ -23,7 +23,7 @@ use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
 
-use super::{TerminalHandler, notify_99, shell_integration};
+use super::{TerminalHandler, shell_integration};
 
 /// A payload-free, static description of a Kitty graphics parse failure, safe
 /// for a warn-level log line. The `Display` of [`KittyParseError`] embeds
@@ -217,22 +217,15 @@ impl TerminalHandler {
             }
 
             // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
-            // reassembly machine; on finalize, branch on the payload type (Task 99.5c):
-            // control payloads (p=close/p=alive/p=?) push Osc99Control, display payloads
-            // (title/body/icon/buttons) push Notification99 as before (Task 99.4).
+            // reassembly machine; on finalize, branch on the payload type:
+            // - `p=?` is answered here from the host capabilities (Task 130.5) and
+            //   never reaches the GUI; while OSC 99 is unsupported it is not answered;
+            // - `p=alive` is dropped while OSC 99 is unsupported, else forwarded;
+            // - `p=close` is always forwarded;
+            // - display payloads (title/body/icon/buttons) push Notification99 (Task 99.4).
             AnsiOscType::Notify99(cmd) => {
                 if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
-                    if let Some(kind) = notify_99::control_kind(finalized.meta.payload_type) {
-                        self.window_commands.push(WindowManipulation::Osc99Control {
-                            id: finalized.meta.id,
-                            kind,
-                        });
-                    } else {
-                        self.window_commands
-                            .push(WindowManipulation::Notification99(Box::new(
-                                finalized.into_notification99_data(),
-                            )));
-                    }
+                    self.dispatch_finalized_osc99(finalized);
                 }
             }
 
@@ -304,6 +297,10 @@ mod tests {
     use freminal_common::buffer_states::window_manipulation::{
         NotificationKind, Osc99ControlKind, WindowManipulation,
     };
+    use freminal_common::host_capabilities::{
+        HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    };
+    use freminal_common::pty_write::PtyWrite;
 
     // ── Existing OSC 9/777 tests ──────────────────────────────────────────────
 
@@ -720,6 +717,12 @@ mod tests {
     #[test]
     fn osc_notify99_alive_pushes_osc99_control_alive() {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
 
         let cmd = Osc99Command {
             id: None,
@@ -738,10 +741,19 @@ mod tests {
         }
     }
 
-    /// A `p=?` payload finalizing must push `Osc99Control { kind: Query }`.
+    /// A `p=?` payload finalizing is answered by the handler and pushes no
+    /// window command (Task 130.5).
     #[test]
-    fn osc_notify99_query_pushes_osc99_control_query() {
+    fn osc_notify99_query_is_answered_without_window_command() {
+        let (tx, rx) = crossbeam_channel::unbounded();
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
 
         let cmd = Osc99Command {
             id: Some("query-1".to_owned()),
@@ -750,14 +762,11 @@ mod tests {
         };
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
 
-        assert_eq!(handler.window_commands.len(), 1);
-        match &handler.window_commands[0] {
-            WindowManipulation::Osc99Control { id, kind } => {
-                assert_eq!(id.as_deref(), Some("query-1"));
-                assert_eq!(*kind, Osc99ControlKind::Query);
-            }
-            other => panic!("expected Osc99Control, got: {other:?}"),
-        }
+        assert_eq!(handler.window_commands.len(), 0);
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert!(bytes.starts_with(b"\x1b]99;i=query-1:p=?;"));
     }
 
     /// A display payload type (`Title`) still produces `Notification99`, not

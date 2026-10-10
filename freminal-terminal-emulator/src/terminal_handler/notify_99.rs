@@ -17,7 +17,12 @@ use freminal_common::buffer_states::osc_notify_99::{
     MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99Command,
     Osc99PayloadEncoding, Osc99PayloadType,
 };
-use freminal_common::buffer_states::window_manipulation::{Notification99Data, Osc99ControlKind};
+use freminal_common::buffer_states::window_manipulation::{
+    Notification99Data, Osc99ControlKind, WindowManipulation,
+};
+use freminal_common::host_capabilities::{
+    Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+};
 
 use super::TerminalHandler;
 use super::chunk_assembler::{BoundedChunkAssembler, ChunkEncoding, ChunkError, ChunkLimits};
@@ -254,11 +259,14 @@ impl FinalizedNotification {
 
 // ── Control payload routing (Task 99.5c) ─────────────────────────────────────
 
-/// Map an OSC 99 payload type to its control kind, if it is a control
-/// payload (`p=close`/`p=alive`/`p=?`).
+/// Map an OSC 99 payload type to its GUI-bound control kind, if it is one
+/// (`p=close`/`p=alive`).
 ///
-/// Display payload types (`Title`/`Body`/`Icon`/`Buttons`) return `None` —
-/// they keep flowing to `WindowManipulation::Notification99` in
+/// `p=?` also returns `None`: the handler answers it itself and never forwards
+/// it to the GUI (Task 130.5), so the `Notify99` arm checks for
+/// [`Osc99PayloadType::Query`] before consulting this function. Display
+/// payload types (`Title`/`Body`/`Icon`/`Buttons`) return `None` too — they
+/// keep flowing to `WindowManipulation::Notification99` in
 /// `terminal_handler/osc.rs`.
 ///
 /// `Osc99PayloadType` is defined in `freminal-common`, so this cannot be an
@@ -270,12 +278,74 @@ pub(in crate::terminal_handler) const fn control_kind(
     match payload_type {
         Osc99PayloadType::Close => Some(Osc99ControlKind::Close),
         Osc99PayloadType::Alive => Some(Osc99ControlKind::Alive),
-        Osc99PayloadType::Query => Some(Osc99ControlKind::Query),
-        Osc99PayloadType::Title
+        Osc99PayloadType::Query
+        | Osc99PayloadType::Title
         | Osc99PayloadType::Body
         | Osc99PayloadType::Icon
         | Osc99PayloadType::Buttons => None,
     }
+}
+
+/// Whether an OSC 99 payload type is a control request (`p=close`,
+/// `p=alive` or `p=?`) rather than display content.
+///
+/// Unlike [`control_kind`], this includes `p=?`, which the handler answers
+/// itself and so has no GUI-bound control kind.
+pub(in crate::terminal_handler) const fn is_control_payload(
+    payload_type: Osc99PayloadType,
+) -> bool {
+    match payload_type {
+        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => true,
+        Osc99PayloadType::Title
+        | Osc99PayloadType::Body
+        | Osc99PayloadType::Icon
+        | Osc99PayloadType::Buttons => false,
+    }
+}
+
+// ── Capability query reply (Task 130.5) ──────────────────────────────────────
+
+/// Build the capability list of the reply to an OSC 99 `p=?` query, for a host
+/// that honours OSC 99 with the given `features`.
+///
+/// The result is the part after the `;` in
+/// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`: colon-separated `key=value`
+/// pairs in a stable order, with no leading or trailing `:`. It advertises
+/// only what is genuinely implemented (the truthful-advertisement rule from
+/// Task 76):
+///
+/// - `a=report` (NOT `focus` — `focus_on_activation` is parsed but freminal
+///   does not act on it), present only when activation can be reported. With
+///   no supported actions the `a` key is omitted entirely, per the spec's
+///   query table ("If no actions are supported, the `a` key must be
+///   absent");
+/// - `c=1` (close reports), present only when close events can be reported;
+/// - `o=` all three occasions;
+/// - `p=` the payload types freminal handles (display types plus the control
+///   types it answers);
+/// - `s=system,silent` (forwarded freedesktop sound-name hints — freminal
+///   forwards the name, playback is the daemon's concern);
+/// - `u=0,1,2` (urgency levels — advertised even though the setter is
+///   unavailable on macOS, matching Task 76's handling of the same gap);
+/// - `w=1` (auto-expiry, wired via `.timeout()`).
+///
+/// Full conformance of the advertised set against the spec is Task 138.
+pub(in crate::terminal_handler) fn osc99_query_reply_body(features: Osc99Features) -> String {
+    let mut keys: Vec<&str> = Vec::with_capacity(7);
+    if features.activation_report == Osc99ActivationReport::Reported {
+        keys.push("a=report");
+    }
+    if features.close_events == Osc99CloseEvents::Reported {
+        keys.push("c=1");
+    }
+    keys.extend([
+        "o=always,unfocused,invisible",
+        "p=title,body,icon,buttons,alive,close,?",
+        "s=system,silent",
+        "u=0,1,2",
+        "w=1",
+    ]);
+    keys.join(":")
 }
 
 // ── Helper: build a FinalizedNotification from accumulated bytes + meta ───────
@@ -422,7 +492,7 @@ impl TerminalHandler {
                     self.pending_notifications.get(&id),
                     Some(PendingEntry::Dropped)
                 ) {
-                    if control_kind(chunk.payload_type).is_some() {
+                    if is_control_payload(chunk.payload_type) {
                         // A control request (`p=close`/`p=alive`/`p=?`) is not
                         // part of the dropped content transfer: forget the
                         // tombstone and handle it as if no entry existed.
@@ -520,6 +590,59 @@ impl TerminalHandler {
                     None
                 }
             }
+        }
+    }
+
+    /// Act on a finalized OSC 99 request, branching on its payload type
+    /// (Tasks 99.5c and 130.5).
+    ///
+    /// - `p=?` is answered here, from [`TerminalHandler::host_capabilities`],
+    ///   and never reaches the GUI. While OSC 99 is unsupported it is not
+    ///   answered at all, so the application sees a terminal that does not
+    ///   speak the protocol.
+    /// - `p=alive` is dropped while OSC 99 is unsupported (no notification
+    ///   can be live), and forwarded to the GUI otherwise.
+    /// - `p=close` is always forwarded.
+    /// - Display payloads push `Notification99` as before.
+    pub(in crate::terminal_handler) fn dispatch_finalized_osc99(
+        &mut self,
+        finalized: FinalizedNotification,
+    ) {
+        let support = self.host_capabilities().osc99;
+
+        if finalized.meta.payload_type == Osc99PayloadType::Query {
+            match support {
+                Osc99Support::Supported(features) => {
+                    // The id was validated by the OSC 99 parser (plain
+                    // identifier characters only), so it is safe to echo.
+                    let id = finalized.meta.id.as_deref().unwrap_or("0");
+                    let caps = osc99_query_reply_body(features);
+                    self.write_osc_response(&format!("99;i={id}:p=?;{caps}"));
+                }
+                Osc99Support::Unsupported => {
+                    tracing::debug!("OSC 99 p=? query ignored: OSC 99 is unsupported");
+                }
+            }
+            return;
+        }
+
+        if finalized.meta.payload_type == Osc99PayloadType::Alive
+            && support == Osc99Support::Unsupported
+        {
+            tracing::debug!("OSC 99 p=alive ignored: OSC 99 is unsupported");
+            return;
+        }
+
+        if let Some(kind) = control_kind(finalized.meta.payload_type) {
+            self.window_commands.push(WindowManipulation::Osc99Control {
+                id: finalized.meta.id,
+                kind,
+            });
+        } else {
+            self.window_commands
+                .push(WindowManipulation::Notification99(Box::new(
+                    finalized.into_notification99_data(),
+                )));
         }
     }
 }
@@ -783,7 +906,7 @@ mod tests {
     // ── 99.5c: control_kind mapping ───────────────────────────────────────────
 
     #[test]
-    fn control_kind_maps_close_alive_query() {
+    fn control_kind_maps_close_and_alive() {
         assert_eq!(
             control_kind(Osc99PayloadType::Close),
             Some(Osc99ControlKind::Close)
@@ -792,10 +915,23 @@ mod tests {
             control_kind(Osc99PayloadType::Alive),
             Some(Osc99ControlKind::Alive)
         );
-        assert_eq!(
-            control_kind(Osc99PayloadType::Query),
-            Some(Osc99ControlKind::Query)
-        );
+    }
+
+    #[test]
+    fn control_kind_maps_query_to_none() {
+        // The handler answers `p=?` itself; it is never forwarded to the GUI.
+        assert_eq!(control_kind(Osc99PayloadType::Query), None);
+    }
+
+    #[test]
+    fn is_control_payload_covers_close_alive_query_only() {
+        assert!(is_control_payload(Osc99PayloadType::Close));
+        assert!(is_control_payload(Osc99PayloadType::Alive));
+        assert!(is_control_payload(Osc99PayloadType::Query));
+        assert!(!is_control_payload(Osc99PayloadType::Title));
+        assert!(!is_control_payload(Osc99PayloadType::Body));
+        assert!(!is_control_payload(Osc99PayloadType::Icon));
+        assert!(!is_control_payload(Osc99PayloadType::Buttons));
     }
 
     #[test]
@@ -1296,5 +1432,54 @@ mod tests {
         assert!(feed(&mut handler, "i=1:d=0:p=close", b"").is_none());
         assert!(!is_dropped(&handler, "1"));
         assert!(handler.pending_notifications.contains_key("1"));
+    }
+
+    // ── 130.5: osc99_query_reply_body ─────────────────────────────────────────
+
+    const REPLY_TAIL: &str = "o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+
+    #[test]
+    fn query_reply_body_full_features_matches_legacy_string() {
+        let features = Osc99Features {
+            activation_report: Osc99ActivationReport::Reported,
+            close_events: Osc99CloseEvents::Reported,
+        };
+        assert_eq!(
+            osc99_query_reply_body(features),
+            "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1"
+        );
+    }
+
+    #[test]
+    fn query_reply_body_activation_not_reported_omits_a_key() {
+        let features = Osc99Features {
+            activation_report: Osc99ActivationReport::NotReported,
+            close_events: Osc99CloseEvents::Reported,
+        };
+        assert_eq!(
+            osc99_query_reply_body(features),
+            format!("c=1:{REPLY_TAIL}")
+        );
+    }
+
+    #[test]
+    fn query_reply_body_close_not_reported_omits_c_key() {
+        let features = Osc99Features {
+            activation_report: Osc99ActivationReport::Reported,
+            close_events: Osc99CloseEvents::NotReported,
+        };
+        assert_eq!(
+            osc99_query_reply_body(features),
+            format!("a=report:{REPLY_TAIL}")
+        );
+    }
+
+    #[test]
+    fn query_reply_body_neither_reported_starts_with_occasion() {
+        let features = Osc99Features {
+            activation_report: Osc99ActivationReport::NotReported,
+            close_events: Osc99CloseEvents::NotReported,
+        };
+        assert_eq!(osc99_query_reply_body(features), REPLY_TAIL);
     }
 }
