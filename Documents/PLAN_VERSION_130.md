@@ -2445,7 +2445,8 @@ Three read-only audits re-traced the stub. The stub undercounted the problem:
   registry holds OSC 99 support. Later tasks add to it (138, 146).
 - **OSC 99 control requests while unsupported.** `p=?` gets no reply. `p=alive` gets no reply
   and is not forwarded to the GUI, because answering it would also advertise the protocol.
-  `p=close` is still forwarded; closing nothing is harmless.
+  **Superseded by adversarial-review finding 14:** every OSC 99 request (display payloads and
+  `p=close` included) is dropped by the handler while `Unsupported`.
 - **`GuiReply` lives in the emulator crate** (`io/gui_reply.rs`, next to `InputEvent`). It
   carries structured fields; framing is the handler's job.
 - **Replies are not recorded to FREC.** This matches handler replies, which were never
@@ -3048,6 +3049,81 @@ Prohibitions: do NOT touch code.
   `freminal/src/gui/notifications.rs`.
 - **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
   avoids changing it twice. Not scheduled in Task 130.
+
+#### 130.C5 — XTGETTCAP echoes the raw request on an invalid name
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 7. Predates Task 130.
+- **Impact:**
+  - For a name that is not valid hex, `handle_xtgettcap` replies `DCS 0 + r <raw request> ST`,
+    echoing the request bytes lossily decoded.
+  - Reproduced: `DCS + q ESC [6n BEL zz ST` gets the reply `DCS 0 + r ESC [6n BEL zz ST`, so
+    an application can inject input into itself (the CVE-2003-0063 class, as 130.C3).
+- **Fix:** follow xterm's ctlseqs, which specify `DCS 0 + r ST` for invalid requests: reply
+  with no echo when the name is not valid hex. A name that _is_ valid hex but unknown keeps
+  today's hex echo, since hex digits cannot carry a control.
+- **Scope:** `terminal_handler/dcs.rs` (`handle_xtgettcap`) and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+#### 130.C6 — A DECRQM for LNM overwrites the LNM state used for input encoding
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 1. Predates Task 130.
+- **Impact:**
+  - `TerminalState::sync_mode` assigns `Mode::LineFeedMode(v)` straight into
+    `modes.line_feed_mode` and does not exclude `Lnm::Query`.
+  - Reproduced: after `CSI 20 h`, a `CSI 20 $ p` leaves `line_feed_mode == Lnm::Query`, so
+    Enter is encoded as if LNM were reset.
+- **Fix:**
+  - The query must not touch the stored state; route `Lnm::Query` to the handler-owned
+    (no-op) arm.
+  - Audit every other `sync_mode` assignment arm for the same pattern and pin each with a
+    test.
+- **Scope:** `state/internal.rs` and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+### 130 Adversarial review (2026-10-10)
+
+An adversarial review of `2862acb9..1e03dd31` found no blocker, one major and fourteen
+minor/nit findings. Two were reproduced by the orchestrator (1 → 130.C6, 7 → 130.C5).
+Disposition, all addressed before merge:
+
+1. **MAJOR — LNM DECRQM clobbers state:** 130.C6.
+2. **RIS drops the parser's in-flight state and the UTF-8 tail.** The behaviour belongs to
+   the 131 reset table, which has a row for it, so 131.8 fixes it. 130 corrects the
+   `apply_state_reset` comment, which understated it.
+3. **The fresh parser's VT52/S8C1T seeding is untested:** add tests.
+4. **`run_case(.., wrapped: bool)`:** becomes a `Delivery` enum.
+5. **The liveness tests exercise `std`, not `Pane`:** add a test on a `Pane` built with
+   `from_channels`.
+6. **OSC 99 `id` / `button` / `live_ids` are echoed unsanitised, relying on validation in
+   another crate:** the serialiser keeps only identifier characters, and an empty id is sent
+   as `0` (also in the `p=?` reply).
+7. **XTGETTCAP echo:** 130.C5.
+8. **Mouse/focus/key event encodings are not S8C1T-aware**, while the docs say "every
+   reply": the docs are scoped to replies to queries, and a GAPS row records the event
+   encodings (unscheduled).
+9. **Stale docs:** `TerminalEmulator::clone_write_tx` and `window_ops.rs`.
+10. **Plan and doc inaccuracies:** 130 status notes, the Task 138 stub, the common-work table,
+    the COVERAGE attribution of the OSC 99 report framing to 130.8, and the
+    `freminal-version-activation` skill's reverse-write guidance. Fixed by the orchestrator.
+11. **`config_example.toml` does not say OSC 99 queries go unanswered while notifications
+    are off:** add a comment.
+12. **`GuiReply::WindowState` doc names `CSI 18 t`;** the query is `CSI 11 t`.
+13. **`TerminalHandler::process_outputs` doc:** a tmux payload is only queued there.
+14. **While OSC 99 is `Unsupported`, display payloads and `p=close` still reach the GUI**
+    (which then caches icons when routing is disabled). **Decision changed:** the handler
+    drops every OSC 99 request while `Unsupported`, so the terminal is consistently one that
+    does not speak the protocol. This supersedes the earlier "`p=close` is still forwarded"
+    bullet. Tests cover `p=close` and display payloads while `Unsupported`, and `p=?` for a
+    tombstoned id.
+15. **Nits:**
+    - the fully-qualified `Decsclm` path in `internal.rs`;
+    - the vacuous `tmux_passthrough_queue_is_drained_by_handle_incoming_data` test (delete);
+    - the `QueryClipboard` debug log prints the unescaped selection (escape and bound it);
+    - `host_capabilities(&Config)` moves out of `gui/notifications.rs` into its own module
+      (`gui/host_capabilities.rs`), since later tasks add non-notification facets.
+    - Accepted: `is_control_payload -> bool` stays. A predicate returning `bool` is not a
+      bool field or parameter.
+    - Already routed: the bool fields in the new tests (130.C4).
 
 ### 130 Orchestrator re-review (2026-10-10)
 
