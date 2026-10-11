@@ -4515,7 +4515,11 @@ Deliverable: the doc changes, markdownlint clean.
 
 ### 132 Status notes
 
-(none yet)
+- **132.1 (done).** Benches added; criterion baseline `pre132` saved. Medians: parse_sgr_heavy
+  57.3 µs; parse_sgr_indexed 56.0 µs; handle_sgr_indexed 90.1 µs; build_snapshot dirty
+  32.40 µs / clean 126.98 ns / partial 24.23 µs; instanced_bg 72.04 ns (80x24) / 136.77 ns
+  (200x50); instanced_fg 765.67 µs / 910.68 µs; instanced_bg_indexed 4.169 µs / 20.929 µs;
+  instanced_fg_indexed 1.764 ms / 2.006 ms. The parser benches are noisy (±15%).
 
 ---
 

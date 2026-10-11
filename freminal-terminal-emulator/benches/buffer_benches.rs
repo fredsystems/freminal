@@ -74,6 +74,26 @@ fn sgr_heavy_payload() -> Vec<u8> {
     out
 }
 
+/// ~4 KB payload dense with indexed-colour SGR sequences.
+/// Each segment is: ESC[38;5;Nm ESC[48;5;Mm + 8 ASCII chars, where N cycles
+/// 0..=255 with stride 1 and M cycles 0..=255 with stride 7 (coprime with
+/// 256, so M visits every index but out of phase with N).
+/// Same total size as `sgr_heavy_payload` (loop-until-4096, may overshoot by
+/// less than one segment).
+fn sgr_indexed_payload() -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+    let mut i = 0usize;
+    while out.len() < 4096 {
+        let n = i % 256;
+        let m = (i * 7) % 256;
+        let esc = format!("\x1b[38;5;{n}m\x1b[48;5;{m}m");
+        out.extend_from_slice(esc.as_bytes());
+        out.extend_from_slice(b"abcdefgh");
+        i += 1;
+    }
+    out
+}
+
 /// ~4 KB payload simulating a TUI screen draw: ESC[row;colH + line data.
 fn cup_writes_payload(width: usize, height: usize) -> Vec<u8> {
     let mut out = Vec::new();
@@ -198,6 +218,28 @@ fn bench_parse_sgr_heavy(c: &mut Criterion) {
     let payload = sgr_heavy_payload();
 
     let mut group = c.benchmark_group("bench_parse_sgr_heavy");
+    group.throughput(Throughput::Bytes(payload.len() as u64));
+
+    group.bench_function(BenchmarkId::new("parser_push_sgr", payload.len()), |b| {
+        b.iter_batched(
+            FreminalAnsiParser::new,
+            |mut parser| {
+                std::hint::black_box(parser.push(&payload));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_parse_sgr_indexed
+// ---------------------------------------------------------------
+fn bench_parse_sgr_indexed(c: &mut Criterion) {
+    let payload = sgr_indexed_payload();
+
+    let mut group = c.benchmark_group("bench_parse_sgr_indexed");
     group.throughput(Throughput::Bytes(payload.len() as u64));
 
     group.bench_function(BenchmarkId::new("parser_push_sgr", payload.len()), |b| {
@@ -360,6 +402,31 @@ fn bench_handle_incoming_data(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_handle_sgr_indexed — handler-level cost of indexed-colour SGR
+// ---------------------------------------------------------------
+fn bench_handle_sgr_indexed(c: &mut Criterion) {
+    let payload = sgr_indexed_payload();
+
+    let mut group = c.benchmark_group("bench_handle_sgr_indexed");
+    group.throughput(Throughput::Bytes(payload.len() as u64));
+
+    group.bench_function(
+        BenchmarkId::new("handle_incoming_data", payload.len()),
+        |b| {
+            b.iter_batched(
+                TerminalState::default,
+                |mut state| {
+                    state.handle_incoming_data(&payload);
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 
     group.finish();
 }
@@ -959,11 +1026,13 @@ criterion_group!(
     targets =
         bench_parse_plain_text,
         bench_parse_sgr_heavy,
+        bench_parse_sgr_indexed,
         bench_parse_osc9,
         bench_parse_kitty_apc_chunks,
         bench_parse_cup_writes,
         bench_parse_bursty,
         bench_handle_incoming_data,
+        bench_handle_sgr_indexed,
         bench_data_and_format_for_gui,
         bench_build_snapshot,
         bench_build_snapshot_with_scrollback,
