@@ -49,7 +49,7 @@ enriched stubs again and get re-decomposed at activation.
 | 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
 | 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | In progress   | 126.1                              |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Pending merge | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Planned       | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
