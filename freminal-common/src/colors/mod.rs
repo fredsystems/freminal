@@ -22,7 +22,7 @@ mod x11_names;
 pub use dynamic::{DynamicColorOverrides, DynamicColorSlot};
 pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
 pub use resolved::ResolvedColors;
-pub use spec::{ColorSpecError, parse_color_spec, scale_hex_channel};
+pub use spec::{ColorSpecError, parse_color_spec};
 
 use crate::themes::ThemePalette;
 use std::fmt;

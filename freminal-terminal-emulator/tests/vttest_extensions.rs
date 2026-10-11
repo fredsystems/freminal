@@ -390,8 +390,15 @@ fn sgr_256_color_foreground() {
         TerminalColor::PaletteIndex(196),
         "SGR 38;5;196 must be stored as PaletteIndex(196)"
     );
-    let rgb = h.state.handler.palette().rgb(196, h.state.handler.theme());
-    assert_eq!(rgb, (255, 0, 0), "palette entry 196 is pure red");
+    // End to end: the stored index resolves to pure red through the
+    // handler's resolved colours, which is what the snapshot carries.
+    let cell_colour = fmt.colors.color;
+    let resolved = h.state.handler.resolved_colors();
+    assert_eq!(
+        resolved.rgb(cell_colour),
+        (255, 0, 0),
+        "palette entry 196 is pure red"
+    );
 }
 
 /// SGR 48;5;N sets the background to palette color N (256-color).
@@ -408,8 +415,14 @@ fn sgr_256_color_background() {
         TerminalColor::PaletteIndex(82),
         "SGR 48;5;82 must be stored as PaletteIndex(82)"
     );
-    let rgb = h.state.handler.palette().rgb(82, h.state.handler.theme());
-    assert_eq!(rgb, (95, 255, 0), "palette entry 82 is #5fff00");
+    // End to end: the stored index resolves through the resolved colours.
+    let cell_colour = fmt.colors.background_color;
+    let resolved = h.state.handler.resolved_colors();
+    assert_eq!(
+        resolved.rgb(cell_colour),
+        (95, 255, 0),
+        "palette entry 82 is #5fff00"
+    );
 }
 
 /// SGR 38;2;R;G;B sets the foreground to a true-color RGB value.

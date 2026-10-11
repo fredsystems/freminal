@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn huge_values_do_not_panic() {
+    fn huge_values_never_panic() {
         assert!(matches!(
             rgb("lab(50 1e308 1e308)"),
             Ok(_) | Err(ColorSpecError::InvalidWideGamutComponent)

@@ -65,8 +65,11 @@ impl Decscnm {
 /// as transported to the renderer. Unlike [`Decscnm`] it has no `Query` state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub enum ScreenInversion {
+    /// Normal video: cells are drawn with their own foreground and background.
     #[default]
     Normal,
+    /// Reverse video (DECSCNM set): each cell's foreground and background are
+    /// swapped when drawn.
     Reversed,
 }
 

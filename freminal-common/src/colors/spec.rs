@@ -218,8 +218,14 @@ fn parse_hash(hex: &str) -> Result<(u8, u8, u8), ColorSpecError> {
 /// - 2 digits: 0xHH  → HH as-is
 /// - 3 digits: 0xHHH → top 8 bits (shift right 4)
 /// - 4 digits: 0xHHHH → top 8 bits (shift right 8)
-#[must_use]
-pub fn scale_hex_channel(s: &str) -> Option<u8> {
+///
+/// Returns `None` for any non-hex byte (a leading `+` or `-` included, which
+/// `from_str_radix` alone would accept or misreport), for an empty string and
+/// for more than four digits.
+fn scale_hex_channel(s: &str) -> Option<u8> {
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let v = u16::from_str_radix(s, 16).ok()?;
     let scaled = match s.len() {
         1 => (v << 4) | v,
@@ -578,6 +584,13 @@ mod tests {
     fn scale_hex_channel_five_digit_returns_none() {
         // Length 5 is not in 1–4 → the `_ => return None` arm
         assert_eq!(scale_hex_channel("fffff"), None);
+    }
+
+    #[test]
+    fn scale_hex_channel_rejects_signs() {
+        assert_eq!(scale_hex_channel("+f"), None);
+        assert_eq!(scale_hex_channel("-1"), None);
+        assert_eq!(scale_hex_channel("+"), None);
     }
 
     #[test]

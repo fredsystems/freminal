@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use freminal_common::{
-    colors::{ColorPalette, DynamicColorOverrides, DynamicColorSlot, ResolvedColors},
+    colors::{
+        ColorPalette, DynamicColorOverrides, DynamicColorSlot, ResolvedColors, default_palette_rgb,
+    },
     themes::ThemePalette,
 };
 
@@ -23,15 +25,18 @@ use freminal_common::{
 /// successive Arcs with `Arc::ptr_eq` to detect a change, so a spurious
 /// rebuild would force a needless repaint. Therefore:
 ///
-/// - A mutator invalidates the cache **only if it changes state**. Setting a
-///   palette or dynamic entry to the value it already holds, resetting an
-///   entry that is already unset, and `set_theme` with an identical theme
-///   (same pointer or equal value) all leave the cached Arc in place.
+/// - A mutator invalidates the cache **only if the effective colour changes**.
+///   Overrides are always stored or cleared, but setting a palette or dynamic
+///   entry to the colour it already shows (including the theme's own value),
+///   resetting an override that equals the theme default, resetting an entry
+///   that is already unset, and `set_theme` with an identical theme (same
+///   pointer or equal value) all leave the cached Arc in place.
 /// - Mutations of [`DynamicColorSlot::Cursor`] **never** invalidate: the
 ///   cursor colour is not part of [`ResolvedColors`] and travels separately.
-/// - `reset_palette_all` invalidates only if some palette entry was set;
-///   `reset_dynamic_all` only if some non-cursor slot was set. The cursor
-///   slot is still cleared by `reset_dynamic_all`.
+/// - `reset_palette_all` invalidates only if some palette entry's effective
+///   colour changes; `reset_dynamic_all` only if some non-cursor slot's
+///   effective colour changes. The cursor slot is still cleared by
+///   `reset_dynamic_all`.
 #[derive(Debug)]
 pub(super) struct ColorState {
     /// Active colour theme for default palette lookups.
@@ -108,8 +113,10 @@ impl ColorState {
 
     /// Clear every palette override (OSC 104 without an index, RIS, DECSTR).
     pub(super) fn reset_palette_all(&mut self) {
-        if self.palette != ColorPalette::default() {
-            self.palette.reset_all();
+        let effective_change = (0..=u8::MAX)
+            .any(|idx| self.palette.rgb(idx, self.theme) != default_palette_rgb(idx, self.theme));
+        self.palette.reset_all();
+        if effective_change {
             self.resolved = None;
         }
     }
@@ -123,40 +130,54 @@ impl ColorState {
     pub(super) const fn effective_dynamic(&self, slot: DynamicColorSlot) -> (u8, u8, u8) {
         match self.dynamic.get(slot) {
             Some(rgb) => rgb,
-            None => match slot {
-                DynamicColorSlot::Foreground => self.theme.foreground,
-                DynamicColorSlot::Background => self.theme.background,
-                DynamicColorSlot::Cursor => self.theme.cursor,
-                DynamicColorSlot::SelectionBackground => self.theme.selection_bg,
-                DynamicColorSlot::SelectionForeground => self.theme.selection_fg,
-            },
+            None => self.theme_dynamic(slot),
+        }
+    }
+
+    /// The theme's own value for `slot`, ignoring any override.
+    const fn theme_dynamic(&self, slot: DynamicColorSlot) -> (u8, u8, u8) {
+        match slot {
+            DynamicColorSlot::Foreground => self.theme.foreground,
+            DynamicColorSlot::Background => self.theme.background,
+            DynamicColorSlot::Cursor => self.theme.cursor,
+            DynamicColorSlot::SelectionBackground => self.theme.selection_bg,
+            DynamicColorSlot::SelectionForeground => self.theme.selection_fg,
         }
     }
 
     /// Override `slot` (OSC 10/11/12/17/19).
+    ///
+    /// The override is always stored; the cache is invalidated only if the
+    /// *effective* colour of a non-cursor slot changes.
     pub(super) fn set_dynamic(&mut self, slot: DynamicColorSlot, rgb: (u8, u8, u8)) {
-        if self.dynamic.get(slot) == Some(rgb) {
-            return;
-        }
+        let effective_before = self.effective_dynamic(slot);
         self.dynamic.set(slot, rgb);
-        self.invalidate_for(slot);
+        if effective_before != rgb {
+            self.invalidate_for(slot);
+        }
     }
 
     /// Clear the override of `slot` (OSC 110/111/112/117/119).
+    ///
+    /// Invalidates only if the effective colour changes.
     pub(super) fn reset_dynamic(&mut self, slot: DynamicColorSlot) {
-        if self.dynamic.get(slot).is_some() {
-            self.dynamic.reset(slot);
+        let effective_before = self.effective_dynamic(slot);
+        self.dynamic.reset(slot);
+        if self.effective_dynamic(slot) != effective_before {
             self.invalidate_for(slot);
         }
     }
 
     /// Clear every dynamic override, the cursor colour included.
+    ///
+    /// Invalidates only if a non-cursor slot's effective colour changes.
     pub(super) fn reset_dynamic_all(&mut self) {
-        let content_set = DynamicColorSlot::ALL
-            .into_iter()
-            .any(|slot| slot != DynamicColorSlot::Cursor && self.dynamic.get(slot).is_some());
+        let content_changes = DynamicColorSlot::ALL.into_iter().any(|slot| {
+            slot != DynamicColorSlot::Cursor
+                && self.effective_dynamic(slot) != self.theme_dynamic(slot)
+        });
         self.dynamic.reset_all();
-        if content_set {
+        if content_changes {
             self.resolved = None;
         }
     }
@@ -321,6 +342,57 @@ mod tests {
         let after = s.resolved();
         assert!(!Arc::ptr_eq(&before, &after));
         assert_eq!(after.foreground, CATPPUCCIN_MOCHA.foreground);
+    }
+
+    #[test]
+    fn set_dynamic_to_exact_theme_value_from_unset_keeps_arc() {
+        let mut s = state();
+        assert!(!changed_by(&mut s, |s| {
+            s.set_dynamic(DynamicColorSlot::Background, CATPPUCCIN_MOCHA.background);
+        }));
+        // The override is still stored.
+        assert_eq!(
+            s.dynamic(DynamicColorSlot::Background),
+            Some(CATPPUCCIN_MOCHA.background)
+        );
+    }
+
+    #[test]
+    fn reset_dynamic_of_override_equal_to_theme_keeps_arc() {
+        let mut s = state();
+        s.set_dynamic(DynamicColorSlot::Foreground, CATPPUCCIN_MOCHA.foreground);
+        assert!(!changed_by(&mut s, |s| {
+            s.reset_dynamic(DynamicColorSlot::Foreground);
+        }));
+        assert_eq!(s.dynamic(DynamicColorSlot::Foreground), None);
+    }
+
+    #[test]
+    fn set_dynamic_real_change_from_theme_override_builds_new_arc() {
+        let mut s = state();
+        s.set_dynamic(DynamicColorSlot::Foreground, CATPPUCCIN_MOCHA.foreground);
+        assert!(changed_by(&mut s, |s| {
+            s.set_dynamic(DynamicColorSlot::Foreground, (1, 2, 3));
+        }));
+    }
+
+    #[test]
+    fn reset_dynamic_all_with_only_theme_equal_overrides_keeps_arc() {
+        let mut s = state();
+        s.set_dynamic(DynamicColorSlot::Foreground, CATPPUCCIN_MOCHA.foreground);
+        s.set_dynamic(DynamicColorSlot::Background, CATPPUCCIN_MOCHA.background);
+        assert!(!changed_by(&mut s, ColorState::reset_dynamic_all));
+        assert_eq!(s.dynamic(DynamicColorSlot::Foreground), None);
+        assert_eq!(s.dynamic(DynamicColorSlot::Background), None);
+    }
+
+    #[test]
+    fn reset_palette_all_with_only_default_equal_overrides_keeps_arc() {
+        let mut s = state();
+        s.set_palette(1, CATPPUCCIN_MOCHA.ansi[1]);
+        s.set_palette(200, default_palette_rgb(200, &CATPPUCCIN_MOCHA));
+        assert!(!changed_by(&mut s, ColorState::reset_palette_all));
+        assert_eq!(*s.palette(), ColorPalette::default());
     }
 
     #[test]

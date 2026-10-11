@@ -4704,6 +4704,12 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
   (which it cannot see); it now returns the stored colour and the renderer's existing
   `DefaultUnderlineColor` → effective-foreground path handles all four SGR 7 × DECSCNM cases
   (orchestrator change, with a test over the four cases). COVERAGE SGR 7 row updated.
+- **132.C6 (done).** R3 `dynamic_color` deleted; R4 `scale_hex_channel` private and rejects
+  signs; R6 dynamic and reset-all mutators invalidate only on an effective change; R7 OSC 4/104
+  stream their fields; R8 RIS/DECSTR for OSC 17/19, three- and four-value OSC 10 chains, an LZ4
+  `PaletteIndex` block round trip; R9 skip reasons (`SkipReason`, payload-free) at debug;
+  R15 size assertion derived from components; R16 vttest 256-colour tests assert the resolved
+  colour; R19 variant docs.
 
 ---
 

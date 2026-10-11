@@ -586,13 +586,6 @@ impl TerminalHandler {
         self.color_state.dynamic(DynamicColorSlot::Cursor)
     }
 
-    /// Get the dynamic colour override for `slot` (OSC 10/11/12/17/19), or
-    /// `None` if the slot follows the theme.
-    #[must_use]
-    pub const fn dynamic_color(&self, slot: DynamicColorSlot) -> Option<(u8, u8, u8)> {
-        self.color_state.dynamic(slot)
-    }
-
     /// The fully resolved content colours (theme + OSC 4 + OSC 10/11/17/19).
     ///
     /// The returned `Arc` is shared between calls until the colours actually

@@ -272,7 +272,12 @@ mod tests {
 
     #[test]
     fn size_is_palette_plus_four_colours() {
-        // 256 * 3 + 4 * 3: guards against accidental growth.
-        assert_eq!(std::mem::size_of::<ResolvedColors>(), 780);
+        // `(u8, u8, u8)` has alignment 1, so the struct is exactly a 256-entry
+        // palette plus the four content colours with no padding. The
+        // assertion exists to catch an accidentally added field.
+        assert_eq!(
+            std::mem::size_of::<ResolvedColors>(),
+            std::mem::size_of::<[(u8, u8, u8); 256 + 4]>()
+        );
     }
 }

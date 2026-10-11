@@ -147,6 +147,82 @@ fn decstr_resets_palette_but_keeps_the_osc10_override() {
 }
 
 #[test]
+fn ris_clears_the_selection_overrides() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]17;rgb:11/22/33\x1b\\");
+    emu.handle_incoming_data(b"\x1b]19;rgb:44/55/66\x1b\\");
+    let set = emu.build_snapshot();
+    assert_eq!(set.resolved_colors.selection_background, (0x11, 0x22, 0x33));
+    assert_eq!(set.resolved_colors.selection_foreground, (0x44, 0x55, 0x66));
+    assert_ne!(
+        set.resolved_colors.selection_background,
+        CATPPUCCIN_MOCHA.selection_bg
+    );
+    assert_ne!(
+        set.resolved_colors.selection_foreground,
+        CATPPUCCIN_MOCHA.selection_fg
+    );
+
+    emu.handle_incoming_data(RIS);
+    let reset = emu.build_snapshot();
+    assert_eq!(
+        reset.resolved_colors.selection_background,
+        CATPPUCCIN_MOCHA.selection_bg
+    );
+    assert_eq!(
+        reset.resolved_colors.selection_foreground,
+        CATPPUCCIN_MOCHA.selection_fg
+    );
+}
+
+#[test]
+fn decstr_keeps_the_selection_overrides() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]17;rgb:11/22/33\x1b\\");
+    emu.handle_incoming_data(b"\x1b]19;rgb:44/55/66\x1b\\");
+
+    emu.handle_incoming_data(DECSTR);
+    let after = emu.build_snapshot();
+    assert_eq!(
+        after.resolved_colors.selection_background,
+        (0x11, 0x22, 0x33)
+    );
+    assert_eq!(
+        after.resolved_colors.selection_foreground,
+        (0x44, 0x55, 0x66)
+    );
+}
+
+#[test]
+fn three_value_osc10_chain_sets_foreground_background_and_cursor() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]10;#010203;#040506;#070809\x1b\\");
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.resolved_colors.foreground, (1, 2, 3));
+    assert_eq!(snap.resolved_colors.background, (4, 5, 6));
+    assert_eq!(snap.cursor_color_override, Some((7, 8, 9)));
+}
+
+#[test]
+fn four_value_osc10_chain_ignores_the_value_that_lands_on_code_13() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]10;#010203;#040506;#070809;#0a0b0c\x1b\\");
+    let snap = emu.build_snapshot();
+    // The fourth value targets OSC 13 (pointer foreground), which is ignored.
+    assert_eq!(snap.resolved_colors.foreground, (1, 2, 3));
+    assert_eq!(snap.resolved_colors.background, (4, 5, 6));
+    assert_eq!(snap.cursor_color_override, Some((7, 8, 9)));
+    assert_eq!(
+        snap.resolved_colors.selection_background,
+        CATPPUCCIN_MOCHA.selection_bg
+    );
+    assert_eq!(
+        snap.resolved_colors.selection_foreground,
+        CATPPUCCIN_MOCHA.selection_fg
+    );
+}
+
+#[test]
 fn osc12_changes_cursor_override_but_not_the_resolved_arc() {
     let (mut emu, _rx) = make_emulator();
     let before = emu.build_snapshot();
