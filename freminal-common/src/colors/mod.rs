@@ -62,9 +62,9 @@ pub enum TerminalColor {
     /// A 256-color palette index (0–255).
     ///
     /// Produced by the SGR `38;5;N` / `48;5;N` / `58;5;N` parser paths.
-    /// The handler resolves this against the mutable `ColorPalette` before
-    /// applying it to cells.  If it somehow reaches the GUI unresolved,
-    /// the default palette lookup is used as a fallback.
+    /// Cells keep the index; the handler does not resolve it.  The renderer
+    /// resolves it at render time through the snapshot's `ResolvedColors`,
+    /// so OSC 4 palette overrides and theme changes recolour existing text.
     PaletteIndex(u8),
 }
 

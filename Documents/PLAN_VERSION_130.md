@@ -4609,6 +4609,11 @@ Deliverable: the doc changes, markdownlint clean.
   override is drawn at `background_opacity` over the theme panel fill, so at opacity < 1 a
   `(1 − opacity)` share of the theme background shows through; accepted. Its upload is not in
   the `frame-profiling` byte counts (132.C4).
+- **132.12 (done).** `handle_sgr` stores `PaletteIndex` unresolved; `ColorPalette::lookup` and
+  `ColorState::palette_lookup` deleted (no callers). OSC 4 and a theme change recolour existing
+  cells with unchanged row epochs; DECRQSS reports `38;5;n`/`48;5;n`/`58;5;n`; placeholder
+  ids from `38;5;42` / `58;5;7` decode as 42 / 7. Benches vs `pre132`: handle_sgr_indexed
+  −11%, instanced_*_indexed within ±4.5%.
 
 ---
 

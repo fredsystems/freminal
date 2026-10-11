@@ -10,8 +10,9 @@
 //!
 //! - [`apply_sgr`] — pure function: maps a single [`SelectGraphicRendition`]
 //!   variant onto a [`FormatTag`] in-place.
-//! - [`TerminalHandler::handle_sgr`] — resolves palette indices then delegates
-//!   to [`apply_sgr`].
+//! - [`TerminalHandler::handle_sgr`] — applies the SGR via [`apply_sgr`] and
+//!   propagates the format to the buffer (palette indices are kept, not
+//!   resolved).
 //! - [`TerminalHandler::build_sgr_response`] — serialises the current
 //!   [`FormatTag`] state back to an SGR parameter string (used by DECRQSS).
 //! - [`append_color_sgr`] / [`append_underline_color_sgr`] — helper free
@@ -32,20 +33,10 @@ use super::TerminalHandler;
 impl TerminalHandler {
     /// Handle SGR (Select Graphic Rendition) — update `current_format` and propagate to buffer.
     pub fn handle_sgr(&mut self, sgr: &SelectGraphicRendition) {
-        // Resolve PaletteIndex colors against the mutable palette before applying.
-        let resolved = match sgr {
-            SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Foreground(self.color_state.palette_lookup(*idx))
-            }
-            SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Background(self.color_state.palette_lookup(*idx))
-            }
-            SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::UnderlineColor(self.color_state.palette_lookup(*idx))
-            }
-            _ => *sgr,
-        };
-        apply_sgr(&mut self.current_format, &resolved);
+        // `PaletteIndex` colours are stored as-is: the renderer resolves them
+        // against the snapshot's `ResolvedColors`, so OSC 4 / theme changes
+        // recolour existing cells and DECRQSS can report `38;5;n`.
+        apply_sgr(&mut self.current_format, sgr);
         self.buffer.set_format(self.current_format.clone());
     }
 
@@ -544,23 +535,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_sgr_palette_index_resolves_against_palette() {
+    fn handle_sgr_palette_index_is_stored_unresolved() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        // Set index 42 to a custom colour.
+        // An OSC 4 override must not leak into the stored cell colour.
         handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xDE, 0xAD, 0x00));
 
-        // Apply SGR foreground with PaletteIndex(42).
         handler.handle_sgr(&SelectGraphicRendition::Foreground(
             TerminalColor::PaletteIndex(42),
         ));
 
-        // The resolved colour should be Custom(0xDE, 0xAD, 0x00), not PaletteIndex(42).
-        let fmt = handler.current_format();
         assert_eq!(
-            fmt.colors.color,
-            TerminalColor::Custom(0xDE, 0xAD, 0x00),
-            "PaletteIndex should be resolved to Custom via palette lookup"
+            handler.current_format().colors.color,
+            TerminalColor::PaletteIndex(42),
+            "PaletteIndex must be kept so the renderer resolves it"
         );
     }
 
@@ -570,39 +558,34 @@ mod tests {
 
         handler.handle_osc(&AnsiOscType::SetPaletteColor(200, 0xAA, 0xBB, 0xCC));
 
-        // Background
         handler.handle_sgr(&SelectGraphicRendition::Background(
             TerminalColor::PaletteIndex(200),
         ));
         assert_eq!(
             handler.current_format().colors.background_color,
-            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+            TerminalColor::PaletteIndex(200),
         );
 
-        // Underline colour
         handler.handle_sgr(&SelectGraphicRendition::UnderlineColor(
             TerminalColor::PaletteIndex(200),
         ));
         assert_eq!(
             handler.current_format().colors.underline_color,
-            TerminalColor::Custom(0xAA, 0xBB, 0xCC),
+            TerminalColor::PaletteIndex(200),
         );
     }
 
     #[test]
-    fn handle_sgr_palette_index_uses_default_when_no_override() {
+    fn handle_sgr_palette_index_without_override_is_stored_unresolved() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        // PaletteIndex(1) with no override → should resolve to the default for index 1.
         handler.handle_sgr(&SelectGraphicRendition::Foreground(
             TerminalColor::PaletteIndex(1),
         ));
 
-        let expected = handler.palette().lookup(1, handler.theme());
         assert_eq!(
             handler.current_format().colors.color,
-            expected,
-            "PaletteIndex without override should resolve to default colour"
+            TerminalColor::PaletteIndex(1),
         );
     }
 
@@ -799,12 +782,8 @@ mod tests {
     }
 
     #[test]
-    fn build_sgr_response_palette_index_fg_is_38_5_n() {
+    fn build_sgr_response_custom_fg_is_38_2_rgb() {
         let mut handler = TerminalHandler::new(80, 24);
-        // Palette index colors bypass the normal PaletteIndex resolution path
-        // only if directly applied; use Custom to verify the formatting path.
-        // We'll test via a direct handle_sgr with a resolved Custom color and
-        // separately verify the palette path via append_color_sgr for coverage.
         handler.handle_sgr(&SelectGraphicRendition::Foreground(TerminalColor::Custom(
             10, 20, 30,
         )));
@@ -812,6 +791,45 @@ mod tests {
         assert!(
             response.contains("38;2;10;20;30"),
             "custom fg should include RGB params: {response}"
+        );
+    }
+
+    #[test]
+    fn build_sgr_response_palette_index_fg_is_38_5_n() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(196),
+        ));
+        let response = handler.build_sgr_response();
+        assert!(
+            response.contains("38;5;196"),
+            "palette fg should report 38;5;n: {response}"
+        );
+    }
+
+    #[test]
+    fn build_sgr_response_palette_index_bg_is_48_5_n() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::Background(
+            TerminalColor::PaletteIndex(21),
+        ));
+        let response = handler.build_sgr_response();
+        assert!(
+            response.contains("48;5;21"),
+            "palette bg should report 48;5;n: {response}"
+        );
+    }
+
+    #[test]
+    fn build_sgr_response_palette_index_underline_is_58_5_n() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::UnderlineColor(
+            TerminalColor::PaletteIndex(7),
+        ));
+        let response = handler.build_sgr_response();
+        assert!(
+            response.contains("58;5;7"),
+            "palette underline should report 58;5;n: {response}"
         );
     }
 

@@ -28,11 +28,7 @@ fn lookup_standard_colors_complete() {
     let palette = ColorPalette::default();
     for i in 0u8..=15 {
         let (r, g, b) = t.ansi[usize::from(i)];
-        assert_eq!(
-            palette.lookup(i, t),
-            TerminalColor::Custom(r, g, b),
-            "ANSI index {i} mismatch"
-        );
+        assert_eq!(palette.rgb(i, t), (r, g, b), "ANSI index {i} mismatch");
         assert_eq!(default_palette_rgb(i, t), (r, g, b), "ANSI index {i}");
     }
 }
@@ -42,18 +38,18 @@ fn lookup_grayscale_range() {
     let t = theme();
     let palette = ColorPalette::default();
     // 232 -> rgb(8,8,8)
-    assert_eq!(palette.lookup(232, t), TerminalColor::Custom(8, 8, 8));
+    assert_eq!(palette.rgb(232, t), (8, 8, 8));
 
     // 255 -> rgb(238,238,238)
-    assert_eq!(palette.lookup(255, t), TerminalColor::Custom(238, 238, 238));
+    assert_eq!(palette.rgb(255, t), (238, 238, 238));
 }
 
 #[test]
 fn lookup_color_cube_sample() {
     let t = theme();
     // Index 40 = cube offset 24 -> r=0, g=4, b=0
-    let result = ColorPalette::default().lookup(40, t);
-    assert_eq!(result, TerminalColor::Custom(0x00, 0xd7, 0x00));
+    let result = ColorPalette::default().rgb(40, t);
+    assert_eq!(result, (0x00, 0xd7, 0x00));
 }
 
 #[test]
@@ -88,12 +84,11 @@ fn greyscale_matches_legacy_formula() {
 }
 
 #[test]
-fn one_table_three_paths_agree_for_every_index() {
+fn one_table_two_paths_agree_for_every_index() {
     let t = theme();
     let palette = ColorPalette::default();
     for i in 0u8..=255 {
         let (r, g, b) = default_palette_rgb(i, t);
-        assert_eq!(palette.lookup(i, t), TerminalColor::Custom(r, g, b), "{i}");
         assert_eq!(palette.rgb(i, t), (r, g, b), "{i}");
         assert_eq!(
             TerminalColor::PaletteIndex(i).resolve_palette_default(t),
@@ -110,10 +105,6 @@ fn index_16_is_black_even_when_theme_black_is_not() {
     assert_eq!(t.ansi[0], (0x45, 0x47, 0x5a));
     assert_eq!(default_palette_rgb(16, t), (0, 0, 0));
     assert_eq!(ColorPalette::default().rgb(16, t), (0, 0, 0));
-    assert_eq!(
-        ColorPalette::default().lookup(16, t),
-        TerminalColor::Custom(0, 0, 0)
-    );
     assert_eq!(
         TerminalColor::PaletteIndex(16).resolve_palette_default(t),
         TerminalColor::Custom(0, 0, 0)
@@ -287,14 +278,15 @@ fn palette_default_is_all_none_overrides() {
     let palette = ColorPalette::default();
     // Default palette should produce theme colors for ANSI indices.
     let (r0, g0, b0) = t.ansi[0];
-    assert_eq!(palette.lookup(0, t), TerminalColor::Custom(r0, g0, b0));
+    assert_eq!(palette.rgb(0, t), (r0, g0, b0));
     let (r1, g1, b1) = t.ansi[1];
-    assert_eq!(palette.lookup(1, t), TerminalColor::Custom(r1, g1, b1));
+    assert_eq!(palette.rgb(1, t), (r1, g1, b1));
     let (r15, g15, b15) = t.ansi[15];
-    assert_eq!(palette.lookup(15, t), TerminalColor::Custom(r15, g15, b15));
+    assert_eq!(palette.rgb(15, t), (r15, g15, b15));
     // Color cube index
-    let c = palette.lookup(196, t);
-    assert!(matches!(c, TerminalColor::Custom(..)));
+    let (r, g, b) = palette.rgb(196, t);
+    assert_eq!((r, g, b), default_palette_rgb(196, t));
+    assert_eq!((r, g, b), (0xff, 0x00, 0x00));
 }
 
 #[test]
@@ -303,13 +295,10 @@ fn palette_set_overrides_default() {
     let mut palette = ColorPalette::default();
     // Override index 0 with a custom color
     palette.set(0, 0x12, 0x34, 0x56);
-    assert_eq!(
-        palette.lookup(0, t),
-        TerminalColor::Custom(0x12, 0x34, 0x56)
-    );
+    assert_eq!(palette.rgb(0, t), (0x12, 0x34, 0x56));
     // Other indices are unaffected
     let (r1, g1, b1) = t.ansi[1];
-    assert_eq!(palette.lookup(1, t), TerminalColor::Custom(r1, g1, b1));
+    assert_eq!(palette.rgb(1, t), (r1, g1, b1));
 }
 
 #[test]
@@ -317,14 +306,11 @@ fn palette_reset_restores_default() {
     let t = theme();
     let mut palette = ColorPalette::default();
     palette.set(5, 0xAA, 0xBB, 0xCC);
-    assert_eq!(
-        palette.lookup(5, t),
-        TerminalColor::Custom(0xAA, 0xBB, 0xCC)
-    );
+    assert_eq!(palette.rgb(5, t), (0xAA, 0xBB, 0xCC));
     palette.reset(5);
     // After reset, index 5 = Magenta from theme
     let (r, g, b) = t.ansi[5];
-    assert_eq!(palette.lookup(5, t), TerminalColor::Custom(r, g, b));
+    assert_eq!(palette.rgb(5, t), (r, g, b));
 }
 
 #[test]
@@ -336,11 +322,11 @@ fn palette_reset_all_clears_all_overrides() {
     palette.set(255, 7, 8, 9);
     palette.reset_all();
     let (r0, g0, b0) = t.ansi[0];
-    assert_eq!(palette.lookup(0, t), TerminalColor::Custom(r0, g0, b0));
+    assert_eq!(palette.rgb(0, t), (r0, g0, b0));
     let (r, g, b) = default_palette_rgb(100, t);
-    assert_eq!(palette.lookup(100, t), TerminalColor::Custom(r, g, b));
+    assert_eq!(palette.rgb(100, t), (r, g, b));
     let (r, g, b) = default_palette_rgb(255, t);
-    assert_eq!(palette.lookup(255, t), TerminalColor::Custom(r, g, b));
+    assert_eq!(palette.rgb(255, t), (r, g, b));
 }
 
 #[test]

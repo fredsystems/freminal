@@ -6,7 +6,6 @@
 //! The 256-colour palette: the single default table ([`default_palette_rgb`]),
 //! and [`ColorPalette`], the mutable per-index override table.
 
-use super::TerminalColor;
 use crate::themes::ThemePalette;
 
 /// Number of entries in the 256-color palette.
@@ -53,13 +52,6 @@ impl ColorPalette {
         *self.overrides = [None; PALETTE_SIZE];
     }
 
-    /// Look up the effective color for `index`, consulting overrides first.
-    #[must_use]
-    pub fn lookup(&self, index: u8, theme: &ThemePalette) -> TerminalColor {
-        let (r, g, b) = self.rgb(index, theme);
-        TerminalColor::Custom(r, g, b)
-    }
-
     /// Get the current RGB value for a palette index (override or default).
     #[must_use]
     pub fn rgb(&self, index: u8, theme: &ThemePalette) -> (u8, u8, u8) {
@@ -88,7 +80,7 @@ const GREYSCALE_START: u8 = 232;
 ///   (`256colres.h`) and kitty.
 /// - 232-255: greyscale `8 + 10 * (index - 232)`.
 ///
-/// Every default lookup ([`ColorPalette::lookup`], [`ColorPalette::rgb`],
+/// Every default lookup ([`ColorPalette::rgb`],
 /// `TerminalColor::resolve_palette_default`) goes through this function.
 #[must_use]
 pub fn default_palette_rgb(index: u8, theme: &ThemePalette) -> (u8, u8, u8) {

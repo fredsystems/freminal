@@ -5596,4 +5596,87 @@ mod tests {
             );
         }
     }
+
+    /// Register a 2x2 RGBA virtual (`U=1`) placement for `image_id` / `placement_id`.
+    fn register_virtual_2x2(handler: &mut TerminalHandler, image_id: u32, placement_id: u32) {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyGraphicsCommand,
+        };
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(image_id),
+                placement_id: Some(placement_id),
+                unicode_placeholder: true,
+                ..KittyControlData::default()
+            },
+            payload: vec![255; 16],
+        });
+    }
+
+    /// `CSI 38;5;42 m` + U+10EEEE decodes image id 42 (kitty spec): the cell
+    /// keeps `PaletteIndex(42)` and is not resolved to theme RGB first.
+    #[test]
+    fn placeholder_with_palette_index_foreground_decodes_image_id() {
+        let mut handler = TerminalHandler::new(80, 24);
+        register_virtual_2x2(&mut handler, 42, 0);
+
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(42),
+        ));
+        assert_eq!(
+            handler.current_format.colors.color,
+            TerminalColor::PaletteIndex(42)
+        );
+        handler.handle_data(&[0xF4, 0x8E, 0xBB, 0xAE]);
+
+        let placement = handler.buffer.rows()[0].cells()[0]
+            .image_placement()
+            .expect("placeholder cell must carry an image placement");
+        assert_eq!(placement.image_id, 42);
+    }
+
+    /// `CSI 58;5;7 m` gives placement id 7 (resolved against the registered
+    /// `(image 42, placement 7)` virtual placement).
+    #[test]
+    fn placeholder_with_palette_index_underline_decodes_placement_id() {
+        let mut handler = TerminalHandler::new(80, 24);
+        register_virtual_2x2(&mut handler, 42, 7);
+
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(42),
+        ));
+        handler.handle_sgr(&SelectGraphicRendition::UnderlineColor(
+            TerminalColor::PaletteIndex(7),
+        ));
+        handler.handle_data(&[0xF4, 0x8E, 0xBB, 0xAE]);
+
+        let placement = handler.buffer.rows()[0].cells()[0]
+            .image_placement()
+            .expect("placeholder cell must carry an image placement");
+        assert_eq!(placement.image_id, 42);
+        assert_eq!(placement.placement_id, Some(7));
+    }
+
+    /// An OSC 4 override of the palette entry must not change the decoded id.
+    #[test]
+    fn placeholder_image_id_ignores_palette_overrides() {
+        let mut handler = TerminalHandler::new(80, 24);
+        register_virtual_2x2(&mut handler, 42, 0);
+        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 1, 2, 3));
+
+        handler.handle_sgr(&SelectGraphicRendition::Foreground(
+            TerminalColor::PaletteIndex(42),
+        ));
+        handler.handle_data(&[0xF4, 0x8E, 0xBB, 0xAE]);
+
+        let placement = handler.buffer.rows()[0].cells()[0]
+            .image_placement()
+            .expect("placeholder cell must carry an image placement");
+        assert_eq!(placement.image_id, 42);
+    }
 }

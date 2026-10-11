@@ -130,8 +130,10 @@ pub fn internal_color_to_egui(
 
         TerminalColor::Custom(r, g, b) => Color32::from_rgb(r, g, b),
 
-        // PaletteIndex should have been resolved by the handler before reaching
-        // the GUI.  If it somehow arrives here, fall back to the default palette.
+        // This egui path serves chrome only; terminal cells (which keep their
+        // `PaletteIndex`) resolve through `ResolvedColors` in
+        // `internal_color_to_gl`. For totality, resolve against the theme's
+        // default palette (no OSC 4 overrides are visible here).
         TerminalColor::PaletteIndex(_idx) => {
             let resolved = color.resolve_palette_default(theme);
             return internal_color_to_egui(resolved, make_faint, theme);

@@ -9,8 +9,12 @@
 
 use std::sync::Arc;
 
-use freminal_common::{pty_write::PtyWrite, themes::CATPPUCCIN_MOCHA};
-use freminal_terminal_emulator::interface::TerminalEmulator;
+use freminal_common::{
+    colors::TerminalColor,
+    pty_write::PtyWrite,
+    themes::{CATPPUCCIN_MOCHA, DRACULA},
+};
+use freminal_terminal_emulator::{interface::TerminalEmulator, snapshot::TerminalSnapshot};
 
 /// Headless emulator; keep the receiver alive so OSC replies do not error.
 fn make_emulator() -> (TerminalEmulator, crossbeam_channel::Receiver<PtyWrite>) {
@@ -152,4 +156,103 @@ fn osc12_changes_cursor_override_but_not_the_resolved_arc() {
     let after = emu.build_snapshot();
     assert_eq!(after.cursor_color_override, Some((0xaa, 0xbb, 0xcc)));
     assert!(Arc::ptr_eq(&before.resolved_colors, &after.resolved_colors));
+}
+
+// --- Palette-index cells keep the index; the renderer resolves it -----------
+
+/// The foreground colour stored for the first `X` in the snapshot.
+fn fg_of_first_x(snap: &TerminalSnapshot) -> TerminalColor {
+    let pos = snap
+        .visible_chars
+        .iter()
+        .position(|c| *c == freminal_common::buffer_states::tchar::TChar::Ascii(b'X'))
+        .expect("snapshot must contain the written `X`");
+    snap.visible_tags
+        .iter()
+        .find(|t| t.start <= pos && pos < t.end)
+        .expect("a format tag must cover the written `X`")
+        .colors
+        .color
+}
+
+/// Drain every PTY reply the emulator wrote, concatenated and lossily decoded.
+fn drain_replies(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+    let mut out = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let PtyWrite::Write(bytes) = msg {
+            out.extend_from_slice(&bytes);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn osc4_recolours_an_existing_palette_index_cell_without_rewriting_it() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[38;5;1mX");
+    let before = emu.build_snapshot();
+
+    let cell_fg = fg_of_first_x(&before);
+    assert_eq!(cell_fg, TerminalColor::PaletteIndex(1));
+    assert_eq!(
+        before.resolved_colors.rgb(cell_fg),
+        CATPPUCCIN_MOCHA.ansi[1]
+    );
+
+    emu.handle_incoming_data(b"\x1b]4;1;rgb:ff/00/00\x1b\\");
+    let after = emu.build_snapshot();
+
+    // The very same stored cell value now resolves to the new colour ...
+    assert_eq!(fg_of_first_x(&after), TerminalColor::PaletteIndex(1));
+    assert_eq!(after.resolved_colors.rgb(cell_fg), (255, 0, 0));
+    // ... and no row was rewritten: it is a render-time lookup.
+    assert_eq!(before.row_epochs, after.row_epochs);
+}
+
+#[test]
+fn theme_change_recolours_an_existing_palette_index_cell() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[38;5;3mX");
+    let before = emu.build_snapshot();
+    let cell_fg = fg_of_first_x(&before);
+    assert_eq!(cell_fg, TerminalColor::PaletteIndex(3));
+    assert_eq!(
+        before.resolved_colors.rgb(cell_fg),
+        CATPPUCCIN_MOCHA.ansi[3]
+    );
+    assert_ne!(CATPPUCCIN_MOCHA.ansi[3], DRACULA.ansi[3]);
+
+    emu.internal.handler.set_theme(&DRACULA);
+    let after = emu.build_snapshot();
+
+    assert_eq!(fg_of_first_x(&after), TerminalColor::PaletteIndex(3));
+    assert_eq!(after.resolved_colors.rgb(cell_fg), DRACULA.ansi[3]);
+    assert_eq!(before.row_epochs, after.row_epochs);
+}
+
+#[test]
+fn decrqss_sgr_reports_palette_index_foreground() {
+    let (mut emu, rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[38;5;196m");
+    emu.handle_incoming_data(b"\x1bP$qm\x1b\\");
+    let reply = drain_replies(&rx);
+    assert!(reply.contains("38;5;196"), "reply: {reply:?}");
+}
+
+#[test]
+fn decrqss_sgr_reports_palette_index_background() {
+    let (mut emu, rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[48;5;21m");
+    emu.handle_incoming_data(b"\x1bP$qm\x1b\\");
+    let reply = drain_replies(&rx);
+    assert!(reply.contains("48;5;21"), "reply: {reply:?}");
+}
+
+#[test]
+fn decrqss_sgr_reports_palette_index_underline_colour() {
+    let (mut emu, rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[58;5;7m");
+    emu.handle_incoming_data(b"\x1bP$qm\x1b\\");
+    let reply = drain_replies(&rx);
+    assert!(reply.contains("58;5;7"), "reply: {reply:?}");
 }

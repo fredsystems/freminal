@@ -377,9 +377,9 @@ fn dectcem_show_cursor() {
 
 /// SGR 38;5;N sets the foreground to palette color N (256-color).
 ///
-/// The handler resolves `PaletteIndex(N)` against the default xterm-256 palette
-/// immediately — `current_format()` returns the resolved `Custom(r,g,b)` value.
-/// Color 196 is pure red (`#ff0000`) in the standard xterm-256 palette.
+/// The handler keeps `PaletteIndex(N)` in the format; the renderer resolves it
+/// at render time. Color 196 is pure red (`#ff0000`) in the standard xterm-256
+/// palette.
 #[test]
 fn sgr_256_color_foreground() {
     let mut h = VtTestHelper::new_default();
@@ -387,15 +387,17 @@ fn sgr_256_color_foreground() {
     let fmt = h.state.handler.current_format();
     assert_eq!(
         fmt.colors.color,
-        TerminalColor::Custom(255, 0, 0),
-        "SGR 38;5;196 must resolve to Custom(255,0,0) — pure red"
+        TerminalColor::PaletteIndex(196),
+        "SGR 38;5;196 must be stored as PaletteIndex(196)"
     );
+    let rgb = h.state.handler.palette().rgb(196, h.state.handler.theme());
+    assert_eq!(rgb, (255, 0, 0), "palette entry 196 is pure red");
 }
 
 /// SGR 48;5;N sets the background to palette color N (256-color).
 ///
 /// Color 82 is `#5fff00` (bright chartreuse) in the standard xterm-256 palette,
-/// resolved to `Custom(95, 255, 0)`.
+/// stored as `PaletteIndex(82)` and resolving to `(95, 255, 0)`.
 #[test]
 fn sgr_256_color_background() {
     let mut h = VtTestHelper::new_default();
@@ -403,9 +405,11 @@ fn sgr_256_color_background() {
     let fmt = h.state.handler.current_format();
     assert_eq!(
         fmt.colors.background_color,
-        TerminalColor::Custom(95, 255, 0),
-        "SGR 48;5;82 must resolve to Custom(95,255,0)"
+        TerminalColor::PaletteIndex(82),
+        "SGR 48;5;82 must be stored as PaletteIndex(82)"
     );
+    let rgb = h.state.handler.palette().rgb(82, h.state.handler.theme());
+    assert_eq!(rgb, (95, 255, 0), "palette entry 82 is #5fff00");
 }
 
 /// SGR 38;2;R;G;B sets the foreground to a true-color RGB value.

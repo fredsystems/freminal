@@ -10,9 +10,7 @@
 use std::sync::Arc;
 
 use freminal_common::{
-    colors::{
-        ColorPalette, DynamicColorOverrides, DynamicColorSlot, ResolvedColors, TerminalColor,
-    },
+    colors::{ColorPalette, DynamicColorOverrides, DynamicColorSlot, ResolvedColors},
     themes::ThemePalette,
 };
 
@@ -83,11 +81,6 @@ impl ColorState {
     /// The effective RGB value of palette entry `idx` (override or default).
     pub(super) fn palette_rgb(&self, idx: u8) -> (u8, u8, u8) {
         self.palette.rgb(idx, self.theme)
-    }
-
-    /// The effective colour of palette entry `idx` as a `Custom` colour.
-    pub(super) fn palette_lookup(&self, idx: u8) -> TerminalColor {
-        self.palette.lookup(idx, self.theme)
     }
 
     /// Override palette entry `idx` (OSC 4).
@@ -395,7 +388,6 @@ mod tests {
         assert_eq!(s.palette_rgb(5), CATPPUCCIN_MOCHA.ansi[5]);
         s.set_palette(5, (10, 20, 30));
         assert_eq!(s.palette_rgb(5), (10, 20, 30));
-        assert_eq!(s.palette_lookup(5), TerminalColor::Custom(10, 20, 30));
         assert_eq!(s.palette().rgb(5, s.theme()), (10, 20, 30));
     }
 }
