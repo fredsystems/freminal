@@ -383,14 +383,14 @@ be produced correctly or uniformly:
 
 ## Charset / G-Set Gaps
 
-| Feature               | Importance | Type | Planned | Notes                                                                                      |
-| --------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------ |
-| SO (0x0E) — Shift Out | ⬜         | 🚧   | —       | Parsed; selects G1 into GL, but G1 rendering is not implemented                            |
-| SI (0x0F) — Shift In  | ⬜         | 🚧   | —       | Parsed; restores G0 into GL — no effect since G1 rendering is absent                       |
-| ESC n (LS2)           | ⬜         | 🚧   | —       | Invoke G2 as GL — parsed, no functional effect                                             |
-| ESC o (LS3)           | ⬜         | ⬜   | —       | Invoke G3 as GL — parsed, no functional effect                                             |
-| ESC \                 | / \} / \~  | ⬜   | 🚧      | —                                                                                          |
-| ESC ) C / ESC \* C    | ❌         | ⬜   | —       | G1/G2 arbitrary charset designation — not planned (ESC ) B / G1=ASCII works since Task 22) |
+| Feature               | Importance | Type | Planned     | Notes                                                                                      |
+| --------------------- | ---------- | ---- | ----------- | ------------------------------------------------------------------------------------------ |
+| SO (0x0E) — Shift Out | ⬜         | 🚧   | Task 147.20 | Parsed; selects G1 into GL, but G1 rendering is not implemented                            |
+| SI (0x0F) — Shift In  | ⬜         | 🚧   | Task 147.20 | Parsed; restores G0 into GL — no effect since G1 rendering is absent                       |
+| ESC n (LS2)           | ⬜         | 🚧   | Task 147.20 | Invoke G2 as GL — parsed, no functional effect                                             |
+| ESC o (LS3)           | ⬜         | ⬜   | Task 147.20 | Invoke G3 as GL — parsed, no functional effect                                             |
+| ESC \                 | / \} / \~  | ⬜   | 🚧          | —                                                                                          |
+| ESC ) C / ESC \* C    | ❌         | ⬜   | Task 147.20 | G1/G2 arbitrary charset designation — not planned (ESC ) B / G1=ASCII works since Task 22) |
 
 G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work correctly, and
 `ESC ) B` (G1=ASCII) was fixed in Task 22; these are the overwhelmingly common cases.
@@ -429,10 +429,10 @@ ignored (warn-logged, no output) until its task lands; none of them misroutes an
 
 ## CSI Standard Mode Gaps
 
-| Mode | Name                       | Importance | Planned | Notes                                                                                                 |
-| ---- | -------------------------- | ---------- | ------- | ----------------------------------------------------------------------------------------------------- |
-| 2    | KAM — Keyboard Action Mode | ⬜         | —       | Not implemented; no keyboard-lock state exists in freminal (surfaced by the DECSTR audit, issue #507) |
-| 12   | SRM — Send/Receive Mode    | ⬜         | —       | Not implemented; rare in practice                                                                     |
+| Mode | Name                       | Importance | Planned     | Notes                                                                                                 |
+| ---- | -------------------------- | ---------- | ----------- | ----------------------------------------------------------------------------------------------------- |
+| 2    | KAM — Keyboard Action Mode | ⬜         | Task 147.21 | Not implemented; no keyboard-lock state exists in freminal (surfaced by the DECSTR audit, issue #507) |
+| 12   | SRM — Send/Receive Mode    | ⬜         | Task 147.21 | Not implemented; rare in practice                                                                     |
 
 LNM (mode 20) and IRM (mode 4) are implemented.
 
@@ -452,10 +452,10 @@ stored mode.
 
 ## DEC Private Mode Gaps
 
-| Mode  | Name           | Importance | Type | Planned | Notes                                                                |
-| ----- | -------------- | ---------- | ---- | ------- | -------------------------------------------------------------------- |
-| ?1001 | Hilite Mouse   | ⬜         | 🚧   | —       | Mode parsed/stored; obsolete hilite tracking not functionally active |
-| ?1034 | Interpret Meta | ⬜         | ⬜   | —       | Meta key sends ESC prefix — not recognized                           |
+| Mode  | Name           | Importance | Type | Planned     | Notes                                                                |
+| ----- | -------------- | ---------- | ---- | ----------- | -------------------------------------------------------------------- |
+| ?1001 | Hilite Mouse   | ⬜         | 🚧   | Task 147.21 | Mode parsed/stored; obsolete hilite tracking not functionally active |
+| ?1034 | Interpret Meta | ⬜         | ⬜   | Task 147.21 | Meta key sends ESC prefix — not recognized                           |
 
 Fully implemented and removed from prior gap lists during v0.3.0–v0.7.0:
 `?2 (DECANM/VT52)`, `?66 (DECNKM)`, `?67 (DECBKM)`, `?69 (DECLRMM)`, `?1007 (AlternateScroll)`,
@@ -533,13 +533,13 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 | Item                     | Rationale                                           | Planned                    |
 | ------------------------ | --------------------------------------------------- | -------------------------- |
-| SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | —                          |
-| SRM standard mode        | Extremely rare in modern terminal output            | —                          |
+| SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | Task 147.20                |
+| SRM standard mode        | Extremely rare in modern terminal output            | Task 147.21                |
 | DECSC/DECRC xterm parity | Three narrow divergences; see Buffer Semantics Gaps | Task 147.6, 147.17, 147.18 |
 | Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | Task 147.19                |
-| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | —                          |
-| ?1001 hilite tracking    | Obsolete mouse mode                                 | —                          |
-| ?1034 interpret-meta key | Niche compatibility                                 | —                          |
+| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | Task 147.21                |
+| ?1001 hilite tracking    | Obsolete mouse mode                                 | Task 147.21                |
+| ?1034 interpret-meta key | Niche compatibility                                 | Task 147.21                |
 | DECSCA / selective erase | No per-cell protected-character bit in buffer model | —                          |
 | 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —                          |
 

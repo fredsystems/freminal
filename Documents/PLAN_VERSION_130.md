@@ -3946,7 +3946,9 @@ Notes:
 Fix every defect, spec deviation, missing test and tooling break that Tasks 126–131 and their
 reviews surfaced but left without a scheduled owner. Also fix a pre-existing defect found in
 the same review (application-keypad encoding), and two pre-v0.13.0 xterm deviations the
-maintainer added on 2026-10-11 (147.18 and 147.19). Created and decomposed on 2026-10-11 against
+maintainer added on 2026-10-11 (147.18 and 147.19). The remaining pre-v0.13.0 charset and
+mode gaps were also resolved on 2026-10-11: 147.20 implements the character sets, and 147.21
+records the four modes as not planned. Created and decomposed on 2026-10-11 against
 `72109bad`. The source was a maintainer review of PR #537: unscheduled findings are latent
 bugs, so each one gets a subtask here or a line in the stub of the task that owns it.
 
@@ -4317,6 +4319,116 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     cursor is unmoved in the middle of the screen.
 - **Damage:** placement damage stays bounded to the image's rows (`freminal-damage-model`).
 
+#### 147.20 — Character sets: G0–G3, locking and single shifts
+
+- **Source:** GAPS "Charset / G-Set Gaps" (SO/SI, LS2/LS3, `ESC ) C` / `ESC * C`). These
+  are pre-v0.13.0; the maintainer added them to 147 on 2026-10-11.
+- **Defects today:**
+  - SO and SI are dropped in `ansi.rs`.
+  - `ESC ) 0` (G1) and `ESC * C` (G2) are recognised but change nothing. `ESC ( A` (UK) is
+    rejected as invalid.
+  - `ESC + 0` (G3) switches on the single global line-drawing flag. That is wrong: it only
+    designates G3. The wrong behaviour is pinned by
+    `esc_plus_0_designates_g3_as_dec_special_graphics`.
+  - LS2, LS3, LS1R, LS2R and LS3R are logged and ignored.
+  - 7-bit SS2/SS3 (`ESC N` / `ESC O`) parse as `Invalid`, and 8-bit `0x8E`/`0x8F` are ignored.
+  - So an application that draws boxes with `ESC ) 0`, then SO, prints `lqqqk` instead of
+    box corners and lines.
+- **Decisions (maintainer, 2026-10-11, from the 147.20 reference read):**
+  - **The full G0–G3 model with GL, GR and a pending single shift**, as xterm
+    (`charproc.c:3774-3844,5481-5493,6174-6207`) and Ghostty (`Screen.zig` `CharsetState`;
+    `stream.zig:1440-1441,2850-2917,3004-3123`) have. kitty and WezTerm stop at G0/G1 with
+    SO/SI.
+  - **Sets:** ASCII (`B`), UK (`A`) and DEC Special Graphics (`0`), in all four slots.
+    - UK maps `#` to `£` unconditionally, as kitty, Ghostty and WezTerm do. xterm alone
+      requires NRC mode.
+    - The 96-character designators (`ESC - . /`) are not planned. No modern reference
+      implements them: Ghostty has a TODO, and kitty and WezTerm lack them.
+  - **An unknown designator final is ignored** and the slot keeps its set, as kitty, Ghostty
+    and WezTerm do. xterm alone resets the slot to ASCII.
+  - **GR is tracked and saved but never applied to bytes 0x80 and above.** Those bytes are
+    UTF-8, and Ghostty and xterm in UTF-8 mode don't apply GR either
+    (`Terminal.zig:1660`, `ptydata.c:94`).
+  - **A single shift applies to the next printable character only and is then cleared.** A
+    non-ASCII character consumes it and prints unmapped, as in Ghostty.
+  - **DECSC saves G0–G3, GL, GR and the pending single shift.** This follows the VT420 and
+    VT520 manuals (quoted in xterm `cursor.c:425-440`) and Ghostty. DECRC restores them, or
+    the defaults if nothing was saved.
+  - **RIS and DECSTR reset all of it to the defaults:** G0–G3 ASCII, GL=G0, GR=G2, no single
+    shift. That is what xterm's `resetCharsets`, Ghostty and kitty do. RIS clears both DECSC
+    slots, and DECSTR sets the active one, as today.
+  - **VT52:** `ESC F` / `ESC G` select line drawing / ASCII as today, expressed through the
+    new model. Entering VT52 saves the ANSI charset state and leaving restores it, as xterm
+    does (`charproc.c:7546-7550,5055-5064`).
+- **Scope:**
+  - A new `freminal-common/src/buffer_states/charset.rs` holding `CharacterSet`,
+    `CharsetSlot` (G0–G3) and `CharsetState { sets, gl, gr, single_shift }`. These are named
+    enums, not bools. It supersedes `line_draw.rs`'s `DecSpecialGraphics`. Per
+    `freminal-module-cohesion`, the line-drawing table moves with it.
+  - `terminal_output.rs`: `DesignateCharset { slot, set }`, `InvokeGl(slot)`,
+    `InvokeGr(slot)` and `SingleShift(slot)` replace `DecSpecialGraphics(..)` and the
+    roughly 27 `Charset*` placeholder variants.
+  - `ansi.rs`:
+    - SO and SI emit `InvokeGl` after the existing data flush;
+    - 8-bit SS2/SS3 emit `SingleShift` when S8C1T is active;
+    - VT52 `ESC F` / `ESC G` move to the new model.
+  - `ansi_components/standard.rs`:
+    - one designator helper for `( ) * +`;
+    - `N` and `O` become SS2/SS3;
+    - `n o ~ } |` become the locking shifts.
+  - `terminal_handler/mod.rs`:
+    - a `charset: CharsetState` field replaces `character_replace`;
+    - `handle_data` keeps its zero-copy fast path (GL is ASCII and no shift is pending) and
+      otherwise uses a table-driven map.
+  - `terminal_handler/cursor_ops.rs` (`SavedDecscState`) and `terminal_handler/reset.rs`.
+    The reset table classifies the new field.
+  - Tests:
+    - designation and invocation for every slot, SO/SI box drawing, LS2/LS3, GR stored but
+      not applied;
+    - SS2/SS3 (7-bit, and 8-bit under S8C1T) affecting exactly one character;
+    - DECSC/DECRC round trip including the single shift;
+    - RIS and DECSTR;
+    - VT52 save and restore;
+    - an unknown final leaving the slot unchanged.
+  - Rewrite `tests/vttest_charsets.rs` and the placeholder-pinning tests in `standard.rs` and
+    `ansi.rs`.
+- **Benchmark:** `parser_push` and `parse_and_handle_80x24`. The plain-ASCII fast path must
+  not regress.
+- **Scheduling:** after 147.8 (shared parser files), before 147.15.
+
+#### 147.21 — KAM, SRM, `?1001` and `?1034` recognised and not implemented
+
+- **Source:** GAPS "CSI Standard Mode Gaps" (KAM, SRM) and "DEC Private Mode Gaps"
+  (`?1001`, `?1034`). These are pre-v0.13.0; the maintainer decided on 2026-10-11.
+- **Decisions (from the 147.21 reference read):**
+  - **KAM (ANSI mode 2, keyboard lock)** is recognised and not implemented. kitty and
+    WezTerm don't implement it. Ghostty only enforces it behind `vt-kam-allowed`, which is
+    off by default, because letting any program lock the keyboard is hostile. xterm alone
+    enforces it.
+  - **SRM (ANSI mode 12, local echo)** is recognised and not implemented. kitty and WezTerm
+    don't implement it, and Ghostty stores it with no consumer. On a modern tty the kernel
+    echoes, so turning local echo on only doubles every character.
+  - **`?1001` (hilite mouse tracking)** is recognised and not implemented. kitty, Ghostty and
+    WezTerm don't implement it; WezTerm's docs warn that it can hang the terminal.
+    - freminal currently aliases it to `?1000`: it sends normal button reports the
+      application never asked for, and claims support in DECRQM. The alias is removed.
+  - **`?1034` (Meta sets the eighth bit)** is recognised and not implemented. Ghostty,
+    WezTerm and kitty don't implement it, and it conflicts with UTF-8 input.
+  - **"Recognised and not implemented" means:**
+    - set and reset are typed modes that log at `debug!`;
+    - DECRQM answers `Ps = 0` (not recognised), as kitty, Ghostty and WezTerm do for modes
+      they lack. KAM and SRM use the ANSI form without `?` (147.1);
+    - nothing else changes.
+- **Scope:**
+  - `freminal-common/src/buffer_states/mode.rs` and `modes/`: typed variants for ANSI 2 and
+    12 and DEC `?1034`. `?1001` leaves `MouseTrack` (remove `XtMseHilite`) and becomes its
+    own not-implemented mode;
+  - `terminal_handler/mod.rs` and `state/internal.rs` (DECRQM, and `sync_mode` lists);
+  - `freminal/src/gui/mouse.rs` (remove the `XtMseHilite` arms);
+  - tests: set, reset and DECRQM for each mode. `?1001h` followed by a click sends no mouse
+    report.
+- **Depends on:** 147.1 (the ANSI DECRQM form; same file).
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -4328,6 +4440,10 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     - close the DECRC/DECOM row as matching kitty, Ghostty and WezTerm, and correct its
       description of xterm (bottom/right clamp only);
     - fix the malformed `ESC \` row (GAPS around line 392);
+    - the charset section for 147.20, including the 96-character designators as not
+      planned;
+    - KAM, SRM, `?1001` and `?1034` as not planned, with the reasons (147.21). Correct the
+      `?1034` row, which describes `?1036`;
     - add XTSMGRAPHICS and XTSMTITLE/XTRMTITLE rows;
     - update the DECKPAM and `CSI Ps u` rows;
   - **`KITTY_PROTOCOL_REFERENCE.md`:** the string-terminator change;
@@ -4377,7 +4493,8 @@ Stale stub text was corrected at the same time:
 ### 147 Execution model
 
 - 147.3 → 147.4 → 147.5 run in order (foundation, encoders, keypad).
-- 147.2 → 147.8 → 147.15 run in order (shared parser files).
+- 147.2 → 147.8 → 147.20 → 147.15 run in order (shared parser files).
+- 147.1 → 147.21 run in order (`mode.rs`).
 - 147.1, 147.6, 147.7, 147.9, 147.10, 147.11, 147.12, 147.13, 147.14 and 147.16 are
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
@@ -4393,7 +4510,7 @@ Stale stub text was corrected at the same time:
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
   `cargo xtask check-windows`, `cargo xtask lint-markdown`.
-- Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15 and 147.18 stay within the 15% threshold, or
+- Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15, 147.18 and 147.20 stay within the 15% threshold, or
   improve.
 - Manual check by the maintainer at the PR: a freshly opened, unfocused window draws the
   unfocused cursor style on its first frame (127.C1).
