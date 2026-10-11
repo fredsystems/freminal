@@ -30,7 +30,8 @@ one plan document, grouped into milestones that ship as point releases:
 
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
-(activated 2026-10-10), and **147** (created 2026-10-11). Everything else is an **enriched stub**:
+(activated 2026-10-10), **147** (created 2026-10-11), and **132** (activated 2026-10-11).
+Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
 example, OSC 66 is not a Contour code, and the 102 wire keys were wrong), so they are now
@@ -3939,6 +3940,585 @@ Notes:
 
 ---
 
+## Task 132 — Colour Foundation
+
+### 132 Summary
+
+**Goal.** A spec-complete colour-spec parser, a reusable SGR-style colour extractor, and
+dynamic colours that actually render. Cells keep the palette index they were written with, and
+the renderer resolves it against the pane's live palette, so OSC 4, OSC 104 and theme changes
+recolour existing text the way xterm and kitty do.
+
+Activated and decomposed on 2026-10-11 on `task-132/colour-foundation`, branched from `main`
+at `6edf882c` (after PR #537).
+
+### 132 Activation recon (2026-10-11)
+
+Four read-only recon passes (colour-spec parser and OSC handlers; SGR parsing and cell storage;
+snapshot, render and damage; background layering) plus two spec-research passes (xterm,
+kitty, Ghostty and X11 source; CSS Color 4 and the X.Org `rgb.txt`). Everything the stub
+claimed was confirmed. The stub's line references were stale (the OSC 10/11 override fields are
+at `terminal_handler/mod.rs:306-320`, read only by `terminal_handler/osc_colors.rs:40-48`).
+
+Findings beyond the stub:
+
+- **`handle_sgr` bakes every index, not just 16–255.** `ColorPalette::lookup` returns
+  `TerminalColor::Custom` for 0–255 (`terminal_handler/sgr.rs:34-56`, `colors.rs:65-71`), so a
+  theme change does not recolour `38;5;1` either. Named colours (SGR 30–37 / 90–97) stay
+  symbolic and resolve from `theme.ansi` at render time, which means they ignore OSC 4.
+- **The compact / LZ4 row format already round-trips `PaletteIndex`** (tag 21 plus one byte,
+  `freminal-buffer/src/compact_row.rs:485-488, 520`). Storing the index needs no format change.
+- **Placeholder ids confirmed broken.** `38;5;42` is stored as `Custom(0,215,135)` and decodes
+  to image id 55175, not 42. The `PaletteIndex` arms of `color_to_image_id` /
+  `color_to_placement_id` (`unicode_placeholder.rs:167-190`) are dead in production.
+- **DECRQSS can never report `38;5;n`** for the same reason (`terminal_handler/sgr.rs:129-145`
+  are dead arms).
+- **Index 16 disagreement.** `lookup_default_256_color(16)` returns `theme.ansi[0]`;
+  `default_index_to_rgb(16)` returns `(0,0,0)`. xterm (`256colres.h`) and kitty
+  (`init_FG_BG_table`) both define index 16 as `(0,0,0)`. Only index 16 differs.
+- **Reply widths are inconsistent.** OSC 4 replies are 16-bit (`rgb:rrrr/gggg/bbbb`); OSC
+  10/11/12 replies are 8-bit. xterm, kitty and Ghostty all reply 16-bit.
+- **OSC chaining is unsupported.** OSC 4 handles one pair, OSC 104 one index, OSC 10 one spec.
+  OSC 17/19 are recognised no-ops; OSC 117/119 are unmapped.
+- **`ThemePalette::cursor_text` has no reader**, and the visual bell colour is hard-coded.
+- **The default background is never drawn.** `DefaultBackground` cells are skipped
+  (`renderer/vertex.rs:561-566`); the visible colour is the window clear plus the egui panel
+  fill, both from the config theme. There is no per-pane full-rect quad today.
+- **No damage signal exists for a palette or dynamic-colour change.** Theme changes are caught
+  by a GUI-side pointer comparison (`frame_dirty.rs:594-596`) that forces a pane-bounded full
+  rebuild. A palette change bumps no row epoch, so the bounded path would reuse stale vertices.
+- **DECSCNM has no damage signal at all** (verified by the orchestrator: `Mode::Decscnm` only
+  stores the mode at `state/internal.rs:315`; `frame_dirty.rs` has no DECSCNM term). See
+  132.C1.
+- **SGR extractor edge cases.** Mode 5 wraps (`38;5;300` is index 44), a missing mode-5 index
+  becomes index 0, mode-2 components over 255 emit `Invalid`, and a missing component becomes 0.
+- **No benchmark exercises indexed colour.** Every SGR payload in the bench suite is `38;2`.
+
+### 132 Decisions (maintainer, 2026-10-11)
+
+1. **`#RGB` is nibble-doubled** (`#3a7` is `0x33aa77`), matching kitty's code and tests and
+   Ghostty. kitty's spec prose and XParseColor say `0x30a070`; kitty's implementation does not
+   follow its own text. `#RRRGGGBBB` / `#RRRRGGGGBBBB` keep the top byte of each channel, which
+   all three agree on.
+2. **Cells store the palette index; lookup is at render time.** The snapshot carries the pane's
+   resolved palette; the renderer resolves `PaletteIndex` and the 16 named colours through it.
+3. **X11 colour names are accepted**, from the full current X.Org `rgb.txt` (782 entries,
+   MIT/X11-style licence, recorded in `ATTRIBUTIONS.md`). Lookup is ASCII-lowercase with spaces
+   significant, matching kitty and the X server.
+4. **`oklch()` and `lab()` are implemented in 132**, following **CSS Color 4**, not kitty's
+   implementation. kitty's code deviates from CSS (and from its own docs) in four ways; each is
+   recorded under "132 Decisions (orchestrator)".
+5. **`cursor_text` and `visual_bell` are deferred to Task 144.** Their only setter is OSC 21.
+   132 covers the xterm dynamic-colour set: OSC 10/11/12/17/19.
+6. **OSC 11 renders through a pane base fill.** A full-rect quad drawn first in the pane pass
+   (before the background image and cell backgrounds), at `background_opacity`, emitted only
+   when the pane's effective background differs from the theme background. The gutter strip,
+   pane borders and window clear keep the theme background.
+
+### 132 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **freminal is MIT, kitty is GPLv3.** No kitty code is copied. kitty is read for observable
+  behaviour only. The wide-gamut maths comes from CSS Color 4 (§9, §13/14, §19 sample code) and
+  Björn Ottosson's OKLab post (public domain / MIT).
+- **Where kitty's `oklch()`/`lab()` differs from CSS, freminal follows CSS:**
+  - kitty's achromatic shortcut feeds OKLab `L` straight into the sRGB OETF; CSS converts
+    properly (`oklch(0.5 0 180)` is `#636363`, not `#BCBCBC`).
+  - kitty treats `lab()` as D65; CSS specifies D50 with Bradford adaptation to D65.
+  - kitty's gamut mapping is dead code (it clips before testing); freminal implements the CSS
+    chroma-reduction search (JND 0.02, epsilon 0.0001, deltaEOK).
+  - kitty scales `C%` by 1/100 and `a%`/`b%` by 1; CSS uses 100% = 0.4 and 100% = 125.
+- **`rgb:` keeps today's scaling**, which already matches kitty: one digit is doubled, two are
+  taken as-is, three and four keep the top byte.
+- **`rgbi:`** values are clamped to `[0, 1]` and rounded half away from zero (`round(f * 255)`);
+  NaN is rejected. This matches kitty.
+- **Prefixes are case-insensitive and the spec is ASCII-trimmed** (kitty, X11). kitty's
+  trailing `# comment` stripping is a config-file artefact and is **not** reproduced.
+- **`@alpha` is not parsed in 132.** kitty honours it only for OSC 21
+  `transparent_background_colorN`; everywhere else a spec with `@` is rejected. It moves to
+  Task 144 with that key.
+- **SGR colour edge cases follow kitty** (the spec is silent; kitty is the tie-breaker):
+  - indices and components are masked with `& 0xFF` (`38;5;256` is index 0; `38;2;300;0;0` is
+    red 44);
+  - an incomplete colour (`38;5`, `38;2;1;2`, bare `38`) changes nothing;
+  - an unknown colour type (`38;4;…`) drops the rest of that SGR sequence (parameters before it
+    have already applied);
+  - colon form decides the colourspace id by count: after `2`, four or more remaining values
+    mean the first is a colourspace id and is ignored. An empty colon field counts as 0.
+- **OSC 4 follows kitty:** an odd number of fields after `4` drops the whole sequence; a pair
+  with a bad index or an unparsable spec is skipped and the rest still apply; `?` queries a
+  pair.
+- **OSC 104 follows kitty:** each index is reset; a bad index is skipped; no parameters reset
+  the whole table.
+- **OSC 10–19 chain** (xterm, kitty): `OSC 10;a;b` sets 10 then 11. Slots 13–16 and 18
+  consume a value and are ignored. Each value is a spec or `?`.
+- **OSC 110, 111, 112, 117, 119 reset one slot each** and ignore any parameters.
+- **Replies are 16-bit** (`rgb:rrrr/gggg/bbbb`, each byte times 257) for OSC 4 and OSC
+  10/11/12/17/19, terminated by the handler's framing (ST, S8C1T-aware), which matches kitty.
+  A selection-colour query reports the override if set, else the theme colour.
+- **Reset classification follows the 131 table:** the OSC 4 palette resets on RIS and DECSTR;
+  the dynamic overrides (now including selection fg/bg) reset on RIS only (xterm). A theme
+  change keeps both, as today.
+- **Damage.** A change to the pane's resolved colours is classified **BOUNDABLE-NOW at pane
+  level**: it is the same shape as `theme_changed` (every vertex of the pane is stale) and goes
+  through `full_pane_rebuild_damage_rect`, so other panes are not repainted. It does not touch
+  chrome. The OSC 12 cursor colour stays on the existing cursor-only path
+  (`previous_cursor_color_override`) and is deliberately **not** folded into the resolved
+  palette.
+- **The resolved palette is cached, not rebuilt per snapshot.** The handler's colour state is
+  one struct with private fields; every mutator invalidates the cached `Arc`, so
+  `build_snapshot` reuses the same `Arc` until something changes, and the GUI can compare by
+  `Arc::ptr_eq`.
+
+### 132 Types (decided)
+
+In `freminal-common/src/colors/` (132.2 turns `colors.rs` into this directory):
+
+```rust
+// colors/dynamic.rs
+pub enum DynamicColorSlot { Foreground, Background, Cursor, SelectionBackground, SelectionForeground }
+pub struct DynamicColorOverrides { /* one Option<(u8, u8, u8)> per slot; private */ }
+// get(slot), set(slot, rgb), reset(slot), reset_all()
+
+// colors/resolved.rs
+pub struct ResolvedColors {
+    pub palette: [(u8, u8, u8); 256],
+    pub foreground: (u8, u8, u8),
+    pub background: (u8, u8, u8),
+    pub selection_background: (u8, u8, u8),
+    pub selection_foreground: (u8, u8, u8),
+}
+// ResolvedColors::resolve(theme, &ColorPalette, &DynamicColorOverrides) -> Self
+// ResolvedColors::rgb(&self, TerminalColor) -> (u8, u8, u8)
+
+// colors/spec.rs
+pub fn parse_color_spec(spec: &str) -> Result<(u8, u8, u8), ColorSpecError>
+pub enum ColorSpecError { /* one variant per failure class */ }
+```
+
+In `freminal-terminal-emulator/src/terminal_handler/color_state.rs` (132.9):
+
+```rust
+pub(crate) struct ColorState {
+    theme: &'static ThemePalette,
+    palette: ColorPalette,
+    dynamic: DynamicColorOverrides,
+    resolved: Option<Arc<ResolvedColors>>, // None = stale; every mutator clears it
+}
+```
+
+### 132 Execution model
+
+Serial, on one checkout (`task-132/colour-foundation`). The subtasks share `colors/`, the
+handler and the renderer, so worktrees would buy nothing. Each subtask is implemented by a
+sub-agent, then reviewed in full by the orchestrator against the subtask text (diff read line
+by line, verification suite re-run by the orchestrator), and only then committed by the
+orchestrator. A sub-agent that ends without a report is treated as unverified: its tree state is
+inspected and the work is finished by a fresh agent, re-decomposed, or discarded.
+
+Order: 132.1, 132.2, 132.3, 132.4, 132.5, 132.6, 132.7, 132.8, 132.9, 132.10, 132.C1, 132.11,
+132.12, 132.13, 132.14. The adversarial review of the whole branch follows 132.14; its findings
+become further `132.Cn` entries.
+
+### 132 Subtasks
+
+Every subtask's verification is `cargo test --all` and
+`cargo clippy --all-targets --all-features -- -D warnings`, plus anything named below. Every
+subtask's prohibitions include: do NOT touch files outside scope, do NOT commit, do NOT update
+plan documents, and do NOT proceed to the next subtask. No `unwrap`/`expect` outside tests, no
+raw numeric `as` casts (`conv2`), no new `bool` fields or parameters. The stop condition is the
+same for all: report files changed and verification results, then await review.
+
+#### 132.1 — Indexed-colour benchmarks and baseline
+
+Scope:
+
+- `freminal-terminal-emulator/benches/buffer_benches.rs`;
+- `freminal/benches/render_loop_bench.rs`.
+
+What:
+
+- Add an indexed-colour payload (`ESC[38;5;Nm` and `ESC[48;5;Mm` with varying N and M, plus
+  eight characters, repeated; same total size as `sgr_heavy_payload`).
+- Add `bench_parse_sgr_indexed` (parser only, mirroring `bench_parse_sgr_heavy`) and
+  `bench_handle_sgr_indexed` (handler level, mirroring `bench_handle_incoming_data`).
+- Add `instanced_bg_indexed` and `instanced_fg_indexed` variants of `bench_bg_instances` /
+  `bench_fg_instances` whose snapshot is produced by feeding the indexed payload.
+- Run, on this commit, the baseline for: the four new benches, `bench_parse_sgr_heavy`,
+  `bench_build_snapshot` (all three sub-benches), `instanced_bg`, `instanced_fg`. Report the
+  numbers in the deliverable.
+
+Deliverable: the benches, compiling under `cargo bench --no-run --all`, and the baseline table.
+
+#### 132.2 — Turn `colors.rs` into a module directory (move only)
+
+Scope: `freminal-common/src/colors.rs` becomes `freminal-common/src/colors/mod.rs`,
+`colors/palette.rs` (the 256-colour tables, `cube_component`, `ColorPalette`) and
+`colors/spec.rs` (`parse_color_spec`, `scale_hex_channel`). Tests move with their code.
+
+What: a pure move. Every public path (`freminal_common::colors::…`) keeps working through
+re-exports in `colors/mod.rs`. No behaviour change, no signature change, no call-site change
+outside `freminal-common`.
+
+Deliverable: the split, `git diff -M` showing moves; all tests pass unchanged.
+
+#### 132.3 — One 256-colour default table; index 16 is `(0,0,0)`
+
+Scope: `freminal-common/src/colors/palette.rs`, `freminal-common/tests/color_tests.rs`, and
+the call sites of the removed function in `freminal-common` and `freminal` (`gui/colors.rs`).
+
+What:
+
+- One function computes the default 256-colour entry: `default_palette_rgb(index: u8, theme)
+  -> (u8, u8, u8)`. 0–15 come from `theme.ansi`; 16–231 are the cube; 232–255 the greyscale
+  ramp. Index 16 is `(0,0,0)`.
+- `lookup_default_256_color`, `default_index_to_rgb` and `resolve_palette_default` are replaced
+  by it (or become thin wrappers over it, if a caller needs `TerminalColor`). The `256..` arm
+  disappears with the `usize` signature.
+- Tests: every index 0–255 agrees between the old query path and the SGR path (one table);
+  index 16 is `(0,0,0)` under a theme whose `ansi[0]` is not black; cube and greyscale spot
+  values (17 → `00/00/5f`, 231 → `ff/ff/ff`, 232 → `08/08/08`, 255 → `ee/ee/ee`).
+
+Deliverable: the deduplicated table and tests. Note in the report that `38;5;16` now renders
+`(0,0,0)` instead of the theme's black.
+
+#### 132.4 — Colour-spec parser parity (hex, `rgb:`, `rgbi:`)
+
+Scope: `freminal-common/src/colors/spec.rs` and the four call sites
+(`ansi_components/osc_palette.rs:74`, `terminal_handler/osc_colors.rs:55, 67, 79`).
+
+What:
+
+- `parse_color_spec(&str) -> Result<(u8, u8, u8), ColorSpecError>`. `ColorSpecError` names
+  each failure class (empty, unknown format, bad hex, wrong channel count, bad intensity, …).
+  Call sites map the error to today's behaviour (skip and `debug!`/`warn!` as they do now).
+- Trim ASCII whitespace; match prefixes case-insensitively.
+- `#` with 3, 6, 9 or 12 hex digits: 3 is nibble-doubled; 6, 9 and 12 keep the top byte of each
+  channel. Any other length is an error.
+- `rgb:` unchanged (1–4 hex digits per channel; 1 doubled, 2 as-is, 3–4 top byte).
+- `rgbi:` three `/`-separated floats, parsed with `str::parse::<f64>`; NaN is an error; values
+  clamp to `[0, 1]`; channel is `round(f * 255)` (half away from zero). Use `conv2` for the
+  float-to-`u8` conversion.
+- Non-ASCII input must still be rejected without panicking (126.1 regression tests stay).
+- Tests: every form, uppercase prefixes and digits, whitespace, `#3a7` is `33aa77`,
+  `#abcabcdef` is `ab/ab/de`, `#123456789abc` is `12/56/9a`, `rgbi:2/-1/0` is `ff/00/00`,
+  `rgbi:0.5/0.5/0.5` is `80/80/80`, `rgbi:nan/0/0` is an error, plus the existing proptests.
+
+Deliverable: the parser and tests.
+
+#### 132.5 — X11 colour names
+
+Scope: new `freminal-common/src/colors/x11_names.rs`; `colors/spec.rs` (lookup hook);
+`ATTRIBUTIONS.md`.
+
+What:
+
+- Fetch `https://gitlab.freedesktop.org/xorg/app/rgb/-/raw/master/rgb.txt` and its `COPYING`.
+  Transcribe all 782 entries into a `const` table of `(&str, (u8, u8, u8))`, keys
+  ASCII-lowercased, sorted for binary search. A header comment names the source URL, the
+  upstream commit, and the licence.
+- `parse_color_spec` tries the name table first (after trimming and lowercasing) when the spec
+  does not start with `#` and is not a recognised prefix form. Spaces are significant
+  (`dark slate gray` and `darkslategray` both exist; `dark  slate gray` does not match).
+- Add an `ATTRIBUTIONS.md` entry carrying the licence notice.
+- Tests: table is strictly sorted and has 782 unique keys; `green` is `(0,255,0)`; `gray` is
+  `(190,190,190)`; `web gray` is `(128,128,128)`; `rebeccapurple` is `(102,51,153)`;
+  `DarkSlateGray` and `dark slate gray` agree; an unknown name is an error.
+
+Deliverable: the table, lookup, attribution and tests.
+
+#### 132.6 — `oklch()` and `lab()` (CSS Color 4)
+
+Scope: new `freminal-common/src/colors/wide_gamut.rs`; `colors/spec.rs` (dispatch).
+
+What (clean-room: do not read or copy kitty's `colors.c`; use CSS Color 4 and Ottosson):
+
+- Syntax, case-insensitive, after trimming: `oklch(` / `lab(` … `)`, with exactly three
+  components separated by spaces and/or commas, optionally followed by `/ alpha` (parsed and
+  ignored; the result is opaque). `none` means 0.
+  - `oklch(L C H)`: L is a number (0–1) or a percentage (100% = 1); C is a number or a
+    percentage (100% = 0.4), floored at 0; H is a number (degrees) or an angle with `deg`,
+    `grad`, `rad` or `turn`.
+  - `lab(L a b)`: L is a number (0–100) or a percentage (100% = 100); a and b are numbers or
+    percentages (100% = 125).
+  - L clamps to its range. Non-finite values are an error. Missing components are an error.
+- Conversion (CSS Color 4 §19 / Ottosson matrices): OKLCh → OKLab → linear sRGB; Lab (D50) →
+  XYZ (D50) → Bradford → XYZ (D65) → linear sRGB. Then the sRGB transfer function.
+- Gamut mapping (CSS Color 4, "CSS gamut mapping to an RGB destination"): if in gamut, done;
+  `L ≥ 1` is white and `L ≤ 0` is black; otherwise binary-search chroma in OKLCh with
+  deltaEOK, JND 0.02, epsilon 0.0001. `lab()` out of gamut is converted to OKLCh and mapped the
+  same way.
+- Final channel is clamped to `[0, 1]` and rounded half away from zero, through `conv2`.
+- Test vectors, exact (8-bit):
+  - CITED (kitty tests, in gamut, CSS agrees): `oklch(0.5 0.1 180)` → `0,117,101`;
+    `oklch(0.7 0.15 140)` → `104,180,87`; `oklch(0.9 0.05 265)` → `206,222,255`;
+    `oklch(1 0 0)` → white; `oklch(0 0 0)` → black; `lab(100 0 0)` → white; `lab(0 0 0)` →
+    black.
+  - COMPUTED during activation from a CSS-correct scratch model (`/tmp/opencode/k/model.py`,
+    reference only): `oklch(0.7 0.35 25)` → `255,86,85`; `oklch(0.5 0.5 0)` → `187,0,94`;
+    `oklch(0.5 0 0)` → `99,99,99`; `lab(50 0 0)` → `119,119,119`;
+    `lab(29.2345 39.3825 20.0664)` → `125,35,41` (CSS lists it as equal to
+    `oklch(40.101% 0.12332 21.555)`); `lab(50 60 40)` → `214,60,55`;
+    `lab(80 -120 120)` → `0,228,62`.
+  - Syntax: commas, percentages, `deg`/`turn`, `none`, `/ 0.5` ignored, uppercase, and
+    rejections (`oklch()`, `oklch(0.5 0.1)`, `oklch(a b c)`, `lab(50)`, trailing junk).
+- If an implementation disagrees with a COMPUTED vector, **stop and report** with the
+  intermediate values; do not adjust the vector or add a tolerance.
+
+Deliverable: the module, dispatch and tests.
+
+#### 132.7 — Reusable SGR colour extractor
+
+Scope: new `freminal-terminal-emulator/src/ansi_components/csi_commands/sgr_color.rs`;
+`ansi_components/csi_commands/sgr.rs` (use it, delete `handle_custom_color` and
+`default_color`); `ansi_components/csi_commands/mod.rs`; the SGR test files
+(`csi_commands/sgr.rs` tests, `tests/sgr_underline_styles.rs`, `tests/sgr_extended.rs`,
+`tests/sgr_matrix.rs`) where an expectation changes under the decided semantics.
+
+What:
+
+- `pub enum SgrColorForm { Semicolon, Colon }`.
+- `pub fn parse_sgr_color(params: &[Option<usize>], form: SgrColorForm) -> Result<SgrColor,
+  SgrColorError>` where `params` starts at the colour-type value (the element after 38/48/58),
+  `SgrColor { color: TerminalColor, consumed: usize }` (`color` is `PaletteIndex` or `Custom`;
+  `consumed` counts the elements used, including the type), and `SgrColorError` distinguishes
+  `Incomplete` from `UnknownType(usize)`.
+- Semantics as decided: `& 0xFF` masking; semicolon `2` takes exactly three values (no
+  colourspace); colon `2` skips the first of four or more remaining values; missing values are
+  `Incomplete`; `None` (empty or unparsable) counts as 0.
+- `sgr.rs`: `Incomplete` produces nothing; `UnknownType` drops the rest of the sequence (with a
+  `warn!`). Bare `38`/`48`/`58` with nothing after is `Incomplete`. The stored colour is still
+  converted by the handler exactly as today (132.12 changes storage).
+- Tests: the extractor's table of inputs (each decision bullet), and parser-level tests for
+  `38;5;256`, `38;5`, `38;2;300;0;0`, `38:2:1:2:3`, `38:2::1:2:3`, `38:2:9:1:2:3`,
+  `38;4;1;1m` (bold not applied), `1;38;5m` (bold applied, colour unchanged).
+- Benchmark: `bench_parse_sgr_heavy` and `bench_parse_sgr_indexed` before/after (15%).
+
+Deliverable: the extractor, the rewired SGR parser, tests and bench numbers. List every changed
+test expectation with the decision bullet that changed it.
+
+#### 132.8 — `DynamicColorOverrides` and `ResolvedColors`
+
+Scope: new `freminal-common/src/colors/dynamic.rs` and `colors/resolved.rs`; `colors/mod.rs`.
+
+What: the types in "132 Types (decided)".
+
+- `DynamicColorOverrides`: private per-slot `Option<(u8, u8, u8)>`; `get`, `set`, `reset`,
+  `reset_all`; `Default` is all-unset.
+- `ResolvedColors::resolve(theme, &ColorPalette, &DynamicColorOverrides)`: the palette is the
+  default table (132.3) overlaid with OSC 4 overrides; `foreground` / `background` /
+  `selection_*` are the override if set, else `theme.foreground` / `theme.background` /
+  `theme.selection_bg` / `theme.selection_fg`. The cursor slot is not resolved here (it stays on
+  the cursor path).
+- `ResolvedColors::rgb(TerminalColor)`: `Default`, `DefaultUnderlineColor` and
+  `DefaultCursorColor` → `foreground`; `DefaultBackground` → `background`; the 16 named
+  variants → `palette[0..16]`; `PaletteIndex(n)` → `palette[n]`; `Custom` passes through.
+- Derive `Debug, Clone, PartialEq, Eq`.
+- Tests: overrides win; reset restores theme; named colours follow an OSC 4 override of 0–15;
+  every `TerminalColor` variant resolves.
+
+Deliverable: the types and tests. No consumers yet; gate unused items with
+`#[cfg_attr(not(test), expect(dead_code))]` plus `TODO(132.9)` only if clippy requires it.
+
+#### 132.9 — Handler `ColorState` and snapshot transport
+
+Scope:
+
+- new `freminal-terminal-emulator/src/terminal_handler/color_state.rs`;
+- `terminal_handler/mod.rs` (fields `palette`, `theme`, `fg_color_override`,
+  `bg_color_override`, `cursor_color_override` become one `color_state: ColorState`; accessors);
+- `terminal_handler/osc.rs`, `terminal_handler/osc_colors.rs`, `terminal_handler/sgr.rs` (read
+  through `ColorState`);
+- `terminal_handler/reset.rs` (classify `color_state`: palette on both kinds, dynamic on Hard);
+- `freminal-terminal-emulator/src/snapshot.rs` and `interface.rs` (`build_snapshot`);
+- tests in those files.
+
+What:
+
+- `ColorState` as in "132 Types (decided)". Methods: `theme()`, `set_theme`,
+  `palette_rgb(idx)`, `set_palette`, `reset_palette(idx)`, `reset_palette_all`,
+  `dynamic(slot)`, `set_dynamic`, `reset_dynamic(slot)`, `reset_dynamic_all`,
+  `resolved(&mut self) -> Arc<ResolvedColors>` (builds and caches when stale). Every mutator
+  clears the cache, including `set_theme`.
+- `TerminalSnapshot` gains `resolved_colors: Arc<ResolvedColors>`. `theme` and
+  `cursor_color_override` stay (chrome and the cursor-only path read them).
+  `TerminalSnapshot::empty()` builds one from `CATPPUCCIN_MOCHA`.
+- Behaviour unchanged: OSC 10/11/12 set/query/reset and OSC 4/104 behave exactly as before
+  (reply formats untouched until 132.13). `handle_sgr` still resolves indices through the
+  palette (until 132.12).
+- Tests: two consecutive snapshots with no colour change share the `Arc` (`Arc::ptr_eq`); an
+  OSC 4 set, an OSC 10 set, an OSC 104, a theme change, RIS and DECSTR each produce a new `Arc`
+  with the expected contents; DECSTR keeps the dynamic overrides and resets the palette.
+- Benchmark: `bench_build_snapshot` (all three) before/after (15%).
+
+Deliverable: the state struct, transport, tests and bench numbers.
+
+#### 132.10 — Renderer resolves through `ResolvedColors`; resolved-colour damage
+
+Scope:
+
+- `freminal/src/gui/colors.rs` (`internal_color_to_gl` takes `&ResolvedColors` instead of the
+  theme; selection-colour helpers);
+- `freminal/src/gui/renderer/vertex.rs` (`BackgroundFrame` / foreground builder inputs;
+  selection colours);
+- `freminal/src/gui/terminal/widget.rs` (pass `snap.resolved_colors`; `PaneRenderCache` gains
+  `previous_resolved_colors`; `invalidate_theme_cache` clears it);
+- `freminal/src/gui/terminal/frame_dirty.rs` (`resolved_colors_changed`);
+- `freminal/benches/render_loop_bench.rs` (adapt to the new signature);
+- tests in those files.
+
+What:
+
+- Every terminal-content colour resolution reads `ResolvedColors`: cell fg/bg/underline/
+  strikethrough, reverse video and DECSCNM composition, selection bg/fg. Chrome, toasts and the
+  window clear keep reading the theme. The implementer lists every remaining `theme.` read in
+  the terminal-content path (widget.rs, vertex.rs) and justifies each.
+- `resolved_colors_changed = !Arc::ptr_eq(...)` against `previous_resolved_colors`; it joins
+  `theme_changed` in `content_changed` and in the `bounded_change` veto, and is recorded where
+  `previous_theme` is recorded.
+- Damage classification per `freminal-damage-model`: BOUNDABLE-NOW at pane level (see
+  decisions). Add a test that an OSC 4 change in one pane of two produces a damage region
+  bounded to that pane.
+- With no overrides, output is pixel-identical to before: the existing pixel goldens pass
+  unchanged.
+- Tests: an OSC 4 override of index 1 recolours an `SGR 31` cell's vertex colour; an OSC 10
+  override changes a `Default` cell's foreground; an OSC 17 override (set directly on the
+  overrides struct in the test) changes the selection quad colour.
+- Benchmark: `instanced_bg`, `instanced_fg` and the indexed variants before/after (15%).
+
+Deliverable: the change, tests, damage test and bench numbers.
+
+#### 132.11 — OSC 11 pane base fill
+
+Scope:
+
+- `freminal/src/gui/renderer/vertex.rs` / `renderer/gpu.rs` (emit and draw the base fill first
+  in both `draw_with_verts` and the cursor-only twin);
+- `freminal/src/gui/terminal/widget.rs` (pass the pane rect and theme background);
+- `freminal/src/gui/renderer/headless.rs`, `renderer/pixel_harness.rs` (let a
+  `SyntheticFrame` carry a background override);
+- new golden under `freminal/tests/golden_pixels/` if a golden is the clearest assertion.
+
+What:
+
+- When `resolved_colors.background != theme.background`, the pane emits one quad covering the
+  whole `terminal_rect` (including the sub-cell remainder) in `resolved_colors.background`, with
+  alpha 1.0 before `u_bg_opacity` (so it matches the panel fill at the configured opacity),
+  drawn before the background image and the cell backgrounds. Otherwise nothing is emitted.
+- `DefaultBackground` cells stay skipped.
+- Tests: unit test that the fill is emitted only when the colours differ; pixel test (runs under
+  `xvfb-run -a cargo test -p freminal --features gl-pixel` in the `gl-pixel` dev shell) that an
+  empty pane with an override reads back the override colour at a cell pixel and in the
+  sub-cell remainder; the existing `default_background_cells_are_left_untouched` still passes.
+- Verify the cursor-only and partial-present paths keep the fill (a cursor move with an
+  override active must not reveal the theme background).
+
+Deliverable: the fill, tests, and the `gl-pixel` run output.
+
+#### 132.12 — Cells keep the palette index
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/sgr.rs` (`handle_sgr` stops resolving;
+  `build_sgr_response` then reports `38;5;n` / `48;5;n` / `58:5:n`);
+- `freminal-common/src/colors/mod.rs` (`TerminalColor::PaletteIndex` doc comment);
+- `freminal-common/src/buffer_states/unicode_placeholder.rs` (doc comments only, if they
+  describe the old behaviour);
+- tests: `terminal_handler/sgr.rs`, `terminal_handler/mod.rs` placeholder tests,
+  `tests/vttest_extensions.rs:376-390`, and any other expectation of `Custom` from `38;5;n`.
+
+What:
+
+- `38;5;n` / `48;5;n` / `58;5;n` store `PaletteIndex(n)`. Nothing else in the handler resolves
+  an index.
+- Tests: OSC 4 after text written with `38;5;1` changes that text's resolved colour in the next
+  snapshot's `ResolvedColors`; a theme change does the same for `38;5;3`; DECRQSS reports
+  `38;5;196`; a unicode placeholder written with `38;5;42` decodes image id 42 and with
+  `58;5;7` placement id 7; a compact-row / LZ4 round trip keeps `PaletteIndex`.
+- Rename the misnamed test `build_sgr_response_palette_index_fg_is_38_5_n` so it tests what its
+  name says.
+- Benchmark: `bench_handle_sgr_indexed` and `instanced_fg_indexed` before/after (15%).
+
+Deliverable: the change, tests and bench numbers.
+
+#### 132.13 — OSC 4 / 104 / 10–19 / 110–119 parsing and replies
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc.rs` (`OscTarget` gains 117/119; `AnsiOscType`
+  colour variants replaced, see below);
+- new `freminal-terminal-emulator/src/ansi_components/osc_colors.rs` (parser side, raw
+  params), replacing `osc_palette.rs`; `ansi_components/osc.rs` dispatch;
+- `freminal-terminal-emulator/src/terminal_handler/osc.rs`, `terminal_handler/osc_colors.rs`;
+- tests in those files and any integration test expecting the old variants or 8-bit replies.
+
+What:
+
+- Replace `RequestColorQueryForeground/Background/Cursor`, `ResetCursorColor`,
+  `ResetForegroundColor`, `ResetBackgroundColor`, `SetPaletteColor`, `QueryPaletteColor` and
+  `ResetPaletteColor` with:
+  - `PaletteColors(Vec<PaletteColorOp>)`, `PaletteColorOp { index: u8, request: ColorRequest }`;
+  - `ResetPaletteColors(PaletteReset)`, `PaletteReset::{All, Indices(Vec<u8>)}`;
+  - `DynamicColors(Vec<(DynamicColorSlot, ColorRequest)>)`;
+  - `ResetDynamicColor(DynamicColorSlot)`;
+  - `ColorRequest::{Set((u8, u8, u8)), Query}`.
+- Parse from the raw parameter bytes (so names with spaces and numeric-looking specs survive),
+  with the OSC 4 / 104 / 10–19 / 110–119 semantics in the decisions. Specs go through
+  `parse_color_spec`. Unmapped slots 13–16, 18 consume a value and are dropped with a `debug!`.
+- Handler: apply each op in order; queries reply in 16-bit. OSC 17/19 set the selection
+  overrides; 117/119 reset them.
+- Tests: `4;1;red;2;?` sets 1 and replies for 2; `4;1;red;2` is dropped entirely;
+  `4;300;red;2;blue` sets only 2; `104;1;2` resets both; `104` resets all; `10;red;blue` sets
+  fg and bg; `10;?;?` replies for both; `13;red;17;blue` style chains skip the ignored slot;
+  `17;#ff0000` then `17;?` replies `rgb:ffff/0000/0000`; `117` resets; `11;dark slate gray`
+  works; replies are 16-bit and ST-terminated (and 8-bit C1 under S8C1T).
+
+Deliverable: the parser, handler, tests. List every removed variant and every changed reply.
+
+#### 132.14 — Documentation
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/PLAN_VERSION_130.md` (reset table row, Task 144 stub, out-of-scope table),
+`Documents/KITTY_PROTOCOL_REFERENCE.md` only if it describes colour-spec parsing.
+
+What:
+
+- Dual-doc update per `freminal-escape-sequence-docs`: OSC 4, 10, 11, 12, 17, 19, 104, 110,
+  111, 112, 117, 119 rows (formats accepted, chaining, 16-bit replies, render-time palette);
+  SGR 38/48/58 edge semantics; OSC 13–16, 18 recognised and ignored. Remove the OSC 10/11 gap.
+- Reset table: selection overrides join the dynamic-colour row (RIS only).
+- Task 144 stub: it now owns `cursor_text`, `visual_bell` and `@alpha`; it builds on
+  `DynamicColorOverrides` and `ResolvedColors`.
+- Out-of-scope table: the wide-gamut row is resolved (implemented in 132, CSS-correct).
+
+Deliverable: the doc changes, markdownlint clean.
+
+### 132 Cleanup entries
+
+#### 132.C1 — DECSCNM toggle does not repaint
+
+- **Surfaced:** activation recon (2026-10-11), verified by the orchestrator. Predates Task 132.
+- **Impact:** `Mode::Decscnm` only stores the mode (`state/internal.rs:315`). DECSCNM colours
+  are baked into the vertex buffers (`renderer/vertex.rs:106-128`), and `frame_dirty.rs` has no
+  term for the display mode, so toggling `?5` without other output leaves the pane in its old
+  colours until something else forces a rebuild. `TerminalSnapshot::is_normal_display` is also
+  a raw `bool` crossing the snapshot boundary (`freminal-state-representation`).
+- **Scope of fix:** `freminal-common/src/buffer_states/modes/decscnm.rs` (a two-state transport
+  enum, e.g. `ScreenInversion::{Normal, Reversed}`, since `Decscnm` carries `Query`);
+  `snapshot.rs`, `interface.rs`, `state/internal.rs`; `freminal/src/gui/terminal/widget.rs`,
+  `frame_dirty.rs`; `freminal/benches/render_loop_bench.rs` (field rename).
+- **Suggested approach:** reproduce with a frame-dirty test first. Carry the enum in the
+  snapshot; add `previous_screen_inversion` to `PaneRenderCache`; a change joins
+  `content_changed` and vetoes the bounded path, exactly like `resolved_colors_changed`.
+- **Verification:** a test that `CSI ? 5 h` with no other output forces a pane rebuild, and
+  `CSI ? 5 l` does too; existing DECSCNM tests pass.
+- **Scheduling:** after 132.10 (same seam); resolved within Task 132.
+
+### 132 Status notes
+
+(none yet)
+
+---
+
 ## Task 147 — v0.13.0 Correctness Cleanup
 
 ### 147 Summary
@@ -4626,53 +5206,6 @@ Stale stub text was corrected at the same time:
 ### 147 Status notes
 
 (none yet)
-
----
-
-## Foundation stubs (v0.13.0)
-
-### Task 132 — Colour Foundation (stub)
-
-**Goal.** A spec-complete colour-spec parser, a reusable SGR-style colour extractor, and
-dynamic colours that actually render.
-
-**Audit findings.**
-
-- **`parse_color_spec` format coverage.** It accepts only `rgb:`, `#RGB` and `#RRGGBB`, with
-  a case-sensitive `rgb:` prefix. It lacks `#RRRGGGBBB`, `#RRRRGGGGBBBB`, `rgbi:`, `@alpha`
-  and X11 colour names. (The panic itself is fixed in 126.1.)
-- **`#RGB` expansion.** Freminal expands `#3a7` to `33aa77` (`r*17`). The spec says digits
-  are the most significant bits (`#3000a0007000`). Kitty's implementation duplicates digits,
-  so kitty's code disagrees with kitty's own spec text.
-- **OSC 10/11 "set" never renders.** The override is read only by OSC 10/11 queries
-  (`terminal_handler/mod.rs:254-264`; not in `snapshot.rs`).
-- **OSC 4 changes apply only to later `38;5;n`.** SGR 30–37/90–97 resolve named colours from
-  the theme at render time, and existing cells keep resolved RGB. Kitty and xterm look colours
-  up at render time, so palette changes and pops recolour existing text.
-- **The 256-colour default table is implemented twice and disagrees at index 16**
-  (`colors.rs:95-159`).
-- **Kitty unicode-placeholder ids may be decoded from theme RGB.** `handle_sgr` resolves
-  `PaletteIndex` to RGB before the cell, so placeholder ids sent as `38;5;n`/`58;5;n` may be
-  decoded from the theme's RGB (verify; Task 136 consumer).
-- **No reusable `2:r:g:b` / `5:i` colour extractor.** SGR's is welded to
-  `TerminalOutput::Sgr`. Task 103 needs one.
-
-**Scope sketch.**
-
-- `ParsedColor { rgb, alpha }` parser parity, case-insensitive.
-- An extracted `parse_sgr_color(&[Option<usize>]) -> Option<TerminalColor>`.
-- A dynamic-colour struct (fg, bg, cursor, cursor_text, selection fg/bg, visual_bell) carried
-  in the snapshot and consumed by the renderer.
-- Palette lookup at render time: index-aware cells.
-- Dedupe the 256-colour table.
-- Damage classification per `freminal-damage-model`: a palette change is genuinely global.
-
-**Open questions.**
-
-- `#RGB` semantics: spec text or kitty/xterm practice.
-- Whether cells store a palette index (render-time lookup) or resolved RGB plus a repaint on
-  palette change. This affects compact-row storage (Task 118 format).
-- Whether `oklch()`/`lab()` are accepted in OSC 21.
 
 ---
 
