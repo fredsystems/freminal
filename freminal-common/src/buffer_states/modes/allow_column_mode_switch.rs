@@ -30,14 +30,14 @@ impl ReportMode for AllowColumnModeSwitch {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NoAllowColumnModeSwitch => String::from("\x1b[?40;2$y"),
-                Self::AllowColumnModeSwitch => String::from("\x1b[?40;1$y"),
-                Self::Query => String::from("\x1b[?40;0$y"),
+                Self::NoAllowColumnModeSwitch => String::from("?40;2$y"),
+                Self::AllowColumnModeSwitch => String::from("?40;1$y"),
+                Self::Query => String::from("?40;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?40;1$y"),
-                SetMode::DecRst => String::from("\x1b[?40;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?40;0$y"),
+                SetMode::DecSet => String::from("?40;1$y"),
+                SetMode::DecRst => String::from("?40;2$y"),
+                SetMode::DecQuery => String::from("?40;0$y"),
             },
         )
     }

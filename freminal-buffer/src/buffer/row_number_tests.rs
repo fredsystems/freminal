@@ -330,9 +330,9 @@ fn decsc_survives_reflow_as_a_screen_position() {
 }
 
 #[test]
-fn decsc_made_on_the_primary_screen_restores_the_screen_position_on_the_alternate_screen() {
-    // The 1049 shape: save on primary, switch, restore. The position is a
-    // screen position, so it is meaningful on either screen.
+fn decsc_made_on_the_primary_screen_is_not_visible_on_the_alternate_screen() {
+    // The DECSC slot is per screen (Task 131.5): a save on the primary
+    // screen is not restorable from the alternate one.
     let mut buf = Buffer::new(20, 5);
     for i in 0..3 {
         line(&mut buf, &format!("row {i}"));
@@ -340,9 +340,15 @@ fn decsc_made_on_the_primary_screen_restores_the_screen_position_on_the_alternat
     buf.set_cursor_pos(Some(6), Some(2));
     buf.save_cursor();
 
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
+    buf.set_cursor_pos(Some(0), Some(0));
     buf.restore_cursor();
 
+    let after = buf.cursor_screen_pos();
+    assert_eq!((after.x, after.y), (0, 0), "the alternate slot is empty");
+
+    buf.switch_to_primary();
+    buf.restore_cursor();
     let restored = buf.cursor_screen_pos();
     assert_eq!((restored.x, restored.y), (6, 2));
 }
@@ -357,10 +363,10 @@ fn decsc_save_before_1049_and_restore_after_leaving_returns_to_the_primary_posit
     buf.set_cursor_pos(Some(7), Some(3));
     buf.save_cursor();
 
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     buf.set_cursor_pos(Some(0), Some(0));
     buf.insert_text(&text("alt"));
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
     buf.restore_cursor();
 
     let restored = buf.cursor_screen_pos();
@@ -553,7 +559,7 @@ fn alternate_screen_uses_its_own_row_namespace() {
     line(&mut buf, "primary");
     let primary_row = buf.row_number_at(0);
 
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
     assert!(buf.row_base().is_alternate());
     assert_eq!(buf.row_base(), RowNumber::ALTERNATE_BASE);
     assert!(buf.cursor_row_number().is_alternate());
@@ -563,7 +569,7 @@ fn alternate_screen_uses_its_own_row_namespace() {
         "a primary number must not resolve on the alternate screen"
     );
 
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
     assert!(!buf.row_base().is_alternate());
     assert_eq!(
         text_of_number(&buf, primary_row).as_deref(),
@@ -572,17 +578,26 @@ fn alternate_screen_uses_its_own_row_namespace() {
 }
 
 #[test]
-fn alternate_row_numbers_are_not_reused_across_sessions() {
+fn alternate_row_numbers_are_not_reused_after_a_clear() {
+    // Alternate contents now persist across sessions, so a re-entry on its own
+    // keeps the old numbers (they still name the same rows). What must never
+    // happen is a *clear* re-issuing them: the blank rows get fresh numbers.
     let mut buf = Buffer::new(20, 3);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
     let first_session_top = buf.row_base();
     let first_session_next = buf.next_row_number();
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
 
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
+    assert_eq!(
+        buf.row_base(),
+        first_session_top,
+        "re-entry alone keeps the persisted rows and their numbers"
+    );
+    buf.clear_alternate_screen();
     assert!(
         buf.row_base() >= first_session_next,
-        "second session must start past the first ({} < {})",
+        "a clear must number its rows past the earlier ones ({} < {})",
         buf.row_base(),
         first_session_next
     );
@@ -597,7 +612,7 @@ fn alt_screen_ed2_keeps_primary_command_blocks() {
     assert_eq!(buf.command_blocks().len(), 1);
     assert_eq!(buf.prompt_rows().len(), 1);
 
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     buf.erase_display();
 
     assert_eq!(
@@ -607,7 +622,7 @@ fn alt_screen_ed2_keeps_primary_command_blocks() {
     );
     assert_eq!(buf.prompt_rows().len(), 1);
     // The block is still the primary one and resolves once back on primary.
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
     assert_eq!(
         text_of_number(&buf, buf.command_blocks()[0].prompt_start_row).as_deref(),
         Some("primary$ cmd")
@@ -628,13 +643,13 @@ fn alt_era_marks_are_dropped_when_the_alternate_screen_is_left() {
     let mut buf = Buffer::new(30, 4);
     block(&mut buf, "primary");
 
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     block(&mut buf, "alt");
     assert_eq!(buf.command_blocks().len(), 2);
     assert_eq!(buf.prompt_rows().len(), 2);
     assert!(buf.prompt_rows()[1].is_alternate());
 
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
 
     assert_eq!(buf.command_blocks().len(), 1, "alt block dropped");
     assert_eq!(buf.command_blocks()[0].fid, "primary");
@@ -650,10 +665,10 @@ fn a_block_that_straddles_the_alternate_screen_loses_only_its_alt_fields() {
     line(&mut buf, "straddle$ vim");
     buf.mark_command_start_row("straddle");
 
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     buf.mark_output_start_row("straddle");
     let _ = buf.finish_command_block(Some(0), "straddle");
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
 
     let b = &buf.command_blocks()[0];
     assert!(!b.prompt_start_row.is_alternate());
@@ -857,7 +872,7 @@ fn resize_on_the_alternate_screen_remaps_primary_marks() {
     long_block(&mut buf, "r", 55);
     let old_prompt = buf.prompt_rows()[0];
 
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     // The alternate screen does not reflow, but the parked primary screen
     // does, and the primary marks held by the buffer must follow it.
     buf.set_size(10, 6, 0);
@@ -872,7 +887,7 @@ fn resize_on_the_alternate_screen_remaps_primary_marks() {
         "the primary prompt mark was renumbered"
     );
 
-    let _ = buf.leave_alternate();
+    buf.switch_to_primary();
     assert_eq!(
         text_of_number(&buf, buf.prompt_rows()[0]).as_deref(),
         Some("r$ cmd")
@@ -893,7 +908,7 @@ fn resize_on_the_alternate_screen_remaps_primary_marks() {
 fn resize_on_the_alternate_screen_leaves_alt_marks_alone() {
     let mut buf = Buffer::new(20, 6);
     long_block(&mut buf, "r", 55);
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     buf.mark_prompt_row();
     let alt_mark = *buf.prompt_rows().last().unwrap();
     assert!(alt_mark.is_alternate());
@@ -937,7 +952,7 @@ fn full_reset_from_the_alternate_screen_keeps_both_namespaces_monotonic() {
         line(&mut buf, &format!("p {i}"));
     }
     let primary_next = buf.next_row_number();
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
     let alt_next = buf.next_row_number();
 
     buf.full_reset();
@@ -950,7 +965,7 @@ fn full_reset_from_the_alternate_screen_keeps_both_namespaces_monotonic() {
         buf.row_base() >= primary_next,
         "primary numbering continues"
     );
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
     assert!(buf.row_base() >= alt_next, "alternate numbering continues");
 }
 

@@ -16,9 +16,13 @@
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decscnm::Decscnm,
-        keypad::KeypadMode, sync_updates::SynchronizedUpdates, xtmsewin::XtMseWin,
+        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
+        decscnm::Decscnm, keypad::KeypadMode, s8c1t::S8c1t, sync_updates::SynchronizedUpdates,
+        xtmsewin::XtMseWin,
     },
+    buffer_states::{tchar::TChar, window_manipulation::WindowManipulation},
+    colors::TerminalColor,
+    config::ThemeMode,
     pty_write::PtyWrite,
 };
 use freminal_terminal_emulator::{
@@ -705,5 +709,200 @@ fn test_hilite_mouse_tracking_decrqm_after_set() {
     assert_eq!(
         resp, "\x1b[?1001;1$y",
         "DECRQM ?1001 after DECSET must return Ps=1 (set)"
+    );
+}
+
+// ─── event-order output processing (Task 130.1) ─────────────────────────────
+
+/// Collect every `PtyWrite::Write` payload currently queued on `rx`.
+fn collect_writes(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<Vec<u8>> {
+    rx.try_iter()
+        .filter_map(|msg| match msg {
+            PtyWrite::Write(bytes) => Some(bytes),
+            PtyWrite::Resize(_) => None,
+        })
+        .collect()
+}
+
+/// A DECRQM query followed by a DA1 request in the same buffer must be
+/// answered in the order the application sent them: the DECRPM reply first,
+/// then the DA1 reply.  Before event-order processing the handler pass emitted
+/// every handler-owned reply (DA1) before the mode-sync pass emitted DECRPM.
+#[test]
+fn decrpm_reply_precedes_da1_reply_in_one_buffer() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1b[?2026$p\x1b[c");
+
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 2, "expected exactly two replies: {writes:?}");
+    assert_eq!(
+        writes[0],
+        b"\x1b[?2026;2$y".to_vec(),
+        "first reply must be the DECRPM answer"
+    );
+    assert!(
+        writes[1].starts_with(b"\x1b[?"),
+        "second reply must be the DA1 answer, got {:?}",
+        String::from_utf8_lossy(&writes[1])
+    );
+    assert!(
+        writes[1].ends_with(b"c"),
+        "DA1 reply must end with 'c', got {:?}",
+        String::from_utf8_lossy(&writes[1])
+    );
+}
+
+/// A mode set *after* RIS in the same buffer must survive: the RIS state reset
+/// applies at the `ResetDevice` position, not after the whole batch.
+#[test]
+fn decckm_set_after_ris_in_one_buffer_survives() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\x1b[?1h");
+
+    assert_eq!(state.modes.cursor_key, Decckm::Application);
+}
+
+/// A mode set *before* RIS in the same buffer is wiped by the reset.
+#[test]
+fn decckm_set_before_ris_in_one_buffer_is_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1b[?1h\x1bc");
+
+    assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+}
+
+/// S8C1T issued after RIS in the same buffer must leave the parser in 8-bit
+/// mode, and a later request gets an 8-bit CSI reply.
+#[test]
+fn s8c1t_after_ris_in_one_buffer_leaves_parser_eight_bit() {
+    let (mut state, rx) = make_state();
+    drain(&rx);
+
+    state.handle_incoming_data(b"\x1bc\x1b G");
+
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::EightBit);
+
+    // The mode also reaches the reply path: a DA1 reply starts with 8-bit CSI.
+    state.handle_incoming_data(b"\x1b[c");
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
+    assert_eq!(writes[0][0], 0x9B, "DA1 reply must use 8-bit CSI");
+}
+
+// ─── RIS state reset: what survives (Task 131.8b) ───────────────────────────
+
+/// The foreground colour of the first visible cell holding `needle`.
+fn foreground_of(state: &mut TerminalState, needle: TChar) -> TerminalColor {
+    let (chars, tags) = state.handler.data_and_format_data_for_gui(0);
+    let idx = chars
+        .visible
+        .iter()
+        .position(|c| *c == needle)
+        .unwrap_or_else(|| panic!("{needle:?} not found in {:?}", chars.visible));
+    tags.visible
+        .iter()
+        .find(|t| t.start <= idx && idx < t.end)
+        .map_or_else(
+            || panic!("no format tag covers index {idx}"),
+            |t| t.colors.color,
+        )
+}
+
+/// A CSI split across chunks with a RIS before it: `ESC c ESC [ 3` ends chunk
+/// one, `1 m X` starts chunk two.  The parser's in-flight sequence belongs to
+/// bytes after the RIS and must survive it, so `X` is printed in red.
+#[test]
+fn partial_csi_after_ris_survives_the_state_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\x1b[3");
+    state.handle_incoming_data(b"1mX");
+
+    assert_eq!(
+        foreground_of(&mut state, TChar::Ascii(b'X')),
+        TerminalColor::Red,
+        "the partial CSI that followed the RIS must complete as SGR 31"
+    );
+}
+
+/// A UTF-8 character split across chunks after a RIS: the leading byte kept in
+/// `leftover_data` follows the RIS and must not be discarded by it.
+#[test]
+fn split_utf8_after_ris_survives_the_state_reset() {
+    let (mut state, _rx) = make_state();
+
+    state.handle_incoming_data(b"\x1bc\xc3");
+    state.handle_incoming_data(b"\xa9");
+
+    let (chars, _) = state.handler.data_and_format_data_for_gui(0);
+    assert!(
+        chars.visible.iter().any(|c| *c == TChar::from('\u{e9}')),
+        "the split e-acute must be printed, got {:?}",
+        chars.visible
+    );
+}
+
+/// `theme_mode` and `theming` are config / OS-pushed state: RIS must not reset
+/// them, and DECRQM `?2031` keeps reporting the configured mode.
+#[test]
+fn ris_preserves_theme_mode_and_theming() {
+    let (mut state, rx) = make_state();
+    state.modes.theme_mode = ThemeMode::Light;
+    state.handle_incoming_data(b"\x1bc");
+
+    assert_eq!(state.modes.theme_mode, ThemeMode::Light);
+
+    drain(&rx);
+    state.handle_incoming_data(b"\x1b[?2031$p");
+    let resp = String::from_utf8(unwrap_write(rx.try_recv().unwrap())).unwrap();
+    assert_eq!(resp, "\x1b[?2031;1$y", "?2031 must still report Light");
+}
+
+/// RIS resets the parser's S8C1T mode: after `ESC SP G` then `ESC c`, a DA1
+/// request in the next chunk is answered with a 7-bit CSI.
+#[test]
+fn ris_resets_parser_s8c1t_to_seven_bit() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G");
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::EightBit);
+
+    state.handle_incoming_data(b"\x1bc");
+    assert_eq!(state.parser.s8c1t_mode, S8c1t::SevenBit);
+
+    drain(&rx);
+    state.handle_incoming_data(b"\x1b[c");
+    let writes = collect_writes(&rx);
+    assert_eq!(writes.len(), 1, "expected one DA1 reply: {writes:?}");
+    assert_eq!(writes[0][0], 0x1b, "DA1 reply must use 7-bit CSI after RIS");
+}
+
+/// A window command already emitted in an earlier chunk but not yet drained by
+/// the GUI is in transit; RIS must not discard it.
+#[test]
+fn ris_keeps_queued_window_commands() {
+    let (mut state, _rx) = make_state();
+    state.handle_incoming_data(b"\x1b]0;kept\x07");
+    assert!(
+        state
+            .window_commands
+            .iter()
+            .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "kept")),
+        "precondition: title command queued, got {:?}",
+        state.window_commands
+    );
+
+    state.handle_incoming_data(b"\x1bc");
+
+    assert!(
+        state
+            .window_commands
+            .iter()
+            .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "kept")),
+        "RIS must not drop already-queued window commands, got {:?}",
+        state.window_commands
     );
 }

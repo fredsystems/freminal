@@ -26,18 +26,18 @@ fn report_without_override_reflects_internal_state() {
     let autowrap = Decawm::AutoWrap;
     let query = Decawm::Query;
 
-    assert_eq!(no_autowrap.report(None), "\x1b[?7;2$y");
-    assert_eq!(autowrap.report(None), "\x1b[?7;1$y");
-    assert_eq!(query.report(None), "\x1b[?7;0$y");
+    assert_eq!(no_autowrap.report(None), "?7;2$y");
+    assert_eq!(autowrap.report(None), "?7;1$y");
+    assert_eq!(query.report(None), "?7;0$y");
 }
 
 #[test]
 fn report_with_override_takes_precedence() {
     let mode = Decawm::NoAutoWrap;
 
-    assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?7;1$y");
-    assert_eq!(mode.report(Some(SetMode::DecRst)), "\x1b[?7;2$y");
-    assert_eq!(mode.report(Some(SetMode::DecQuery)), "\x1b[?7;0$y");
+    assert_eq!(mode.report(Some(SetMode::DecSet)), "?7;1$y");
+    assert_eq!(mode.report(Some(SetMode::DecRst)), "?7;2$y");
+    assert_eq!(mode.report(Some(SetMode::DecQuery)), "?7;0$y");
 }
 
 #[test]

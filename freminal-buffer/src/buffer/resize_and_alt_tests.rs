@@ -47,11 +47,11 @@ fn alt_screen_resize_keeps_primary_scrollback_up_to_the_configured_limit() {
     // 11 000 retained rows is past the old hard-coded 10 000-row placeholder
     // but well inside the configured 12 000.
     let mut buf = large_primary(11_000, 12_000);
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
 
     let _ = buf.set_size(20, 5, 0);
 
-    let saved = buf.saved_primary.as_ref().expect("primary is parked");
+    let saved = buf.parked_primary.as_ref().expect("primary is parked");
     assert_eq!(
         saved.rows.len(),
         11_000,
@@ -68,11 +68,11 @@ fn alt_screen_resize_keeps_primary_scrollback_up_to_the_configured_limit() {
 fn alt_screen_resize_still_trims_the_parked_primary_to_the_configured_limit() {
     // The limit is honoured, not ignored: past it, the oldest rows go.
     let mut buf = large_primary(300, 100);
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
 
     let _ = buf.set_size(20, 5, 0);
 
-    let saved = buf.saved_primary.as_ref().expect("primary is parked");
+    let saved = buf.parked_primary.as_ref().expect("primary is parked");
     assert_eq!(
         saved.rows.len(),
         100 + 5,

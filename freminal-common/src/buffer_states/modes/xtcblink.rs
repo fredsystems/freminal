@@ -44,14 +44,14 @@ impl ReportMode for XtCBlink {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Steady => String::from("\x1b[?12;2$y"),
-                Self::Blinking => String::from("\x1b[?12;1$y"),
-                Self::Query => String::from("\x1b[?12;0$y"),
+                Self::Steady => String::from("?12;2$y"),
+                Self::Blinking => String::from("?12;1$y"),
+                Self::Query => String::from("?12;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?12;1$y"),
-                SetMode::DecRst => String::from("\x1b[?12;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?12;0$y"),
+                SetMode::DecSet => String::from("?12;1$y"),
+                SetMode::DecRst => String::from("?12;2$y"),
+                SetMode::DecQuery => String::from("?12;0$y"),
             },
         )
     }

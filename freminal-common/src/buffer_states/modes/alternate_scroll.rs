@@ -44,14 +44,14 @@ impl ReportMode for AlternateScroll {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Enabled => String::from("\x1b[?1007;1$y"),
-                Self::Disabled => String::from("\x1b[?1007;2$y"),
-                Self::Query => String::from("\x1b[?1007;0$y"),
+                Self::Enabled => String::from("?1007;1$y"),
+                Self::Disabled => String::from("?1007;2$y"),
+                Self::Query => String::from("?1007;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?1007;1$y"),
-                SetMode::DecRst => String::from("\x1b[?1007;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?1007;0$y"),
+                SetMode::DecSet => String::from("?1007;1$y"),
+                SetMode::DecRst => String::from("?1007;2$y"),
+                SetMode::DecQuery => String::from("?1007;0$y"),
             },
         )
     }

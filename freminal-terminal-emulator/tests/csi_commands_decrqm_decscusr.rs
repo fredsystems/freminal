@@ -84,7 +84,8 @@ fn decrqm_without_mode_number_produces_no_mode_query() {
 fn decscusr_valid_range_and_default_and_invalid() {
     // DECSCUSR is CSI Ps ' ' q (note the SPACE before 'q')
     // Typical values:
-    // 0 or 1: blinking block
+    // 0 (or omitted): the configured cursor style (Task 131 review)
+    // 1: blinking block
     // 2: steady block
     // 3: blinking underline
     // 4: steady underline
@@ -122,9 +123,10 @@ fn decscusr_valid_range_and_default_and_invalid() {
     // recognised-but-unhandled sequence and must produce no cursor-style output.
     let outs = push_seq("\x1b[q");
     assert!(
-        !outs
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::CursorVisualStyle(_))),
+        !outs.iter().any(|o| matches!(
+            o,
+            TerminalOutput::CursorVisualStyle(_) | TerminalOutput::CursorVisualStyleDefault
+        )),
         "bare CSI q must not produce a cursor style, got {outs:?}"
     );
     assert!(

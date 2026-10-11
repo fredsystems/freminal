@@ -706,7 +706,7 @@ mod tests {
         assert!(buf.compress_scrollback_block(0, visible_start));
         assert_eq!(buf.blocks.len(), 1);
 
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert!(
             buf.blocks.is_empty(),
             "alt screen must start with no blocks"
@@ -716,7 +716,7 @@ mod tests {
             0
         );
 
-        let _ = buf.leave_alternate();
+        buf.switch_to_primary();
 
         assert_eq!(
             buf.blocks.len(),
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn compress_idle_scrollback_alternate_screen_is_noop() {
         let mut buf = buffer_with_compact_scrollback(20);
-        buf.enter_alternate(0);
+        buf.enter_fresh_alternate();
         assert_eq!(buf.kind, BufferType::Alternate);
 
         let compressed = buf.compress_idle_scrollback(usize::MAX);
@@ -1205,8 +1205,8 @@ mod tests {
     fn counts_survive_an_alternate_screen_round_trip() {
         let mut buf = buffer_with_compact_scrollback(12);
         assert!(buf.compress_scrollback_block(0, 6));
-        buf.enter_alternate(0);
-        let _ = buf.leave_alternate();
+        buf.enter_fresh_alternate();
+        buf.switch_to_primary();
         assert_eq!(only_block_id_live_rows(&buf), 6);
         buf.debug_assert_invariants();
     }

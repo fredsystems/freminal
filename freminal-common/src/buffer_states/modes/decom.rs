@@ -22,14 +22,14 @@ impl ReportMode for Decom {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NormalCursor => String::from("\x1b[?6;2$y"),
-                Self::OriginMode => String::from("\x1b[?6;1$y"),
-                Self::Query => String::from("\x1b[?6;0$y"),
+                Self::NormalCursor => String::from("?6;2$y"),
+                Self::OriginMode => String::from("?6;1$y"),
+                Self::Query => String::from("?6;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?6;1$y"),
-                SetMode::DecRst => String::from("\x1b[?6;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?6;0$y"),
+                SetMode::DecSet => String::from("?6;1$y"),
+                SetMode::DecRst => String::from("?6;2$y"),
+                SetMode::DecQuery => String::from("?6;0$y"),
             },
         )
     }

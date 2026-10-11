@@ -19,6 +19,10 @@
 //! and every mutation is one of the explicit methods below, each of which
 //! advances the generation. Adding a mutator that forgets to do so is the one
 //! way to break the cache, which is why the surface is deliberately small.
+//! It would also break `Buffer::drop_alternate_marks`, which skips its scan
+//! for alternate-screen marks while the generation is unchanged since its
+//! [`CommandBlockLog::checkpoint`]: such a mutator could leave alternate marks
+//! behind on the primary screen (caught only by a debug assertion).
 
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -54,6 +58,9 @@ impl CommandBlocksGeneration {
 pub(in crate::buffer) struct CommandBlockLog {
     blocks: VecDeque<CommandBlock>,
     generation: CommandBlocksGeneration,
+    /// The generation at which the owner last vouched for some property of
+    /// the contents (see [`Self::checkpoint`]). `None` until it has.
+    checkpoint: Option<CommandBlocksGeneration>,
 }
 
 impl CommandBlockLog {
@@ -62,12 +69,32 @@ impl CommandBlockLog {
         Self {
             blocks: VecDeque::new(),
             generation: CommandBlocksGeneration::next(),
+            checkpoint: None,
         }
     }
 
     /// The generation of the current contents.
     pub(in crate::buffer) const fn generation(&self) -> CommandBlocksGeneration {
         self.generation
+    }
+
+    /// Record that the current contents are known to have some property the
+    /// caller cares about (for the buffer: no block holds an alternate-screen
+    /// row number). The log does not know what the property is.
+    ///
+    /// Any later mutation advances the generation, so
+    /// [`Self::changed_since_checkpoint`] reports it and the caller must
+    /// re-establish the property by inspection. This makes "has anything
+    /// changed since I last checked" an O(1) question, which the mutators'
+    /// generation stamp already answers.
+    pub(in crate::buffer) const fn checkpoint(&mut self) {
+        self.checkpoint = Some(self.generation);
+    }
+
+    /// Whether the contents differ from those at the last
+    /// [`Self::checkpoint`]. `true` if there has never been one.
+    pub(in crate::buffer) fn changed_since_checkpoint(&self) -> bool {
+        self.checkpoint != Some(self.generation)
     }
 
     fn touch(&mut self) {
@@ -201,6 +228,50 @@ mod tests {
         }
         assert_ne!(log.generation(), before);
         assert_eq!(log.front().unwrap().exit_code, Some(3));
+    }
+
+    #[test]
+    fn a_log_has_changed_since_checkpoint_until_one_is_taken() {
+        let mut log = CommandBlockLog::new();
+        assert!(log.changed_since_checkpoint(), "no checkpoint yet");
+        log.checkpoint();
+        assert!(!log.changed_since_checkpoint());
+    }
+
+    #[test]
+    fn every_mutation_invalidates_the_checkpoint() {
+        let mut log = CommandBlockLog::new();
+        log.push_back(block("a"));
+
+        log.checkpoint();
+        log.push_back(block("b"));
+        assert!(log.changed_since_checkpoint(), "push_back");
+
+        log.checkpoint();
+        assert!(log.pop_front().is_some());
+        assert!(log.changed_since_checkpoint(), "pop_front");
+
+        log.checkpoint();
+        log.retain_mut(|_| true);
+        assert!(log.changed_since_checkpoint(), "retain_mut");
+
+        log.checkpoint();
+        let _ = log.iter_mut().count();
+        assert!(log.changed_since_checkpoint(), "iter_mut");
+
+        log.checkpoint();
+        log.clear();
+        assert!(log.changed_since_checkpoint(), "clear of a non-empty log");
+    }
+
+    #[test]
+    fn reads_and_no_op_removals_keep_the_checkpoint() {
+        let mut log = CommandBlockLog::new();
+        log.checkpoint();
+        let _ = (log.len(), log.front(), log.iter().count());
+        assert!(log.pop_front().is_none());
+        log.clear();
+        assert!(!log.changed_since_checkpoint());
     }
 
     #[test]

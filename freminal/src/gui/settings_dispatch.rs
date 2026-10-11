@@ -160,6 +160,33 @@ impl FreminalGui {
             }
         }
 
+        // Broadcast host-dependent capability changes to all panes (Task
+        // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
+        let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg);
+        if new_host_capabilities != super::host_capabilities::host_capabilities(&self.config) {
+            for win in self.windows.values() {
+                for tab in &win.tabs {
+                    match tab.pane_tree.iter_panes() {
+                        Ok(panes) => {
+                            for pane in panes {
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::HostCapabilitiesChange(new_host_capabilities),
+                                    "Failed to send HostCapabilitiesChange to PTY thread"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "iter_panes() failed on tab during host capabilities \
+                                 apply: {e}; skipping this tab"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         self.config = new_cfg;
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed

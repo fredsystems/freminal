@@ -30,14 +30,14 @@ impl ReportMode for AllowAltScreen {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Allow => String::from("\x1b[?1046;1$y"),
-                Self::Disallow => String::from("\x1b[?1046;2$y"),
-                Self::Query => String::from("\x1b[?1046;0$y"),
+                Self::Allow => String::from("?1046;1$y"),
+                Self::Disallow => String::from("?1046;2$y"),
+                Self::Query => String::from("?1046;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?1046;1$y"),
-                SetMode::DecRst => String::from("\x1b[?1046;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?1046;0$y"),
+                SetMode::DecSet => String::from("?1046;1$y"),
+                SetMode::DecRst => String::from("?1046;2$y"),
+                SetMode::DecQuery => String::from("?1046;0$y"),
             },
         )
     }

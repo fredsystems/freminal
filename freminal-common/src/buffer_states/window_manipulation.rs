@@ -77,17 +77,17 @@ pub struct Notification99Data {
     pub expire_ms: Option<i64>,
 }
 
-/// The three OSC 99 app→terminal control payload types that are NOT display
-/// requests: they require a terminal response or state change rather than a
-/// notification banner (Task 99).
+/// The OSC 99 app→terminal control payload types the GUI acts on.
+///
+/// They require a terminal response or state change rather than a
+/// notification banner (Task 99). `p=?` is not among them: the PTY thread
+/// answers it itself (Task 130.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99ControlKind {
     /// `p=close`: the application asks to close the notification with this id.
     Close,
     /// `p=alive`: liveness poll; the terminal answers with the live-id list.
     Alive,
-    /// `p=?`: capability query; the terminal answers with its supported keys.
-    Query,
 }
 
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
@@ -196,12 +196,13 @@ pub enum WindowManipulation {
     /// that parser, not here.  Transported via the `WindowCommand` channel
     /// (not the snapshot) and rendered by Task 99.5.
     Notification99(Box<Notification99Data>),
-    /// OSC 99 app→terminal control sequence (`p=close`/`p=alive`/`p=?`, Task 99).
+    /// OSC 99 app→terminal control sequence (`p=close` / `p=alive`, Task 99).
     ///
-    /// Routed distinctly from display notifications: it drives a terminal
-    /// response (close reconciliation, alive-id list, or capability
-    /// handshake) rather than a banner. The reverse writes land in Tasks
-    /// 99.6/99.7.
+    /// Routed distinctly from display notifications: it drives close
+    /// reconciliation or the alive-id list reply rather than a banner. The
+    /// capability query `p=?` is never carried here: it is answered on the PTY
+    /// thread from the host capabilities (Task 130.5) and does not reach the
+    /// GUI, so it never becomes an `Osc99Control`.
     Osc99Control {
         /// Notification id (`i=`) the control refers to, if any.
         id: Option<String>,

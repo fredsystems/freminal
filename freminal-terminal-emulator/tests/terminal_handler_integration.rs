@@ -6,11 +6,22 @@
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
+use freminal_common::buffer_states::modes::xtextscrn::XtExtscrn;
 use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::ansi_components::csi_commands::ed::EraseDisplayMode;
 use freminal_terminal_emulator::ansi_components::csi_commands::el::EraseLineMode;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
+
+/// Set `?1049` (save cursor, switch to the alternate screen, clear it).
+fn enter_alternate_1049(handler: &mut TerminalHandler) {
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+}
+
+/// Reset `?1049` (switch to the primary screen, restore the cursor).
+fn leave_alternate_1049(handler: &mut TerminalHandler) {
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
+}
 
 /// Helper to convert a string slice to TChar representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
@@ -174,13 +185,13 @@ fn test_alternate_buffer_switching() {
     let primary_cursor_x = handler.buffer().cursor().pos.x;
 
     // Enter alternate buffer
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Write different content
     handler.handle_data(&text_to_bytes("Alternate content"));
 
     // Leave alternate buffer
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Should restore primary buffer state
     assert_eq!(handler.buffer().cursor().pos.x, primary_cursor_x);
@@ -397,13 +408,13 @@ fn test_mixed_operations_workflow() {
     handler.handle_data(&text_to_bytes("vim"));
 
     // Simulate entering vim (alternate screen)
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     handler.handle_erase_in_display(EraseDisplayMode::All);
     handler.handle_cursor_pos(Some(1), Some(1));
     handler.handle_data(&text_to_bytes("~ VIM - Vi IMproved"));
 
     // Exit vim
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Back to shell - cursor position is restored from primary buffer
     // The cursor should be where we left it before entering alternate
@@ -579,7 +590,7 @@ fn test_process_outputs_delete_lines() {
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     let mut handler = TerminalHandler::new(10, 5);
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Fill 5 visible rows
     let outputs = vec![
@@ -634,7 +645,7 @@ fn ind_scrolls_at_bottom_margin() {
     let mut handler = TerminalHandler::new(10, 5);
 
     // Enter alternate screen so IND scrolls rather than growing scrollback.
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Fill all 5 rows with content.
     for _ in 0..5 {
@@ -667,7 +678,7 @@ fn ind_scrolls_at_bottom_margin() {
     );
 
     // Leave alternate buffer to restore state.
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 }
 
 #[test]
@@ -884,9 +895,10 @@ fn save_restore_position() {
 }
 
 #[test]
-fn restore_without_save_is_noop() {
-    // RestoreCursor without a prior SaveCursor must not panic and must leave
-    // the cursor at its current position.
+fn restore_without_save_homes_the_cursor() {
+    // RestoreCursor without a prior SaveCursor must not panic; it behaves as
+    // if a default cursor at home had been saved (131.C2, xterm
+    // `CursorRestoreFlags` with nothing saved).
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     let mut handler = TerminalHandler::new(20, 10);
@@ -896,22 +908,14 @@ fn restore_without_save_is_noop() {
         x: Some(4),
         y: Some(3),
     }]);
-    let x_before = handler.buffer().cursor().pos.x;
-    let y_before = handler.buffer().cursor().pos.y;
+    assert_ne!(handler.buffer().cursor_screen_pos().x, 0);
 
-    // Restore without a prior save — must be a no-op.
+    // Restore without a prior save: home.
     handler.process_outputs(&[TerminalOutput::RestoreCursor]);
 
-    assert_eq!(
-        handler.buffer().cursor().pos.x,
-        x_before,
-        "x must not change on restore without save"
-    );
-    assert_eq!(
-        handler.buffer().cursor().pos.y,
-        y_before,
-        "y must not change on restore without save"
-    );
+    let pos = handler.buffer().cursor_screen_pos();
+    assert_eq!(pos.x, 0, "x must be home on restore without save");
+    assert_eq!(pos.y, 0, "y must be home on restore without save");
 }
 
 #[test]
@@ -1578,8 +1582,8 @@ fn cursor_visual_style_set() {
 }
 
 #[test]
-fn set_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
-    // Regression test for issue #406: `set_cursor_visual_style` is the seam
+fn set_configured_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
+    // Regression test for issue #406: `set_configured_cursor_visual_style` is the seam
     // used to apply `config.cursor` at pane-spawn time and on a live
     // Settings change. It must take effect immediately (like `set_theme`),
     // and a subsequent DECSCUSR output from the running program must still
@@ -1597,11 +1601,11 @@ fn set_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
         "sanity: bare TerminalHandler::new starts at the type default"
     );
 
-    handler.set_cursor_visual_style(CursorVisualStyle::VerticalLineCursorBlink);
+    handler.set_configured_cursor_visual_style(CursorVisualStyle::VerticalLineCursorBlink);
     assert_eq!(
         handler.cursor_visual_style(),
         CursorVisualStyle::VerticalLineCursorBlink,
-        "set_cursor_visual_style must take effect immediately"
+        "set_configured_cursor_visual_style must take effect immediately"
     );
 
     // A running program's own DECSCUSR request still wins afterward.
@@ -2669,7 +2673,7 @@ fn test_ris_via_process_outputs_does_not_panic() {
     // Set up various state.
     fill_lines(&mut handler, 24);
     handler.handle_set_scroll_region(5, 20);
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     handler.handle_data(&text_to_bytes("Alternate content"));
 
     // Full reset — should return to primary, clean state.
@@ -2720,13 +2724,16 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
 
     let mut handler = TerminalHandler::new(40, 10);
 
-    // Move SGR, DECOM, DECTCEM and the scroll region away from their
-    // defaults. DECAWM is deliberately left at `AutoWrap`, the enum's
-    // `Default`: DECSTR resets it to `NoAutoWrap`, so the assertion below
-    // can only pass if DECSTR actually changed it, not if it was left alone
-    // or reset to `Default`.
+    // Move SGR, DECOM, DECAWM, DECTCEM and the scroll region away from their
+    // defaults. DECSTR resets DECAWM to `AutoWrap` (xterm, Ghostty, WezTerm
+    // and kitty, against the literal VT510 Table 5-9), so DECAWM starts at
+    // `NoAutoWrap`: the assertion below can only pass if DECSTR actually
+    // changed it, not if it was left alone.
     handler.process_outputs(&[
         TerminalOutput::Sgr(freminal_common::sgr::SelectGraphicRendition::Bold),
+        TerminalOutput::Mode(Mode::Decawm(
+            freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap,
+        )),
         TerminalOutput::Mode(Mode::Decom(Decom::OriginMode)),
         TerminalOutput::Mode(Mode::Dectem(Dectcem::Hide)),
     ]);
@@ -2736,6 +2743,10 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
     assert_eq!(handler.buffer().is_decom_enabled(), Decom::OriginMode);
     assert!(!handler.show_cursor());
     assert_eq!(handler.buffer().scroll_region(), (2, 7));
+    assert_eq!(
+        handler.buffer().is_wrap_enabled(),
+        freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap
+    );
 
     // DECSTR.
     handler.process_outputs(&[TerminalOutput::SoftReset]);
@@ -2752,8 +2763,8 @@ fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
     );
     assert_eq!(
         handler.buffer().is_wrap_enabled(),
-        freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap,
-        "DECSTR must reset DECAWM to No Autowrap (not the enum default AutoWrap)"
+        freminal_common::buffer_states::modes::decawm::Decawm::AutoWrap,
+        "DECSTR must reset DECAWM to autowrap on (xterm resource default)"
     );
     assert!(
         handler.show_cursor(),
@@ -2880,7 +2891,7 @@ fn test_decstr_preserves_queued_window_title_command() {
 fn test_decstr_does_not_exit_alternate_screen() {
     let mut handler = TerminalHandler::new(40, 10);
 
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
     assert!(handler.is_alternate_screen());
 
     handler.process_outputs(&[TerminalOutput::SoftReset]);
@@ -3538,7 +3549,7 @@ fn test_tab_stops_shared_across_alternate_screen() {
     handler.process_outputs(&[TerminalOutput::HorizontalTabSet]);
 
     // Enter alternate screen
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Verify the custom stop is visible in alternate screen
     handler.handle_cursor_pos(Some(1), Some(1)); // col 0
@@ -3551,13 +3562,13 @@ fn test_tab_stop_changes_in_alternate_persist_to_primary() {
     let mut handler = TerminalHandler::new(80, 24);
 
     // Enter alternate screen
-    handler.handle_enter_alternate();
+    enter_alternate_1049(&mut handler);
 
     // Clear all tab stops while in alternate
     handler.process_outputs(&[TerminalOutput::TabClear(TabClearMode::AllCharacter)]);
 
     // Leave alternate — return to primary
-    handler.handle_leave_alternate();
+    leave_alternate_1049(&mut handler);
 
     // Tab stops should be cleared in primary too (shared, not per-buffer)
     handler.handle_cursor_pos(Some(1), Some(1));
@@ -3738,9 +3749,10 @@ fn test_screen_alignment_resets_scroll_region() {
 // ── 7.29 — Legacy alternate screen ?47/?1047 and ?1048 ──────────────
 
 #[test]
-fn alt_screen_47_enter_clears_and_leave_restores() {
-    // ?47 should behave like ?1049 for buffer switching: enter alternate
-    // clears the screen, leave restores primary content.
+fn alt_screen_47_first_entry_is_blank_and_leave_shows_primary() {
+    // ?47 only switches screens (Task 131.6): a first-ever alternate screen
+    // is blank (it is not cleared on entry; a later entry would show the
+    // persisted content), and leaving shows the primary content again.
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
         modes::xtextscrn::AltScreen47,
@@ -3786,20 +3798,22 @@ fn alt_screen_47_enter_clears_and_leave_restores() {
 }
 
 #[test]
-fn alt_screen_1047_enter_clears_and_leave_restores() {
-    // ?1047 is an alias for ?47 — same behavior.
+fn alt_screen_1047_enters_blank_and_leave_restores() {
+    // ?1047 enter only switches (the never-used alternate is blank because it
+    // is new, not because enter clears it); leave clears the alternate and
+    // restores the primary.
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
-        modes::xtextscrn::AltScreen47,
+        modes::xtextscrn::AltScreen1047,
     };
 
     let mut handler = TerminalHandler::new(20, 5);
     handler.handle_data(b"hello");
 
-    // Enter alternate — via terminal_mode_from_params, ?1047 maps to AltScreen47.
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
-        &SetMode::DecSet,
-    )))]);
+    // Enter alternate via ?1047.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen1047(
+        AltScreen1047::new(&SetMode::DecSet),
+    ))]);
 
     let alt_rows = handler.buffer().visible_rows(0);
     let alt_text = row_text(&alt_rows[0]);
@@ -3808,9 +3822,9 @@ fn alt_screen_1047_enter_clears_and_leave_restores() {
         "alternate screen via ?1047 should be blank"
     );
 
-    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen47(AltScreen47::new(
-        &SetMode::DecRst,
-    )))]);
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::AltScreen1047(
+        AltScreen1047::new(&SetMode::DecRst),
+    ))]);
 
     let restored = handler.buffer().visible_rows(0);
     let text = row_text(&restored[0]);
@@ -3860,26 +3874,29 @@ fn save_cursor_1048_saves_and_restores() {
 }
 
 #[test]
-fn mode_from_params_maps_47_and_1047_to_alt_screen_47() {
+fn mode_from_params_maps_47_and_1047_to_distinct_alt_screen_modes() {
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
-        modes::xtextscrn::AltScreen47,
+        modes::xtextscrn::{AltScreen47, AltScreen1047},
     };
 
     let mode_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecSet);
     assert_eq!(mode_47, Mode::AltScreen47(AltScreen47::Alternate));
 
     let mode_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecSet);
-    assert_eq!(mode_1047, Mode::AltScreen47(AltScreen47::Alternate));
+    assert_eq!(mode_1047, Mode::AltScreen1047(AltScreen1047::Alternate));
 
     let rst_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecRst);
     assert_eq!(rst_47, Mode::AltScreen47(AltScreen47::Primary));
 
     let rst_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecRst);
-    assert_eq!(rst_1047, Mode::AltScreen47(AltScreen47::Primary));
+    assert_eq!(rst_1047, Mode::AltScreen1047(AltScreen1047::Primary));
 
     let query_47 = Mode::terminal_mode_from_params(b"?47", SetMode::DecQuery);
     assert_eq!(query_47, Mode::AltScreen47(AltScreen47::Query));
+
+    let query_1047 = Mode::terminal_mode_from_params(b"?1047", SetMode::DecQuery);
+    assert_eq!(query_1047, Mode::AltScreen1047(AltScreen1047::Query));
 }
 
 #[test]
@@ -4072,7 +4089,7 @@ fn decrpm_lnm_default_is_line_feed() {
         TerminalOutput::Mode(Mode::LineFeedMode(Lnm::new(&SetMode::DecQuery))),
     );
     // Default LNM is LineFeed (disabled) → Ps=2 (reset)
-    assert_eq!(resp, "\x1b[?20;2$y", "LNM default (LineFeed mode) → Ps=2");
+    assert_eq!(resp, "\x1b[20;2$y", "LNM default (LineFeed mode) → Ps=2");
 }
 
 // ── DECOM (Origin Mode ?6) ────────────────────────────────────────────────────
@@ -4744,7 +4761,7 @@ fn alt_buffer_resize_shrink_maintains_row_count_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     assert_eq!(buf.rows().len(), 24, "pre-condition");
 
@@ -4764,7 +4781,7 @@ fn alt_buffer_resize_grow_maintains_row_count_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     assert_eq!(buf.rows().len(), 24, "pre-condition");
 
@@ -4787,7 +4804,7 @@ fn alt_buffer_lf_scrolls_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Set scroll region to full screen (1-based inclusive: 1..24)
     buf.set_scroll_region(1, 24);
@@ -4838,7 +4855,7 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4885,7 +4902,7 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4931,7 +4948,7 @@ fn alt_buffer_ri_scrolls_after_resize_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill screen
     for row in 0..24 {
@@ -4975,7 +4992,7 @@ fn alt_buffer_resize_multiple_cycles_maintain_invariant() {
     use freminal_buffer::buffer::Buffer;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Shrink → grow → shrink → grow
     for &new_height in &[20_usize, 30, 15, 24] {
@@ -4997,7 +5014,7 @@ fn alt_buffer_tmux_resize_scenario() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // tmux sets DECSTBM to (1, height-1) for the top pane, leaving the
     // bottom row for the status bar.  set_scroll_region takes 1-based
@@ -5074,7 +5091,7 @@ fn alt_buffer_width_shrink_maintains_row_count_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill every row to full width so reflow would have split them.
     for row in 0..24 {
@@ -5101,7 +5118,7 @@ fn alt_buffer_width_grow_maintains_row_count_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows with content
     for row in 0..24 {
@@ -5130,7 +5147,7 @@ fn alt_buffer_width_and_height_shrink_maintains_invariant() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows with full-width content
     for row in 0..24 {
@@ -5158,7 +5175,7 @@ fn alt_buffer_lf_works_after_width_shrink() {
     use freminal_common::buffer_states::tchar::TChar;
 
     let mut buf = Buffer::new(80, 24);
-    buf.enter_alternate(0);
+    buf.switch_to_alternate();
 
     // Fill rows
     for row in 0..24 {
@@ -6078,7 +6095,7 @@ fn decrpm_xt_rev_wrap2_after_set_then_reset() {
 // ── Reverse Wrap (?45) — DECRPM via handler ───────────────────────────
 
 #[test]
-fn decrpm_reverse_wrap_default_is_enabled() {
+fn decrpm_reverse_wrap_default_is_disabled() {
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
         modes::reverse_wrap_around::ReverseWrapAround,
@@ -6092,8 +6109,8 @@ fn decrpm_reverse_wrap_default_is_enabled() {
         ))),
     );
     assert_eq!(
-        resp, "\x1b[?45;1$y",
-        "Reverse wrap default (WrapAround/enabled) → Ps=1"
+        resp, "\x1b[?45;2$y",
+        "Reverse wrap default (DontWrap/disabled) → Ps=2"
     );
 }
 

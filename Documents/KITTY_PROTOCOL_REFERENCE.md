@@ -1,5 +1,15 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
+Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
+(131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
+see "freminal current-state deltas: keyboard" and "freminal current-state:
+graphics". No other section changed.
+
+Last updated: 2026-10-10 — Task 130 — the OSC 99 `p=?` capability query is
+now answered on the PTY thread in stream order, gated on configuration and
+platform (see "Capability handshake" under the current-state deltas); the
+rest of this file is unchanged.
+
 Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stubs
 renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
@@ -157,8 +167,10 @@ Unknown `p=` values must be ignored (forward compat).
 
 ### Reports written back to the application (reverse PTY path)
 
-All reports go back through the reverse-write path (`Pane::pty_write_tx` /
-`write_to_pty`), the same channel DSR/DA/OSC 52 responses use.
+The GUI sends each report to the originating pane's PTY thread as a structured
+`GuiReply` (`InputEvent::Reply`), and the handler frames it like every other
+reply, honouring S8C1T (Task 130). The `p=?` handshake never reaches the GUI:
+the PTY thread answers it itself.
 
 Activation (only when `a=report` was set):
 
@@ -255,21 +267,41 @@ OSC 99 routing landed across Tasks 99.1–99.8:
 - Chunk reassembly: `reassemble_osc99` accumulates multi-escape payloads
   (`pending_notifications` on `TerminalHandler`, cleared in `full_reset()`)
   before a fully-formed `Notification99Data` reaches the GUI.
-- App→terminal control payloads (close/alive/`p=?` query) are split into
+- App→terminal control payloads (`p=close` / `p=alive`) are split into
   `Osc99Control` / `Osc99ControlKind` rather than folded into the display
-  path.
+  path. The `p=?` query is no longer forwarded to the GUI: the handler
+  answers it itself (Task 130.5, below).
 - Display: `NotificationRouter::route_osc99` (`freminal/src/gui/notifications.rs`)
   pushes the toast leg and/or a `notify-rust` desktop notification, honouring
   the `o=` occasion gate, urgency, sound, auto-expiry, buttons, and the `g=`
   icon-by-data cache (`icon_cache: HashMap<String, Vec<u8>>`).
-- Reverse reports: activation, close, and alive reports are written back via
-  the originating pane's `pty_write_tx` (Linux/BSD observes real
+- Reverse reports: activation, close, and alive reports are sent as `GuiReply`
+  values through a `Weak` handle to the originating pane's input channel, so a
+  displayed notification never keeps a closed pane alive (Task 130.8), and the
+  PTY thread frames them (Linux/BSD observes real
   activation/close through `wait_for_action`; macOS/Windows emit the
   `untracked` close form immediately, since no observable handle is available
   from a background thread there).
-- Capability handshake: `p=?` is answered with `osc99_query_response`,
-  truthfully advertising only what's implemented (see `OSC99_CAPABILITIES` in
-  `notifications.rs`).
+- Capability handshake (Task 130.5, replacing the Task 99 GUI-side reply):
+  `p=?` is answered on the PTY thread by `TerminalHandler`, in byte-stream
+  order, so the reply precedes the answer to a DA1 sent after it in the same
+  write (the detection handshake above works). The reply is framed by the
+  handler and honours S8C1T, and is never tmux-wrapped. What it advertises
+  comes from `HostCapabilities` (`freminal-common`), which the GUI computes
+  from the config and platform, seeds at pane spawn and re-sends on config
+  change:
+  - **Unsupported** — `[notifications] enabled` is false, `osc_99` is false,
+    or `routing_osc99` is `disabled`. `p=?` is not answered at all, so the
+    application sees a terminal that does not speak OSC 99. Every other OSC 99
+    request is ignored too, before reassembly, and an in-flight transfer is
+    discarded when support is turned off.
+  - **Supported** — `a=report` is advertised only on Linux/BSD with a
+    system-capable routing (`system`, `both`, `system_when_unfocused`);
+    `c=1` only with a system-capable routing (a toast-only routing has no
+    desktop notification whose close could be reported). The remaining keys
+    (`o`, `p`, `s`, `u`, `w`) are fixed. With no supported action the `a`
+    key is omitted, per the spec.
+  - Conformance of the advertised set against the spec is still Task 138.
 - Config: `[notifications] osc_99` (added in 110.0, wired through
   `ConfigPartial`/`apply_partial`) is enforced at the `route_osc99` drain site
   (Task 99.8) as a kill-switch alongside the master `enabled` gate.
@@ -629,6 +661,18 @@ implementation choice.
   transmit-only `a=t` images and lowercase-deleted images referenced again by
   id — PR #382 review fix.)
 
+- **Placements are per screen (Task 131.7).** `virtual_placements`,
+  `real_placements` and the scrollback-prune base are kept per screen, as kitty's
+  per-screen graphics manager does. `a=d` with `d=a`/`d=A` and the pruners act on
+  the active screen only; a screen switch touches neither map, and a clear of the
+  alternate screen (`?1049h`, or `?1047l` on the alternate) empties the alternate
+  map. RIS clears both screens' maps. Placing an image at the alternate screen's
+  bottom row scrolls the screen as a line feed would, instead of growing the
+  store (Task 131.C5). Because the alternate screen persists while parked, a
+  parked alternate keeps its image store and placements until it is cleared
+  (`?1049h`, `?1047l`) or RIS, as kitty's alternate graphics manager does across
+  toggles. A real screen switch also ends the placeholder continuity run.
+
 **Closed after Task 100:**
 
 - **`t=f`/`t=t` file-path security** — Task 100 left `read_kitty_file`
@@ -818,8 +862,16 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
 - **✅ Done (101.3):** F3 is normalized to `13 ~` under KKP (was `ESC O R` SS3,
   which collides with CPR). The legacy (non-KKP) path keeps `ESC O R` for xterm
   terminfo compatibility.
-- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`,
-  separate main/alt-screen stacks (all tested). All 5 flag bits defined.
+- **✅ Done (Task 131.3, fixes B15): one stack per screen.** The primary and
+  alternate screens each keep their own mode stack (`ScreenScoped<KittyKeyboardStack>`),
+  and the active screen's stack is the one `CSI > u`, `CSI < u`, `CSI = u` and
+  `CSI ? u` act on. The alternate stack persists between alternate-screen
+  sessions, as kitty's `alt_key_encoding_flags` does, instead of being replaced by
+  a fresh one on entry. Before, a second `?1049h` moved the alternate stack over
+  the parked main stack and the main stack was lost. RIS **and DECSTR** clear both
+  stacks, as kitty's `do_screen_reset` does (DECSTR previously left them).
+- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`
+  (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).
 - DA1 does not advertise kitty keyboard (correct — detection is via `CSI ? u`).
 

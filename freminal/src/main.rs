@@ -20,7 +20,7 @@
 //! GUI Thread (update() — pure render, no mutation)
 //!   ├─ Loads TerminalSnapshot from ArcSwap (atomic, lock-free)
 //!   ├─ Sends InputEvent through crossbeam channel
-//!   ├─ Sends PtyWrite directly for Report* responses
+//!   ├─ Sends InputEvent::Reply (GuiReply) for Report* responses
 //!   └─ Owns ViewState (scroll offset, mouse, focus — never shared)
 //! ```
 

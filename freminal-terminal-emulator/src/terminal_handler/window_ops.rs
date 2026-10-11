@@ -21,10 +21,10 @@ impl TerminalHandler {
     /// Handle a `WindowManipulation` command.
     ///
     /// Report variants that can be answered from terminal state are handled
-    /// synchronously here via `write_to_pty` so the response reaches the PTY
-    /// in the same processing batch as DA1 and other inline responses.  This
-    /// is critical for applications (e.g. yazi) that use DA1 as a "fence" to
-    /// detect when all prior query responses have arrived.
+    /// synchronously here via `write_csi_response` so the response reaches
+    /// the PTY in the same processing batch as DA1 and other inline
+    /// responses.  This is critical for applications (e.g. yazi) that use DA1
+    /// as a "fence" to detect when all prior query responses have arrived.
     ///
     /// Variants that require GUI-side data (viewport position, window title,
     /// clipboard, etc.) are deferred to `self.window_commands` for the GUI

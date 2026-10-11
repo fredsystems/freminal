@@ -46,6 +46,7 @@ mod command_history;
 mod frame_damage;
 mod frame_drain;
 mod geometry_interop;
+mod host_capabilities;
 mod hot_reload;
 mod hover_cursor;
 pub(crate) mod icons;

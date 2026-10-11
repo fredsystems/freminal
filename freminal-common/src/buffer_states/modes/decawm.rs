@@ -46,14 +46,14 @@ impl ReportMode for Decawm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NoAutoWrap => String::from("\x1b[?7;2$y"),
-                Self::AutoWrap => String::from("\x1b[?7;1$y"),
-                Self::Query => String::from("\x1b[?7;0$y"),
+                Self::NoAutoWrap => String::from("?7;2$y"),
+                Self::AutoWrap => String::from("?7;1$y"),
+                Self::Query => String::from("?7;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?7;1$y"),
-                SetMode::DecRst => String::from("\x1b[?7;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?7;0$y"),
+                SetMode::DecSet => String::from("?7;1$y"),
+                SetMode::DecRst => String::from("?7;2$y"),
+                SetMode::DecQuery => String::from("?7;0$y"),
             },
         )
     }
@@ -89,41 +89,32 @@ mod tests {
 
     #[test]
     fn report_auto_wrap_no_override() {
-        assert_eq!(Decawm::AutoWrap.report(None), "\x1b[?7;1$y");
+        assert_eq!(Decawm::AutoWrap.report(None), "?7;1$y");
     }
 
     #[test]
     fn report_no_auto_wrap_no_override() {
-        assert_eq!(Decawm::NoAutoWrap.report(None), "\x1b[?7;2$y");
+        assert_eq!(Decawm::NoAutoWrap.report(None), "?7;2$y");
     }
 
     #[test]
     fn report_query_no_override() {
-        assert_eq!(Decawm::Query.report(None), "\x1b[?7;0$y");
+        assert_eq!(Decawm::Query.report(None), "?7;0$y");
     }
 
     #[test]
     fn report_with_dec_set_override() {
-        assert_eq!(
-            Decawm::NoAutoWrap.report(Some(SetMode::DecSet)),
-            "\x1b[?7;1$y"
-        );
+        assert_eq!(Decawm::NoAutoWrap.report(Some(SetMode::DecSet)), "?7;1$y");
     }
 
     #[test]
     fn report_with_dec_rst_override() {
-        assert_eq!(
-            Decawm::AutoWrap.report(Some(SetMode::DecRst)),
-            "\x1b[?7;2$y"
-        );
+        assert_eq!(Decawm::AutoWrap.report(Some(SetMode::DecRst)), "?7;2$y");
     }
 
     #[test]
     fn report_with_dec_query_override() {
-        assert_eq!(
-            Decawm::AutoWrap.report(Some(SetMode::DecQuery)),
-            "\x1b[?7;0$y"
-        );
+        assert_eq!(Decawm::AutoWrap.report(Some(SetMode::DecQuery)), "?7;0$y");
     }
 
     // ── Display ──────────────────────────────────────────────────────

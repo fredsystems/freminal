@@ -35,7 +35,7 @@ use freminal_common::buffer_states::modes::{
     unknown::{ModeNamespace, UnknownMode},
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
-    xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+    xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
 };
 
@@ -276,10 +276,10 @@ fn decset_q47_returns_altscreen47_alternate() {
 }
 
 #[test]
-fn decset_q1047_returns_altscreen47_alternate() {
+fn decset_q1047_returns_altscreen1047_alternate() {
     assert_eq!(
         dispatch(b"?1047", SetMode::DecSet),
-        Mode::AltScreen47(AltScreen47::Alternate)
+        Mode::AltScreen1047(AltScreen1047::Alternate)
     );
 }
 
@@ -539,34 +539,34 @@ fn unknown_q999_with_decrst_returns_unknown_stripped() {
 }
 
 // ---------------------------------------------------------------------------
-// Group 5: Both ?47 and ?1047 map to AltScreen47
+// Group 5: ?47 and ?1047 are distinct modes (AltScreen47 / AltScreen1047)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn both_q47_and_q1047_map_to_altscreen47_decset() {
+fn q47_and_q1047_are_distinct_modes_decset() {
     let via_47 = dispatch(b"?47", SetMode::DecSet);
     let via_1047 = dispatch(b"?1047", SetMode::DecSet);
     assert_eq!(via_47, Mode::AltScreen47(AltScreen47::Alternate));
-    assert_eq!(via_1047, Mode::AltScreen47(AltScreen47::Alternate));
-    assert_eq!(via_47, via_1047);
+    assert_eq!(via_1047, Mode::AltScreen1047(AltScreen1047::Alternate));
+    assert_ne!(via_47, via_1047);
 }
 
 #[test]
-fn both_q47_and_q1047_map_to_altscreen47_decrst() {
+fn q47_and_q1047_are_distinct_modes_decrst() {
     let via_47 = dispatch(b"?47", SetMode::DecRst);
     let via_1047 = dispatch(b"?1047", SetMode::DecRst);
     assert_eq!(via_47, Mode::AltScreen47(AltScreen47::Primary));
-    assert_eq!(via_1047, Mode::AltScreen47(AltScreen47::Primary));
-    assert_eq!(via_47, via_1047);
+    assert_eq!(via_1047, Mode::AltScreen1047(AltScreen1047::Primary));
+    assert_ne!(via_47, via_1047);
 }
 
 #[test]
-fn both_q47_and_q1047_map_to_altscreen47_decquery() {
+fn q47_and_q1047_are_distinct_modes_decquery() {
     let via_47 = dispatch(b"?47", SetMode::DecQuery);
     let via_1047 = dispatch(b"?1047", SetMode::DecQuery);
     assert_eq!(via_47, Mode::AltScreen47(AltScreen47::Query));
-    assert_eq!(via_1047, Mode::AltScreen47(AltScreen47::Query));
-    assert_eq!(via_47, via_1047);
+    assert_eq!(via_1047, Mode::AltScreen1047(AltScreen1047::Query));
+    assert_ne!(via_47, via_1047);
 }
 
 #[test]

@@ -50,9 +50,14 @@ pub mod xtextscrn;
 pub mod xtmsewin;
 
 /// Implemented by all DEC private mode enums to produce a `DECRPM` response
-/// string for `CSI ? Ps $ p` queries.
+/// body for `CSI ? Ps $ p` queries.
 pub trait ReportMode {
-    /// Format a `CSI ? Ps ; Pm $ y` response for this mode.
+    /// Format the body of a `CSI ? Ps ; Pm $ y` response for this mode.
+    ///
+    /// The returned string is the body only -- it does **not** include the
+    /// `CSI` introducer (`ESC [` or `0x9B`). For example `?2004;1$y` or
+    /// `4;2$y`. The caller frames it with the correct C1 encoding for the
+    /// current S8C1T mode (`TerminalHandler::write_csi_response`).
     ///
     /// `override_mode` allows the caller to substitute a specific `SetMode`
     /// value instead of the current mode state (used by the emulator when

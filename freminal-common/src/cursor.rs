@@ -11,16 +11,21 @@ use crate::config::CursorShapeConfig;
 ///
 /// | Variant                  | Ps |
 /// | ------------------------ | -- |
-/// | `BlockCursorBlink`       | 0 or 1 |
+/// | `BlockCursorBlink`       | 1 |
 /// | `BlockCursorSteady`      | 2 |
 /// | `UnderlineCursorBlink`   | 3 |
 /// | `UnderlineCursorSteady`  | 4 |
 /// | `VerticalLineCursorBlink`| 5 |
 /// | `VerticalLineCursorSteady`| 6 |
+///
+/// `Ps = 0` is *not* a shape: it means "the configured style" and is carried
+/// by `TerminalOutput::CursorVisualStyleDefault`. The `From<usize>` conversion
+/// maps any value without a shape of its own (including 0) to
+/// `BlockCursorBlink`, so callers must handle 0 before converting.
 #[allow(clippy::module_name_repetitions)]
 #[derive(Default, Debug, Eq, PartialEq, Clone)]
 pub enum CursorVisualStyle {
-    /// Blinking block cursor (DECSCUSR 0 or 1).
+    /// Blinking block cursor (DECSCUSR 1).
     BlockCursorBlink,
     /// Steady block cursor — the default (DECSCUSR 2).
     #[default]

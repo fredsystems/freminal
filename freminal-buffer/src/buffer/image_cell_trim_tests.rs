@@ -27,7 +27,7 @@ use crate::{
 
 fn alt_buf(width: usize, height: usize) -> Buffer {
     let mut buf = Buffer::new(width, height);
-    buf.enter_alternate(0);
+    buf.enter_fresh_alternate();
     buf
 }
 

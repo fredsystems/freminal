@@ -22,14 +22,15 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138, 139, 140       |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138, 139, 140, 147  |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
 | v0.13.4   | Drag & Drop                                | 105                          |
 
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
-subtask breakdown: **126**, **127**, **128** and (activated 2026-10-09) **129**. Everything else is an **enriched stub**:
+subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
+(activated 2026-10-10), and **147** (created 2026-10-11). Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
 example, OSC 66 is not a Contour code, and the 102 wire keys were wrong), so they are now
@@ -44,13 +45,14 @@ enriched stubs again and get re-decomposed at activation.
 | 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
 | 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
 | 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Pending merge | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | M     | Planned       | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | M     | Planned       | None                               |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Pending merge | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Pending merge | 130.1–130.3 (foundation)           |
 | 132 | Colour Foundation                           | v0.13.0   | L     | Planned       | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Planned       | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -139,7 +141,7 @@ claims to verify, not as evidence.
 | Underlines            | Complete                                            | Mostly compliant. SGR 21 means bold-off where kitty means double underline; `4:N>5` clears instead of clamping; underline geometry untested and unclamped; default colour wrong under SGR 7 + DECSCNM                                                | 140           |
 | Graphics              | "Fully implemented", "graphics surface is complete" | ~30 deviations, 5 high. Replies to id-less commands; `t=t` deletes arbitrary files; text and erase destroy image tiles; placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                          | 126, 135, 136 |
 | Keyboard              | "Substantially compliant, remainder tracked"        | Encoder machinery sound, but the GUI layer feeding it is not. Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable | 137           |
-| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; `p=?` answered after DA1                                                 | 138           |
+| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; ~~`p=?` answered after DA1~~ (fixed by 130)                              | 138           |
 | Pointer shapes        | Undocumented                                        | Plain set works. Push, pop and query (and `=`) all reset the shape to default instead; a query gets no reply; no stack                                                                                                                               | 139           |
 | Clipboard (OSC 5522)  | Not mentioned                                       | Entirely missing; payloads would be warn-logged by the unknown-OSC path                                                                                                                                                                              | 146           |
 | Color control         | Not mentioned                                       | OSC 21 and colour stack missing. OSC 10/11 "set" never reaches rendering. `CSI # P` deletes characters. `parse_color_spec` panics on non-ASCII input                                                                                                 | 126, 132, 144 |
@@ -197,7 +199,7 @@ foundation tasks result. Each one has at least three consumers.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | **128** CSI dispatch                      | Route on (private prefix, intermediate, final). Fixes 6+ live misroutes                                                                                                                              | 103, 137, 141, 142, 143, 144                |
 | **129** Wire infrastructure               | One bounded `key=value` metadata tokenizer; strict, streaming and unpadded base64; a bounded chunk accumulator; parser size caps; raw-params OSC dispatch; payload-safe logging; APC response helper | 102, 104, 105, 135, 138, 139, 144, 145, 146 |
-| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T, tmux wrap); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality                       | 102, 135, 138, 139, 144, 146, 105           |
+| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T; never tmux-wrapped); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality              | 102, 135, 138, 139, 144, 146, 105           |
 | **131** Screen-scoped state & resets      | One registry for per-screen state (alt-screen enter/leave idempotent) and an explicit reset table (RIS vs DECSTR) per protocol                                                                       | 103, 135, 136, 137, 139, 141                |
 | **132** Colour foundation                 | Spec-complete colour-spec parser; a reusable SGR-style colour extractor; dynamic colours that actually render                                                                                        | 103, 140, 144, 136 (placeholder ids)        |
 | **133** Shared consent prompt             | One consent overlay component, registered once with modal-input suppression and dismissible-presence                                                                                                 | 102, 146, 105                               |
@@ -221,9 +223,10 @@ Two seams were considered and **not** made separate tasks:
   127 lives entirely in the GUI crate (renderer, widget, config). 128 lives entirely in the
   parser (`ansi_components/`) and `terminal_handler/dcs.rs`. They are file-disjoint and
   behaviour-disjoint.
-- **Then 129, 130, 131 and 132.** 130 depends on 129. 131 and 132 are independent of both and
-  of each other.
-- **Then 138, 139 and 140**, which close out v0.13.0.
+- **Then 129, 130, 131 and 132.** 130 depends on 129. 130 and 131 run as parallel worktrees
+  after a shared foundation (130.1–130.3); see "130 Execution model". 132 is independent.
+- **Then 138, 139, 140 and 147**, which close out v0.13.0. Task 147 fixes everything Tasks
+  126–131 left unscheduled; see "147 Execution model".
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
@@ -2330,83 +2333,2303 @@ keep unbounded id strings (Task 138).
 
 ---
 
+## Task 130 — Reverse-Path & Capability-Query Consistency
+
+### 130 Summary
+
+Every reply the terminal sends to the application is framed by the handler, so it honours
+S8C1T. Every capability query is answered on the PTY thread, in byte-stream order, so its
+reply comes before the DA1 reply that the kitty detection recipes rely on. Advertised
+capabilities match what the running configuration and platform actually deliver. Activated
+and decomposed on 2026-10-10 against `2862acb9` (main after PR #536).
+
+### 130 Activation recon (2026-10-10)
+
+Three read-only audits re-traced the stub. The stub undercounted the problem:
+
+- **Reply classes.** Handler replies split four ways.
+  - **Framed by the handler** (`write_*_response`, S8C1T-aware): DA1/2/3, XTVERSION, DSR, CPR,
+    the `CSI t` reports answered on the PTY thread, OSC 4/10/11/12, DECRQSS, XTGETTCAP, and
+    kitty graphics.
+  - **Hand-formatted `\x1b[…` strings through `write_to_pty`:** DECRQM for handler-owned
+    modes (`ReportMode::report()` returns a full `\x1b[?N;Ps$y` string) and the kitty
+    keyboard query `CSI ? u`.
+  - **`TerminalState::send_decrpm`** (`state/internal.rs:717`) bypasses the handler
+    entirely, for 11 `TerminalState`-owned modes.
+  - **GUI hand-formatted, all 7-bit:**
+    - `rendering.rs`: the `CSI 1t/2t`, `3t`, `4t` and `5t` window reports, OSC `L`/`l`
+      title reports, and the OSC 52 reply;
+    - `app_impl.rs`: OSC 99 `p=alive` and `p=?`;
+    - the `freminal-notify-99` thread: OSC 99 activation and close reports.
+- **Ordering.** `handle_incoming_data` runs `handler.process_outputs` over the whole batch,
+  then `sync_mode_flags` over the whole batch, then a post-hoc RIS scan, then the tmux
+  reparse queue.
+  - A DECRQM reply for a `TerminalState`-owned mode therefore lands **after** a DA1 that
+    came later in the same read.
+  - Anything that arrived through tmux passthrough is answered after everything else.
+  - The OSC 99 `p=?` reply is built by the GUI on a later frame, so it always follows DA1.
+- **tmux.**
+  - `handle_tmux_passthrough` dispatches inner APC and DCS directly, with
+    `in_tmux_passthrough` set so that their replies are wrapped in `ESC P tmux; … ESC \`.
+  - Inner CSI goes through `dispatch_tmux_csi` (about 310 lines), a second CSI dispatcher
+    that predates Task 128. It handles plain numeric cursor and erase commands only and
+    exists purely to keep ordering against inner APC.
+  - Everything else is pushed onto `tmux_reparse_queue`. That queue is fed into the
+    **main** parser at the end of the batch, so a read that ended mid-sequence gets the
+    reparsed bytes spliced into its partial sequence.
+- **tmux never unwraps replies.**
+  - tmux reads what the outer terminal sends as key input (`tty-keys.c`). It recognises only
+    a fixed set of replies (DA, XTVERSION, OSC 10/11/4/52, …) and never unwraps
+    `ESC P tmux;`.
+  - The wrapped replies freminal sends today therefore reach tmux as garbage keystrokes.
+  - kitty, WezTerm and Ghostty all reply unwrapped.
+- **OSC 99 `p=?`** answers a constant string unconditionally:
+  `a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1`.
+  - No notification config is consulted, and notifications are disabled by default.
+  - `a=report` is advertised on macOS and Windows, where activation is never reported.
+- **Config on the PTY thread.**
+  - The PTY thread sees only `PtyTabInitialState` (theme, URL detection, cursor style) and a
+    handful of per-field `InputEvent`s broadcast by `apply_new_config`.
+  - Nothing reaches it about notifications or capabilities.
+
+### 130 Decisions (maintainer, 2026-10-10)
+
+- **Replies are never tmux-wrapped.** Delete `wrap_tmux_passthrough` and the
+  `in_tmux_passthrough` flag. The stub's "tmux-passthrough-wrapped" premise was wrong; see the
+  recon.
+- **Every GUI reply goes through the typed reply path.** That covers the window reports,
+  title reports, OSC 52 and all four OSC 99 reports, not just the two the stub named.
+- **Config reaches the PTY thread as a seed plus events**, following the existing precedent: a
+  typed `HostCapabilities` seeded through `PtyTabInitialState`, and
+  `InputEvent::HostCapabilitiesChange` broadcast from `apply_new_config`. No `ArcSwap` for
+  config.
+- **OSC 99 `p=?` truthfulness.**
+  - No reply at all when `notifications.enabled` is off, `osc_99` is off, or `routing_osc99`
+    is `Disabled`.
+  - `a=report` is advertised only on Linux/BSD, and only when the routing can take the system
+    leg (`System`, `Both`, `SystemWhenUnfocused`).
+  - `c=1` is advertised only when the system leg is possible.
+  - Every other key is unchanged; full conformance is Task 138.
+- **The tmux passthrough is unified with the real parser** (the maintainer's "do it right"
+  answer to the Task 131 stub question; it is foundation work here).
+  - `TerminalState` processes parsed outputs one at a time, in event order.
+  - Each tmux payload is drained immediately, through a fresh parser instance.
+  - `dispatch_tmux_csi` is deleted.
+
+### 130 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **Event order is the processing model.**
+  - For each parsed output, `TerminalState` does three things in order:
+    1. calls the handler for that one output;
+    2. syncs its own mode flags for it;
+    3. applies its own RIS state reset if the output is `ResetDevice`.
+  - It then drains any tmux payload the handler queued while processing that output.
+  - The once-per-batch `prune_evicted_real_placements` stays once per batch.
+  - This fixes the DECRQM-after-DA1 inversion and makes RIS apply in event order, as DECSTR
+    already does.
+- **The tmux parser is fresh per payload.**
+  - It is seeded with the outer parser's `vt52_mode` and `s8c1t_mode`.
+  - Inner payloads are complete sequences; a fresh parser cannot splice into the outer one.
+  - Nesting depth is capped at `MAX_TMUX_PASSTHROUGH_DEPTH = 4`. Deeper payloads are dropped
+    with a payload-free debug log.
+- **DECRPM is framed by the handler.**
+  - `ReportMode::report()` returns the body only (`?N;Ps$y`).
+  - Every DECRPM, including the `TerminalState`-owned ones, goes out through
+    `write_csi_response`. `send_decrpm` is deleted.
+  - `CSI ? u` also goes through `write_csi_response`.
+  - After 130.3 only two raw `write_to_pty` callers remain:
+    - the VT52 DA1 reply `ESC / Z`, which is VT52 and has no C1 form;
+    - the empty ENQ answerback.
+- **`HostCapabilities` is the registry of host-dependent facts.** It holds exactly what the
+  PTY thread cannot know by itself: config and platform. Answers that are intrinsic to the
+  handler's own implementation (DA1, XTGETTCAP, kitty `a=q`, `CSI ? u`, DECRQSS) stay where
+  they are, because their source of truth is the code that implements them. Today the
+  registry holds OSC 99 support. Later tasks add to it (138, 146).
+- **OSC 99 control requests while unsupported.** `p=?` gets no reply. `p=alive` gets no reply
+  and is not forwarded to the GUI, because answering it would also advertise the protocol.
+  **Superseded by adversarial-review finding 14:** every OSC 99 request (display payloads and
+  `p=close` included) is dropped by the handler while `Unsupported`.
+- **`GuiReply` lives in the emulator crate** (`io/gui_reply.rs`, next to `InputEvent`). It
+  carries structured fields; framing is the handler's job.
+- **Replies are not recorded to FREC.** This matches handler replies, which were never
+  recorded. Only `InputEvent::Key` is recorded as `PtyInput`.
+- **The notify thread must not keep the PTY consumer alive.**
+  - The consumer thread exits when the pane's `input_tx` disconnects.
+  - A strong `Sender<InputEvent>` clone held by the long-blocking `freminal-notify-99`
+    thread would keep a closed pane's shell alive for as long as the notification is
+    displayed.
+  - So the pane owns an `Arc<Sender<InputEvent>>` (`Pane::reply_tx`, never cloned
+    strongly), and the notify thread holds a `Weak`. A reply for a closed pane is dropped.
+- **`Pane::pty_write_tx` stays**, but only for layout startup-command injection
+  (`layout_ops.rs:262`). Moving that to `InputEvent::Key` would start recording it as user
+  input, which is a separate decision. Its docs are corrected.
+
+### 130 Execution model
+
+Tasks 130 and 131 run as **parallel worktrees after a foundation**, per
+`parallel-work-isolation`.
+
+- **Foundation first:** 130.1–130.3 land sequentially on the integration branch
+  `task-130-131/reverse-path-and-screen-state`.
+  - Task 131 needs all three:
+    - 130.1 owns the `TerminalState` processing loop, which 131 would otherwise touch for RIS
+      ordering;
+    - 130.2 deletes the tmux code, which 131's reset table would otherwise have to classify;
+    - 130.3 changes `ReportMode`, which 131's new `?1047` mode type implements.
+  - Landing them first removes the shared-type and shared-function conflicts.
+- **Then two worktrees fork from the integration branch:**
+  - `../freminal-130` on `task-130/reverse-path` (130.4–130.9);
+  - `../freminal-131` on `task-131/screen-state` (131.1–131.11).
+- **Remaining overlap after the fork:**
+  - both edit `terminal_handler/mod.rs`: 130 adds the `host_capabilities` field and setter,
+    131 restructures fields and resets;
+  - both edit `ESCAPE_SEQUENCE_COVERAGE.md` / `ESCAPE_SEQUENCE_GAPS.md` (different rows);
+  - this plan document (status notes only).
+
+  The single semantic coupling is that 131's exhaustive reset table must classify 130's new
+  field. That is enforced at compile time by the table's exhaustive destructuring, and it is
+  resolved by the orchestrator at merge.
+
+- **Merge order:** each task passes its adversarial review in its own worktree. 130 then
+  merges into the integration branch, 131 rebases, and 131 merges. The full verification
+  suite runs after each merge.
+- Each subtask is implemented by a sub-agent, reviewed in full by the orchestrator against
+  the subtask text, and committed by the orchestrator.
+
+### 130 Subtasks
+
+Every subtask's verification is `cargo test --all` and
+`cargo clippy --all-targets --all-features -- -D warnings`, plus anything named below. Every
+subtask's prohibitions include: do NOT touch files outside scope, do NOT commit, do NOT update
+plan documents, and do NOT proceed to the next subtask. The stop condition is the same for
+all: report files changed and verification results, then await review.
+
+#### 130.1 — Event-order output processing (foundation)
+
+Scope:
+
+- `freminal-terminal-emulator/src/state/internal.rs` (production and tests);
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs`:
+  - `process_outputs`;
+  - a new `pub(crate)` per-output entry point;
+  - a new `pub(crate) fn finish_output_batch(&mut self)` that runs
+    `prune_evicted_real_placements`;
+- new tests in `freminal-terminal-emulator/tests/terminal_state_tests.rs`.
+
+What:
+
+- `handle_incoming_data` (and the reparse path) iterates the parsed outputs once. For each
+  output it does, in this order:
+  1. call `handler.process_output_in_batch(output)` (the renamed, now `pub(crate)`,
+     `process_output`);
+  2. call `self.sync_mode_flags(output)`;
+  3. if the output is `TerminalOutput::ResetDevice`, apply the `TerminalState` RIS reset
+     **at that point**: modes, parser, `leftover_data`, `cursor_visual_style`, and
+     `window_commands`.
+
+  After the loop it calls `handler.finish_output_batch()`.
+
+- Extract the RIS block into `fn apply_state_reset(&mut self)`.
+- **RIS replaces the parser mid-iteration.** The outputs that follow in the same chunk were
+  already parsed by the old parser. Only the next chunk sees the fresh parser. Document this
+  at the reset site.
+- `handler.process_outputs` keeps its public behaviour (tests, benches and the shadow handler
+  use it). It becomes `for o in outputs { self.process_output_in_batch(o) }` followed by
+  `self.finish_output_batch()`.
+- The tmux reparse drain is left where it is in this subtask (130.2 moves it).
+- Update the pipeline doc comment on `handle_incoming_data`. Stages 4–6 become one
+  event-order stage.
+
+Deliverable:
+
+- the change;
+- regression tests through `handle_incoming_data` with a write-channel receiver:
+  - `CSI ?2026$p` followed by `CSI c` in one buffer yields the DECRPM reply **before** the
+    DA1 reply. It fails before the change.
+  - `ESC c` followed by `CSI ?1h` (DECCKM) in one buffer leaves DECCKM set. It fails before
+    the change, because the post-hoc RIS reset wiped it.
+  - `CSI ?1h` followed by `ESC c` leaves DECCKM reset.
+  - `ESC c` followed by `ESC SP G` (S8C1T) in one buffer leaves the parser in 8-bit mode.
+
+Benchmarks:
+
+- Groups `bench_handle_incoming_data`, `bench_parse_bursty`, `bench_parse_cup_writes` and
+  `bench_parse_sgr_heavy`.
+- The orchestrator captures the baseline before the subtask starts, as
+  `--save-baseline before_130_1`. The implementer captures the comparison.
+- 15% threshold, per `performance-benchmarks`.
+
+Verification: as above, plus `cargo bench --no-run --all`.
+
+Prohibitions: do NOT change the tmux reparse path (130.2); do NOT change reply formats
+(130.3); do NOT change what RIS resets (Task 131).
+
+#### 130.2 — tmux passthrough through the real parser (foundation)
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/dcs.rs`:
+  - `handle_tmux_passthrough`;
+  - delete `dispatch_tmux_csi`, `wrap_tmux_passthrough` and their tests;
+  - convert the surviving tmux tests;
+- `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs`: remove the wrapping branch
+  from `write_bytes_to_pty`;
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs`:
+  - remove the `in_tmux_passthrough` field;
+  - rename `tmux_reparse_queue` to `tmux_passthrough_queue` and `take_tmux_reparse_queue` to
+    `take_tmux_passthrough_queue`;
+- `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`: only the test at about
+  line 11563 that sets `in_tmux_passthrough`;
+- `freminal-terminal-emulator/src/state/internal.rs`;
+- `freminal-terminal-emulator/tests/standard_unit.rs` (tmux tests);
+- new integration tests in `freminal-terminal-emulator/tests/tmux_passthrough.rs`.
+
+What:
+
+- **Handler side.** `handle_tmux_passthrough` un-doubles the ESC bytes and pushes the
+  **whole** inner payload onto `tmux_passthrough_queue`, whatever its introducer. It no
+  longer dispatches anything itself.
+- **`TerminalState` side.** In the event-order loop from 130.1, after processing an output,
+  `TerminalState` takes the handler's queue. For each payload it:
+  1. builds a fresh `FreminalAnsiParser`;
+  2. copies `vt52_mode` and `s8c1t_mode` from `self.parser`;
+  3. parses the payload;
+  4. processes the resulting outputs through the same per-output routine, recursively, with
+     a depth argument.
+
+  At depth `MAX_TMUX_PASSTHROUGH_DEPTH` (`4`, a module constant) a payload is dropped with a
+  `debug!` that carries its length and depth only.
+
+- **Delete** `drain_tmux_reparse_queue`, `dispatch_tmux_csi`, `wrap_tmux_passthrough`,
+  `double_esc` (if it becomes unused) and `in_tmux_passthrough`. Replies are never wrapped
+  (maintainer decision).
+- **Convert the tests.**
+  - Every deleted `dispatch_tmux_csi` test's scenario becomes a `TerminalState`-level test
+    in `tests/tmux_passthrough.rs`, asserting the same buffer effect.
+  - Tests asserting wrapped replies are rewritten to assert **unwrapped** replies.
+  - Remove nothing without a replacement. List the old-to-new mapping in the report.
+
+Deliverable:
+
+- the change;
+- tests:
+  - inner CSI cursor/erase (the old direct-dispatch set);
+  - inner SGR and mode set (previously reparsed);
+  - inner OSC title;
+  - inner kitty APC (`a=T`, `a=q` reply is **unwrapped**);
+  - inner DCS DECRQSS (reply unwrapped);
+  - nested tmux at depth 2 works;
+  - depth 5 is dropped;
+  - ordering: `tmux;CSI H` + `tmux;APC a=p` + `tmux;CSI 5;5H` + `tmux;APC a=p` in one buffer
+    places the two images at the two cursor positions (the scenario `dispatch_tmux_csi`
+    existed for);
+  - a read ending mid-sequence followed by a tmux payload in the next read does not corrupt
+    either sequence;
+  - `DCS tmux; ESC [ c ST` yields an unwrapped DA1 reply, in order with a surrounding
+    `CSI 5n`.
+
+Verification: as above.
+
+Prohibitions: do NOT change reply formats beyond removing the wrapping (130.3); do NOT
+change non-tmux DCS dispatch.
+
+#### 130.3 — Handler-framed CSI replies (foundation)
+
+Scope:
+
+- `freminal-common/src/buffer_states/modes/mod.rs` (`ReportMode` doc);
+- every `ReportMode` impl in `freminal-common/src/buffer_states/modes/*.rs` and
+  `freminal-common/src/buffer_states/mode.rs`, plus their tests;
+- `freminal-common/tests/mode_boilerplate_tests.rs`;
+- `freminal-common/tests/mouse_mode_tests.rs`;
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (DECRQM arms and the
+  `KittyKeyboardQuery` arm);
+- `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` (visibility only);
+- `freminal-terminal-emulator/src/state/internal.rs` (`handle_mode_query`; delete
+  `send_decrpm`);
+- `freminal-terminal-emulator/tests/modes_tests.rs`;
+- `freminal-terminal-emulator/tests/integration_all.rs`;
+- `freminal-terminal-emulator/tests/decrpm_integration.rs`;
+- `freminal-terminal-emulator/tests/vttest_s8c1t.rs`.
+
+What:
+
+- **`ReportMode::report()`** returns the DECRPM body without the introducer (`?2004;1$y`,
+  `20;2$y`). Update the trait doc to say so.
+- **Handler.** Every DECRQM arm and the `CSI ? u` arm call
+  `self.write_csi_response(&body)`. The `?2031` theming reply in `handle_mode_query` becomes
+  a body too.
+- **`TerminalState`.** `handle_mode_query` calls `self.handler.write_csi_response(&body)`.
+  Make that helper `pub(crate)` if it is not already reachable. Delete `send_decrpm` and its
+  two tests, replacing them with S8C1T tests below.
+- **`write_to_pty` callers.** After the change, the only remaining callers of `write_to_pty`
+  are the VT52 `ESC / Z` reply and ENQ. Reduce `write_to_pty` to `pub(super)` or narrower if
+  nothing outside `terminal_handler` needs it.
+- List every remaining `write_to_pty` / `write_bytes_to_pty` caller in the report.
+
+Deliverable:
+
+- the change;
+- tests:
+  - DECRQM for one handler-owned mode (`?7`), one `TerminalState`-owned mode (`?2004`) and
+    `?2031` in S8C1T mode starts with `0x9B` and contains no `ESC [`;
+  - the same three in 7-bit mode are byte-identical to before;
+  - `CSI ? u` in S8C1T mode is `0x9B ? <flags> u`;
+  - unknown-mode DECRQM (`?9999$p`) stays framed.
+
+Verification: as above.
+
+Prohibitions: do NOT change any reply's content, only its framing; do NOT touch GUI replies
+(130.7–130.8).
+
+#### 130.4 — `HostCapabilities` on the PTY thread
+
+Scope:
+
+- new `freminal-common/src/host_capabilities.rs`, plus `freminal-common/src/lib.rs` (module
+  declaration);
+- `freminal-terminal-emulator/src/io/mod.rs` (new `InputEvent` variant);
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (field, setter, getter);
+- `freminal/src/gui/pty.rs`:
+  - a `PtyTabInitialState` field;
+  - `apply_initial_state`;
+  - the `handle_input` arm;
+  - `input_event_needs_repaint`;
+  - tests;
+- `freminal/src/gui/notifications.rs`: `pub(crate) fn host_capabilities(config: &Config) -> HostCapabilities`,
+  plus tests;
+- `freminal/src/gui/settings_dispatch.rs` (broadcast);
+- the five `PtyTabInitialState` construction sites:
+  - `freminal/src/gui/tab_spawning.rs` (3);
+  - `freminal/src/gui/app_impl.rs` (2);
+  - the test site in `pty.rs`.
+
+What:
+
+- **`freminal-common::host_capabilities`:**
+
+  ```rust
+  pub struct HostCapabilities { pub osc99: Osc99Support }      // Debug, Clone, Copy, PartialEq, Eq, Default
+  pub enum Osc99Support { #[default] Unsupported, Supported(Osc99Features) }
+  pub struct Osc99Features { pub activation_report: Osc99ActivationReport, pub close_events: Osc99CloseEvents }
+  pub enum Osc99ActivationReport { Reported, NotReported }
+  pub enum Osc99CloseEvents { Reported, NotReported }
+  ```
+
+- **Handler:** a `host_capabilities: HostCapabilities` field (default `Unsupported`),
+  `set_host_capabilities`, and `host_capabilities()`.
+- **`InputEvent::HostCapabilitiesChange(HostCapabilities)`.** The consumer calls the setter.
+  The repaint classifier returns false for it.
+- **`host_capabilities(config)` in the GUI:**
+  - `Unsupported` unless `config.notifications.enabled && config.notifications.osc_99 && routing_osc99 != Disabled`.
+  - "System leg possible" means `routing_osc99` is `System`, `Both` or
+    `SystemWhenUnfocused`.
+  - `activation_report = Reported` iff the system leg is possible **and**
+    `cfg!(all(unix, not(target_os = "macos")))`.
+  - `close_events = Reported` iff the system leg is possible.
+  - Doc-comment the reasoning: the activation callback exists only on the Linux/BSD D-Bus
+    backend (`show_system_osc99`).
+- **Seed and broadcast.**
+  - Seed: add a `host_capabilities` field to `PtyTabInitialState` and set it in
+    `apply_initial_state`. Every construction site uses `host_capabilities(&self.config)`.
+  - Broadcast: in `apply_new_config`, if
+    `host_capabilities(&new_cfg) != host_capabilities(&self.config)`, send the event to
+    every pane in every window, following the `AutoDetectUrls` block's pattern.
+
+Deliverable:
+
+- the change;
+- tests:
+  - a `host_capabilities` truth table: enabled/osc_99/each routing value; the platform
+    expectation uses `cfg!`;
+  - `apply_initial_state` seeds the field;
+  - the classifier test includes the new variant;
+  - a handler setter/getter test.
+
+Verification: as above, plus `cargo xtask check-windows` (platform `cfg`).
+
+Prohibitions: do NOT change OSC 99 behaviour yet (130.5); do NOT add a config option.
+
+#### 130.5 — OSC 99 `p=?` and `p=alive` gating on the PTY thread
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/osc.rs` (the `Notify99` arm);
+- `freminal-terminal-emulator/src/terminal_handler/notify_99.rs` (new
+  `fn osc99_query_reply_body`);
+- `freminal/src/gui/notifications.rs`:
+  - delete `OSC99_CAPABILITIES` and `osc99_query_response`;
+  - delete or adapt their tests;
+- `freminal/src/gui/app_impl.rs` (delete the `Query` branch);
+- `freminal-common/src/buffer_states/window_manipulation.rs`: remove
+  `Osc99ControlKind::Query` if it becomes unreachable, and its uses;
+- tests in `freminal-terminal-emulator/tests/` (a new `osc99_query.rs`).
+
+What:
+
+- **`p=?` is answered in the handler.** In the `Notify99` arm, a finalized `p=?` request is
+  answered right there with `write_osc_response(&body)`, and **no** window command is pushed.
+  - The body is `99;i=<id or 0>:p=?;<capabilities>`.
+  - `<capabilities>` comes from `osc99_query_reply_body(&Osc99Features)`. It is the current
+    string with two changes:
+    - `a=report` is present only when `activation_report == Reported`; with no supported
+      actions the `a` key is omitted, per the spec;
+    - `c=1` is present only when `close_events == Reported`.
+  - Key order is unchanged.
+  - When `host_capabilities.osc99 == Unsupported`, there is no reply (a debug log only).
+- **`p=alive` while `Unsupported`** is dropped in the handler, with no window command and a
+  debug log. `p=close` is unchanged.
+- **The GUI's `Query` branch is deleted.** If `Osc99ControlKind::Query` then has no producer,
+  delete the variant and its mapping. `control_kind` no longer maps `Query`, and the handler
+  branches on the payload type instead.
+
+Deliverable:
+
+- the change;
+- tests through `handle_incoming_data`:
+  - `p=?` while `Unsupported` → no bytes;
+  - `p=?` with full features → the exact old string;
+  - with `NotReported` activation → the string without `a=report`;
+  - with `NotReported` close → without `c=1`;
+  - `p=?` then `CSI c` in one buffer → the OSC 99 reply precedes DA1;
+  - S8C1T framing (`0x9D … 0x9C`);
+  - `p=alive` while `Unsupported` → no window command;
+  - `p=alive` while `Supported` → `Osc99Control { kind: Alive }` as before.
+
+Verification: as above.
+
+Prohibitions: do NOT change any other OSC 99 key or payload type (Task 138); do NOT move
+the alive/activation/close reports yet (130.8).
+
+#### 130.6 — Typed `GuiReply` and the handler serialiser
+
+Scope:
+
+- new `freminal-terminal-emulator/src/io/gui_reply.rs`, plus `io/mod.rs` (module and the
+  `InputEvent::Reply` variant);
+- `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` (the serialiser);
+- `freminal-terminal-emulator/src/interface.rs` (`TerminalEmulator::write_gui_reply`);
+- `freminal/src/gui/pty.rs` (the `handle_input` arm, classifier and tests).
+
+What:
+
+- **The `GuiReply` type:**
+
+  ```rust
+  pub enum GuiReply {
+      WindowState(WindowStateReport),                 // CSI 1 t / CSI 2 t
+      WindowPosition { x: usize, y: usize },          // CSI 3 ; x ; y t
+      WindowSizePixels { height: usize, width: usize }, // CSI 4 ; h ; w t
+      ScreenSizePixels { height: usize, width: usize }, // CSI 5 ; h ; w t
+      IconLabel(String),                              // OSC L <label> ST
+      WindowTitle(String),                            // OSC l <title> ST
+      Clipboard { selection: String, base64_payload: String }, // OSC 52 ; sel ; payload ST
+      Osc99Activation { id: Option<String>, button: Option<String> }, // OSC 99 ; i=<id> ; <button> ST
+      Osc99Closed { id: Option<String>, tracking: Osc99CloseTracking }, // OSC 99 ; i=<id>:p=close ; [untracked] ST
+      Osc99Alive { request_id: Option<String>, live_ids: Vec<String> }, // OSC 99 ; i=<id>:p=alive ; a,b ST
+  }
+  pub enum WindowStateReport { Normal, Iconified }
+  pub enum Osc99CloseTracking { Tracked, Untracked }
+  ```
+
+- **Serialising.**
+  - `TerminalHandler::write_gui_reply(&mut self, reply: &GuiReply)` builds each body and
+    sends it through `write_csi_response` / `write_osc_response`.
+  - Missing ids default to `0`, as the GUI builders did.
+  - The bodies are byte-identical to today's GUI strings without their 7-bit framing.
+- `TerminalEmulator::write_gui_reply` delegates to the handler.
+- **`InputEvent::Reply(GuiReply)`.** The consumer calls `emulator.write_gui_reply`. The
+  repaint classifier returns false. The event is not recorded to FREC.
+
+Deliverable:
+
+- the type and serialiser;
+- a table test over every variant in 7-bit and 8-bit mode. The 7-bit bytes must equal the
+  current GUI builders' output; copy the expected strings from `rendering.rs` and
+  `notifications.rs`.
+
+Verification: as above.
+
+Prohibitions: do NOT migrate any GUI sender yet (130.7, 130.8).
+
+#### 130.7 — GUI window, title and OSC 52 replies through `GuiReply`
+
+Scope:
+
+- `freminal/src/gui/rendering.rs`:
+  - `handle_window_manipulation` signature and the report arms;
+  - delete `send_pty_response`;
+- `freminal/src/gui/frame_drain.rs` (call site, vec element types, tests);
+- doc comments that name `pty_write_tx` for replies:
+  - `rendering.rs`;
+  - `panes/mod.rs:133`;
+  - `pty.rs` (the `TabChannels` doc);
+  - `freminal/src/main.rs:23`;
+  - `freminal-terminal-emulator/src/io/mod.rs` (the `WindowCommand::Report` doc).
+
+What:
+
+- `handle_window_manipulation` takes `reply_tx: &Sender<InputEvent>` (the pane's
+  `input_tx`) instead of `pty_write_tx`.
+- Each report arm sends `InputEvent::Reply(GuiReply::…)` with the same values it formats
+  today.
+- The `osc99_*` vectors carry `Sender<InputEvent>`; their element types change here.
+- `Pane::pty_write_tx` is documented as "layout startup-command injection only".
+
+Deliverable:
+
+- the change;
+- a test calling `handle_window_manipulation` with a `ReportTitle` / `QueryClipboard` command
+  and asserting the `InputEvent::Reply` received.
+
+Verification: as above.
+
+Prohibitions: do NOT change the OSC 52 security gating or toast events; do NOT touch the
+OSC 99 senders beyond the vector element type (130.8).
+
+#### 130.8 — OSC 99 reports through `GuiReply`, and the weak notify handle
+
+Scope:
+
+- `freminal/src/gui/panes/mod.rs`: a new `reply_tx: Arc<Sender<InputEvent>>` field, its
+  construction, and every `Pane` literal in tests and benches:
+  - `panes/mod.rs`;
+  - `frame_drain.rs`;
+  - `actions.rs`;
+  - `tabs.rs`;
+  - `freminal/benches/pane_resolution_bench.rs`;
+- `freminal/src/gui/pty.rs` (`TabChannels`);
+- `freminal/src/gui/app_impl.rs` (the `Alive` branch);
+- `freminal/src/gui/notifications.rs`:
+  - `route_osc99`;
+  - `show_system_osc99`;
+  - `osc99_action_report`;
+  - delete the `osc99_activation_report` / `osc99_close_report` / `osc99_alive_report` byte
+    builders and their tests, replacing them with `GuiReply` builders;
+- `freminal/src/gui/rendering.rs` (which sender is pushed with the OSC 99 vectors).
+
+What:
+
+- `Pane::reply_tx` is an `Arc` holding a clone of the pane's `input_tx`. The pane is its only
+  strong owner. Doc-comment why it exists (consumer-thread liveness).
+- The OSC 99 notification and control vectors carry `Weak<Sender<InputEvent>>`, from
+  `Arc::downgrade(&pane.reply_tx)`.
+- **Alive:** `app_impl` upgrades the weak handle and sends `GuiReply::Osc99Alive`.
+- **Notify thread:** `show_system_osc99` moves the `Weak` into `freminal-notify-99`, which
+  upgrades it per send.
+  - `osc99_action_report` returns `Option<GuiReply>`.
+  - A failed upgrade drops the reply with a `debug!`.
+
+Deliverable:
+
+- the change;
+- tests:
+  - `osc99_action_report` returns the expected `GuiReply` for `__closed`, `default` and a
+    button id, each with its gating flag;
+  - dropping the `Arc` makes `upgrade()` fail, so no event is sent (a unit test of the
+    send helper);
+  - the alive path sends `GuiReply::Osc99Alive` with sorted ids.
+
+Verification: as above, plus `cargo xtask check-windows` (the macOS/Windows branch of
+`show_system_osc99` changes).
+
+Prohibitions: do NOT change OSC 99 routing, toasts or the live map.
+
+#### 130.9 — Escape-sequence dual-doc and reference update
+
+Scope:
+
+- `Documents/ESCAPE_SEQUENCE_COVERAGE.md`;
+- `Documents/ESCAPE_SEQUENCE_GAPS.md`;
+- `Documents/KITTY_PROTOCOL_REFERENCE.md` (the OSC 99 query section only).
+
+What:
+
+- Record:
+  - S8C1T framing for DECRPM, `CSI ? u`, and all GUI replies;
+  - tmux passthrough via the real parser, with unwrapped replies;
+  - `p=?` answered in stream order and gated on configuration and platform;
+  - `p=alive` gated.
+- Refresh "Last updated" in all three documents.
+
+Verification: the pre-commit markdownlint and prettier hooks pass on the three files.
+
+Prohibitions: do NOT touch code.
+
+### 130 Status notes
+
+- **130.1 — Complete (2026-10-10), commit `d45d9389`.**
+  - `TerminalState::process_parsed_outputs` runs handler, mode sync and the RIS state reset
+    per output.
+  - Three new regression tests were confirmed failing against the old code.
+  - Benchmarks within ±5% of `before_130_1`.
+- **130.2 — Complete (2026-10-10), commit `7b869c20`.**
+  - The handler queues each un-doubled tmux payload, and `TerminalState` parses it with a
+    fresh, seeded parser right after the producing output, up to depth 4.
+  - `dispatch_tmux_csi`, `wrap_tmux_passthrough`, `double_esc` and `in_tmux_passthrough` are
+    deleted.
+  - A table-driven test proves every old direct-dispatch and fall-through shape behaves
+    identically wrapped and direct.
+  - Seven new tests were confirmed failing against the old code. One of them shows reparsed
+    OSCs used to miss the same batch's window-command drain.
+  - The orchestrator rewrote the mid-sequence splice test to use a sequence the old code
+    actually reparsed.
+  - Benchmarks within +1.2% of `before_130_1`.
+- **130.3 — Complete (2026-10-10), commit `6bb4e529`.**
+  - `ReportMode::report()` returns the body.
+  - All DECRPM (handler and `TerminalState`) and `CSI ? u` replies go through
+    `write_csi_response`, and `send_decrpm` is deleted.
+  - Only VT52 `ESC / Z` and ENQ still call `write_to_pty`.
+  - Two pre-existing reply-content bugs surfaced: 130.C1 and 130.C2.
+- **130.4 — Complete (2026-10-10), commit `790a77e6`.**
+  - `HostCapabilities` (`freminal-common`) is seeded through `PtyTabInitialState` at all five
+    spawn sites and re-sent with `InputEvent::HostCapabilitiesChange` from `apply_new_config`.
+  - The resolver later moved to `freminal/src/gui/host_capabilities.rs` (review finding 15).
+- **130.5 — Complete (2026-10-10), commit `ebd361e8`.**
+  - `p=?` is answered in `dispatch_finalized_osc99` with conditional `a=report` / `c=1`;
+    `Osc99ControlKind::Query` and the GUI query path are deleted.
+  - Review finding 14 later extended the gate so every OSC 99 request is dropped while
+    unsupported.
+- **130.6 — Complete (2026-10-10), commit `8b5b165e`.** `GuiReply`, `InputEvent::Reply` and the
+  handler serialiser `write_gui_reply`, with byte-identical 7-bit output.
+- **130.7 — Complete (2026-10-10), commit `165cd17f`.** Window, title, OSC 52 and OSC 99
+  replies are sent as `GuiReply`; the GUI byte builders and `send_pty_response` are deleted.
+- **130.8 — Complete (2026-10-10), commit `630469cf`.** `Pane::reply_tx` (`Arc`) with `Weak`
+  handles for OSC 99 consumers; review fixes in `120d90fa` (single reply handle) and
+  `dede495e` (a liveness test on a real `Pane`).
+- **130.9 — Complete (2026-10-10), commit `1e03dd31`.** COVERAGE, GAPS and the kitty reference.
+- **Cleanups:**
+  - 130.C1 (`ce0e8cad`), 130.C2 and 130.C3 (`120d90fa`), and 130.C5 and 130.C6 (`74149b30`)
+    are resolved.
+  - 130.C4 is routed to Task 138.
+
+### 130 Cleanup entries
+
+#### 130.C1 — DECRQM for LNM (ANSI mode 20) answers in the DEC-private form
+
+- **Surfaced:** 130.3 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Lnm::report` returns `?20;Ps$y`. LNM is an ANSI mode, so `CSI 20 $ p` must be answered
+    with `CSI 20 ; Ps $ y`, without `?`; IRM (`4;Ps$y`) already does this correctly.
+  - An application parsing the reply can treat it as an answer about DEC private mode 20.
+- **Scope of fix:** `freminal-common/src/buffer_states/modes/lnm.rs` and its tests; any
+  emulator test that pins the `?20` form.
+- **Verification:** `CSI 20 $ p` yields `CSI 20 ; 2 $ y` by default and `CSI 20 ; 1 $ y` after
+  `CSI 20 h`.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
+#### 130.C2 — DECRQM for DECSCLM answers "not recognised"
+
+- **Surfaced:** 130.3 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Decsclm::report` always returns `?4;0$y` ("not recognised"), although freminal parses
+    DECSCLM and deliberately does not implement smooth scrolling.
+  - The DECRPM value for a recognised mode that can never be set is `4` ("permanently
+    reset"), as `?2027` already uses `3` for permanently set.
+- **Scope of fix:** `freminal-common/src/buffer_states/modes/decsclm.rs` and its tests;
+  `freminal-common/tests/mode_boilerplate_tests.rs`.
+- **Verification:** `CSI ? 4 $ p` yields `CSI ? 4 ; 4 $ y` whatever the set/reset history.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+- **Scope widened (maintainer, 2026-10-10):** the C1 implementer found that `CSI ? 4 $ p` is
+  never answered at all. `Mode::Decsclm(_)` falls into the "not acted on" arms of both
+  `TerminalHandler` and `TerminalState::sync_mode`, so `Decsclm::report` is unreachable. The
+  fix adds a `Mode::Decsclm(Decsclm::Query)` arm in `terminal_handler/mod.rs` that answers via
+  `write_csi_response`.
+
+#### 130.C3 — Title, icon-label and OSC 52 replies echo control bytes
+
+- **Surfaced:** orchestrator re-review of 130.6 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - An application can set the title `A ESC [6n B`; the OSC parser keeps an ESC that is not
+    followed by `\` (129.C5). `CSI 21 t` then echoes that ESC back into the application's
+    input, the title-report injection class (CVE-2003-0063).
+  - `OSC 52 ; c ESC [6n ; ?` likewise echoes the selection parameter verbatim.
+  - Reproduced: the title is stored as `"A\u{1b}[6nB"` and the selection as `"c\u{1b}[6n"`.
+- **Scope of fix:**
+  - `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` (`write_gui_reply`), the
+    single point every GUI reply passes through;
+  - its tests.
+- **Approach:**
+  - `IconLabel` / `WindowTitle`: drop every C0 control, DEL and C1 control (U+0080–U+009F)
+    before framing.
+  - `Clipboard`: keep only the characters xterm defines for `Pc` (`c p q s 0`–`7`), dropping
+    everything else. An empty result is sent as empty; xterm's "empty means `s0`" rule
+    concerns the request, not the reply.
+- **Verification:** a title or selection carrying ESC, BEL, `0x9B` (as U+009B) and DEL produces
+  a reply containing none of them, in 7-bit and 8-bit mode; ordinary titles are unchanged.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
+#### 130.C4 — OSC 99 report flags cross the thread boundary as `bool`
+
+- **Surfaced:** orchestrator re-review of 130.7 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Notification99Data::{report_activation, focus_on_activation, close_report}` and the
+    parser state in `osc_notify_99.rs` are raw `bool`s, carried from the PTY thread to the GUI.
+  - `osc99_action_report` and `Osc99LiveEntry` take or store the same `bool`s.
+  - This violates `freminal-state-representation` for transported state.
+- **Scope of fix:** the OSC 99 data model across `freminal-common`
+  (`window_manipulation.rs`, `osc_notify_99.rs`), `terminal_handler/notify_99.rs` and
+  `freminal/src/gui/notifications.rs`.
+- **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
+  avoids changing it twice. Not scheduled in Task 130.
+
+#### 130.C5 — XTGETTCAP echoes the raw request on an invalid name
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 7. Predates Task 130.
+- **Impact:**
+  - For a name that is not valid hex, `handle_xtgettcap` replies `DCS 0 + r <raw request> ST`,
+    echoing the request bytes lossily decoded.
+  - Reproduced: `DCS + q ESC [6n BEL zz ST` gets the reply `DCS 0 + r ESC [6n BEL zz ST`, so
+    an application can inject input into itself (the CVE-2003-0063 class, as 130.C3).
+- **Fix:** follow xterm's ctlseqs, which specify `DCS 0 + r ST` for invalid requests: reply
+  with no echo when the name is not valid hex. A name that _is_ valid hex but unknown keeps
+  today's hex echo, since hex digits cannot carry a control.
+- **Scope:** `terminal_handler/dcs.rs` (`handle_xtgettcap`) and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+#### 130.C6 — A DECRQM for LNM overwrites the LNM state used for input encoding
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 1. Predates Task 130.
+- **Impact:**
+  - `TerminalState::sync_mode` assigns `Mode::LineFeedMode(v)` straight into
+    `modes.line_feed_mode` and does not exclude `Lnm::Query`.
+  - Reproduced: after `CSI 20 h`, a `CSI 20 $ p` leaves `line_feed_mode == Lnm::Query`, so
+    Enter is encoded as if LNM were reset.
+- **Fix:**
+  - The query must not touch the stored state; route `Lnm::Query` to the handler-owned
+    (no-op) arm.
+  - Audit every other `sync_mode` assignment arm for the same pattern and pin each with a
+    test.
+- **Scope:** `state/internal.rs` and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+### 130 Adversarial review (2026-10-10)
+
+An adversarial review of `2862acb9..1e03dd31` found no blocker, one major and fourteen
+minor/nit findings. Two were reproduced by the orchestrator (1 → 130.C6, 7 → 130.C5).
+Disposition, all addressed before merge:
+
+1. **MAJOR — LNM DECRQM clobbers state:** 130.C6.
+2. **RIS drops the parser's in-flight state and the UTF-8 tail.** The behaviour belongs to
+   the 131 reset table, which has a row for it, so 131.8 fixes it. 130 corrects the
+   `apply_state_reset` comment, which understated it. **Fixed by 131.8** (the parser is no
+   longer replaced; only its DECANM/S8C1T modes reset); the 131 merge kept 131's comment.
+3. **The fresh parser's VT52/S8C1T seeding is untested:** add tests.
+4. **`run_case(.., wrapped: bool)`:** becomes a `Delivery` enum.
+5. **The liveness tests exercise `std`, not `Pane`:** add a test on a `Pane` built with
+   `from_channels`.
+6. **OSC 99 `id` / `button` / `live_ids` are echoed unsanitised, relying on validation in
+   another crate:** the serialiser keeps only identifier characters, and an empty id is sent
+   as `0` (also in the `p=?` reply).
+7. **XTGETTCAP echo:** 130.C5.
+8. **Mouse/focus/key event encodings are not S8C1T-aware**, while the docs say "every
+   reply": the docs are scoped to replies to queries, and a GAPS row records the event
+   encodings (unscheduled).
+9. **Stale docs:** `TerminalEmulator::clone_write_tx` and `window_ops.rs`.
+10. **Plan and doc inaccuracies:** 130 status notes, the Task 138 stub, the common-work table,
+    the COVERAGE attribution of the OSC 99 report framing to 130.8, and the
+    `freminal-version-activation` skill's reverse-write guidance. Fixed by the orchestrator.
+11. **`config_example.toml` does not say OSC 99 queries go unanswered while notifications
+    are off:** add a comment.
+12. **`GuiReply::WindowState` doc names `CSI 18 t`;** the query is `CSI 11 t`.
+13. **`TerminalHandler::process_outputs` doc:** a tmux payload is only queued there.
+14. **While OSC 99 is `Unsupported`, display payloads and `p=close` still reach the GUI**
+    (which then caches icons when routing is disabled). **Decision changed:** the handler
+    drops every OSC 99 request while `Unsupported`, so the terminal is consistently one that
+    does not speak the protocol. This supersedes the earlier "`p=close` is still forwarded"
+    bullet. Tests cover `p=close` and display payloads while `Unsupported`, and `p=?` for a
+    tombstoned id.
+15. **Nits:**
+    - the fully-qualified `Decsclm` path in `internal.rs`;
+    - the vacuous `tmux_passthrough_queue_is_drained_by_handle_incoming_data` test (delete);
+    - the `QueryClipboard` debug log prints the unescaped selection (escape and bound it);
+    - `host_capabilities(&Config)` moves out of `gui/notifications.rs` into its own module
+      (`gui/host_capabilities.rs`), since later tasks add non-notification facets.
+    - Accepted: `is_control_payload -> bool` stays. A predicate returning `bool` is not a
+      bool field or parameter.
+    - Already routed: the bool fields in the new tests (130.C4).
+
+### 130 Confirmation review (2026-10-10)
+
+A second read-only review re-checked every adversarial-review finding against the fix
+commits. All were FIXED except items 10 and R7, which were PARTIAL. It also found eight new
+items, all addressed in `5d5fba25` and the follow-up docs commit:
+
+- **N1:** two OSC 99 tests ran with OSC 99 unsupported and passed vacuously. They now use
+  supported capabilities and carry positive controls.
+- **N2:** an IRM DECRQM stored `Irm::Query`, switching insert mode off, and sent no reply.
+  It is now answered `CSI 4 ; Ps $ y` without touching the state. This closes the IRM half
+  of issue #528.
+- **N3:** the docs still said only `p=alive` was ignored while unsupported, and did not
+  record 130.C5 or 130.C6. Corrected.
+- **N4:** the `Osc99Control` doc still mentioned `p=?`. Corrected.
+- **N5:** the `Unsupported` gate ran after reassembly, so a transfer begun while unsupported
+  could complete after support was enabled. The gate now runs before reassembly, and
+  `set_host_capabilities` discards pending transfers when support is turned off.
+- **N6 (accepted):** XTGETTCAP answers each name separately, like kitty, so two invalid names
+  give two identical bare replies. That matches kitty's per-name behaviour.
+- **N7 (accepted, recorded in GAPS):** in S8C1T mode a UTF-8 title reply can contain bytes in
+  0x80–0x9F. This predates Task 130 and is niche.
+- **N8:** a cosmetic doc wrap in `window_ops.rs`. The `MASTER_PLAN.md` mention of
+  `write_to_pty` / `pty_write_tx` is a historical v0.11.0 dependency note and stays.
+
+### 130 Orchestrator re-review (2026-10-10)
+
+The maintainer found that 130.2–130.8 had been committed after a partial review: diffs read
+truncated, new untracked files never opened, verification steps taken on trust. Every
+commit was then re-read in full. Results:
+
+- **130.2:** pass. One gap, R2a: no test pins that an _incomplete_ inner tmux sequence is
+  discarded by the fresh parser instead of leaking into the outer stream.
+- **130.3:** pass. The 33 `ReportMode` diffs were checked mechanically; every change is the
+  `ESC [` removal or its rustfmt re-wrap.
+- **130.4:** pass. The `apply_new_config` broadcast has no test, as no existing broadcast does:
+  there is no `FreminalGui` test harness, and extracting a helper only to test it is what
+  `freminal-extend-or-extract` forbids. Accepted.
+- **130.5:** pass.
+- **130.6:** pass, but surfaced 130.C3.
+- **130.7:** pass, but surfaced 130.C4, plus R7: stale comments that still route `p=?` to
+  the GUI (`Osc99Control` doc in `notifications.rs`, `osc99_controls` doc in
+  `frame_drain.rs`).
+- **130.8:** three findings:
+  - R8a: `handle_window_manipulation` takes both `reply_tx: &Sender` and
+    `reply_handle: &Arc<Sender>` for the same channel; keep only the `Arc`.
+  - R8b: the new tests exercise `std`'s `Arc`/`Weak`, not freminal; add a test that the
+    handles `handle_window_manipulation` collects stop upgrading once the pane's handles drop.
+  - R8c: an over-long doc line in `show_system_osc99`.
+
+R2a, R7 and R8a–c are fixed with 130.C2 and 130.C3 before the adversarial review.
+
+---
+
+## Task 131 — Screen-Scoped State & Reset Lifecycle
+
+### 131 Summary
+
+Give per-screen state one mechanism. Make the three alternate-screen modes behave as xterm
+and Ghostty do. Make RIS and DECSTR reset an explicit, compiler-checked table instead of two
+hand-maintained lists. Activated and decomposed on 2026-10-10 against `2862acb9`.
+
+### 131 Activation recon (2026-10-10)
+
+- **`?47`, `?1047` and `?1049` are one code path.**
+  - `?47` and `?1047` parse to `Mode::AltScreen47`.
+  - All three reach `handle_enter_alternate` / `handle_leave_alternate`.
+  - Every entry saves the cursor, installs a blank alternate store and homes the cursor
+    (twice: `CursorState::default()`, then `reset_scroll_region_to_full`).
+  - Every leave drops the alternate rows and images and restores the primary cursor.
+  - DECRQM for `?1047` reports `?47`.
+- **B15 is confirmed.** `Buffer::enter_alternate` is idempotent; `handle_enter_alternate` is
+  not. A second `?1049h` moves the alternate keyboard stack over the parked main stack, and
+  the main stack is lost.
+- **Handler state that should be per-screen but is global.**
+  - `virtual_placements` is never touched on a switch.
+  - `real_placements` is filtered on leave only.
+  - Kitty `d=a`/`d=A` clears both screens' placements.
+  - `saved_character_replace` (part of DECSC) is a single slot.
+- **The buffer's DECSC slot is cloned on entry**, so the alternate screen inherits it, and
+  alternate-side saves are discarded on leave. The scroll region is swapped per screen.
+- **RIS misses a lot.**
+  - Transfer state: `kitty_transfer`, iTerm2 `multipart_state`.
+  - Modes: `insert_mode`, `nrc_mode`, `reverse_wrap`, `xt_rev_wrap2`, `vt52_mode`,
+    `s8c1t_mode` (the parser is reset but the handler mirror is not),
+    `in_band_resize_enabled`, `sixel_display_mode`, `private_color_registers`,
+    `sixel_shared_palette`, `allow_alt_screen`.
+  - Exact semantics are pinned by 131.1.
+- **DECSTR** documents that it deliberately leaves the kitty keyboard stack.
+
+#### Reference behaviour (read from source, 2026-10-10)
+
+| Behaviour                          | xterm `charproc.c` | Ghostty `Terminal.zig` | WezTerm `terminalstate` | kitty `screen.c`    | freminal today |
+| ---------------------------------- | ------------------ | ---------------------- | ----------------------- | ------------------- | -------------- |
+| 47/1047 enter: save, clear?        | no, no             | no, no                 | no, no                  | no, no              | yes, yes       |
+| 1047 leave clears alt              | yes                | yes                    | yes                     | no                  | (always new)   |
+| 1049 enter: save, switch, clear    | yes                | yes                    | yes                     | yes                 | yes            |
+| 1049 leave: switch, restore        | yes                | yes                    | yes                     | yes                 | yes            |
+| Cursor position across a switch    | kept               | kept (copied)          | kept (1049: homed)      | homed, reset        | homed          |
+| 2nd `1049h` while in alt           | save + clear       | save + clear           | no-op                   | no-op               | no-op          |
+| `1049l` while on primary           | DECRC              | DECRC                  | no-op                   | no-op               | no-op          |
+| Alt contents persist across uses   | yes                | yes                    | yes                     | yes                 | no             |
+| DECSC slot                         | per screen         | per screen             | per screen              | per screen          | shared-ish     |
+| Scroll margins                     | shared             | shared                 | shared                  | shared              | per screen     |
+| Kitty keyboard stack               | –                  | –                      | –                       | per screen, persist | swapped, fresh |
+| DECSTR clears kitty keyboard flags | –                  | –                      | –                       | yes (both)          | no             |
+
+### 131 Decisions (maintainer, 2026-10-10)
+
+- **Follow the consensus of xterm, Ghostty, WezTerm and kitty.** Where they split 2–2, follow
+  xterm and Ghostty: xterm defines these modes, and Ghostty matches it deliberately.
+  Concretely:
+  - **`?47`:** switch screens only. No save, no clear; the cursor position and attributes
+    are kept.
+  - **`?1047`:** on enter, the same as `?47`. On leave, if on the alternate screen, clear it,
+    then switch to the primary.
+  - **`?1049` enter:**
+    1. DECSC on the current screen; when already in alt this saves into the **alt** slot;
+    2. switch to alternate (a no-op if already there);
+    3. clear the alternate screen.
+
+    The cursor position is kept. A second `?1049h` therefore re-saves and clears, and the
+    main screen's save is untouched.
+
+  - **`?1049` leave:** switch to primary (a no-op if already there), then DECRC
+    unconditionally.
+  - **Alternate contents persist** across sessions. Only `?1049`-enter and `?1047`-leave
+    clear them.
+  - **The DECSC slot is per screen.** The scroll margins are **shared** and are not touched
+    by a switch.
+- **DECSTR follows kitty for kitty state.** It clears both kitty keyboard stacks. Tasks 139
+  and 103 do the same for pointer-shape stacks and extra cursors. Non-kitty state keeps the
+  VT510 Table 5-9 behaviour.
+- **The alternate kitty keyboard stack persists** between alternate sessions, as kitty's
+  `alt_key_encoding_flags` does.
+- **tmux CSI unification** was absorbed into Task 130 (130.2).
+
+### 131 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **`ScreenScoped<T> { primary: T, alternate: T }`** has no notion of an "active" screen. It
+  is indexed with `get(BufferType)` / `get_mut(BufferType)`, and the handler passes
+  `self.buffer.kind()`. The buffer is the single source of truth for which screen is active,
+  so enter and leave cannot drift and are idempotent by construction; that fixes B15
+  structurally. Module: `terminal_handler/screen_scoped.rs`.
+- **Buffer API.** `enter_alternate(scroll_offset)` and `leave_alternate() -> usize` are
+  replaced by:
+  - `switch_to_alternate()` and `switch_to_primary()`, which are idempotent, keep the cursor
+    position and attributes, and leave margins alone;
+  - `clear_alternate_screen()`, valid only while alt is active.
+
+  The `scroll_offset` round trip is dead (its only caller passes `0` and discards the
+  result) and is deleted.
+
+- **Parked screens.**
+  - `SavedPrimaryState` becomes
+    `ParkedScreen { rows, reflow_anchor, saved_cursor, image_store, image_cell_count, blocks, next_block_id }`.
+  - The `Buffer` holds `parked_primary: Option<ParkedScreen>` and
+    `parked_alternate: Option<ParkedScreen>`.
+  - Invariant: exactly the inactive screen may be parked. The alternate may also be absent
+    (never entered, or reset).
+  - Margins are no longer parked. The cursor is not restored from a parked screen either;
+    it keeps its screen position across a switch.
+  - `ParkedScreen` does carry `reflow_anchor: CursorState`: the cursor the screen had when it
+    was parked, used **only** to anchor reflow and height-shrink trimming while a parked
+    screen is resized (`resize_saved_primary` / `resize_parked_alternate` feed it to the
+    temporary buffer). It is never restored. Without it, a home cursor would make a shrink
+    trim the wrong rows.
+  - The image store is parked with `mem::take`, not cloned.
+- **The cursor across a switch** keeps its **screen** coordinates:
+  1. `cursor_screen_pos()` on the source screen;
+  2. `visible_window_start(0) + y` on the target;
+  3. push `ScrollFill` rows if the target store is shorter, as `restore_cursor` does.
+
+  The x position and all cursor fields are carried unchanged.
+
+- **Clearing** installs a fresh alternate `RowStore` at the old store's `next_number()`.
+  Row numbers stay unique, so no mark, placement or horizon can alias the blank rows. Clearing
+  also empties the alternate image store and drops alternate-namespace marks. The handler
+  drops the alternate screen's placement maps on clear. Blank cells were first
+  default-attributed; **superseded by adversarial-review finding 15:** the clear applies the
+  current background (BCE), as xterm and Ghostty do.
+- **Marks.** Alternate-namespace prompt marks and command blocks are still dropped on every
+  leave (`drop_alternate_marks`). The GUI never shows gutters on the alternate screen, and
+  keeping them would resurrect stale marks.
+- **Resizing a parked alternate is eager.** `set_size` on the primary also resizes a parked
+  alternate store, through `resize_parked_alternate`, which mirrors `resize_saved_primary`.
+  It uses a temporary `Buffer` with `kind: Alternate`, so the alternate no-reflow branch runs.
+  That keeps the invariant that every store matches the buffer's dimensions. The handler
+  prunes the parked alternate placement map against the store's new base afterwards.
+- **Kitty placements are per screen.** `virtual_placements` and `real_placements` become
+  `ScreenScoped`.
+  - `d=a`/`d=A` and the pruners act on the active screen only, as kitty's per-screen
+    `grman` does.
+  - `kitty_transfer` stays global: it is stream state, not screen state. RIS clears it.
+- **The reset table is exhaustive destructuring.**
+  - `TerminalHandler::reset(kind: ResetKind)` destructures `self` with no `..`.
+  - Every field is either reset (with the per-kind rule) or bound to `_` with a comment
+    giving the reason it survives.
+  - Adding a field without classifying it is then a compile error. That is the explicit
+    reset table the stub asked for.
+  - `ResetKind { Hard, Soft }` lives in the same module.
+  - `full_reset` and `soft_reset` become thin wrappers.
+- **`ResetKind` stays handler-internal** (`pub(crate)`): nothing outside the emulator crate
+  needs it.
+
+### 131 Subtasks
+
+The verification, standing prohibitions and stop condition are as for Task 130. Order:
+
+1. 131.1, the audit; its findings fill the reset table.
+2. 131.2, then 131.3.
+3. 131.4.
+4. 131.5, then 131.6, then 131.7.
+5. 131.C4, then 131.8 together with 131.C3.
+6. The cleanup entries 131.C1 and 131.C2.
+7. 131.9, then 131.10.
+
+#### 131.1 — RIS / DECSTR semantics audit (READ-ONLY)
+
+Scope: read-only.
+
+- `TerminalHandler` and `Buffer` fields, and the `TerminalState` RIS block;
+- xterm `charproc.c` (`ReallyReset`, `VTReset`) and `cursor.c`;
+- kitty `screen.c` (`do_screen_reset`).
+
+What: for every `TerminalHandler` field and every `Buffer` field, give:
+
+- its RIS behaviour;
+- its DECSTR behaviour;
+- the source line in xterm (or kitty, for kitty-protocol state) that justifies it;
+- what freminal does today.
+
+Flag every divergence.
+
+Deliverable: the table, which the orchestrator copies into "131 Reset table" below.
+
+Prohibitions: do NOT edit files.
+
+#### 131.2 — `ScreenScoped<T>`
+
+Scope: new `freminal-terminal-emulator/src/terminal_handler/screen_scoped.rs`, plus the
+module declaration in `terminal_handler/mod.rs`.
+
+What:
+
+- `pub(crate) struct ScreenScoped<T> { primary: T, alternate: T }` with these methods:
+  - `new(primary, alternate)`;
+  - `get(&self, BufferType) -> &T`;
+  - `get_mut(&mut self, BufferType) -> &mut T`;
+  - `both_mut(&mut self) -> [&mut T; 2]`.
+- Derive `Debug`, `Clone`, `Default` where `T` allows.
+- Add `pub fn kind(&self) -> BufferType` to `Buffer` if it does not exist. This is a
+  one-line addition in `freminal-buffer/src/buffer/mod.rs`, added to scope.
+- If clippy flags the type as unused, gate it with
+  `#[cfg_attr(not(test), expect(dead_code))]` plus a `TODO(131.3)` comment.
+
+Deliverable: the type, with unit tests for indexing and independence.
+
+#### 131.3 — Kitty keyboard stack per screen (fixes B15)
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs`:
+  - fields;
+  - the four keyboard arms;
+  - `kitty_keyboard_flags`;
+  - `full_reset` / `soft_reset`;
+  - the `soft_reset` doc comment;
+- `freminal-terminal-emulator/src/terminal_handler/scroll_ops.rs` (delete the hand swap);
+- new `freminal-terminal-emulator/src/terminal_handler/kitty_keyboard_stack.rs`;
+- `freminal-terminal-emulator/tests/kitty_keyboard_stack.rs`.
+
+What:
+
+- **`KittyKeyboardStack`** wraps `Vec<u32>`. Its methods (`current`, `push`, `pop`, `set`,
+  `clear`) carry exactly today's arm logic, including `MAX_STACK_DEPTH` eviction and the
+  set-on-empty push.
+- **Fields.** `kitty_keyboard_stack: ScreenScoped<KittyKeyboardStack>` replaces both old
+  fields, and `kitty_keyboard_flags()` reads the active one.
+- **Switching** no longer touches the stacks. The alternate stack persists between
+  sessions.
+- **RIS and DECSTR** clear both stacks. Update the `soft_reset` doc comment.
+
+Deliverable:
+
+- the change;
+- tests:
+  - B15: `?1049h`, `CSI >5u`, `?1049h`, `?1049l` restores the main stack;
+  - alternate persistence: push in alt, leave, re-enter, and the flags are still there;
+  - main unaffected by alt pushes;
+  - DECSTR clears both;
+  - RIS clears both;
+  - the existing `alternate_screen_gets_independent_stack` updated to the persistence
+    semantics.
+
+Prohibitions: do NOT change the `KittyKeyboardQuery` reply (framed by 130.3).
+
+#### 131.4 — Distinguish `?1047` from `?47`
+
+Scope:
+
+- `freminal-common/src/buffer_states/mode.rs`;
+- `freminal-common/src/buffer_states/modes/xtextscrn.rs` (the new `AltScreen1047` type);
+- their tests;
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (the mode arms: route
+  `AltScreen1047` exactly as `AltScreen47` for now; the DECRQM arm);
+- `freminal-terminal-emulator/src/state/internal.rs` (the `sync_mode` handler-owned list);
+- `freminal-terminal-emulator/tests/modes_exhaustive.rs` and `tests/modes_unit.rs` if they
+  enumerate modes.
+
+What:
+
+- `?1047` parses to `Mode::AltScreen1047(AltScreen1047)`, with the same `Alternate` /
+  `Primary` / `Query` shape as `AltScreen47`.
+- DECRQM for `?1047` reports `?1047;Ps$y`. Set means the alternate screen is active, as for
+  47 and 1049 (xterm `DP_X_ALTBUF`).
+- Behaviour is otherwise unchanged in this subtask.
+
+Deliverable: parse, display and report tests, and a DECRQM `?1047` test.
+
+#### 131.5 — Buffer: parked screens and the switch primitives
+
+Scope:
+
+- `freminal-buffer/src/buffer/mod.rs` (`ParkedScreen`, fields, invariants, tests);
+- `freminal-buffer/src/buffer/resize_and_alt.rs`;
+- `freminal-buffer/src/buffer/lifecycle.rs` (`full_reset`, `debug_assert_invariants`);
+- `freminal-buffer/src/buffer/cursor.rs` (only if a helper is needed);
+- `freminal-buffer/src/buffer/scroll.rs` (only so that `reset_scroll_region_to_full` is no
+  longer called on a switch);
+- buffer tests that pin the old semantics:
+  - `freminal-buffer/src/buffer/*_tests.rs`;
+  - `freminal-buffer/tests/scroll_region_edge_cases.rs`;
+- `freminal-buffer/benches/buffer_row_bench.rs` (`bench_alternate_screen_switch`: add a
+  re-entry case);
+- `freminal-terminal-emulator/src/terminal_handler/scroll_ops.rs`: mechanical call-site
+  update only. Enter becomes `save_cursor` + `switch_to_alternate` + `clear_alternate_screen`;
+  leave becomes `switch_to_primary` + `restore_cursor`. This is the `?1049` shape for every
+  mode until 131.6;
+- tests in `freminal-terminal-emulator` that call `enter_alternate` / `leave_alternate`
+  directly.
+
+What: implement the "Buffer API", "Parked screens", "cursor across a switch", "Clearing",
+"Marks" and "Resizing a parked alternate" decisions above.
+
+- **`full_reset`** drops both parked screens and advances `next_alt_base` past a parked
+  alternate's `next_number()`.
+- **Invariants.** `debug_assert_invariants` asserts:
+  - the parked/active exclusivity;
+  - parked store dimensions;
+  - `image_cell_count` per store.
+
+Deliverable:
+
+- the change;
+- buffer tests:
+  - alternate rows and images persist across leave/enter;
+  - `clear_alternate_screen` gives blank rows with unique, monotonic row numbers;
+  - the cursor screen position is kept both ways, including a 1-row primary;
+  - margins are untouched by a switch;
+  - the DECSC slot is per screen (save on primary, switch, save on alt, switch back, and
+    restore gives the primary position);
+  - resizing on the primary resizes the parked alternate (width clip and height
+    shrink/grow);
+  - `full_reset` from either screen keeps both namespaces monotonic;
+  - switches are idempotent.
+- Every test that pinned the old semantics is updated, and the report lists each with the
+  reason.
+
+Benchmarks:
+
+- `bench_alternate_screen_switch` (buffer) and `bench_alt_screen_transition_e2e` (emulator),
+  before and after.
+- The orchestrator captures the baseline as `before_131_5`.
+- Add an `alternate_reenter` case for the persisted re-entry path.
+
+Verification: as above, plus `cargo bench --no-run --all`.
+
+Prohibitions: do NOT implement the per-mode semantics in the handler (131.6); do NOT touch
+the placement maps (131.7).
+
+#### 131.6 — Handler: per-mode alternate-screen semantics and a per-screen DECSC charset
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/scroll_ops.rs`;
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (the mode arms and the
+  `saved_character_replace` field);
+- `freminal-terminal-emulator/src/terminal_handler/cursor_ops.rs` (DECSC / DECRC use the
+  per-screen charset slot);
+- handler tests;
+- `freminal-terminal-emulator/tests/terminal_handler_integration.rs` (tests that pin the old
+  semantics).
+
+What:
+
+- Implement the maintainer decisions for `?47`, `?1047` and `?1049` exactly as written.
+  Replace `handle_enter_alternate` / `handle_leave_alternate` with
+  `fn handle_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction)`,
+  where:
+  - `AltScreenMode` is `{ Legacy47, Clearing1047, SaveClear1049 }`;
+  - `AltScreenAction` is `{ Enter, Leave }`;
+  - both are private enums.
+- `?1046` gating is unchanged.
+- `saved_character_replace` becomes `ScreenScoped<Option<DecSpecialGraphics>>` and follows the
+  buffer's DECSC slot.
+
+Deliverable: handler tests for each mode and action, covering:
+
+- cursor kept;
+- clear or no clear;
+- a second `?1049h` re-saves into the alternate slot and clears;
+- `?1049l` on the primary performs DECRC;
+- `?47` leave does not restore;
+- `?1047` leave clears the alternate (re-entering with `?47` shows blank);
+- `?47` re-entry shows the old alternate content.
+
+Prohibitions: do NOT change the placement maps (131.7).
+
+#### 131.7 — Kitty placement maps per screen
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (fields, placement resolution,
+  `visible_image_placements_extended`, `inject_virtual_parent_relatives`);
+- `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (every
+  `virtual_placements` / `real_placements` access, `d=a`/`d=A`, the pruners, the reflow
+  remap);
+- `freminal-terminal-emulator/src/terminal_handler/scroll_ops.rs` (clear hook; delete the
+  leave filter);
+- graphics tests.
+
+What:
+
+- Both maps become `ScreenScoped` and are accessed through the active screen.
+- `clear_alternate_screen` is paired with clearing the alternate maps.
+- After a resize, the parked alternate map is pruned against the parked store; add a buffer
+  getter for the parked alternate's base if needed (added to scope:
+  `freminal-buffer/src/buffer/mod.rs`, getter only).
+- `placement_prune_base` follows the active screen.
+- Delete the old leave filter, and update
+  `leaving_the_alternate_screen_drops_alt_placements_only` to the persistence semantics.
+
+Deliverable:
+
+- tests:
+  - alternate placements persist across `?47` leave/enter;
+  - `?1049` enter clears them;
+  - `d=a` on the alternate leaves primary placements alone;
+  - a virtual placement created on the alternate is not visible on the primary;
+  - reflow on the primary does not corrupt parked alternate placements.
+
+#### 131.8 — The exhaustive reset table
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/mod.rs` (`full_reset`, `soft_reset`,
+  a new `reset`);
+- new `freminal-terminal-emulator/src/terminal_handler/reset.rs` (`ResetKind` and `reset`);
+- `freminal-terminal-emulator/src/terminal_handler/graphics_iterm2.rs` (only if a reset
+  helper is needed);
+- `freminal-terminal-emulator/tests/terminal_handler_integration.rs` (RIS/DECSTR tests).
+
+What:
+
+- Implement `reset(kind)` as exhaustive destructuring, following the "131 Reset table"
+  below, which comes from 131.1.
+- Fix every RIS divergence the table marks "fix".
+- `full_reset` = `reset(Hard)` plus the existing DECCOLM restore sequence.
+- `soft_reset` = `reset(Soft)` plus the existing cursor save/restore choreography.
+
+Deliverable:
+
+- the change;
+- one RIS test per newly reset field, failing before the change;
+- DECSTR tests for any changed field.
+
+#### 131.9 — End-to-end alternate-screen suite
+
+Scope: new `freminal-terminal-emulator/tests/alt_screen_lifecycle.rs`.
+
+What: an e2e suite through `handle_incoming_data` and `build_snapshot`. It covers:
+
+- `?47`, `?1047`, `?1049`: each enter/leave/double-enter/double-leave/query;
+- disallowed (`?1046 l`);
+- mixed modes (enter 47, leave 1049);
+- cross-screen state: keyboard stack, placements, DECSC, margins, URL and selection snapshot
+  fields;
+- RIS from the alternate screen;
+- DECSTR on the alternate screen.
+
+Each assertion is on observable snapshot/reply state.
+
+#### 131.10 — Escape-sequence dual-doc and reference update
+
+Scope:
+
+- `Documents/ESCAPE_SEQUENCE_COVERAGE.md`;
+- `Documents/ESCAPE_SEQUENCE_GAPS.md`;
+- `Documents/KITTY_PROTOCOL_REFERENCE.md` (the keyboard stack section).
+
+What:
+
+- Record the `?47`/`?1047`/`?1049` rows, DECSC per screen, DECSTR and RIS changes, and the
+  per-screen kitty state.
+- Refresh "Last updated" in all three documents.
+
+Verification: the pre-commit markdownlint and prettier hooks pass on the three files.
+
+### 131 Status notes
+
+- **131.1 — Complete (2026-10-10).** Audit table folded into "131 Reset table"; surfaced
+  131.C3 and 131.C4.
+- **131.2 — Complete (2026-10-10), commit `ed74fa74`.** `ScreenScoped<T>` and `Buffer::kind`.
+- **131.3 — Complete (2026-10-10), commit `aa707bb1`.**
+  - `KittyKeyboardStack` per screen fixes B15.
+  - The alternate stack persists between sessions.
+  - RIS and DECSTR clear both stacks.
+- **131.4 — Complete (2026-10-10), commit `9157cb76`.** `?1047` is `Mode::AltScreen1047`, and
+  DECRQM reports 1047. Two test files outside the stated scope
+  (`mode_dispatch_tests.rs`, `terminal_handler_integration.rs`) needed mechanical assertion
+  updates that the parse split forced; accepted.
+- **131.5 — Complete (2026-10-10), commit `b320677d`.**
+  - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
+  - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
+    position and leave the margins alone. `clear_alternate_screen` installs a fresh store
+    at the old store's `next_number`.
+  - Parked screens are resized eagerly. `full_reset` keeps both namespaces monotonic.
+  - Every test that pinned the old semantics was updated (the list is in the commit), and
+    new buffer tests were added in `screen_switch_tests.rs`.
+  - Accepted nit: a first-ever entry builds a blank store and then the clear builds another.
+    That skips `height` row numbers in a 63-bit space and costs one allocation.
+  - **Benchmark finding:** `bench_alternate_screen_switch` dropped the buffer inside the
+    timed closure, so its old figures (~37 µs) measured deallocation, not the switch. Each
+    routine now returns the buffer.
+  - Against `before_131_5`, measured in the old shape before that bench fix, no change was
+    statistically significant (every p > 0.05; medians moved +1.7% for `enter_alternate`
+    and −16% for `leave_alternate`, both within noise). Because the old shape measured
+    deallocation and the switch API itself changed, **no valid pre-change baseline exists**
+    for the corrected bench shape (adversarial-review finding 8).
+  - Corrected measurements: `enter_alternate` ~1.0 µs, `leave_alternate` ~0.16 µs,
+    `alternate_reenter` ~0.16 µs. `bench_alt_screen_transition_e2e`: no significant change
+    (~16–18 µs).
+  - The stale `handle_leave_alternate` comment noted here was removed by 131.7.
+- **131.6 — Complete (2026-10-10), commit `91a663f8`.**
+  - `handle_alternate_screen(mode, action)` implements the `?47` / `?1047` / `?1049`
+    decisions exactly.
+  - The DECSC charset slot is `ScreenScoped`.
+  - New tests in `tests/alt_screen_modes.rs`.
+  - The DECSTR active-screen charset slot has no dedicated test yet; 131.8 adds one.
+- **131.7 — Complete (2026-10-10), commit `70b9bfcb`.**
+  - The virtual and real placement maps and the prune base are `ScreenScoped`, and every
+    operation acts on the active screen.
+  - The reflow remap translates the primary map whichever screen is active, and the parked
+    map is pruned against `Buffer::parked_row_span`.
+  - A clear empties the alternate maps; a switch touches neither.
+  - Surfaced 131.C5.
+- **131.8 — Complete (2026-10-10), commits `998ee131` (131.8a, handler) and `4ea250fc` (131.8b,
+  `TerminalState` and 131.C3).**
+  - `TerminalHandler::reset(ResetKind)` destructures the handler with no `..`, so every field
+    is classified at compile time.
+  - RIS and DECSTR follow the reset table. The new `configured_cursor_visual_style` is the
+    baseline RIS and DECSTR restore.
+  - RIS in `TerminalState` keeps the parser's in-flight sequence, the UTF-8 tail, the theme
+    state and queued commands.
+  - The orchestrator deleted the now-unused `set_cursor_visual_style` and pointed the #406
+    regression test at the configured-style seam.
+- **Cleanups:**
+  - 131.C1 and 131.C2: `57b657b6`. DECSC/DECRC save SGR and DECOM; DECRC without a save homes
+    with defaults. The orchestrator added that an open OSC 8 hyperlink is not part of the
+    save (xterm, kitty and Ghostty), with a test.
+  - 131.C3: `4ea250fc`.
+  - 131.C4: `1d7f22a3`.
+  - 131.C5: `193fd200`.
+- **131.9 — Complete (2026-10-10), commit `4071e616`.** 43 end-to-end tests through
+  `build_snapshot`.
+- **131.10 — Complete (2026-10-10), commit `9d0dae4d`.** COVERAGE, GAPS and the kitty reference.
+
+### 131 Adversarial review (2026-10-10)
+
+The adversarial review of `b6230618..b115cdce` found no blocker or major issue and 19
+minor/nit/uncertain findings. Disposition, all addressed before merge:
+
+1. **DECSCUSR `0` used the compiled default, not the configured style.** kitty (`screen.c`
+   `screen_set_cursor`: `mode 0` → `NO_CURSOR_SHAPE`), Ghostty (`.default` →
+   `default_style`) and WezTerm (`CursorStyle::Default`) use the configured style; xterm
+   maps `0` to a blinking block (its configured style is `Ps 7`). Consensus: `CSI 0 SP q`
+   restores the configured style, and `1` stays a blinking block. **Fixed.**
+2. **An open OSC 8 hyperlink leaked across a screen switch.** kitty
+   (`screen_toggle_screen_buffer` sets `active_hyperlink_id = 0`) and Ghostty
+   (`switchScreen` ends the hyperlink) end it. **Fixed:** a real switch ends the live
+   hyperlink.
+3. **Image placement on the alternate screen scrolls the whole screen, ignoring DECSTBM.**
+   This is consistent with the primary path, which pushes rows into scrollback regardless
+   of margins. **Routed to Task 136**, whose stub owns the cursor-after-placement and
+   margin-aware scroll rules. Recorded in the 131.C5 entry.
+4. **A parked alternate keeps its image store and placements indefinitely** under `?47`
+   use. This is the decided persistence (kitty keeps its alternate graphics manager across
+   toggles too). **Documented** in the kitty reference.
+5. **131.9 lacked the URL / selection snapshot coverage.** **Added** a URL test. Selection is
+   GUI-side: alternate rows are in a different row namespace, so a primary selection becomes
+   `Foreign` and is cleared (Task 125).
+6. **RIS tests were missing** for the handler's DECANM mirror and the sixel shared palette.
+   **Added.**
+7. **`debug_assert_parked_screens` was thinner than planned.** **Extended:** parked row
+   widths, row namespace, `reflow_anchor` bound, and parked block `live_rows`.
+8. **The benchmark comparison is not like-for-like.** The old bench measured deallocation,
+   and the switch API changed, so no valid pre-change baseline exists in the new shape.
+   **Stated** in the status note, and its "±2% / −16%" contradiction corrected.
+9. **Stale docs:** `restore_cursor` and `SavedCursor` (per-screen slots) and the `soft_reset`
+   "Saved character set" section. **Fixed.**
+10. **Other stale text** (`?1047` test comment, `AltScreen1047` doc, the `kind` field doc,
+    plan-note order and counts, the reset-table note on `placement_prune_base`).
+    **Fixed.** `resize_saved_primary` keeps its name, as planned.
+11. **A `bool` closure parameter in `reset_table.rs`.** **Fixed.**
+12. **`ResetKind` and `KittyKeyboardStack` are `pub`, not `pub(crate)`.** **Accepted:** both
+    live in private modules, and clippy's `redundant_pub_crate` (denied) rejects
+    `pub(crate)` there.
+13. **`drop_alternate_marks` is O(marks) on every clear and switch.** **Fixed** with an O(1)
+    guard where the mark lists are ordered.
+14. **A first-ever entry builds two stores.** Already accepted (131.5 status).
+15. **The alternate clear used default attributes.** xterm (`ClearScreen`, BCE) and Ghostty
+    (`eraseDisplay` with the cursor background) apply the current background; kitty and
+    WezTerm use the default. A 2–2 split, so the maintainer's tie-break (xterm + Ghostty)
+    applies. **Fixed:** the clear is BCE. This supersedes the 131 decision bullet "BCE on
+    this clear is not changed".
+16. **`prev_placeholder` survived a screen switch.** **Fixed:** a real switch clears it.
+17. **Bytes after a RIS in the same read are parsed under the pre-RIS DECANM/S8C1T mode.**
+    This predates Task 131 and is the same limit as any mode change mid-read. **Recorded**
+    as a GAPS paragraph ("Mode changes take effect per read"), and the COVERAGE RIS row
+    qualified.
+18. **Marks on popped padding rows of a parked primary.** **Accepted:** marks sit on the
+    cursor row, and a padding pop never removes the cursor row, so this is unreachable.
+19. **Prettier reflows whole tables in COVERAGE.** **Accepted:** the hook realigns tables, so
+    this is unavoidable.
+
+### 131 Reset table
+
+From the 131.1 audit (2026-10-10). The references are:
+
+- xterm `charproc.c` `ReallyReset`: the `if (full)` block is RIS and the `else` block is
+  DECSTR; the lines above it apply to both.
+- kitty `screen.c` `do_screen_reset`, for kitty-protocol state.
+- Ghostty `Terminal.zig` `softReset` and WezTerm `Device::SoftReset`, as tie-breakers.
+
+The **maintainer rule** is to follow the consensus. Where they split, xterm wins for non-kitty
+state and kitty wins for kitty state. Only rows that change behaviour, or that were in doubt,
+are listed. Every other field keeps today's behaviour, and 131.8's exhaustive destructuring
+records each one with its reason.
+
+| State                                                                 | RIS                                              | DECSTR             | Source                               | Today                              |
+| --------------------------------------------------------------------- | ------------------------------------------------ | ------------------ | ------------------------------------ | ---------------------------------- |
+| DECCOLM restore (`pre_deccolm_width`)                                 | restore **only if** DECCOLM changed the width    | –                  | xterm 14534                          | always forces 80 cols + PTY resize |
+| `cursor_visual_style`                                                 | configured default                               | configured default | xterm 14379-83, Ghostty              | compiled default / untouched       |
+| `insert_mode`, `nrc_mode`                                             | off                                              | off (unchanged)    | xterm 14510                          | not reset on RIS                   |
+| `reverse_wrap`, `xt_rev_wrap2`                                        | default                                          | default            | xterm 14510/14549, Ghostty, WezTerm  | never reset                        |
+| `s8c1t_mode`, `vt52_mode` (handler mirrors)                           | 7-bit / ANSI                                     | –                  | xterm 14500                          | not reset; diverge from parser     |
+| `sixel_display_mode`, `private_color_registers`, sixel shared palette | default                                          | –                  | xterm 14474-87                       | not reset                          |
+| `in_band_resize_enabled`                                              | off                                              | –                  | convention                           | not reset                          |
+| `kitty_transfer`, `multipart_state`                                   | idle / none                                      | –                  | plan decision                        | not reset                          |
+| `modify_other_keys_level`                                             | 0                                                | **0**              | xterm 14420, Ghostty, WezTerm        | DECSTR keeps it                    |
+| `palette` (OSC 4)                                                     | reset                                            | **reset**          | xterm 14404, Ghostty, kitty          | DECSTR keeps it                    |
+| DECAWM                                                                | on                                               | **on**             | xterm 14549, Ghostty, WezTerm, kitty | DECSTR sets off                    |
+| kitty keyboard stacks                                                 | cleared                                          | **cleared**        | kitty 226-227                        | DECSTR keeps them                  |
+| `pointer_shape`                                                       | default                                          | **default**        | kitty 216-217                        | DECSTR keeps it                    |
+| `window_commands`, `pending_command_events`                           | **kept** (already-emitted events in transit)     | kept               | freminal-internal                    | cleared on RIS                     |
+| OSC 7 cwd, `$HISTFILE`                                                | **kept** (maintainer)                            | kept               | describes the process                | cleared on RIS                     |
+| `TerminalModes::theme_mode`, `theming`                                | **kept** (config and OS state)                   | kept               | freminal-internal                    | wiped by `TerminalModes::default`  |
+| parser state, `leftover_data`                                         | reset only the parser's `vt52_mode`/`s8c1t_mode` | –                  | the chunk is already parsed          | parser replaced, leftover dropped  |
+| DECSC slot                                                            | empty slot behaves as "home, defaults" (131.C2)  | home (unchanged)   | xterm 14546-47, Ghostty              | `None` (DECRC no-op)               |
+
+Notes:
+
+- The DECSTR DECAWM row follows xterm, Ghostty, WezTerm and kitty against the literal VT510
+  Table 5-9. xterm's own comment records the deviation.
+- RIS keeps the colour overrides it resets today (OSC 10/11/12: kitty, Ghostty and WezTerm
+  reset them). DECSTR keeps them (xterm).
+- The pure transport and cache fields (`write_tx`, `placement_prune_base` — kept on DECSTR,
+  re-based on RIS together with the cleared maps —
+  `row_epoch_counter`, `cell_pixel_*`, `theme`, `tmux_passthrough_queue`) are kept, as is
+  `allow_alt_screen` (xterm does not reset it).
+- Task 130's `host_capabilities` (config and platform facts seeded by the GUI and updated by
+  `InputEvent::HostCapabilitiesChange`) is kept by both: it describes the host, not the
+  terminal. Classified when Task 131 merged onto Task 130.
+
+### 131 Cleanup entries
+
+#### 131.C1 — DECSC / DECRC do not save SGR or DECOM
+
+- **Surfaced:** activation recon (2026-10-10). Predates Task 131.
+- **Impact:**
+  - `handle_save_cursor` saves the buffer `CursorState`, whose attribute fields have no
+    readers, plus the charset.
+  - The live SGR state (`current_format` / `Buffer::current_tag`) is not saved or
+    restored.
+  - xterm `CursorSave2` / `CursorRestoreFlags` (`cursor.c`) save the SGR attributes and
+    colours, DECOM, the selective-erase attribute, the charsets and the wrap flag.
+  - `?1049` and DECSC/DECRC therefore lose SGR.
+- **Scope of fix:**
+  - `terminal_handler/cursor_ops.rs`;
+  - the buffer `SavedCursor` (`freminal-buffer/src/buffer/cursor.rs`);
+  - whatever owns `current_format`.
+- **Suggested approach:** reproduce with a test first. Save `current_format` and DECOM in the
+  per-screen slot next to the position; restore both.
+- **Verification:**
+  - `CSI 1;31m ESC 7 CSI 0m ESC 8 X` writes a bold red `X`;
+  - DECOM survives DECSC/DECRC.
+- **Scheduling:** after 131.6; resolved within Task 131.
+
+#### 131.C2 — DECRC without a prior DECSC is a no-op
+
+- **Surfaced:** activation recon (2026-10-10). Predates Task 131.
+- **Impact:**
+  - `Buffer::restore_cursor` does nothing when no cursor was saved.
+  - xterm (`CursorRestoreFlags` with `sc->saved == False`) and Ghostty (`restoreCursor`)
+    home the cursor, reset the attributes and reset the charsets.
+  - Under per-screen DECSC slots this is reachable on every first alternate session.
+- **Scope of fix:**
+  - `freminal-buffer/src/buffer/cursor.rs`;
+  - `terminal_handler/cursor_ops.rs`.
+- **Suggested approach:** treat an empty slot as a saved default cursor at home.
+- **Verification:** a DECRC-with-no-save test homes the cursor and resets SGR.
+- **Scheduling:** after 131.C1.
+
+#### 131.C3 — Dead `TerminalState` mirrors of handler state
+
+- **Surfaced:** 131.1 audit (2026-10-10). Predates Task 131.
+- **Impact:** three fields are written but never read in production. RIS resets them while
+  the authoritative handler copies survive, so they misdocument the reset behaviour.
+  - `TerminalState::cursor_visual_style` (the snapshot reads the handler's copy);
+  - `TerminalModes::reverse_wrap_around` (the authority is `TerminalHandler::reverse_wrap`);
+  - `TerminalModes::cursor_blinking` (the blink state lives in the handler's cursor style).
+- **Scope of fix:**
+  - `freminal-terminal-emulator/src/state/internal.rs`;
+  - `freminal-common/src/buffer_states/mode.rs` (`TerminalModes`);
+  - the tests that read the mirrors.
+- **Suggested approach:** delete the three mirrors and route any test reads to the handler.
+- **Verification:** `rg` finds no remaining reader; the suite passes.
+- **Scheduling:** with 131.8.
+
+#### 131.C4 — Reverse-wrap (`?45`) defaults to on, unlike xterm
+
+- **Surfaced:** 131.1 audit (2026-10-10). Predates Task 131.
+- **Impact:**
+  - `ReverseWrapAround::default()` is `WrapAround`, and its doc claims that matches xterm.
+  - It does not: xterm's `reverseWrap` resource defaults to false, Ghostty defaults off, and
+    WezTerm resets it to off.
+  - RIS and DECSTR reset the mode to its default after 131.8, so the default becomes
+    observable.
+- **Maintainer decision (2026-10-10):** change the default to off.
+- **Scope of fix:**
+  - `freminal-common/src/buffer_states/modes/reverse_wrap_around.rs` and its tests;
+  - tests that assume reverse wrap is on by default (`rg` for `ReverseWrapAround` and
+    reverse-wrap backspace tests);
+  - the DECRQM `?45` default expectation.
+- **Verification:**
+  - `CSI ? 45 $ p` on a fresh terminal reports reset (`2`);
+  - BS at column 0 does not wrap until `CSI ? 45 h`.
+- **Scheduling:** before 131.8.
+
+#### 131.C5 — Placing an image on the alternate screen's last row grows the store
+
+- **Surfaced:** 131.7 implementation (2026-10-10), reproduced by the orchestrator on the
+  integration branch before any Task 131 change, so it predates Task 131.
+- **Impact:**
+  - `Buffer::place_image` makes room below an image, and for the cursor after it, with
+    `push_row`, then trims only on the primary screen (`enforce_scrollback_limit`).
+  - On the alternate screen the store grows to `height + 1` rows. A debug build panics on
+    the "alternate buffer must have exactly `height` rows" invariant. A release build keeps
+    an oversized alternate store, which 131.5's parked-screen invariants assume cannot
+    happen.
+  - Reproduced with `?1049h`, then CUP to the last row, then `APC G a=T,…,r=1`.
+- **Fix:** on the alternate screen, after each growth, evict the excess front rows with the
+  alternate screen's own scroll path (`evict_front_rows`), so the content scrolls up exactly
+  as a line feed at the bottom would. Then re-derive the image's base row from its stable
+  origin row number, as the primary path does.
+- **Scope:** `freminal-buffer/src/buffer/images.rs` (`place_image`) and tests.
+- **Verification:**
+  - Placing a 1-row and a 3-row image on the alternate screen's last row keeps
+    `rows.len() == height`.
+  - The image's cells sit on the expected scrolled rows, and the cursor is on the row below
+    the image (or the last row).
+  - The primary behaviour is unchanged.
+- **Scheduling:** within Task 131, after 131.7.
+- **Status: Resolved (2026-10-10), commit `193fd200`.** Routed to Task 136: placement
+  scrolls the whole screen and ignores DECSTBM on both screens (adversarial-review
+  finding 3), which belongs with the cursor-after-placement and margin-aware scroll items in
+  the Task 136 stub.
+
+---
+
+## Task 147 — v0.13.0 Correctness Cleanup
+
+### 147 Summary
+
+Fix every defect, spec deviation, missing test and tooling break that Tasks 126–131 and their
+reviews surfaced but left without a scheduled owner. Also fix a pre-existing defect found in
+the same review (application-keypad encoding), and two pre-v0.13.0 xterm deviations the
+maintainer added on 2026-10-11 (147.18 and 147.19). The remaining pre-v0.13.0 charset and
+mode gaps were also resolved on 2026-10-11: 147.20 implements the character sets, and 147.21
+records five modes as not planned. 147.22–147.24 cover XTGETTCAP, the HP escapes and
+Alt-sends-ESC. Created and decomposed on 2026-10-11 against
+`72109bad`. The source was a maintainer review of PR #537: unscheduled findings are latent
+bugs, so each one gets a subtask here or a line in the stub of the task that owns it.
+
+The sweep re-read the Task 126–131 sections in full: status notes, cleanup entries,
+adversarial, confirmation and orchestrator reviews, and plan-drift notes. It also covered
+`ESCAPE_SEQUENCE_GAPS.md`, `ESCAPE_SEQUENCE_COVERAGE.md`, `KITTY_PROTOCOL_REFERENCE.md`,
+source TODOs and the commit log. Every item it found ended up in one of four places:
+
+- a subtask below;
+- a line added to the stub of the task that owns the code (listed under "Routed to existing
+  stubs");
+- confirmed resolved;
+- shown not to be a defect, with evidence (listed under "Reviewed, not defects").
+
+Source review: PR #537 (Copilot and CodeRabbit).
+
+### 147 Maintainer decisions (2026-10-11)
+
+- **A bare ESC inside an OSC, DCS or APC string** (one not followed by `\`) ends the string,
+  following Ghostty and WezTerm (the Williams VT state machine). The body received so far is
+  dispatched. The ESC then starts a new escape sequence, so the next byte is parsed as part
+  of it.
+  - xterm instead drops the string. kitty, and freminal today, keep the ESC in the body.
+  - Exception: inside `DCS tmux;` a doubled `ESC ESC` is data, exactly as today.
+- **DECRC with DECOM set keeps clamping to the screen only.** kitty, Ghostty and WezTerm do the
+  same. xterm alone clamps to the bottom and right margins (not the top or left). There is no
+  code change; the GAPS entry is corrected and closed.
+- **XTSMTITLE / XTRMTITLE (`CSI > Pm t` / `CSI > Pm T`)** are recognised and ignored without a
+  warning, as kitty, Ghostty and WezTerm do. They are documented as not planned.
+- **UTF-8 title and icon replies in S8C1T mode** keep sending raw UTF-8, matching xterm, the
+  only reference terminal with S8C1T (`charproc.c:8950-8973`, `ptydata.c:614-629`). There is
+  no code change; the GAPS entry is closed with that reasoning.
+- **Layout startup commands go through the input channel**, so FREC records them and they
+  are ordered with all other input.
+- **The CSI parser reuses its buffers** across sequences: the larger 128.P1 option, now
+  accepted.
+- **`CSI Ps u` with any parameter is ignored**, as xterm (`charproc.c:4912-4925`), kitty
+  (`vt-parser.c:1370-1374`) and WezTerm (`csi.rs` `noparams!`) do. Ghostty alone restores the
+  cursor.
+- **DECSC saves the pending-wrap flag**, as xterm (`cursor.c:408,494`), Ghostty
+  (`gh_term.zig:2080,2116`) and WezTerm (`wez_ts.rs:2724,2763`) do. kitty loses it.
+- **Application keypad (DECKPAM) sends SS3 sequences.** This follows the VT220 table in xterm
+  (`ctlseqs.txt:2625-2652`, `input.c:1390-1400`) and Ghostty (`function_keys.zig:121-141`).
+  kitty sends plain digits and WezTerm ignores DECKPAM. With the split at 2–2, the standing
+  xterm + Ghostty tie-break applies.
+- **Every CSI or SS3 introducer the terminal generates honours S8C1T**, as xterm does: key,
+  focus, mouse and bracketed-paste reports all go through `unparseputc1`
+  (`charproc.c:9356-9365`; `button.c:5525-5529,5694-5709`; `input.c:1341-1411`).
+  - kitty, Ghostty and WezTerm have no S8C1T at all.
+  - This covers the kitty-keyboard and `modifyOtherKeys` CSI encodings: they are CSI
+    sequences, and xterm's rule is per introducer.
+  - VT52 mode is unaffected, and so is Alt-prefixed text (`ESC` followed by a character).
+
+### 147 Subtasks
+
+Every subtask leaves `cargo test --all` and
+`cargo clippy --all-targets --all-features -- -D warnings` green. Parser and encoder subtasks
+name their benchmark (`freminal-bench-table`) and record before and after results in their
+status note (`performance-benchmarks`, 15% threshold). Escape-sequence behaviour changes are
+documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes itself.
+
+#### 147.1 — DECRQM for an unknown ANSI mode keeps its namespace (issue #528 remainder)
+
+- **Source:** 130 confirmation review N2; GAPS "DECRQM for ANSI modes"; CodeRabbit on PR #537
+  (`mode.rs:291`).
+- **Defect:** `terminal_mode_from_params` drops the `?` when it builds
+  `Mode::UnknownQuery(Vec<u8>)`, and `Mode::report` always formats `?{digits};0$y`. So an
+  unsupported ANSI query such as `CSI 2 $ p` is answered as DEC private mode 2. The spec
+  (`ctlseqs.txt:1502-1510`) gives the ANSI form `CSI Ps ; Pm $ y`, with no `?`.
+- **Scope:**
+  - `freminal-common/src/buffer_states/mode.rs`: `UnknownQuery` carries the existing
+    `ModeNamespace`, as `Unknown(UnknownMode)` already does, and its construction sites and
+    report arm use it;
+  - `freminal-terminal-emulator/src/state/internal.rs` (the `UnknownQuery` arm);
+  - `freminal-terminal-emulator/src/terminal_handler/mod.rs` (the DECRQM reply);
+  - the tests in `mode_dispatch_tests.rs` and `decrpm_integration.rs`.
+- **Deliverable:** `CSI 2 $ p` gets `CSI 2 ; 0 $ y` and `CSI ? 9999 $ p` gets
+  `CSI ? 9999 ; 0 $ y`, both framed per S8C1T. Tests cover both namespaces in both framings.
+- **Closes:** issue #528, when the PR merges.
+
+#### 147.2 — Parser mode changes take effect within the same read
+
+- **Source:** 131 adversarial review finding 17; GAPS "Mode changes take effect per read".
+- **Defect:** `TerminalState` parses a whole PTY read (`self.parser.push(&incoming)`) and then
+  applies the outputs. S8C1T/S7C1T, DECANM and RIS change the parser's own mode only when
+  their output is applied, so the rest of that read was already parsed under the old mode.
+- **Design (resolved):** the parser applies its own mode at the moment it emits the output
+  that changes it. There is precedent: `ansi.rs:708` already sets `vt52_mode` itself on VT52
+  `ESC <`. The cases are:
+  - `EightBitControl` and `SevenBitControl` set `s8c1t_mode`;
+  - `Mode::Decanm(Vt52 | Ansi)` sets `vt52_mode`;
+  - `ResetDevice` resets both.
+
+  `TerminalState` keeps mirroring each change to the handler. The parser no longer needs to
+  be resumable.
+
+- **Scope:**
+  - `freminal-terminal-emulator/src/ansi.rs` and the sub-parsers that emit those outputs;
+  - `state/internal.rs`: remove the now-redundant parser writes and keep the handler mirror;
+  - tests that feed a mode change and a mode-dependent sequence in **one** read. Examples:
+    `ESC SP G` then `0x9B 6 n`; `CSI ? 2 l` then a VT52 `ESC A`; S8C1T, then RIS, then
+    `0x9B` (must now be text);
+  - the tmux passthrough seeding (`internal.rs` seeds a fresh parser from `self.parser`).
+- **Benchmark:** `parser_push`, `parser_push_sgr`, `parse_and_handle_80x24`.
+
+#### 147.3 — S8C1T reaches the GUI encoders (foundation for 147.4)
+
+- **Source:** 130 adversarial review finding 8.
+- **Scope:**
+  - add `s8c1t: S8c1t` to `TerminalSnapshot` (it already has an enum; transported state
+    stays typed, per `freminal-state-representation`) and fill it in `build_snapshot`;
+  - add it to `InputModes` (`freminal/src/gui/terminal/input.rs`) in
+    `InputModes::from_snapshot`;
+  - update snapshot equality and the idle checks if they enumerate fields.
+- **Deliverable:** a test that `ESC SP G` is visible in the next snapshot and in
+  `InputModes`.
+
+#### 147.4 — Generated CSI / SS3 introducers honour S8C1T
+
+- **Source:** 130 adversarial review finding 8; GAPS "8-bit C1 Control Gap".
+- **Design (resolved):** a rewrite of the encoded bytes is not safe, because Alt+`[` and
+  Alt+`O` legitimately send `ESC [` and `ESC O`. Instead, each construction site emits its
+  introducer through one helper: an `Introducer { Csi, Ss3 }` written as `ESC [` / `ESC O`
+  in 7-bit mode and `0x9B` / `0x8F` in 8-bit mode. The helper lives with the input encoders
+  in `freminal-terminal-emulator/src/input.rs`.
+- **Scope:**
+  - legacy `to_payload` and `to_payload_kkp`: arrows, Home/End, F-keys (SS3 and CSI), the
+    `CSI ~` keys, `modifyOtherKeys` and kitty `CSI u`;
+  - focus `CSI I` / `CSI O`, on the PTY-thread path `state/internal.rs` `send_focus_event`
+    (it reads the handler's mode);
+  - GUI mouse: X10/normal `CSI M`, SGR `CSI <` and SGR-pixel (`freminal/src/gui/mouse.rs`);
+  - bracketed-paste markers `CSI 200~` / `CSI 201~` (`freminal/src/gui/actions.rs`), wrapping
+    paste text that is never rewritten;
+  - not VT52 mode, and not Alt-prefixed text.
+- **Deliverable:** table tests, one row per encoder, in both modes. Existing 7-bit tests stay
+  unchanged.
+- **Benchmark:** the input-encoding benchmark named in `freminal-bench-table` (if none covers
+  `to_payload`, add one first, per `performance-benchmarks`).
+- **Depends on:** 147.3.
+
+#### 147.5 — Application keypad (DECKPAM) sends SS3
+
+- **Source:** found during this sweep (pre-existing, outside 126–131); related to Task 137 B11.
+- **Defect:**
+  - The live keypad path (Task 114 raw intercept → `drain_pending_raw_keys` →
+    `legacy_keypad_byte`) never reads `keypad_app_mode`, so DECKPAM is ignored end to end.
+  - The only code that does read it, `TerminalInput::KeyPad`, is never constructed outside
+    tests. Its application arms also emit a wrong `ESC [ O p` form, and they match integers
+    0–9 while callers pass ASCII.
+- **Scope:**
+  - `freminal/src/gui/terminal/input.rs`: in application keypad mode, the legacy (non-kitty)
+    keypad path sends the VT220 SS3 form from the 147 decisions: digits `SS3 p`…`SS3 y`,
+    `.` `SS3 n`, `-` `SS3 m`, `,` `SS3 l`, `+` `SS3 k`, `*` `SS3 j`, `/` `SS3 o`, `=` `SS3 X`,
+    Enter `SS3 M`. It goes through the 147.4 introducer helper;
+  - delete `TerminalInput::KeyPad` and the tests that pin its wrong output, in both
+    `to_payload` and `to_payload_kkp`;
+  - kitty-keyboard keypad encodings are unchanged.
+- **Out of scope:** NumLock-off navigation semantics (B11's NumLock half) stay in Task 137,
+  because winit exposes no lock state.
+- **Depends on:** 147.4.
+
+#### 147.6 — DECSC / DECRC save the pending-wrap flag
+
+- **Source:** GAPS "DECSC saved state" (the remainder after 131.C1).
+- **Scope:**
+  - `freminal-buffer/src/buffer/cursor.rs`: `SavedCursor` records whether the cursor was in
+    the pending-wrap position (`x == width`), and `restore_cursor` restores it instead of
+    clamping to `width - 1`, following xterm, Ghostty and WezTerm;
+  - this applies to all three save paths: DECSC, `CSI s` and `?1048`/`?1049`;
+  - tests: a save at the last column with wrap pending, then a restore, then printing a
+    character wraps to the next line. Also a restore after a resize that narrows the screen.
+
+#### 147.7 — `CSI Ps u` with parameters is ignored
+
+- **Source:** 128.5 status note ("separate behaviour decision").
+- **Scope:** `ansi_components/csi_commands/scorc.rs`. Any parameter, including an explicit
+  `0`, makes the sequence recognised-and-ignored with no `RestoreCursor` output. Update the
+  doc comment and the tests. `CSI u` with no parameters still restores.
+
+#### 147.8 — A bare ESC ends OSC / DCS / APC strings
+
+- **Source:** 129.C5 residual; 147 maintainer decision.
+- **Scope:**
+  - `ansi_components/osc.rs` (`osc_byte_class`, the terminator path), `ansi_components/dcs.rs`
+    and `ansi_components/apc.rs`. An ESC followed by anything other than `\` dispatches the
+    string received so far. That ESC then starts a new escape sequence, so the following
+    byte is parsed as part of it;
+  - the `DCS tmux;` ESC-doubling rule is unchanged;
+  - an over-cap sequence that is being consumed and dropped also ends at a bare ESC;
+  - BEL and C1 ST (in S8C1T) terminators, and CAN/SUB cancellation, are unchanged;
+  - tests:
+    - an unterminated `OSC 2;title` followed by `CSI 31 m` sets the title and applies the
+      SGR;
+    - a DCS and an APC behave the same way;
+    - tmux passthrough with doubled ESC still works;
+    - `ESC \` still terminates.
+  - Update the tests that pin the kitty behaviour (`dcs.rs:419-430`, `apc.rs:290-299` and
+    their OSC counterparts).
+- **Benchmark:** `parser_push` and the OSC/DCS benches.
+
+#### 147.9 — XTSMGRAPHICS, plus XTSMTITLE / XTRMTITLE recognised
+
+- **Source:** 128.C4 (both are named there as unrouted CSI that now warns); untracked in
+  COVERAGE and GAPS.
+- **XTSMGRAPHICS `CSI ? Pi ; Pa ; Pv S`** follows xterm with ReGIS absent
+  (`charproc.c:5160-5286`, `ctlseqs.txt:672-696`). The reply is `CSI ? Pi ; Ps [; Pv…] S`,
+  framed by the handler (S8C1T-aware).
+  - A parameter count other than 3 gets no reply.
+  - **Pi=1 (colour registers):**
+    - Pa=1 (read), Pa=2 (reset) and Pa=4 (read max) answer status 0 with `MAX_PALETTE`
+      (256);
+    - Pa=3 (set) answers status 3, because the register count is fixed;
+    - any other Pa answers status 2.
+  - **Pi=2 (sixel geometry):**
+    - Pa=1 answers status 0 with the current text-area pixel size (clamped to the decoder's
+      maximum, if it has one);
+    - Pa=4 answers status 0 with the maximum geometry;
+    - Pa=2 and Pa=3 answer status 3, as in xterm;
+    - any other Pa answers status 2.
+  - **Pi=3 (ReGIS)** answers status 3; any other Pi answers status 1.
+- **`CSI > Pm t` and `CSI > Pm T`** are routed to recognised-and-ignored outputs with no
+  `warn!`.
+- **Scope:** `ansi_components/csi_dispatch.rs` (the `question` and `greater` groups), a new
+  `csi_commands/xtsmgraphics.rs`, the handler reply in `terminal_handler/reports.rs`, and
+  tests through the full stack.
+
+#### 147.10 — Layout startup commands go through the input channel
+
+- **Source:** 130 decision note on `Pane::pty_write_tx`.
+- **Scope:**
+  - `freminal/src/gui/layout_ops.rs` sends startup commands as `InputEvent::Key(bytes)` on the
+    pane's input sender, so FREC records them and they are ordered with all other input;
+  - if `layout_ops` is the last production user, remove `Pane::pty_write_tx` and the
+    `pty.rs` clone that feeds it, together with their test and bench constructors;
+  - a test that a layout startup command arrives as an `InputEvent` and is recorded.
+- **Stop condition:** if `pty_write_tx` turns out to have another production user, stop and
+  report. Do not route around it.
+
+#### 147.11 — The host-capability broadcast gets a home and a test
+
+- **Source:** 130 orchestrator re-review (130.4 untested).
+- **Defect:** the diff-and-broadcast step in `freminal/src/gui/settings_dispatch.rs`
+  (`apply_new_config` → `InputEvent::HostCapabilitiesChange` to every pane) has no test. A
+  wrong comparison would leave every pane's OSC 99 support stale after a settings change.
+- **Design (resolved):** decide whether a config change produces a capability change, and
+  which events to send, in one function in `freminal/src/gui/host_capabilities.rs`.
+  `settings_dispatch.rs` calls it. Per `freminal-extend-or-extract`, this gives the concept a
+  home; it is not a helper extracted only for testing.
+- **Deliverable:** unit tests for the cases below, plus a test over real
+  `crossbeam` senders standing in for panes:
+  - unchanged config: no events;
+  - changed routing: one event per pane;
+  - platform-only fields: no events.
+
+#### 147.12 — The first alternate-screen entry builds one store
+
+- **Source:** 131.5 status note; 131 adversarial review finding 14.
+- **Scope:** `freminal-buffer/src/buffer/resize_and_alt.rs`. The first `switch_to_alternate`
+  followed by `clear_alternate_screen` builds one blank store, not two. Row numbering must
+  stay monotonic. `debug_assert_parked_screens` and the namespace invariants keep passing.
+- **Deliverable:** a test that a first `?1049h` allocates one store, and that the alternate
+  `next_number` follows the parked store.
+- **Benchmark:** `bench_alternate_screen_switch` (the corrected 131.5 shape is the baseline).
+
+#### 147.13 — Graphics transfer hygiene
+
+- **Source:** 129 adversarial review, "Accepted as is".
+- **Scope:**
+  - `terminal_handler/chunk_assembler.rs`: growth never reserves past the total cap. Today
+    `Vec` doubling can transiently reserve about twice the 400 MiB kitty cap. Add a test with
+    a small-cap assembler that checks capacity never exceeds the cap;
+  - `terminal_handler/graphics_kitty.rs`: the unknown-id `a=p` log drops to `debug!`, because
+    the client already gets `ENOENT` on the wire. A client probing every frame then no longer
+    fills the logs.
+
+#### 147.14 — Windows `t=t` deletion goes by handle
+
+- **Source:** 126.2 (the unix `unlinkat` and `(dev, ino)` binding has no Windows equivalent).
+- **Scope:**
+  - `terminal_handler/graphics_kitty.rs` `#[cfg(windows)]` path: open the temp file with
+    `FILE_FLAG_DELETE_ON_CLOSE` (`std::os::windows::fs::OpenOptionsExt::custom_flags`) and a
+    share mode that includes delete;
+  - check that the handle is a regular file;
+  - read through that handle and drop it, so the file deleted is the file read. No new
+    dependency.
+- **Verification:** `cargo xtask check-windows`; the Windows CI test job runs the existing
+  `t=t` tests.
+
+#### 147.15 — The CSI parser reuses its buffers
+
+- **Source:** 128.P1 remainder (maintainer decision 2026-10-11).
+- **Scope:** `ansi_components/csi.rs`. Its three per-sequence `Vec`s become parser-owned
+  buffers, cleared and reused for each sequence. Outputs that need owned data still copy
+  out, and the public API is unchanged. The `sub_parsers_stay_small` size bound is revisited
+  only if the buffers must live in `ParserInner`; record the decision.
+- **Benchmark:** `parser_push_sgr`, `parser_push`, `parse_and_handle_80x24`. The status note
+  records the before/after table.
+- **Scheduling:** after 147.2 and 147.8 (same files).
+
+#### 147.16 — `cargo xtask lint-markdown` passes (126.C1)
+
+- **Source:** 126.C1.
+- **Scope:**
+  - `xtask/src/main.rs`: the glob excludes `.direnv` (and `target`), and the "known issue"
+    swallow at `main.rs:398` is removed, so the command is a real gate;
+  - fix the remaining lint debt (about 550 errors, mostly MD060 and MD033) in the
+    `Documents/` files it reports;
+  - run `prettier --write` on each reported file **by name** (never a glob), then fix by
+    hand whatever prettier does not;
+  - inline HTML that is load-bearing gets a scoped rule in `.markdownlint-cli2.yaml` with a
+    comment, not a blanket disable.
+- **Deliverable:** `cargo xtask lint-markdown` exits 0.
+
+#### 147.18 — The saved cursor follows its text through a resize
+
+- **Source:** GAPS "Saved cursor on resize, alternate active" (pre-v0.13.0, from Task 125;
+  added to 147 by maintainer decision 2026-10-11).
+- **Defect:** the DECSC slot stores a screen position, and a resize never moves it. When the
+  resize reflows or pulls rows back from scrollback, a later DECRC puts the cursor on a
+  different line of text from the one it was saved on. The classic case: `?1049h`, resize
+  the window, `?1049l`, and the shell prompt is redrawn in the wrong place.
+- **Reference behaviour:**
+  - Ghostty pins every screen's saved cursor to its cell for the resize and reads it back
+    afterwards (`Screen.zig` `resize`, `saved_cursor_pin`). If the pinned cell left the
+    active area, the cursor goes to the top-left. If pending wrap was set and the cursor is
+    no longer in the last column, pending wrap is cleared and x advances by one.
+  - xterm does not reflow, but shifts the main screen's saved row by the number of lines
+    pulled from scrollback while the alternate screen is up (`cursor.c:380-392`
+    `AdjustSavedCursor`, called from `screen.c:2435`).
+  - Freminal reflows, so it follows Ghostty, which is the general form of the xterm rule.
+- **Scope:**
+  - `freminal-buffer/src/buffer/resize_and_alt.rs` and `cursor.rs`: the live screen's slot
+    and a parked screen's slot both track their cell through `set_size` / reflow. Use the
+    same row-number/offset remap that already carries `reflow_anchor` and the cursor
+    (`pending_reflow_remap`), not a recomputed screen offset;
+  - Ghostty's fallbacks apply: the cell left the screen, or the pending-wrap fix-up;
+  - tests:
+    - a primary-screen save, then a narrowing reflow, then DECRC lands on the same
+      character;
+    - `?1049h`, then a resize that grows the height and pulls rows from scrollback, then
+      `?1049l`: the cursor is on the saved text (the xterm case);
+    - the saved cell scrolled off the screen;
+    - pending wrap across a widening resize.
+- **Depends on:** 147.6 (pending wrap is part of the saved state) and 147.12 (same file).
+
+#### 147.19 — Sixel under DECSDM draws at the screen origin and never scrolls
+
+- **Source:** GAPS "Sixel placement under DECSDM" (pre-v0.13.0, from Task 125; added to 147
+  by maintainer decision 2026-10-11).
+- **Defect:** with sixel display mode set (`?80 h`, sixel scrolling off), freminal places the
+  image at the cursor, lets `place_image` scroll the screen, and then puts the cursor back.
+  xterm places the image at the top-left of the screen (`graphics_sixel.c:395-405`,
+  `get_new_graphic(xw, 0, 0, …)`). It never scrolls; the scroll at `:853-866` happens only
+  when sixel scrolling is on, and rows past the bottom are discarded. The text cursor does
+  not move.
+- **Scope:**
+  - `freminal-buffer`: `place_image` gets an explicit placement mode. Use a named enum (for
+    example an inline mode against a fixed-origin mode with no scrolling), never a bool, per
+    `freminal-state-representation`. In fixed-origin mode the image is anchored at screen
+    row 0, column 0, clipped to the visible rows, and neither the cursor nor the scroll
+    position changes;
+  - `terminal_handler/graphics_sixel.rs` uses that mode when `Decsdm::DisplayMode` is set.
+    `restore_cursor_to_image_origin` is deleted if this was its last caller;
+  - the existing DECSDM tests (`sixel_display_mode_cursor_does_not_advance`,
+    `sixel_display_mode_at_scrollback_capacity_keeps_cursor_on_image_origin`) are rewritten
+    to the xterm behaviour;
+  - new tests: an image taller than the screen is clipped with no scrollback growth, and the
+    cursor is unmoved in the middle of the screen.
+- **Damage:** placement damage stays bounded to the image's rows (`freminal-damage-model`).
+
+#### 147.20 — Character sets: G0–G3, locking and single shifts
+
+- **Source:** GAPS "Charset / G-Set Gaps" (SO/SI, LS2/LS3, `ESC ) C` / `ESC * C`). These
+  are pre-v0.13.0; the maintainer added them to 147 on 2026-10-11.
+- **Defects today:**
+  - SO and SI are dropped in `ansi.rs`.
+  - `ESC ) 0` (G1) and `ESC * C` (G2) are recognised but change nothing. `ESC ( A` (UK) is
+    rejected as invalid.
+  - `ESC + 0` (G3) switches on the single global line-drawing flag. That is wrong: it only
+    designates G3. The wrong behaviour is pinned by
+    `esc_plus_0_designates_g3_as_dec_special_graphics`.
+  - LS2, LS3, LS1R, LS2R and LS3R are logged and ignored.
+  - 7-bit SS2/SS3 (`ESC N` / `ESC O`) parse as `Invalid`, and 8-bit `0x8E`/`0x8F` are ignored.
+  - So an application that draws boxes with `ESC ) 0`, then SO, prints `lqqqk` instead of
+    box corners and lines.
+- **Decisions (maintainer, 2026-10-11, from the 147.20 reference read):**
+  - **The full G0–G3 model with GL, GR and a pending single shift**, as xterm
+    (`charproc.c:3774-3844,5481-5493,6174-6207`) and Ghostty (`Screen.zig` `CharsetState`;
+    `stream.zig:1440-1441,2850-2917,3004-3123`) have. kitty and WezTerm stop at G0/G1 with
+    SO/SI.
+  - **Sets:** ASCII (`B`), UK (`A`) and DEC Special Graphics (`0`), in all four slots.
+    - UK maps `#` to `£` unconditionally, as kitty, Ghostty and WezTerm do. xterm alone
+      requires NRC mode.
+    - The 96-character designators (`ESC - . /`) are not planned. No modern reference
+      implements them: Ghostty has a TODO, and kitty and WezTerm lack them.
+  - **An unknown designator final is ignored** and the slot keeps its set, as kitty, Ghostty
+    and WezTerm do. xterm alone resets the slot to ASCII.
+  - **GR is tracked and saved but never applied to bytes 0x80 and above.** Those bytes are
+    UTF-8, and Ghostty and xterm in UTF-8 mode don't apply GR either
+    (`Terminal.zig:1660`, `ptydata.c:94`).
+  - **A single shift applies to the next printable character only and is then cleared.** A
+    non-ASCII character consumes it and prints unmapped, as in Ghostty.
+  - **DECSC saves G0–G3, GL, GR and the pending single shift.** This follows the VT420 and
+    VT520 manuals (quoted in xterm `cursor.c:425-440`) and Ghostty. DECRC restores them, or
+    the defaults if nothing was saved.
+  - **RIS and DECSTR reset all of it to the defaults:** G0–G3 ASCII, GL=G0, GR=G2, no single
+    shift. That is what xterm's `resetCharsets`, Ghostty and kitty do. RIS clears both DECSC
+    slots, and DECSTR sets the active one, as today.
+  - **VT52:** `ESC F` / `ESC G` select line drawing / ASCII as today, expressed through the
+    new model. Entering VT52 saves the ANSI charset state and leaving restores it, as xterm
+    does (`charproc.c:7546-7550,5055-5064`).
+- **Scope:**
+  - A new `freminal-common/src/buffer_states/charset.rs` holding `CharacterSet`,
+    `CharsetSlot` (G0–G3) and `CharsetState { sets, gl, gr, single_shift }`. These are named
+    enums, not bools. It supersedes `line_draw.rs`'s `DecSpecialGraphics`. Per
+    `freminal-module-cohesion`, the line-drawing table moves with it.
+  - `terminal_output.rs`: `DesignateCharset { slot, set }`, `InvokeGl(slot)`,
+    `InvokeGr(slot)` and `SingleShift(slot)` replace `DecSpecialGraphics(..)` and the
+    roughly 27 `Charset*` placeholder variants.
+  - `ansi.rs`:
+    - SO and SI emit `InvokeGl` after the existing data flush;
+    - 8-bit SS2/SS3 emit `SingleShift` when S8C1T is active;
+    - VT52 `ESC F` / `ESC G` move to the new model.
+  - `ansi_components/standard.rs`:
+    - one designator helper for `( ) * +`;
+    - `N` and `O` become SS2/SS3;
+    - `n o ~ } |` become the locking shifts.
+  - `terminal_handler/mod.rs`:
+    - a `charset: CharsetState` field replaces `character_replace`;
+    - `handle_data` keeps its zero-copy fast path (GL is ASCII and no shift is pending) and
+      otherwise uses a table-driven map.
+  - `terminal_handler/cursor_ops.rs` (`SavedDecscState`) and `terminal_handler/reset.rs`.
+    The reset table classifies the new field.
+  - Tests:
+    - designation and invocation for every slot, SO/SI box drawing, LS2/LS3, GR stored but
+      not applied;
+    - SS2/SS3 (7-bit, and 8-bit under S8C1T) affecting exactly one character;
+    - DECSC/DECRC round trip including the single shift;
+    - RIS and DECSTR;
+    - VT52 save and restore;
+    - an unknown final leaving the slot unchanged.
+  - Rewrite `tests/vttest_charsets.rs` and the placeholder-pinning tests in `standard.rs` and
+    `ansi.rs`.
+- **Benchmark:** `parser_push` and `parse_and_handle_80x24`. The plain-ASCII fast path must
+  not regress.
+- **Scheduling:** after 147.8 (shared parser files), before 147.15.
+
+#### 147.21 — KAM, SRM, `?1001`, `?1034` and `?1035` recognised and not implemented
+
+- **Source:** GAPS "CSI Standard Mode Gaps" (KAM, SRM) and "DEC Private Mode Gaps"
+  (`?1001`, `?1034`). These are pre-v0.13.0; the maintainer decided on 2026-10-11.
+- **Decisions (from the 147.21 reference read):**
+  - **KAM (ANSI mode 2, keyboard lock)** is recognised and not implemented. kitty and
+    WezTerm don't implement it. Ghostty only enforces it behind `vt-kam-allowed`, which is
+    off by default, because letting any program lock the keyboard is hostile. xterm alone
+    enforces it.
+  - **SRM (ANSI mode 12, local echo)** is recognised and not implemented. kitty and WezTerm
+    don't implement it, and Ghostty stores it with no consumer. On a modern tty the kernel
+    echoes, so turning local echo on only doubles every character.
+  - **`?1001` (hilite mouse tracking)** is recognised and not implemented. kitty, Ghostty and
+    WezTerm don't implement it; WezTerm's docs warn that it can hang the terminal.
+    - freminal currently aliases it to `?1000`: it sends normal button reports the
+      application never asked for, and claims support in DECRQM. The alias is removed.
+  - **`?1034` (Meta sets the eighth bit)** is recognised and not implemented. Ghostty,
+    WezTerm and kitty don't implement it, and it conflicts with UTF-8 input.
+  - **`?1035` (NumLock overrides the application keypad)** is recognised and not
+    implemented. winit exposes no NumLock state (Task 114.11), so the mode cannot be
+    honoured. If lock state becomes available, it belongs with Task 137 K14.
+  - **"Recognised and not implemented" means:**
+    - set and reset are typed modes that log at `debug!`;
+    - DECRQM answers `Ps = 0` (not recognised), as kitty, Ghostty and WezTerm do for modes
+      they lack. KAM and SRM use the ANSI form without `?` (147.1);
+    - nothing else changes.
+- **Scope:**
+  - `freminal-common/src/buffer_states/mode.rs` and `modes/`: typed variants for ANSI 2 and
+    12 and DEC `?1034` and `?1035`. `?1001` leaves `MouseTrack` (remove `XtMseHilite`) and becomes its
+    own not-implemented mode;
+  - `terminal_handler/mod.rs` and `state/internal.rs` (DECRQM, and `sync_mode` lists);
+  - `freminal/src/gui/mouse.rs` (remove the `XtMseHilite` arms);
+  - tests: set, reset and DECRQM for each mode. `?1001h` followed by a click sends no mouse
+    report.
+- **Depends on:** 147.1 (the ANSI DECRQM form; same file).
+
+#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` <!-- codespell:ignore rin -->
+
+- **Source:** GAPS "XTGETTCAP capability expansion" (pre-v0.13.0; added to 147 by maintainer
+  decision 2026-10-11). The GAPS row calls `indn` "indent N"; it is "scroll forward N lines".
+- **Reference behaviour:**
+  - kitty (`terminfo.py:183,211,403,425`), Ghostty (`ghostty.zig:203-213`) and WezTerm (its
+    terminfo database via `xt_get_tcap`) all answer `indn` (`CSI %p1%d S`) and `rin` <!-- codespell:ignore rin -->
+    (`CSI %p1%d T`), and kitty also answers the termcap aliases `SF` and `SR`. xterm answers
+    only its key table.
+  - `query-os-name` (alias `query-os_name`) is answered by kitty (`terminfo.py:555-557`) and
+    foot with `uname -s` (`Linux`, `Darwin`, `FreeBSD`, ...). kitty issue #9217 is where it
+    was proposed as a terminal-agnostic query. Ghostty and WezTerm don't answer it.
+- **Scope:** `terminal_handler/dcs.rs` `lookup_termcap`:
+  - `indn`/`SF` → `\x1b[%p1%dS` and `rin`/`SR` → `\x1b[%p1%dT`, using the table's <!-- codespell:ignore rin -->
+    existing raw-ESC convention (as `Smulx` does). Both are truthful: SU and SD are
+    implemented and respect the scroll region;
+  - `query-os-name` / `query-os_name` → a `cfg!(target_os)` mapping to `uname -s` names:
+    linux `Linux`, macos `Darwin`, freebsd `FreeBSD`, openbsd `OpenBSD`, netbsd `NetBSD`,
+    windows `Windows`, otherwise `Unknown`. No new dependency;
+  - not `kitty-query-os_name`, which is kitty's own namespace with different values;
+  - tests: each name and alias, a mixed multi-name request, and the reply hex.
+  - `rin` trips codespell; mark its lines with `// codespell:ignore rin` (Markdown: the
+    equivalent HTML comment).
+
+#### 147.23 — HP `ESC F`, `ESC l`, `ESC m` recognised and not implemented
+
+- **Source:** GAPS "ESC Gaps" (pre-v0.13.0; added to 147 by maintainer decision 2026-10-11).
+- **Reference behaviour:**
+  - xterm: `ESC F` moves to the lower-left corner **only** if the `hpLowerleftBugCompat`
+    resource is set, and it defaults to off (`charproc.c:448,3982-3990`). `ESC l` / `ESC m`
+    set or clear the top margin at the cursor row (`charproc.c:4759-4770`). These are HP
+    compatibility hacks.
+  - kitty, Ghostty and WezTerm ignore all three.
+- **Decision (majority):** recognised and not implemented.
+- **Scope:** `terminal_handler/mod.rs`. The three arms log at `debug!` as intentionally
+  ignored HP compatibility sequences, instead of the `warn!` "not yet implemented". A test
+  checks there is no state change. VT52 `ESC F` (graphics mode) stays a separate, working
+  path.
+
+#### 147.24 — Alt sends ESC (`?1036` / `?1039`) and macOS Option as Alt
+
+- **Source:** maintainer decision 2026-10-11. This takes the legacy text half of Task 137 B1
+  ("Alt and Super never apply to text keys").
+- **Defect today:** Alt+letter sends a plain letter. egui delivers `Event::Key { B, alt }`,
+  which matches no arm and is dropped, and `Event::Text("b")`, which is sent as `b`. So
+  readline/emacs bindings like Alt+b, Alt+f and Alt+d don't work. No Alt combination
+  produces an ESC prefix anywhere.
+- **Reference behaviour:**
+  - Ghostty: `?1036` (`alt_esc_prefix`, default **set**) gates the ESC prefix on Alt+text.
+    When it is reset, the plain character is sent (`key_encode.zig:540,555-583`). `?1039` is
+    stored and reported but not consumed.
+  - xterm: `metaSendsEscape` / `altSendsEscape` (`input.c:1470-1535`). Without eight-bit
+    meta, a reset mode sends the plain character.
+  - kitty: legacy Alt always prefixes ESC (`key_encoding.c:141,149,343-348`).
+  - macOS Option composes characters unless an option-as-alt setting says otherwise:
+    kitty `macos_option_as_alt`; Ghostty `macos-option-as-alt`.
+- **Decisions:**
+  - Follow Ghostty. `?1036` defaults to set; while set, legacy Alt+text sends `ESC`
+    followed by the text, and while reset it sends the text alone. `?1039` is a typed,
+    stored mode that DECRQM reports truthfully and that has no further effect. Neither mode
+    is part of RIS or DECSTR state beyond returning to its default; classify both in the
+    reset table.
+  - DECRQM reports `?1036` and `?1039` as set or reset (`Ps` 1/2).
+  - **Only the legacy path changes.** When any kitty keyboard flag is active, Alt+text
+    behaves as today; Task 137 owns its `CSI u` encoding.
+  - A new `[keyboard] macos_option_as_alt` config option: a named enum `none` (default),
+    `left`, `right`, `both`. While it is `none`, macOS Option keeps composing and is not
+    treated as Alt. It is wired per `freminal-config-options`, with the full `ConfigPartial`
+    / `apply_partial` checklist, `config_example.toml`, the settings UI, and the Nix module
+    if it mirrors the schema.
+  - **Stop condition for `left`/`right`:** they need to know which Option key is held. If
+    winit's per-side modifier state cannot reach the encoder through the existing Task 114
+    raw-key path without a new channel, implement `none`/`both` only, and stop and report
+    before adding a channel (`freminal-architecture`).
+  - AltGr must never be prefixed. On Linux AltGr is not Alt in winit. On Windows AltGr
+    arrives as Ctrl+Alt; tests must pin that AltGr text is sent unprefixed.
+- **Scope:**
+  - `freminal-common`: the `?1036`/`?1039` mode types (`modes/`), parsing in `mode.rs`, and
+    the config enum and section;
+  - `freminal-terminal-emulator`: `TerminalModes` fields, `sync_mode`, DECRQM, the snapshot
+    field (typed), and the `TerminalInput` text variant gains its Alt prefix through the
+    147.4 encoder (built at the construction site, never by rewriting encoded bytes);
+  - `freminal/src/gui/terminal/input.rs`: when Alt (per the Option setting on macOS) is held,
+    `Event::Text` emits the prefixed form, and the stray `Event::Key { .., alt }` stays
+    dropped so nothing is sent twice;
+  - tests:
+    - Alt+b sends `ESC b` with `?1036` set and `b` with it reset;
+    - a multi-byte Alt+text gets one prefix;
+    - kitty flags active means unchanged;
+    - AltGr text is unprefixed;
+    - the macOS Option settings, through the input-mapping unit tests;
+    - DECRQM for both modes;
+    - the config round trip.
+- **Out of scope (stays in Task 137):** modifiers on Enter, Tab, Backspace and Escape (B2,
+  B3), Super/Hyper/Meta, and kitty-protocol Alt encoding.
+- **Depends on:** 147.3 and 147.4 (snapshot input-mode transport and the encoder helpers),
+  and 147.21 (same mode files).
+
+#### 147.17 — Documentation
+
+- **Scope:**
+  - **COVERAGE and GAPS:**
+    - every behaviour change above;
+    - remove the "Mode changes take effect per read" paragraph and the event-encoding and
+      UTF-8-title sentences from the 8-bit section. The UTF-8 title behaviour is closed as
+      matching xterm, with the citations;
+    - close the DECRC/DECOM row as matching kitty, Ghostty and WezTerm, and correct its
+      description of xterm (bottom/right clamp only);
+    - fix the malformed `ESC \` row (GAPS around line 392);
+    - the charset section for 147.20, including the 96-character designators as not
+      planned;
+    - KAM, SRM, `?1001`, `?1034` and `?1035` as not planned, with the reasons (147.21).
+      Correct the `?1034` row, which describes `?1036`;
+    - `?1036`/`?1039` rows (147.24), XTGETTCAP `indn`/`rin`/`query-os-name` (147.22), and HP <!-- codespell:ignore rin -->
+      `ESC F`/`l`/`m` as not planned (147.23);
+    - `config_example.toml` documentation for `[keyboard]` is part of 147.24, not this
+      subtask;
+    - add XTSMGRAPHICS and XTSMTITLE/XTRMTITLE rows;
+    - update the DECKPAM and `CSI Ps u` rows;
+  - **`KITTY_PROTOCOL_REFERENCE.md`:** the string-terminator change;
+  - refresh both "Last updated" headers;
+  - `prettier` and `markdownlint` on the named files only.
+
+### 147 Routed to existing stubs (added 2026-10-11)
+
+These are owned by tasks that rewrite the code involved. Each is now written into that
+task's stub:
+
+- **Task 138:** a saturated 128-id OSC 99 map refuses even complete single-chunk
+  notifications. Tombstoned ids are unbounded strings. (129 review; previously routed, but
+  missing from the stub.)
+- **Task 138:** the transported OSC 99 `bool`s (130.C4). Already present.
+- **Task 135:** cap `o=z` inflation at the size implied by `s`/`v`/`f`, not only at
+  `MAX_KITTY_DATA_BYTES`. (129 review; previously routed, but missing from the stub.)
+- **Task 136:** image placement ignores DECSTBM (131 review finding 3, 131.C5). Already
+  present.
+- **Task 139:** RIS and DECSTR clear the pointer-shape stack. (131 decision; missing from the
+  stub.)
+- **Task 137:** B11's DECKPAM half moves to 147.5; the NumLock half stays.
+
+Stale stub text was corrected at the same time:
+
+- Task 141: the tmux ED line (the tmux CSI dispatch was deleted by 130.2).
+- Task 137: the "DECSTR clearing the flags" question (done by 131.3).
+
+### 147 Reviewed, not defects
+
+| Item                                         | Why it is not a defect                                                                  |
+| -------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Parked alternate keeps its images (131 r4)   | The decided persistence; kitty's alternate graphics manager does the same.              |
+| Selection cleared on a switch (131 r5)       | By design: alternate rows are a different row namespace (Task 125).                     |
+| `ResetKind` / `KittyKeyboardStack` are `pub` | Private modules; `clippy::redundant_pub_crate` (denied) rejects `pub(crate)`.           |
+| Marks on popped padding rows (131 r18)       | Unreachable: marks sit on the cursor row, which a padding pop never removes.            |
+| Prettier reflows COVERAGE tables (131 r19)   | Formatter behaviour, not a code defect.                                                 |
+| `?1049l` on the primary restores the cursor  | Matches xterm (`charproc.c:7736-7741`); 2–2 split resolved by the xterm + Ghostty rule. |
+| XTGETTCAP answers per name (130 N6)          | Matches kitty.                                                                          |
+| `is_control_payload -> bool`                 | A predicate returning `bool`, not a bool field or parameter.                            |
+| 129 small-limit assembler tests              | The real caps are pinned by value tests; a 400 MiB push in a unit test adds nothing.    |
+| `is_bare_continuation` leniency (129)        | Matches kitty's leniency for clients that repeat `i=`/`f=` on every chunk.              |
+| `decode_strict` / `encode_unpadded` unused   | Their consumers are Tasks 102 and 146 (both stubs name them).                           |
+| 131.5 benchmark baseline                     | Not a defect: the corrected figures are recorded and are 147.12's baseline.             |
+| 127.C1 first-frame visual                    | Checked by the maintainer at the 147 PR (see verification).                             |
+
+### 147 Execution model
+
+- 147.3 → 147.4 → 147.5 run in order (foundation, encoders, keypad).
+- 147.2 → 147.8 → 147.20 → 147.15 run in order (shared parser files).
+- 147.1 → 147.21 run in order (`mode.rs`).
+- 147.24 runs after 147.4 and 147.21.
+- 147.22 and 147.23 are independent.
+- 147.1, 147.6, 147.7, 147.9, 147.10, 147.11, 147.12, 147.13, 147.14 and 147.16 are
+  independent of each other and of the two chains. Run them in any order, or in parallel
+  worktrees per `parallel-work-isolation`.
+- 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
+- 147.19 is independent.
+- 147.17 runs last.
+- Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
+  test that fails on the old code. The task ends with an adversarial review and a
+  confirmation review, as for 130 and 131.
+
+### 147 Verification
+
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
+  `cargo xtask check-windows`, `cargo xtask lint-markdown`.
+- Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15, 147.18 and 147.20 stay within the 15% threshold, or
+  improve.
+- Manual check by the maintainer at the PR: a freshly opened, unfocused window draws the
+  unfocused cursor style on its first frame (127.C1).
+
+### 147 Status notes
+
+(none yet)
+
+---
+
 ## Foundation stubs (v0.13.0)
-
-### Task 130 — Reverse-Path & Capability-Query Consistency (stub)
-
-**Goal.** Every terminal-to-application reply is framed by the handler (S8C1T-aware,
-tmux-passthrough-wrapped). Every capability query is answered on the PTY thread, so its
-reply precedes the DA1 reply that the kitty detection recipes rely on. Advertised
-capabilities match what is actually implemented and enabled.
-
-**Audit findings.**
-
-- **GUI-originated replies bypass `write_osc_response`.** The OSC 52 query reply
-  (`rendering.rs:549`) and all OSC 99 reports (`notifications.rs:553-597`) are hand-formatted
-  bytes sent on `pty_write_tx`, so they are not S8C1T-aware and not tmux-wrapped.
-- **The OSC 99 `p=?` reply is GUI-asynchronous.** It arrives after DA1, so the spec's
-  detection concludes "unsupported". It is also not sent while the window is not rendering
-  frames.
-- **OSC 99 advertises capabilities it lacks.** It answers `p=?` while notifications are
-  disabled (the default), and advertises `a=report` on platforms that never send it.
-- **Capability queries are scattered** across DECRQM, XTGETTCAP, `p=?`, `a=q` and `CSI ? u`,
-  with no single source of truth.
-
-**Scope sketch.**
-
-- A handler-side reply path that GUI-originated events can request through: a typed
-  `InputEvent` variant carrying a structured reply, serialised by the handler.
-- The OSC 99 `p=?` reply moves to the PTY thread, computed from config passed to the PTY
-  side.
-- A small capability registry consulted by every query handler.
-
-**Durable decisions.** No new PTY write channel. Replies use the existing
-`write_to_pty`/`pty_writer.rs` helpers (a new channel would need maintainer sign-off per
-`freminal-version-activation`).
-
-**Open questions.**
-
-- How config (notification enablement, routing) reaches the PTY thread for truthful
-  capability answers: snapshot of config at spawn plus update events, or a shared immutable
-  `Arc` swapped on config reload.
-
-### Task 131 — Screen-Scoped State & Reset Lifecycle (stub)
-
-**Goal.** One explicit mechanism for state that is per-screen (main vs alternate) and for
-what RIS and DECSTR reset. Each protocol registers into it instead of being added to a
-hand-maintained list.
-
-**Audit findings.**
-
-- **Kitty keyboard stack.** It is hand-swapped in `handle_enter_alternate` /
-  `handle_leave_alternate` (`scroll_ops.rs:93-120`). A second `?1049h` replaces the saved
-  main stack (B15): the call site does not guard double entry, while `Buffer::enter_alternate`
-  does.
-- **Graphics.** Placement maps are handler-global, while image stores are swapped per screen.
-  The kitty chunked-transfer state (`kitty_transfer`, formerly `kitty_state`) is not cleared
-  on RIS. Neither are the iTerm2 `multipart_state` nor the `tmux_reparse_queue` (found by
-  the Task 129 activation recon and review).
-- **Pointer-shape stack.** OSC 22 needs per-screen stacks (Task 139). Multiple cursors clear
-  on screen switch (Task 103). XTSAVE needs one global slot (Task 141).
-- **Reset lists are scattered.** `full_reset` (`mod.rs:602-640`) and `soft_reset`
-  (`mod.rs:718+`) are flat lists. Kitty clears the keyboard flags and extra cursors on DECSTR
-  too; freminal documents not doing so for keyboard.
-- **The tmux passthrough re-implements CSI dispatch** (`terminal_handler/dcs.rs:228-522`).
-
-**Scope sketch.**
-
-- A `ScreenScoped<T>` holder with idempotent enter/leave.
-- A per-protocol `reset(kind: ResetKind)` with `ResetKind { Hard, Soft }`.
-- Migrate the keyboard stack and graphics placement maps.
-- Fix B15 and the RIS `kitty_transfer` / `multipart_state` / `tmux_reparse_queue` leaks.
-- An e2e `?1049`/`?47` test suite.
-
-**Open questions.**
-
-- DECSTR behaviour per protocol: follow kitty (clear keyboard flags and extra cursors) or
-  stay conservative.
-- Whether to unify the tmux passthrough CSI path with `AnsiCsiParser` (changes reply
-  wrapping and ordering; maintainer decision).
 
 ### Task 132 — Colour Foundation (stub)
 
@@ -2527,6 +4750,8 @@ rewrite.
   - A shm name without a leading `/` is accepted.
   - Limits are absent: unbounded inflate, unbounded chunk accumulation, a client-supplied
     `S` trusted as capacity, and no 10000 px / 400 MB limits.
+  - `o=z` inflation is capped at `MAX_KITTY_DATA_BYTES` only (Task 129), not at the size
+    implied by `s`/`v`/`f` (129 review; written here by Task 147).
   - A chunked `a=f` continuation carrying `a=f` (required by spec) restarts the transfer
     (`graphics_kitty.rs:271-285`; the test uses a non-conformant shape).
 - **Animation.**
@@ -2602,7 +4827,9 @@ size themselves per placement.
 - a snapshot placement list (sparse);
 - `build_image_verts` consuming placements;
 - three render passes (below-background, below-text, above-text);
-- margin-aware scroll containment.
+- margin-aware scroll containment, including the room an image placement makes below itself:
+  today `Buffer::place_image` scrolls the whole screen (primary and alternate) whatever the
+  DECSTBM margins (routed from Task 131 adversarial-review finding 3 / 131.C5).
 
 **Durable decisions.**
 
@@ -2625,7 +4852,8 @@ combination, in legacy mode as well.
 **Audit findings (B1–B18).**
 
 - **B1 (high), Alt and Super never apply to text keys** (egui delivers `Event::Text`).
-  Alt+b, Alt+f and Alt+Backspace are broken in legacy mode too.
+  Legacy Alt+text (ESC prefix, `?1036`/`?1039`, macOS Option as Alt) moved to Task 147.24.
+  Super on text keys, Alt+Backspace (B3) and the kitty-protocol encoding remain here.
 - **B2 (high), modified Enter is dropped entirely** (`gui/terminal/input.rs:1894-1899`).
 - **B3 (high), Enter/Tab/Backspace/Escape carry no modifiers.** Shift+Tab sends HT instead of
   `CSI Z`.
@@ -2641,8 +4869,9 @@ combination, in legacy mode as well.
 - **B8, unmodified F1–F4 and DECCKM arrows** keep SS3 under flags 1 and 8.
 - **B9, Enter/Tab/Backspace emit release/repeat without flag 8.**
 - **B10, flag 2 alone is inert.**
-- **B11, keypad regressions** from the raw intercept: NumLock-off navigation keys,
-  text-producing keypad keys sent as `CSI u`, and DECKPAM ignored.
+- **B11, keypad regressions** from the raw intercept: NumLock-off navigation keys and
+  text-producing keypad keys sent as `CSI u`. The "DECKPAM ignored" half moved to Task 147.5
+  (legacy application keypad sends SS3).
 - **B12, F13–F35 are unreachable from the GUI.**
 - **B13, legacy modified F3 is sent as `CSI 1;mR`.**
 - **B14, modifier-key events** likely carry stale modifier bits on Wayland.
@@ -2677,8 +4906,6 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 
 - (a) vs (b) above.
 - Ctrl+`-` maps to 0x1F (xterm) or `-` (kitty spec).
-- A macOS option-as-alt config key.
-- DECSTR clearing the flags (Task 131).
 - Shipping CapsLock/NumLock/ScrollLock key events under flag 8 without the lock bits.
 
 ### Task 138 — Desktop Notifications (OSC 99) Conformance (stub, v0.13.0)
@@ -2699,9 +4926,19 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - **Reverse path.**
   - Buttons are reported **0-based**; the spec says 1-based.
   - The close report is lost after activation (notify-rust `FnOnce`).
-  - `p=?` is answered after DA1 (Task 130).
-  - Capabilities are advertised while notifications are disabled.
+  - ~~`p=?` is answered after DA1~~: fixed by Task 130 (answered on the PTY thread in stream
+    order).
+  - ~~Capabilities are advertised while notifications are disabled~~: fixed by Task 130 (every
+    OSC 99 request is dropped while unsupported; `a=report` / `c=1` follow platform and
+    routing).
+  - Ids, buttons and live-id lists are sanitised at the reply serialiser since Task 130; the
+    transported `report_activation` / `focus_on_activation` / `close_report` bools are
+    130.C4, routed here.
   - The `p=alive` map is global across panes, unbounded and never pruned on user dismissal.
+  - A saturated 128-id reassembly map refuses even complete single-chunk notifications, and
+    nothing expires an unterminated id except its final chunk or RIS. Tombstoned
+    (`PendingEntry::Dropped`) ids are unbounded strings. Needs expiry or LRU eviction and an
+    id-length cap (129 review; written here by Task 147).
 - **Lifecycle.**
   - No update-in-place for a repeated `i=`.
   - `p=close` does not close the notification.
@@ -2748,6 +4985,8 @@ User filtering goes through `freminal-config-options`.
 - Query replies via `write_osc_response`, including `__current__`, `__default__` and
   `__grabbed__`.
 - Canonical names; the snapshot carries only the stack top.
+- RIS and DECSTR clear both screens' stacks, as the Task 131 decision records for the other
+  screen-scoped kitty state (written here by Task 147).
 
 **Open questions.**
 
@@ -2805,7 +5044,6 @@ behaviour change. Underline vertex tests and pixel goldens. Terminfo additions p
 
 - Mode state is split three ways: `TerminalModes`, handler-owned modes and buffer-owned
   modes. XTSAVE must snapshot all three consistently.
-- The tmux-passthrough ED dispatch needs `22` as well.
 
 **Open questions.**
 

@@ -48,8 +48,14 @@ These are the seams this codebase actually splits along:
   the first implementation subtask.
 - **Reverse-PTY-write features** (notification activation, transfer
   acks, query responses -- anything where the terminal writes back to
-  the application) get an explicit subtask for the write path, scoped
-  to the existing `write_to_pty` / `Pane::pty_write_tx` plumbing.
+  the application) get an explicit subtask for the write path. A reply
+  the PTY thread can compute is written by the handler through its
+  `write_csi_response` / `write_osc_response` / `write_dcs_response` /
+  `write_apc_response` helpers (S8C1T-aware). A reply only the GUI can
+  produce is sent as a typed `GuiReply` in `InputEvent::Reply` on the
+  pane's input channel, and the handler frames it (Task 130); long-lived
+  GUI-side consumers hold a `Weak` handle (`Pane::reply_tx`).
+  `Pane::pty_write_tx` is for layout startup-command injection only.
   A new channel needs maintainer sign-off.
 - **Config options** follow the `freminal-config-options` wiring
   checklist as their own subtask, never bolted onto a feature subtask.

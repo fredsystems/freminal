@@ -130,7 +130,22 @@ pub struct Pane {
     /// Channel sender for input events (key, resize, focus) to this pane's PTY thread.
     pub input_tx: Sender<InputEvent>,
 
-    /// Sender for raw bytes back to this pane's PTY (for Report* responses).
+    /// Strong handle to a clone of [`Self::input_tx`], existing purely so
+    /// that long-lived off-frame consumers can hold a `Weak` reference.
+    ///
+    /// The PTY consumer thread exits when every `Sender<InputEvent>` for the
+    /// channel is dropped. A consumer that outlives the frame (the OSC 99
+    /// desktop-notification thread blocks for the notification's whole
+    /// lifetime) must therefore never own a strong sender, or it would keep a
+    /// closed pane's consumer thread (and shell) alive. The pane is the only
+    /// strong owner of this `Arc`; only `Weak` handles are given out, so
+    /// dropping the pane drops the last strong sender and the consumer sees
+    /// the channel disconnect.
+    pub reply_tx: Arc<Sender<InputEvent>>,
+
+    /// Sender for raw bytes to this pane's PTY, for layout startup-command
+    /// injection only. GUI-originated replies (window reports, OSC 52, OSC 99)
+    /// go through `input_tx` as `InputEvent::Reply`.
     pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window manipulation commands from this pane's PTY thread.
@@ -307,6 +322,7 @@ impl Pane {
         Self {
             id: pane_id,
             arc_swap: channels.arc_swap,
+            reply_tx: Arc::new(channels.input_tx.clone()),
             input_tx: channels.input_tx,
             pty_write_tx: channels.pty_write_tx,
             window_cmd_rx: channels.window_cmd_rx,
@@ -1738,6 +1754,7 @@ mod tests {
         Pane {
             id,
             arc_swap,
+            reply_tx: Arc::new(input_tx.clone()),
             input_tx,
             pty_write_tx,
             window_cmd_rx,
@@ -1796,6 +1813,61 @@ mod tests {
         pane1.view_state.scroll_offset = 42;
         assert_eq!(pane1.view_state.scroll_offset, 42);
         assert_eq!(pane2.view_state.scroll_offset, 0);
+    }
+
+    // ── reply handle liveness (Task 130.8) ───────────────────────────
+
+    /// A `Pane` built by `from_channels` holds the only strong handles on its
+    /// input channel (`input_tx` and `reply_tx`). Dropping the pane must
+    /// therefore disconnect the channel and kill the `reply_tx` weak handles,
+    /// so a notification thread can never keep the PTY thread's input channel
+    /// alive after its pane is gone. The test keeps no clone of the sender.
+    #[test]
+    fn dropping_a_pane_releases_every_strong_input_sender() {
+        use crossbeam_channel::RecvTimeoutError;
+        use std::time::Duration;
+
+        let (input_tx, input_rx) = crossbeam_channel::unbounded::<InputEvent>();
+        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
+        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
+
+        let channels = crate::gui::pty::TabChannels {
+            arc_swap: Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            command_event_rx,
+            echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+        };
+        let window_post = Arc::new(Mutex::new(crate::gui::renderer::WindowPostRenderer::new()));
+        let pane = Pane::from_channels(PaneId(0), channels, window_post, "p".to_owned());
+
+        let weak = Arc::downgrade(&pane.reply_tx);
+        assert!(weak.upgrade().is_some(), "handle is live while the pane is");
+
+        drop(pane);
+
+        assert!(
+            matches!(
+                input_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Disconnected)
+            ),
+            "a strong Sender<InputEvent> outlived the pane"
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "the reply handle must not outlive the pane"
+        );
     }
 
     // ── recent_commands ring buffer (Task 72.9) ──────────────────────

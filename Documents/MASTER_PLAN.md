@@ -10,32 +10,32 @@ and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                                 | Plan Document                                                         | Tasks              | Status      |
-| ------- | ---------------------------------------- | --------------------------------------------------------------------- | ------------------ | ----------- |
-| v0.2.0  | —                                        | (Tasks 1–35 below)                                                    | 35                 | Done        |
-| v0.3.0  | Daily Driver                             | (retired — see DESIGN_DECISIONS.md)                                   | 36–44              | Complete    |
-| v0.4.0  | Search & Protocol                        | (retired — see DESIGN_DECISIONS.md)                                   | 45–52              | Complete    |
-| v0.5.0  | Multi-Instance & Visual                  | (retired — see DESIGN_DECISIONS.md)                                   | 53–58              | Complete    |
-| v0.6.0  | Foundation                               | (retired — see DESIGN_DECISIONS.md)                                   | 62–67              | Complete    |
-| v0.7.0  | Recording & Layouts                      | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69        | Complete    |
-| v0.8.0  | Correctness & Polish                     | `PLAN_VERSION_080.md`                                                 | 70–71              | Complete    |
-| v0.9.0  | Modern Workflow Terminal                 | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98   | Complete    |
-| v0.10.0 | Beautification & Fonts                   | `PLAN_VERSION_100.md`                                                 | 111–112            | Complete    |
-| v0.11.0 | Kitty: Notifications & Graphics          | `PLAN_VERSION_110.md`                                                 | 99–101, 114        | Complete    |
-| v0.11.1 | Correctness Fixes                        | `PLAN_VERSION_111.md`                                                 | 115–117            | Complete    |
-| v0.12.0 | Scrollback Memory & Performance          | `PLAN_VERSION_120.md`                                                 | 118–125            | Complete    |
-| v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140   | In progress |
-| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137            | Planned     |
-| v0.13.2 | Kitty: Small & Medium New Protocols      | `PLAN_VERSION_130.md`                                                 | 103, 141–145       | Planned     |
-| v0.13.3 | Kitty: Text Sizing, Transfer & Clipboard | `PLAN_VERSION_130.md`                                                 | 102, 104, 133, 146 | Planned     |
-| v0.13.4 | Kitty: Drag & Drop                       | `PLAN_VERSION_130.md`                                                 | 105                | Planned     |
-| v0.14.0 | Power-User Toolkit                       | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97       | Stub        |
-| v0.15.0 | Remote                                   | `PLAN_VERSION_150.md`                                                 | 86                 | Stub        |
-| v0.16.0 | Reach & Credibility                      | `PLAN_VERSION_160.md`                                                 | 88, 89, 91, 93     | Stub        |
-| v0.17.0 | Status Bar                               | `PLAN_VERSION_170.md`                                                 | 85                 | Stub        |
-| v0.18.0 | AI Assist — Advisory                     | `PLAN_VERSION_180.md`                                                 | 87a                | Stub        |
-| v0.19.0 | AI Assist — Generative                   | `PLAN_VERSION_190.md`                                                 | 87b                | Stub        |
-| v0.20.0 | Event Hook API                           | `PLAN_VERSION_200.md`                                                 | 84                 | Stub        |
+| Version | Codename                                 | Plan Document                                                         | Tasks                 | Status      |
+| ------- | ---------------------------------------- | --------------------------------------------------------------------- | --------------------- | ----------- |
+| v0.2.0  | —                                        | (Tasks 1–35 below)                                                    | 35                    | Done        |
+| v0.3.0  | Daily Driver                             | (retired — see DESIGN_DECISIONS.md)                                   | 36–44                 | Complete    |
+| v0.4.0  | Search & Protocol                        | (retired — see DESIGN_DECISIONS.md)                                   | 45–52                 | Complete    |
+| v0.5.0  | Multi-Instance & Visual                  | (retired — see DESIGN_DECISIONS.md)                                   | 53–58                 | Complete    |
+| v0.6.0  | Foundation                               | (retired — see DESIGN_DECISIONS.md)                                   | 62–67                 | Complete    |
+| v0.7.0  | Recording & Layouts                      | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69           | Complete    |
+| v0.8.0  | Correctness & Polish                     | `PLAN_VERSION_080.md`                                                 | 70–71                 | Complete    |
+| v0.9.0  | Modern Workflow Terminal                 | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98      | Complete    |
+| v0.10.0 | Beautification & Fonts                   | `PLAN_VERSION_100.md`                                                 | 111–112               | Complete    |
+| v0.11.0 | Kitty: Notifications & Graphics          | `PLAN_VERSION_110.md`                                                 | 99–101, 114           | Complete    |
+| v0.11.1 | Correctness Fixes                        | `PLAN_VERSION_111.md`                                                 | 115–117               | Complete    |
+| v0.12.0 | Scrollback Memory & Performance          | `PLAN_VERSION_120.md`                                                 | 118–125               | Complete    |
+| v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140, 147 | In progress |
+| v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137               | Planned     |
+| v0.13.2 | Kitty: Small & Medium New Protocols      | `PLAN_VERSION_130.md`                                                 | 103, 141–145          | Planned     |
+| v0.13.3 | Kitty: Text Sizing, Transfer & Clipboard | `PLAN_VERSION_130.md`                                                 | 102, 104, 133, 146    | Planned     |
+| v0.13.4 | Kitty: Drag & Drop                       | `PLAN_VERSION_130.md`                                                 | 105                   | Planned     |
+| v0.14.0 | Power-User Toolkit                       | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97          | Stub        |
+| v0.15.0 | Remote                                   | `PLAN_VERSION_150.md`                                                 | 86                    | Stub        |
+| v0.16.0 | Reach & Credibility                      | `PLAN_VERSION_160.md`                                                 | 88, 89, 91, 93        | Stub        |
+| v0.17.0 | Status Bar                               | `PLAN_VERSION_170.md`                                                 | 85                    | Stub        |
+| v0.18.0 | AI Assist — Advisory                     | `PLAN_VERSION_180.md`                                                 | 87a                   | Stub        |
+| v0.19.0 | AI Assist — Generative                   | `PLAN_VERSION_190.md`                                                 | 87b                   | Stub        |
+| v0.20.0 | Event Hook API                           | `PLAN_VERSION_200.md`                                                 | 84                    | Stub        |
 
 **v0.8.0 is a hard gate.** No work on v0.9.0 or later begins until v0.8.0 (Tasks 70 and 71)
 is complete. v0.8.0 closes every correctness and hygiene gap identified in the post-v0.7.0
@@ -229,9 +229,9 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 126 | Pre-existing Safety Gate                    | `PLAN_VERSION_130.md` (Task 126)              | Complete      | None                          |
 | 127 | Unfocused / Inactive-Pane Cursor (#531)     | `PLAN_VERSION_130.md` (Task 127)              | Complete      | None                          |
 | 128 | Prefix/Intermediate-Aware CSI Dispatch      | `PLAN_VERSION_130.md` (Task 128)              | Complete      | Task 126                      |
-| 129 | Kitty Wire Infrastructure                   | `PLAN_VERSION_130.md` (Task 129)              | Pending merge | None                          |
-| 130 | Reverse-Path & Capability-Query Consistency | `PLAN_VERSION_130.md` (Task 130)              | Planned       | Task 129                      |
-| 131 | Screen-Scoped State & Reset Lifecycle       | `PLAN_VERSION_130.md` (Task 131)              | Planned       | None                          |
+| 129 | Kitty Wire Infrastructure                   | `PLAN_VERSION_130.md` (Task 129)              | Complete      | None                          |
+| 130 | Reverse-Path & Capability-Query Consistency | `PLAN_VERSION_130.md` (Task 130)              | Pending merge | Task 129                      |
+| 131 | Screen-Scoped State & Reset Lifecycle       | `PLAN_VERSION_130.md` (Task 131)              | Pending merge | Task 130.1-130.3 (foundation) |
 | 132 | Colour Foundation                           | `PLAN_VERSION_130.md` (Task 132)              | Planned       | Task 126                      |
 | 133 | Shared Consent Prompt                       | `PLAN_VERSION_130.md` (Task 133)              | Planned       | None                          |
 | 134 | Unicode Width & Segmentation Conformance    | `PLAN_VERSION_130.md` (Task 134)              | Planned       | None                          |
@@ -247,6 +247,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 144 | Color Control (OSC 21) & Colour Stack       | `PLAN_VERSION_130.md` (Task 144)              | Planned       | Tasks 128–130, 132            |
 | 145 | Kitty Shell-Integration Compatibility       | `PLAN_VERSION_130.md` (Task 145)              | Planned       | Task 129; decision            |
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
+| 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
 
 ---
 
@@ -500,9 +501,9 @@ media, ISO-level shifts, print/pause/menu keys) via a raw-winit intercept; the l
 was reverted and is tracked separately. All target stable kitty specs; v0.11.0 keyboard ships
 "substantially compliant, remainder tracked (Task 114)".
 
-**Tasks 102–105 and 126–146 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
+**Tasks 102–105 and 126–147 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–129 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–131 and 147 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -819,7 +820,9 @@ Update this section as tasks complete:
 | 126  | 2026-10-08 | 2026-10-09 | 126.1-126.4 complete; merged via PR #534 (`c424d59e`); 126.C1 open                 |
 | 127  | 2026-10-09 | 2026-10-09 | 127.1-127.8, review fixes, 127.C1-C3; merged via PR #535 (`72a5f7e1`)              |
 | 128  | 2026-10-09 | 2026-10-09 | 128.1-128.6, review fixes, 128.C1-C4, parser perf; merged via PR #535 (`72a5f7e1`) |
-| 129  | 2026-10-09 |            | 129.1-129.15, two review passes, 129.C1-C6 resolved; PR pending                    |
+| 129  | 2026-10-09 | 2026-10-10 | 129.1-129.15, two review passes, 129.C1-C6; merged via PR #536 (`2862acb9`)        |
+| 130  | 2026-10-10 |            | 130.1-130.9, C1-C3, C5-C6, two review passes; on `task-130-131/...`; PR to open    |
+| 131  | 2026-10-10 |            | 131.1-131.10, C1-C5, two review passes; merged onto 130 (`6236687c`); PR to open   |
 
 ---
 
@@ -842,7 +845,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–146; audit + 126–129 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–147; audit + 126–131, 147 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)

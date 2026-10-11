@@ -33,14 +33,14 @@ impl ReportMode for XtMseWin {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Disabled => String::from("\x1b[?1004;2$y"),
-                Self::Enabled => String::from("\x1b[?1004;1$y"),
-                Self::Query => String::from("\x1b[?1004;0$y"),
+                Self::Disabled => String::from("?1004;2$y"),
+                Self::Enabled => String::from("?1004;1$y"),
+                Self::Query => String::from("?1004;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?1004;1$y"),
-                SetMode::DecRst => String::from("\x1b[?1004;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?1004;0$y"),
+                SetMode::DecSet => String::from("?1004;1$y"),
+                SetMode::DecRst => String::from("?1004;2$y"),
+                SetMode::DecQuery => String::from("?1004;0$y"),
             },
         )
     }

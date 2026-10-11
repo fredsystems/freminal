@@ -30,14 +30,14 @@ impl ReportMode for Decanm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Ansi => String::from("\x1b[?2;1$y"),
-                Self::Vt52 => String::from("\x1b[?2;2$y"),
-                Self::Query => String::from("\x1b[?2;0$y"),
+                Self::Ansi => String::from("?2;1$y"),
+                Self::Vt52 => String::from("?2;2$y"),
+                Self::Query => String::from("?2;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?2;1$y"),
-                SetMode::DecRst => String::from("\x1b[?2;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?2;0$y"),
+                SetMode::DecSet => String::from("?2;1$y"),
+                SetMode::DecRst => String::from("?2;2$y"),
+                SetMode::DecQuery => String::from("?2;0$y"),
             },
         )
     }

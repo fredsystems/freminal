@@ -17,9 +17,10 @@ use freminal_common::{
             decbkm::Decbkm,
             decckm::Decckm,
             decnkm::Decnkm,
+            decsclm::Decsclm,
             keypad::KeypadMode,
+            lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
-            reverse_wrap_around::ReverseWrapAround,
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
             theme::Theming,
@@ -30,7 +31,6 @@ use freminal_common::{
     },
     config::ThemeMode,
     cursor::CursorVisualStyle,
-    send_or_log,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
 };
 
@@ -44,6 +44,16 @@ use crate::{
 };
 
 use crate::terminal_handler::TerminalHandler as NewHandler;
+
+/// Deepest tmux DCS passthrough nesting `TerminalState` will process.
+///
+/// Top-level PTY outputs are depth 0; the payload of a top-level tmux DCS is
+/// depth 1, a tmux DCS inside that is depth 2, and so on.  A payload that
+/// would be processed at a depth above this limit is dropped (with a
+/// payload-free debug line), so four levels of nesting work and a fifth does
+/// not.  The cap bounds recursion on hostile input; real use is one level
+/// (tmux inside the terminal) or two (tmux inside tmux).
+const MAX_TMUX_PASSTHROUGH_DEPTH: usize = 4;
 
 /// Format the first `max_bytes` of `data` as a hex string for trace logging.
 ///
@@ -75,7 +85,6 @@ pub struct TerminalState {
     pub write_tx: crossbeam_channel::Sender<PtyWrite>,
     pub leftover_data: Option<Vec<u8>>,
     pub window_commands: Vec<WindowManipulation>,
-    pub cursor_visual_style: CursorVisualStyle,
 
     /// The `freminal-buffer` implementation — the sole source of truth for
     /// terminal content, cursor position, and format state.
@@ -129,7 +138,6 @@ impl TerminalState {
             write_tx,
             leftover_data: None,
             window_commands: Vec::new(),
-            cursor_visual_style: CursorVisualStyle::default(),
             handler,
         }
     }
@@ -227,7 +235,9 @@ impl TerminalState {
     ///   `bracketed_paste`, `mouse_tracking`, `mouse_encoding`, `focus_reporting`
     ///   (`XtMseWin`), `repeat_keys` (DECARM), `keypad_mode` (DECPAM/DECNKM),
     ///   `invert_screen` (DECSCNM), `synchronized_updates`, `line_feed_mode`,
-    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and `reverse_wrap_around`.
+    ///   `backarrow_key_mode` (DECBKM), `alternate_scroll`, and the
+    ///   theme state (`theming`, `theme_mode`).  `?45` reverse wrap and the cursor
+    ///   blink state are owned by the handler alone.
     ///
     /// - **`FreminalAnsiParser.vt52_mode` (parser layer)** — DECANM must also
     ///   be mirrored into the parser so it routes ESC bytes to the correct
@@ -304,13 +314,13 @@ impl TerminalState {
             Mode::XtMseWin(v) => self.modes.focus_reporting = v.clone(),
             Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
             Mode::Decarm(v) => self.modes.repeat_keys = *v,
-            // ?45 set/reset: sync into TerminalModes for backwards compat.
-            // Query is answered by the handler; ignore it here.
-            Mode::ReverseWrapAround(
-                v @ (ReverseWrapAround::WrapAround | ReverseWrapAround::DontWrap),
-            ) => self.modes.reverse_wrap_around = *v,
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-            Mode::LineFeedMode(v) => self.modes.line_feed_mode = *v,
+            // `Lnm::Query` is excluded by the handler-owned arm below: a DECRQM
+            // for LNM must not overwrite the stored state that input encoding
+            // reads.
+            Mode::LineFeedMode(v @ (Lnm::NewLine | Lnm::LineFeed)) => {
+                self.modes.line_feed_mode = *v;
+            }
             Mode::Decnkm(Decnkm::Application) => {
                 self.modes.keypad_mode = KeypadMode::Application;
             }
@@ -322,6 +332,7 @@ impl TerminalState {
             // ── Modes handled entirely by TerminalHandler ──────
             Mode::XtExtscrn(_)
             | Mode::AltScreen47(_)
+            | Mode::AltScreen1047(_)
             | Mode::SaveCursor1048(_)
             | Mode::Decawm(_)
             | Mode::Dectem(_)
@@ -341,7 +352,9 @@ impl TerminalState {
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
-            | Mode::Decanm(Decanm::Query) => {}
+            | Mode::LineFeedMode(Lnm::Query)
+            | Mode::Decanm(Decanm::Query)
+            | Mode::Decsclm(Decsclm::Query) => {}
             // DECANM — toggle the parser between VT52 and ANSI modes.
             // The handler owns the authoritative `vt52_mode` flag, but
             // the parser also needs to know so it routes ESC bytes to
@@ -380,13 +393,13 @@ impl TerminalState {
         match mode {
             Mode::Decckm(Decckm::Query) => {
                 let resp = self.modes.cursor_key.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::BracketedPaste(
                 freminal_common::buffer_states::modes::rl_bracket::RlBracket::Query,
             ) => {
                 let resp = self.modes.bracketed_paste.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::MouseMode(MouseTrack::Query(report_mode)) => {
                 let ps = match *report_mode {
@@ -411,39 +424,40 @@ impl TerminalState {
                         }
                     }
                 };
-                let resp = format!("\x1b[?{report_mode};{ps}$y");
-                self.send_decrpm(&resp);
+                let resp = format!("?{report_mode};{ps}$y");
+                self.handler.write_csi_response(&resp);
             }
             Mode::XtMseWin(XtMseWin::Query) => {
                 let resp = self.modes.focus_reporting.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decscnm(freminal_common::buffer_states::modes::decscnm::Decscnm::Query) => {
                 let resp = self.modes.invert_screen.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decarm(Decarm::Query) => {
                 let resp = self.modes.repeat_keys.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::SynchronizedUpdates(SynchronizedUpdates::Query) => {
                 let resp = self.modes.synchronized_updates.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::Decnkm(Decnkm::Query) => {
                 let override_mode = match self.modes.keypad_mode {
                     KeypadMode::Application => SetMode::DecSet,
                     KeypadMode::Numeric => SetMode::DecRst,
                 };
-                self.send_decrpm(&Decnkm::Application.report(Some(override_mode)));
+                self.handler
+                    .write_csi_response(&Decnkm::Application.report(Some(override_mode)));
             }
             Mode::Decbkm(Decbkm::Query) => {
                 let resp = self.modes.backarrow_key_mode.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             Mode::AlternateScroll(AlternateScroll::Query) => {
                 let resp = self.modes.alternate_scroll.report(None);
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             // ── ?2031 Theming query ─────────────────────────────────────────
             //
@@ -460,38 +474,128 @@ impl TerminalState {
             //                        (dynamically follows OS preference; app can override)
             Mode::Theming(Theming::Query) => {
                 let resp = match self.modes.theme_mode {
-                    ThemeMode::Light => String::from("\x1b[?2031;1$y"),
-                    ThemeMode::Dark => String::from("\x1b[?2031;2$y"),
+                    ThemeMode::Light => String::from("?2031;1$y"),
+                    ThemeMode::Dark => String::from("?2031;2$y"),
                     ThemeMode::Auto => match self.modes.theming {
-                        Theming::Light => String::from("\x1b[?2031;3$y"),
-                        Theming::Dark | Theming::Query => String::from("\x1b[?2031;4$y"),
+                        Theming::Light => String::from("?2031;3$y"),
+                        Theming::Dark | Theming::Query => String::from("?2031;4$y"),
                     },
                 };
-                self.send_decrpm(&resp);
+                self.handler.write_csi_response(&resp);
             }
             _ => {}
         }
     }
 
-    /// Drain the tmux reparse queue, parsing and processing any queued
-    /// raw bytes (CSI/OSC sequences from DCS tmux passthrough).
-    fn drain_tmux_reparse_queue(&mut self) {
-        loop {
-            let reparse = self.handler.take_tmux_reparse_queue();
-            if reparse.is_empty() {
-                break;
+    /// Apply one parsed batch in event order.
+    ///
+    /// Each output is applied to the handler, then to the `TerminalState`-owned
+    /// mode flags, then (for `ResetDevice`) to the `TerminalState` RIS reset,
+    /// before the next output is looked at.  This keeps every side effect that
+    /// reads or writes state (replies, mode queries, RIS) in the order the
+    /// application sent the sequences.
+    ///
+    /// Any tmux DCS passthrough payload an output queued is processed right
+    /// after that output, before the next one, so an inner sequence takes
+    /// effect at the position its wrapper occupied on the wire.  The handler's
+    /// end-of-batch housekeeping runs once, after the last output (see
+    /// [`Self::process_outputs_at_depth`] for why not per nested batch).
+    fn process_parsed_outputs(&mut self, parsed: &[TerminalOutput]) {
+        self.process_outputs_at_depth(parsed, 0);
+        self.handler.finish_output_batch();
+    }
+
+    /// Apply `outputs` in event order at tmux nesting `depth`.
+    ///
+    /// Top-level PTY outputs are depth 0.  The payload of a tmux DCS found at
+    /// depth `d` is processed at depth `d + 1`.  A payload that would be
+    /// processed at a depth above [`MAX_TMUX_PASSTHROUGH_DEPTH`] is dropped
+    /// with a payload-free debug line.
+    ///
+    /// For each output: (a) the handler applies it, (b) the `TerminalState`
+    /// mode flags are synced, (c) `ResetDevice` applies the `TerminalState`
+    /// RIS reset, and only then (d) the tmux payloads the handler queued while
+    /// applying it are drained.  Each payload is parsed with a **fresh**
+    /// [`FreminalAnsiParser`] seeded with the outer parser's `vt52_mode` and
+    /// `s8c1t_mode`: a payload is a complete sequence, so it must neither
+    /// splice into nor leave residue in whatever sequence the outer parser is
+    /// part-way through.
+    ///
+    /// The end-of-batch housekeeping (`finish_output_batch`) is deliberately
+    /// **not** run here: it is a per-PTY-read cost (see
+    /// `prune_evicted_real_placements`), and nested payloads are part of the
+    /// same read.  [`Self::process_parsed_outputs`] runs it once at the top.
+    fn process_outputs_at_depth(&mut self, outputs: &[TerminalOutput], depth: usize) {
+        for output in outputs {
+            self.handler.process_output_in_batch(output);
+            self.sync_mode_flags(output);
+            if matches!(output, TerminalOutput::ResetDevice) {
+                // RIS resets the parser's DECANM / S8C1T modes mid-iteration.
+                // The outputs that follow in this same chunk were already
+                // parsed, so they are applied as parsed; the parser's
+                // in-flight sequence, `leftover_data` and queued window
+                // commands belong to bytes after the RIS and survive it.
+                self.apply_state_reset();
             }
-            for raw in reparse {
-                let reparsed = self.parser.push(&raw);
-                for output in &reparsed {
-                    trace!(%output, "reparsed tmux passthrough output");
-                }
-                self.handler.process_outputs(&reparsed);
-                for output in &reparsed {
-                    self.sync_mode_flags(output);
-                }
-            }
+            self.process_tmux_passthrough_queue(depth);
         }
+    }
+
+    /// Drain the handler's tmux passthrough queue and process each payload
+    /// through a fresh parser, one nesting level below `depth`.
+    ///
+    /// See [`Self::process_outputs_at_depth`] for the depth semantics.
+    fn process_tmux_passthrough_queue(&mut self, depth: usize) {
+        let queued = self.handler.take_tmux_passthrough_queue();
+        for payload in queued {
+            let payload_depth = depth + 1;
+            if payload_depth > MAX_TMUX_PASSTHROUGH_DEPTH {
+                debug!(
+                    "tmux passthrough payload dropped: nesting depth {payload_depth} exceeds {MAX_TMUX_PASSTHROUGH_DEPTH} ({} bytes)",
+                    payload.len()
+                );
+                continue;
+            }
+            let mut parser = FreminalAnsiParser::new();
+            parser.vt52_mode = self.parser.vt52_mode;
+            parser.s8c1t_mode = self.parser.s8c1t_mode;
+            let inner = parser.push(&payload);
+            for output in &inner {
+                trace!(output = %BoundedDisplay(output), "parsed tmux passthrough output");
+            }
+            self.process_outputs_at_depth(&inner, payload_depth);
+        }
+    }
+
+    /// RIS (ESC c) — reset the state that lives in `TerminalState`.
+    ///
+    /// The handler has already reset all buffer-level state when it processed
+    /// `ResetDevice`.  This resets only what `TerminalState` itself owns, and
+    /// only the part of it that RIS reaches:
+    ///
+    /// - `modes` return to their defaults, **except** `theme_mode` and
+    ///   `theming`, which are config / OS-pushed state that is re-pushed only
+    ///   on the next `ThemeModeUpdate`;
+    /// - the parser's `vt52_mode` and `s8c1t_mode` return to ANSI / 7-bit.  The
+    ///   parser itself is **not** replaced: this chunk has already been parsed,
+    ///   so the parser's in-flight sequence and pending data belong to bytes
+    ///   that follow the RIS;
+    /// - `leftover_data` is kept for the same reason (it holds a split UTF-8
+    ///   character that follows the RIS);
+    /// - `window_commands` is kept: those events were already emitted and are
+    ///   in transit to the GUI.
+    ///
+    /// `write_tx` is preserved (user configuration).
+    fn apply_state_reset(&mut self) {
+        let theme_mode = self.modes.theme_mode;
+        let theming = self.modes.theming.clone();
+        self.modes = TerminalModes {
+            theme_mode,
+            theming,
+            ..TerminalModes::default()
+        };
+        self.parser.vt52_mode = Decanm::Ansi;
+        self.parser.s8c1t_mode = S8c1t::SevenBit;
     }
 
     /// Process one chunk of raw PTY bytes through the full terminal pipeline.
@@ -510,24 +614,24 @@ impl TerminalState {
     /// 3. **Parser** — feeds the complete (non-trailing) bytes to
     ///    `FreminalAnsiParser::push()`, which produces a `Vec<TerminalOutput>`.
     ///
-    /// 4. **Buffer mutations** — `TerminalHandler::process_outputs()` applies
-    ///    every `TerminalOutput` item to the buffer: text insertion, cursor
-    ///    movement, erase operations, mode changes, etc.
+    /// 4. **Event-order processing** — a single pass over the parsed outputs.
+    ///    For each `TerminalOutput` item, in order: the handler applies it to
+    ///    the buffer (text insertion, cursor movement, erase operations, mode
+    ///    changes, replies, etc.); the `TerminalState`-owned mode flags are
+    ///    synced (mouse tracking, bracketed paste, focus reporting, DECANM,
+    ///    etc.); if the item is `ResetDevice` (ESC c), the `TerminalState` RIS
+    ///    reset runs at that point (modes other than the theme state, and the
+    ///    parser's DECANM / S8C1T modes; `leftover_data`, the parser's
+    ///    in-flight sequence and queued window commands survive); and finally
+    ///    any DCS tmux passthrough payload the item queued is parsed with a
+    ///    fresh parser and processed the same way, recursively, up to
+    ///    `MAX_TMUX_PASSTHROUGH_DEPTH` levels, before the next item is looked
+    ///    at.  The handler's end-of-batch
+    ///    housekeeping runs once after the last top-level item.
     ///
-    /// 5. **Mode sync** — iterates the same output list a second time to update
-    ///    the mode flags that live in `TerminalState` rather than the handler
-    ///    (mouse tracking, bracketed paste, focus reporting, DECANM, etc.).
-    ///
-    /// 6. **RIS reset** — if any item is `ResetDevice` (ESC c), resets all
-    ///    `TerminalState`-owned mode fields and clears window commands.
-    ///
-    /// 7. **Window commands** — drains the handler's `window_commands` queue
+    /// 5. **Window commands** — drains the handler's `window_commands` queue
     ///    into `self.window_commands` so the GUI's `handle_window_manipulation`
     ///    drain loop can pick them up on the next frame.
-    ///
-    /// 8. **tmux reparse** — drains any raw bytes queued by the DCS tmux
-    ///    passthrough handler, re-runs them through the parser and handler,
-    ///    and loops until the queue is empty.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         debug!("Handling Incoming Data");
         trace!(
@@ -617,46 +721,13 @@ impl TerminalState {
             trace!(output = %BoundedDisplay(output), "parsed terminal output");
         }
 
-        self.handler.process_outputs(&parsed);
-
-        // ── Sync mode flags that the handler doesn't own ─────────────
-        for output in &parsed {
-            self.sync_mode_flags(output);
-        }
-
-        // ── RIS (ESC c) — full terminal reset ──────────────────────────
-        //
-        // If the parsed output contains a ResetDevice, the handler has already
-        // reset all buffer-level state.  We also need to reset the state that
-        // lives in TerminalState: modes, parser, leftover data, and cursor
-        // visual style.  `write_tx` is preserved (user configuration).
-        if parsed
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::ResetDevice))
-        {
-            self.modes = TerminalModes::default();
-            self.parser = FreminalAnsiParser::new();
-            self.leftover_data = None;
-            self.cursor_visual_style = CursorVisualStyle::default();
-            self.window_commands.clear();
-        }
+        self.process_parsed_outputs(&parsed);
 
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation
         // can consume them.
         self.window_commands
             .extend(self.handler.take_window_commands());
-
-        // ── tmux passthrough reparse queue ─────────────────────────────
-        //
-        // tmux DCS passthrough can contain inner CSI or OSC sequences that
-        // the handler cannot parse (the ANSI parser lives here, not in the
-        // handler).  After process_outputs() returns, we drain any queued
-        // raw bytes, feed them through the parser, and process the resulting
-        // TerminalOutput items.  This loop runs until the queue is empty
-        // (inner sequences are unlikely to produce more reparse items, but
-        // we handle it for correctness).
-        self.drain_tmux_reparse_queue();
 
         let elapsed = now.elapsed();
         if elapsed.as_millis() > 0 {
@@ -708,18 +779,6 @@ impl TerminalState {
         }
 
         Ok(())
-    }
-
-    /// Send a DECRPM response string directly to the PTY.
-    ///
-    /// This bypasses the `TerminalInput` encoding path — the response is an
-    /// escape sequence that must be sent verbatim.
-    fn send_decrpm(&self, response: &str) {
-        send_or_log!(
-            self.write_tx,
-            PtyWrite::Write(response.as_bytes().to_vec()),
-            "Failed to send DECRPM response"
-        );
     }
 }
 
@@ -972,31 +1031,6 @@ mod tests {
         }
     }
 
-    // ── send_decrpm ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn send_decrpm_sends_response_to_channel() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let state = TerminalState::new(tx, None);
-        let resp = "\x1b[?1;2$y";
-        state.send_decrpm(resp);
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            PtyWrite::Write(bytes) => assert_eq!(bytes, resp.as_bytes().to_vec()),
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
-        }
-    }
-
-    #[test]
-    fn send_decrpm_on_disconnected_channel_does_not_panic() {
-        // Drop the receiver → send will silently fail but must not panic.
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        let state = TerminalState::new(tx, None);
-        drop(rx);
-        // Must not panic
-        state.send_decrpm("\x1b[?1;2$y");
-    }
-
     // ══════════════════════════════════════════════════════════════════════════
     //  Coverage gap tests
     // ══════════════════════════════════════════════════════════════════════════
@@ -1119,34 +1153,63 @@ mod tests {
         }
     }
 
-    // ── drain_tmux_reparse_queue via DCS tmux passthrough ───────────────────
+    /// Wrap `inner` in `levels` nested `ESC P tmux; ... ESC \` envelopes.
+    fn tmux_nest(inner: &[u8], levels: usize) -> Vec<u8> {
+        let mut bytes = inner.to_vec();
+        for _ in 0..levels {
+            let mut wrapped = b"\x1bPtmux;".to_vec();
+            for &b in &bytes {
+                if b == 0x1b {
+                    wrapped.push(0x1b);
+                }
+                wrapped.push(b);
+            }
+            wrapped.extend_from_slice(b"\x1b\\");
+            bytes = wrapped;
+        }
+        bytes
+    }
+
     #[test]
-    fn drain_tmux_reparse_queue_processes_osc_passthrough() {
+    fn tmux_passthrough_beyond_the_depth_cap_is_dropped_with_a_payload_free_debug() {
+        let inner = b"\x1b]0;SECRETPAYLOAD\x07";
         let mut state = TerminalState::default();
-        // Feed a tmux DCS passthrough containing an OSC title-set sequence:
-        // DCS tmux ; ESC ] 0 ; hello BEL ST
-        // In tmux passthrough, ESCs inside are doubled, so:
-        // ESC P tmux ; ESC ESC ] 0 ; h e l l o BEL ESC \
-        let mut data: Vec<u8> = Vec::new();
-        data.push(0x1b); // ESC
-        data.push(b'P'); // DCS
-        data.extend_from_slice(b"tmux;");
-        data.push(0x1b); // Doubled ESC
-        data.push(0x1b); // (second ESC — tmux doubles them)
-        data.push(b']'); // OSC
-        data.extend_from_slice(b"0;hello");
-        data.push(0x07); // BEL terminator for inner OSC
-        data.push(0x1b); // ESC
-        data.push(b'\\'); // ST to end DCS
-        // Process through the full pipeline — this should queue the OSC
-        // in the tmux reparse queue, and drain_tmux_reparse_queue should
-        // process it.
-        state.handle_incoming_data(&data);
-        // The tmux reparse queue should be drained (empty after processing)
-        let remaining = state.handler.take_tmux_reparse_queue();
+        let events = crate::log_capture::capture(|| {
+            state.handle_incoming_data(&tmux_nest(inner, MAX_TMUX_PASSTHROUGH_DEPTH + 1));
+        });
         assert!(
-            remaining.is_empty(),
-            "tmux reparse queue should be drained after handle_incoming_data"
+            state.window_commands.is_empty(),
+            "a dropped payload must not be processed"
+        );
+        let dropped: Vec<_> = events
+            .iter()
+            .filter(|(_, text)| text.contains("tmux passthrough payload dropped"))
+            .collect();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "expected exactly one drop line: {events:?}"
+        );
+        let (level, text) = dropped[0];
+        assert_eq!(*level, tracing::Level::DEBUG);
+        assert!(!text.contains("SECRETPAYLOAD"), "drop line leaked: {text}");
+        assert!(
+            text.contains("depth 5"),
+            "drop line must carry the depth: {text}"
+        );
+    }
+
+    #[test]
+    fn tmux_passthrough_at_the_depth_cap_is_processed() {
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(&tmux_nest(b"\x1b]0;hello\x07", MAX_TMUX_PASSTHROUGH_DEPTH));
+        assert!(
+            state
+                .window_commands
+                .iter()
+                .any(|c| matches!(c, WindowManipulation::SetTitleBarText(t) if t == "hello")),
+            "got {:?}",
+            state.window_commands
         );
     }
 

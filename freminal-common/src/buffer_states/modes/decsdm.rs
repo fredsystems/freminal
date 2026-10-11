@@ -30,14 +30,14 @@ impl ReportMode for Decsdm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::ScrollingMode => String::from("\x1b[?80;2$y"),
-                Self::DisplayMode => String::from("\x1b[?80;1$y"),
-                Self::Query => String::from("\x1b[?80;0$y"),
+                Self::ScrollingMode => String::from("?80;2$y"),
+                Self::DisplayMode => String::from("?80;1$y"),
+                Self::Query => String::from("?80;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?80;1$y"),
-                SetMode::DecRst => String::from("\x1b[?80;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?80;0$y"),
+                SetMode::DecSet => String::from("?80;1$y"),
+                SetMode::DecRst => String::from("?80;2$y"),
+                SetMode::DecQuery => String::from("?80;0$y"),
             },
         )
     }
