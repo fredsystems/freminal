@@ -4530,7 +4530,8 @@ Deliverable: the doc changes, markdownlint clean.
   `Bounded` arm's search-only fallback); per `freminal-extend-or-extract`, give it a named
   function because it is a decision, not only to test it, then unit-test every arm.
 - **Verification:** a test per arm, including `Full` with and without a degenerate pane rect.
-- **Scheduling:** routed to Task 147 (147.25).
+- **Scheduling:** resolved within Task 132 (pulled back from Task 147 after the adversarial
+  review, finding R1, because 132.10 required this test).
 
 #### 132.C3 — `--features gl-pixel` builds with dead-code warnings
 
@@ -4568,6 +4569,66 @@ Deliverable: the doc changes, markdownlint clean.
   144 extra bytes in the new category, and a frame with neither reports 0; existing totals
   unchanged otherwise.
 - **Scheduling:** resolved within Task 132, after 132.14.
+
+#### 132.C5 — SGR 7 on default colours ignores the default foreground/background
+
+- **Surfaced:** adversarial review, finding R2 (2026-10-11). Predates Task 132.
+- **Impact:** `StateColors::color()` / `background_color()` / `underline_color()`
+  (`freminal-common/src/buffer_states/cursor.rs`) map `Default` → `White` and
+  `DefaultBackground` → `Black` under `ReverseVideo::On` (`default_to_regular`), so reversed
+  default text renders ANSI 7 on ANSI 0 instead of the default background on the default
+  foreground, and ignores OSC 10/11 and the theme's own fg/bg. xterm and kitty swap the
+  current default colours. DECSCNM already does this correctly, so SGR 7 and DECSCNM disagree.
+- **Scope of fix:** `cursor.rs` (drop `default_to_regular` from the three accessors);
+  `TerminalColor::default_to_regular` deleted if it has no remaining caller; their tests;
+  `freminal/src/gui/renderer/vertex.rs` tests whose expectations encode White/Black.
+- **Verification:** reversed default text resolves to (background, foreground) of the pane's
+  `ResolvedColors`, including under an OSC 10/11 override; SGR 7 + DECSCNM still cancel.
+- **Scheduling:** resolved within Task 132.
+
+#### 132.C6 — Adversarial review fixes: common and emulator
+
+Findings R3, R4, R6, R7 (allocation only), R8 (emulator-side coverage), R9, R15, R16, R19.
+Resolved within Task 132; details under "132 Adversarial review".
+
+#### 132.C7 — Adversarial review fixes: GUI
+
+Findings R5, R8 (pixel ordering test), R10. Resolved within Task 132.
+
+### 132 Adversarial review (2026-10-11)
+
+One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
+
+| ID  | Sev   | Finding (short)                                                       | Disposition                         |
+| --- | ----- | --------------------------------------------------------------------- | ----------------------------------- |
+| R1  | major | 132.10's pane-bounded damage test missing (deferred to 147.25)        | 132.C2, pulled back into Task 132   |
+| R2  | major | SGR 7 on defaults ignores default fg/bg (and OSC 10/11)               | 132.C5                              |
+| R3  | major | `TerminalHandler::dynamic_color` public, unused, untested             | 132.C6: delete                      |
+| R4  | minor | `scale_hex_channel` public and accepts a sign                         | 132.C6: validate, narrow visibility |
+| R5  | minor | stale `struct_excessive_bools` allow on `FgRenderOptions`             | 132.C7                              |
+| R6  | minor | dynamic mutators compare stored override, not effective colour        | 132.C6                              |
+| R7  | minor | OSC 4/104 collect every field; no op cap                              | 132.C6 streams; cap: per spec       |
+| R8  | minor | missing tests (RIS/DECSTR selection, 3-value chain, LZ4, pixel order) | 132.C6 / 132.C7                     |
+| R9  | minor | `ColorSpecError` class never logged                                   | 132.C6                              |
+| R10 | minor | `draw_base_fill` allocates per draw; test-only `without_base_fill`    | 132.C7                              |
+| R11 | minor | DECSCNM leaves the sub-cell remainder un-inverted                     | Task 147.27                         |
+| R12 | nit   | "132 Types (decided)" out of date                                     | orchestrator (plan)                 |
+| R13 | nit   | status notes skip 132.2/3/5/8; MASTER_PLAN note stale                 | orchestrator (plan)                 |
+| R14 | nit   | COVERAGE history paragraphs lack a superseded pointer                 | orchestrator (docs)                 |
+| R15 | nit   | `ResolvedColors` size assertion looks layout-brittle                  | 132.C6: derive from component sizes |
+| R16 | nit   | vttest 256-colour tests assert the table, not the SGR path            | 132.C6: assert end to end           |
+| R17 | nit   | unknown SGR colour type `warn!` can repeat                            | not a defect (see below)            |
+| R18 | nit   | translucent window: override compounds with the theme panel fill      | routed to Task 144                  |
+| R19 | nit   | `ScreenInversion` variants undocumented                               | 132.C6                              |
+
+- **R7 (op cap):** no per-sequence cap, deliberately: xterm and kitty answer every query, and
+  the body is already bounded by the parser's OSC size cap (recorded under 132.13).
+- **R16 (`ESC[xyzm`):** the separate "non-empty output" check in `sgr_matrix.rs` is not a
+  weakening; `CSI x` is DECREQTPARM, so the sequence was never an SGR.
+- **R17:** payload-free `warn!` on an unhandled sequence is the repo convention; the pre-132
+  code warned on the same input.
+- **R18:** fixing it needs a replace blend for one draw, and `blend_func` is not in the frozen
+  GL facade surface. Task 144 already owns background-opacity questions; recorded there.
 
 ### 132 Status notes
 
@@ -5226,21 +5287,6 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Depends on:** 147.3 and 147.4 (snapshot input-mode transport and the encoder helpers),
   and 147.21 (same mode files).
 
-#### 147.25 — Unit-test the full-rebuild damage mapping in `show()`
-
-- **Source:** Task 132 cleanup entry 132.C2 (surfaced in the 132.10 review). Predates 132.
-- **Defect today:** the decision from `FullRebuildDamage` (plus the pane rect and the
-  empty-bounded fallback inputs) to `PaneFrameDamage` is inline in `TerminalWidget::show()`,
-  which needs a live egui `Ui`. No test proves that a pane-wide trigger reports
-  `Region(pane rect)` rather than `Full`, so a regression of 124.21 finding 2 would not be
-  caught.
-- **Scope:** `freminal/src/gui/terminal/widget.rs`.
-- **Fix:** give the decision a named function (it is a branching decision, not a helper
-  extracted only for a test; see `freminal-extend-or-extract`) and call it from `show()`.
-- **Tests:** one per arm: `Full` with a pane rect gives `Region`; `Full` with a degenerate
-  rect gives `Full`; each `Bounded` empty-fallback branch.
-- **Depends on:** nothing.
-
 #### 147.26 — `--features gl-pixel` dead-code warnings in `gl_facade`
 
 - **Source:** Task 132 cleanup entry 132.C3 (surfaced running the pixel goldens in
@@ -5253,6 +5299,23 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Tests / verification:** `cargo build -p freminal --features gl-pixel --all-targets` and
   `--features frame-profiling` are both warning-free; add the `gl-pixel`-only combination to
   a lint gate so it cannot regress.
+- **Depends on:** nothing.
+
+#### 147.27 — DECSCNM leaves the pane's sub-cell remainder in normal video
+
+- **Source:** Task 132 adversarial review, finding R11. Predates 132.
+- **Defect today:** with DECSCNM (`?5h`) set, cells are drawn inverted, but the strip of the
+  pane's `terminal_rect` right of and below the last cell (less than one cell wide) shows the
+  normal default background. xterm inverts the whole window area.
+- **Constraint found in review:** the obvious fix (a base fill of the resolved foreground while
+  reversed, reusing Task 132.11) is wrong on its own: a cell with SGR 7 under DECSCNM has an
+  effective background of `DefaultBackground`, which the renderer skips, so it would show the
+  fill (the foreground colour) instead of the default background. The skip rule must become
+  "skip only when the effective background equals what lies beneath".
+- **Scope:** `freminal/src/gui/renderer/{gpu,vertex}.rs` (`PaneBackground::base_fill_for`,
+  the `DefaultBackground` skip), `freminal/src/gui/terminal/widget.rs`.
+- **Tests:** pixel tests for the remainder strip under DECSCNM, and for SGR 7 + DECSCNM
+  (double reversal shows the default background), via the `.#gl-pixel` harness.
 - **Depends on:** nothing.
 
 #### 147.17 — Documentation
@@ -5331,7 +5394,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.25 and 147.26 are independent.
+- 147.19, 147.26 and 147.27 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -5798,6 +5861,10 @@ DECRARA is out of scope; kitty does not implement it.
 
 - `transparent_background_color1..7` (spec table) versus `1..8` (kitty code).
 - Whether per-colour background opacity is in scope or split out.
+- From Task 132 review R18: with `background_opacity` < 1, the OSC 11 base fill is drawn at
+  that opacity over the theme panel fill, so a `(1 − opacity)` share of the theme background
+  shows through. A replace blend for the fill would fix it but needs `blend_func` in the
+  frozen GL facade; decide here alongside per-colour opacity.
 
 ### Task 145 — Kitty Shell-Integration Compatibility (stub, v0.13.2; decision-gated)
 
