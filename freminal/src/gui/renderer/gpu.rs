@@ -856,9 +856,16 @@ impl TerminalRenderer {
         // 3-0. OSC 11 base fill (Task 132.11): underneath everything,
         // including the background image. No GL call when there is no
         // override.
+        #[cfg(feature = "frame-profiling")]
+        let base_fill_bytes = self.draw_base_fill(gl, vp_w, vp_h, background);
+        #[cfg(not(feature = "frame-profiling"))]
         self.draw_base_fill(gl, vp_w, vp_h, background);
 
         // 3a. Background image (drawn behind everything but the base fill).
+        #[cfg(feature = "frame-profiling")]
+        let bg_image_bytes =
+            self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
+        #[cfg(not(feature = "frame-profiling"))]
         self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
 
         // 3b. Cell backgrounds, decorations, foreground glyphs, inline images.
@@ -902,6 +909,8 @@ impl TerminalRenderer {
             foreground_instance_vbo_bytes: fg_bytes,
             decoration_vbo_bytes: deco_bytes,
             image_vertex_vbo_bytes: img_bytes,
+            // Task 132.C4: the two per-draw one-quad uploads.
+            background_quad_vbo_bytes: base_fill_bytes.saturating_add(bg_image_bytes),
             image_texture_bytes,
             atlas_full_bytes,
             atlas_subrect_bytes,
@@ -1011,7 +1020,14 @@ impl TerminalRenderer {
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
+        #[cfg(feature = "frame-profiling")]
+        let base_fill_bytes = self.draw_base_fill(gl, vp_w, vp_h, background);
+        #[cfg(not(feature = "frame-profiling"))]
         self.draw_base_fill(gl, vp_w, vp_h, background);
+        #[cfg(feature = "frame-profiling")]
+        let bg_image_bytes =
+            self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
+        #[cfg(not(feature = "frame-profiling"))]
         self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
         self.draw_background_instanced(
             gl,
@@ -1052,10 +1068,13 @@ impl TerminalRenderer {
         // Task 125.6: bg/fg/image are genuinely zero here -- this path
         // issues no upload for them at all, so `UploadByteCounts::default`'s
         // zero fields for those three categories are correct, not merely
-        // unmeasured.
+        // unmeasured. The two full-viewport background quads are the
+        // exception (Task 132.C4): they are re-uploaded on every draw,
+        // cursor-only included, so they are counted here too.
         #[cfg(feature = "frame-profiling")]
         UploadByteCounts {
             decoration_vbo_bytes: deco_bytes,
+            background_quad_vbo_bytes: base_fill_bytes.saturating_add(bg_image_bytes),
             atlas_full_bytes,
             atlas_subrect_bytes,
             ..UploadByteCounts::default()
@@ -1679,14 +1698,17 @@ impl TerminalRenderer {
     /// The quad spans `(0, 0)..(vp_w, vp_h)`, the full viewport of the
     /// pane's paint callback, which includes the sub-cell remainder to the
     /// right of and below the cell grid.
-    fn draw_base_fill(&self, gl: &Gl<'_>, vp_w: f32, vp_h: f32, background: PaneBackground) {
+    ///
+    /// Returns the exact bytes uploaded to [`Self::base_fill_vbo`] (Task
+    /// 132.C4), `0` when no GL call was made.
+    fn draw_base_fill(&self, gl: &Gl<'_>, vp_w: f32, vp_h: f32, background: PaneBackground) -> u64 {
         let Some([r, g, b]) = background.base_fill else {
-            return;
+            return 0;
         };
         let (Some(prog), Some(vao), Some(vbo)) =
             (self.deco_program, self.deco_vao, self.base_fill_vbo)
         else {
-            return;
+            return 0;
         };
 
         let mut quad = Vec::with_capacity(VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
@@ -1716,6 +1738,8 @@ impl TerminalRenderer {
             gl.bind_vertex_array(None);
             gl.use_program(None);
         }
+
+        bytes.len().value_as::<u64>().unwrap_or(0)
     }
 
     /// Draw the background image quad.
@@ -1727,6 +1751,9 @@ impl TerminalRenderer {
     /// - **Tile**: repeat at native pixel scale.
     ///
     /// Skips if no texture is loaded (`bg_img_texture` is `None`).
+    ///
+    /// Returns the exact bytes uploaded to [`Self::bg_img_vbo`] (Task
+    /// 132.C4), `0` when no texture is loaded and nothing was uploaded.
     fn draw_background_image(
         &self,
         gl: &Gl<'_>,
@@ -1734,7 +1761,7 @@ impl TerminalRenderer {
         vp_h: f32,
         opacity: f32,
         mode: freminal_common::config::BackgroundImageMode,
-    ) {
+    ) -> u64 {
         let (Some(prog), Some(vao), Some(vbo), Some(tex), Some((img_w, img_h))) = (
             self.bg_img_program,
             self.bg_img_vao,
@@ -1742,7 +1769,7 @@ impl TerminalRenderer {
             self.bg_img_texture,
             self.bg_img_size,
         ) else {
-            return;
+            return 0;
         };
 
         // Compute quad position and UV rectangle based on fit mode.
@@ -1796,6 +1823,8 @@ impl TerminalRenderer {
             gl.active_texture(glow::TEXTURE0);
             gl.use_program(None);
         }
+
+        bytes.len().value_as::<u64>().unwrap_or(0)
     }
 
     /// Free all GPU resources.
@@ -3312,6 +3341,10 @@ mod upload_byte_attribution_tests {
         assert_eq!(uploads.foreground_instance_vbo_bytes, 16);
         assert_eq!(uploads.decoration_vbo_bytes, 24);
         assert_eq!(uploads.image_vertex_vbo_bytes, 0);
+        assert_eq!(
+            uploads.background_quad_vbo_bytes, 0,
+            "no base fill and no background image: no quad upload (Task 132.C4)"
+        );
         assert_eq!(uploads.image_texture_bytes, 0);
         assert_eq!(uploads.atlas_full_bytes, expected_atlas_bytes);
         assert_eq!(uploads.atlas_subrect_bytes, 0);
@@ -3556,11 +3589,178 @@ mod upload_byte_attribution_tests {
         );
         assert_eq!(uploads.foreground_instance_vbo_bytes, 0);
         assert_eq!(uploads.image_vertex_vbo_bytes, 0);
+        assert_eq!(uploads.background_quad_vbo_bytes, 0);
         assert_eq!(uploads.image_texture_bytes, 0);
         // The atlas had already fully synced during the priming full
         // draw and nothing new was inserted, so this call's atlas sync
         // must be the zero-byte reuse case too.
         assert_eq!(uploads.atlas_full_bytes, 0);
         assert_eq!(uploads.atlas_subrect_bytes, 0);
+    }
+
+    // ── Task 132.C4: per-draw full-viewport background quads ─────────
+
+    /// A pane background with an OSC 11 base fill active.
+    const fn base_filled() -> PaneBackground {
+        PaneBackground {
+            opacity: 1.0,
+            base_fill: Some([0.25, 0.5, 0.75]),
+        }
+    }
+
+    /// Run a full draw with `background` and no vertex data at all.
+    fn draw_empty_with_background(
+        renderer: &mut TerminalRenderer,
+        gl: &Gl<'_>,
+        atlas: &mut GlyphAtlas,
+        background: PaneBackground,
+    ) -> super::UploadByteCounts {
+        let empty: Vec<f32> = Vec::new();
+        renderer.draw_with_verts(
+            gl,
+            atlas,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &[],
+            &HashMap::new(),
+            800,
+            600,
+            10.0,
+            20.0,
+            background,
+            1.0,
+            BackgroundImageMode::default(),
+            None,
+        )
+    }
+
+    /// Run a cursor-only draw with `background` and no decoration data.
+    fn cursor_only_with_background(
+        renderer: &mut TerminalRenderer,
+        gl: &Gl<'_>,
+        atlas: &mut GlyphAtlas,
+        background: PaneBackground,
+    ) -> super::UploadByteCounts {
+        renderer.draw_with_cursor_only_update(
+            gl,
+            atlas,
+            &[],
+            0,
+            0,
+            0,
+            &[],
+            800,
+            600,
+            10.0,
+            20.0,
+            background,
+            1.0,
+            BackgroundImageMode::default(),
+            None,
+        )
+    }
+
+    /// Write a tiny PNG into `dir` and load it as the renderer's
+    /// background image.
+    fn load_test_background_image(
+        renderer: &mut TerminalRenderer,
+        gl: &Gl<'_>,
+        dir: &std::path::Path,
+    ) {
+        let path = dir.join("bg.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .expect("write test png");
+        renderer
+            .update_background_image(gl, &path)
+            .expect("background image loads against the recording facade");
+    }
+
+    #[test]
+    fn a_frame_with_a_base_fill_reports_exactly_one_quad_of_background_quad_bytes() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+
+        let uploads = draw_empty_with_background(&mut renderer, &gl, &mut atlas, base_filled());
+
+        // 6 vertices x 6 f32 x 4 bytes.
+        assert_eq!(uploads.background_quad_vbo_bytes, 144);
+        assert_eq!(uploads.background_instance_vbo_bytes, 0);
+        assert_eq!(uploads.foreground_instance_vbo_bytes, 0);
+        assert_eq!(uploads.decoration_vbo_bytes, 0);
+        assert_eq!(uploads.image_vertex_vbo_bytes, 0);
+        assert_eq!(uploads.image_texture_bytes, 0);
+        assert_eq!(uploads.atlas_subrect_bytes, 0);
+        assert_eq!(
+            uploads.total(),
+            144 + uploads.atlas_full_bytes,
+            "the new category is part of the total exactly once"
+        );
+    }
+
+    #[test]
+    fn a_frame_with_neither_base_fill_nor_background_image_reports_zero_quad_bytes() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+
+        let uploads = draw_empty_with_background(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            PaneBackground::without_base_fill(1.0),
+        );
+        assert_eq!(uploads.background_quad_vbo_bytes, 0);
+        assert_eq!(uploads.total(), uploads.atlas_full_bytes);
+    }
+
+    #[test]
+    fn a_cursor_only_frame_counts_the_base_fill_quad_it_redraws() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        draw_empty_with_background(&mut renderer, &gl, &mut atlas, base_filled());
+
+        let with_fill = cursor_only_with_background(&mut renderer, &gl, &mut atlas, base_filled());
+        assert_eq!(with_fill.background_quad_vbo_bytes, 144);
+        assert_eq!(with_fill.total(), 144);
+
+        let without = cursor_only_with_background(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            PaneBackground::without_base_fill(1.0),
+        );
+        assert_eq!(without.background_quad_vbo_bytes, 0);
+        assert_eq!(without.total(), 0);
+    }
+
+    #[test]
+    fn the_background_image_quad_is_counted_on_full_and_cursor_only_frames() {
+        let (gl, mut renderer) = init_renderer();
+        let mut atlas = GlyphAtlas::new(32, 128);
+        let dir = tempfile::tempdir().expect("tempdir");
+        load_test_background_image(&mut renderer, &gl, dir.path());
+
+        // 6 vertices x (vec2 pos + vec2 uv) x 4 bytes.
+        let full = draw_empty_with_background(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            PaneBackground::without_base_fill(1.0),
+        );
+        assert_eq!(full.background_quad_vbo_bytes, 96);
+
+        let cursor_only = cursor_only_with_background(
+            &mut renderer,
+            &gl,
+            &mut atlas,
+            PaneBackground::without_base_fill(1.0),
+        );
+        assert_eq!(cursor_only.background_quad_vbo_bytes, 96);
+
+        // Both quads on the same frame sum.
+        let both = cursor_only_with_background(&mut renderer, &gl, &mut atlas, base_filled());
+        assert_eq!(both.background_quad_vbo_bytes, 96 + 144);
     }
 }

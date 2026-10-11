@@ -4628,6 +4628,9 @@ Deliverable: the doc changes, markdownlint clean.
   117, 119 and the ignored 13–16/18/113–116/118; SGR 38/48/58 edge semantics; DECSCNM; RIS and
   DECSTR colour behaviour). Reset-table note, Task 144 stub and the wide-gamut out-of-scope row
   updated by the orchestrator. `KITTY_PROTOCOL_REFERENCE.md` and `SGR.md` needed no change.
+- **132.C4 (done).** `UploadByteCounts::background_quad_vbo_bytes` counts the base-fill quad
+  (144 bytes) and the background-image quad (96 bytes) on full and cursor-only frames; added
+  to the flush line. Compiled away without `frame-profiling`.
 
 ---
 
