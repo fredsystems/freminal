@@ -4697,6 +4697,13 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
   unit-tested; `osc4_change_in_one_of_two_panes_damages_only_that_pane` runs the real chain to
   `decide_frame_damage` and gets `Partial` with exactly that pane's rect. The never-built read
   of `cursor_vert_range` is now taken on every non-skipped frame (one uncontended lock).
+- **132.C5 (done).** SGR 7 swaps the stored colours verbatim (defaults kept), so reversed
+  default text shows the resolved default background on the resolved default foreground,
+  OSC 10/11 included; `TerminalColor::default_to_regular` deleted. Found in review:
+  `underline_color()` substituted the background under SGR 7, which is wrong under DECSCNM
+  (which it cannot see); it now returns the stored colour and the renderer's existing
+  `DefaultUnderlineColor` → effective-foreground path handles all four SGR 7 × DECSCNM cases
+  (orchestrator change, with a test over the four cases). COVERAGE SGR 7 row updated.
 
 ---
 

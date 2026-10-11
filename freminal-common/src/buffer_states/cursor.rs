@@ -118,36 +118,46 @@ impl StateColors {
     }
 
     /// Return the effective foreground color, accounting for reverse-video.
+    ///
+    /// Under [`ReverseVideo::On`] the foreground and background are swapped
+    /// verbatim. Default variants are deliberately kept (a default background
+    /// becomes [`TerminalColor::DefaultBackground`] used as the foreground):
+    /// the renderer resolves them through `ResolvedColors`, so a reversed
+    /// default cell shows the pane's current default background on its current
+    /// default foreground, including theme colours and OSC 10/11 overrides.
     #[must_use]
     pub const fn color(&self) -> TerminalColor {
         match self.reverse_video {
-            ReverseVideo::On => self.background_color.default_to_regular(),
+            ReverseVideo::On => self.background_color,
             ReverseVideo::Off => self.color,
         }
     }
 
+    /// Return the effective background color, accounting for reverse-video.
+    ///
+    /// Under [`ReverseVideo::On`] this is the stored foreground, unchanged. A
+    /// default foreground ([`TerminalColor::Default`]) stays as-is and is
+    /// resolved to the current default foreground colour by the renderer (and,
+    /// not being `DefaultBackground`, is drawn as a background quad).
     #[must_use]
     pub const fn background_color(&self) -> TerminalColor {
         match self.reverse_video {
-            ReverseVideo::On => self.color.default_to_regular(),
+            ReverseVideo::On => self.color,
             ReverseVideo::Off => self.background_color,
         }
     }
 
+    /// Return the underline decoration color.
+    ///
+    /// The stored value is returned unchanged, whatever the reverse-video
+    /// state: an explicitly-set underline colour is independent of fg/bg
+    /// inversion, and [`TerminalColor::DefaultUnderlineColor`] means "follow
+    /// the text colour", which the renderer resolves to the *effective*
+    /// foreground (after SGR 7 and DECSCNM are both applied). Substituting a
+    /// fallback here would be wrong under DECSCNM, which this type cannot see.
     #[must_use]
     pub const fn underline_color(&self) -> TerminalColor {
-        match self.reverse_video {
-            ReverseVideo::On => {
-                // An explicitly-set underline colour is independent of fg/bg inversion.
-                // Only fall back to the inverted background when no underline colour was set.
-                if matches!(self.underline_color, TerminalColor::DefaultUnderlineColor) {
-                    self.background_color.default_to_regular()
-                } else {
-                    self.underline_color
-                }
-            }
-            ReverseVideo::Off => self.underline_color,
-        }
+        self.underline_color
     }
 
     pub const fn flip_reverse_video(&mut self) {

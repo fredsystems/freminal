@@ -141,27 +141,6 @@ fn default_palette_matches_xterm_cube_and_greyscale() {
 }
 
 #[test]
-fn default_colors_to_regular() {
-    assert_eq!(
-        TerminalColor::Default.default_to_regular(),
-        TerminalColor::White
-    );
-    assert_eq!(
-        TerminalColor::DefaultUnderlineColor.default_to_regular(),
-        TerminalColor::White
-    );
-    assert_eq!(
-        TerminalColor::DefaultCursorColor.default_to_regular(),
-        TerminalColor::White
-    );
-    assert_eq!(
-        TerminalColor::DefaultBackground.default_to_regular(),
-        TerminalColor::Black
-    );
-    assert_eq!(TerminalColor::Red.default_to_regular(), TerminalColor::Red);
-}
-
-#[test]
 fn display_predefined_colors_full() {
     // Standard
     assert_eq!(TerminalColor::Default.to_string(), "default");
@@ -390,15 +369,6 @@ fn palette_index_resolve_non_palette_is_identity() {
     assert_eq!(
         TerminalColor::Custom(1, 2, 3).resolve_palette_default(t),
         TerminalColor::Custom(1, 2, 3)
-    );
-}
-
-#[test]
-fn palette_index_default_to_regular_identity() {
-    // PaletteIndex is not a "default" variant, so default_to_regular returns self
-    assert_eq!(
-        TerminalColor::PaletteIndex(5).default_to_regular(),
-        TerminalColor::PaletteIndex(5)
     );
 }
 

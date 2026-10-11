@@ -69,15 +69,6 @@ pub enum TerminalColor {
 }
 
 impl TerminalColor {
-    #[must_use]
-    pub const fn default_to_regular(self) -> Self {
-        match self {
-            Self::Default | Self::DefaultUnderlineColor | Self::DefaultCursorColor => Self::White,
-            Self::DefaultBackground => Self::Black,
-            _ => self,
-        }
-    }
-
     /// Resolve a `PaletteIndex` to its default color (stateless).
     ///
     /// Returns `self` unchanged for all other variants.

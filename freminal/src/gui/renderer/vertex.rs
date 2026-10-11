@@ -78,14 +78,17 @@ const fn x_scale(lw: LineWidth) -> f32 {
 // `StateColors::color()` / `StateColors::background_color()` already resolve
 // per-cell SGR-7 (reverse video) before vertex.rs ever sees a color:
 // `color()` returns the SGR-7-effective foreground, `background_color()`
-// returns the SGR-7-effective background.
+// returns the SGR-7-effective background. SGR-7 swaps the stored colours
+// verbatim, default variants included (`Default` becomes the background,
+// `DefaultBackground` the foreground); `ResolvedColors::rgb` then resolves
+// them to the pane's current default fg/bg, OSC 10/11 overrides included.
 //
 // DECSCNM (whole-screen reverse video) must compose with SGR-7 by XOR: a
 // cell's fg/bg should appear swapped when *exactly one* of {SGR-7, DECSCNM}
 // is active (both active cancels out back to normal).
 //
-// Rather than re-implement the swap (and duplicate `default_to_regular()`'s
-// sentinel handling), we exploit an accessor-swap identity: when DECSCNM is
+// Rather than re-implement the swap (and duplicate `StateColors`' handling),
+// we exploit an accessor-swap identity: when DECSCNM is
 // active, calling the OPPOSITE accessor reproduces the XOR exactly:
 //
 // - DECSCNM off -> use the accessor for the property we want (today's
@@ -3144,6 +3147,156 @@ mod tests {
         let got =
             first_fg_instance_color(default_colors(), &colors, None, ScreenInversion::Reversed);
         assert_eq!(got, rgba((3, 2, 1)));
+    }
+
+    #[test]
+    fn bg_sgr7_default_cell_draws_resolved_foreground() {
+        // SGR 7 on default colours: the bg instance is the pane's resolved
+        // default FOREGROUND (not ANSI 7), including an OSC 10 override.
+        let line = make_line(
+            1,
+            8.0,
+            default_colors().with_reverse_video(ReverseVideo::On),
+            FontDecorationFlags::empty(),
+        );
+        let plain = overridden_colors(&[], &[]);
+        let (bg, _) = bg_with_colors(
+            std::slice::from_ref(&line),
+            &plain,
+            None,
+            ScreenInversion::Normal,
+        );
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
+        assert_eq!(&bg[2..6], rgba(plain.foreground).as_slice());
+        assert_ne!(
+            &bg[2..6],
+            rgba(plain.palette[7]).as_slice(),
+            "must not be ANSI 7"
+        );
+
+        let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
+        assert_eq!(&bg[2..6], rgba((7, 8, 9)).as_slice());
+    }
+
+    #[test]
+    fn default_underline_follows_the_effective_foreground_under_sgr7_and_decscnm() {
+        // A default underline colour follows the text colour, after SGR 7 and
+        // DECSCNM are both applied (Task 132.C5). Overrides make fg and bg
+        // distinct and non-ANSI so the assertion cannot pass by accident.
+        let mut flags = FontDecorationFlags::empty();
+        flags.insert(FontDecorations::Underline);
+        let colors = overridden_colors(
+            &[],
+            &[
+                (DynamicColorSlot::Foreground, (10, 20, 30)),
+                (DynamicColorSlot::Background, (200, 210, 220)),
+            ],
+        );
+        let reversed = default_colors().with_reverse_video(ReverseVideo::On);
+        let cases = [
+            (
+                default_colors(),
+                ScreenInversion::Normal,
+                (10, 20, 30),
+                "plain",
+            ),
+            (reversed, ScreenInversion::Normal, (200, 210, 220), "SGR 7"),
+            (
+                default_colors(),
+                ScreenInversion::Reversed,
+                (200, 210, 220),
+                "DECSCNM",
+            ),
+            (
+                reversed,
+                ScreenInversion::Reversed,
+                (10, 20, 30),
+                "SGR 7 + DECSCNM",
+            ),
+        ];
+        for (cell, inversion, expected, label) in cases {
+            let line = make_line(1, 8.0, cell, flags);
+            let (_, deco) = bg_with_colors(&[line], &colors, None, inversion);
+            assert_eq!(&deco[2..6], rgba(expected).as_slice(), "{label}");
+        }
+    }
+
+    #[test]
+    fn fg_sgr7_default_cell_uses_resolved_background() {
+        // SGR 7 on default colours: the glyph is the pane's resolved default
+        // BACKGROUND (not ANSI 0), including an OSC 11 override.
+        let reversed = default_colors().with_reverse_video(ReverseVideo::On);
+        let plain = overridden_colors(&[], &[]);
+        let got = first_fg_instance_color(reversed, &plain, None, ScreenInversion::Normal);
+        assert_eq!(got, rgba(plain.background));
+        assert_ne!(got, rgba(plain.palette[0]), "must not be ANSI 0");
+
+        let colors = overridden_colors(&[], &[(DynamicColorSlot::Background, (3, 2, 1))]);
+        let got = first_fg_instance_color(reversed, &colors, None, ScreenInversion::Normal);
+        assert_eq!(got, rgba((3, 2, 1)));
+    }
+
+    #[test]
+    fn sgr7_plus_decscnm_on_default_cell_shows_default_colours() {
+        // Double reversal cancels: no bg instance (effective bg is
+        // `DefaultBackground`, skipped) and the glyph is the resolved
+        // default foreground, even with OSC 10/11 overrides.
+        let reversed = default_colors().with_reverse_video(ReverseVideo::On);
+        let colors = overridden_colors(
+            &[],
+            &[
+                (DynamicColorSlot::Foreground, (7, 8, 9)),
+                (DynamicColorSlot::Background, (3, 2, 1)),
+            ],
+        );
+        let line = make_line(1, 8.0, reversed, FontDecorationFlags::empty());
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
+        assert!(bg.is_empty(), "double reversal must skip the bg quad");
+
+        let got = first_fg_instance_color(reversed, &colors, None, ScreenInversion::Reversed);
+        assert_eq!(got, rgba((7, 8, 9)));
+    }
+
+    #[test]
+    fn effective_fg_bg_sgr7_default_colours_truth_table() {
+        let off = default_colors();
+        let on = off.with_reverse_video(ReverseVideo::On);
+        assert_eq!(
+            effective_fg(&off, ScreenInversion::Normal),
+            TerminalColor::Default
+        );
+        assert_eq!(
+            effective_bg(&off, ScreenInversion::Normal),
+            TerminalColor::DefaultBackground
+        );
+        assert_eq!(
+            effective_fg(&off, ScreenInversion::Reversed),
+            TerminalColor::DefaultBackground
+        );
+        assert_eq!(
+            effective_bg(&off, ScreenInversion::Reversed),
+            TerminalColor::Default
+        );
+        // SGR 7 alone swaps defaults exactly as DECSCNM alone does.
+        assert_eq!(
+            effective_fg(&on, ScreenInversion::Normal),
+            effective_fg(&off, ScreenInversion::Reversed)
+        );
+        assert_eq!(
+            effective_bg(&on, ScreenInversion::Normal),
+            effective_bg(&off, ScreenInversion::Reversed)
+        );
+        // Both cancel.
+        assert_eq!(
+            effective_fg(&on, ScreenInversion::Reversed),
+            TerminalColor::Default
+        );
+        assert_eq!(
+            effective_bg(&on, ScreenInversion::Reversed),
+            TerminalColor::DefaultBackground
+        );
     }
 
     #[test]
