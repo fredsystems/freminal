@@ -399,11 +399,11 @@ G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work corr
 
 ## ESC Gaps
 
-| Sequence | Importance | Type | Planned | Notes                                                             |
-| -------- | ---------- | ---- | ------- | ----------------------------------------------------------------- |
-| ESC F    | ⬜         | 🚧   | —       | Cursor to lower-left of screen — parsed with debug log, no effect |
-| ESC l    | ⬜         | 🚧   | —       | Memory Lock — parsed with debug log, no effect                    |
-| ESC m    | ⬜         | 🚧   | —       | Memory Unlock — parsed with debug log, no effect                  |
+| Sequence | Importance | Type | Planned     | Notes                                                             |
+| -------- | ---------- | ---- | ----------- | ----------------------------------------------------------------- |
+| ESC F    | ⬜         | 🚧   | Task 147.23 | Cursor to lower-left of screen — parsed with debug log, no effect |
+| ESC l    | ⬜         | 🚧   | Task 147.23 | Memory Lock — parsed with debug log, no effect                    |
+| ESC m    | ⬜         | 🚧   | Task 147.23 | Memory Unlock — parsed with debug log, no effect                  |
 
 ---
 
@@ -524,10 +524,10 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                            | Rationale                                                                                                                                                                    | Planned                 |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —                       |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                               | Task 147.1 (issue #528) |
+| Item                            | Rationale                                                                                                                                                                                  | Planned                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (scroll forward N lines), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | Task 147.22             |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                                             | Task 147.1 (issue #528) |
 
 ### Priority 3 — Low priority / optional
 

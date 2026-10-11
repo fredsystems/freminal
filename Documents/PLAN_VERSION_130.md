@@ -3948,7 +3948,8 @@ reviews surfaced but left without a scheduled owner. Also fix a pre-existing def
 the same review (application-keypad encoding), and two pre-v0.13.0 xterm deviations the
 maintainer added on 2026-10-11 (147.18 and 147.19). The remaining pre-v0.13.0 charset and
 mode gaps were also resolved on 2026-10-11: 147.20 implements the character sets, and 147.21
-records the four modes as not planned. Created and decomposed on 2026-10-11 against
+records five modes as not planned. 147.22–147.24 cover XTGETTCAP, the HP escapes and
+Alt-sends-ESC. Created and decomposed on 2026-10-11 against
 `72109bad`. The source was a maintainer review of PR #537: unscheduled findings are latent
 bugs, so each one gets a subtask here or a line in the stub of the task that owns it.
 
@@ -4396,7 +4397,7 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   not regress.
 - **Scheduling:** after 147.8 (shared parser files), before 147.15.
 
-#### 147.21 — KAM, SRM, `?1001` and `?1034` recognised and not implemented
+#### 147.21 — KAM, SRM, `?1001`, `?1034` and `?1035` recognised and not implemented
 
 - **Source:** GAPS "CSI Standard Mode Gaps" (KAM, SRM) and "DEC Private Mode Gaps"
   (`?1001`, `?1034`). These are pre-v0.13.0; the maintainer decided on 2026-10-11.
@@ -4414,6 +4415,9 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
       application never asked for, and claims support in DECRQM. The alias is removed.
   - **`?1034` (Meta sets the eighth bit)** is recognised and not implemented. Ghostty,
     WezTerm and kitty don't implement it, and it conflicts with UTF-8 input.
+  - **`?1035` (NumLock overrides the application keypad)** is recognised and not
+    implemented. winit exposes no NumLock state (Task 114.11), so the mode cannot be
+    honoured. If lock state becomes available, it belongs with Task 137 K14.
   - **"Recognised and not implemented" means:**
     - set and reset are typed modes that log at `debug!`;
     - DECRQM answers `Ps = 0` (not recognised), as kitty, Ghostty and WezTerm do for modes
@@ -4421,13 +4425,111 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     - nothing else changes.
 - **Scope:**
   - `freminal-common/src/buffer_states/mode.rs` and `modes/`: typed variants for ANSI 2 and
-    12 and DEC `?1034`. `?1001` leaves `MouseTrack` (remove `XtMseHilite`) and becomes its
+    12 and DEC `?1034` and `?1035`. `?1001` leaves `MouseTrack` (remove `XtMseHilite`) and becomes its
     own not-implemented mode;
   - `terminal_handler/mod.rs` and `state/internal.rs` (DECRQM, and `sync_mode` lists);
   - `freminal/src/gui/mouse.rs` (remove the `XtMseHilite` arms);
   - tests: set, reset and DECRQM for each mode. `?1001h` followed by a click sends no mouse
     report.
 - **Depends on:** 147.1 (the ANSI DECRQM form; same file).
+
+#### 147.22 — XTGETTCAP answers `indn`, `rin` and `query-os-name` <!-- codespell:ignore rin -->
+
+- **Source:** GAPS "XTGETTCAP capability expansion" (pre-v0.13.0; added to 147 by maintainer
+  decision 2026-10-11). The GAPS row calls `indn` "indent N"; it is "scroll forward N lines".
+- **Reference behaviour:**
+  - kitty (`terminfo.py:183,211,403,425`), Ghostty (`ghostty.zig:203-213`) and WezTerm (its
+    terminfo database via `xt_get_tcap`) all answer `indn` (`CSI %p1%d S`) and `rin` <!-- codespell:ignore rin -->
+    (`CSI %p1%d T`), and kitty also answers the termcap aliases `SF` and `SR`. xterm answers
+    only its key table.
+  - `query-os-name` (alias `query-os_name`) is answered by kitty (`terminfo.py:555-557`) and
+    foot with `uname -s` (`Linux`, `Darwin`, `FreeBSD`, ...). kitty issue #9217 is where it
+    was proposed as a terminal-agnostic query. Ghostty and WezTerm don't answer it.
+- **Scope:** `terminal_handler/dcs.rs` `lookup_termcap`:
+  - `indn`/`SF` → `\x1b[%p1%dS` and `rin`/`SR` → `\x1b[%p1%dT`, using the table's <!-- codespell:ignore rin -->
+    existing raw-ESC convention (as `Smulx` does). Both are truthful: SU and SD are
+    implemented and respect the scroll region;
+  - `query-os-name` / `query-os_name` → a `cfg!(target_os)` mapping to `uname -s` names:
+    linux `Linux`, macos `Darwin`, freebsd `FreeBSD`, openbsd `OpenBSD`, netbsd `NetBSD`,
+    windows `Windows`, otherwise `Unknown`. No new dependency;
+  - not `kitty-query-os_name`, which is kitty's own namespace with different values;
+  - tests: each name and alias, a mixed multi-name request, and the reply hex.
+  - `rin` trips codespell; mark its lines with `// codespell:ignore rin` (Markdown: the
+    equivalent HTML comment).
+
+#### 147.23 — HP `ESC F`, `ESC l`, `ESC m` recognised and not implemented
+
+- **Source:** GAPS "ESC Gaps" (pre-v0.13.0; added to 147 by maintainer decision 2026-10-11).
+- **Reference behaviour:**
+  - xterm: `ESC F` moves to the lower-left corner **only** if the `hpLowerleftBugCompat`
+    resource is set, and it defaults to off (`charproc.c:448,3982-3990`). `ESC l` / `ESC m`
+    set or clear the top margin at the cursor row (`charproc.c:4759-4770`). These are HP
+    compatibility hacks.
+  - kitty, Ghostty and WezTerm ignore all three.
+- **Decision (majority):** recognised and not implemented.
+- **Scope:** `terminal_handler/mod.rs`. The three arms log at `debug!` as intentionally
+  ignored HP compatibility sequences, instead of the `warn!` "not yet implemented". A test
+  checks there is no state change. VT52 `ESC F` (graphics mode) stays a separate, working
+  path.
+
+#### 147.24 — Alt sends ESC (`?1036` / `?1039`) and macOS Option as Alt
+
+- **Source:** maintainer decision 2026-10-11. This takes the legacy text half of Task 137 B1
+  ("Alt and Super never apply to text keys").
+- **Defect today:** Alt+letter sends a plain letter. egui delivers `Event::Key { B, alt }`,
+  which matches no arm and is dropped, and `Event::Text("b")`, which is sent as `b`. So
+  readline/emacs bindings like Alt+b, Alt+f and Alt+d don't work. No Alt combination
+  produces an ESC prefix anywhere.
+- **Reference behaviour:**
+  - Ghostty: `?1036` (`alt_esc_prefix`, default **set**) gates the ESC prefix on Alt+text.
+    When it is reset, the plain character is sent (`key_encode.zig:540,555-583`). `?1039` is
+    stored and reported but not consumed.
+  - xterm: `metaSendsEscape` / `altSendsEscape` (`input.c:1470-1535`). Without eight-bit
+    meta, a reset mode sends the plain character.
+  - kitty: legacy Alt always prefixes ESC (`key_encoding.c:141,149,343-348`).
+  - macOS Option composes characters unless an option-as-alt setting says otherwise:
+    kitty `macos_option_as_alt`; Ghostty `macos-option-as-alt`.
+- **Decisions:**
+  - Follow Ghostty. `?1036` defaults to set; while set, legacy Alt+text sends `ESC`
+    followed by the text, and while reset it sends the text alone. `?1039` is a typed,
+    stored mode that DECRQM reports truthfully and that has no further effect. Neither mode
+    is part of RIS or DECSTR state beyond returning to its default; classify both in the
+    reset table.
+  - DECRQM reports `?1036` and `?1039` as set or reset (`Ps` 1/2).
+  - **Only the legacy path changes.** When any kitty keyboard flag is active, Alt+text
+    behaves as today; Task 137 owns its `CSI u` encoding.
+  - A new `[keyboard] macos_option_as_alt` config option: a named enum `none` (default),
+    `left`, `right`, `both`. While it is `none`, macOS Option keeps composing and is not
+    treated as Alt. It is wired per `freminal-config-options`, with the full `ConfigPartial`
+    / `apply_partial` checklist, `config_example.toml`, the settings UI, and the Nix module
+    if it mirrors the schema.
+  - **Stop condition for `left`/`right`:** they need to know which Option key is held. If
+    winit's per-side modifier state cannot reach the encoder through the existing Task 114
+    raw-key path without a new channel, implement `none`/`both` only, and stop and report
+    before adding a channel (`freminal-architecture`).
+  - AltGr must never be prefixed. On Linux AltGr is not Alt in winit. On Windows AltGr
+    arrives as Ctrl+Alt; tests must pin that AltGr text is sent unprefixed.
+- **Scope:**
+  - `freminal-common`: the `?1036`/`?1039` mode types (`modes/`), parsing in `mode.rs`, and
+    the config enum and section;
+  - `freminal-terminal-emulator`: `TerminalModes` fields, `sync_mode`, DECRQM, the snapshot
+    field (typed), and the `TerminalInput` text variant gains its Alt prefix through the
+    147.4 encoder (built at the construction site, never by rewriting encoded bytes);
+  - `freminal/src/gui/terminal/input.rs`: when Alt (per the Option setting on macOS) is held,
+    `Event::Text` emits the prefixed form, and the stray `Event::Key { .., alt }` stays
+    dropped so nothing is sent twice;
+  - tests:
+    - Alt+b sends `ESC b` with `?1036` set and `b` with it reset;
+    - a multi-byte Alt+text gets one prefix;
+    - kitty flags active means unchanged;
+    - AltGr text is unprefixed;
+    - the macOS Option settings, through the input-mapping unit tests;
+    - DECRQM for both modes;
+    - the config round trip.
+- **Out of scope (stays in Task 137):** modifiers on Enter, Tab, Backspace and Escape (B2,
+  B3), Super/Hyper/Meta, and kitty-protocol Alt encoding.
+- **Depends on:** 147.3 and 147.4 (snapshot input-mode transport and the encoder helpers),
+  and 147.21 (same mode files).
 
 #### 147.17 — Documentation
 
@@ -4442,8 +4544,12 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     - fix the malformed `ESC \` row (GAPS around line 392);
     - the charset section for 147.20, including the 96-character designators as not
       planned;
-    - KAM, SRM, `?1001` and `?1034` as not planned, with the reasons (147.21). Correct the
-      `?1034` row, which describes `?1036`;
+    - KAM, SRM, `?1001`, `?1034` and `?1035` as not planned, with the reasons (147.21).
+      Correct the `?1034` row, which describes `?1036`;
+    - `?1036`/`?1039` rows (147.24), XTGETTCAP `indn`/`rin`/`query-os-name` (147.22), and HP <!-- codespell:ignore rin -->
+      `ESC F`/`l`/`m` as not planned (147.23);
+    - `config_example.toml` documentation for `[keyboard]` is part of 147.24, not this
+      subtask;
     - add XTSMGRAPHICS and XTSMTITLE/XTRMTITLE rows;
     - update the DECKPAM and `CSI Ps u` rows;
   - **`KITTY_PROTOCOL_REFERENCE.md`:** the string-terminator change;
@@ -4495,6 +4601,8 @@ Stale stub text was corrected at the same time:
 - 147.3 → 147.4 → 147.5 run in order (foundation, encoders, keypad).
 - 147.2 → 147.8 → 147.20 → 147.15 run in order (shared parser files).
 - 147.1 → 147.21 run in order (`mode.rs`).
+- 147.24 runs after 147.4 and 147.21.
+- 147.22 and 147.23 are independent.
 - 147.1, 147.6, 147.7, 147.9, 147.10, 147.11, 147.12, 147.13, 147.14 and 147.16 are
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
@@ -4744,7 +4852,8 @@ combination, in legacy mode as well.
 **Audit findings (B1–B18).**
 
 - **B1 (high), Alt and Super never apply to text keys** (egui delivers `Event::Text`).
-  Alt+b, Alt+f and Alt+Backspace are broken in legacy mode too.
+  Legacy Alt+text (ESC prefix, `?1036`/`?1039`, macOS Option as Alt) moved to Task 147.24.
+  Super on text keys, Alt+Backspace (B3) and the kitty-protocol encoding remain here.
 - **B2 (high), modified Enter is dropped entirely** (`gui/terminal/input.rs:1894-1899`).
 - **B3 (high), Enter/Tab/Backspace/Escape carry no modifiers.** Shift+Tab sends HT instead of
   `CSI Z`.
@@ -4797,7 +4906,6 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 
 - (a) vs (b) above.
 - Ctrl+`-` maps to 0x1F (xterm) or `-` (kitty spec).
-- A macOS option-as-alt config key.
 - Shipping CapsLock/NumLock/ScrollLock key events under flag 8 without the lock bits.
 
 ### Task 138 — Desktop Notifications (OSC 99) Conformance (stub, v0.13.0)
