@@ -823,7 +823,7 @@ Update this section as tasks complete:
 | 129  | 2026-10-09 | 2026-10-10 | 129.1-129.15, two review passes, 129.C1-C6; merged via PR #536 (`2862acb9`)        |
 | 130  | 2026-10-10 | 2026-10-11 | 130.1-130.9, C1-C3, C5-C6, two review passes; merged via PR #537 (`61b86bf5`)      |
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
-| 132  | 2026-10-11 |            | Activated and decomposed on `task-132/colour-foundation`                           |
+| 132  | 2026-10-11 |            | 132.1-132.14, C1-C7, adversarial review; PR pending                                |
 
 ---
 

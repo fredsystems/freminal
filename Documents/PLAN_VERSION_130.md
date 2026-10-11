@@ -4073,12 +4073,14 @@ Findings beyond the stub:
 
 ### 132 Types (decided)
 
-In `freminal-common/src/colors/` (132.2 turns `colors.rs` into this directory):
+As built (updated after the adversarial review, R12). In `freminal-common/src/colors/`
+(132.2 turned `colors.rs` into this directory):
 
 ```rust
 // colors/dynamic.rs
 pub enum DynamicColorSlot { Foreground, Background, Cursor, SelectionBackground, SelectionForeground }
-pub struct DynamicColorOverrides { /* one Option<(u8, u8, u8)> per slot; private */ }
+// ALL, osc_code(), from_osc_code()
+pub struct DynamicColorOverrides { /* [Option<(u8, u8, u8)>; 5], private */ }
 // get(slot), set(slot, rgb), reset(slot), reset_all()
 
 // colors/resolved.rs
@@ -4092,21 +4094,35 @@ pub struct ResolvedColors {
 // ResolvedColors::resolve(theme, &ColorPalette, &DynamicColorOverrides) -> Self
 // ResolvedColors::rgb(&self, TerminalColor) -> (u8, u8, u8)
 
-// colors/spec.rs
+// colors/spec.rs (+ x11_names.rs: a `static` 782-entry table; wide_gamut.rs)
 pub fn parse_color_spec(spec: &str) -> Result<(u8, u8, u8), ColorSpecError>
 pub enum ColorSpecError { /* one variant per failure class */ }
+```
+
+In `freminal-common/src/buffer_states/osc_color.rs` (132.13):
+
+```rust
+pub enum ColorRequest { Set((u8, u8, u8)), Query }
+pub struct PaletteColorOp { pub index: u8, pub request: ColorRequest }
+pub enum PaletteReset { All, Indices(Vec<u8>) }
+pub struct DynamicColorOp { pub slot: DynamicColorSlot, pub request: ColorRequest }
 ```
 
 In `freminal-terminal-emulator/src/terminal_handler/color_state.rs` (132.9):
 
 ```rust
-pub(crate) struct ColorState {
+pub(super) struct ColorState {
     theme: &'static ThemePalette,
     palette: ColorPalette,
     dynamic: DynamicColorOverrides,
-    resolved: Option<Arc<ResolvedColors>>, // None = stale; every mutator clears it
+    resolved: Option<Arc<ResolvedColors>>, // None = stale
 }
+// palette_rgb, set_palette, reset_palette(_all), dynamic, effective_dynamic,
+// set_dynamic, reset_dynamic(_all), resolved; invalidates only on an effective change
 ```
+
+In `freminal-common/src/buffer_states/modes/decscnm.rs` (132.C1): `ScreenInversion { Normal,
+Reversed }`. In the GUI renderer (132.11): `PaneBackground { opacity, base_fill }`.
 
 ### 132 Execution model
 
@@ -4637,9 +4653,15 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
   32.40 µs / clean 126.98 ns / partial 24.23 µs; instanced_bg 72.04 ns (80x24) / 136.77 ns
   (200x50); instanced_fg 765.67 µs / 910.68 µs; instanced_bg_indexed 4.169 µs / 20.929 µs;
   instanced_fg_indexed 1.764 ms / 2.006 ms. The parser benches are noisy (±15%).
+- **132.2 (done).** Pure move; line-multiset diff showed only headers, imports and one
+  `pub(super)`.
+- **132.3 (done).** `default_palette_rgb` is the one table; index 16 is `(0, 0, 0)`.
 - **132.4 (done).** The subtask text's `rgb::0/0` example was wrong (the second `:` belongs to
   the first channel, so it is `WrongChannelCount { found: 2 }`); the empty-channel case is
   tested as `rgb:/0/0` and `rgb:0//0`.
+- **132.5 (done).** Table verified by the orchestrator against upstream `rgb.txt` at
+  `2b2019ca` (782 names, identical values) and the `COPYING` notice byte-for-byte; a length
+  guard skips the lowercase copy for over-long input.
 - **132.6 (done).** Verified by the orchestrator against an independent CSS Color 4 oracle
   (written from the spec text, not shared with the implementer): 3000 random `oklch()`/`lab()`
   inputs, in and out of gamut, all bit-exact.
@@ -4648,6 +4670,7 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
   `Invalid`; an unknown colour type drops the rest of the sequence. `from_usize_color` and
   `SgrParseError` deleted (no remaining callers). Parser benches vs `pre132`: sgr_heavy −7.4%,
   sgr_indexed −5.0%.
+- **132.8 (done).** Types only; named-colour mapping matches the renderer's.
 - **132.9 (done).** `ColorState` invalidates the cached `Arc<ResolvedColors>` only on an
   _effective_ change: a palette set/reset compares the effective RGB, `set_theme` treats equal
   themes as unchanged (a `&'static` to a `const` theme has no stable address, so pointer

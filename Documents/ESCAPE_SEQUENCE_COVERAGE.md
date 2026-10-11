@@ -137,7 +137,8 @@ replies to id-less commands, placement model — Tasks 135, 136), OSC 99 (button
 reported 0-based, `p=?` answered after DA1 — Task 138) and the kitty keyboard
 protocol (`CSI > u` / `? u` / `= u`; the GUI layer drops Alt/Super on text keys
 and modified Enter — Task 137). OSC 10/11 "set" is downgraded to 🚧: the query
-works, but a set stores an override that never reaches rendering (Task 132).
+works, but a set stores an override that never reaches rendering (Task 132;
+superseded by the 2026-10-11 Task 132 entry above, which made it ✅).
 The OSC 66 row is corrected: Contour does not use OSC 66 (its colour-scheme
 notification is `CSI ? 996 n` / `?2031`); OSC 66 is kitty's text-sizing
 protocol and the freminal handler is a vestigial no-op (Task 104). New rows
