@@ -88,6 +88,10 @@ enum Command {
     #[command(visible_alias = "c")]
     Check,
 
+    /// Verify the workspace compiles on the MSRV toolchain (`cargo check`, no clippy)
+    #[command(visible_alias = "cm")]
+    CheckMsrv,
+
     /// Run clippy for the x86_64-pc-windows-gnu target (Windows cross-check)
     #[command(visible_alias = "cw")]
     CheckWindows,
@@ -217,6 +221,7 @@ impl Command {
             Self::CI => ci(),
             Self::Build => build(),
             Self::Check => check(),
+            Self::CheckMsrv => check_msrv(),
             Self::CheckWindows => check_windows(),
             Self::Deny => deny(),
             Self::Machete => machete(),
@@ -307,6 +312,23 @@ fn check() -> Result<()> {
     ])
 }
 
+/// Verify the workspace compiles on the MSRV toolchain.
+///
+/// Deliberately `cargo check`, **not** clippy, and warnings are **not**
+/// denied. The MSRV contract is "freminal builds on `rust-version`", not
+/// "the MSRV toolchain's clippy agrees with current clippy". Linting with two
+/// clippy versions under `-D warnings` forces code to satisfy the
+/// intersection of two drifting lint sets (which sometimes conflict, e.g.
+/// MSRV `must_use_candidate` vs current `double_must_use`), and no local gate
+/// runs the MSRV clippy, so those failures only ever surfaced in CI
+/// (issue #540). Clippy with `-D warnings` runs on stable only (`check`).
+///
+/// The caller selects the toolchain (CI: `dtolnay/rust-toolchain` pinned to
+/// the `rust-version` in the workspace `Cargo.toml`).
+fn check_msrv() -> Result<()> {
+    run_cargo(vec!["check", "--all-targets", "--all-features"])
+}
+
 /// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
 ///
 /// Cross-checks the Windows-only `#[cfg(windows)]` code paths (portable-pty's
@@ -378,9 +400,14 @@ fn check_readme() -> Result<()> {
 }
 
 /// Generate code coverage report
+///
+/// Runs the tests under `cargo-nextest` (`llvm-cov nextest`), the same runner
+/// as [`test_libs`]. Doctests are not included, as they were not under plain
+/// `cargo llvm-cov` either.
 fn coverage() -> Result<()> {
     run_cargo(vec![
         "llvm-cov",
+        "nextest",
         "--lcov",
         "--output-path",
         "target/lcov.info",
@@ -502,6 +529,13 @@ fn test_docs() -> Result<()> {
 
 /// Run lib tests for the workspace's default packages
 ///
+/// Runs under `cargo-nextest` (configured in `.config/nextest.toml`), which
+/// executes each test in its own process scheduled across every core and
+/// every test binary at once. `cargo test` runs the binaries one after
+/// another, so its wall time is the sum of the binaries; nextest's is roughly
+/// the slowest single test (~22s -> ~5s here, issue #538). nextest cannot run
+/// doctests, so [`test_docs`] still uses `cargo test --doc`.
+///
 /// Uses explicit target flags instead of `--all-targets` to exclude
 /// benchmarks.  `--all-targets` is equivalent to `--lib --bins --tests
 /// --benches --examples`; including `--benches` causes Criterion harnesses
@@ -510,7 +544,8 @@ fn test_docs() -> Result<()> {
 /// separately by `bench_compile()`.
 fn test_libs() -> Result<()> {
     run_cargo(vec![
-        "test",
+        "nextest",
+        "run",
         "--lib",
         "--bins",
         "--tests",
@@ -541,7 +576,14 @@ fn test_default_features() -> Result<()> {
     // doesn't leak into this pass — we need to verify the code compiles and
     // passes tests with NO optional features enabled.
     run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo_no_features(vec!["test", "--lib", "--bins", "--tests", "--examples"])?;
+    run_cargo_no_features(vec![
+        "nextest",
+        "run",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--examples",
+    ])?;
     run_cargo_no_features(vec!["test", "--doc"])?;
     Ok(())
 }

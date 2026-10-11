@@ -56,9 +56,11 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-pub mod gui;
-mod shell_integration;
+// The GUI and shell-integration modules live in the `freminal` library crate
+// (`lib.rs`). Declaring them again here with `mod` would compile the whole GUI
+// module tree a second time into the binary and run its unit tests twice.
 use anyhow::Result;
+use freminal::{gui, shell_integration};
 use freminal_common::{args::Args, config, config::load_config_with_warnings};
 use freminal_terminal_emulator::recording::{
     RecordingMetadata, RecordingSwap, TopologySnapshot, empty_recording_swap, start_recording,
