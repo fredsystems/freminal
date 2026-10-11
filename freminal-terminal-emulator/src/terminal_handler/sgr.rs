@@ -293,6 +293,15 @@ mod tests {
     };
 
     use super::*;
+    use freminal_common::buffer_states::osc_color::{ColorRequest, PaletteColorOp};
+
+    /// OSC 4 set of one palette entry.
+    fn set_palette_osc(index: u8, r: u8, g: u8, b: u8) -> AnsiOscType {
+        AnsiOscType::PaletteColors(vec![PaletteColorOp {
+            index,
+            request: ColorRequest::Set((r, g, b)),
+        }])
+    }
 
     // ------------------------------------------------------------------
     // apply_sgr unit tests (pure function, no buffer involved)
@@ -539,7 +548,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // An OSC 4 override must not leak into the stored cell colour.
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xDE, 0xAD, 0x00));
+        handler.handle_osc(&set_palette_osc(42, 0xDE, 0xAD, 0x00));
 
         handler.handle_sgr(&SelectGraphicRendition::Foreground(
             TerminalColor::PaletteIndex(42),
@@ -556,7 +565,7 @@ mod tests {
     fn handle_sgr_palette_index_background_and_underline() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(200, 0xAA, 0xBB, 0xCC));
+        handler.handle_osc(&set_palette_osc(200, 0xAA, 0xBB, 0xCC));
 
         handler.handle_sgr(&SelectGraphicRendition::Background(
             TerminalColor::PaletteIndex(200),

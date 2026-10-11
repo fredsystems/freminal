@@ -256,3 +256,43 @@ fn decrqss_sgr_reports_palette_index_underline_colour() {
     let reply = drain_replies(&rx);
     assert!(reply.contains("58;5;7"), "reply: {reply:?}");
 }
+
+#[test]
+fn one_osc4_sequence_updates_several_palette_entries() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]4;1;red;2;#00ff00;3;blue\x1b\\");
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.resolved_colors.palette[1], (255, 0, 0));
+    assert_eq!(snap.resolved_colors.palette[2], (0, 255, 0));
+    assert_eq!(snap.resolved_colors.palette[3], (0, 0, 255));
+}
+
+#[test]
+fn osc104_with_indices_resets_only_those_entries() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]4;1;red;2;#00ff00;3;blue\x1b\\");
+    emu.handle_incoming_data(b"\x1b]104;1;3\x1b\\");
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.resolved_colors.palette[1], CATPPUCCIN_MOCHA.ansi[1]);
+    assert_eq!(snap.resolved_colors.palette[2], (0, 255, 0));
+    assert_eq!(snap.resolved_colors.palette[3], CATPPUCCIN_MOCHA.ansi[3]);
+}
+
+#[test]
+fn one_osc10_sequence_sets_foreground_and_background() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]10;red;blue\x1b\\");
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.resolved_colors.foreground, (255, 0, 0));
+    assert_eq!(snap.resolved_colors.background, (0, 0, 255));
+}
+
+#[test]
+fn osc110_and_osc111_reset_the_foreground_and_background() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]10;red;blue\x1b\\");
+    emu.handle_incoming_data(b"\x1b]110\x1b\\\x1b]111\x1b\\");
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.resolved_colors.foreground, CATPPUCCIN_MOCHA.foreground);
+    assert_eq!(snap.resolved_colors.background, CATPPUCCIN_MOCHA.background);
+}

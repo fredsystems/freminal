@@ -4614,6 +4614,14 @@ Deliverable: the doc changes, markdownlint clean.
   cells with unchanged row epochs; DECRQSS reports `38;5;n`/`48;5;n`/`58;5;n`; placeholder
   ids from `38;5;42` / `58;5;7` decode as 42 / 7. Benches vs `pre132`: handle_sgr_indexed
   −11%, instanced_*_indexed within ±4.5%.
+- **132.13 (done).** The seven OSC colour `AnsiOscType` variants and `AnsiOscInternalType` are
+  replaced by `PaletteColors` / `ResetPaletteColors` / `DynamicColors` / `ResetDynamicColor`
+  (request types in `buffer_states/osc_color.rs`); `OscTarget` collapses to
+  `DynamicColors(10..=19)` / `ResetDynamicColor(110..=119)`. Chaining, 16-bit replies and the
+  kitty skip rules as decided. A non-UTF-8 colour value is now a skipped value rather than
+  `TerminalOutput::Invalid`. Reviewed, not a defect: a large OSC 4 body of `n;?` pairs
+  produces one reply per query with no cap (xterm and kitty do the same; the body is already
+  bounded by the parser's OSC size cap, and DA/DSR queries have the same amplification shape).
 
 ---
 

@@ -2337,6 +2337,23 @@ mod tests {
     };
 
     use super::*;
+    use freminal_common::buffer_states::osc_color::{ColorRequest, PaletteColorOp, PaletteReset};
+
+    /// OSC 4 set of one palette entry.
+    fn set_palette_osc(index: u8, r: u8, g: u8, b: u8) -> AnsiOscType {
+        AnsiOscType::PaletteColors(vec![PaletteColorOp {
+            index,
+            request: ColorRequest::Set((r, g, b)),
+        }])
+    }
+
+    /// OSC 4 query of one palette entry.
+    fn query_palette_osc(index: u8) -> AnsiOscType {
+        AnsiOscType::PaletteColors(vec![PaletteColorOp {
+            index,
+            request: ColorRequest::Query,
+        }])
+    }
 
     #[test]
     fn process_output_blink_then_data() {
@@ -2877,7 +2894,7 @@ mod tests {
     #[test]
     fn handle_osc_set_palette_color() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xAA, 0xBB, 0xCC));
+        handler.handle_osc(&set_palette_osc(42, 0xAA, 0xBB, 0xCC));
 
         let (r, g, b) = handler.palette().rgb(42, handler.theme());
         assert_eq!((r, g, b), (0xAA, 0xBB, 0xCC));
@@ -2890,10 +2907,10 @@ mod tests {
         handler.set_write_tx(tx);
 
         // Set index 10 to a known value first.
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(10, 0xFF, 0x80, 0x00));
+        handler.handle_osc(&set_palette_osc(10, 0xFF, 0x80, 0x00));
 
         // Query it.
-        handler.handle_osc(&AnsiOscType::QueryPaletteColor(10));
+        handler.handle_osc(&query_palette_osc(10));
 
         let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
             panic!("expected PtyWrite::Write response from query");
@@ -2912,7 +2929,7 @@ mod tests {
         handler.set_write_tx(tx);
 
         // Query index 0 (Black in Catppuccin Mocha) without setting an override.
-        handler.handle_osc(&AnsiOscType::QueryPaletteColor(0));
+        handler.handle_osc(&query_palette_osc(0));
 
         let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
             panic!("expected PtyWrite::Write response from query");
@@ -2930,14 +2947,16 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Set index 5 to a custom value.
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(5, 0x11, 0x22, 0x33));
+        handler.handle_osc(&set_palette_osc(5, 0x11, 0x22, 0x33));
         assert_eq!(
             handler.palette().rgb(5, handler.theme()),
             (0x11, 0x22, 0x33)
         );
 
         // Reset just index 5.
-        handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
+        handler.handle_osc(&AnsiOscType::ResetPaletteColors(PaletteReset::Indices(
+            vec![5],
+        )));
 
         // Should revert to the default for index 5.
         let default_rgb = freminal_common::colors::default_palette_rgb(5, handler.theme());
@@ -2949,12 +2968,12 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Set a few indices.
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(0, 0xFF, 0x00, 0x00));
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(100, 0x00, 0xFF, 0x00));
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(255, 0x00, 0x00, 0xFF));
+        handler.handle_osc(&set_palette_osc(0, 0xFF, 0x00, 0x00));
+        handler.handle_osc(&set_palette_osc(100, 0x00, 0xFF, 0x00));
+        handler.handle_osc(&set_palette_osc(255, 0x00, 0x00, 0xFF));
 
         // Reset all.
-        handler.handle_osc(&AnsiOscType::ResetPaletteColor(None));
+        handler.handle_osc(&AnsiOscType::ResetPaletteColors(PaletteReset::All));
 
         // All should revert to defaults.
         assert_eq!(
@@ -2967,7 +2986,7 @@ mod tests {
     fn full_reset_clears_palette() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 0xFF, 0x00, 0xFF));
+        handler.handle_osc(&set_palette_osc(42, 0xFF, 0x00, 0xFF));
         assert_ne!(
             handler.palette(),
             &freminal_common::colors::ColorPalette::default()
@@ -5667,7 +5686,7 @@ mod tests {
     fn placeholder_image_id_ignores_palette_overrides() {
         let mut handler = TerminalHandler::new(80, 24);
         register_virtual_2x2(&mut handler, 42, 0);
-        handler.handle_osc(&AnsiOscType::SetPaletteColor(42, 1, 2, 3));
+        handler.handle_osc(&set_palette_osc(42, 1, 2, 3));
 
         handler.handle_sgr(&SelectGraphicRendition::Foreground(
             TerminalColor::PaletteIndex(42),

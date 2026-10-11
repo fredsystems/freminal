@@ -429,6 +429,28 @@ fn response_osc11_uses_8bit_osc_in_s8c1t() {
     );
 }
 
+/// An OSC 11 query reply is 16 bits per channel, framed with the 8-bit OSC
+/// (0x9D) and ST (0x9C) under S8C1T, and with `ESC ]` / `ESC \` otherwise.
+#[test]
+fn response_osc11_exact_16bit_bytes_in_both_framings() {
+    let mut h = VtTestHelper::new_default();
+
+    h.feed(b"\x1b]11;rgb:12/34/56\x1b\\");
+    h.feed(b"\x1b]11;?\x1b\\");
+    assert_eq!(
+        h.drain_pty_writes_concatenated(),
+        b"\x1b]11;rgb:1212/3434/5656\x1b\\"
+    );
+
+    h.feed(b"\x1b G"); // enable S8C1T
+    let _ = h.drain_pty_writes();
+    h.feed(b"\x1b]11;?\x1b\\");
+    assert_eq!(
+        h.drain_pty_writes_concatenated(),
+        b"\x9d11;rgb:1212/3434/5656\x9c"
+    );
+}
+
 // ─── 8-bit DCS sub-parser ───────────────────────────────────────────────────
 
 /// When S8C1T is active, 0x90 should start a DCS sequence (equivalent to ESC P).
