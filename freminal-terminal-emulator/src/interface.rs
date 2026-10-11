@@ -881,6 +881,7 @@ impl TerminalEmulator {
         let prompt_rows = Arc::<[RowNumber]>::from(self.internal.handler.buffer().prompt_rows());
         let command_blocks = self.snapshot_command_blocks();
         let theme = self.internal.handler.theme();
+        let resolved_colors = self.internal.handler.resolved_colors();
 
         // ── Inline image data ────────────────────────────────────────────────
         let (images, visible_image_placements) =
@@ -987,6 +988,7 @@ impl TerminalEmulator {
             prompt_rows,
             command_blocks,
             theme,
+            resolved_colors,
             images,
             visible_image_placements,
             visible_line_widths,

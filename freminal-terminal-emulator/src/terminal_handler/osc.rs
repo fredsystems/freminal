@@ -166,10 +166,10 @@ impl TerminalHandler {
 
             // Palette manipulation: OSC 4 (set/query) and OSC 104 (reset)
             AnsiOscType::SetPaletteColor(idx, r, g, b) => {
-                self.palette.set(*idx, *r, *g, *b);
+                self.color_state.set_palette(*idx, (*r, *g, *b));
             }
             AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.rgb(*idx, self.theme);
+                let (r, g, b) = self.color_state.palette_rgb(*idx);
                 let body = format!(
                     "4;{idx};rgb:{:04x}/{:04x}/{:04x}",
                     u16::from(r) * 257,
@@ -179,10 +179,10 @@ impl TerminalHandler {
                 self.write_osc_response(&body);
             }
             AnsiOscType::ResetPaletteColor(Some(idx)) => {
-                self.palette.reset(*idx);
+                self.color_state.reset_palette(*idx);
             }
             AnsiOscType::ResetPaletteColor(None) => {
-                self.palette.reset_all();
+                self.color_state.reset_palette_all();
             }
 
             // OSC 22 — set pointer (mouse cursor) shape.

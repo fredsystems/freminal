@@ -14,7 +14,7 @@
 
 use freminal_common::{
     buffer_states::osc::{AnsiOscInternalType, AnsiOscType},
-    colors::parse_color_spec,
+    colors::{DynamicColorSlot, parse_color_spec},
 };
 
 use super::TerminalHandler;
@@ -37,23 +37,29 @@ impl TerminalHandler {
         match osc {
             // OSC 11 query: respond with the effective background color.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
+                let (r, g, b) = self
+                    .color_state
+                    .effective_dynamic(DynamicColorSlot::Background);
                 self.write_osc_response(&format!("11;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 10 query: respond with the effective foreground color.
             AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
+                let (r, g, b) = self
+                    .color_state
+                    .effective_dynamic(DynamicColorSlot::Foreground);
                 self.write_osc_response(&format!("10;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 12 query: respond with the effective cursor color.
             AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.cursor_color_override.unwrap_or(self.theme.cursor);
+                let (r, g, b) = self.color_state.effective_dynamic(DynamicColorSlot::Cursor);
                 self.write_osc_response(&format!("12;rgb:{r:02x}/{g:02x}/{b:02x}"));
             }
             // OSC 11 set: store a dynamic background color override.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
                 match parse_color_spec(spec) {
-                    Ok(rgb) => self.bg_color_override = Some(rgb),
+                    Ok(rgb) => self
+                        .color_state
+                        .set_dynamic(DynamicColorSlot::Background, rgb),
                     Err(err) => {
                         tracing::warn!("OSC 11: unrecognised color spec");
                         tracing::debug!(
@@ -66,7 +72,9 @@ impl TerminalHandler {
             // OSC 10 set: store a dynamic foreground color override.
             AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
                 match parse_color_spec(spec) {
-                    Ok(rgb) => self.fg_color_override = Some(rgb),
+                    Ok(rgb) => self
+                        .color_state
+                        .set_dynamic(DynamicColorSlot::Foreground, rgb),
                     Err(err) => {
                         tracing::warn!("OSC 10: unrecognised color spec");
                         tracing::debug!(
@@ -79,7 +87,7 @@ impl TerminalHandler {
             // OSC 12 set: store a dynamic cursor color override.
             AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::String(spec)) => {
                 match parse_color_spec(spec) {
-                    Ok(rgb) => self.cursor_color_override = Some(rgb),
+                    Ok(rgb) => self.color_state.set_dynamic(DynamicColorSlot::Cursor, rgb),
                     Err(err) => {
                         tracing::warn!("OSC 12: unrecognised color spec");
                         tracing::debug!(
@@ -91,15 +99,15 @@ impl TerminalHandler {
             }
             // OSC 110: reset dynamic foreground color override.
             AnsiOscType::ResetForegroundColor => {
-                self.fg_color_override = None;
+                self.color_state.reset_dynamic(DynamicColorSlot::Foreground);
             }
             // OSC 111: reset dynamic background color override.
             AnsiOscType::ResetBackgroundColor => {
-                self.bg_color_override = None;
+                self.color_state.reset_dynamic(DynamicColorSlot::Background);
             }
             // OSC 112: reset dynamic cursor color override.
             AnsiOscType::ResetCursorColor => {
-                self.cursor_color_override = None;
+                self.color_state.reset_dynamic(DynamicColorSlot::Cursor);
             }
             // Unknown internal-type variants and unreachable arms — silently ignore.
             _ => {}

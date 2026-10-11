@@ -36,6 +36,7 @@ use freminal_common::{
         row_number::RowNumber,
         tchar::TChar,
     },
+    colors::{ColorPalette, DynamicColorOverrides, ResolvedColors},
     cursor::CursorVisualStyle,
     themes::ThemePalette,
 };
@@ -360,6 +361,15 @@ pub struct TerminalSnapshot {
     /// theme without holding any lock.
     pub theme: &'static ThemePalette,
 
+    /// The fully resolved content colours: the theme, OSC 4 palette
+    /// overrides and OSC 10/11/17/19 dynamic overrides folded into RGB.
+    ///
+    /// The `Arc` is shared between snapshots until a content colour actually
+    /// changes, so the GUI detects a change with `Arc::ptr_eq`. The cursor
+    /// colour (OSC 12) is not part of this value; it travels separately in
+    /// [`Self::cursor_color_override`].
+    pub resolved_colors: Arc<ResolvedColors>,
+
     /// Dynamic cursor color override (set via OSC 12; reset via OSC 112).
     ///
     /// When `Some`, the cursor should be rendered in this color instead of
@@ -483,6 +493,11 @@ impl TerminalSnapshot {
             prompt_rows: Arc::from([]),
             command_blocks: Arc::from(Vec::<CommandBlock>::new()),
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            resolved_colors: Arc::new(ResolvedColors::resolve(
+                &freminal_common::themes::CATPPUCCIN_MOCHA,
+                &ColorPalette::default(),
+                &DynamicColorOverrides::default(),
+            )),
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
             visible_line_widths: Arc::new(Vec::new()),
@@ -508,6 +523,15 @@ mod tests {
             TerminalSnapshot::empty().application_escape_key,
             ApplicationEscapeKey::Reset
         );
+    }
+
+    #[test]
+    fn empty_resolved_colors_match_the_default_theme() {
+        let snap = TerminalSnapshot::empty();
+        let theme = &freminal_common::themes::CATPPUCCIN_MOCHA;
+        assert_eq!(snap.resolved_colors.foreground, theme.foreground);
+        assert_eq!(snap.resolved_colors.background, theme.background);
+        assert_eq!(snap.resolved_colors.palette[1], theme.ansi[1]);
     }
 
     #[test]

@@ -4531,6 +4531,11 @@ Deliverable: the doc changes, markdownlint clean.
   `Invalid`; an unknown colour type drops the rest of the sequence. `from_usize_color` and
   `SgrParseError` deleted (no remaining callers). Parser benches vs `pre132`: sgr_heavy −7.4%,
   sgr_indexed −5.0%.
+- **132.9 (done).** `ColorState` invalidates the cached `Arc<ResolvedColors>` only on an
+  _effective_ change: a palette set/reset compares the effective RGB, `set_theme` treats equal
+  themes as unchanged (a `&'static` to a `const` theme has no stable address, so pointer
+  equality alone is insufficient), and the cursor slot never invalidates. build_snapshot vs
+  `pre132`: dirty −4.9%, clean +1.3%, partial −10.8% (all within noise).
 
 ---
 

@@ -35,13 +35,13 @@ impl TerminalHandler {
         // Resolve PaletteIndex colors against the mutable palette before applying.
         let resolved = match sgr {
             SelectGraphicRendition::Foreground(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Foreground(self.palette.lookup(*idx, self.theme))
+                SelectGraphicRendition::Foreground(self.color_state.palette_lookup(*idx))
             }
             SelectGraphicRendition::Background(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::Background(self.palette.lookup(*idx, self.theme))
+                SelectGraphicRendition::Background(self.color_state.palette_lookup(*idx))
             }
             SelectGraphicRendition::UnderlineColor(TerminalColor::PaletteIndex(idx)) => {
-                SelectGraphicRendition::UnderlineColor(self.palette.lookup(*idx, self.theme))
+                SelectGraphicRendition::UnderlineColor(self.color_state.palette_lookup(*idx))
             }
             _ => *sgr,
         };

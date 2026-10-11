@@ -56,7 +56,7 @@ use freminal_common::{
         },
         window_manipulation::WindowManipulation,
     },
-    colors::{ColorPalette, TerminalColor},
+    colors::{ColorPalette, DynamicColorSlot, ResolvedColors, TerminalColor},
     cursor::CursorVisualStyle,
     host_capabilities::{HostCapabilities, Osc99Support},
     pty_write::PtyWrite,
@@ -69,6 +69,7 @@ use scroll_ops::{AltScreenAction, AltScreenMode};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use freminal_buffer::buffer::Buffer;
@@ -76,6 +77,8 @@ use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
 
 mod chunk_assembler;
 use chunk_assembler::BoundedChunkAssembler;
+mod color_state;
+use color_state::ColorState;
 mod cursor_ops;
 mod dcs;
 mod edit_ops;
@@ -282,8 +285,9 @@ pub struct TerminalHandler {
     ftcs_state: FtcsState,
     /// Exit code from the most recent `OSC 133 ; D [; exitcode]` marker.
     last_exit_code: Option<i32>,
-    /// Mutable 256-color palette with optional per-index overrides.
-    palette: ColorPalette,
+    /// The theme, the OSC 4 palette overrides, the OSC 10/11/12/17/19 dynamic
+    /// overrides and the cached [`ResolvedColors`] derived from them.
+    color_state: ColorState,
     /// Whether DECCOLM (132-column mode switching) is allowed.
     /// Controlled by `CSI?40h` / `CSI?40l` (`AllowColumnModeSwitch`).
     allow_column_mode_switch: AllowColumnModeSwitch,
@@ -298,26 +302,9 @@ pub struct TerminalHandler {
     /// (80-column reset) restores the actual GUI window width rather than
     /// hardcoding 80.  `None` means DECCOLM has not changed the width.
     pre_deccolm_width: Option<usize>,
-    /// Active color theme for default palette lookups.
-    theme: &'static ThemePalette,
     /// Host-dependent capability facts (configuration and platform) the GUI
     /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
     host_capabilities: HostCapabilities,
-    /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
-    ///
-    /// When `Some`, responses to OSC 10 queries use this value instead of the
-    /// theme's `foreground` field.
-    fg_color_override: Option<(u8, u8, u8)>,
-    /// Dynamic background color override (set via OSC 11; reset via OSC 111).
-    ///
-    /// When `Some`, responses to OSC 11 queries use this value instead of the
-    /// theme's `background` field.
-    bg_color_override: Option<(u8, u8, u8)>,
-    /// Dynamic cursor color override (set via OSC 12; reset via OSC 112).
-    ///
-    /// When `Some`, the cursor is rendered in this color instead of the
-    /// theme's `cursor` field.
-    cursor_color_override: Option<(u8, u8, u8)>,
     /// Pointer (mouse cursor) shape requested via OSC 22.
     ///
     /// Defaults to `PointerShape::Default` (OS default arrow).
@@ -503,15 +490,11 @@ impl TerminalHandler {
             shell_histfile: None,
             ftcs_state: FtcsState::default(),
             last_exit_code: None,
-            palette: ColorPalette::default(),
+            color_state: ColorState::new(&freminal_common::themes::CATPPUCCIN_MOCHA),
             allow_column_mode_switch: AllowColumnModeSwitch::AllowColumnModeSwitch,
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
-            theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
             host_capabilities: HostCapabilities::default(),
-            fg_color_override: None,
-            bg_color_override: None,
-            cursor_color_override: None,
             pointer_shape: PointerShape::Default,
             progress: ProgressReport::default(),
             progress_updated_at: None,
@@ -552,12 +535,12 @@ impl TerminalHandler {
     /// Get the active theme palette.
     #[must_use]
     pub const fn theme(&self) -> &'static ThemePalette {
-        self.theme
+        self.color_state.theme()
     }
 
     /// Set the active theme palette.
-    pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
-        self.theme = theme;
+    pub fn set_theme(&mut self, theme: &'static ThemePalette) {
+        self.color_state.set_theme(theme);
     }
 
     /// Get the host-dependent capability facts.
@@ -600,7 +583,22 @@ impl TerminalHandler {
     /// Returns `None` when the theme default should be used.
     #[must_use]
     pub const fn cursor_color_override(&self) -> Option<(u8, u8, u8)> {
-        self.cursor_color_override
+        self.color_state.dynamic(DynamicColorSlot::Cursor)
+    }
+
+    /// Get the dynamic colour override for `slot` (OSC 10/11/12/17/19), or
+    /// `None` if the slot follows the theme.
+    #[must_use]
+    pub const fn dynamic_color(&self, slot: DynamicColorSlot) -> Option<(u8, u8, u8)> {
+        self.color_state.dynamic(slot)
+    }
+
+    /// The fully resolved content colours (theme + OSC 4 + OSC 10/11/17/19).
+    ///
+    /// The returned `Arc` is shared between calls until the colours actually
+    /// change, so callers may detect a change with `Arc::ptr_eq`.
+    pub fn resolved_colors(&mut self) -> Arc<ResolvedColors> {
+        self.color_state.resolved()
     }
 
     /// Get the current pointer (mouse cursor) shape requested via OSC 22.
@@ -825,7 +823,7 @@ impl TerminalHandler {
     /// Get a reference to the 256-color palette.
     #[must_use]
     pub const fn palette(&self) -> &ColorPalette {
-        &self.palette
+        self.color_state.palette()
     }
 
     /// Get a reference to the current character format (SGR state).
