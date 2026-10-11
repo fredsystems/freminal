@@ -4646,6 +4646,25 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
 - **R18:** fixing it needs a replace blend for one draw, and `blend_func` is not in the frozen
   GL facade surface. Task 144 already owns background-opacity questions; recorded there.
 
+### 132 Final benchmarks (2026-10-11, isolated runs vs `pre132`)
+
+| Bench                               | pre132           | final            | Change   |
+| ----------------------------------- | ---------------- | ---------------- | -------- |
+| parse_sgr_heavy                     | 57.3 µs          | 50.9 µs          | −11%     |
+| parse_sgr_indexed                   | 56.0 µs          | 48.5 µs          | −13%     |
+| handle_sgr_indexed                  | 90.1 µs          | 74.2 µs          | −18%     |
+| build_snapshot dirty                | 32.40 µs         | 28.9 µs          | −11%     |
+| build_snapshot clean                | 126.98 ns        | 128.0 ns         | +1%      |
+| build_snapshot partial_dirty        | 24.23 µs         | 21.9 µs          | −10%     |
+| instanced_bg 80x24 / 200x50         | 72 / 137 ns      | 72 / 132 ns      | 0 / −4%  |
+| instanced_fg 80x24 / 200x50         | 766 / 911 µs     | 764 / 911 µs     | 0 / 0%   |
+| instanced_bg_indexed 80x24 / 200x50 | 4.17 / 20.9 µs   | 4.31 / 21.7 µs   | +3 / +4% |
+| instanced_fg_indexed 80x24 / 200x50 | 1.764 / 2.006 ms | 1.766 / 1.930 ms | 0 / −4%  |
+
+No regression over the 15% threshold. A first pass run back to back with the render benches
+showed build_snapshot +28% / +20%; isolated reruns (twice) did not reproduce it, so it was
+contention, not code.
+
 ### 132 Confirmation review (2026-10-11)
 
 A second CODE-REVIEW pass over the remediation (`4856c363..8da1091e`): R2–R19 confirmed done;
