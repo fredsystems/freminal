@@ -2942,7 +2942,7 @@ mod tests {
         handler.handle_osc(&AnsiOscType::ResetPaletteColor(Some(5)));
 
         // Should revert to the default for index 5.
-        let default_rgb = freminal_common::colors::default_index_to_rgb(5, handler.theme());
+        let default_rgb = freminal_common::colors::default_palette_rgb(5, handler.theme());
         assert_eq!(handler.palette().rgb(5, handler.theme()), default_rgb);
     }
 

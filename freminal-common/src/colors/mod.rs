@@ -6,13 +6,10 @@
 mod palette;
 mod spec;
 
-pub use palette::{
-    ColorPalette, PALETTE_SIZE, cube_component, default_index_to_rgb, lookup_256_color_by_index,
-};
+pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
 pub use spec::{parse_color_spec, scale_hex_channel};
 
 use crate::themes::ThemePalette;
-use palette::lookup_default_256_color;
 use std::fmt;
 use thiserror::Error;
 
@@ -72,7 +69,10 @@ impl TerminalColor {
     #[must_use]
     pub fn resolve_palette_default(self, theme: &ThemePalette) -> Self {
         match self {
-            Self::PaletteIndex(idx) => lookup_default_256_color(usize::from(idx), theme),
+            Self::PaletteIndex(idx) => {
+                let (r, g, b) = default_palette_rgb(idx, theme);
+                Self::Custom(r, g, b)
+            }
             other => other,
         }
     }
