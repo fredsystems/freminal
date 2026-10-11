@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(parse_color_spec(""), Err(ColorSpecError::Empty));
         assert_eq!(
             parse_color_spec("notacolor"),
-            Err(ColorSpecError::UnknownFormat)
+            Err(ColorSpecError::UnknownName)
         );
         // wrong length
         assert_eq!(

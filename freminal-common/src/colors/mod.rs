@@ -5,6 +5,7 @@
 
 mod palette;
 mod spec;
+mod x11_names;
 
 pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
 pub use spec::{ColorSpecError, parse_color_spec, scale_hex_channel};

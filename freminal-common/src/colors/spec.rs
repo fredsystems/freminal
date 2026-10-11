@@ -4,9 +4,10 @@
 // https://opensource.org/licenses/MIT.
 
 //! Parsing of X11 colour specification strings (`rgb:R/G/B`, `rgbi:R/G/B`,
-//! `#RGB`, `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB`) as used by OSC
-//! colour-setting sequences.
+//! `#RGB`, `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB`, and X11 colour names
+//! such as `DarkSlateGray`) as used by OSC colour-setting sequences.
 
+use super::x11_names::lookup_x11_name;
 use conv2::{ConvUtil, RoundToNearest};
 use thiserror::Error;
 
@@ -16,9 +17,10 @@ pub enum ColorSpecError {
     /// Nothing was left of the spec after trimming whitespace.
     #[error("empty colour specification")]
     Empty,
-    /// The spec did not start with `#`, `rgb:` or `rgbi:`.
-    #[error("unrecognised colour specification format")]
-    UnknownFormat,
+    /// The spec did not start with `#`, `rgb:` or `rgbi:`, and is not a
+    /// known X11 colour name.
+    #[error("unrecognised colour name or specification format")]
+    UnknownName,
     /// A `#` or `rgb:` channel contained a character that is not an ASCII hex digit.
     #[error("colour specification contains a non-hexadecimal digit")]
     InvalidHexDigit,
@@ -57,6 +59,9 @@ pub enum ColorSpecError {
 /// - `#RGB` (3 digits, each nibble doubled)
 /// - `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB` (6, 9 or 12 digits; the top
 ///   byte of each channel is kept)
+/// - An X11 colour name from `rgb.txt` (e.g. `green`, `DarkSlateGray`,
+///   `dark slate gray`), matched ASCII case-insensitively. Spaces are
+///   significant; they are neither stripped nor collapsed.
 ///
 /// # Errors
 ///
@@ -80,7 +85,8 @@ pub fn parse_color_spec(spec: &str) -> Result<(u8, u8, u8), ColorSpecError> {
     if let Some(hex) = spec.strip_prefix('#') {
         return parse_hash(hex);
     }
-    Err(ColorSpecError::UnknownFormat)
+    // Not a prefix form: the only remaining valid spec is a colour name.
+    lookup_x11_name(spec).ok_or(ColorSpecError::UnknownName)
 }
 
 /// Strip `prefix` from the start of `s`, comparing ASCII case-insensitively.
@@ -287,15 +293,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_color_spec_unknown_format() {
+    fn parse_color_spec_unknown_name() {
         assert_eq!(
             parse_color_spec("notacolor"),
-            Err(ColorSpecError::UnknownFormat)
+            Err(ColorSpecError::UnknownName)
         );
         assert_eq!(
             parse_color_spec("rgbx:1/2/3"),
-            Err(ColorSpecError::UnknownFormat)
+            Err(ColorSpecError::UnknownName)
         );
+    }
+
+    #[test]
+    fn parse_color_spec_x11_names() {
+        assert_eq!(parse_color_spec("green"), Ok((0, 255, 0)));
+        assert_eq!(parse_color_spec("gray"), Ok((190, 190, 190)));
+        assert_eq!(parse_color_spec("grey"), Ok((190, 190, 190)));
+        assert_eq!(parse_color_spec("web gray"), Ok((128, 128, 128)));
+        assert_eq!(parse_color_spec("rebeccapurple"), Ok((102, 51, 153)));
+        assert_eq!(parse_color_spec("navy blue"), Ok((0, 0, 128)));
+    }
+
+    #[test]
+    fn parse_color_spec_x11_name_spellings_agree() {
+        for spelling in [
+            "DarkSlateGray",
+            "darkslategray",
+            "dark slate gray",
+            "DARK SLATE GRAY",
+        ] {
+            assert_eq!(parse_color_spec(spelling), Ok((47, 79, 79)), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn parse_color_spec_x11_name_spaces_are_significant() {
+        assert_eq!(
+            parse_color_spec("dark  slate gray"),
+            Err(ColorSpecError::UnknownName)
+        );
+        assert_eq!(
+            parse_color_spec("dark-slate-gray"),
+            Err(ColorSpecError::UnknownName)
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_x11_name_non_ascii_is_unknown_name() {
+        assert_eq!(
+            parse_color_spec("gr\u{e9}en"),
+            Err(ColorSpecError::UnknownName)
+        );
+        assert_eq!(
+            parse_color_spec("\u{4e2d}\u{6587}"),
+            Err(ColorSpecError::UnknownName)
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_x11_name_trims_whitespace() {
+        assert_eq!(parse_color_spec("  green\t"), Ok((0, 255, 0)));
+        assert_eq!(parse_color_spec("\n dark slate gray \r"), Ok((47, 79, 79)));
     }
 
     #[test]
