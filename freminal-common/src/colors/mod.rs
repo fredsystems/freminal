@@ -7,7 +7,7 @@ mod palette;
 mod spec;
 
 pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
-pub use spec::{parse_color_spec, scale_hex_channel};
+pub use spec::{ColorSpecError, parse_color_spec, scale_hex_channel};
 
 use crate::themes::ThemePalette;
 use std::fmt;

@@ -4520,6 +4520,9 @@ Deliverable: the doc changes, markdownlint clean.
   32.40 µs / clean 126.98 ns / partial 24.23 µs; instanced_bg 72.04 ns (80x24) / 136.77 ns
   (200x50); instanced_fg 765.67 µs / 910.68 µs; instanced_bg_indexed 4.169 µs / 20.929 µs;
   instanced_fg_indexed 1.764 ms / 2.006 ms. The parser benches are noisy (±15%).
+- **132.4 (done).** The subtask text's `rgb::0/0` example was wrong (the second `:` belongs to
+  the first channel, so it is `WrongChannelCount { found: 2 }`); the empty-channel case is
+  tested as `rgb:/0/0` and `rgb:0//0`.
 
 ---
 

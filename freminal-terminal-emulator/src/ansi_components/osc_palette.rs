@@ -71,16 +71,19 @@ pub(super) fn handle_osc_palette_color(
         return;
     }
 
-    if let Some(rgb) = parse_color_spec(spec) {
-        output.push(TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(
-            index, rgb.0, rgb.1, rgb.2,
-        )));
-    } else {
-        tracing::warn!("OSC 4: invalid color spec");
-        tracing::debug!(
-            "OSC 4: invalid color spec: {}",
-            lossy_sequence_for_log_bounded(spec.as_bytes())
-        );
+    match parse_color_spec(spec) {
+        Ok(rgb) => {
+            output.push(TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(
+                index, rgb.0, rgb.1, rgb.2,
+            )));
+        }
+        Err(err) => {
+            tracing::warn!("OSC 4: invalid color spec");
+            tracing::debug!(
+                "OSC 4: invalid color spec ({err}): {}",
+                lossy_sequence_for_log_bounded(spec.as_bytes())
+            );
+        }
     }
 }
 
@@ -133,7 +136,7 @@ mod tests {
     use super::super::osc::AnsiOscParser;
     use freminal_common::buffer_states::osc::AnsiOscType;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
-    use freminal_common::colors::{parse_color_spec, scale_hex_channel};
+    use freminal_common::colors::{ColorSpecError, parse_color_spec, scale_hex_channel};
 
     fn feed_osc(payload: &[u8]) -> Vec<TerminalOutput> {
         let mut parser = AnsiOscParser::new();
@@ -204,13 +207,13 @@ mod tests {
 
     #[test]
     fn parse_color_spec_rgb_2digit() {
-        assert_eq!(parse_color_spec("rgb:ff/00/80"), Some((0xff, 0x00, 0x80)));
+        assert_eq!(parse_color_spec("rgb:ff/00/80"), Ok((0xff, 0x00, 0x80)));
     }
 
     #[test]
     fn parse_color_spec_rgb_1digit() {
         // 1-digit: a → 0xaa
-        assert_eq!(parse_color_spec("rgb:a/b/c"), Some((0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_color_spec("rgb:a/b/c"), Ok((0xaa, 0xbb, 0xcc)));
     }
 
     #[test]
@@ -218,45 +221,75 @@ mod tests {
         // 4-digit: ffff → 0xff, 0000 → 0x00
         assert_eq!(
             parse_color_spec("rgb:ffff/0000/8000"),
-            Some((0xff, 0x00, 0x80))
+            Ok((0xff, 0x00, 0x80))
         );
     }
 
     #[test]
     fn parse_color_spec_rgb_mixed_lengths() {
         // Mixed: 1/2/4 digits
-        assert_eq!(parse_color_spec("rgb:f/ff/ffff"), Some((0xff, 0xff, 0xff)));
+        assert_eq!(parse_color_spec("rgb:f/ff/ffff"), Ok((0xff, 0xff, 0xff)));
     }
 
     #[test]
     fn parse_color_spec_hash_6digit() {
-        assert_eq!(parse_color_spec("#ff0080"), Some((0xff, 0x00, 0x80)));
-        assert_eq!(parse_color_spec("#000000"), Some((0x00, 0x00, 0x00)));
-        assert_eq!(parse_color_spec("#ffffff"), Some((0xff, 0xff, 0xff)));
+        assert_eq!(parse_color_spec("#ff0080"), Ok((0xff, 0x00, 0x80)));
+        assert_eq!(parse_color_spec("#000000"), Ok((0x00, 0x00, 0x00)));
+        assert_eq!(parse_color_spec("#ffffff"), Ok((0xff, 0xff, 0xff)));
     }
 
     #[test]
     fn parse_color_spec_hash_3digit() {
         // #RGB → each expanded by *17: f→ff, 0→00, 8→88
-        assert_eq!(parse_color_spec("#f08"), Some((0xff, 0x00, 0x88)));
-        assert_eq!(parse_color_spec("#abc"), Some((0xaa, 0xbb, 0xcc)));
+        assert_eq!(parse_color_spec("#f08"), Ok((0xff, 0x00, 0x88)));
+        assert_eq!(parse_color_spec("#abc"), Ok((0xaa, 0xbb, 0xcc)));
     }
 
     #[test]
     fn parse_color_spec_invalid_formats() {
-        assert_eq!(parse_color_spec(""), None);
-        assert_eq!(parse_color_spec("notacolor"), None);
-        assert_eq!(parse_color_spec("#12"), None); // wrong length
-        assert_eq!(parse_color_spec("#1234567"), None); // wrong length
-        assert_eq!(parse_color_spec("rgb:"), None); // no channels
-        assert_eq!(parse_color_spec("rgb:ff/00"), None); // only 2 channels
-        assert_eq!(parse_color_spec("rgb:ff/00/80/aa"), None); // 4 channels
-        assert_eq!(parse_color_spec("#zzzzzz"), None); // invalid hex
+        assert_eq!(parse_color_spec(""), Err(ColorSpecError::Empty));
+        assert_eq!(
+            parse_color_spec("notacolor"),
+            Err(ColorSpecError::UnknownFormat)
+        );
+        // wrong length
+        assert_eq!(
+            parse_color_spec("#12"),
+            Err(ColorSpecError::InvalidHexLength { len: 2 })
+        );
+        // wrong length
+        assert_eq!(
+            parse_color_spec("#1234567"),
+            Err(ColorSpecError::InvalidHexLength { len: 7 })
+        );
+        // no channels
+        assert_eq!(
+            parse_color_spec("rgb:"),
+            Err(ColorSpecError::WrongChannelCount { found: 1 })
+        );
+        // only 2 channels
+        assert_eq!(
+            parse_color_spec("rgb:ff/00"),
+            Err(ColorSpecError::WrongChannelCount { found: 2 })
+        );
+        // 4 channels
+        assert_eq!(
+            parse_color_spec("rgb:ff/00/80/aa"),
+            Err(ColorSpecError::WrongChannelCount { found: 4 })
+        );
+        // invalid hex
+        assert_eq!(
+            parse_color_spec("#zzzzzz"),
+            Err(ColorSpecError::InvalidHexDigit)
+        );
     }
 
     #[test]
     fn parse_color_spec_rgb_invalid_hex() {
-        assert_eq!(parse_color_spec("rgb:zz/00/00"), None);
+        assert_eq!(
+            parse_color_spec("rgb:zz/00/00"),
+            Err(ColorSpecError::InvalidHexDigit)
+        );
     }
 
     // ------------------------------------------------------------------

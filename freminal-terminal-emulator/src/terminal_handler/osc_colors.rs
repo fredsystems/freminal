@@ -52,38 +52,41 @@ impl TerminalHandler {
             }
             // OSC 11 set: store a dynamic background color override.
             AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.bg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 11: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 11: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+                match parse_color_spec(spec) {
+                    Ok(rgb) => self.bg_color_override = Some(rgb),
+                    Err(err) => {
+                        tracing::warn!("OSC 11: unrecognised color spec");
+                        tracing::debug!(
+                            "OSC 11: unrecognised color spec ({err}): {:?}",
+                            lossy_sequence_for_log_bounded(spec.as_bytes())
+                        );
+                    }
                 }
             }
             // OSC 10 set: store a dynamic foreground color override.
             AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.fg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 10: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 10: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+                match parse_color_spec(spec) {
+                    Ok(rgb) => self.fg_color_override = Some(rgb),
+                    Err(err) => {
+                        tracing::warn!("OSC 10: unrecognised color spec");
+                        tracing::debug!(
+                            "OSC 10: unrecognised color spec ({err}): {:?}",
+                            lossy_sequence_for_log_bounded(spec.as_bytes())
+                        );
+                    }
                 }
             }
             // OSC 12 set: store a dynamic cursor color override.
             AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.cursor_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 12: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 12: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+                match parse_color_spec(spec) {
+                    Ok(rgb) => self.cursor_color_override = Some(rgb),
+                    Err(err) => {
+                        tracing::warn!("OSC 12: unrecognised color spec");
+                        tracing::debug!(
+                            "OSC 12: unrecognised color spec ({err}): {:?}",
+                            lossy_sequence_for_log_bounded(spec.as_bytes())
+                        );
+                    }
                 }
             }
             // OSC 110: reset dynamic foreground color override.
