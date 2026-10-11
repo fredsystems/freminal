@@ -558,9 +558,10 @@ fn csi_decswbv_space_t_is_not_window_ops() {
 fn csi_decsca_quote_q_is_not_cursor_style() {
     let (output, outcome) = parse(b"1\"q");
     assert!(
-        !output
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::CursorVisualStyle(_))),
+        !output.iter().any(|o| matches!(
+            o,
+            TerminalOutput::CursorVisualStyle(_) | TerminalOutput::CursorVisualStyleDefault
+        )),
         "DECSCA must not set a cursor style: {output:?}"
     );
     assert_eq!(output, []);
@@ -571,9 +572,10 @@ fn csi_decsca_quote_q_is_not_cursor_style() {
 fn csi_decll_q_is_not_cursor_style() {
     let (output, outcome) = parse(b"1q");
     assert!(
-        !output
-            .iter()
-            .any(|o| matches!(o, TerminalOutput::CursorVisualStyle(_))),
+        !output.iter().any(|o| matches!(
+            o,
+            TerminalOutput::CursorVisualStyle(_) | TerminalOutput::CursorVisualStyleDefault
+        )),
         "DECLL must not set a cursor style: {output:?}"
     );
     assert_eq!(output, []);

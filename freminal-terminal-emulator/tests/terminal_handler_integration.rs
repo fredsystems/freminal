@@ -3749,9 +3749,10 @@ fn test_screen_alignment_resets_scroll_region() {
 // ── 7.29 — Legacy alternate screen ?47/?1047 and ?1048 ──────────────
 
 #[test]
-fn alt_screen_47_enter_clears_and_leave_restores() {
-    // ?47 should behave like ?1049 for buffer switching: enter alternate
-    // clears the screen, leave restores primary content.
+fn alt_screen_47_first_entry_is_blank_and_leave_shows_primary() {
+    // ?47 only switches screens (Task 131.6): a first-ever alternate screen
+    // is blank (it is not cleared on entry; a later entry would show the
+    // persisted content), and leaving shows the primary content again.
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
         modes::xtextscrn::AltScreen47,

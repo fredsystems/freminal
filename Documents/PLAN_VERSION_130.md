@@ -3549,8 +3549,8 @@ minor/nit/uncertain findings. Disposition, all addressed before merge:
    hyperlink.
 3. **Image placement on the alternate screen scrolls the whole screen, ignoring DECSTBM.**
    This is consistent with the primary path, which pushes rows into scrollback regardless
-   of margins. **Routed to Task 135**, which owns the cursor-after-placement and scrolling
-   rules. Recorded in the 131.C5 entry.
+   of margins. **Routed to Task 136**, whose stub owns the cursor-after-placement and
+   margin-aware scroll rules. Recorded in the 131.C5 entry.
 4. **A parked alternate keeps its image store and placements indefinitely** under `?47`
    use. This is the decided persistence (kitty keeps its alternate graphics manager across
    toggles too). **Documented** in the kitty reference.
@@ -3584,7 +3584,8 @@ minor/nit/uncertain findings. Disposition, all addressed before merge:
 16. **`prev_placeholder` survived a screen switch.** **Fixed:** a real switch clears it.
 17. **Bytes after a RIS in the same read are parsed under the pre-RIS DECANM/S8C1T mode.**
     This predates Task 131 and is the same limit as any mode change mid-read. **Recorded**
-    as a GAPS row, and the COVERAGE RIS row qualified.
+    as a GAPS paragraph ("Mode changes take effect per read"), and the COVERAGE RIS row
+    qualified.
 18. **Marks on popped padding rows of a parked primary.** **Accepted:** marks sit on the
     cursor row, and a padding pop never removes the cursor row, so this is unreachable.
 19. **Prettier reflows whole tables in COVERAGE.** **Accepted:** the hook realigns tables, so
@@ -3735,9 +3736,10 @@ Notes:
     the image (or the last row).
   - The primary behaviour is unchanged.
 - **Scheduling:** within Task 131, after 131.7.
-- **Status: Resolved (2026-10-10), commit `193fd200`.** Routed to Task 135: placement
+- **Status: Resolved (2026-10-10), commit `193fd200`.** Routed to Task 136: placement
   scrolls the whole screen and ignores DECSTBM on both screens (adversarial-review
-  finding 3), which is part of the cursor-after-placement rule Task 135 owns.
+  finding 3), which belongs with the cursor-after-placement and margin-aware scroll items in
+  the Task 136 stub.
 
 ---
 
@@ -3937,7 +3939,9 @@ size themselves per placement.
 - a snapshot placement list (sparse);
 - `build_image_verts` consuming placements;
 - three render passes (below-background, below-text, above-text);
-- margin-aware scroll containment.
+- margin-aware scroll containment, including the room an image placement makes below itself:
+  today `Buffer::place_image` scrolls the whole screen (primary and alternate) whatever the
+  DECSTBM margins (routed from Task 131 adversarial-review finding 3 / 131.C5).
 
 **Durable decisions.**
 

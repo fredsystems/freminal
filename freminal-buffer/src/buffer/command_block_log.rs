@@ -19,6 +19,10 @@
 //! and every mutation is one of the explicit methods below, each of which
 //! advances the generation. Adding a mutator that forgets to do so is the one
 //! way to break the cache, which is why the surface is deliberately small.
+//! It would also break `Buffer::drop_alternate_marks`, which skips its scan
+//! for alternate-screen marks while the generation is unchanged since its
+//! [`CommandBlockLog::checkpoint`]: such a mutator could leave alternate marks
+//! behind on the primary screen (caught only by a debug assertion).
 
 use std::collections::VecDeque;
 use std::ops::Deref;

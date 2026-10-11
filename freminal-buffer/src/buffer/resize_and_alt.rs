@@ -1367,9 +1367,12 @@ impl Buffer {
     /// The blank cells apply the current background (BCE), as xterm's
     /// `ClearScreen` and Ghostty's `eraseDisplay(.complete)` do: they carry the
     /// background colour of the current format and nothing else (no
-    /// foreground, weight, decoration, hyperlink or blink). That is stored the
-    /// way ED does ([`Row::clear_with_tag`]): with a default background the
-    /// rows stay sparse, otherwise every cell is an explicit blank.
+    /// foreground, weight, decoration, hyperlink or blink). The blanks are
+    /// stored with the same mechanism ED uses ([`Row::clear_with_tag`]): with a
+    /// default background the rows stay sparse, otherwise every cell is an
+    /// explicit blank. Note that ED itself currently copies the whole format
+    /// into the blanks, not just the background; whether that is right is the
+    /// open erase-format question routed to Task 140.
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;
