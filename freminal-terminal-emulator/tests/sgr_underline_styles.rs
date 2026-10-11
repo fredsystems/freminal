@@ -263,12 +263,20 @@ fn sgr_semicolon_color_followed_by_colon_segment_not_dropped() {
 }
 
 #[test]
-fn sgr_malformed_semicolon_color_preserves_following_params() {
-    // Semicolon-form 38;9 (invalid mode) followed by bold.
-    // The 38;9 should fail gracefully and bold should still be applied.
+fn sgr_unknown_semicolon_color_type_drops_rest_of_sequence() {
+    // Semicolon-form 38;9 (unknown colour type) emits nothing and drops every
+    // remaining parameter of the sequence, matching kitty. The bold after it
+    // is therefore NOT applied.
     let sgrs = extract_sgrs("\x1b[38;9;1m");
     assert!(
-        sgrs.contains(&SelectGraphicRendition::Bold),
-        "Bold should not be swallowed after malformed color: {sgrs:?}",
+        sgrs.is_empty(),
+        "rest of sequence should be dropped: {sgrs:?}"
     );
+}
+
+#[test]
+fn sgr_params_before_unknown_color_type_are_kept() {
+    // Parameters before the bad colour were already emitted and still apply.
+    let sgrs = extract_sgrs("\x1b[1;38;9;3m");
+    assert_eq!(sgrs, vec![SelectGraphicRendition::Bold]);
 }

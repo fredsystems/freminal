@@ -4526,6 +4526,11 @@ Deliverable: the doc changes, markdownlint clean.
 - **132.6 (done).** Verified by the orchestrator against an independent CSS Color 4 oracle
   (written from the spec text, not shared with the implementer): 3000 random `oklch()`/`lab()`
   inputs, in and out of gamut, all bit-exact.
+- **132.7 (done).** Behaviour changes, all per the decided SGR semantics: bare `38`/`48`/`58`
+  no longer resets the colour (kitty does nothing); `38;2;256;0;0` masks instead of emitting
+  `Invalid`; an unknown colour type drops the rest of the sequence. `from_usize_color` and
+  `SgrParseError` deleted (no remaining callers). Parser benches vs `pre132`: sgr_heavy −7.4%,
+  sgr_indexed −5.0%.
 
 ---
 

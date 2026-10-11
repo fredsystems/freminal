@@ -99,6 +99,7 @@ pub mod rep;
 pub mod scorc;
 pub mod sd;
 pub mod sgr;
+pub mod sgr_color;
 pub mod su;
 pub mod tbc;
 pub mod util;

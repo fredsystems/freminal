@@ -11,6 +11,8 @@
 //! - malformed/partial sequences & recovery
 
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::colors::TerminalColor;
+use freminal_common::sgr::SelectGraphicRendition;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 
 fn push_seq(seq: &str) -> Vec<TerminalOutput> {
@@ -122,22 +124,36 @@ fn sgr_truecolor_fg_bg() {
 
 #[test]
 fn sgr_malformed_and_recovery() {
-    // Malformed/partial sequences should not panic and should drive error paths:
+    // Malformed/partial sequences must not panic. Incomplete colours emit
+    // nothing (matching kitty); out-of-range components are masked to 8 bits;
+    // garbage params are not an SGR at all.
     let bad = [
-        "\x1b[38;2;255;255m", // missing B component
-        "\x1b[38;5m",         // missing palette index
-        "\x1b[38;2;256;0;0m", // out-of-range (implementation typically clamps/invalid)
-        "\x1b[xyzm",          // garbage params
+        // missing B component: incomplete, nothing emitted
+        ("\x1b[38;2;255;255m", vec![]),
+        // missing palette index: incomplete, nothing emitted
+        ("\x1b[38;5m", vec![]),
+        // out-of-range component: 256 & 0xFF = 0
+        (
+            "\x1b[38;2;256;0;0m",
+            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+                TerminalColor::Custom(0, 0, 0),
+            ))],
+        ),
     ];
-    for s in bad {
+    for (s, expected) in bad {
         let outs = push_seq(s);
         println!("SGR malformed {:?} -> {:?}", s, outs);
-        assert!(
-            !outs.is_empty(),
-            "Expected some invalid/error output for malformed {:?}",
-            s
-        );
+        assert_eq!(outs, expected, "unexpected output for malformed {:?}", s);
     }
+
+    // `ESC [ x y z m` is not an SGR (`x` is DECREQTPARM); it must still
+    // produce some output rather than vanish.
+    let garbage = push_seq("\x1b[xyzm");
+    println!("SGR garbage -> {:?}", garbage);
+    assert!(
+        !garbage.is_empty(),
+        "Expected some output for garbage params"
+    );
 
     // Recovery: after malformed inputs, a valid chain should still parse fine.
     let rec = push_seq("\x1b[38;5m\x1b[1;4m\x1b[0m");
