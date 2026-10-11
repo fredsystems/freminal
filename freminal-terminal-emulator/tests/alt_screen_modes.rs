@@ -11,6 +11,7 @@
 //! kitty; see `Documents/PLAN_VERSION_130.md` ("131 Decisions").
 
 use freminal_buffer::cell::Cell;
+use freminal_common::cursor::CursorVisualStyle;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 
@@ -296,4 +297,140 @@ fn kitty_image_on_alternate_last_row_keeps_the_store_at_height() {
         height,
         "the alternate store must stay exactly one screen tall"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Review finding 2: a real screen switch ends the live OSC 8 hyperlink
+// ---------------------------------------------------------------------------
+
+/// How many visible tags (primary or alternate, whichever is active) carry a
+/// hyperlink.
+fn url_tag_count(handler: &mut TerminalHandler) -> usize {
+    let (_chars, tags) = handler.data_and_format_data_for_gui(0);
+    tags.visible.iter().filter(|t| t.url.is_some()).count()
+}
+
+const OPEN_LINK: &str = "\x1b]8;;https://example.com/link\x1b\\";
+
+#[test]
+fn hyperlink_open_on_primary_does_not_leak_into_alternate_1049() {
+    let mut h = TerminalHandler::new(80, 24);
+    feed(&mut h, OPEN_LINK);
+    assert!(h.current_format().url.is_some());
+    feed(&mut h, "\x1b[?1049h");
+    assert!(h.is_alternate_screen());
+    assert!(
+        h.current_format().url.is_none(),
+        "a screen switch ends the hyperlink"
+    );
+    feed(&mut h, "X");
+    assert_eq!(url_tag_count(&mut h), 0, "X must carry no URL");
+}
+
+#[test]
+fn hyperlink_open_on_primary_does_not_leak_into_alternate_for_every_mode() {
+    for enter in ["\x1b[?47h", "\x1b[?1047h", "\x1b[?1049h"] {
+        let mut h = TerminalHandler::new(80, 24);
+        feed(&mut h, OPEN_LINK);
+        feed(&mut h, enter);
+        feed(&mut h, "X");
+        assert_eq!(url_tag_count(&mut h), 0, "{enter:?} must end the hyperlink");
+    }
+}
+
+#[test]
+fn hyperlink_open_on_alternate_does_not_leak_into_primary_47() {
+    let mut h = TerminalHandler::new(80, 24);
+    feed(&mut h, "\x1b[?47h");
+    feed(&mut h, OPEN_LINK);
+    assert!(h.current_format().url.is_some());
+    feed(&mut h, "\x1b[?47l");
+    assert!(!h.is_alternate_screen());
+    feed(&mut h, "Y");
+    assert!(h.current_format().url.is_none());
+    assert_eq!(url_tag_count(&mut h), 0, "Y must carry no URL");
+}
+
+#[test]
+fn hyperlink_open_on_alternate_does_not_leak_into_primary_for_every_leave() {
+    for (enter, leave) in [
+        ("\x1b[?47h", "\x1b[?47l"),
+        ("\x1b[?1047h", "\x1b[?1047l"),
+        ("\x1b[?1049h", "\x1b[?1049l"),
+    ] {
+        let mut h = TerminalHandler::new(80, 24);
+        feed(&mut h, enter);
+        feed(&mut h, OPEN_LINK);
+        feed(&mut h, leave);
+        feed(&mut h, "Y");
+        assert_eq!(url_tag_count(&mut h), 0, "{leave:?} must end the hyperlink");
+    }
+}
+
+#[test]
+fn hyperlink_without_a_screen_switch_keeps_working() {
+    let mut h = TerminalHandler::new(80, 24);
+    feed(&mut h, OPEN_LINK);
+    feed(&mut h, "L");
+    assert!(h.current_format().url.is_some());
+    assert_eq!(url_tag_count(&mut h), 1, "the link text carries the URL");
+}
+
+#[test]
+fn idempotent_screen_switch_keeps_the_hyperlink() {
+    // `?47l` while already on the primary screen is not a switch.
+    let mut h = TerminalHandler::new(80, 24);
+    feed(&mut h, OPEN_LINK);
+    feed(&mut h, "\x1b[?47l");
+    assert!(!h.is_alternate_screen());
+    assert!(
+        h.current_format().url.is_some(),
+        "no screen change, so the hyperlink stays open"
+    );
+    feed(&mut h, "L");
+    assert_eq!(url_tag_count(&mut h), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Review finding 1: DECSCUSR 0 restores the configured cursor style
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decscusr_zero_restores_the_configured_style() {
+    let mut h = TerminalHandler::new(80, 24);
+    h.set_configured_cursor_visual_style(CursorVisualStyle::VerticalLineCursorSteady);
+    feed(&mut h, "\x1b[2 q");
+    assert_eq!(
+        h.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorSteady
+    );
+    feed(&mut h, "\x1b[0 q");
+    assert_eq!(
+        h.cursor_visual_style(),
+        CursorVisualStyle::VerticalLineCursorSteady
+    );
+}
+
+#[test]
+fn decscusr_without_a_parameter_behaves_like_zero() {
+    let mut h = TerminalHandler::new(80, 24);
+    h.set_configured_cursor_visual_style(CursorVisualStyle::UnderlineCursorBlink);
+    feed(&mut h, "\x1b[2 q");
+    assert_eq!(
+        h.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorSteady
+    );
+    feed(&mut h, "\x1b[ q");
+    assert_eq!(
+        h.cursor_visual_style(),
+        CursorVisualStyle::UnderlineCursorBlink
+    );
+}
+
+#[test]
+fn decscusr_one_is_a_blinking_block_not_the_configured_style() {
+    let mut h = TerminalHandler::new(80, 24);
+    h.set_configured_cursor_visual_style(CursorVisualStyle::VerticalLineCursorSteady);
+    feed(&mut h, "\x1b[1 q");
+    assert_eq!(h.cursor_visual_style(), CursorVisualStyle::BlockCursorBlink);
 }

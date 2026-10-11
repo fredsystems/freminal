@@ -772,10 +772,11 @@ impl TerminalHandler {
     /// default (`Some(DecSpecialGraphics::default())`), not left as `None`
     /// ("nothing saved"). Otherwise a program that designated DEC Special
     /// Graphics after DECSTR and then issued DECRC without its own DECSC
-    /// would keep the graphics set. RIS ([`Self::full_reset`]) still uses
-    /// `None`: it records no save at all, and xterm's behaviour for DECRC
-    /// with nothing saved is tracked separately in
-    /// `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+    /// would keep the graphics set. RIS ([`Self::full_reset`]) records no
+    /// save at all (`None` in both screens' slots); DECRC with nothing saved
+    /// homes the cursor and resets the SGR rendition and character set to
+    /// their defaults, as xterm and Ghostty do, so the two resets are
+    /// indistinguishable to a program.
     pub fn soft_reset(&mut self) {
         self.reset(ResetKind::Soft);
     }
@@ -2047,6 +2048,9 @@ impl TerminalHandler {
             }
             TerminalOutput::CursorVisualStyle(style) => {
                 self.cursor_visual_style = style.clone();
+            }
+            TerminalOutput::CursorVisualStyleDefault => {
+                self.cursor_visual_style = self.configured_cursor_visual_style.clone();
             }
             TerminalOutput::WindowManipulation(wm) => {
                 self.handle_window_manipulation(wm);

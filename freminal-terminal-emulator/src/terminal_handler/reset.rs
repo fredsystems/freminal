@@ -216,3 +216,44 @@ impl TerminalHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ResetKind;
+    use crate::terminal_handler::TerminalHandler;
+    use freminal_common::buffer_states::sixel::{MAX_PALETTE, default_sixel_palette};
+
+    /// A shared palette that differs from the default, so "kept" and "reset"
+    /// cannot be confused.
+    fn custom_palette() -> Box<[(u8, u8, u8); MAX_PALETTE]> {
+        let mut palette = default_sixel_palette();
+        palette[1] = (1, 2, 3);
+        Box::new(palette)
+    }
+
+    #[test]
+    fn ris_discards_the_sixel_shared_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.sixel_shared_palette = Some(custom_palette());
+
+        handler.reset(ResetKind::Hard);
+
+        assert!(
+            handler.sixel_shared_palette.is_none(),
+            "RIS must discard the persistent sixel palette (xterm ReallyReset)"
+        );
+    }
+
+    #[test]
+    fn decstr_keeps_the_sixel_shared_palette() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.sixel_shared_palette = Some(custom_palette());
+
+        handler.reset(ResetKind::Soft);
+
+        assert!(
+            handler.sixel_shared_palette.is_some(),
+            "DECSTR keeps the sixel state: the reset table has no row for it"
+        );
+    }
+}

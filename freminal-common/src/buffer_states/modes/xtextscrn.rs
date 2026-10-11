@@ -110,6 +110,11 @@ impl fmt::Display for AltScreen47 {
 /// Alternate screen (?1047) — switch buffer without explicit cursor
 /// save/restore.  Distinct from [`AltScreen47`] so DECRQM replies carry the
 /// queried mode number.
+///
+/// Entering only switches to the alternate screen (like `?47`); the
+/// alternate screen is not cleared on enter.  Leaving clears the alternate
+/// screen first (when it is active) and then switches back to the primary
+/// screen.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum AltScreen1047 {
     #[default]

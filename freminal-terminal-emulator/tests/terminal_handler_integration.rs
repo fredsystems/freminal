@@ -3797,8 +3797,10 @@ fn alt_screen_47_enter_clears_and_leave_restores() {
 }
 
 #[test]
-fn alt_screen_1047_enter_clears_and_leave_restores() {
-    // ?1047 has its own mode variant but currently behaves like ?47.
+fn alt_screen_1047_enters_blank_and_leave_restores() {
+    // ?1047 enter only switches (the never-used alternate is blank because it
+    // is new, not because enter clears it); leave clears the alternate and
+    // restores the primary.
     use freminal_common::buffer_states::{
         mode::{Mode, SetMode},
         modes::xtextscrn::AltScreen1047,

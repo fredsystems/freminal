@@ -140,25 +140,40 @@ fn ris_after_deccolm_restores_the_pre_deccolm_width() {
 
 // ── RIS resets ──────────────────────────────────────────────────────────────
 
+/// The first three cells of row 0 after: IRM on, optionally a RIS, then
+/// writing "AB", homing and writing "X". Replace mode gives "XB", insert mode
+/// "XAB".
+fn first_row_after_irm(reset: RisAfterIrm) -> String {
+    let mut rig = Rig::new(80, 24);
+    rig.feed(b"\x1b[4h");
+    match reset {
+        RisAfterIrm::Ris => rig.feed(RIS),
+        RisAfterIrm::Nothing => {}
+    }
+    rig.feed(b"AB\x1b[1;1HX");
+    let rows = rig.state.handler.buffer().visible_rows(0);
+    let row = rows.first().expect("first visible row");
+    (0..3)
+        .map(|col| row.resolve_cell(col).tchar().to_string())
+        .collect::<String>()
+}
+
+/// Whether a RIS follows the IRM change in [`first_row_after_irm`].
+#[derive(Clone, Copy)]
+enum RisAfterIrm {
+    Nothing,
+    Ris,
+}
+
 #[test]
 fn ris_resets_insert_mode() {
-    // Write "AB", home, write "X": replace mode gives "XB", insert mode "XAB".
-    let first_row_after = |reset: bool| {
-        let mut rig = Rig::new(80, 24);
-        rig.feed(b"\x1b[4h");
-        if reset {
-            rig.feed(RIS);
-        }
-        rig.feed(b"AB\x1b[1;1HX");
-        let rows = rig.state.handler.buffer().visible_rows(0);
-        let row = rows.first().expect("first visible row");
-        (0..3)
-            .map(|col| row.resolve_cell(col).tchar().to_string())
-            .collect::<String>()
-    };
-    assert_eq!(first_row_after(false), "XAB", "sanity: IRM inserts");
     assert_eq!(
-        first_row_after(true).trim_end(),
+        first_row_after_irm(RisAfterIrm::Nothing),
+        "XAB",
+        "sanity: IRM inserts"
+    );
+    assert_eq!(
+        first_row_after_irm(RisAfterIrm::Ris).trim_end(),
         "XB",
         "RIS must reset IRM to replace mode"
     );
@@ -490,5 +505,41 @@ fn decstr_on_the_alternate_screen_leaves_the_primary_saved_charset_alone() {
         cell_text.as_deref(),
         Some("\u{2500}"),
         "DECRC on the primary must restore its own DEC Special Graphics slot"
+    );
+}
+
+/// The DECRQM status digit for DECANM (`?2`) after feeding `bytes` as one
+/// chunk, ending in the query.
+///
+/// Once the parser is in VT52 mode it no longer parses `CSI ? 2 $ p`, so the
+/// whole sequence has to arrive in a single chunk, which the parser reads in
+/// ANSI mode before any mode sync.
+fn decanm_status_after(rig: &mut Rig, bytes: &[u8]) -> u8 {
+    rig.drain();
+    let mut chunk = bytes.to_vec();
+    chunk.extend_from_slice(b"\x1b[?2$p");
+    rig.feed(&chunk);
+    let reply = rig.drain_bytes();
+    let text = String::from_utf8_lossy(&reply).into_owned();
+    text.strip_suffix("$y")
+        .and_then(|head| head.rsplit(';').next())
+        .and_then(|digits| digits.parse::<u8>().ok())
+        .unwrap_or_else(|| panic!("no DECRPM reply for ?2: {text:?}"))
+}
+
+#[test]
+fn ris_resets_the_handlers_decanm_mirror_to_ansi() {
+    // DECRQM ?2 reports 2 (reset) while in VT52 mode and 1 (set) in ANSI mode.
+    let mut rig = Rig::new(80, 24);
+    assert_eq!(
+        decanm_status_after(&mut rig, b"\x1b[?2l"),
+        2,
+        "sanity: DECANM reset means VT52"
+    );
+    let mut rig = Rig::new(80, 24);
+    assert_eq!(
+        decanm_status_after(&mut rig, b"\x1b[?2l\x1bc"),
+        1,
+        "RIS must return the handler's DECANM mirror to ANSI"
     );
 }

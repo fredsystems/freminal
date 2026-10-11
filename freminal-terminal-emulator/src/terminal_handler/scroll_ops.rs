@@ -144,7 +144,36 @@ impl TerminalHandler {
     /// across `?47` and `?1047` re-entry.  They are cleared together with the
     /// screen ([`Self::clear_alternate_screen`]), and a resize prunes the
     /// parked screen's map against its parked store.
+    ///
+    /// A switch that actually changes the active screen also ends the live
+    /// OSC 8 hyperlink and drops the kitty unicode-placeholder continuity
+    /// state (see [`Self::end_screen_scoped_state`]); an idempotent request
+    /// (already on the target screen) does neither.
     pub(super) fn handle_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction) {
+        let kind_before = self.buffer.kind();
+        self.apply_alternate_screen(mode, action);
+        if self.buffer.kind() != kind_before {
+            self.end_screen_scoped_state();
+        }
+    }
+
+    /// End the state that must not outlive the screen it was produced on.
+    ///
+    /// * The live OSC 8 hyperlink: kitty (`screen_toggle_screen_buffer` zeroes
+    ///   `active_hyperlink_id`) and Ghostty (`switchScreen` ends it) both end
+    ///   the link on a screen switch, so text printed on the new screen is not
+    ///   silently linked to a URL opened on the other one.
+    /// * The unicode-placeholder continuity state (`prev_placeholder`): a
+    ///   placeholder cell on the new screen must not inherit its image
+    ///   identity from the last cell printed on the old one.
+    fn end_screen_scoped_state(&mut self) {
+        self.current_format.url = None;
+        self.buffer.set_format(self.current_format.clone());
+        self.prev_placeholder = None;
+    }
+
+    /// Perform the mode-specific part of an alternate-screen transition.
+    fn apply_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction) {
         match (mode, action) {
             (AltScreenMode::Legacy47 | AltScreenMode::Clearing1047, AltScreenAction::Enter) => {
                 self.buffer.switch_to_alternate();
@@ -283,5 +312,66 @@ impl TerminalHandler {
             };
             send_or_log!(tx, PtyWrite::Resize(size), "Failed to send PTY resize");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AltScreenAction, AltScreenMode, TerminalHandler};
+    use crate::terminal_handler::PrevPlaceholder;
+    use freminal_common::colors::TerminalColor;
+
+    fn placeholder() -> PrevPlaceholder {
+        PrevPlaceholder {
+            image_id: 42,
+            placement_id: 0,
+            row: 1,
+            col: 5,
+            id_msb: 0,
+            fg_color: TerminalColor::Custom(0, 0, 42),
+            underline_color: TerminalColor::Custom(0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn real_screen_switch_clears_the_placeholder_continuity_state() {
+        for mode in [
+            AltScreenMode::Legacy47,
+            AltScreenMode::Clearing1047,
+            AltScreenMode::SaveClear1049,
+        ] {
+            let mut handler = TerminalHandler::new(80, 24);
+
+            handler.prev_placeholder = Some(placeholder());
+            handler.handle_alternate_screen(mode, AltScreenAction::Enter);
+            assert!(handler.is_alternate_screen());
+            assert!(
+                handler.prev_placeholder.is_none(),
+                "{mode:?} enter must clear prev_placeholder"
+            );
+
+            handler.prev_placeholder = Some(placeholder());
+            handler.handle_alternate_screen(mode, AltScreenAction::Leave);
+            assert!(!handler.is_alternate_screen());
+            assert!(
+                handler.prev_placeholder.is_none(),
+                "{mode:?} leave must clear prev_placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn idempotent_screen_request_keeps_the_placeholder_continuity_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.prev_placeholder = Some(placeholder());
+        // Already on the primary screen: leaving is not a switch.
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        assert!(handler.prev_placeholder.is_some());
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.prev_placeholder = Some(placeholder());
+        // Already on the alternate screen: entering again is not a switch.
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        assert!(handler.prev_placeholder.is_some());
     }
 }

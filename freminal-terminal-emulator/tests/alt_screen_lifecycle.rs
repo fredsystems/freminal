@@ -1002,3 +1002,68 @@ fn decstr_on_the_alternate_homes_the_active_screens_saved_cursor() {
         "DECSTR resets the active screen's saved cursor to home"
     );
 }
+
+// ---------------------------------------------------------------------------
+// URL data per screen
+// ---------------------------------------------------------------------------
+
+/// The URLs the snapshot's visible tags carry, in order.
+fn snapshot_urls(snap: &TerminalSnapshot) -> Vec<String> {
+    snap.url_tag_indices
+        .iter()
+        .filter_map(|&i| snap.visible_tags.get(i))
+        .filter_map(|tag| tag.url.as_ref().map(|u| u.url.clone()))
+        .collect()
+}
+
+#[test]
+fn primary_urls_do_not_appear_on_the_alternate_and_survive_the_round_trip() {
+    for mode in AltMode::ALL {
+        let mut rig = Rig::new();
+        rig.feed("\x1b]8;;https://example.com/osc8\x1b\\link\x1b]8;;\x1b\\ plain");
+        let primary = rig.snap();
+        assert!(primary.has_urls, "{mode:?}: sanity: the link is visible");
+        assert_eq!(
+            snapshot_urls(&primary),
+            ["https://example.com/osc8"],
+            "{mode:?}: sanity"
+        );
+
+        rig.feed(&mode.enter());
+        let alt = rig.snap();
+        assert!(alt.is_alternate_screen);
+        assert!(
+            !alt.has_urls,
+            "{mode:?}: the alternate snapshot carries no URL data"
+        );
+        assert!(
+            alt.url_tag_indices.is_empty(),
+            "{mode:?}: the alternate snapshot indexes no URL tags"
+        );
+
+        rig.feed(&mode.leave());
+        let back = rig.snap();
+        assert!(!back.is_alternate_screen);
+        assert!(back.has_urls, "{mode:?}: the primary link survives");
+        assert_eq!(
+            snapshot_urls(&back),
+            ["https://example.com/osc8"],
+            "{mode:?}: the primary URL data is intact"
+        );
+        assert_eq!(text(&back), "linkplain");
+    }
+}
+
+#[test]
+fn auto_detected_primary_url_survives_an_alternate_round_trip() {
+    let mut rig = Rig::new();
+    rig.feed("see https://example.com/auto here");
+    let primary = rig.snap();
+    assert!(primary.has_urls, "sanity: the URL is auto-detected");
+    let before = snapshot_urls(&primary);
+
+    rig.feed(&AltMode::M47.enter());
+    assert!(!rig.snap().has_urls);
+    rig.feed(&AltMode::M47.leave());
+    assert_eq!(snapshot_urls(&rig.snap()), before);
+}

@@ -104,6 +104,11 @@ pub enum TerminalOutput {
     Skipped,
     DecSpecialGraphics(DecSpecialGraphics),
     CursorVisualStyle(CursorVisualStyle),
+    /// DECSCUSR `Ps = 0` (or an omitted `Ps`): restore the *configured* cursor
+    /// style, not a fixed shape. kitty, Ghostty and `WezTerm` all treat `0` as
+    /// "the default style", which is the user's configuration; `Ps = 1` stays
+    /// an explicit blinking block ([`TerminalOutput::CursorVisualStyle`]).
+    CursorVisualStyleDefault,
     WindowManipulation(WindowManipulation),
     RequestDeviceAttributes,
     SetLeftAndRightMargins {
@@ -274,6 +279,7 @@ impl std::fmt::Display for TerminalOutput {
             Self::CursorVisualStyle(cursor_visual_style) => {
                 write!(f, "CursorVisualStyle({cursor_visual_style:?})")
             }
+            Self::CursorVisualStyleDefault => write!(f, "CursorVisualStyleDefault"),
             Self::WindowManipulation(window_manipulation) => {
                 write!(f, "WindowManipulation({window_manipulation:?})")
             }
