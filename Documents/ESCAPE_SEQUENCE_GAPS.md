@@ -10,6 +10,23 @@ flag remain). No other gap row was itemised for the alternate-screen modes
 per-screen kitty keyboard stack (B15) or per-screen kitty placements; they are
 recorded as fixed in `ESCAPE_SEQUENCE_COVERAGE.md`.
 
+Last updated: 2026-10-10 — Task 130 (reverse-path and capability-query
+consistency). Closes the LNM half of the ANSI-mode DECRQM gap (`CSI 20 $ p` now
+answers `CSI 20 ; Ps $ y`, 130.C1) and the DECSCLM no-reply case (`CSI ? 4 $ p`
+now answers `CSI ? 4 ; 4 $ y`, 130.C2); the IRM and unknown-ANSI-mode halves
+stay open (issue #528). Closes the OSC 99 `p=?` "answered after DA1" defect
+(130.5): it is answered in stream order, gated on configuration and platform,
+and every OSC 99 request is ignored while OSC 99 is unsupported. The IRM half of
+issue #528 is also closed: `CSI 4 $ p` answers `CSI 4 ; Ps $ y` and no longer
+switches insert mode off. Also recorded (no gap
+rows were itemised for them): DECRPM, `CSI ? u` and every GUI-originated reply
+now honour S8C1T (130.3, 130.6, 130.7); replies are produced in byte-stream
+order and RIS applies at its stream position (130.1); tmux DCS passthrough runs
+every inner sequence through the real parser and never wraps replies (130.2);
+title, icon-label and OSC 52 replies no longer echo control characters
+(130.C3). OSC 99 conformance beyond this remains Task 138. See
+`ESCAPE_SEQUENCE_COVERAGE.md`.
+
 Last updated: 2026-10-10 — 129.C5 closed: a C0 byte inside an OSC made the
 parser emit `Invalid` and print the rest of the payload as text. Control bytes
 now follow ECMA-48 / DEC VT500 (CAN/SUB cancel silently; other C0 and DEL are
@@ -251,8 +268,8 @@ not conformant (Task 138, v0.13.0). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **DECRQM for ANSI modes:** `CSI Pa $ p` replies use the DEC-private form,
-  and an IRM query clears insert mode (issue #528)
+- **DECRQM for ANSI modes:** a query for an unknown ANSI mode is answered in
+  the DEC-private form (issue #528); LNM and IRM are correct since Task 130
 - **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
   hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
   three narrow xterm divergences in cursor save/restore (DECOM scroll-region
@@ -280,18 +297,18 @@ the prior panel-fill-only white inversion.
 
 ## OSC Gaps
 
-| Sequence          | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                                             |
-| ----------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OSC 66            | ⬜         | ⬜   | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement                         |
-| OSC 10/11 set     | 🟨         | 🚧   | v0.13.0 Task 132 | Query works; a set stores an override that never reaches rendering                                                                                                                                                                                                |
-| OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path                                                                                                                                                                                   |
-| OSC 22            | 🟨         | 🚧   | v0.13.0 Task 139 | Pointer shapes — plain set/reset works; push (`>`), pop (`<`), query (`?`) and `=` reset the shape to default; no stack, no query reply                                                                                                                           |
-| OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                                            |
-| OSC 99            | 🟩         | 🚧   | v0.13.0 Task 138 | Kitty notifications implemented (Task 99) but not conformant: 0-based button reports, chunk metadata clobbered by defaults, `a=report` disables focus, close report lost after activation, no update-in-place, `p=close` does not close, `p=?` answered after DA1 |
-| OSC 5113          | 🟨         | ⬜   | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                                             |
-| OSC 5522          | 🟨         | ⬜   | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                                          |
-| OSC 72            | ⬜         | ⬜   | v0.13.4 Task 105 | Kitty drag and drop — missing; spec stable upstream, blocked locally by winit 0.30's DnD API                                                                                                                                                                      |
-| OSC 133 UI        | 🟨         | 🚧   | v0.9.0 Task 73   | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                                                                |
+| Sequence          | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                     |
+| ----------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OSC 66            | ⬜         | ⬜   | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement |
+| OSC 10/11 set     | 🟨         | 🚧   | v0.13.0 Task 132 | Query works; a set stores an override that never reaches rendering                                                                                                                                                                        |
+| OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path                                                                                                                                                           |
+| OSC 22            | 🟨         | 🚧   | v0.13.0 Task 139 | Pointer shapes — plain set/reset works; push (`>`), pop (`<`), query (`?`) and `=` reset the shape to default; no stack, no query reply                                                                                                   |
+| OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
+| OSC 99            | 🟩         | 🚧   | v0.13.0 Task 138 | Kitty notifications implemented (Task 99) but not conformant: 0-based button reports, chunk metadata clobbered by defaults, `a=report` disables focus, close report lost after activation, no update-in-place, `p=close` does not close   |
+| OSC 5113          | 🟨         | ⬜   | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                     |
+| OSC 5522          | 🟨         | ⬜   | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                  |
+| OSC 72            | ⬜         | ⬜   | v0.13.4 Task 105 | Kitty drag and drop — missing; spec stable upstream, blocked locally by winit 0.30's DnD API                                                                                                                                              |
+| OSC 133 UI        | 🟨         | 🚧   | v0.9.0 Task 73   | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                                        |
 
 ---
 
@@ -421,14 +438,15 @@ LNM (mode 20) and IRM (mode 4) are implemented.
 
 ### DECRQM for ANSI modes (`CSI Pa $ p`)
 
-The ANSI-mode form of DECRQM is handled incorrectly (issue #528). It should
-be answered `CSI Pa ; Ps $ y`, without the `?` that the DEC-private form
-(`CSI ? Pd ; Ps $ y`) carries.
+Part of the ANSI-mode form of DECRQM is still handled incorrectly (issue #528).
+It should be answered `CSI Pa ; Ps $ y`, without the `?` that the DEC-private
+form (`CSI ? Pd ; Ps $ y`) carries. LNM (`CSI 20 $ p`, 130.C1) and IRM
+(`CSI 4 $ p`, Task 130 review) are correct, and a query no longer overwrites the
+stored mode.
 
-| Behaviour               | Importance | Type | Planned | Notes                                                                                                                                                                                    |
-| ----------------------- | ---------- | ---- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| IRM query (`CSI 4 $ p`) | 🟨         | 🚧   | —       | No reply, and the query is stored as the live insert mode, so it switches insert mode off. `TerminalHandler` assigns `Mode::Irm(irm)` directly, including `Irm::Query` (issue #528).     |
-| ANSI-form reply prefix  | ⬜         | 🚧   | —       | Replies to ANSI-mode queries carry `?`: LNM answers `CSI ? 20 ; Ps $ y` via `Lnm::report`, and unknown modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. |
+| Behaviour              | Importance | Type | Planned | Notes                                                                                                                                             |
+| ---------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ANSI-form reply prefix | ⬜         | 🚧   | —       | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.) |
 
 ---
 
@@ -478,7 +496,7 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13.
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (unscheduled; recorded by the Task 130 adversarial review). Also, in S8C1T mode a reply that echoes UTF-8 text (a title or icon label) can contain bytes in 0x80–0x9F as continuation bytes of a multi-byte character (e.g. `Ĝ` is `C4 9C`), which a strict 8-bit consumer could misread as a C1 control; unscheduled.
 
 **Mode changes take effect per read.** A read from the PTY is parsed in one pass before any of
 it is applied, so a change of parser mode (S8C1T / S7C1T, DECANM entering or leaving VT52, and
@@ -509,7 +527,7 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | Item                            | Rationale                                                                                                                                                                    | Planned    |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | An IRM query silently clears insert mode, and replies use the DEC-private form. See "CSI Standard Mode Gaps"                                                                 | issue #528 |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                               | issue #528 |
 
 ### Priority 3 — Low priority / optional
 

@@ -140,7 +140,7 @@ claims to verify, not as evidence.
 | Underlines            | Complete                                            | Mostly compliant. SGR 21 means bold-off where kitty means double underline; `4:N>5` clears instead of clamping; underline geometry untested and unclamped; default colour wrong under SGR 7 + DECSCNM                                                | 140           |
 | Graphics              | "Fully implemented", "graphics surface is complete" | ~30 deviations, 5 high. Replies to id-less commands; `t=t` deletes arbitrary files; text and erase destroy image tiles; placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                          | 126, 135, 136 |
 | Keyboard              | "Substantially compliant, remainder tracked"        | Encoder machinery sound, but the GUI layer feeding it is not. Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable | 137           |
-| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; `p=?` answered after DA1                                                 | 138           |
+| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; ~~`p=?` answered after DA1~~ (fixed by 130)                              | 138           |
 | Pointer shapes        | Undocumented                                        | Plain set works. Push, pop and query (and `=`) all reset the shape to default instead; a query gets no reply; no stack                                                                                                                               | 139           |
 | Clipboard (OSC 5522)  | Not mentioned                                       | Entirely missing; payloads would be warn-logged by the unknown-OSC path                                                                                                                                                                              | 146           |
 | Color control         | Not mentioned                                       | OSC 21 and colour stack missing. OSC 10/11 "set" never reaches rendering. `CSI # P` deletes characters. `parse_color_spec` panics on non-ASCII input                                                                                                 | 126, 132, 144 |
@@ -198,7 +198,7 @@ foundation tasks result. Each one has at least three consumers.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | **128** CSI dispatch                      | Route on (private prefix, intermediate, final). Fixes 6+ live misroutes                                                                                                                              | 103, 137, 141, 142, 143, 144                |
 | **129** Wire infrastructure               | One bounded `key=value` metadata tokenizer; strict, streaming and unpadded base64; a bounded chunk accumulator; parser size caps; raw-params OSC dispatch; payload-safe logging; APC response helper | 102, 104, 105, 135, 138, 139, 144, 145, 146 |
-| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T, tmux wrap); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality                       | 102, 135, 138, 139, 144, 146, 105           |
+| **130** Reverse path & capability queries | GUI-originated replies go through handler framing (S8C1T; never tmux-wrapped); capability queries answered on the PTY thread so they precede DA1; advertised capabilities match reality              | 102, 135, 138, 139, 144, 146, 105           |
 | **131** Screen-scoped state & resets      | One registry for per-screen state (alt-screen enter/leave idempotent) and an explicit reset table (RIS vs DECSTR) per protocol                                                                       | 103, 135, 136, 137, 139, 141                |
 | **132** Colour foundation                 | Spec-complete colour-spec parser; a reusable SGR-style colour extractor; dynamic colours that actually render                                                                                        | 103, 140, 144, 136 (placeholder ids)        |
 | **133** Shared consent prompt             | One consent overlay component, registered once with modal-input suppression and dismissible-presence                                                                                                 | 102, 146, 105                               |
@@ -2445,7 +2445,8 @@ Three read-only audits re-traced the stub. The stub undercounted the problem:
   registry holds OSC 99 support. Later tasks add to it (138, 146).
 - **OSC 99 control requests while unsupported.** `p=?` gets no reply. `p=alive` gets no reply
   and is not forwarded to the GUI, because answering it would also advertise the protocol.
-  `p=close` is still forwarded; closing nothing is harmless.
+  **Superseded by adversarial-review finding 14:** every OSC 99 request (display payloads and
+  `p=close` included) is dropped by the handler while `Unsupported`.
 - **`GuiReply` lives in the emulator crate** (`io/gui_reply.rs`, next to `InputEvent`). It
   carries structured fields; framing is the handler's job.
 - **Replies are not recorded to FREC.** This matches handler replies, which were never
@@ -2978,6 +2979,27 @@ Prohibitions: do NOT touch code.
     `write_csi_response`, and `send_decrpm` is deleted.
   - Only VT52 `ESC / Z` and ENQ still call `write_to_pty`.
   - Two pre-existing reply-content bugs surfaced: 130.C1 and 130.C2.
+- **130.4 — Complete (2026-10-10), commit `790a77e6`.**
+  - `HostCapabilities` (`freminal-common`) is seeded through `PtyTabInitialState` at all five
+    spawn sites and re-sent with `InputEvent::HostCapabilitiesChange` from `apply_new_config`.
+  - The resolver later moved to `freminal/src/gui/host_capabilities.rs` (review finding 15).
+- **130.5 — Complete (2026-10-10), commit `ebd361e8`.**
+  - `p=?` is answered in `dispatch_finalized_osc99` with conditional `a=report` / `c=1`;
+    `Osc99ControlKind::Query` and the GUI query path are deleted.
+  - Review finding 14 later extended the gate so every OSC 99 request is dropped while
+    unsupported.
+- **130.6 — Complete (2026-10-10), commit `8b5b165e`.** `GuiReply`, `InputEvent::Reply` and the
+  handler serialiser `write_gui_reply`, with byte-identical 7-bit output.
+- **130.7 — Complete (2026-10-10), commit `165cd17f`.** Window, title, OSC 52 and OSC 99
+  replies are sent as `GuiReply`; the GUI byte builders and `send_pty_response` are deleted.
+- **130.8 — Complete (2026-10-10), commit `630469cf`.** `Pane::reply_tx` (`Arc`) with `Weak`
+  handles for OSC 99 consumers; review fixes in `120d90fa` (single reply handle) and
+  `dede495e` (a liveness test on a real `Pane`).
+- **130.9 — Complete (2026-10-10), commit `1e03dd31`.** COVERAGE, GAPS and the kitty reference.
+- **Cleanups:**
+  - 130.C1 (`ce0e8cad`), 130.C2 and 130.C3 (`120d90fa`), and 130.C5 and 130.C6 (`74149b30`)
+    are resolved.
+  - 130.C4 is routed to Task 138.
 
 ### 130 Cleanup entries
 
@@ -3006,6 +3028,175 @@ Prohibitions: do NOT touch code.
   `freminal-common/tests/mode_boilerplate_tests.rs`.
 - **Verification:** `CSI ? 4 $ p` yields `CSI ? 4 ; 4 $ y` whatever the set/reset history.
 - **Scheduling:** in the Task 130 worktree, before the adversarial review.
+- **Scope widened (maintainer, 2026-10-10):** the C1 implementer found that `CSI ? 4 $ p` is
+  never answered at all. `Mode::Decsclm(_)` falls into the "not acted on" arms of both
+  `TerminalHandler` and `TerminalState::sync_mode`, so `Decsclm::report` is unreachable. The
+  fix adds a `Mode::Decsclm(Decsclm::Query)` arm in `terminal_handler/mod.rs` that answers via
+  `write_csi_response`.
+
+#### 130.C3 — Title, icon-label and OSC 52 replies echo control bytes
+
+- **Surfaced:** orchestrator re-review of 130.6 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - An application can set the title `A ESC [6n B`; the OSC parser keeps an ESC that is not
+    followed by `\` (129.C5). `CSI 21 t` then echoes that ESC back into the application's
+    input, the title-report injection class (CVE-2003-0063).
+  - `OSC 52 ; c ESC [6n ; ?` likewise echoes the selection parameter verbatim.
+  - Reproduced: the title is stored as `"A\u{1b}[6nB"` and the selection as `"c\u{1b}[6n"`.
+- **Scope of fix:**
+  - `freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` (`write_gui_reply`), the
+    single point every GUI reply passes through;
+  - its tests.
+- **Approach:**
+  - `IconLabel` / `WindowTitle`: drop every C0 control, DEL and C1 control (U+0080–U+009F)
+    before framing.
+  - `Clipboard`: keep only the characters xterm defines for `Pc` (`c p q s 0`–`7`), dropping
+    everything else. An empty result is sent as empty; xterm's "empty means `s0`" rule
+    concerns the request, not the reply.
+- **Verification:** a title or selection carrying ESC, BEL, `0x9B` (as U+009B) and DEL produces
+  a reply containing none of them, in 7-bit and 8-bit mode; ordinary titles are unchanged.
+- **Scheduling:** in the Task 130 worktree, before the adversarial review.
+
+#### 130.C4 — OSC 99 report flags cross the thread boundary as `bool`
+
+- **Surfaced:** orchestrator re-review of 130.7 (2026-10-10). Predates Task 130.
+- **Impact:**
+  - `Notification99Data::{report_activation, focus_on_activation, close_report}` and the
+    parser state in `osc_notify_99.rs` are raw `bool`s, carried from the PTY thread to the GUI.
+  - `osc99_action_report` and `Osc99LiveEntry` take or store the same `bool`s.
+  - This violates `freminal-state-representation` for transported state.
+- **Scope of fix:** the OSC 99 data model across `freminal-common`
+  (`window_manipulation.rs`, `osc_notify_99.rs`), `terminal_handler/notify_99.rs` and
+  `freminal/src/gui/notifications.rs`.
+- **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
+  avoids changing it twice. Not scheduled in Task 130.
+
+#### 130.C5 — XTGETTCAP echoes the raw request on an invalid name
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 7. Predates Task 130.
+- **Impact:**
+  - For a name that is not valid hex, `handle_xtgettcap` replies `DCS 0 + r <raw request> ST`,
+    echoing the request bytes lossily decoded.
+  - Reproduced: `DCS + q ESC [6n BEL zz ST` gets the reply `DCS 0 + r ESC [6n BEL zz ST`, so
+    an application can inject input into itself (the CVE-2003-0063 class, as 130.C3).
+- **Fix:** follow xterm's ctlseqs, which specify `DCS 0 + r ST` for invalid requests: reply
+  with no echo when the name is not valid hex. A name that _is_ valid hex but unknown keeps
+  today's hex echo, since hex digits cannot carry a control.
+- **Scope:** `terminal_handler/dcs.rs` (`handle_xtgettcap`) and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+#### 130.C6 — A DECRQM for LNM overwrites the LNM state used for input encoding
+
+- **Surfaced:** 130 adversarial review (2026-10-10), finding 1. Predates Task 130.
+- **Impact:**
+  - `TerminalState::sync_mode` assigns `Mode::LineFeedMode(v)` straight into
+    `modes.line_feed_mode` and does not exclude `Lnm::Query`.
+  - Reproduced: after `CSI 20 h`, a `CSI 20 $ p` leaves `line_feed_mode == Lnm::Query`, so
+    Enter is encoded as if LNM were reset.
+- **Fix:**
+  - The query must not touch the stored state; route `Lnm::Query` to the handler-owned
+    (no-op) arm.
+  - Audit every other `sync_mode` assignment arm for the same pattern and pin each with a
+    test.
+- **Scope:** `state/internal.rs` and tests.
+- **Scheduling:** in the Task 130 worktree, before merge.
+
+### 130 Adversarial review (2026-10-10)
+
+An adversarial review of `2862acb9..1e03dd31` found no blocker, one major and fourteen
+minor/nit findings. Two were reproduced by the orchestrator (1 → 130.C6, 7 → 130.C5).
+Disposition, all addressed before merge:
+
+1. **MAJOR — LNM DECRQM clobbers state:** 130.C6.
+2. **RIS drops the parser's in-flight state and the UTF-8 tail.** The behaviour belongs to
+   the 131 reset table, which has a row for it, so 131.8 fixes it. 130 corrects the
+   `apply_state_reset` comment, which understated it. **Fixed by 131.8** (the parser is no
+   longer replaced; only its DECANM/S8C1T modes reset); the 131 merge kept 131's comment.
+3. **The fresh parser's VT52/S8C1T seeding is untested:** add tests.
+4. **`run_case(.., wrapped: bool)`:** becomes a `Delivery` enum.
+5. **The liveness tests exercise `std`, not `Pane`:** add a test on a `Pane` built with
+   `from_channels`.
+6. **OSC 99 `id` / `button` / `live_ids` are echoed unsanitised, relying on validation in
+   another crate:** the serialiser keeps only identifier characters, and an empty id is sent
+   as `0` (also in the `p=?` reply).
+7. **XTGETTCAP echo:** 130.C5.
+8. **Mouse/focus/key event encodings are not S8C1T-aware**, while the docs say "every
+   reply": the docs are scoped to replies to queries, and a GAPS row records the event
+   encodings (unscheduled).
+9. **Stale docs:** `TerminalEmulator::clone_write_tx` and `window_ops.rs`.
+10. **Plan and doc inaccuracies:** 130 status notes, the Task 138 stub, the common-work table,
+    the COVERAGE attribution of the OSC 99 report framing to 130.8, and the
+    `freminal-version-activation` skill's reverse-write guidance. Fixed by the orchestrator.
+11. **`config_example.toml` does not say OSC 99 queries go unanswered while notifications
+    are off:** add a comment.
+12. **`GuiReply::WindowState` doc names `CSI 18 t`;** the query is `CSI 11 t`.
+13. **`TerminalHandler::process_outputs` doc:** a tmux payload is only queued there.
+14. **While OSC 99 is `Unsupported`, display payloads and `p=close` still reach the GUI**
+    (which then caches icons when routing is disabled). **Decision changed:** the handler
+    drops every OSC 99 request while `Unsupported`, so the terminal is consistently one that
+    does not speak the protocol. This supersedes the earlier "`p=close` is still forwarded"
+    bullet. Tests cover `p=close` and display payloads while `Unsupported`, and `p=?` for a
+    tombstoned id.
+15. **Nits:**
+    - the fully-qualified `Decsclm` path in `internal.rs`;
+    - the vacuous `tmux_passthrough_queue_is_drained_by_handle_incoming_data` test (delete);
+    - the `QueryClipboard` debug log prints the unescaped selection (escape and bound it);
+    - `host_capabilities(&Config)` moves out of `gui/notifications.rs` into its own module
+      (`gui/host_capabilities.rs`), since later tasks add non-notification facets.
+    - Accepted: `is_control_payload -> bool` stays. A predicate returning `bool` is not a
+      bool field or parameter.
+    - Already routed: the bool fields in the new tests (130.C4).
+
+### 130 Confirmation review (2026-10-10)
+
+A second read-only review re-checked every adversarial-review finding against the fix
+commits. All were FIXED except items 10 and R7, which were PARTIAL. It also found eight new
+items, all addressed in `5d5fba25` and the follow-up docs commit:
+
+- **N1:** two OSC 99 tests ran with OSC 99 unsupported and passed vacuously. They now use
+  supported capabilities and carry positive controls.
+- **N2:** an IRM DECRQM stored `Irm::Query`, switching insert mode off, and sent no reply.
+  It is now answered `CSI 4 ; Ps $ y` without touching the state. This closes the IRM half
+  of issue #528.
+- **N3:** the docs still said only `p=alive` was ignored while unsupported, and did not
+  record 130.C5 or 130.C6. Corrected.
+- **N4:** the `Osc99Control` doc still mentioned `p=?`. Corrected.
+- **N5:** the `Unsupported` gate ran after reassembly, so a transfer begun while unsupported
+  could complete after support was enabled. The gate now runs before reassembly, and
+  `set_host_capabilities` discards pending transfers when support is turned off.
+- **N6 (accepted):** XTGETTCAP answers each name separately, like kitty, so two invalid names
+  give two identical bare replies. That matches kitty's per-name behaviour.
+- **N7 (accepted, recorded in GAPS):** in S8C1T mode a UTF-8 title reply can contain bytes in
+  0x80–0x9F. This predates Task 130 and is niche.
+- **N8:** a cosmetic doc wrap in `window_ops.rs`. The `MASTER_PLAN.md` mention of
+  `write_to_pty` / `pty_write_tx` is a historical v0.11.0 dependency note and stays.
+
+### 130 Orchestrator re-review (2026-10-10)
+
+The maintainer found that 130.2–130.8 had been committed after a partial review: diffs read
+truncated, new untracked files never opened, verification steps taken on trust. Every
+commit was then re-read in full. Results:
+
+- **130.2:** pass. One gap, R2a: no test pins that an _incomplete_ inner tmux sequence is
+  discarded by the fresh parser instead of leaking into the outer stream.
+- **130.3:** pass. The 33 `ReportMode` diffs were checked mechanically; every change is the
+  `ESC [` removal or its rustfmt re-wrap.
+- **130.4:** pass. The `apply_new_config` broadcast has no test, as no existing broadcast does:
+  there is no `FreminalGui` test harness, and extracting a helper only to test it is what
+  `freminal-extend-or-extract` forbids. Accepted.
+- **130.5:** pass.
+- **130.6:** pass, but surfaced 130.C3.
+- **130.7:** pass, but surfaced 130.C4, plus R7: stale comments that still route `p=?` to
+  the GUI (`Osc99Control` doc in `notifications.rs`, `osc99_controls` doc in
+  `frame_drain.rs`).
+- **130.8:** three findings:
+  - R8a: `handle_window_manipulation` takes both `reply_tx: &Sender` and
+    `reply_handle: &Arc<Sender>` for the same channel; keep only the `Arc`.
+  - R8b: the new tests exercise `std`'s `Arc`/`Weak`, not freminal; add a test that the
+    handles `handle_window_manipulation` collects stop upgrading once the pane's handles drop.
+  - R8c: an over-long doc line in `show_system_osc99`.
+
+R2a, R7 and R8a–c are fixed with 130.C2 and 130.C3 before the adversarial review.
 
 ---
 
@@ -3636,6 +3827,9 @@ Notes:
   re-based on RIS together with the cleared maps —
   `row_epoch_counter`, `cell_pixel_*`, `theme`, `tmux_passthrough_queue`) are kept, as is
   `allow_alt_screen` (xterm does not reset it).
+- Task 130's `host_capabilities` (config and platform facts seeded by the GUI and updated by
+  `InputEvent::HostCapabilitiesChange`) is kept by both: it describes the host, not the
+  terminal. Classified when Task 131 merged onto Task 130.
 
 ### 131 Cleanup entries
 
@@ -4038,8 +4232,14 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - **Reverse path.**
   - Buttons are reported **0-based**; the spec says 1-based.
   - The close report is lost after activation (notify-rust `FnOnce`).
-  - `p=?` is answered after DA1 (Task 130).
-  - Capabilities are advertised while notifications are disabled.
+  - ~~`p=?` is answered after DA1~~: fixed by Task 130 (answered on the PTY thread in stream
+    order).
+  - ~~Capabilities are advertised while notifications are disabled~~: fixed by Task 130 (every
+    OSC 99 request is dropped while unsupported; `a=report` / `c=1` follow platform and
+    routing).
+  - Ids, buttons and live-id lists are sanitised at the reply serialiser since Task 130; the
+    transported `report_activation` / `focus_on_activation` / `close_report` bools are
+    130.C4, routed here.
   - The `p=alive` map is global across panes, unbounded and never pruned on user dismissal.
 - **Lifecycle.**
   - No update-in-place for a repeated `i=`.

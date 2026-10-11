@@ -179,19 +179,83 @@ test_mode_type!(
 );
 
 // Lnm (20): default=LineFeed, Set=NewLine, Reset=LineFeed
-// Note: parameter in the DECRPM string uses ?20 notation.
-test_mode_type!(
-    lnm_tests,
-    Lnm,
-    20,
-    Lnm::LineFeed,
-    Lnm::NewLine,
-    Lnm::LineFeed,
-    Lnm::Query,
-    "New Line Mode (LNM)",
-    "Line Feed Mode (LNM)",
-    "Query Line Mode (LNM)"
-);
+// LNM is an ANSI mode, so its DECRPM body has no `?` prefix (`20;Ps$y`).
+// It cannot use `test_mode_type!`, which emits the DEC-private `?` form.
+mod lnm_tests {
+    use super::*;
+
+    #[test]
+    fn default_value() {
+        assert_eq!(Lnm::default(), Lnm::LineFeed);
+    }
+
+    #[test]
+    fn new_dec_set() {
+        assert_eq!(Lnm::new(&SetMode::DecSet), Lnm::NewLine);
+    }
+
+    #[test]
+    fn new_dec_rst() {
+        assert_eq!(Lnm::new(&SetMode::DecRst), Lnm::LineFeed);
+    }
+
+    #[test]
+    fn new_dec_query() {
+        assert_eq!(Lnm::new(&SetMode::DecQuery), Lnm::Query);
+    }
+
+    #[test]
+    fn report_none_set_variant() {
+        assert_eq!(Lnm::NewLine.report(None), "20;1$y");
+    }
+
+    #[test]
+    fn report_none_reset_variant() {
+        assert_eq!(Lnm::LineFeed.report(None), "20;2$y");
+    }
+
+    #[test]
+    fn report_none_query_variant() {
+        assert_eq!(Lnm::Query.report(None), "20;0$y");
+    }
+
+    #[test]
+    fn report_override_dec_set() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecSet)), "20;1$y");
+    }
+
+    #[test]
+    fn report_override_dec_rst() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecRst)), "20;2$y");
+    }
+
+    #[test]
+    fn report_override_dec_query() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecQuery)), "20;0$y");
+    }
+
+    #[test]
+    fn report_never_has_dec_private_prefix() {
+        for variant in [Lnm::NewLine, Lnm::LineFeed, Lnm::Query] {
+            assert!(!variant.report(None).starts_with('?'));
+        }
+    }
+
+    #[test]
+    fn display_set_variant() {
+        assert_eq!(format!("{}", Lnm::NewLine), "New Line Mode (LNM)");
+    }
+
+    #[test]
+    fn display_reset_variant() {
+        assert_eq!(format!("{}", Lnm::LineFeed), "Line Feed Mode (LNM)");
+    }
+
+    #[test]
+    fn display_query_variant() {
+        assert_eq!(format!("{}", Lnm::Query), "Query Line Mode (LNM)");
+    }
+}
 
 // ReverseWrapAround (?45): default=DontWrap, Set=WrapAround, Reset=DontWrap
 test_mode_type!(
@@ -575,7 +639,7 @@ mod decscnm_tests {
 }
 
 // ===========================================================================
-// Decsclm (?4) — SPECIAL: report() ALWAYS returns "?4;0$y"
+// Decsclm (?4) — SPECIAL: report() ALWAYS returns "?4;4$y"
 // ===========================================================================
 mod decsclm_tests {
     use super::*;
@@ -600,38 +664,38 @@ mod decsclm_tests {
         assert_eq!(Decsclm::new(&SetMode::DecQuery), Decsclm::Query);
     }
 
-    // report() ALWAYS returns "?4;0$y" regardless of variant or override
+    // report() ALWAYS returns "?4;4$y" regardless of variant or override
     #[test]
     fn report_smooth_scroll_none() {
-        assert_eq!(Decsclm::SmoothScroll.report(None), "?4;0$y");
+        assert_eq!(Decsclm::SmoothScroll.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_fast_scroll_none() {
-        assert_eq!(Decsclm::FastScroll.report(None), "?4;0$y");
+        assert_eq!(Decsclm::FastScroll.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_query_none() {
-        assert_eq!(Decsclm::Query.report(None), "?4;0$y");
+        assert_eq!(Decsclm::Query.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_override_dec_set() {
-        assert_eq!(Decsclm::FastScroll.report(Some(SetMode::DecSet)), "?4;0$y");
+        assert_eq!(Decsclm::FastScroll.report(Some(SetMode::DecSet)), "?4;4$y");
     }
 
     #[test]
     fn report_override_dec_rst() {
         assert_eq!(
             Decsclm::SmoothScroll.report(Some(SetMode::DecRst)),
-            "?4;0$y"
+            "?4;4$y"
         );
     }
 
     #[test]
     fn report_override_dec_query() {
-        assert_eq!(Decsclm::Query.report(Some(SetMode::DecQuery)), "?4;0$y");
+        assert_eq!(Decsclm::Query.report(Some(SetMode::DecQuery)), "?4;4$y");
     }
 
     // Display

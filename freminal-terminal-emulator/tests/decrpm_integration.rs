@@ -190,6 +190,26 @@ fn backspace_at_column_zero_does_not_wrap_until_mode_45_is_set() {
     );
 }
 
+/// `?45` is handler-owned since Task 131.C3, so the `TerminalModes` table in
+/// `querying_a_terminal_state_mode_never_changes_stored_modes` cannot see it:
+/// prove observably that a query reports the set state and leaves it set.
+#[test]
+fn querying_reverse_wrap_around_reports_and_keeps_the_set_state() {
+    let (mut state, rx) = make_state();
+    let last_col = state.handler.win_size().0 - 1;
+    state.handle_incoming_data(b"AB\r\n\x1b[?45h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?45$p");
+    assert_eq!(resp, "\x1b[?45;1$y", "?45 after set → Ps=1");
+
+    state.handle_incoming_data(b"\x08");
+    let wrapped = state.handler.cursor_pos();
+    assert_eq!(
+        (wrapped.x, wrapped.y),
+        (last_col, 0),
+        "a DECRQM must not switch reverse wrap off"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Synchronized Updates (?2026)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -541,4 +561,245 @@ fn decrpm_alt_screen_47_still_reports_47() {
     state.handle_incoming_data(b"\x1b[?47h");
     let resp = feed_and_collect(&mut state, &rx, b"\x1b[?47$p");
     assert_eq!(resp, "\x1b[?47;1$y");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LNM (ANSI mode 20) — answered in the ANSI form `20;Ps$y`, without `?`
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_lnm_default_is_reset_in_ansi_form() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y", "LNM default → Ps=2, no `?` prefix");
+}
+
+#[test]
+fn decrpm_lnm_after_set_is_set() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[20h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;1$y");
+}
+
+#[test]
+fn decrpm_lnm_after_reset_is_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[20h");
+    state.handle_incoming_data(b"\x1b[20l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IRM (ANSI mode 4) — answered in the ANSI form `4;Ps$y`, without `?`
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Text of the first visible row, trailing spaces trimmed.
+fn first_row_text(state: &TerminalState) -> String {
+    let rows = state.handler.buffer().visible_rows(0);
+    let text: String = rows[0].characters().iter().map(|c| c.into_utf8()).collect();
+    text.trim_end().to_string()
+}
+
+/// Write `X` over the start of a row holding `AB` and return what the row now
+/// reads: `XAB` when IRM is active (insert), `XB` when it is not (replace).
+fn write_x_at_column_one(state: &mut TerminalState) -> String {
+    state.handle_incoming_data(b"\x1b[2J\x1b[H"); // clear screen, home
+    state.handle_incoming_data(b"AB\x1b[1GX");
+    first_row_text(state)
+}
+
+#[test]
+fn decrpm_irm_default_is_reset_in_ansi_form() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y", "IRM default (replace) → Ps=2, no `?`");
+}
+
+#[test]
+fn decrpm_irm_after_set_is_set_and_insert_stays_active() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[4h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;1$y");
+    assert_eq!(
+        write_x_at_column_one(&mut state),
+        "XAB",
+        "a DECRQM must not turn insert mode off"
+    );
+}
+
+#[test]
+fn decrpm_irm_after_reset_is_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[4h");
+    state.handle_incoming_data(b"\x1b[4l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y");
+    assert_eq!(write_x_at_column_one(&mut state), "XB");
+}
+
+#[test]
+fn decrpm_irm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, b"\x9b4;2$y");
+}
+
+#[test]
+fn irm_query_on_default_state_leaves_replace_mode() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+    assert_eq!(resp, "\x1b[4;2$y");
+    assert_eq!(write_x_at_column_one(&mut state), "XB");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DECSCLM (?4) — recognised but never settable: always "permanently reset"
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn decrpm_decsclm_default_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y", "exactly one Ps=4 reply, nothing else");
+}
+
+#[test]
+fn decrpm_decsclm_after_set_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[?4h");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y");
+}
+
+#[test]
+fn decrpm_decsclm_after_reset_is_permanently_reset() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b[?4h");
+    state.handle_incoming_data(b"\x1b[?4l");
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, "\x1b[?4;4$y");
+}
+
+#[test]
+fn decsclm_set_and_reset_produce_no_reply() {
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[?4h\x1b[?4l");
+    assert_eq!(
+        resp, "",
+        "DECSET/DECRST of ?4 are not acted on and not answered"
+    );
+}
+
+#[test]
+fn decrpm_decsclm_in_8bit_mode_uses_0x9b() {
+    let (mut state, rx) = make_state();
+    state.handle_incoming_data(b"\x1b G"); // S8C1T
+    let resp = feed_and_collect_bytes(&mut state, &rx, b"\x1b[?4$p");
+    assert_eq!(resp, b"\x9b?4;4$y");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A DECRQM must never overwrite the stored state (Task 130.C6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn lnm_query_after_set_leaves_line_feed_mode_set() {
+    use freminal_common::buffer_states::modes::lnm::Lnm;
+
+    let (mut state, rx) = make_state();
+    let _ = feed_and_collect(&mut state, &rx, b"\x1b[20h");
+    assert_eq!(state.modes.line_feed_mode, Lnm::NewLine);
+
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;1$y", "LNM is set, so DECRQM reports Ps=1");
+    assert_eq!(
+        state.modes.line_feed_mode,
+        Lnm::NewLine,
+        "a DECRQM must not overwrite the stored LNM state"
+    );
+}
+
+#[test]
+fn lnm_query_on_default_state_leaves_line_feed_mode_reset() {
+    use freminal_common::buffer_states::modes::lnm::Lnm;
+
+    let (mut state, rx) = make_state();
+    let resp = feed_and_collect(&mut state, &rx, b"\x1b[20$p");
+    assert_eq!(resp, "\x1b[20;2$y");
+    assert_eq!(state.modes.line_feed_mode, Lnm::LineFeed);
+}
+
+/// IRM lives on the handler rather than in `TerminalModes`, so the aggregate
+/// check below cannot see it: prove the same invariant observably, in both
+/// directions (a query must neither turn insert on nor turn it off).
+#[test]
+fn querying_irm_never_changes_insert_mode() {
+    for (label, change, expected) in [
+        ("insert stays on", &b"\x1b[4h"[..], "XAB"),
+        ("replace stays on", &b"\x1b[4l"[..], "XB"),
+    ] {
+        let (mut state, rx) = make_state();
+        let _ = feed_and_collect(&mut state, &rx, change);
+        let resp = feed_and_collect(&mut state, &rx, b"\x1b[4$p");
+        assert!(!resp.is_empty(), "{label}: the query must be answered");
+        assert_eq!(
+            write_x_at_column_one(&mut state),
+            expected,
+            "{label}: a DECRQM must not change the stored IRM state"
+        );
+    }
+}
+
+/// Every `TerminalState`-owned mode whose enum has a `Query` variant (or whose
+/// query is routed through one): moving the mode off its default and then
+/// querying it must leave the stored `TerminalModes` byte-for-byte unchanged.
+#[test]
+fn querying_a_terminal_state_mode_never_changes_stored_modes() {
+    // (label, sequence that moves the mode off its default, DECRQM sequence)
+    let cases: &[(&str, &[u8], &[u8])] = &[
+        ("DECCKM ?1", b"\x1b[?1h", b"\x1b[?1$p"),
+        ("DECSCNM ?5", b"\x1b[?5h", b"\x1b[?5$p"),
+        ("DECARM ?8", b"\x1b[?8l", b"\x1b[?8$p"),
+        ("X10 mouse ?9", b"\x1b[?9h", b"\x1b[?9$p"),
+        ("LNM 20", b"\x1b[20h", b"\x1b[20$p"),
+        ("DECNKM ?66", b"\x1b[?66h", b"\x1b[?66$p"),
+        ("DECBKM ?67", b"\x1b[?67h", b"\x1b[?67$p"),
+        ("X11 mouse ?1000", b"\x1b[?1000h", b"\x1b[?1000$p"),
+        ("Button mouse ?1002", b"\x1b[?1002h", b"\x1b[?1002$p"),
+        ("Any mouse ?1003", b"\x1b[?1003h", b"\x1b[?1003$p"),
+        ("XtMseWin ?1004", b"\x1b[?1004h", b"\x1b[?1004$p"),
+        ("UTF-8 mouse ?1005", b"\x1b[?1005h", b"\x1b[?1005$p"),
+        ("SGR mouse ?1006", b"\x1b[?1006h", b"\x1b[?1006$p"),
+        ("AlternateScroll ?1007", b"\x1b[?1007h", b"\x1b[?1007$p"),
+        ("SGR-pixels mouse ?1016", b"\x1b[?1016h", b"\x1b[?1016$p"),
+        ("BracketedPaste ?2004", b"\x1b[?2004h", b"\x1b[?2004$p"),
+        ("SynchronizedUpdates ?2026", b"\x1b[?2026h", b"\x1b[?2026$p"),
+        ("Theming ?2031", b"\x1b[?2031l", b"\x1b[?2031$p"),
+    ];
+
+    for (label, change, query) in cases {
+        let (mut state, rx) = make_state();
+        // ?2031 is only honoured when the theme mode is Auto.
+        state.modes.theme_mode = ThemeMode::Auto;
+        let default_modes = format!("{:?}", state.modes);
+
+        let _ = feed_and_collect(&mut state, &rx, change);
+        let changed = format!("{:?}", state.modes);
+        assert_ne!(
+            changed, default_modes,
+            "{label}: the change sequence must move the stored state off its default"
+        );
+
+        let resp = feed_and_collect(&mut state, &rx, query);
+        assert!(!resp.is_empty(), "{label}: the query must be answered");
+        assert_eq!(
+            format!("{:?}", state.modes),
+            changed,
+            "{label}: a DECRQM must not change the stored state"
+        );
+    }
 }

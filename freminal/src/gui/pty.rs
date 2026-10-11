@@ -131,7 +131,9 @@ const MAX_PTY_READ_BATCH: usize = 64;
 /// - `NoRepaint`: `Key`, `FocusChange` (child-fd writes only, no emulator state
 ///   change — the echo arrives later via `pty_read_rx`, which requests its own
 ///   repaint); `ExtractSelection` (read-only; the GUI blocks on `clipboard_rx`
-///   in the SAME frame, so no future wake is needed).
+///   in the SAME frame, so no future wake is needed); `HostCapabilitiesChange`
+///   (updates a handler field no snapshot carries); `Reply` (a GUI-originated
+///   reply serialised to the child fd; no emulator state change).
 /// - `Repaint`: `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
 ///   `AutoDetectUrls`, `ThemeModeUpdate`, `ClearScrollback` (all mutate
 ///   snapshot-visible state), and `RequestSearchBuffer` (read-only, but the GUI
@@ -162,6 +164,10 @@ enum InputOutcome {
 /// - `ExtractSelection`: read-only; the result is delivered on `clipboard_tx`
 ///   and the GUI consumes it with a BLOCKING `clipboard_rx.recv_timeout` in the
 ///   SAME frame that requested it, so no future wake is needed.
+/// - `HostCapabilitiesChange`: updates a handler field that no snapshot
+///   carries; it only changes how later protocol queries are answered.
+/// - `Reply`: a GUI-originated reply written to the child fd; no emulator
+///   state change, nothing for the GUI to render.
 ///
 /// `true` (repaint needed):
 /// - `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
@@ -173,9 +179,11 @@ enum InputOutcome {
 ///   suppressed.
 const fn input_event_needs_repaint(event: &InputEvent) -> bool {
     match event {
-        InputEvent::Key(_) | InputEvent::FocusChange(_) | InputEvent::ExtractSelection { .. } => {
-            false
-        }
+        InputEvent::Key(_)
+        | InputEvent::FocusChange(_)
+        | InputEvent::ExtractSelection { .. }
+        | InputEvent::HostCapabilitiesChange(_)
+        | InputEvent::Reply(_) => false,
         InputEvent::Resize(..)
         | InputEvent::ScrollOffset { .. }
         | InputEvent::ThemeChange(_)
@@ -322,7 +330,9 @@ pub struct TabChannels {
     /// Sender for input events (key, resize, focus) to the PTY thread.
     pub input_tx: Sender<InputEvent>,
 
-    /// Sender for raw bytes back to the PTY (Report* responses).
+    /// Sender for raw bytes to the PTY, for layout startup-command injection
+    /// only. GUI-originated replies go through `input_tx` as
+    /// `InputEvent::Reply`.
     pub pty_write_tx: Sender<PtyWrite>,
 
     /// Receiver for window commands from the PTY thread.
@@ -413,6 +423,11 @@ pub struct PtyTabInitialState {
     /// (`InputEvent::CursorConfigChange` is the live-apply equivalent;
     /// issue #406).
     pub cursor_style: freminal_common::cursor::CursorVisualStyle,
+    /// Host-dependent capability facts, resolved from the config via
+    /// `host_capabilities::host_capabilities`
+    /// (`InputEvent::HostCapabilitiesChange` is the live-apply equivalent;
+    /// Task 130.4).
+    pub host_capabilities: freminal_common::host_capabilities::HostCapabilities,
 }
 
 /// Apply `initial_state` to a freshly constructed pane's handler.
@@ -436,6 +451,10 @@ fn apply_initial_state(handler: &mut TerminalHandler, initial_state: PtyTabIniti
     // normally, exactly as on a real terminal. It is also the baseline RIS
     // and DECSTR restore the cursor style to.
     handler.set_configured_cursor_visual_style(initial_state.cursor_style);
+
+    // Seed the host-dependent capability facts (config + platform) the PTY
+    // thread cannot derive by itself.
+    handler.set_host_capabilities(initial_state.host_capabilities);
 }
 
 /// Per-pane configuration forwarded to the PTY child process.
@@ -740,8 +759,8 @@ fn spawn_pty_consumer_thread(
                             | WindowManipulation::ReportIconLabel
                             | WindowManipulation::ReportTitle
                             | WindowManipulation::QueryClipboard(_)
-                            // OSC 99 display and control requests drive reverse writes
-                            // back to the originating pane's pty_write_tx (Tasks
+                            // OSC 99 display and control requests drive reverse replies
+                            // back to the originating pane's input_tx (Tasks
                             // 99.5c/99.6/99.7), so they are classified as Report like
                             // the other PTY-response-producing variants above.
                             | WindowManipulation::Notification99(_)
@@ -843,6 +862,16 @@ fn spawn_pty_consumer_thread(
                                 .internal
                                 .handler
                                 .set_configured_cursor_visual_style(style);
+                        }
+                        InputEvent::HostCapabilitiesChange(caps) => {
+                            emulator.internal.handler.set_host_capabilities(caps);
+                        }
+                        InputEvent::Reply(reply) => {
+                            // Child-fd write only, framed by the handler in the
+                            // application's S8C1T mode. Deliberately not recorded
+                            // to FREC: the recording captures user input
+                            // (`PtyInput`), not terminal-to-application replies.
+                            emulator.write_gui_reply(&reply);
                         }
                         InputEvent::AutoDetectUrls(enabled) => {
                             emulator
@@ -1191,6 +1220,10 @@ fn spawn_pty_consumer_thread(
 mod tests {
     use super::*;
     use freminal_common::buffer_states::row_number::RowNumber;
+    use freminal_common::host_capabilities::{
+        HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    };
+    use freminal_terminal_emulator::io::{GuiReply, WindowStateReport};
 
     /// Helper: build a fresh `CommandBlock` with the given fid.
     fn block_with_fid(fid: &str) -> CommandBlock {
@@ -1364,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_initial_state_seeds_theme_auto_detect_urls_and_cursor_style() {
+    fn apply_initial_state_seeds_theme_auto_detect_urls_cursor_style_and_host_capabilities() {
         // Regression test for issue #406 (and the pre-existing theme /
         // auto_detect_urls seeding this PR's cursor_style change follows the
         // shape of): `spawn_pty_tab` cannot be unit-tested directly (it
@@ -1384,6 +1417,17 @@ mod tests {
         // this test proves `apply_initial_state` actually changed the value
         // rather than happening to match a pre-existing default.
         let seeded_auto_detect_urls = !handler.buffer_mut().auto_detect_urls();
+        assert_eq!(
+            handler.host_capabilities(),
+            HostCapabilities::default(),
+            "sanity: TerminalHandler::new defaults to nothing supported"
+        );
+        let seeded_host_capabilities = HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        };
 
         apply_initial_state(
             &mut handler,
@@ -1391,6 +1435,7 @@ mod tests {
                 theme: &DRACULA,
                 auto_detect_urls: seeded_auto_detect_urls,
                 cursor_style: CursorVisualStyle::VerticalLineCursorBlink,
+                host_capabilities: seeded_host_capabilities,
             },
         );
 
@@ -1422,6 +1467,7 @@ mod tests {
             CursorVisualStyle::VerticalLineCursorBlink,
             "RIS must restore the configured cursor style, not the compiled default"
         );
+        assert_eq!(handler.host_capabilities(), seeded_host_capabilities);
     }
 
     /// Table test locking the #459 repaint classification for EVERY
@@ -1451,6 +1497,15 @@ mod tests {
             end_col: 1,
             is_block: false,
         }));
+        // HostCapabilitiesChange only updates a handler field no snapshot
+        // carries.
+        assert!(!input_event_needs_repaint(
+            &InputEvent::HostCapabilitiesChange(HostCapabilities::default())
+        ));
+        // Reply is a child-fd write only.
+        assert!(!input_event_needs_repaint(&InputEvent::Reply(
+            GuiReply::WindowState(WindowStateReport::Normal)
+        )));
 
         // Repaint: everything that mutates snapshot-visible state, plus
         // RequestSearchBuffer (polled on a later frame -> needs a guaranteed

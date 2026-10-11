@@ -30,6 +30,7 @@ use freminal_common::{
         modes::declrmm::Declrmm,
         modes::decnrcm::Decnrcm,
         modes::decom::Decom,
+        modes::decsclm::Decsclm,
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
@@ -57,6 +58,7 @@ use freminal_common::{
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
+    host_capabilities::{HostCapabilities, Osc99Support},
     pty_write::PtyWrite,
     themes::ThemePalette,
 };
@@ -298,6 +300,9 @@ pub struct TerminalHandler {
     pre_deccolm_width: Option<usize>,
     /// Active color theme for default palette lookups.
     theme: &'static ThemePalette,
+    /// Host-dependent capability facts (configuration and platform) the GUI
+    /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
+    host_capabilities: HostCapabilities,
     /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
     ///
     /// When `Some`, responses to OSC 10 queries use this value instead of the
@@ -503,6 +508,7 @@ impl TerminalHandler {
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            host_capabilities: HostCapabilities::default(),
             fg_color_override: None,
             bg_color_override: None,
             cursor_color_override: None,
@@ -552,6 +558,30 @@ impl TerminalHandler {
     /// Set the active theme palette.
     pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
         self.theme = theme;
+    }
+
+    /// Get the host-dependent capability facts.
+    #[must_use]
+    pub const fn host_capabilities(&self) -> HostCapabilities {
+        self.host_capabilities
+    }
+
+    /// Set the host-dependent capability facts.
+    ///
+    /// Called with the GUI's value at pane spawn and again whenever a config
+    /// change alters it. Not touched by a terminal reset: these are facts about
+    /// the host, not terminal state.
+    ///
+    /// When the new value leaves OSC 99 unsupported, every in-flight OSC 99
+    /// chunk accumulator is discarded. Chunks received while unsupported are
+    /// dropped before reassembly, so without this a transfer begun while
+    /// supported could be completed by a later chunk after re-enabling,
+    /// splicing text from two separate eras of host configuration.
+    pub fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
+        if matches!(host_capabilities.osc99, Osc99Support::Unsupported) {
+            self.pending_notifications.clear();
+        }
+        self.host_capabilities = host_capabilities;
     }
 
     /// Get the current S8C1T mode.
@@ -1487,6 +1517,13 @@ impl TerminalHandler {
     ///
     /// This is the main entry point for integrating with the parser.
     /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
+    ///
+    /// A tmux DCS passthrough payload is only **queued** here
+    /// (see [`Self::take_tmux_passthrough_queue`]); the handler never executes
+    /// it. The payload runs only when `TerminalState` drives processing, which
+    /// drains the queue after each output and processes every payload through a
+    /// fresh parser. A caller that feeds a handler directly must drain the queue
+    /// itself, or a tmux payload has no effect.
     pub fn process_outputs(&mut self, outputs: &[TerminalOutput]) {
         for output in outputs {
             self.process_output_in_batch(output);
@@ -2022,12 +2059,33 @@ impl TerminalHandler {
                 }
 
                 // ── Insert/Replace Mode (IRM, ANSI mode 4) ───────────
-                Mode::Irm(irm) => {
+                // DECRQM (`CSI 4 $ p`) is answered from the stored state and
+                // never stores `Irm::Query` (which would silently turn insert
+                // mode off).
+                Mode::Irm(Irm::Query) => {
+                    let mode = if self.insert_mode.is_insert() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_csi_response(&Irm::Insert.report(Some(mode)));
+                }
+                Mode::Irm(irm @ (Irm::Insert | Irm::Replace)) => {
                     self.insert_mode = *irm;
                 }
 
+                // ── Scroll Mode (DECSCLM, ?4) — recognised, never settable ──
+                // Freminal does not implement smooth scrolling, so Set/Reset
+                // are not acted on (below), but DECRQM is answered: the mode
+                // is permanently reset (Ps=4) whatever the history.
+                Mode::Decsclm(Decsclm::Query) => {
+                    self.write_csi_response(&Decsclm::Query.report(None));
+                }
+
                 // ── Modes parsed but not yet acted on ─────────────────
-                Mode::NoOp | Mode::Decsclm(_) | Mode::Unknown(_) => {
+                Mode::NoOp
+                | Mode::Decsclm(Decsclm::SmoothScroll | Decsclm::FastScroll)
+                | Mode::Unknown(_) => {
                     tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },
@@ -4286,6 +4344,26 @@ mod tests {
         handler.handle_data(b"q");
         // Cursor should advance
         assert_eq!(handler.buffer().cursor().pos.x, 1);
+    }
+
+    #[test]
+    fn host_capabilities_default_then_set_and_get() {
+        use freminal_common::host_capabilities::{
+            Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.host_capabilities(), HostCapabilities::default());
+        assert_eq!(handler.host_capabilities().osc99, Osc99Support::Unsupported);
+
+        let caps = HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::NotReported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        };
+        handler.set_host_capabilities(caps);
+        assert_eq!(handler.host_capabilities(), caps);
     }
 
     #[test]

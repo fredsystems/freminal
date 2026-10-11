@@ -20,6 +20,7 @@
 //! intended sink; the toast leg never spawns a thread.
 
 use std::collections::HashMap;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use conv2::ValueInto;
@@ -30,8 +31,8 @@ use freminal_common::buffer_states::window_manipulation::{
     Notification99Data, NotificationKind, Osc99ControlKind,
 };
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
-use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 use super::command_blocks::format_command_duration;
 use super::toast::{ToastKind, ToastStack};
@@ -534,67 +535,38 @@ pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str)
     live.remove(id).is_some()
 }
 
-/// Build an OSC 99 activation report: `ESC ] 99 ; i=<id> ; <button> ST`.
+/// Send `reply` to the originating pane's PTY consumer through a `Weak`
+/// handle to its input sender.
 ///
-/// `id` defaults to `0` when absent; `button` is the (0-based) action-id
-/// string freminal registered for the button, or `None` for
-/// whole-notification activation (empty button field).
-///
-/// Only reachable from non-test code on Linux/BSD, where `notify-rust`'s
-/// D-Bus backend exposes an observable handle (see `show_system_osc99`).
-/// macOS/Windows have no background-thread activation callback, so this
-/// builder has no non-test caller there — but it is still exercised by
-/// unit tests on every platform, so it is compiled (not `cfg`'d out); the
-/// dead-code allow is scoped to exactly the platforms that lack a caller.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
-pub(super) fn osc99_activation_report(id: Option<&str>, button: Option<&str>) -> Vec<u8> {
-    let id = id.unwrap_or("0");
-    let button = button.unwrap_or("");
-    format!("\x1b]99;i={id};{button}\x1b\\").into_bytes()
+/// OSC 99 replies can be produced long after the frame that collected the
+/// request (the desktop-notification thread blocks for the notification's
+/// lifetime), so they must never hold a strong `Sender<InputEvent>`: that
+/// would keep the closed pane's PTY consumer thread -- and its shell --
+/// alive until the notification is dismissed. The handle is upgraded per
+/// send; if the pane is gone the upgrade fails and the reply is dropped
+/// (nobody is left to read it).
+pub(super) fn send_reply_weak(reply_tx: &Weak<Sender<InputEvent>>, reply: GuiReply) {
+    let Some(tx) = reply_tx.upgrade() else {
+        tracing::debug!("dropping OSC 99 reply: originating pane is closed");
+        return;
+    };
+    send_or_log!(tx, InputEvent::Reply(reply), "Failed to send OSC 99 reply");
 }
 
-/// Build an OSC 99 close report: `ESC ] 99 ; i=<id> : p=close ; [untracked] ST`.
-///
-/// `untracked` marks a close freminal could not directly observe (macOS /
-/// Windows, where the background thread cannot watch for a close event).
-pub(super) fn osc99_close_report(id: Option<&str>, untracked: bool) -> Vec<u8> {
-    let id = id.unwrap_or("0");
-    let payload = if untracked { "untracked" } else { "" };
-    format!("\x1b]99;i={id}:p=close;{payload}\x1b\\").into_bytes()
-}
-
-/// Build an OSC 99 alive report: `ESC ] 99 ; i=<req-id> : p=alive ; id1,id2 ST`.
-///
-/// `req_id` defaults to `0` when the poll carried no id; `live_ids` is
-/// comma-joined verbatim (empty list -> empty payload).
-pub(super) fn osc99_alive_report(req_id: Option<&str>, live_ids: &[String]) -> Vec<u8> {
-    let req_id = req_id.unwrap_or("0");
-    let list = live_ids.join(",");
-    format!("\x1b]99;i={req_id}:p=alive;{list}\x1b\\").into_bytes()
-}
-
-/// The OSC 99 capabilities freminal truthfully advertises in a `p=?`
-/// response.
-///
-/// Colon-separated `key=value` pairs, in a stable order. Advertises only
-/// what is genuinely implemented (the truthful-advertisement rule from
-/// Task 76): `a=report` (NOT `focus` — `focus_on_activation` is parsed but
-/// freminal does not act on it), `c=1` (close reports), `o=` all three
-/// occasions (99.5a), `p=` the payload types freminal handles (display
-/// types plus the control types it answers), `s=system,silent` (forwarded
-/// freedesktop sound-name hints — freminal forwards the name, playback is
-/// the daemon's concern), `u=0,1,2` (urgency levels — advertised even
-/// though the setter is unavailable on macOS, matching Task 76's handling
-/// of the same gap), and `w=1` (auto-expiry, wired via `.timeout()`).
-const OSC99_CAPABILITIES: &str = "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
-
-/// Build the OSC 99 `p=?` capability handshake response:
-/// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`.
-///
-/// `id` defaults to `0` when the query control carried no id.
-pub(super) fn osc99_query_response(id: Option<&str>) -> Vec<u8> {
-    let id = id.unwrap_or("0");
-    format!("\x1b]99;i={id}:p=?;{OSC99_CAPABILITIES}\x1b\\").into_bytes()
+/// Answer an OSC 99 `p=alive` poll with the current live notification ids
+/// (sorted), through the originating pane's `Weak` reply handle.
+pub(super) fn send_osc99_alive(
+    live: &HashMap<String, Osc99LiveEntry>,
+    request_id: Option<String>,
+    reply_tx: &Weak<Sender<InputEvent>>,
+) {
+    send_reply_weak(
+        reply_tx,
+        GuiReply::Osc99Alive {
+            request_id,
+            live_ids: live_ids_sorted(live),
+        },
+    );
 }
 
 /// Collect the live notification ids in sorted order (deterministic for the
@@ -606,14 +578,15 @@ pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<Str
 }
 
 /// Map a `notify-rust` xdg action id observed by `wait_for_action` to the
-/// OSC 99 reverse-path report bytes to send, if any.
+/// OSC 99 reverse-path [`GuiReply`] to send, if any.
 ///
 /// `action` is `"__closed"` (dismissed without action), `"default"`
 /// (whole-notification activation), or the button's registered id string
 /// (the 0-based `enumerate` index used when registering `.action(...)`).
 /// Returns `None` when the source notification didn't request a report for
 /// this event (`report_activation` / `close_report` both gate their
-/// respective branches).
+/// respective branches). The PTY thread serialises the reply and frames it
+/// per the application's S8C1T mode.
 ///
 /// Only called from non-test code on Linux/BSD (the `wait_for_action`
 /// callback in `show_system_osc99`); macOS/Windows emit an untracked close
@@ -626,19 +599,27 @@ pub(super) fn osc99_action_report(
     id: Option<&str>,
     report_activation: bool,
     close_report: bool,
-) -> Option<Vec<u8>> {
+) -> Option<GuiReply> {
+    let id = id.map(str::to_owned);
     match action {
-        "__closed" => close_report.then(|| osc99_close_report(id, false)),
-        "default" => report_activation.then(|| osc99_activation_report(id, None)),
-        other => report_activation.then(|| osc99_activation_report(id, Some(other))),
+        "__closed" => close_report.then_some(GuiReply::Osc99Closed {
+            id,
+            tracking: Osc99CloseTracking::Tracked,
+        }),
+        "default" => report_activation.then_some(GuiReply::Osc99Activation { id, button: None }),
+        other => report_activation.then(|| GuiReply::Osc99Activation {
+            id,
+            button: Some(other.to_owned()),
+        }),
     }
 }
 
 /// An OSC 99 app→terminal control sequence collected from
 /// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
-/// (Task 99.5c). Paired with a cloned `pty_write_tx` in
-/// `app_impl::update()`'s post-loop routing, where it is answered:
-/// Task 99.6 (close/alive) and Task 99.7 (query).
+/// (Task 99.5c). Paired with a `Weak` handle to the pane's reply sender in
+/// `app_impl::update()`'s post-loop routing, where it is answered
+/// (Task 99.6: close/alive). `p=?` never reaches the GUI: the PTY thread
+/// answers it itself (Task 130.5).
 #[derive(Debug, Clone)]
 pub(super) struct Osc99Control {
     /// Notification id (`i=`) the control refers to, if any.
@@ -688,7 +669,7 @@ impl NotificationRouter {
         toasts: &mut ToastStack,
         icon_cache: &mut HashMap<String, Vec<u8>>,
         live: &mut HashMap<String, Osc99LiveEntry>,
-        pty_write_tx: &Sender<PtyWrite>,
+        reply_tx: &Weak<Sender<InputEvent>>,
     ) {
         if !config.enabled {
             return;
@@ -739,7 +720,7 @@ impl NotificationRouter {
         }
 
         if wants_system {
-            Self::show_system_osc99(data, resolved_icon, pty_write_tx.clone());
+            Self::show_system_osc99(data, resolved_icon, Weak::clone(reply_tx));
         }
 
         // Only track this notification in `live` if the SYSTEM leg fired.
@@ -1015,30 +996,32 @@ impl NotificationRouter {
 
     /// Show an OS notification for an OSC 99 notification, retaining the
     /// handle where the platform allows it so activation/close can be
-    /// reported back to the originating pane's PTY (Task 99.5b + 99.6).
+    /// reported back to the originating pane's PTY thread (Task 99.5b + 99.6).
     ///
     /// On Linux/BSD (`notify-rust`'s D-Bus backend), the handle's
     /// `wait_for_action` blocks the spawned thread for the notification's
     /// lifetime, observing whole-notification activation, button
     /// activation, and dismissal ("closed") — each writes the matching
-    /// report to `pty_write_tx` when the source notification requested it
+    /// [`GuiReply`] through `reply_tx` when the source notification requested it
     /// (`a=report` / `c=1`). On macOS/Windows, `notify-rust` does not expose
     /// an observable handle from a background thread (the macOS callback
     /// needs the main run loop), so a `c=1` close report is emitted
     /// immediately in the `untracked` form and no activation reports are
-    /// sent. The icon temp file (if any) is removed on a best-effort basis
-    /// once the daemon has read it; cleanup failure never fails the
-    /// notification.
+    /// sent. `reply_tx` is a `Weak` handle upgraded per send, so this
+    /// long-lived thread never keeps a closed pane's PTY consumer alive; a
+    /// reply for a closed pane is dropped. The icon temp file (if any) is
+    /// removed on a best-effort basis once the daemon has read it; cleanup
+    /// failure never fails the notification.
     fn show_system_osc99(
         data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,
-        pty_write_tx: Sender<PtyWrite>,
+        reply_tx: Weak<Sender<InputEvent>>,
     ) {
         // See `show_system`: the OS notification call aborts in test binaries
         // on macOS (uncatchable foreign ObjC exception in a non-bundled
         // process). The OSC 99 unit tests assert only on the `live` map and
         // toast state — both settled before this point — and never read the
-        // `pty_write_tx` close/activation reports, so skipping the spawn under
+        // `reply_tx` close/activation replies, so skipping the spawn under
         // test loses no coverage.
         if cfg!(test) {
             return;
@@ -1082,17 +1065,13 @@ impl NotificationRouter {
                         Self::remove_icon_temp_file(&path);
                     }
                     handle.wait_for_action(move |action| {
-                        if let Some(bytes) = osc99_action_report(
+                        if let Some(reply) = osc99_action_report(
                             action,
                             id.as_deref(),
                             report_activation,
                             close_report,
                         ) {
-                            send_or_log!(
-                                pty_write_tx,
-                                PtyWrite::Write(bytes),
-                                "Failed to send OSC 99 activation/close report"
-                            );
+                            send_reply_weak(&reply_tx, reply);
                         }
                     });
                 }
@@ -1115,12 +1094,11 @@ impl NotificationRouter {
                 }
                 let _ = report_activation;
                 if close_report {
-                    let bytes = osc99_close_report(id.as_deref(), true);
-                    send_or_log!(
-                        pty_write_tx,
-                        PtyWrite::Write(bytes),
-                        "Failed to send OSC 99 untracked close report"
-                    );
+                    let reply = GuiReply::Osc99Closed {
+                        id: id.clone(),
+                        tracking: Osc99CloseTracking::Untracked,
+                    };
+                    send_reply_weak(&reply_tx, reply);
                 }
                 if let Some(path) = icon_temp_path.take() {
                     Self::remove_icon_temp_file(&path);
@@ -1817,7 +1795,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -1846,7 +1824,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -1869,7 +1847,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99(); // occasion: None => Always
 
         NotificationRouter::route_osc99(
@@ -1901,7 +1879,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1922,7 +1900,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1951,7 +1929,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1971,7 +1949,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         NotificationRouter::route_osc99(
             &data,
             &config,
@@ -1998,7 +1976,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
 
         NotificationRouter::route_osc99(
             &data,
@@ -2076,7 +2054,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n1".to_owned()),
             report_activation: true,
@@ -2105,7 +2083,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99(); // id: None
 
         NotificationRouter::route_osc99(
@@ -2127,7 +2105,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2152,7 +2130,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n2".to_owned()),
             occasion: Some("unfocused".to_owned()),
@@ -2185,7 +2163,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n3".to_owned()),
             ..default_n99()
@@ -2214,7 +2192,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2245,7 +2223,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("toast-only".to_owned()),
             ..default_n99()
@@ -2280,7 +2258,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("tracked".to_owned()),
             ..default_n99()
@@ -2314,7 +2292,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = default_n99();
 
         NotificationRouter::route_osc99(
@@ -2358,114 +2336,60 @@ mod tests {
         assert!(!removed);
     }
 
-    // ── 99.5b + 99.6: reverse-path report builders ────────────────────────
+    // ── 99.5b + 99.6: reverse-path reply selection ────────────────────────
 
     #[test]
-    fn osc99_activation_report_with_id_no_button() {
+    fn osc99_action_report_default_activates_whole_notification() {
         assert_eq!(
-            osc99_activation_report(Some("abc"), None),
-            b"\x1b]99;i=abc;\x1b\\".to_vec()
+            osc99_action_report("default", Some("abc"), true, false),
+            Some(GuiReply::Osc99Activation {
+                id: Some("abc".to_owned()),
+                button: None,
+            })
         );
     }
 
     #[test]
-    fn osc99_activation_report_with_id_and_button() {
+    fn osc99_action_report_button_carries_action_id() {
         assert_eq!(
-            osc99_activation_report(Some("abc"), Some("2")),
-            b"\x1b]99;i=abc;2\x1b\\".to_vec()
+            osc99_action_report("2", Some("abc"), true, true),
+            Some(GuiReply::Osc99Activation {
+                id: Some("abc".to_owned()),
+                button: Some("2".to_owned()),
+            })
         );
     }
 
     #[test]
-    fn osc99_activation_report_no_id_defaults_to_zero() {
+    fn osc99_action_report_activation_without_id() {
         assert_eq!(
-            osc99_activation_report(None, None),
-            b"\x1b]99;i=0;\x1b\\".to_vec()
+            osc99_action_report("default", None, true, false),
+            Some(GuiReply::Osc99Activation {
+                id: None,
+                button: None,
+            })
         );
     }
 
     #[test]
-    fn osc99_close_report_tracked() {
+    fn osc99_action_report_closed_is_tracked() {
         assert_eq!(
-            osc99_close_report(Some("abc"), false),
-            b"\x1b]99;i=abc:p=close;\x1b\\".to_vec()
+            osc99_action_report("__closed", Some("abc"), false, true),
+            Some(GuiReply::Osc99Closed {
+                id: Some("abc".to_owned()),
+                tracking: Osc99CloseTracking::Tracked,
+            })
         );
     }
 
     #[test]
-    fn osc99_close_report_untracked() {
+    fn osc99_action_report_gated_by_requested_reports() {
         assert_eq!(
-            osc99_close_report(Some("abc"), true),
-            b"\x1b]99;i=abc:p=close;untracked\x1b\\".to_vec()
+            osc99_action_report("__closed", Some("a"), true, false),
+            None
         );
-    }
-
-    #[test]
-    fn osc99_close_report_no_id_defaults_to_zero() {
-        assert_eq!(
-            osc99_close_report(None, false),
-            b"\x1b]99;i=0:p=close;\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_with_req_id_and_ids() {
-        assert_eq!(
-            osc99_alive_report(Some("q1"), &["a".to_owned(), "b".to_owned()]),
-            b"\x1b]99;i=q1:p=alive;a,b\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_empty_live_list() {
-        assert_eq!(
-            osc99_alive_report(Some("q1"), &[]),
-            b"\x1b]99;i=q1:p=alive;\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_alive_report_no_req_id_defaults_to_zero() {
-        assert_eq!(
-            osc99_alive_report(None, &["x".to_owned()]),
-            b"\x1b]99;i=0:p=alive;x\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_query_response_with_id_matches_exact_bytes() {
-        assert_eq!(
-            osc99_query_response(Some("q1")),
-            b"\x1b]99;i=q1:p=?;a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1\x1b\\".to_vec()
-        );
-    }
-
-    #[test]
-    fn osc99_query_response_no_id_defaults_to_zero() {
-        let bytes = osc99_query_response(None);
-        assert!(bytes.starts_with(b"\x1b]99;i=0:p=?;"));
-    }
-
-    #[test]
-    fn osc99_capabilities_are_truthful() {
-        // Guards the truthful-advertisement decision: activation reporting
-        // is advertised, but NOT the `focus` sub-capability (freminal parses
-        // `focus_on_activation` but does not act on it). Scoped to the `a=`
-        // field specifically — the `o=` field's `unfocused` value legitimately
-        // contains the substring "focus".
-        let a_field = OSC99_CAPABILITIES
-            .split(':')
-            .find(|kv| kv.starts_with("a="))
-            .expect("a= field present");
-        assert_eq!(a_field, "a=report");
-        assert!(!a_field.contains("focus"));
-
-        // `p=` payload types must include at least `title` (spec minimum).
-        let p_field = OSC99_CAPABILITIES
-            .split(':')
-            .find(|kv| kv.starts_with("p="))
-            .expect("p= field present");
-        assert!(p_field.contains("title"));
+        assert_eq!(osc99_action_report("default", Some("a"), false, true), None);
+        assert_eq!(osc99_action_report("1", Some("a"), false, true), None);
     }
 
     #[test]
@@ -2548,5 +2472,114 @@ mod tests {
         // Clean up.
         NotificationRouter::remove_icon_temp_file(&a);
         NotificationRouter::remove_icon_temp_file(&b);
+    }
+
+    // ── Weak reply handle (Task 130.8) ───────────────────────────────
+
+    fn reply_channel() -> (
+        std::sync::Arc<Sender<InputEvent>>,
+        crossbeam_channel::Receiver<InputEvent>,
+    ) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        (std::sync::Arc::new(tx), rx)
+    }
+
+    #[test]
+    fn send_reply_weak_delivers_while_the_pane_handle_is_alive() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+
+        send_reply_weak(
+            &weak,
+            GuiReply::Osc99Closed {
+                id: Some("n1".to_owned()),
+                tracking: Osc99CloseTracking::Untracked,
+            },
+        );
+
+        match rx.try_recv() {
+            Ok(InputEvent::Reply(GuiReply::Osc99Closed { id, tracking })) => {
+                assert_eq!(id.as_deref(), Some("n1"));
+                assert_eq!(tracking, Osc99CloseTracking::Untracked);
+            }
+            other => panic!("expected an OSC 99 closed reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_reply_weak_drops_the_reply_after_the_pane_handle_is_gone() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        // Must not panic and must not deliver anything.
+        send_reply_weak(
+            &weak,
+            GuiReply::Osc99Closed {
+                id: None,
+                tracking: Osc99CloseTracking::Untracked,
+            },
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn weak_reply_handle_does_not_keep_the_input_channel_connected() {
+        // Mirrors `Pane::reply_tx`: the pane's `input_tx` clone is wrapped in
+        // an `Arc`, and only `Weak` handles escape. Dropping the pane's
+        // strong handles must disconnect the channel so the PTY consumer
+        // (blocked in `recv`) exits even while a `Weak` is still held by a
+        // notification thread.
+        let (tx, rx) = crossbeam_channel::unbounded::<InputEvent>();
+        let arc = std::sync::Arc::new(tx);
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        ));
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn send_osc99_alive_reports_sorted_live_ids() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        let mut live = HashMap::new();
+        for id in ["b", "c", "a"] {
+            live.insert(
+                id.to_owned(),
+                Osc99LiveEntry {
+                    report_activation: false,
+                    close_report: false,
+                },
+            );
+        }
+
+        send_osc99_alive(&live, Some("req".to_owned()), &weak);
+
+        match rx.try_recv() {
+            Ok(InputEvent::Reply(GuiReply::Osc99Alive {
+                request_id,
+                live_ids,
+            })) => {
+                assert_eq!(request_id.as_deref(), Some("req"));
+                assert_eq!(live_ids, ["a", "b", "c"]);
+            }
+            other => panic!("expected an OSC 99 alive reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_osc99_alive_is_silent_for_a_closed_pane() {
+        let (arc, rx) = reply_channel();
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+
+        send_osc99_alive(&HashMap::new(), None, &weak);
+
+        assert!(rx.try_recv().is_err());
     }
 }

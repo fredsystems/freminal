@@ -125,7 +125,8 @@ impl TerminalHandler {
             allow_column_mode_switch,
             allow_alt_screen: _, // xterm does not reset it: survives both
             pre_deccolm_width,
-            theme: _, // configuration: survives both
+            theme: _,             // configuration: survives both
+            host_capabilities: _, // host facts (config + platform), not terminal state: survives both
             fg_color_override,
             bg_color_override,
             cursor_color_override,

@@ -17,7 +17,9 @@ use freminal_common::{
             decbkm::Decbkm,
             decckm::Decckm,
             decnkm::Decnkm,
+            decsclm::Decsclm,
             keypad::KeypadMode,
+            lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
             s8c1t::S8c1t,
             sync_updates::SynchronizedUpdates,
@@ -313,7 +315,12 @@ impl TerminalState {
             Mode::Decscnm(v) => self.modes.invert_screen = v.clone(),
             Mode::Decarm(v) => self.modes.repeat_keys = *v,
             Mode::SynchronizedUpdates(v) => self.modes.synchronized_updates = v.clone(),
-            Mode::LineFeedMode(v) => self.modes.line_feed_mode = *v,
+            // `Lnm::Query` is excluded by the handler-owned arm below: a DECRQM
+            // for LNM must not overwrite the stored state that input encoding
+            // reads.
+            Mode::LineFeedMode(v @ (Lnm::NewLine | Lnm::LineFeed)) => {
+                self.modes.line_feed_mode = *v;
+            }
             Mode::Decnkm(Decnkm::Application) => {
                 self.modes.keypad_mode = KeypadMode::Application;
             }
@@ -345,7 +352,9 @@ impl TerminalState {
             | Mode::PrivateColorRegisters(_)
             | Mode::ReverseWrapAround(_)
             | Mode::XtRevWrap2(_)
-            | Mode::Decanm(Decanm::Query) => {}
+            | Mode::LineFeedMode(Lnm::Query)
+            | Mode::Decanm(Decanm::Query)
+            | Mode::Decsclm(Decsclm::Query) => {}
             // DECANM — toggle the parser between VT52 and ANSI modes.
             // The handler owns the authoritative `vt52_mode` flag, but
             // the parser also needs to know so it routes ESC bytes to
@@ -1142,20 +1151,6 @@ mod tests {
             }
             PtyWrite::Resize(_) => panic!("unexpected Resize"),
         }
-    }
-
-    // ── tmux passthrough queue is drained in-line ───────────────────────────
-    #[test]
-    fn tmux_passthrough_queue_is_drained_by_handle_incoming_data() {
-        let mut state = TerminalState::default();
-        // A tmux DCS passthrough containing an OSC title-set sequence:
-        // ESC P tmux; ESC ESC ] 0 ; hello BEL ESC \   (inner ESC is doubled)
-        state.handle_incoming_data(b"\x1bPtmux;\x1b\x1b]0;hello\x07\x1b\\");
-        // The queue must be empty again once the batch has been processed.
-        assert!(
-            state.handler.take_tmux_passthrough_queue().is_empty(),
-            "tmux passthrough queue should be drained after handle_incoming_data"
-        );
     }
 
     /// Wrap `inner` in `levels` nested `ESC P tmux; ... ESC \` envelopes.

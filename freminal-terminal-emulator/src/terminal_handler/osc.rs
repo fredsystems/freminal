@@ -18,12 +18,13 @@ use freminal_common::buffer_states::{
     url::Url,
     window_manipulation::{NotificationKind, WindowManipulation},
 };
+use freminal_common::host_capabilities::Osc99Support;
 
 use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
 
-use super::{TerminalHandler, notify_99, shell_integration};
+use super::{TerminalHandler, shell_integration};
 
 /// A payload-free, static description of a Kitty graphics parse failure, safe
 /// for a warn-level log line. The `Display` of [`KittyParseError`] embeds
@@ -216,23 +217,23 @@ impl TerminalHandler {
                 });
             }
 
-            // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
-            // reassembly machine; on finalize, branch on the payload type (Task 99.5c):
-            // control payloads (p=close/p=alive/p=?) push Osc99Control, display payloads
-            // (title/body/icon/buttons) push Notification99 as before (Task 99.4).
+            // OSC 99 stateful notification (Task 99).
+            // - while OSC 99 is unsupported EVERY chunk (display payloads,
+            //   `p=close`, `p=alive`, `p=?`) is dropped BEFORE reassembly, so the
+            //   terminal looks like one that does not speak the protocol and no
+            //   state accumulates for a transfer that could complete after the
+            //   host later enables the protocol;
+            // - while supported, each chunk is fed into the reassembly machine and
+            //   on finalize `dispatch_finalized_osc99` acts on it: `p=?` is answered
+            //   here from the host capabilities (Task 130.5) and never reaches the
+            //   GUI, `p=alive` / `p=close` are forwarded as `Osc99Control`, and
+            //   display payloads (title/body/icon/buttons) push Notification99
+            //   (Task 99.4).
             AnsiOscType::Notify99(cmd) => {
-                if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
-                    if let Some(kind) = notify_99::control_kind(finalized.meta.payload_type) {
-                        self.window_commands.push(WindowManipulation::Osc99Control {
-                            id: finalized.meta.id,
-                            kind,
-                        });
-                    } else {
-                        self.window_commands
-                            .push(WindowManipulation::Notification99(Box::new(
-                                finalized.into_notification99_data(),
-                            )));
-                    }
+                if matches!(self.host_capabilities().osc99, Osc99Support::Unsupported) {
+                    tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
+                } else if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
+                    self.dispatch_finalized_osc99(finalized);
                 }
             }
 
@@ -304,6 +305,10 @@ mod tests {
     use freminal_common::buffer_states::window_manipulation::{
         NotificationKind, Osc99ControlKind, WindowManipulation,
     };
+    use freminal_common::host_capabilities::{
+        HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    };
+    use freminal_common::pty_write::PtyWrite;
 
     // ── Existing OSC 9/777 tests ──────────────────────────────────────────────
 
@@ -570,13 +575,26 @@ mod tests {
         );
     }
 
+    /// A handler whose host supports OSC 99: while it does not, every OSC 99
+    /// request is dropped (130 adversarial review finding 14).
+    fn osc99_supported_handler() -> TerminalHandler {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
+        handler
+    }
+
     // ── OSC 99 emit tests (Task 99.4) ─────────────────────────────────────────
 
     /// A single done title-only notification finalizes and pushes exactly one
     /// `Notification99` window command with defaults mapped correctly.
     #[test]
     fn osc_notify99_single_done_title_pushes_window_command() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         assert_eq!(handler.window_commands, []);
 
         let cmd = Osc99Command {
@@ -603,7 +621,7 @@ mod tests {
     fn osc_notify99_base64_title_split_mid_quantum_pushes_decoded_command() {
         use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         // "Hello" -> "SGVsbG8=", split after "SGV" (mid-quantum).
         let first = parse_osc_99(b"i=s:d=0:e=1", b"SGV").unwrap();
         let second = parse_osc_99(b"i=s:e=1", b"sbG8=").unwrap();
@@ -626,17 +644,22 @@ mod tests {
     fn osc_notify99_invalid_base64_pushes_no_window_command() {
         use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
         let cmd = parse_osc_99(b"e=1", b"@@@@").unwrap();
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
         assert_eq!(handler.window_commands, []);
+
+        // Control: a valid base64 title through the same handler DOES push.
+        let ok = parse_osc_99(b"e=1", b"SGVsbG8=").unwrap();
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(ok))]);
+        assert_eq!(handler.window_commands.len(), 1);
     }
 
     /// A fully-specified notification maps urgency/occasion/expiry/actions
     /// correctly into the `Notification99Data` shell.
     #[test]
     fn osc_notify99_full_fields_map_correctly() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("notif-1".to_owned()),
@@ -674,7 +697,7 @@ mod tests {
     /// command — it is still awaiting more chunks.
     #[test]
     fn osc_notify99_non_final_chunk_does_not_push_window_command() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("pending-1".to_owned()),
@@ -688,6 +711,23 @@ mod tests {
             handler.window_commands.is_empty(),
             "non-final chunk must not emit a window command"
         );
+
+        // Control: the final chunk of the same transfer DOES push, proving the
+        // empty assertion above is not vacuous.
+        let last = Osc99Command {
+            id: Some("pending-1".to_owned()),
+            done: true,
+            payload: b"-rest".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(last))]);
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("partial-rest"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
     }
 
     // ── OSC 99 control routing (Task 99.5c) ───────────────────────────────────
@@ -697,7 +737,7 @@ mod tests {
     /// misrouted as empty display notifications).
     #[test]
     fn osc_notify99_close_pushes_osc99_control_close() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             id: Some("close-1".to_owned()),
@@ -720,6 +760,12 @@ mod tests {
     #[test]
     fn osc_notify99_alive_pushes_osc99_control_alive() {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
 
         let cmd = Osc99Command {
             id: None,
@@ -738,10 +784,19 @@ mod tests {
         }
     }
 
-    /// A `p=?` payload finalizing must push `Osc99Control { kind: Query }`.
+    /// A `p=?` payload finalizing is answered by the handler and pushes no
+    /// window command (Task 130.5).
     #[test]
-    fn osc_notify99_query_pushes_osc99_control_query() {
+    fn osc_notify99_query_is_answered_without_window_command() {
+        let (tx, rx) = crossbeam_channel::unbounded();
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(tx);
+        handler.set_host_capabilities(HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::Reported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        });
 
         let cmd = Osc99Command {
             id: Some("query-1".to_owned()),
@@ -750,21 +805,18 @@ mod tests {
         };
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
 
-        assert_eq!(handler.window_commands.len(), 1);
-        match &handler.window_commands[0] {
-            WindowManipulation::Osc99Control { id, kind } => {
-                assert_eq!(id.as_deref(), Some("query-1"));
-                assert_eq!(*kind, Osc99ControlKind::Query);
-            }
-            other => panic!("expected Osc99Control, got: {other:?}"),
-        }
+        assert_eq!(handler.window_commands.len(), 0);
+        let PtyWrite::Write(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected PtyWrite::Write");
+        };
+        assert!(bytes.starts_with(b"\x1b]99;i=query-1:p=?;"));
     }
 
     /// A display payload type (`Title`) still produces `Notification99`, not
     /// `Osc99Control` — the display path is unchanged by the 99.5c branch.
     #[test]
     fn osc_notify99_title_still_pushes_notification99_not_control() {
-        let mut handler = TerminalHandler::new(80, 24);
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
             payload_type: Osc99PayloadType::Title,
@@ -804,6 +856,24 @@ mod tests {
                 "{level} line leaked payload: {text}"
             );
         }
+    }
+
+    #[test]
+    fn osc99_request_dropped_while_unsupported_logs_a_payload_free_debug() {
+        // `TerminalState::default()` carries the default host capabilities:
+        // OSC 99 unsupported.
+        let events = feed_and_capture(b"\x1b]99;i=1;SECRETPAYLOAD\x1b\\");
+        assert!(
+            events
+                .iter()
+                .all(|(_, text)| !text.contains("SECRETPAYLOAD")),
+            "a log line leaked the payload: {events:?}"
+        );
+        let drops = events
+            .iter()
+            .filter(|(_, text)| text.contains("OSC 99 request dropped"))
+            .count();
+        assert_eq!(drops, 1, "exactly one drop line, got: {events:?}");
     }
 
     #[test]
