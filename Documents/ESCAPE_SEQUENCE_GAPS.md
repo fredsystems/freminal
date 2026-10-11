@@ -13,8 +13,8 @@ recorded as fixed in `ESCAPE_SEQUENCE_COVERAGE.md`.
 Last updated: 2026-10-10 — Task 130 (reverse-path and capability-query
 consistency). Closes the LNM half of the ANSI-mode DECRQM gap (`CSI 20 $ p` now
 answers `CSI 20 ; Ps $ y`, 130.C1) and the DECSCLM no-reply case (`CSI ? 4 $ p`
-now answers `CSI ? 4 ; 4 $ y`, 130.C2); the IRM and unknown-ANSI-mode halves
-stay open (issue #528). Closes the OSC 99 `p=?` "answered after DA1" defect
+now answers `CSI ? 4 ; 4 $ y`, 130.C2); the unknown-ANSI-mode half stays open
+(issue #528). Closes the OSC 99 `p=?` "answered after DA1" defect
 (130.5): it is answered in stream order, gated on configuration and platform,
 and every OSC 99 request is ignored while OSC 99 is unsupported. The IRM half of
 issue #528 is also closed: `CSI 4 $ p` answers `CSI 4 ; Ps $ y` and no longer
@@ -328,11 +328,11 @@ saved homes the cursor with default state, so the earlier entries for those are
 gone. Reference: xterm `cursor.c` (`CursorSave`, `CursorRestore`, `CursorSave2`,
 `AdjustSavedCursor`) and `screen.c`.
 
-| Behaviour                                | Importance | Type | Planned | Notes                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| DECRC scroll-region clamp                | ⬜         | 🚧   | —       | xterm clamps the position restored by DECRC to the scroll region when the restored origin mode is on. Freminal saves and restores DECOM itself (Task 131.C1) but clamps to the screen only, so a position saved under a different DECSTBM state can land outside the region it would be in xterm.                                                                                                        |
-| DECSC saved state                        | ⬜         | 🚧   | —       | Besides the position, xterm saves the pending-wrap flag (`do_wrap`) and DECSCA protection in its `DECSC_FLAGS`. Freminal saves the position, the SGR rendition (weight, decorations, colours), DECOM and the character set per screen (Task 131.C1), and keeps an open OSC 8 hyperlink out of the save (as xterm, kitty and Ghostty do); it does not save the pending-wrap flag (DECSCA is unsupported). |
-| Saved cursor on resize, alternate active | ⬜         | 🚧   | —       | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
+| Behaviour                                | Importance | Type | Planned     | Notes                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------- | ---------- | ---- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECRC scroll-region clamp                | ⬜         | 🚧   | Task 147.17 | xterm clamps the position restored by DECRC to the scroll region when the restored origin mode is on. Freminal saves and restores DECOM itself (Task 131.C1) but clamps to the screen only, so a position saved under a different DECSTBM state can land outside the region it would be in xterm.                                                                                                        |
+| DECSC saved state                        | ⬜         | 🚧   | Task 147.6  | Besides the position, xterm saves the pending-wrap flag (`do_wrap`) and DECSCA protection in its `DECSC_FLAGS`. Freminal saves the position, the SGR rendition (weight, decorations, colours), DECOM and the character set per screen (Task 131.C1), and keeps an open OSC 8 hyperlink out of the save (as xterm, kitty and Ghostty do); it does not save the pending-wrap flag (DECSCA is unsupported). |
+| Saved cursor on resize, alternate active | ⬜         | 🚧   | —           | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
 
 One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
 (Soft Terminal Reset, issue #507) audit:
@@ -444,9 +444,9 @@ form (`CSI ? Pd ; Ps $ y`) carries. LNM (`CSI 20 $ p`, 130.C1) and IRM
 (`CSI 4 $ p`, Task 130 review) are correct, and a query no longer overwrites the
 stored mode.
 
-| Behaviour              | Importance | Type | Planned | Notes                                                                                                                                             |
-| ---------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ANSI-form reply prefix | ⬜         | 🚧   | —       | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.) |
+| Behaviour              | Importance | Type | Planned    | Notes                                                                                                                                             |
+| ---------------------- | ---------- | ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ANSI-form reply prefix | ⬜         | 🚧   | Task 147.1 | Unknown ANSI modes answer `CSI ? Pa ; 0 $ y` because `Mode::UnknownQuery` drops the namespace. (LNM answers `CSI 20 ; Ps $ y` since Task 130.C1.) |
 
 ---
 
@@ -496,13 +496,13 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 8-bit C1 controls (0x80–0x9F), in particular 0x9B as a one-byte CSI introducer, are supported
 **only when S8C1T mode is active** (`ESC SP G`). The default is 7-bit (S7C1T). Modern terminal
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
-that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (unscheduled; recorded by the Task 130 adversarial review). Also, in S8C1T mode a reply that echoes UTF-8 text (a title or icon label) can contain bytes in 0x80–0x9F as continuation bytes of a multi-byte character (e.g. `Ĝ` is `C4 9C`), which a strict 8-bit consumer could misread as a C1 control; unscheduled.
+that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13; since Task 130 so do DECRPM, `CSI ? u` and every GUI-originated reply (window reports, title/icon reports, OSC 52, OSC 99). VT52 `ESC / Z` stays 7-bit by definition. **Not covered:** terminal-to-application _event_ encodings (mouse reports, focus in/out `CSI I` / `CSI O`, and key encodings) are still emitted in the 7-bit form whatever the S8C1T state (Task 147.3–147.5; recorded by the Task 130 adversarial review). Also, in S8C1T mode a reply that echoes UTF-8 text (a title or icon label) can contain bytes in 0x80–0x9F as continuation bytes of a multi-byte character (e.g. `Ĝ` is `C4 9C`), which a strict 8-bit consumer could misread as a C1 control. xterm, the only reference terminal with S8C1T, sends the same raw bytes; the entry is closed as matching xterm by Task 147.17.
 
 **Mode changes take effect per read.** A read from the PTY is parsed in one pass before any of
 it is applied, so a change of parser mode (S8C1T / S7C1T, DECANM entering or leaving VT52, and
 the parser half of RIS) affects the _next_ read: bytes after the change in the same read were
 already parsed under the old mode. Applications that switch mode and then immediately emit
-sequences in the new mode within one write can be misread. Unscheduled; recorded by the Task
+sequences in the new mode within one write can be misread. Fixed by Task 147.2; recorded by the Task
 131 adversarial review.
 
 ---
@@ -524,10 +524,10 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                            | Rationale                                                                                                                                                                    | Planned    |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
-| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                               | issue #528 |
+| Item                            | Rationale                                                                                                                                                                    | Planned                 |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| XTGETTCAP capability expansion  | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —                       |
+| ANSI-mode DECRQM (`CSI Pa $ p`) | Unknown ANSI modes reply in the DEC-private form. See "CSI Standard Mode Gaps"                                                                                               | Task 147.1 (issue #528) |
 
 ### Priority 3 — Low priority / optional
 
