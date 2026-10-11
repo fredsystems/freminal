@@ -3945,7 +3945,8 @@ Notes:
 
 Fix every defect, spec deviation, missing test and tooling break that Tasks 126–131 and their
 reviews surfaced but left without a scheduled owner. Also fix a pre-existing defect found in
-the same review (application-keypad encoding). Created and decomposed on 2026-10-11 against
+the same review (application-keypad encoding), and two pre-v0.13.0 xterm deviations the
+maintainer added on 2026-10-11 (147.18 and 147.19). Created and decomposed on 2026-10-11 against
 `72109bad`. The source was a maintainer review of PR #537: unscheduled findings are latent
 bugs, so each one gets a subtask here or a line in the stub of the task that owns it.
 
@@ -4259,6 +4260,63 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
     comment, not a blanket disable.
 - **Deliverable:** `cargo xtask lint-markdown` exits 0.
 
+#### 147.18 — The saved cursor follows its text through a resize
+
+- **Source:** GAPS "Saved cursor on resize, alternate active" (pre-v0.13.0, from Task 125;
+  added to 147 by maintainer decision 2026-10-11).
+- **Defect:** the DECSC slot stores a screen position, and a resize never moves it. When the
+  resize reflows or pulls rows back from scrollback, a later DECRC puts the cursor on a
+  different line of text from the one it was saved on. The classic case: `?1049h`, resize
+  the window, `?1049l`, and the shell prompt is redrawn in the wrong place.
+- **Reference behaviour:**
+  - Ghostty pins every screen's saved cursor to its cell for the resize and reads it back
+    afterwards (`Screen.zig` `resize`, `saved_cursor_pin`). If the pinned cell left the
+    active area, the cursor goes to the top-left. If pending wrap was set and the cursor is
+    no longer in the last column, pending wrap is cleared and x advances by one.
+  - xterm does not reflow, but shifts the main screen's saved row by the number of lines
+    pulled from scrollback while the alternate screen is up (`cursor.c:380-392`
+    `AdjustSavedCursor`, called from `screen.c:2435`).
+  - Freminal reflows, so it follows Ghostty, which is the general form of the xterm rule.
+- **Scope:**
+  - `freminal-buffer/src/buffer/resize_and_alt.rs` and `cursor.rs`: the live screen's slot
+    and a parked screen's slot both track their cell through `set_size` / reflow. Use the
+    same row-number/offset remap that already carries `reflow_anchor` and the cursor
+    (`pending_reflow_remap`), not a recomputed screen offset;
+  - Ghostty's fallbacks apply: the cell left the screen, or the pending-wrap fix-up;
+  - tests:
+    - a primary-screen save, then a narrowing reflow, then DECRC lands on the same
+      character;
+    - `?1049h`, then a resize that grows the height and pulls rows from scrollback, then
+      `?1049l`: the cursor is on the saved text (the xterm case);
+    - the saved cell scrolled off the screen;
+    - pending wrap across a widening resize.
+- **Depends on:** 147.6 (pending wrap is part of the saved state) and 147.12 (same file).
+
+#### 147.19 — Sixel under DECSDM draws at the screen origin and never scrolls
+
+- **Source:** GAPS "Sixel placement under DECSDM" (pre-v0.13.0, from Task 125; added to 147
+  by maintainer decision 2026-10-11).
+- **Defect:** with sixel display mode set (`?80 h`, sixel scrolling off), freminal places the
+  image at the cursor, lets `place_image` scroll the screen, and then puts the cursor back.
+  xterm places the image at the top-left of the screen (`graphics_sixel.c:395-405`,
+  `get_new_graphic(xw, 0, 0, …)`). It never scrolls; the scroll at `:853-866` happens only
+  when sixel scrolling is on, and rows past the bottom are discarded. The text cursor does
+  not move.
+- **Scope:**
+  - `freminal-buffer`: `place_image` gets an explicit placement mode. Use a named enum (for
+    example an inline mode against a fixed-origin mode with no scrolling), never a bool, per
+    `freminal-state-representation`. In fixed-origin mode the image is anchored at screen
+    row 0, column 0, clipped to the visible rows, and neither the cursor nor the scroll
+    position changes;
+  - `terminal_handler/graphics_sixel.rs` uses that mode when `Decsdm::DisplayMode` is set.
+    `restore_cursor_to_image_origin` is deleted if this was its last caller;
+  - the existing DECSDM tests (`sixel_display_mode_cursor_does_not_advance`,
+    `sixel_display_mode_at_scrollback_capacity_keeps_cursor_on_image_origin`) are rewritten
+    to the xterm behaviour;
+  - new tests: an image taller than the screen is clipped with no scrollback growth, and the
+    cursor is unmoved in the middle of the screen.
+- **Damage:** placement damage stays bounded to the image's rows (`freminal-damage-model`).
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -4323,6 +4381,8 @@ Stale stub text was corrected at the same time:
 - 147.1, 147.6, 147.7, 147.9, 147.10, 147.11, 147.12, 147.13, 147.14 and 147.16 are
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
+- 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
+- 147.19 is independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -4333,7 +4393,7 @@ Stale stub text was corrected at the same time:
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
   `cargo xtask check-windows`, `cargo xtask lint-markdown`.
-- Benchmarks for 147.2, 147.4, 147.8, 147.12 and 147.15 stay within the 15% threshold, or
+- Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15 and 147.18 stay within the 15% threshold, or
   improve.
 - Manual check by the maintainer at the PR: a freshly opened, unfocused window draws the
   unfocused cursor style on its first frame (127.C1).

@@ -332,7 +332,7 @@ gone. Reference: xterm `cursor.c` (`CursorSave`, `CursorRestore`, `CursorSave2`,
 | ---------------------------------------- | ---------- | ---- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | DECRC scroll-region clamp                | ⬜         | 🚧   | Task 147.17 | xterm clamps the position restored by DECRC to the scroll region when the restored origin mode is on. Freminal saves and restores DECOM itself (Task 131.C1) but clamps to the screen only, so a position saved under a different DECSTBM state can land outside the region it would be in xterm.                                                                                                        |
 | DECSC saved state                        | ⬜         | 🚧   | Task 147.6  | Besides the position, xterm saves the pending-wrap flag (`do_wrap`) and DECSCA protection in its `DECSC_FLAGS`. Freminal saves the position, the SGR rendition (weight, decorations, colours), DECOM and the character set per screen (Task 131.C1), and keeps an open OSC 8 hyperlink out of the save (as xterm, kitty and Ghostty do); it does not save the pending-wrap flag (DECSCA is unsupported). |
-| Saved cursor on resize, alternate active | ⬜         | 🚧   | —           | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
+| Saved cursor on resize, alternate active | ⬜         | 🚧   | Task 147.18 | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                                                                  |
 
 One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
 (Soft Terminal Reset, issue #507) audit:
@@ -477,7 +477,7 @@ v0.13.1.
 
 | Behaviour                                   | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sixel placement under DECSDM                | ⬜         | 🚧   | —                | With sixel scrolling disabled (DECSDM, `?80` set) xterm draws the image at the top-left of the screen and does not move the text cursor. Freminal draws it at the cursor position and then restores the cursor to the image origin. The text cursor does not move in either; only the image position differs.                                                                 |
+| Sixel placement under DECSDM                | ⬜         | 🚧   | Task 147.19      | With sixel scrolling disabled (DECSDM, `?80` set) xterm draws the image at the top-left of the screen and does not move the text cursor. Freminal draws it at the cursor position and then restores the cursor to the image origin. The text cursor does not move in either; only the image position differs.                                                                 |
 | Kitty graphics conformance                  | 🟩         | 🚧   | v0.13.1 Task 135 | About 30 deviations: replies to id-less commands, text and erase destroy image tiles, `S=`/`O=` ignored for files, `CSI 14 t` reports the OS window rectangle for every pane                                                                                                                                                                                                  |
 | Kitty graphics placement model and z-layers | 🟩         | 🚧   | v0.13.1 Task 136 | Placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                                                                                                                                                                                                                                                                           |
 | Kitty kitten transport (`DCS @kitty-…`)     | ⬜         | ⬜   | —                | Not implemented and not planned: private kitten plumbing (`@kitty-print`, `echo`, `ssh`, `ask`, `clone`, `edit`) and the `@kitty-cmd` remote-control API are out of scope (`PLAN_VERSION_130.md` Out of scope). Consumed silently since Task 129.14: no warn, and a dedicated debug line with the length only (the generic, bounded `DCS received` debug line still applies). |
@@ -531,17 +531,17 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 3 — Low priority / optional
 
-| Item                     | Rationale                                           | Planned |
-| ------------------------ | --------------------------------------------------- | ------- |
-| SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | —       |
-| SRM standard mode        | Extremely rare in modern terminal output            | —       |
-| DECSC/DECRC xterm parity | Three narrow divergences; see Buffer Semantics Gaps | —       |
-| Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | —       |
-| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | —       |
-| ?1001 hilite tracking    | Obsolete mouse mode                                 | —       |
-| ?1034 interpret-meta key | Niche compatibility                                 | —       |
-| DECSCA / selective erase | No per-cell protected-character bit in buffer model | —       |
-| 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —       |
+| Item                     | Rationale                                           | Planned                    |
+| ------------------------ | --------------------------------------------------- | -------------------------- |
+| SO/SI + G1 rendering     | Almost never used in practice since UTF-8 took over | —                          |
+| SRM standard mode        | Extremely rare in modern terminal output            | —                          |
+| DECSC/DECRC xterm parity | Three narrow divergences; see Buffer Semantics Gaps | Task 147.6, 147.17, 147.18 |
+| Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | Task 147.19                |
+| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | —                          |
+| ?1001 hilite tracking    | Obsolete mouse mode                                 | —                          |
+| ?1034 interpret-meta key | Niche compatibility                                 | —                          |
+| DECSCA / selective erase | No per-cell protected-character bit in buffer model | —                          |
+| 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —                          |
 
 ---
 
