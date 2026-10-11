@@ -88,7 +88,7 @@ to the v0.13.x tasks (graphics: Tasks 135, 136; keyboard: Task 137), and OSC 99
 conformance (Task 138) is added. New gap entries, each with its planned task:
 OSC 21 / colour stack (Task 144), OSC 22 pointer shapes (Task 139), OSC 5522
 (Task 146), OSC 5113 (Task 102), OSC 72 (Task 105), OSC 10/11 set not reaching
-rendering (Task 132), a new "CSI Gaps" section for unscroll (Task 142), DECCARA
+rendering (Task 132; closed by the 2026-10-11 entry above), a new "CSI Gaps" section for unscroll (Task 142), DECCARA
 / DECSACE (Task 143), XTSAVE/XTRESTORE, `CSI 22 J` and the mouse-leave report
 (Task 141), SGR 221/222 (Task 140) and multiple cursors (Task 103). The OSC 66
 entry is corrected: Contour does not use OSC 66 (its notification is

@@ -2349,7 +2349,7 @@ pub(super) enum PriorVertexState {
 
 impl PriorVertexState {
     /// Read the prior state off a pane's [`RenderState`].
-    fn of(render_state: &Mutex<RenderState>) -> Self {
+    pub(super) fn of(render_state: &Mutex<RenderState>) -> Self {
         let never_built = render_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2503,6 +2503,28 @@ enum EmptyBoundedDamage {
     /// Fall back to `PaneFrameDamage::Unchanged` -- correct only when
     /// search is the sole bounded source and its own row union is empty.
     Unchanged,
+}
+
+/// The [`EmptyBoundedDamage`] fallback for a [`FullRebuildDamage::Bounded`]
+/// frame: `Unchanged` only when search is the sole bounded source this frame
+/// (no selection, hover or row change), otherwise `Full` (Task 124.14d; see
+/// [`EmptyBoundedDamage`] for why).
+///
+/// A named decision rather than an inline condition so every combination is
+/// unit-tested (Task 132 review, N1).
+const fn empty_bounded_fallback(
+    observations: FrameDirtyObservations,
+    changed_rows: &super::frame_dirty::ChangedRows,
+) -> EmptyBoundedDamage {
+    if observations.search_changed
+        && !observations.selection_changed
+        && !observations.hover_changed
+        && !changed_rows.any()
+    {
+        EmptyBoundedDamage::Unchanged
+    } else {
+        EmptyBoundedDamage::Full
+    }
 }
 
 /// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from every
@@ -3512,9 +3534,6 @@ impl FreminalTerminalWidget {
                     trail_duration: self.cursor_trail_duration,
                 },
             );
-            let selection_changed = dirty.observations.selection_changed;
-            let search_changed = dirty.observations.search_changed;
-            let hover_changed = dirty.observations.hover_changed;
             let current_selection = dirty.current_selection;
             let screen_selection = dirty.screen_selection;
             let search_epoch = dirty.search_epoch;
@@ -4046,15 +4065,8 @@ impl FreminalTerminalWidget {
                             // Selection/hover/row sources keep the existing
                             // `Full` fallback -- see `EmptyBoundedDamage`'s
                             // doc comment.
-                            let empty_fallback = if search_changed
-                                && !selection_changed
-                                && !hover_changed
-                                && !dirty.changed_rows.any()
-                            {
-                                EmptyBoundedDamage::Unchanged
-                            } else {
-                                EmptyBoundedDamage::Full
-                            };
+                            let empty_fallback =
+                                empty_bounded_fallback(dirty.observations, &dirty.changed_rows);
                             build_bounded_damage(
                                 &dirty.changed_rows,
                                 BoundedDamageSpans {
@@ -7503,6 +7515,40 @@ mod full_rebuild_decision_tests {
             image_frame_changed: false,
             image_pixels_changed: false,
             text_blink_changed: false,
+        }
+    }
+
+    /// Every combination of the four inputs of [`empty_bounded_fallback`]:
+    /// `Unchanged` exactly when search alone changed.
+    #[test]
+    fn empty_bounded_fallback_is_unchanged_only_for_search_alone() {
+        use super::super::frame_dirty::ChangedRows;
+        for bits in 0u8..16 {
+            let search = bits & 1 != 0;
+            let selection = bits & 2 != 0;
+            let hover = bits & 4 != 0;
+            let rows = bits & 8 != 0;
+            let observations = FrameDirtyObservations {
+                search_changed: search,
+                selection_changed: selection,
+                hover_changed: hover,
+                ..quiet()
+            };
+            let changed_rows = if rows {
+                ChangedRows::Rows(vec![0])
+            } else {
+                ChangedRows::None
+            };
+            let expected = if search && !selection && !hover && !rows {
+                EmptyBoundedDamage::Unchanged
+            } else {
+                EmptyBoundedDamage::Full
+            };
+            assert_eq!(
+                empty_bounded_fallback(observations, &changed_rows),
+                expected,
+                "search={search} selection={selection} hover={hover} rows={rows}"
+            );
         }
     }
 

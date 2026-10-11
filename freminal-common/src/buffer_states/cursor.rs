@@ -30,8 +30,10 @@ pub enum ReverseVideo {
 /// The active foreground, background, and underline colors for a cursor position,
 /// together with the current reverse-video state.
 ///
-/// All color lookups respect `reverse_video`: when `On`, `get_color` returns
-/// the background and `get_background_color` returns the foreground.
+/// The fg/bg accessors respect `reverse_video`: when `On`, [`Self::color`]
+/// returns the stored background and [`Self::background_color`] the stored
+/// foreground, default variants included. [`Self::underline_color`] returns
+/// the stored underline colour in both states.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct StateColors {
     /// Active text foreground color.

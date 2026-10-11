@@ -2782,7 +2782,7 @@ mod evaluate_frame_dirty_state_tests {
         let full_a = decide_full_rebuild(
             outcome_a.rebuild,
             outcome_a.observations,
-            PriorVertexState::Built,
+            PriorVertexState::of(&render_state_a),
         );
         assert_eq!(full_a, Some(FullRebuildDamage::Full));
         let damage_a = pane_damage_for_full_rebuild(Some(pane_a_rect));
@@ -2796,7 +2796,7 @@ mod evaluate_frame_dirty_state_tests {
             decide_full_rebuild(
                 outcome_b.rebuild,
                 outcome_b.observations,
-                PriorVertexState::Built
+                PriorVertexState::of(&render_state_b)
             ),
             None
         );

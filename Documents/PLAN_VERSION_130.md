@@ -4646,6 +4646,23 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
 - **R18:** fixing it needs a replace blend for one draw, and `blend_func` is not in the frozen
   GL facade surface. Task 144 already owns background-opacity questions; recorded there.
 
+### 132 Confirmation review (2026-10-11)
+
+A second CODE-REVIEW pass over the remediation (`4856c363..8da1091e`): R2–R19 confirmed done;
+R1 partial. No blockers or majors. New findings and dispositions:
+
+- **N1 (minor):** the `Bounded`-arm empty-fallback condition in `show()` was still inline
+  and untested. Fixed: `empty_bounded_fallback(FrameDirtyObservations, &ChangedRows)` with an
+  exhaustive 16-case test; this completes R1 / 132.C2.
+- **N2 (nit):** the two-pane damage test passed `PriorVertexState::Built` literally. Fixed:
+  derived with `PriorVertexState::of` from each pane's render state. The pane rect is still
+  supplied directly (its geometry is covered by `full_pane_rebuild_damage_rect_tests`).
+- **N3 (nit):** `StateColors` docs named the old accessors. Fixed.
+- **N4 (nit):** a GAPS history paragraph lacked a "closed by" pointer. Fixed.
+- **N5 (nit):** `huge_values_never_panic` rename called churn; not a defect, it was R8.
+- **N6 (info):** the per-frame `cursor_vert_range` lock and the 256-entry `reset_palette_all`
+  compare are negligible; recorded.
+
 ### 132 Status notes
 
 - **132.1 (done).** Benches added; criterion baseline `pre132` saved. Medians: parse_sgr_heavy
