@@ -4523,6 +4523,9 @@ Deliverable: the doc changes, markdownlint clean.
 - **132.4 (done).** The subtask text's `rgb::0/0` example was wrong (the second `:` belongs to
   the first channel, so it is `WrongChannelCount { found: 2 }`); the empty-channel case is
   tested as `rgb:/0/0` and `rgb:0//0`.
+- **132.6 (done).** Verified by the orchestrator against an independent CSS Color 4 oracle
+  (written from the spec text, not shared with the implementer): 3000 random `oklch()`/`lab()`
+  inputs, in and out of gamut, all bit-exact.
 
 ---
 

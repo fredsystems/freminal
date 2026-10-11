@@ -4,9 +4,11 @@
 // https://opensource.org/licenses/MIT.
 
 //! Parsing of X11 colour specification strings (`rgb:R/G/B`, `rgbi:R/G/B`,
-//! `#RGB`, `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB`, and X11 colour names
-//! such as `DarkSlateGray`) as used by OSC colour-setting sequences.
+//! `#RGB`, `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB`, X11 colour names
+//! such as `DarkSlateGray`, and the CSS Color 4 `oklch()` / `lab()` functions)
+//! as used by OSC colour-setting sequences.
 
+use super::wide_gamut;
 use super::x11_names::lookup_x11_name;
 use conv2::{ConvUtil, RoundToNearest};
 use thiserror::Error;
@@ -17,7 +19,7 @@ pub enum ColorSpecError {
     /// Nothing was left of the spec after trimming whitespace.
     #[error("empty colour specification")]
     Empty,
-    /// The spec did not start with `#`, `rgb:` or `rgbi:`, and is not a
+    /// The spec did not start with `#`, `rgb:`, `rgbi:`, `oklch(` or `lab(`, and is not a
     /// known X11 colour name.
     #[error("unrecognised colour name or specification format")]
     UnknownName,
@@ -45,6 +47,22 @@ pub enum ColorSpecError {
     /// An `rgbi:` component was not a valid floating-point intensity.
     #[error("'rgbi:' component is not a valid intensity")]
     InvalidIntensity,
+    /// An `oklch()` or `lab()` spec was malformed: the closing `)` was
+    /// missing or not the final character, or the `/ alpha` part was empty.
+    #[error("malformed 'oklch()' or 'lab()' colour specification")]
+    InvalidWideGamut,
+    /// An `oklch()` or `lab()` spec did not have exactly three colour
+    /// components before the optional `/ alpha`.
+    #[error("'oklch()' or 'lab()' has {found} components; expected 3")]
+    WideGamutComponentCount {
+        /// Number of components found before any `/`.
+        found: usize,
+    },
+    /// An `oklch()` or `lab()` component (or alpha) was not a finite number,
+    /// percentage or `none`, or carried a unit or percentage that is not
+    /// allowed for that component.
+    #[error("'oklch()' or 'lab()' component is not valid")]
+    InvalidWideGamutComponent,
 }
 
 /// Parse an X11 color spec string to an RGB triple.
@@ -59,6 +77,10 @@ pub enum ColorSpecError {
 /// - `#RGB` (3 digits, each nibble doubled)
 /// - `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB` (6, 9 or 12 digits; the top
 ///   byte of each channel is kept)
+/// - `oklch(L C H)` and `lab(L a b)` (CSS Color 4): three components
+///   separated by whitespace and/or commas, optionally followed by
+///   `/ alpha`, which is validated but ignored.  Out-of-gamut colours are
+///   gamut-mapped into sRGB. See the `wide_gamut` module for details.
 /// - An X11 colour name from `rgb.txt` (e.g. `green`, `DarkSlateGray`,
 ///   `dark slate gray`), matched ASCII case-insensitively. Spaces are
 ///   significant; they are neither stripped nor collapsed.
@@ -84,6 +106,12 @@ pub fn parse_color_spec(spec: &str) -> Result<(u8, u8, u8), ColorSpecError> {
     }
     if let Some(hex) = spec.strip_prefix('#') {
         return parse_hash(hex);
+    }
+    if let Some(rest) = strip_prefix_ignore_ascii_case(spec, "oklch(") {
+        return wide_gamut::parse_oklch(rest);
+    }
+    if let Some(rest) = strip_prefix_ignore_ascii_case(spec, "lab(") {
+        return wide_gamut::parse_lab(rest);
     }
     // Not a prefix form: the only remaining valid spec is a colour name.
     lookup_x11_name(spec).ok_or(ColorSpecError::UnknownName)

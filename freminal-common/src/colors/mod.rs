@@ -5,6 +5,7 @@
 
 mod palette;
 mod spec;
+mod wide_gamut;
 mod x11_names;
 
 pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
