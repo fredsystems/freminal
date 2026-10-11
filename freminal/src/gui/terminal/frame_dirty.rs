@@ -2729,6 +2729,111 @@ mod evaluate_frame_dirty_state_tests {
         assert!(outcome.observations.content_changed);
     }
 
+    /// Task 132.C2 (the 132.10 requirement): an OSC 4 change in ONE pane of
+    /// two must produce damage bounded to THAT pane, not a full-window
+    /// repaint. Runs the real chain end to end -- `evaluate_frame_dirty_state`
+    /// -> `decide_full_rebuild` -> `pane_damage_for_full_rebuild` ->
+    /// `decide_frame_damage` -- for two panes, each with a settled cache.
+    #[test]
+    fn osc4_change_in_one_of_two_panes_damages_only_that_pane() {
+        use super::super::widget::{
+            FullRebuildDamage, PriorVertexState, decide_full_rebuild, pane_damage_for_full_rebuild,
+        };
+        use crate::gui::frame_damage::{PaneDamageInput, decide_frame_damage};
+        use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
+
+        let pane_a_rect = PaneDamageRect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+        };
+
+        // Both panes were last rendered from the same shared colours.
+        let settled = base_snapshot();
+        let cache_a = settled_cache(&settled, true, solid());
+        let cache_b = settled_cache(&settled, true, solid());
+        let render_state_a = render_state_with_deco_verts(true);
+        let render_state_b = render_state_with_deco_verts(true);
+        let mut view_a = ViewState::new();
+        let mut view_b = ViewState::new();
+
+        // Pane A receives a fresh `Arc<ResolvedColors>` (the OSC 4 change);
+        // pane B's snapshot is untouched.
+        let snap_a = with_recoloured_palette(&settled);
+        let outcome_a = call(
+            &snap_a,
+            &mut view_a,
+            &cache_a,
+            &render_state_a,
+            true,
+            solid(),
+        );
+        let outcome_b = call(
+            &settled,
+            &mut view_b,
+            &cache_b,
+            &render_state_b,
+            true,
+            solid(),
+        );
+
+        // Pane A: a pane-wide trigger -> full rebuild -> ITS OWN rect.
+        let full_a = decide_full_rebuild(
+            outcome_a.rebuild,
+            outcome_a.observations,
+            PriorVertexState::Built,
+        );
+        assert_eq!(full_a, Some(FullRebuildDamage::Full));
+        let damage_a = pane_damage_for_full_rebuild(Some(pane_a_rect));
+        assert_eq!(damage_a, PaneFrameDamage::Region(vec![pane_a_rect]));
+
+        // Pane B: nothing changed, so neither the cursor-only patch nor a
+        // full rebuild runs, and `show()` leaves its damage at the default
+        // `Unchanged`.
+        assert_ne!(outcome_b.rebuild, VertexRebuild::CursorOnly);
+        assert_eq!(
+            decide_full_rebuild(
+                outcome_b.rebuild,
+                outcome_b.observations,
+                PriorVertexState::Built
+            ),
+            None
+        );
+        let damage_b = PaneFrameDamage::Unchanged;
+
+        let frame = decide_frame_damage(
+            false,
+            false,
+            &[
+                PaneDamageInput {
+                    bell_active: false,
+                    cursor_damage: damage_a,
+                    search_overlay_rects: Vec::new(),
+                },
+                PaneDamageInput {
+                    bell_active: false,
+                    cursor_damage: damage_b,
+                    search_overlay_rects: Vec::new(),
+                },
+            ],
+        );
+
+        match frame {
+            freminal_windowing::FrameDamage::Partial(rects) => assert_eq!(
+                rects,
+                vec![freminal_windowing::DamageRect {
+                    x: pane_a_rect.x,
+                    y: pane_a_rect.y,
+                    width: pane_a_rect.width,
+                    height: pane_a_rect.height,
+                }],
+                "damage must be exactly pane A's rect"
+            ),
+            other => panic!("expected Partial bounded to pane A, got {other:?}"),
+        }
+    }
+
     #[test]
     fn identical_contents_in_a_new_arc_still_count_as_changed() {
         // Pointer semantics: the trigger is `Arc::ptr_eq`, not value

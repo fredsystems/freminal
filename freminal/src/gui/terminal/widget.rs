@@ -56,7 +56,7 @@ use super::{
     cursor_blink::{ActivationBlinkReset, CursorStateInputs, frame_cursor_state},
     frame_dirty::{
         CursorFrame, CursorFrameInputs, DrawnCursor, FrameDirtyContext, FrameDirtyGeometry,
-        VertexRebuild, evaluate_frame_dirty_state,
+        FrameDirtyObservations, VertexRebuild, evaluate_frame_dirty_state,
     },
     input::{
         InputCarryState, PaneFocus, WriteInputParams, scroll_overlay_passthrough,
@@ -2315,7 +2315,8 @@ fn viewport_framebuffer_geometry(ui: &Ui, terminal_rect: egui::Rect, ppp: f32) -
 /// bounded *damage*", never a bounded rebuild. Bounding the vertex upload
 /// itself is Task 125, gated on a fixed-stride relayout that does not exist
 /// yet.
-enum FullRebuildDamage {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FullRebuildDamage {
     /// Content changed only within known bounds -- the frame's
     /// `changed_rows` row list (Task 124.14a), the current/previous
     /// selection's screen-row span (Task 124.14b-i), the current/previous
@@ -2328,6 +2329,103 @@ enum FullRebuildDamage {
     /// No bound is available; report
     /// [`crate::gui::renderer::PaneFrameDamage::Full`].
     Full,
+}
+
+/// Whether this pane's [`RenderState`] has ever completed a vertex rebuild.
+///
+/// Derived from `RenderState::cursor_vert_range` being unset -- NOT from
+/// `deco_verts` being empty, see that field's doc. It is a named enum rather
+/// than a `bool` (`freminal-state-representation`) because it is an input to
+/// [`decide_full_rebuild`], where a bare `true`/`false` argument would not say
+/// which way round it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PriorVertexState {
+    /// No rebuild has ever stored a cursor range: nothing on screen for a
+    /// reuse to preserve (124.21's "never-built" global category).
+    NeverBuilt,
+    /// At least one rebuild has run, so the pane's GPU buffers are reusable.
+    Built,
+}
+
+impl PriorVertexState {
+    /// Read the prior state off a pane's [`RenderState`].
+    fn of(render_state: &Mutex<RenderState>) -> Self {
+        let never_built = render_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cursor_vert_range
+            .is_none();
+        if never_built {
+            Self::NeverBuilt
+        } else {
+            Self::Built
+        }
+    }
+}
+
+/// Resolve a frame's [`VertexRebuild`] decision into whether -- and how -- the
+/// full rebuild runs (`None` means the existing GPU buffers are reused
+/// unchanged, or, for [`VertexRebuild::CursorOnly`], that the cursor-only
+/// patch path runs instead).
+///
+/// This is a real branching decision (six independent triggers plus the
+/// never-built veto, behind a three-way switch), which is why it has a named
+/// home instead of living inline in `show()`: the inline form needs a live
+/// egui `Ui` and so could not be tested, and the property worth pinning
+/// (a pane-wide trigger rebuilds THIS pane, see [`pane_damage_for_full_rebuild`])
+/// was therefore unpinned (Task 132.C2).
+///
+/// [`VertexRebuild::ReevaluateFullRebuild`] rebuilds in full when any
+/// observation fired or the pane was never built. Pane-wide triggers
+/// (`theme_changed`, `resolved_colors_changed`, `screen_inversion_changed`,
+/// `dims_changed`, `folds_changed`) arrive here already folded into
+/// `observations.content_changed`.
+pub(super) const fn decide_full_rebuild(
+    rebuild: VertexRebuild,
+    observations: FrameDirtyObservations,
+    prior: PriorVertexState,
+) -> Option<FullRebuildDamage> {
+    match rebuild {
+        VertexRebuild::CursorOnly => None,
+        VertexRebuild::Bounded => Some(FullRebuildDamage::Bounded),
+        VertexRebuild::ReevaluateFullRebuild => {
+            // `prior` is the "never built" signal (124.21's empty-prior-state
+            // category). NOT `deco_verts.is_empty()` -- see
+            // `RenderState::cursor_vert_range`.
+            if observations.content_changed
+                || observations.selection_changed
+                || observations.text_blink_changed
+                || observations.search_changed
+                || observations.hover_changed
+                || observations.image_frame_changed
+                || observations.image_pixels_changed
+                || matches!(prior, PriorVertexState::NeverBuilt)
+            {
+                Some(FullRebuildDamage::Full)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// The pane-level damage a [`FullRebuildDamage::Full`] frame reports.
+///
+/// The pane's OWN rect (`Region`), not [`crate::gui::renderer::PaneFrameDamage::Full`]:
+/// `decide_frame_damage` returns `Full` for the whole window the moment any
+/// pane reports `Full`, discarding every sibling's bounded damage (Task
+/// 124.21 finding 2). `pane_rect_damage` is `None` only when the pane's own
+/// bounds are degenerate (see [`full_pane_rebuild_damage_rect`]), in which
+/// case `Full` is the correct, safe fallback.
+///
+/// Extracted from `show()` so the property can be tested without a live egui
+/// `Ui` (Task 132.C2).
+pub(super) fn pane_damage_for_full_rebuild(
+    pane_rect_damage: Option<crate::gui::renderer::PaneDamageRect>,
+) -> crate::gui::renderer::PaneFrameDamage {
+    pane_rect_damage.map_or(crate::gui::renderer::PaneFrameDamage::Full, |d| {
+        crate::gui::renderer::PaneFrameDamage::Region(vec![d])
+    })
 }
 
 /// The current/previous screen-row span for each of [`build_bounded_damage`]'s
@@ -3414,13 +3512,9 @@ impl FreminalTerminalWidget {
                     trail_duration: self.cursor_trail_duration,
                 },
             );
-            let content_changed = dirty.observations.content_changed;
             let selection_changed = dirty.observations.selection_changed;
             let search_changed = dirty.observations.search_changed;
             let hover_changed = dirty.observations.hover_changed;
-            let image_frame_changed = dirty.observations.image_frame_changed;
-            let image_pixels_changed = dirty.observations.image_pixels_changed;
-            let text_blink_changed = dirty.observations.text_blink_changed;
             let current_selection = dirty.current_selection;
             let screen_selection = dirty.screen_selection;
             let search_epoch = dirty.search_epoch;
@@ -3483,33 +3577,11 @@ impl FreminalTerminalWidget {
             // itself never changes shape or becomes partial -- bounding the
             // vertex upload itself is Task 125, gated on a fixed-stride
             // relayout that does not exist yet.
-            let full_rebuild = match dirty.rebuild {
-                VertexRebuild::CursorOnly => None,
-                VertexRebuild::Bounded => Some(FullRebuildDamage::Bounded),
-                VertexRebuild::ReevaluateFullRebuild => {
-                    // The last clause is the "never built" signal (124.21's
-                    // empty-prior-state category): no rebuild has ever stored
-                    // a cursor range. NOT `deco_verts.is_empty()` -- see
-                    // `RenderState::cursor_vert_range`.
-                    if content_changed
-                        || selection_changed
-                        || text_blink_changed
-                        || search_changed
-                        || hover_changed
-                        || image_frame_changed
-                        || image_pixels_changed
-                        || render_state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .cursor_vert_range
-                            .is_none()
-                    {
-                        Some(FullRebuildDamage::Full)
-                    } else {
-                        None
-                    }
-                }
-            };
+            let full_rebuild = decide_full_rebuild(
+                dirty.rebuild,
+                dirty.observations,
+                PriorVertexState::of(render_state),
+            );
 
             // Task 125.5: the raw `VertexRebuild` decision and its
             // resolved render-work class are both known now -- before
@@ -3961,10 +4033,7 @@ impl FreminalTerminalWidget {
                         // is `None` only when the pane's own bounds are
                         // degenerate, in which case `Full` is the correct,
                         // safe fallback.
-                        FullRebuildDamage::Full => pane_rect_damage
-                            .map_or(crate::gui::renderer::PaneFrameDamage::Full, |d| {
-                                crate::gui::renderer::PaneFrameDamage::Region(vec![d])
-                            }),
+                        FullRebuildDamage::Full => pane_damage_for_full_rebuild(pane_rect_damage),
                         FullRebuildDamage::Bounded => {
                             // Task 124.14d: `Unchanged` is the accurate
                             // terminal-band contribution -- not a fallback --
@@ -7401,6 +7470,184 @@ mod full_pane_rebuild_damage_rect_tests {
             "a pane rect entirely below the framebuffer must clamp away to \
              nothing (-> Full at the call site), not emit a degenerate rect"
         );
+    }
+}
+
+/// Task 132.C2: the two full-rebuild damage decisions `show()` used to make
+/// inline ([`decide_full_rebuild`] and [`pane_damage_for_full_rebuild`]),
+/// which needed a live egui `Ui` and so were untested. The end-to-end
+/// "OSC 4 in one pane of two" test lives in `frame_dirty.rs`, next to the
+/// fixtures it builds on.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod full_rebuild_decision_tests {
+    use super::*;
+    use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
+
+    fn rect() -> PaneDamageRect {
+        PaneDamageRect {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        }
+    }
+
+    /// No observation fired.
+    fn quiet() -> FrameDirtyObservations {
+        FrameDirtyObservations {
+            content_changed: false,
+            selection_changed: false,
+            search_changed: false,
+            hover_changed: false,
+            image_frame_changed: false,
+            image_pixels_changed: false,
+            text_blink_changed: false,
+        }
+    }
+
+    #[test]
+    fn a_full_rebuild_with_a_pane_rect_reports_that_region() {
+        assert_eq!(
+            pane_damage_for_full_rebuild(Some(rect())),
+            PaneFrameDamage::Region(vec![rect()])
+        );
+    }
+
+    #[test]
+    fn a_full_rebuild_with_degenerate_pane_bounds_falls_back_to_full() {
+        assert_eq!(pane_damage_for_full_rebuild(None), PaneFrameDamage::Full);
+    }
+
+    #[test]
+    fn cursor_only_never_runs_the_full_rebuild() {
+        // Even with every observation firing and the pane never built: the
+        // `CursorOnly` outcome already excluded those, so it fully
+        // determines the frame.
+        let all = FrameDirtyObservations {
+            content_changed: true,
+            selection_changed: true,
+            search_changed: true,
+            hover_changed: true,
+            image_frame_changed: true,
+            image_pixels_changed: true,
+            text_blink_changed: true,
+        };
+        assert_eq!(
+            decide_full_rebuild(VertexRebuild::CursorOnly, all, PriorVertexState::NeverBuilt),
+            None
+        );
+    }
+
+    #[test]
+    fn bounded_is_a_bounded_full_rebuild() {
+        assert_eq!(
+            decide_full_rebuild(VertexRebuild::Bounded, quiet(), PriorVertexState::Built),
+            Some(FullRebuildDamage::Bounded)
+        );
+    }
+
+    #[test]
+    fn reevaluate_with_nothing_changed_on_a_built_pane_reuses_the_buffers() {
+        assert_eq!(
+            decide_full_rebuild(
+                VertexRebuild::ReevaluateFullRebuild,
+                quiet(),
+                PriorVertexState::Built
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reevaluate_on_a_never_built_pane_is_a_full_rebuild() {
+        assert_eq!(
+            decide_full_rebuild(
+                VertexRebuild::ReevaluateFullRebuild,
+                quiet(),
+                PriorVertexState::NeverBuilt
+            ),
+            Some(FullRebuildDamage::Full)
+        );
+    }
+
+    #[test]
+    fn reevaluate_rebuilds_in_full_for_each_trigger_individually() {
+        let triggers: [(&str, FrameDirtyObservations); 7] = [
+            (
+                "content_changed",
+                FrameDirtyObservations {
+                    content_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "selection_changed",
+                FrameDirtyObservations {
+                    selection_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "search_changed",
+                FrameDirtyObservations {
+                    search_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "hover_changed",
+                FrameDirtyObservations {
+                    hover_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "image_frame_changed",
+                FrameDirtyObservations {
+                    image_frame_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "image_pixels_changed",
+                FrameDirtyObservations {
+                    image_pixels_changed: true,
+                    ..quiet()
+                },
+            ),
+            (
+                "text_blink_changed",
+                FrameDirtyObservations {
+                    text_blink_changed: true,
+                    ..quiet()
+                },
+            ),
+        ];
+        for (name, observations) in triggers {
+            assert_eq!(
+                decide_full_rebuild(
+                    VertexRebuild::ReevaluateFullRebuild,
+                    observations,
+                    PriorVertexState::Built
+                ),
+                Some(FullRebuildDamage::Full),
+                "{name} alone must force a full rebuild"
+            );
+        }
+    }
+
+    #[test]
+    fn prior_vertex_state_tracks_the_cursor_vert_range() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+        assert_eq!(
+            PriorVertexState::of(&render_state),
+            PriorVertexState::NeverBuilt
+        );
+        // A built pane with an EMPTY cursor range (blink-off, no decoration
+        // quads) is still built: emptiness is not the signal.
+        render_state.lock().unwrap().cursor_vert_range = Some(CursorVertRange { start: 0, len: 0 });
+        assert_eq!(PriorVertexState::of(&render_state), PriorVertexState::Built);
     }
 }
 

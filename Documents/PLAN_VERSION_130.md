@@ -4692,6 +4692,11 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
 - **132.C4 (done).** `UploadByteCounts::background_quad_vbo_bytes` counts the base-fill quad
   (144 bytes) and the background-image quad (96 bytes) on full and cursor-only frames; added
   to the flush line. Compiled away without `frame-profiling`.
+- **132.C2 (done).** `decide_full_rebuild(VertexRebuild, FrameDirtyObservations,
+  PriorVertexState)` and `pane_damage_for_full_rebuild(Option<PaneDamageRect>)` named and
+  unit-tested; `osc4_change_in_one_of_two_panes_damages_only_that_pane` runs the real chain to
+  `decide_frame_damage` and gets `Partial` with exactly that pane's rect. The never-built read
+  of `cursor_vert_range` is now taken on every non-skipped frame (one uncontended lock).
 
 ---
 
