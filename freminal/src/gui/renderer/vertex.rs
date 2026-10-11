@@ -161,10 +161,6 @@ pub(crate) const BG_INSTANCE_FLOATS: usize = 6;
 /// Options controlling per-glyph foreground rendering.
 ///
 /// Bundled to keep `build_foreground_instances` within the 7-argument lint limit.
-// Three independent, short-lived rendering-intent flags (selection shape,
-// two blink-visibility phases); a state machine would couple
-// unrelated concerns and obscure intent.
-#[allow(clippy::struct_excessive_bools)]
 pub struct FgRenderOptions {
     /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
     /// or `None` when no selection is active.
@@ -1664,16 +1660,31 @@ fn emit_glyph_instance(
 //  Quad geometry helper
 // ---------------------------------------------------------------------------
 
-/// Push a solid-color axis-aligned quad (2 triangles = 6 vertices) into `verts`.
+/// The 6 vertices (2 triangles) of a solid-colour axis-aligned quad, as a
+/// fixed-size array.
 ///
-/// Vertex layout: `x, y, r, g, b, a`.
-pub(super) fn push_quad(verts: &mut Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
+/// Vertex layout: `x, y, r, g, b, a`. This is the single definition of the
+/// layout: [`push_quad`] appends exactly this array, and callers that must
+/// not allocate (the per-draw OSC 11 base fill) use it directly.
+pub(super) const fn quad_vertices(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: [f32; 4],
+) -> [f32; VERTS_PER_QUAD * DECO_VERTEX_FLOATS] {
     let [r, g, b, a] = color;
-    let quad = [
+    [
         x0, y0, r, g, b, a, x1, y0, r, g, b, a, x0, y1, r, g, b, a, x1, y0, r, g, b, a, x1, y1, r,
         g, b, a, x0, y1, r, g, b, a,
-    ];
-    verts.extend_from_slice(&quad);
+    ]
+}
+
+/// Push a solid-color axis-aligned quad (2 triangles = 6 vertices) into `verts`.
+///
+/// Vertex layout: `x, y, r, g, b, a` (see [`quad_vertices`]).
+pub(super) fn push_quad(verts: &mut Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
+    verts.extend_from_slice(&quad_vertices(x0, y0, x1, y1, color));
 }
 
 // ---------------------------------------------------------------------------
@@ -3339,6 +3350,17 @@ mod tests {
         let mut verts = Vec::new();
         push_quad(&mut verts, 0.0, 0.0, 10.0, 10.0, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(verts.len(), VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
+    }
+
+    #[test]
+    fn quad_vertices_equals_what_push_quad_appends() {
+        let color = [0.25, 0.5, 0.75, 0.5];
+        let mut pushed = Vec::new();
+        push_quad(&mut pushed, 1.0, 2.0, 30.0, 40.0, color);
+        assert_eq!(
+            quad_vertices(1.0, 2.0, 30.0, 40.0, color).as_slice(),
+            pushed.as_slice()
+        );
     }
 
     #[test]

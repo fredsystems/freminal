@@ -1399,39 +1399,73 @@ mod base_fill_pixel_tests {
         }
     }
 
-    /// (2) The fill is underneath: glyphs are drawn over it. The synthetic
-    /// grid cannot express a cell with an explicit SGR background, so this
-    /// asserts the weaker property it can: glyph pixels differ from the fill
-    /// (they were drawn on top), while empty-cell pixels equal it.
+    /// (2) The fill is underneath: glyphs are drawn over it.
+    ///
+    /// Font-independent ordering property over two captures of the same
+    /// glyph-bearing frame, without and with a base fill. This harness
+    /// enables no `GL_BLEND`, so a glyph quad *overwrites* its whole
+    /// rectangle, including the texels with no coverage, which come out
+    /// fully transparent. The property is therefore stated on what the
+    /// glyph pass wrote, not on a blend:
+    ///
+    /// - where the bare capture is opaque (full glyph coverage), the filled
+    ///   capture is the identical pixel: the glyph is drawn over the fill;
+    /// - where the bare capture is fully transparent (no coverage), the
+    ///   filled capture is either exactly the fill (no glyph quad reached
+    ///   it) or exactly the bare pixel (a glyph quad overwrote it) -- never
+    ///   anything else, so nothing else corrupts the fill;
+    /// - partially covered pixels are not compared.
     #[test]
     fn glyphs_are_drawn_over_the_fill_and_empty_pixels_show_it() {
-        let Some(with_fill) = super::tests::capture_or_skip(&filled(), "base-fill-under-glyphs")
-        else {
+        let Some(bare) = super::tests::capture_or_skip(&plain(), "base-fill-under-glyphs") else {
             return;
         };
-        let grid_w = with_fill.width - REMAINDER.0;
-        let grid_h = with_fill.height - REMAINDER.1;
+        let with_fill = capture(&filled()).expect("filled capture");
+        assert_eq!(
+            (bare.width, bare.height),
+            (with_fill.width, with_fill.height)
+        );
 
-        let mut fill_px = 0usize;
-        let mut other_px = 0usize;
-        for y in 0..grid_h {
-            for x in 0..grid_w {
-                if with_fill.pixel(x, y) == Some(FILL_RGBA) {
-                    fill_px += 1;
-                } else {
-                    other_px += 1;
+        let mut covered = 0usize;
+        let mut shows_fill = 0usize;
+        for y in 0..bare.height {
+            for x in 0..bare.width {
+                let before = bare.pixel(x, y).unwrap();
+                let after = with_fill.pixel(x, y).unwrap();
+                match before[3] {
+                    255 => {
+                        covered += 1;
+                        assert_ne!(
+                            before, FILL_RGBA,
+                            "premise: pixel ({x}, {y}) must be distinguishable from the fill"
+                        );
+                        assert_eq!(
+                            after, before,
+                            "fully covered pixel ({x}, {y}) must be the glyph, drawn over the fill"
+                        );
+                    }
+                    0 => {
+                        if after == FILL_RGBA {
+                            shows_fill += 1;
+                        } else {
+                            assert_eq!(
+                                after, before,
+                                "uncovered pixel ({x}, {y}) must be the fill or what the \
+                                 glyph pass itself wrote"
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         assert!(
-            other_px > 500,
-            "glyph pixels must be drawn over the fill, found only {other_px} \
-             non-fill pixels in the grid"
+            covered > 0,
+            "premise: the frame must have fully covered glyph pixels"
         );
         assert!(
-            fill_px > other_px,
-            "most of a text grid is empty cell, which shows the fill \
-             ({fill_px} fill vs {other_px} other)"
+            shows_fill > 0,
+            "premise: the frame must have uncovered pixels that show the fill"
         );
     }
 

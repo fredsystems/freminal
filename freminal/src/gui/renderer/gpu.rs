@@ -30,7 +30,7 @@ use super::shaders::{
 };
 use super::vertex::{
     BG_INSTANCE_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS, IMG_VERTEX_FLOATS, ImageDrawEntry,
-    VERTS_PER_QUAD, extract_atlas_rect, push_quad,
+    VERTS_PER_QUAD, extract_atlas_rect, quad_vertices,
 };
 use freminal_terminal_emulator::InlineImage;
 
@@ -90,16 +90,6 @@ pub struct PaneBackground {
 }
 
 impl PaneBackground {
-    /// A pane background with no override: cell backgrounds at `opacity`,
-    /// and nothing drawn underneath them.
-    #[must_use]
-    pub const fn without_base_fill(opacity: f32) -> Self {
-        Self {
-            opacity,
-            base_fill: None,
-        }
-    }
-
     /// The base fill a pane needs, given the configured theme's background
     /// and the background the pane has actually resolved (theme value or
     /// OSC 11 override).
@@ -856,17 +846,15 @@ impl TerminalRenderer {
         // 3-0. OSC 11 base fill (Task 132.11): underneath everything,
         // including the background image. No GL call when there is no
         // override.
-        #[cfg(feature = "frame-profiling")]
         let base_fill_bytes = self.draw_base_fill(gl, vp_w, vp_h, background);
         #[cfg(not(feature = "frame-profiling"))]
-        self.draw_base_fill(gl, vp_w, vp_h, background);
+        let _ = base_fill_bytes;
 
         // 3a. Background image (drawn behind everything but the base fill).
-        #[cfg(feature = "frame-profiling")]
         let bg_image_bytes =
             self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
         #[cfg(not(feature = "frame-profiling"))]
-        self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
+        let _ = bg_image_bytes;
 
         // 3b. Cell backgrounds, decorations, foreground glyphs, inline images.
         self.draw_background_instanced(
@@ -1020,15 +1008,13 @@ impl TerminalRenderer {
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
-        #[cfg(feature = "frame-profiling")]
         let base_fill_bytes = self.draw_base_fill(gl, vp_w, vp_h, background);
         #[cfg(not(feature = "frame-profiling"))]
-        self.draw_base_fill(gl, vp_w, vp_h, background);
-        #[cfg(feature = "frame-profiling")]
+        let _ = base_fill_bytes;
         let bg_image_bytes =
             self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
         #[cfg(not(feature = "frame-profiling"))]
-        self.draw_background_image(gl, vp_w, vp_h, bg_image_opacity, bg_image_mode);
+        let _ = bg_image_bytes;
         self.draw_background_instanced(
             gl,
             bg_inst_total_floats,
@@ -1711,15 +1697,9 @@ impl TerminalRenderer {
             return 0;
         };
 
-        let mut quad = Vec::with_capacity(VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
-        push_quad(
-            &mut quad,
-            0.0,
-            0.0,
-            vp_w,
-            vp_h,
-            [r, g, b, background.opacity],
-        );
+        // A stack array, not a `Vec`: this runs on every draw that has an
+        // override, and the quad is a fixed 6 vertices.
+        let quad = quad_vertices(0.0, 0.0, vp_w, vp_h, [r, g, b, background.opacity]);
         let bytes = verts_as_bytes(&quad);
 
         unsafe {
@@ -3016,13 +2996,6 @@ mod tests {
         assert!(approx_eq(b[0], 0.0));
     }
 
-    #[test]
-    fn without_base_fill_carries_the_opacity_and_no_fill() {
-        let bg = PaneBackground::without_base_fill(0.5);
-        assert!(approx_eq(bg.opacity, 0.5));
-        assert_eq!(bg.base_fill, None);
-    }
-
     // ── BackgroundImageMode::Fill ─────────────────────────────────────
 
     #[test]
@@ -3234,6 +3207,14 @@ mod upload_byte_attribution_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    /// A fully opaque pane background with no OSC 11 override.
+    const fn opaque_without_base_fill() -> PaneBackground {
+        PaneBackground {
+            opacity: 1.0,
+            base_fill: None,
+        }
+    }
+
     /// Construct an initialized [`TerminalRenderer`] against a fresh
     /// [`Gl::recording`] facade, with `init()`'s own call log drained so
     /// each test's assertions start from a clean slate.
@@ -3301,7 +3282,7 @@ mod upload_byte_attribution_tests {
             600,
             10.0,
             20.0,
-            PaneBackground::without_base_fill(1.0),
+            opaque_without_base_fill(),
             1.0,
             BackgroundImageMode::default(),
             None,
@@ -3575,7 +3556,7 @@ mod upload_byte_attribution_tests {
             600,
             10.0,
             20.0,
-            PaneBackground::without_base_fill(1.0),
+            opaque_without_base_fill(),
             1.0,
             BackgroundImageMode::default(),
             None,
@@ -3705,12 +3686,8 @@ mod upload_byte_attribution_tests {
         let (gl, mut renderer) = init_renderer();
         let mut atlas = GlyphAtlas::new(32, 128);
 
-        let uploads = draw_empty_with_background(
-            &mut renderer,
-            &gl,
-            &mut atlas,
-            PaneBackground::without_base_fill(1.0),
-        );
+        let uploads =
+            draw_empty_with_background(&mut renderer, &gl, &mut atlas, opaque_without_base_fill());
         assert_eq!(uploads.background_quad_vbo_bytes, 0);
         assert_eq!(uploads.total(), uploads.atlas_full_bytes);
     }
@@ -3725,12 +3702,8 @@ mod upload_byte_attribution_tests {
         assert_eq!(with_fill.background_quad_vbo_bytes, 144);
         assert_eq!(with_fill.total(), 144);
 
-        let without = cursor_only_with_background(
-            &mut renderer,
-            &gl,
-            &mut atlas,
-            PaneBackground::without_base_fill(1.0),
-        );
+        let without =
+            cursor_only_with_background(&mut renderer, &gl, &mut atlas, opaque_without_base_fill());
         assert_eq!(without.background_quad_vbo_bytes, 0);
         assert_eq!(without.total(), 0);
     }
@@ -3743,20 +3716,12 @@ mod upload_byte_attribution_tests {
         load_test_background_image(&mut renderer, &gl, dir.path());
 
         // 6 vertices x (vec2 pos + vec2 uv) x 4 bytes.
-        let full = draw_empty_with_background(
-            &mut renderer,
-            &gl,
-            &mut atlas,
-            PaneBackground::without_base_fill(1.0),
-        );
+        let full =
+            draw_empty_with_background(&mut renderer, &gl, &mut atlas, opaque_without_base_fill());
         assert_eq!(full.background_quad_vbo_bytes, 96);
 
-        let cursor_only = cursor_only_with_background(
-            &mut renderer,
-            &gl,
-            &mut atlas,
-            PaneBackground::without_base_fill(1.0),
-        );
+        let cursor_only =
+            cursor_only_with_background(&mut renderer, &gl, &mut atlas, opaque_without_base_fill());
         assert_eq!(cursor_only.background_quad_vbo_bytes, 96);
 
         // Both quads on the same frame sum.

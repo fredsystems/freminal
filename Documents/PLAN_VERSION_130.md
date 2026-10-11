@@ -4710,6 +4710,13 @@ One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
   `PaletteIndex` block round trip; R9 skip reasons (`SkipReason`, payload-free) at debug;
   R15 size assertion derived from components; R16 vttest 256-colour tests assert the resolved
   colour; R19 variant docs.
+- **132.C7 (done).** R5 stale `struct_excessive_bools` allow removed; R10 the base-fill quad
+  is a stack array from `quad_vertices` (the single definition `push_quad` now appends),
+  `without_base_fill` removed, the cfg-paired draw calls collapsed; R8 the glyph-over-fill
+  pixel test is a font-independent ordering property over two captures (ran under
+  `.#gl-pixel`). C6's first commit attempt was rejected by `xtask-check` ("files were modified
+  by this hook") because the orchestrator started the C7 agent concurrently with the commit;
+  retried alone, it passed.
 
 ---
 
