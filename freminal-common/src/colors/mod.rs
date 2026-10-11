@@ -3,12 +3,25 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+//! Terminal colour types and resolution.
+//!
+//! - [`TerminalColor`] (this module): the colour a cell asks for.
+//! - `palette`: the default 256-colour table and the OSC 4 override table.
+//! - `dynamic`: the OSC 10/11/12/17/19 dynamic-colour slots and overrides.
+//! - `resolved`: [`ResolvedColors`], everything folded into plain RGB.
+//! - `spec`: parsing of xterm colour specifications.
+//! - `x11_names` / `wide_gamut`: named-colour and wide-gamut spec support.
+
+mod dynamic;
 mod palette;
+mod resolved;
 mod spec;
 mod wide_gamut;
 mod x11_names;
 
+pub use dynamic::{DynamicColorOverrides, DynamicColorSlot};
 pub use palette::{ColorPalette, PALETTE_SIZE, default_palette_rgb};
+pub use resolved::ResolvedColors;
 pub use spec::{ColorSpecError, parse_color_spec, scale_hex_channel};
 
 use crate::themes::ThemePalette;
