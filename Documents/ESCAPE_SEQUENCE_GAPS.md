@@ -1,5 +1,17 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-11 — Task 132 (colour foundation). Closed and removed from
+"OSC Gaps": "OSC 10/11 set" — an override now reaches rendering (default
+foreground; default background through a pane base fill), and OSC 17 / OSC 19
+(selection colours) are implemented and rendered. No other gap row was itemised
+for the colour-spec parser, OSC 4 / 104 multi-entry forms, OSC 10-19 chaining,
+16-bit replies, render-time palette resolution, the SGR 38 / 48 / 58 edge cases
+or the DECSCNM repaint; they are recorded as fixed in
+`ESCAPE_SEQUENCE_COVERAGE.md`. Still open and owned by Task 144: OSC 21, the
+colour stack (OSC 30001 / 30101, `CSI # P` / `# Q` / `# R`), kitty's `@alpha`
+colour suffix, and the `cursor_text` and `visual_bell` colours (their only
+setter is OSC 21).
+
 Last updated: 2026-10-10 — Task 131 (screen-scoped state and reset lifecycle).
 Closed and removed from "Buffer Semantics Gaps": the DECSC save slot per screen
 (131.5, 131.6) and DECRC with nothing saved (131.C2). Narrowed: "DECRC and DECOM"
@@ -261,8 +273,7 @@ not conformant (Task 138, v0.13.0). The remaining gaps are:
   SGR (Task 140), misc extensions (Task 141), unscroll (Task 142), DECCARA/DECSACE
   (Task 143), colour control (Task 144), multiple cursors (Task 103), text sizing
   (Task 104), file transfer (Task 102), clipboard (Task 146), drag and drop (Task 105)
-- **OSC gaps:** OSC 66 (kitty text sizing; a vestigial no-op, Task 104); OSC 10/11 set
-  does not reach rendering (Task 132)
+- **OSC gaps:** OSC 66 (kitty text sizing; a vestigial no-op, Task 104)
 - **Keyboard gaps:** `caps_lock`/`num_lock` decoration bits + CapsLock/NumLock/ScrollLock
   transition events (reverted — not producible uniformly across platforms),
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
@@ -300,8 +311,7 @@ the prior panel-fill-only white inversion.
 | Sequence          | Importance | Type | Planned          | Notes                                                                                                                                                                                                                                     |
 | ----------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 66            | ⬜         | ⬜   | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement |
-| OSC 10/11 set     | 🟨         | 🚧   | v0.13.0 Task 132 | Query works; a set stores an override that never reaches rendering                                                                                                                                                                        |
-| OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path                                                                                                                                                           |
+| OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path. Also owns `@alpha` (the colour-spec parser does not accept it), `cursor_text` and `visual_bell`, whose only setter is OSC 21                             |
 | OSC 22            | 🟨         | 🚧   | v0.13.0 Task 139 | Pointer shapes — plain set/reset works; push (`>`), pop (`<`), query (`?`) and `=` reset the shape to default; no stack, no query reply                                                                                                   |
 | OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
 | OSC 99            | 🟩         | 🚧   | v0.13.0 Task 138 | Kitty notifications implemented (Task 99) but not conformant: 0-based button reports, chunk metadata clobbered by defaults, `a=report` disables focus, close report lost after activation, no update-in-place, `p=close` does not close   |

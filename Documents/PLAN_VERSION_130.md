@@ -164,7 +164,7 @@ claims to verify, not as evidence.
 | XTGETTCAP kitty-private names (`kitty-query-*`)                                | Reveal kitty's own config; only meaningful for kitty                                                              |
 | `OSC 1337;SetUserVar`                                                          | Not a documented kitty protocol (iTerm2 origin)                                                                   |
 | OSC 3008                                                                       | Ignored by kitty too                                                                                              |
-| Wide-gamut colours (`oklch()`, `lab()`)                                        | Config syntax only; no escape code. Optional in OSC 21 parsing (Task 132 open question)                           |
+| Wide-gamut colours (`oklch()`, `lab()`)                                        | Resolved: implemented by Task 132 (132.6) in every colour spec, CSS Color 4–correct                               |
 | DECRARA (`CSI … $ t`)                                                          | Standard DEC, but kitty does not implement it. Task 128 stops it from executing as a window op                    |
 | Custom shaders, cursor trails, layouts, sessions                               | Kitty application features, not terminal protocols                                                                |
 
@@ -3825,7 +3825,9 @@ Notes:
 - The DECSTR DECAWM row follows xterm, Ghostty, WezTerm and kitty against the literal VT510
   Table 5-9. xterm's own comment records the deviation.
 - RIS keeps the colour overrides it resets today (OSC 10/11/12: kitty, Ghostty and WezTerm
-  reset them). DECSTR keeps them (xterm).
+  reset them). DECSTR keeps them (xterm). Task 132 added the OSC 17/19 selection overrides to
+  the same `DynamicColorOverrides` set, so they follow the same rule: reset by RIS, kept by
+  DECSTR. The theme lives in `ColorState` and survives both.
 - The pure transport and cache fields (`write_tx`, `placement_prune_base` — kept on DECSTR,
   re-based on RIS together with the cleared maps —
   `row_epoch_counter`, `cell_pixel_*`, `theme`, `tmux_passthrough_queue`) are kept, as is
@@ -4622,6 +4624,10 @@ Deliverable: the doc changes, markdownlint clean.
   `TerminalOutput::Invalid`. Reviewed, not a defect: a large OSC 4 body of `n;?` pairs
   produces one reply per query with no cap (xterm and kitty do the same; the body is already
   bounded by the parser's OSC size cap, and DA/DSR queries have the same amplification shape).
+- **132.14 (done).** COVERAGE and GAPS updated (OSC 10/11 🚧 → ✅; rows added for OSC 17, 19,
+  117, 119 and the ignored 13–16/18/113–116/118; SGR 38/48/58 edge semantics; DECSCNM; RIS and
+  DECSTR colour behaviour). Reset-table note, Task 144 stub and the wide-gamut out-of-scope row
+  updated by the orchestrator. `KITTY_PROTOCOL_REFERENCE.md` and `SGR.md` needed no change.
 
 ---
 
@@ -5768,6 +5774,16 @@ DECRARA is out of scope; kitty does not implement it.
   `CSI idx;count # Q`.
 - **Saved state** covers dynamic colours, `cursor_text`, `visual_bell`, transparent-bg
   overrides and the 256-colour palette.
+- **Owned here, not by Task 132 (maintainer decision 2026-10-11):** the `cursor_text` and
+  `visual_bell` colours (fields, rendering and setters; their only setter is OSC 21; today
+  `ThemePalette::cursor_text` has no reader and the bell colour is hard-coded) and kitty's
+  `@alpha` colour suffix (meaningful only for `transparent_background_colorN`; the shared
+  colour-spec parser rejects `@`).
+- **Builds on Task 132:** add the new slots to `DynamicColorOverrides` /
+  `DynamicColorSlot` and, where they are content colours, to `ResolvedColors`; parse OSC 21
+  values with the shared `parse_color_spec` (which already accepts names, `rgbi:`,
+  `oklch()` and `lab()`); push/pop must go through `ColorState`'s mutators so the resolved
+  `Arc` and the GUI's damage trigger follow.
 
 **Depends on.**
 
