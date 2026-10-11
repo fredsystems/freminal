@@ -105,7 +105,7 @@ fn integration_modes_reporting() {
         ("DECTCEM", dectcem_show.report(None)),
     ] {
         assert!(
-            r.starts_with("\x1b[?") && r.ends_with("$y"),
+            r.starts_with('?') && r.ends_with("$y"),
             "{label}: expected DECRQM response, got {r:?}"
         );
     }
@@ -116,21 +116,21 @@ fn integration_modes_reporting() {
     for sm in overrides {
         let s = decawm_on.report(Some(sm));
         assert!(
-            s.starts_with("\x1b[?") && s.ends_with("$y"),
+            s.starts_with('?') && s.ends_with("$y"),
             "DECAWM override report should be DECRQM, got {s:?}"
         );
     }
     for sm in overrides {
         let s = deccolm_132.report(Some(sm));
         assert!(
-            s.starts_with("\x1b[?") && s.ends_with("$y"),
+            s.starts_with('?') && s.ends_with("$y"),
             "DECCOLM override report should be DECRQM, got {s:?}"
         );
     }
     for sm in overrides {
         let s = dectcem_show.report(Some(sm));
         assert!(
-            s.starts_with("\x1b[?") && s.ends_with("$y"),
+            s.starts_with('?') && s.ends_with("$y"),
             "DECTCEM override report should be DECRQM, got {s:?}"
         );
     }

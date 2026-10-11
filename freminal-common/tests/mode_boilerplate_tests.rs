@@ -33,7 +33,7 @@ use freminal_common::buffer_states::modes::{
     theme::Theming,
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
-    xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+    xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
 };
 
@@ -99,17 +99,17 @@ macro_rules! test_mode_type {
             // ---------------------------------------------------------------
             #[test]
             fn report_none_set_variant() {
-                assert_eq!($set.report(None), format!("\x1b[?{};1$y", $param));
+                assert_eq!($set.report(None), format!("?{};1$y", $param));
             }
 
             #[test]
             fn report_none_reset_variant() {
-                assert_eq!($reset.report(None), format!("\x1b[?{};2$y", $param));
+                assert_eq!($reset.report(None), format!("?{};2$y", $param));
             }
 
             #[test]
             fn report_none_query_variant() {
-                assert_eq!($query.report(None), format!("\x1b[?{};0$y", $param));
+                assert_eq!($query.report(None), format!("?{};0$y", $param));
             }
 
             // ---------------------------------------------------------------
@@ -119,7 +119,7 @@ macro_rules! test_mode_type {
             fn report_override_dec_set() {
                 assert_eq!(
                     $default.report(Some(SetMode::DecSet)),
-                    format!("\x1b[?{};1$y", $param)
+                    format!("?{};1$y", $param)
                 );
             }
 
@@ -127,7 +127,7 @@ macro_rules! test_mode_type {
             fn report_override_dec_rst() {
                 assert_eq!(
                     $default.report(Some(SetMode::DecRst)),
-                    format!("\x1b[?{};2$y", $param)
+                    format!("?{};2$y", $param)
                 );
             }
 
@@ -135,7 +135,7 @@ macro_rules! test_mode_type {
             fn report_override_dec_query() {
                 assert_eq!(
                     $default.report(Some(SetMode::DecQuery)),
-                    format!("\x1b[?{};0$y", $param)
+                    format!("?{};0$y", $param)
                 );
             }
 
@@ -179,26 +179,90 @@ test_mode_type!(
 );
 
 // Lnm (20): default=LineFeed, Set=NewLine, Reset=LineFeed
-// Note: parameter in the DECRPM string uses ?20 notation.
-test_mode_type!(
-    lnm_tests,
-    Lnm,
-    20,
-    Lnm::LineFeed,
-    Lnm::NewLine,
-    Lnm::LineFeed,
-    Lnm::Query,
-    "New Line Mode (LNM)",
-    "Line Feed Mode (LNM)",
-    "Query Line Mode (LNM)"
-);
+// LNM is an ANSI mode, so its DECRPM body has no `?` prefix (`20;Ps$y`).
+// It cannot use `test_mode_type!`, which emits the DEC-private `?` form.
+mod lnm_tests {
+    use super::*;
 
-// ReverseWrapAround (?45): default=WrapAround, Set=WrapAround, Reset=DontWrap
+    #[test]
+    fn default_value() {
+        assert_eq!(Lnm::default(), Lnm::LineFeed);
+    }
+
+    #[test]
+    fn new_dec_set() {
+        assert_eq!(Lnm::new(&SetMode::DecSet), Lnm::NewLine);
+    }
+
+    #[test]
+    fn new_dec_rst() {
+        assert_eq!(Lnm::new(&SetMode::DecRst), Lnm::LineFeed);
+    }
+
+    #[test]
+    fn new_dec_query() {
+        assert_eq!(Lnm::new(&SetMode::DecQuery), Lnm::Query);
+    }
+
+    #[test]
+    fn report_none_set_variant() {
+        assert_eq!(Lnm::NewLine.report(None), "20;1$y");
+    }
+
+    #[test]
+    fn report_none_reset_variant() {
+        assert_eq!(Lnm::LineFeed.report(None), "20;2$y");
+    }
+
+    #[test]
+    fn report_none_query_variant() {
+        assert_eq!(Lnm::Query.report(None), "20;0$y");
+    }
+
+    #[test]
+    fn report_override_dec_set() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecSet)), "20;1$y");
+    }
+
+    #[test]
+    fn report_override_dec_rst() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecRst)), "20;2$y");
+    }
+
+    #[test]
+    fn report_override_dec_query() {
+        assert_eq!(Lnm::LineFeed.report(Some(SetMode::DecQuery)), "20;0$y");
+    }
+
+    #[test]
+    fn report_never_has_dec_private_prefix() {
+        for variant in [Lnm::NewLine, Lnm::LineFeed, Lnm::Query] {
+            assert!(!variant.report(None).starts_with('?'));
+        }
+    }
+
+    #[test]
+    fn display_set_variant() {
+        assert_eq!(format!("{}", Lnm::NewLine), "New Line Mode (LNM)");
+    }
+
+    #[test]
+    fn display_reset_variant() {
+        assert_eq!(format!("{}", Lnm::LineFeed), "Line Feed Mode (LNM)");
+    }
+
+    #[test]
+    fn display_query_variant() {
+        assert_eq!(format!("{}", Lnm::Query), "Query Line Mode (LNM)");
+    }
+}
+
+// ReverseWrapAround (?45): default=DontWrap, Set=WrapAround, Reset=DontWrap
 test_mode_type!(
     reverse_wrap_around_tests,
     ReverseWrapAround,
     45,
-    ReverseWrapAround::WrapAround,
+    ReverseWrapAround::DontWrap,
     ReverseWrapAround::WrapAround,
     ReverseWrapAround::DontWrap,
     ReverseWrapAround::Query,
@@ -503,17 +567,17 @@ mod decscnm_tests {
     // report(None)
     #[test]
     fn report_none_set_variant() {
-        assert_eq!(Decscnm::ReverseDisplay.report(None), "\x1b[?5;1$y");
+        assert_eq!(Decscnm::ReverseDisplay.report(None), "?5;1$y");
     }
 
     #[test]
     fn report_none_reset_variant() {
-        assert_eq!(Decscnm::NormalDisplay.report(None), "\x1b[?5;2$y");
+        assert_eq!(Decscnm::NormalDisplay.report(None), "?5;2$y");
     }
 
     #[test]
     fn report_none_query_variant() {
-        assert_eq!(Decscnm::Query.report(None), "\x1b[?5;0$y");
+        assert_eq!(Decscnm::Query.report(None), "?5;0$y");
     }
 
     // report(Some(_)) — override wins
@@ -521,7 +585,7 @@ mod decscnm_tests {
     fn report_override_dec_set() {
         assert_eq!(
             Decscnm::NormalDisplay.report(Some(SetMode::DecSet)),
-            "\x1b[?5;1$y"
+            "?5;1$y"
         );
     }
 
@@ -529,7 +593,7 @@ mod decscnm_tests {
     fn report_override_dec_rst() {
         assert_eq!(
             Decscnm::NormalDisplay.report(Some(SetMode::DecRst)),
-            "\x1b[?5;2$y"
+            "?5;2$y"
         );
     }
 
@@ -537,7 +601,7 @@ mod decscnm_tests {
     fn report_override_dec_query() {
         assert_eq!(
             Decscnm::NormalDisplay.report(Some(SetMode::DecQuery)),
-            "\x1b[?5;0$y"
+            "?5;0$y"
         );
     }
 
@@ -575,7 +639,7 @@ mod decscnm_tests {
 }
 
 // ===========================================================================
-// Decsclm (?4) — SPECIAL: report() ALWAYS returns "\x1b[?4;0$y"
+// Decsclm (?4) — SPECIAL: report() ALWAYS returns "?4;4$y"
 // ===========================================================================
 mod decsclm_tests {
     use super::*;
@@ -600,44 +664,38 @@ mod decsclm_tests {
         assert_eq!(Decsclm::new(&SetMode::DecQuery), Decsclm::Query);
     }
 
-    // report() ALWAYS returns "\x1b[?4;0$y" regardless of variant or override
+    // report() ALWAYS returns "?4;4$y" regardless of variant or override
     #[test]
     fn report_smooth_scroll_none() {
-        assert_eq!(Decsclm::SmoothScroll.report(None), "\x1b[?4;0$y");
+        assert_eq!(Decsclm::SmoothScroll.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_fast_scroll_none() {
-        assert_eq!(Decsclm::FastScroll.report(None), "\x1b[?4;0$y");
+        assert_eq!(Decsclm::FastScroll.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_query_none() {
-        assert_eq!(Decsclm::Query.report(None), "\x1b[?4;0$y");
+        assert_eq!(Decsclm::Query.report(None), "?4;4$y");
     }
 
     #[test]
     fn report_override_dec_set() {
-        assert_eq!(
-            Decsclm::FastScroll.report(Some(SetMode::DecSet)),
-            "\x1b[?4;0$y"
-        );
+        assert_eq!(Decsclm::FastScroll.report(Some(SetMode::DecSet)), "?4;4$y");
     }
 
     #[test]
     fn report_override_dec_rst() {
         assert_eq!(
             Decsclm::SmoothScroll.report(Some(SetMode::DecRst)),
-            "\x1b[?4;0$y"
+            "?4;4$y"
         );
     }
 
     #[test]
     fn report_override_dec_query() {
-        assert_eq!(
-            Decsclm::Query.report(Some(SetMode::DecQuery)),
-            "\x1b[?4;0$y"
-        );
+        assert_eq!(Decsclm::Query.report(Some(SetMode::DecQuery)), "?4;4$y");
     }
 
     // Display
@@ -661,7 +719,7 @@ mod decsclm_tests {
 }
 
 // ===========================================================================
-// GraphemeClustering (?2027) — SPECIAL: permanently set → "\x1b[?2027;3$y"
+// GraphemeClustering (?2027) — SPECIAL: permanently set → "?2027;3$y"
 // report(None) for Unicode/Legacy → ;3, for Query → ;0
 // report(Some(DecSet/DecRst)) → ;3, report(Some(DecQuery)) → ;0
 // ===========================================================================
@@ -700,17 +758,17 @@ mod grapheme_clustering_tests {
     // report(None) — Unicode and Legacy both report permanently-set (;3)
     #[test]
     fn report_none_unicode_variant() {
-        assert_eq!(GraphemeClustering::Unicode.report(None), "\x1b[?2027;3$y");
+        assert_eq!(GraphemeClustering::Unicode.report(None), "?2027;3$y");
     }
 
     #[test]
     fn report_none_legacy_variant() {
-        assert_eq!(GraphemeClustering::Legacy.report(None), "\x1b[?2027;3$y");
+        assert_eq!(GraphemeClustering::Legacy.report(None), "?2027;3$y");
     }
 
     #[test]
     fn report_none_query_variant() {
-        assert_eq!(GraphemeClustering::Query.report(None), "\x1b[?2027;0$y");
+        assert_eq!(GraphemeClustering::Query.report(None), "?2027;0$y");
     }
 
     // report(Some(_)) — DecSet/DecRst → ;3, DecQuery → ;0
@@ -718,7 +776,7 @@ mod grapheme_clustering_tests {
     fn report_override_dec_set() {
         assert_eq!(
             GraphemeClustering::Unicode.report(Some(SetMode::DecSet)),
-            "\x1b[?2027;3$y"
+            "?2027;3$y"
         );
     }
 
@@ -726,7 +784,7 @@ mod grapheme_clustering_tests {
     fn report_override_dec_rst() {
         assert_eq!(
             GraphemeClustering::Unicode.report(Some(SetMode::DecRst)),
-            "\x1b[?2027;3$y"
+            "?2027;3$y"
         );
     }
 
@@ -734,7 +792,7 @@ mod grapheme_clustering_tests {
     fn report_override_dec_query() {
         assert_eq!(
             GraphemeClustering::Unicode.report(Some(SetMode::DecQuery)),
-            "\x1b[?2027;0$y"
+            "?2027;0$y"
         );
     }
 
@@ -821,17 +879,17 @@ mod xtextscrn_tests {
     // report(None)
     #[test]
     fn report_none_alternate_variant() {
-        assert_eq!(XtExtscrn::Alternate.report(None), "\x1b[?1049;1$y");
+        assert_eq!(XtExtscrn::Alternate.report(None), "?1049;1$y");
     }
 
     #[test]
     fn report_none_primary_variant() {
-        assert_eq!(XtExtscrn::Primary.report(None), "\x1b[?1049;2$y");
+        assert_eq!(XtExtscrn::Primary.report(None), "?1049;2$y");
     }
 
     #[test]
     fn report_none_query_variant() {
-        assert_eq!(XtExtscrn::Query.report(None), "\x1b[?1049;0$y");
+        assert_eq!(XtExtscrn::Query.report(None), "?1049;0$y");
     }
 
     // report(Some(_))
@@ -839,7 +897,7 @@ mod xtextscrn_tests {
     fn report_override_dec_set() {
         assert_eq!(
             XtExtscrn::Primary.report(Some(SetMode::DecSet)),
-            "\x1b[?1049;1$y"
+            "?1049;1$y"
         );
     }
 
@@ -847,7 +905,7 @@ mod xtextscrn_tests {
     fn report_override_dec_rst() {
         assert_eq!(
             XtExtscrn::Primary.report(Some(SetMode::DecRst)),
-            "\x1b[?1049;2$y"
+            "?1049;2$y"
         );
     }
 
@@ -855,7 +913,7 @@ mod xtextscrn_tests {
     fn report_override_dec_query() {
         assert_eq!(
             XtExtscrn::Primary.report(Some(SetMode::DecQuery)),
-            "\x1b[?1049;0$y"
+            "?1049;0$y"
         );
     }
 
@@ -911,17 +969,17 @@ mod altscreen47_tests {
     // report(None)
     #[test]
     fn report_none_alternate_variant() {
-        assert_eq!(AltScreen47::Alternate.report(None), "\x1b[?47;1$y");
+        assert_eq!(AltScreen47::Alternate.report(None), "?47;1$y");
     }
 
     #[test]
     fn report_none_primary_variant() {
-        assert_eq!(AltScreen47::Primary.report(None), "\x1b[?47;2$y");
+        assert_eq!(AltScreen47::Primary.report(None), "?47;2$y");
     }
 
     #[test]
     fn report_none_query_variant() {
-        assert_eq!(AltScreen47::Query.report(None), "\x1b[?47;0$y");
+        assert_eq!(AltScreen47::Query.report(None), "?47;0$y");
     }
 
     // report(Some(_))
@@ -929,7 +987,7 @@ mod altscreen47_tests {
     fn report_override_dec_set() {
         assert_eq!(
             AltScreen47::Primary.report(Some(SetMode::DecSet)),
-            "\x1b[?47;1$y"
+            "?47;1$y"
         );
     }
 
@@ -937,7 +995,7 @@ mod altscreen47_tests {
     fn report_override_dec_rst() {
         assert_eq!(
             AltScreen47::Primary.report(Some(SetMode::DecRst)),
-            "\x1b[?47;2$y"
+            "?47;2$y"
         );
     }
 
@@ -945,7 +1003,7 @@ mod altscreen47_tests {
     fn report_override_dec_query() {
         assert_eq!(
             AltScreen47::Primary.report(Some(SetMode::DecQuery)),
-            "\x1b[?47;0$y"
+            "?47;0$y"
         );
     }
 
@@ -969,6 +1027,99 @@ mod altscreen47_tests {
     #[test]
     fn display_query_variant() {
         assert_eq!(format!("{}", AltScreen47::Query), "AltScreen47 (QUERY)");
+    }
+}
+
+// ===========================================================================
+// AltScreen1047 (?1047): default=Primary, Set=Alternate, Reset=Primary
+// ===========================================================================
+mod altscreen1047_tests {
+    use super::*;
+
+    #[test]
+    fn default_value() {
+        assert_eq!(AltScreen1047::default(), AltScreen1047::Primary);
+    }
+
+    #[test]
+    fn new_dec_set() {
+        assert_eq!(
+            AltScreen1047::new(&SetMode::DecSet),
+            AltScreen1047::Alternate
+        );
+    }
+
+    #[test]
+    fn new_dec_rst() {
+        assert_eq!(AltScreen1047::new(&SetMode::DecRst), AltScreen1047::Primary);
+    }
+
+    #[test]
+    fn new_dec_query() {
+        assert_eq!(AltScreen1047::new(&SetMode::DecQuery), AltScreen1047::Query);
+    }
+
+    // report(None)
+    #[test]
+    fn report_none_alternate_variant() {
+        assert_eq!(AltScreen1047::Alternate.report(None), "?1047;1$y");
+    }
+
+    #[test]
+    fn report_none_primary_variant() {
+        assert_eq!(AltScreen1047::Primary.report(None), "?1047;2$y");
+    }
+
+    #[test]
+    fn report_none_query_variant() {
+        assert_eq!(AltScreen1047::Query.report(None), "?1047;0$y");
+    }
+
+    // report(Some(_))
+    #[test]
+    fn report_override_dec_set() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecSet)),
+            "?1047;1$y"
+        );
+    }
+
+    #[test]
+    fn report_override_dec_rst() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecRst)),
+            "?1047;2$y"
+        );
+    }
+
+    #[test]
+    fn report_override_dec_query() {
+        assert_eq!(
+            AltScreen1047::Primary.report(Some(SetMode::DecQuery)),
+            "?1047;0$y"
+        );
+    }
+
+    // Display
+    #[test]
+    fn display_alternate_variant() {
+        assert_eq!(
+            format!("{}", AltScreen1047::Alternate),
+            "AltScreen1047 (SET) Alternate Screen"
+        );
+    }
+
+    #[test]
+    fn display_primary_variant() {
+        assert_eq!(
+            format!("{}", AltScreen1047::Primary),
+            "AltScreen1047 (RESET) Primary Screen"
+        );
+    }
+
+    #[test]
+    fn display_query_variant() {
+        assert_eq!(format!("{}", AltScreen1047::Query), "AltScreen1047 (QUERY)");
     }
 }
 
@@ -1007,17 +1158,17 @@ mod save_cursor1048_tests {
     // report(None)
     #[test]
     fn report_none_save_variant() {
-        assert_eq!(SaveCursor1048::Save.report(None), "\x1b[?1048;1$y");
+        assert_eq!(SaveCursor1048::Save.report(None), "?1048;1$y");
     }
 
     #[test]
     fn report_none_restore_variant() {
-        assert_eq!(SaveCursor1048::Restore.report(None), "\x1b[?1048;2$y");
+        assert_eq!(SaveCursor1048::Restore.report(None), "?1048;2$y");
     }
 
     #[test]
     fn report_none_query_variant() {
-        assert_eq!(SaveCursor1048::Query.report(None), "\x1b[?1048;0$y");
+        assert_eq!(SaveCursor1048::Query.report(None), "?1048;0$y");
     }
 
     // report(Some(_))
@@ -1025,7 +1176,7 @@ mod save_cursor1048_tests {
     fn report_override_dec_set() {
         assert_eq!(
             SaveCursor1048::Restore.report(Some(SetMode::DecSet)),
-            "\x1b[?1048;1$y"
+            "?1048;1$y"
         );
     }
 
@@ -1033,7 +1184,7 @@ mod save_cursor1048_tests {
     fn report_override_dec_rst() {
         assert_eq!(
             SaveCursor1048::Restore.report(Some(SetMode::DecRst)),
-            "\x1b[?1048;2$y"
+            "?1048;2$y"
         );
     }
 
@@ -1041,7 +1192,7 @@ mod save_cursor1048_tests {
     fn report_override_dec_query() {
         assert_eq!(
             SaveCursor1048::Restore.report(Some(SetMode::DecQuery)),
-            "\x1b[?1048;0$y"
+            "?1048;0$y"
         );
     }
 

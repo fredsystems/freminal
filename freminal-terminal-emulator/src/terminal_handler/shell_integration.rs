@@ -213,15 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn full_reset_clears_cwd() {
+    fn full_reset_keeps_cwd() {
+        // The OSC 7 working directory describes the process, not the screen
+        // (maintainer decision, Task 131 reset table), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::RemoteHost(
             "file://localhost/home/user".to_string(),
         ));
-        assert!(handler.current_working_directory().is_some());
+        let before = handler.current_working_directory().map(str::to_owned);
+        assert!(before.is_some());
 
         handler.full_reset();
-        assert_eq!(handler.current_working_directory(), None);
+        assert_eq!(
+            handler.current_working_directory().map(str::to_owned),
+            before
+        );
     }
 
     #[test]

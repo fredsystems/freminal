@@ -10,11 +10,30 @@
 
 use conv2::ValueFrom;
 use freminal_common::{
-    buffer_states::modes::{decanm::Decanm, decom::Decom, dectcem::Dectcem, xtcblink::XtCBlink},
+    buffer_states::{
+        format_tag::FormatTag,
+        line_draw::DecSpecialGraphics,
+        modes::{decanm::Decanm, decom::Decom, dectcem::Dectcem, xtcblink::XtCBlink},
+    },
     cursor::CursorVisualStyle,
 };
 
 use super::TerminalHandler;
+
+/// The handler-owned half of a DECSC save: the state xterm's `CursorSave2`
+/// records that the buffer does not own.
+///
+/// The buffer's own `SavedCursor` holds the position and DECOM. Freminal uses
+/// a simplified single-flag charset model, so `character_replace` stands in
+/// for the G0/G1 designators and GL/GR invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SavedDecscState {
+    /// The DEC Special Graphics remapping state at the time of the save.
+    pub(super) character_replace: DecSpecialGraphics,
+    /// The SGR rendition (colours, weight, decorations, blink) at the time of
+    /// the save. Its `url` (an open OSC 8 hyperlink) is ignored on restore.
+    pub(super) format: FormatTag,
+}
 
 impl TerminalHandler {
     /// Handle cursor position (CUP, HVP).
@@ -87,18 +106,45 @@ impl TerminalHandler {
         self.buffer.move_cursor_relative(-dx, 0);
     }
 
-    /// Handle DECSC — save the current cursor position, SGR state, and character set.
+    /// Handle DECSC — save the current cursor position, DECOM, SGR state, and character set.
+    ///
+    /// The save goes into the *active* screen's slot: the buffer keeps the
+    /// position and DECOM, the handler keeps the character set and SGR
+    /// rendition.
     pub fn handle_save_cursor(&mut self) {
         self.buffer.save_cursor();
-        self.saved_character_replace = Some(self.character_replace.clone());
+        *self.saved_decsc.get_mut(self.buffer.kind()) = Some(SavedDecscState {
+            character_replace: self.character_replace.clone(),
+            format: self.current_format.clone(),
+        });
     }
 
-    /// Handle DECRC — restore the cursor position, SGR state, and character set saved by the most recent DECSC.
+    /// Handle DECRC — restore the cursor position, DECOM, SGR state, and character set saved by the most recent DECSC.
+    ///
+    /// Reads the *active* screen's slot. With nothing saved on this screen the
+    /// cursor goes home and the SGR rendition and character set reset to their
+    /// defaults, as xterm and Ghostty do.
     pub fn handle_restore_cursor(&mut self) {
         self.buffer.restore_cursor();
-        if let Some(saved) = &self.saved_character_replace {
-            self.character_replace = saved.clone();
-        }
+        let (character_replace, format) = self
+            .saved_decsc
+            .get(self.buffer.kind())
+            .as_ref()
+            .map_or_else(
+                || (DecSpecialGraphics::default(), FormatTag::default()),
+                |saved| (saved.character_replace.clone(), saved.format.clone()),
+            );
+        // An open OSC 8 hyperlink is not part of the DECSC state: xterm saves
+        // no hyperlink, kitty keeps the active hyperlink on the screen rather
+        // than the cursor, and Ghostty's saved cursor has none. DECRC
+        // therefore keeps whatever hyperlink is live now.
+        let format = FormatTag {
+            url: self.current_format.url.clone(),
+            ..format
+        };
+        self.character_replace = character_replace;
+        self.current_format = format.clone();
+        self.buffer.set_format(format);
     }
 
     /// Handle CPR — Cursor Position Report.
@@ -130,17 +176,6 @@ impl TerminalHandler {
     #[must_use]
     pub fn cursor_visual_style(&self) -> CursorVisualStyle {
         self.cursor_visual_style.clone()
-    }
-
-    /// Set the cursor shape / blink style.
-    ///
-    /// Used to seed the initial style from `config.cursor` when a pane is
-    /// spawned, and to apply a live Settings change to an already-running
-    /// pane (issue #406). Like DECSCUSR, this is a plain overwrite — once
-    /// set, a subsequent DECSCUSR or `XTCBlink` request from the running
-    /// program takes over normally, exactly as on a real terminal.
-    pub const fn set_cursor_visual_style(&mut self, style: CursorVisualStyle) {
-        self.cursor_visual_style = style;
     }
 
     /// Apply an `XtCBlink` blink-mode change to the current `cursor_visual_style`.

@@ -708,6 +708,14 @@ impl Buffer {
     /// If the image extends below the visible area, new rows are created
     /// (scrolling if necessary in the primary buffer).
     ///
+    /// On the alternate screen the store must stay exactly `height` rows, so
+    /// after each growth (the image's rows, then the cursor row below it) the
+    /// excess front rows are evicted the way `scroll_up` would: content
+    /// scrolls up by the number of rows pushed. The cursor lands on the row
+    /// below the image when it is on screen, else on the last row; an image
+    /// taller than the screen keeps its bottom rows and clamps its origin to
+    /// the top, as the primary fallback does.
+    ///
     /// Returns a [`PlaceImageResult`] describing the (possibly adjusted)
     /// scroll offset and the TRUE stamped origin row/column of the image —
     /// the origin reflects any `enforce_scrollback_limit` drain that
@@ -829,6 +837,8 @@ impl Buffer {
             // An origin drained off the top clamps to the oldest row, as the
             // hand-counted compensation this replaces did.
             base_row = origin_row.rows_after(self.rows.base()).unwrap_or(0);
+        } else {
+            base_row = self.trim_alternate_to_height(origin_row);
         }
 
         // Move cursor below the image, column 0 (iTerm2 behaviour).
@@ -842,6 +852,8 @@ impl Buffer {
             if self.kind == BufferType::Primary {
                 current_offset = self.enforce_scrollback_limit(current_offset);
                 base_row = origin_row.rows_after(self.rows.base()).unwrap_or(0);
+            } else {
+                base_row = self.trim_alternate_to_height(origin_row);
             }
 
             final_row = base_row + display_rows;
@@ -860,6 +872,29 @@ impl Buffer {
             origin_col: start_col,
             placement_instance,
         }
+    }
+
+    /// Restore the alternate screen's exactly-`height`-rows invariant after
+    /// image placement grew the store, and return the image origin's row index.
+    ///
+    /// `place_image` makes room for the image and for the cursor row below it
+    /// by pushing rows. The primary screen keeps those rows as scrollback
+    /// (`enforce_scrollback_limit` trims only past the limit); the alternate
+    /// screen has no scrollback, so the excess front rows are evicted through
+    /// [`Buffer::evict_front_rows`], the same path `scroll_up` uses. The
+    /// content therefore scrolls up by exactly the number of rows pushed, as a
+    /// line feed at the bottom would, and image-cell, horizon and mark
+    /// bookkeeping stay consistent.
+    ///
+    /// The returned index is re-derived from the stable `origin_row` number,
+    /// as the primary branch does. An origin that scrolled off the top (an
+    /// image taller than the screen) clamps to row 0.
+    fn trim_alternate_to_height(&mut self, origin_row: RowNumber) -> usize {
+        let excess = self.rows.len().saturating_sub(self.height);
+        if excess > 0 {
+            let _ = self.evict_front_rows(excess);
+        }
+        origin_row.rows_after(self.rows.base()).unwrap_or(0)
     }
 
     /// Put the cursor back on the top-left cell of the image `result` describes.

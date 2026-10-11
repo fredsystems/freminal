@@ -10,8 +10,11 @@
 
 use conv2::ValueFrom;
 use freminal_common::{
-    buffer_states::modes::{
-        decawm::Decawm, declrmm::Declrmm, in_band_resize_mode::InBandResizeMode, lnm::Lnm,
+    buffer_states::{
+        buffer_type::BufferType,
+        modes::{
+            decawm::Decawm, declrmm::Declrmm, in_band_resize_mode::InBandResizeMode, lnm::Lnm,
+        },
     },
     pty_write::{FreminalTerminalSize, PtyWrite},
     send_or_log,
@@ -20,6 +23,29 @@ use freminal_common::{
 use freminal_buffer::buffer::Buffer;
 
 use super::TerminalHandler;
+
+/// Which DEC private mode drives an alternate-screen transition.
+///
+/// The three modes share the screen switch but differ in what accompanies it;
+/// see [`TerminalHandler::handle_alternate_screen`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AltScreenMode {
+    /// `?47` -- switch only.
+    Legacy47,
+    /// `?1047` -- switch; clear the alternate screen on leave.
+    Clearing1047,
+    /// `?1049` -- DECSC, switch and clear on enter; switch and DECRC on leave.
+    SaveClear1049,
+}
+
+/// Direction of an alternate-screen transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AltScreenAction {
+    /// Set the mode (`CSI ? Pm h`).
+    Enter,
+    /// Reset the mode (`CSI ? Pm l`).
+    Leave,
+}
 
 impl TerminalHandler {
     /// Handle LF (Line Feed) — advance cursor to the next line, scrolling if needed.
@@ -89,33 +115,89 @@ impl TerminalHandler {
         self.buffer.scroll_region_down_n(n);
     }
 
-    /// Handle entering alternate screen
-    pub fn handle_enter_alternate(&mut self) {
-        // scroll_offset is owned by ViewState on the GUI side; the PTY thread
-        // always passes 0 when entering the alternate screen.
-        self.buffer.enter_alternate(0);
-        // Save and reset the KKP stack — the spec requires main and alternate
-        // screens to maintain independent keyboard mode stacks.
-        self.saved_kitty_keyboard_stack = Some(std::mem::take(&mut self.kitty_keyboard_stack));
+    /// Handle an alternate-screen mode transition.
+    ///
+    /// The three DEC modes differ in what accompanies the screen switch, and
+    /// follow the consensus of xterm, Ghostty, `WezTerm` and kitty:
+    ///
+    /// | Mode / action | Effect |
+    /// | --- | --- |
+    /// | `?47` enter | switch to the alternate screen; nothing else |
+    /// | `?47` leave | switch to the primary screen; nothing else |
+    /// | `?1047` enter | same as `?47` enter |
+    /// | `?1047` leave | if on the alternate screen, clear it, then switch to primary |
+    /// | `?1049` enter | DECSC on the *current* screen, switch to alternate, clear it |
+    /// | `?1049` leave | switch to primary, then DECRC unconditionally |
+    ///
+    /// Every switch is idempotent and keeps the cursor's screen position and
+    /// attributes; the scroll margins are shared and never touched.  The
+    /// alternate screen's contents persist across sessions: only a `?1049`
+    /// enter and a `?1047` leave clear them.  Because `?1049` enter saves on
+    /// the current screen, a second `?1049h` while already on the alternate
+    /// screen re-saves into the alternate screen's DECSC slot (the primary's
+    /// save is untouched) and clears the alternate screen again.  `?1049l`
+    /// while already on the primary screen performs a DECRC from the primary
+    /// slot.
+    ///
+    /// The kitty placement maps are per screen, so a switch does not touch
+    /// them: the alternate screen's placements persist with its image store
+    /// across `?47` and `?1047` re-entry.  They are cleared together with the
+    /// screen ([`Self::clear_alternate_screen`]), and a resize prunes the
+    /// parked screen's map against its parked store.
+    ///
+    /// A switch that actually changes the active screen also ends the live
+    /// OSC 8 hyperlink and drops the kitty unicode-placeholder continuity
+    /// state (see [`Self::end_screen_scoped_state`]); an idempotent request
+    /// (already on the target screen) does neither.
+    pub(super) fn handle_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction) {
+        let kind_before = self.buffer.kind();
+        self.apply_alternate_screen(mode, action);
+        if self.buffer.kind() != kind_before {
+            self.end_screen_scoped_state();
+        }
     }
 
-    /// Handle leaving alternate screen
-    pub fn handle_leave_alternate(&mut self) {
-        // Returns the saved scroll_offset from the primary screen; discarded here
-        // because scroll_offset is owned by ViewState on the GUI side.
-        let _restored_offset = self.buffer.leave_alternate();
-        // The alternate screen's rows are gone, and so are the placements
-        // that were recorded against them (the buffer drops its own
-        // alternate-screen marks the same way).
-        self.real_placements
-            .retain(|_, placement| !placement.origin_row.is_alternate());
-        // A resize while the alternate screen was up may have trimmed the
-        // parked primary store's tail; judge the primary placements against
-        // the primary store now that it is active again.
-        self.prune_unissued_real_placements();
-        // Restore the main-screen KKP stack.
-        if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
-            self.kitty_keyboard_stack = saved;
+    /// End the state that must not outlive the screen it was produced on.
+    ///
+    /// * The live OSC 8 hyperlink: kitty (`screen_toggle_screen_buffer` zeroes
+    ///   `active_hyperlink_id`) and Ghostty (`switchScreen` ends it) both end
+    ///   the link on a screen switch, so text printed on the new screen is not
+    ///   silently linked to a URL opened on the other one.
+    /// * The unicode-placeholder continuity state (`prev_placeholder`): a
+    ///   placeholder cell on the new screen must not inherit its image
+    ///   identity from the last cell printed on the old one.
+    fn end_screen_scoped_state(&mut self) {
+        self.current_format.url = None;
+        self.buffer.set_format(self.current_format.clone());
+        self.prev_placeholder = None;
+    }
+
+    /// Perform the mode-specific part of an alternate-screen transition.
+    fn apply_alternate_screen(&mut self, mode: AltScreenMode, action: AltScreenAction) {
+        match (mode, action) {
+            (AltScreenMode::Legacy47 | AltScreenMode::Clearing1047, AltScreenAction::Enter) => {
+                self.buffer.switch_to_alternate();
+            }
+            (AltScreenMode::Legacy47, AltScreenAction::Leave) => {
+                self.buffer.switch_to_primary();
+            }
+            (AltScreenMode::Clearing1047, AltScreenAction::Leave) => {
+                // `clear_alternate_screen` is only valid while the alternate
+                // screen is active; leaving from the primary is a no-op.
+                if self.buffer.kind() == BufferType::Alternate {
+                    self.clear_alternate_screen();
+                    self.buffer.switch_to_primary();
+                }
+            }
+            (AltScreenMode::SaveClear1049, AltScreenAction::Enter) => {
+                self.handle_save_cursor();
+                self.buffer.switch_to_alternate();
+                self.clear_alternate_screen();
+            }
+            (AltScreenMode::SaveClear1049, AltScreenAction::Leave) => {
+                self.buffer.switch_to_primary();
+                self.handle_restore_cursor();
+            }
         }
     }
 
@@ -230,5 +312,66 @@ impl TerminalHandler {
             };
             send_or_log!(tx, PtyWrite::Resize(size), "Failed to send PTY resize");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AltScreenAction, AltScreenMode, TerminalHandler};
+    use crate::terminal_handler::PrevPlaceholder;
+    use freminal_common::colors::TerminalColor;
+
+    fn placeholder() -> PrevPlaceholder {
+        PrevPlaceholder {
+            image_id: 42,
+            placement_id: 0,
+            row: 1,
+            col: 5,
+            id_msb: 0,
+            fg_color: TerminalColor::Custom(0, 0, 42),
+            underline_color: TerminalColor::Custom(0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn real_screen_switch_clears_the_placeholder_continuity_state() {
+        for mode in [
+            AltScreenMode::Legacy47,
+            AltScreenMode::Clearing1047,
+            AltScreenMode::SaveClear1049,
+        ] {
+            let mut handler = TerminalHandler::new(80, 24);
+
+            handler.prev_placeholder = Some(placeholder());
+            handler.handle_alternate_screen(mode, AltScreenAction::Enter);
+            assert!(handler.is_alternate_screen());
+            assert!(
+                handler.prev_placeholder.is_none(),
+                "{mode:?} enter must clear prev_placeholder"
+            );
+
+            handler.prev_placeholder = Some(placeholder());
+            handler.handle_alternate_screen(mode, AltScreenAction::Leave);
+            assert!(!handler.is_alternate_screen());
+            assert!(
+                handler.prev_placeholder.is_none(),
+                "{mode:?} leave must clear prev_placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn idempotent_screen_request_keeps_the_placeholder_continuity_state() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.prev_placeholder = Some(placeholder());
+        // Already on the primary screen: leaving is not a switch.
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+        assert!(handler.prev_placeholder.is_some());
+
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        handler.prev_placeholder = Some(placeholder());
+        // Already on the alternate screen: entering again is not a switch.
+        handler.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+        assert!(handler.prev_placeholder.is_some());
     }
 }

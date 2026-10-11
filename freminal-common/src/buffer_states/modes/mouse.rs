@@ -74,7 +74,7 @@ impl ReportMode for MouseEncoding {
             }
             Some(SetMode::DecQuery) => 0,
         };
-        format!("\x1b[?{mode_number};{set_mode}$y")
+        format!("?{mode_number};{set_mode}$y")
     }
 }
 
@@ -160,7 +160,7 @@ impl ReportMode for MouseTrack {
             }
             Some(SetMode::DecQuery) => 0,
         };
-        format!("\x1b[?{mode_number};{set_mode}$y")
+        format!("?{mode_number};{set_mode}$y")
     }
 }
 
@@ -188,26 +188,26 @@ mod tests {
     fn report_mouse_track_query_variant_no_override() {
         // Query(1000): mode_number=1000, falls through DecRst/None → set_mode=0
         let mode = MouseTrack::Query(1000);
-        assert_eq!(mode.report(None), "\x1b[?1000;0$y");
+        assert_eq!(mode.report(None), "?1000;0$y");
     }
 
     #[test]
     fn report_mouse_track_query_variant_dec_set_override() {
         // With DecSet override, Query is treated same as NoTracking → set_mode=0
         let mode = MouseTrack::Query(1000);
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?1000;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?1000;0$y");
     }
 
     #[test]
     fn report_mouse_track_query_variant_dec_rst_override() {
         let mode = MouseTrack::Query(9);
-        assert_eq!(mode.report(Some(SetMode::DecRst)), "\x1b[?9;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecRst)), "?9;0$y");
     }
 
     #[test]
     fn report_mouse_track_query_variant_dec_query_override() {
         let mode = MouseTrack::Query(1003);
-        assert_eq!(mode.report(Some(SetMode::DecQuery)), "\x1b[?1003;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecQuery)), "?1003;0$y");
     }
 
     // ── MouseTrack::Query Display ────────────────────────────────────
@@ -224,21 +224,21 @@ mod tests {
     fn report_mouse_track_x11_set_no_override() {
         let mode = MouseTrack::XtMseX11;
         // None path → NoTracking check fails (is X11) → set_mode=2
-        assert_eq!(mode.report(None), "\x1b[?1000;2$y");
+        assert_eq!(mode.report(None), "?1000;2$y");
     }
 
     #[test]
     fn report_mouse_track_xt_mse_x10_dec_set_override() {
         let mode = MouseTrack::XtMsex10;
         // DecSet: not NoTracking and not Query → set_mode=1
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?9;1$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?9;1$y");
     }
 
     #[test]
     fn report_mouse_track_no_tracking_dec_set() {
         let mode = MouseTrack::NoTracking;
         // DecSet: NoTracking → i32::from(false) = 0
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?0;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?0;0$y");
     }
 
     // ── MouseEncoding ReportMode edge cases ─────────────────────────
@@ -247,27 +247,27 @@ mod tests {
     fn report_mouse_encoding_sgr_dec_set_override() {
         let mode = MouseEncoding::Sgr;
         // DecSet: Sgr != X11 → set_mode=1
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?1006;1$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?1006;1$y");
     }
 
     #[test]
     fn report_mouse_encoding_sgr_no_override() {
         let mode = MouseEncoding::Sgr;
         // None: Sgr != X11 → set_mode=2
-        assert_eq!(mode.report(None), "\x1b[?1006;2$y");
+        assert_eq!(mode.report(None), "?1006;2$y");
     }
 
     #[test]
     fn report_mouse_encoding_x11_dec_set_override() {
         let mode = MouseEncoding::X11;
         // DecSet: X11 == X11 → i32::from(false) = 0
-        assert_eq!(mode.report(Some(SetMode::DecSet)), "\x1b[?0;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecSet)), "?0;0$y");
     }
 
     #[test]
     fn report_mouse_encoding_dec_query_override() {
         let mode = MouseEncoding::Utf8;
-        assert_eq!(mode.report(Some(SetMode::DecQuery)), "\x1b[?1005;0$y");
+        assert_eq!(mode.report(Some(SetMode::DecQuery)), "?1005;0$y");
     }
 
     // ── MouseEncoding Display ────────────────────────────────────────

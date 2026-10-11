@@ -41,7 +41,7 @@ use crate::buffer_states::modes::{
     unknown::{ModeNamespace, UnknownMode},
     xt_rev_wrap2::XtRevWrap2,
     xtcblink::XtCBlink,
-    xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+    xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
     xtmsewin::XtMseWin,
 };
 
@@ -69,7 +69,6 @@ pub struct TerminalModes {
     pub cursor_key: Decckm,
     pub bracketed_paste: RlBracket,
     pub focus_reporting: XtMseWin,
-    pub cursor_blinking: XtCBlink,
     pub mouse_tracking: MouseTrack,
     /// The wire format for mouse reports, set independently of `mouse_tracking`.
     ///
@@ -79,7 +78,6 @@ pub struct TerminalModes {
     pub synchronized_updates: SynchronizedUpdates,
     pub invert_screen: Decscnm,
     pub repeat_keys: Decarm,
-    pub reverse_wrap_around: ReverseWrapAround,
     pub line_feed_mode: Lnm,
     pub keypad_mode: KeypadMode,
     pub backarrow_key_mode: Decbkm,
@@ -129,6 +127,7 @@ pub enum Mode {
     XtCBlink(XtCBlink),
     XtExtscrn(XtExtscrn),
     AltScreen47(AltScreen47),
+    AltScreen1047(AltScreen1047),
     SaveCursor1048(SaveCursor1048),
     XtMseWin(XtMseWin),
     BracketedPaste(RlBracket),
@@ -205,7 +204,8 @@ impl Mode {
             b"?1045" => Self::XtRevWrap2(XtRevWrap2::new(&mode)),
             b"?1046" => Self::AllowAltScreen(AllowAltScreen::new(&mode)),
             b"?1049" => Self::XtExtscrn(XtExtscrn::new(&mode)),
-            b"?47" | b"?1047" => Self::AltScreen47(AltScreen47::new(&mode)),
+            b"?47" => Self::AltScreen47(AltScreen47::new(&mode)),
+            b"?1047" => Self::AltScreen1047(AltScreen1047::new(&mode)),
             b"?1048" => Self::SaveCursor1048(SaveCursor1048::new(&mode)),
             b"?1070" => Self::PrivateColorRegisters(PrivateColorRegisters::new(&mode)),
             b"?2004" => Self::BracketedPaste(RlBracket::new(&mode)),
@@ -266,6 +266,7 @@ impl ReportMode for Mode {
             Self::XtCBlink(xt_cblink) => xt_cblink.report(override_mode),
             Self::XtExtscrn(xt_extscrn) => xt_extscrn.report(override_mode),
             Self::AltScreen47(alt47) => alt47.report(override_mode),
+            Self::AltScreen1047(alt1047) => alt1047.report(override_mode),
             Self::SaveCursor1048(sc1048) => sc1048.report(override_mode),
             Self::XtMseWin(xt_mse_win) => xt_mse_win.report(override_mode),
             Self::BracketedPaste(rl_bracket) => rl_bracket.report(override_mode),
@@ -287,7 +288,7 @@ impl ReportMode for Mode {
             Self::UnknownQuery(v) => {
                 // convert each digit to a char
                 let digits = v.iter().map(|&x| x as char).collect::<String>();
-                format!("\x1b[?{digits};0$y")
+                format!("?{digits};0$y")
             }
         }
     }
@@ -326,6 +327,7 @@ impl fmt::Display for Mode {
             Self::XtMseWin(xt_mse_win) => write!(f, "{xt_mse_win}"),
             Self::XtExtscrn(xt_extscrn) => write!(f, "{xt_extscrn}"),
             Self::AltScreen47(alt47) => write!(f, "{alt47}"),
+            Self::AltScreen1047(alt1047) => write!(f, "{alt1047}"),
             Self::SaveCursor1048(sc1048) => write!(f, "{sc1048}"),
             Self::BracketedPaste(bracketed_paste) => write!(f, "{bracketed_paste}"),
             Self::ReverseWrapAround(reverse_wrap_around) => write!(f, "{reverse_wrap_around}"),
@@ -397,13 +399,13 @@ mod tests {
     #[test]
     fn report_application_escape_key_set() {
         let mode = Mode::ApplicationEscapeKey(ApplicationEscapeKey::Set);
-        assert_eq!(mode.report(None), "\x1b[?7727;1$y");
+        assert_eq!(mode.report(None), "?7727;1$y");
     }
 
     #[test]
     fn report_in_band_resize_mode_set() {
         let mode = Mode::InBandResizeMode(InBandResizeMode::Set);
-        assert_eq!(mode.report(None), "\x1b[?2048;1$y");
+        assert_eq!(mode.report(None), "?2048;1$y");
     }
 
     // ── Display ─────────────────────────────────────────────────────
@@ -451,13 +453,13 @@ mod tests {
     #[test]
     fn report_declrmm_enabled() {
         let mode = Mode::Declrmm(super::super::modes::declrmm::Declrmm::Enabled);
-        assert_eq!(mode.report(None), "\x1b[?69;1$y");
+        assert_eq!(mode.report(None), "?69;1$y");
     }
 
     #[test]
     fn report_declrmm_disabled() {
         let mode = Mode::Declrmm(super::super::modes::declrmm::Declrmm::Disabled);
-        assert_eq!(mode.report(None), "\x1b[?69;2$y");
+        assert_eq!(mode.report(None), "?69;2$y");
     }
 
     #[test]
@@ -493,14 +495,14 @@ mod tests {
     fn report_theming_dark_ps2() {
         // Theming::Dark → currently dark → Ps=2
         let mode = Mode::Theming(Theming::Dark);
-        assert_eq!(mode.report(None), "\x1b[?2031;2$y");
+        assert_eq!(mode.report(None), "?2031;2$y");
     }
 
     #[test]
     fn report_theming_light_ps1() {
         // Theming::Light → currently light → Ps=1
         let mode = Mode::Theming(Theming::Light);
-        assert_eq!(mode.report(None), "\x1b[?2031;1$y");
+        assert_eq!(mode.report(None), "?2031;1$y");
     }
 
     // ── TerminalModes theming/theme_mode defaults ─────────────────────
@@ -543,7 +545,7 @@ mod tests {
     #[test]
     fn report_unknown_query_decrpm_format() {
         let mode = Mode::UnknownQuery(vec![b'4', b'7']);
-        assert_eq!(mode.report(None), "\x1b[?47;0$y");
+        assert_eq!(mode.report(None), "?47;0$y");
     }
 
     #[test]
@@ -605,21 +607,21 @@ mod tests {
     #[test]
     fn report_decawm_auto_wrap() {
         let mode = Mode::Decawm(Decawm::AutoWrap);
-        assert_eq!(mode.report(None), "\x1b[?7;1$y");
+        assert_eq!(mode.report(None), "?7;1$y");
     }
 
     #[test]
     fn report_irm_insert() {
         use super::super::modes::irm::Irm;
         let mode = Mode::Irm(Irm::Insert);
-        assert_eq!(mode.report(None), "\x1b[4;1$y");
+        assert_eq!(mode.report(None), "4;1$y");
     }
 
     #[test]
     fn report_private_color_registers_private() {
         use super::super::modes::private_color_registers::PrivateColorRegisters;
         let mode = Mode::PrivateColorRegisters(PrivateColorRegisters::Private);
-        assert_eq!(mode.report(None), "\x1b[?1070;1$y");
+        assert_eq!(mode.report(None), "?1070;1$y");
     }
 
     #[test]
@@ -627,7 +629,7 @@ mod tests {
         use super::super::modes::mouse::MouseTrack;
         let mode = Mode::MouseMode(MouseTrack::NoTracking);
         // NoTracking → mode_number=0, set_mode=0 (DecRst/None path)
-        assert_eq!(mode.report(None), "\x1b[?0;0$y");
+        assert_eq!(mode.report(None), "?0;0$y");
     }
 
     #[test]
@@ -635,7 +637,7 @@ mod tests {
         use super::super::modes::mouse::MouseEncoding;
         let mode = Mode::MouseEncodingMode(MouseEncoding::X11);
         // X11 → mode_number=0, set_mode=0 (X11 is default/reset)
-        assert_eq!(mode.report(None), "\x1b[?0;0$y");
+        assert_eq!(mode.report(None), "?0;0$y");
     }
 
     // ── SetMode Display ─────────────────────────────────────────────
@@ -1010,6 +1012,48 @@ mod tests {
         use super::super::modes::xtextscrn::XtExtscrn;
         let s = format!("{}", Mode::XtExtscrn(XtExtscrn::new(&SetMode::DecSet)));
         assert_ne!(s, "");
+    }
+
+    #[test]
+    fn report_alt_screen1047() {
+        use super::super::modes::xtextscrn::AltScreen1047;
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecSet));
+        assert_eq!(mode.report(None), "?1047;1$y");
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecRst));
+        assert_eq!(mode.report(None), "?1047;2$y");
+        let mode = Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecQuery));
+        assert_eq!(mode.report(None), "?1047;0$y");
+    }
+
+    #[test]
+    fn display_alt_screen1047() {
+        use super::super::modes::xtextscrn::AltScreen1047;
+        let s = format!(
+            "{}",
+            Mode::AltScreen1047(AltScreen1047::new(&SetMode::DecSet))
+        );
+        assert_eq!(s, "AltScreen1047 (SET) Alternate Screen");
+    }
+
+    #[test]
+    fn parse_1047_is_distinct_from_47() {
+        use super::super::modes::xtextscrn::{AltScreen47, AltScreen1047};
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecSet),
+            Mode::AltScreen1047(AltScreen1047::Alternate)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecRst),
+            Mode::AltScreen1047(AltScreen1047::Primary)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?1047", SetMode::DecQuery),
+            Mode::AltScreen1047(AltScreen1047::Query)
+        );
+        assert_eq!(
+            Mode::terminal_mode_from_params(b"?47", SetMode::DecSet),
+            Mode::AltScreen47(AltScreen47::Alternate)
+        );
     }
 
     #[test]

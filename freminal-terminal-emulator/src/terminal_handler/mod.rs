@@ -9,8 +9,10 @@ use crate::io::SearchCorpus;
 use crate::snapshot::BufferExtent;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
+use cursor_ops::SavedDecscState;
 use freminal_common::{
     buffer_states::{
+        buffer_type::BufferType,
         command_block::CommandBlock,
         cursor::CursorPos,
         format_tag::FormatTag,
@@ -28,19 +30,19 @@ use freminal_common::{
         modes::declrmm::Declrmm,
         modes::decnrcm::Decnrcm,
         modes::decom::Decom,
+        modes::decsclm::Decsclm,
         modes::decsdm::Decsdm,
         modes::dectcem::Dectcem,
         modes::grapheme::GraphemeClustering,
         modes::in_band_resize_mode::InBandResizeMode,
         modes::irm::Irm,
-        modes::kitty_keyboard::KittyKeyboardFlags,
         modes::lnm::Lnm,
         modes::private_color_registers::PrivateColorRegisters,
         modes::reverse_wrap_around::ReverseWrapAround,
         modes::s8c1t::S8c1t,
         modes::xt_rev_wrap2::XtRevWrap2,
         modes::xtcblink::XtCBlink,
-        modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
+        modes::xtextscrn::{AltScreen47, AltScreen1047, SaveCursor1048, XtExtscrn},
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
         progress::ProgressReport,
@@ -56,9 +58,14 @@ use freminal_common::{
     },
     colors::{ColorPalette, TerminalColor},
     cursor::CursorVisualStyle,
+    host_capabilities::{HostCapabilities, Osc99Support},
     pty_write::PtyWrite,
     themes::ThemePalette,
 };
+use kitty_keyboard_stack::KittyKeyboardStack;
+use reset::ResetKind;
+use screen_scoped::ScreenScoped;
+use scroll_ops::{AltScreenAction, AltScreenMode};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,11 +83,14 @@ mod graphics_iterm2;
 mod graphics_kitty;
 use graphics_kitty::signed_cell_offset;
 mod graphics_sixel;
+mod kitty_keyboard_stack;
 mod notify_99;
 mod osc;
 mod osc_colors;
 mod pty_writer;
 mod reports;
+mod reset;
+mod screen_scoped;
 mod scroll_ops;
 mod sgr;
 mod shell_integration;
@@ -224,14 +234,27 @@ pub struct TerminalHandler {
     show_cursor: Dectcem,
     /// The current cursor shape and blink state.
     cursor_visual_style: CursorVisualStyle,
+    /// The cursor shape and blink state the user configured
+    /// (`config.cursor`).
+    ///
+    /// The baseline RIS and DECSTR restore [`Self::cursor_visual_style`] to,
+    /// as xterm and Ghostty do.  Set only through
+    /// [`Self::set_configured_cursor_visual_style`]; DECSCUSR changes the
+    /// current style alone.
+    configured_cursor_visual_style: CursorVisualStyle,
     /// Whether DEC Special Graphics character remapping is active.
     character_replace: DecSpecialGraphics,
-    /// Saved `character_replace` state from the most recent DECSC.
+    /// The handler-owned half of the most recent DECSC (the charset and the
+    /// SGR rendition), one slot per screen (indexed by `buffer.kind()`),
+    /// mirroring the buffer's own per-screen DECSC slot, which holds the
+    /// position and DECOM.
     ///
     /// The VT100 spec requires DECSC to save the character set designators
     /// (G0/G1) and GL invocation.  Freminal uses a simplified single-flag
-    /// model, so we save just `character_replace` here.
-    saved_character_replace: Option<DecSpecialGraphics>,
+    /// model, so `character_replace` stands in for them; the SGR rendition is
+    /// saved alongside it.  `None` means no DECSC has run on that screen;
+    /// DECRC then homes with default attributes.
+    saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
@@ -277,6 +300,9 @@ pub struct TerminalHandler {
     pre_deccolm_width: Option<usize>,
     /// Active color theme for default palette lookups.
     theme: &'static ThemePalette,
+    /// Host-dependent capability facts (configuration and platform) the GUI
+    /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
+    host_capabilities: HostCapabilities,
     /// Dynamic foreground color override (set via OSC 10; reset via OSC 110).
     ///
     /// When `Some`, responses to OSC 10 queries use this value instead of the
@@ -321,20 +347,26 @@ pub struct TerminalHandler {
     /// subsequent `m=1` chunks, and consumed by a final `m=0` chunk. A cap
     /// error moves it to `Discarding` until the transfer's final chunk.
     kitty_transfer: KittyTransfer,
-    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands.
+    /// Virtual placements created by Kitty `a=p,U=1` or `a=T,U=1` commands,
+    /// one map per screen.
     ///
     /// Keyed by `(image_id, placement_id)`.  When U+10EEEE placeholder characters
     /// appear in the text stream, these are looked up to determine image tile
-    /// dimensions.
-    virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
-    /// First-class real (cell-stamped) placements, keyed by (`image_id`,
-    /// `placement_id`). Enables relative placements (parent link) and
-    /// cascade delete (Task 100.4a).
-    real_placements: HashMap<(u64, u32), RealPlacement>,
-    /// The buffer's row base when `real_placements` was last pruned of entries
-    /// whose origin row has been evicted. Pruning only runs when the base has
-    /// moved off this value; see `TerminalHandler::prune_evicted_real_placements`.
-    placement_prune_base: RowNumber,
+    /// dimensions.  Like kitty's per-screen graphics manager, every operation
+    /// acts on the active screen's map; the other screen's map is parked with
+    /// its image store and persists until that screen is cleared.
+    virtual_placements: ScreenScoped<HashMap<(u64, u32), VirtualPlacement>>,
+    /// First-class real (cell-stamped) placements, one map per screen, keyed by
+    /// (`image_id`, `placement_id`). Enables relative placements (parent link)
+    /// and cascade delete (Task 100.4a).  Per screen for the same reason as
+    /// `virtual_placements`.
+    real_placements: ScreenScoped<HashMap<(u64, u32), RealPlacement>>,
+    /// Per screen, the buffer's row base when that screen's `real_placements`
+    /// map was last pruned of entries whose origin row has been evicted.
+    /// Pruning only runs when the active screen's base has moved off this
+    /// value; see `TerminalHandler::prune_evicted_real_placements`.  Starts at
+    /// each screen's namespace origin.
+    placement_prune_base: ScreenScoped<RowNumber>,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -352,21 +384,16 @@ pub struct TerminalHandler {
     /// dimensions to cell counts.  Defaults to 16 until the first resize
     /// event provides real font metrics.
     cell_pixel_height: u32,
-    /// Raw bytes queued for re-parsing by the emulator layer.
+    /// Un-doubled inner payloads from tmux DCS passthrough, awaiting the
+    /// real parser.
     ///
-    /// tmux DCS passthrough can contain inner CSI or OSC sequences that
-    /// `TerminalHandler` cannot parse directly (the ANSI parser lives in
-    /// the `freminal-terminal-emulator` crate).  These bytes are queued here
-    /// and drained by `TerminalState::handle_incoming_data()` after
-    /// `process_outputs()` returns, fed back through the parser, and
-    /// processed as normal terminal output.
-    tmux_reparse_queue: Vec<Vec<u8>>,
-    /// True while dispatching an inner sequence from a tmux DCS passthrough.
-    ///
-    /// When set, [`write_to_pty`] wraps the outgoing response in a DCS tmux
-    /// passthrough envelope (`ESC P tmux; <doubled-ESC payload> ESC \`) so
-    /// that tmux can relay it back to the requesting client.
-    in_tmux_passthrough: bool,
+    /// `TerminalHandler` has no ANSI parser (it lives in this crate's
+    /// `ansi` module and is owned by `TerminalState`), so
+    /// `handle_tmux_passthrough` queues each whole inner sequence here.
+    /// `TerminalState` takes the queue immediately after the output that
+    /// produced it, parses every payload with a fresh parser and processes
+    /// the result in event order.
+    tmux_passthrough_queue: Vec<Vec<u8>>,
     /// Current xterm `modifyOtherKeys` level (0, 1, or 2).
     ///
     /// Set by `CSI > 4 ; Pv m`.  Level 0 is the default (disabled).
@@ -437,18 +464,15 @@ pub struct TerminalHandler {
     /// `0x90` instead of `ESC P`, OSC uses `0x9D` instead of `ESC ]`, and ST
     /// uses `0x9C` instead of `ESC \`.  Default is `SevenBit`.
     s8c1t_mode: S8c1t,
-    /// Kitty keyboard protocol mode stack.
+    /// Kitty keyboard protocol mode stack, one per screen.
     ///
-    /// Each entry is a `u32` bitmask.  Programs push on entry via `CSI > flags u`
-    /// and pop on exit via `CSI < number u`.  The active flags are
-    /// `kitty_keyboard_stack.last().copied().unwrap_or(0)`.
-    /// Bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`] (256) entries.
-    kitty_keyboard_stack: Vec<u32>,
-    /// Saved main-screen KKP stack when alternate screen is active.
-    ///
-    /// The spec requires main and alternate screens to maintain independent
-    /// keyboard mode stacks.
-    saved_kitty_keyboard_stack: Option<Vec<u32>>,
+    /// Programs push on entry via `CSI > flags u` and pop on exit via
+    /// `CSI < number u`.  The active flags are the top entry of the stack for
+    /// the screen the buffer currently shows (`buffer.kind()`).  The two
+    /// stacks are independent and each persists across screen switches, so
+    /// neither entering nor leaving the alternate screen touches either one.
+    /// Each is bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`](freminal_common::buffer_states::modes::kitty_keyboard::KittyKeyboardFlags::MAX_STACK_DEPTH) (256) entries.
+    kitty_keyboard_stack: ScreenScoped<KittyKeyboardStack>,
     /// In-flight OSC 99 notification accumulators, keyed by the `i=` id.
     ///
     /// Multi-chunk notifications arrive with `d=0` chunks that must be
@@ -468,8 +492,9 @@ impl TerminalHandler {
             current_format: FormatTag::default(),
             show_cursor: Dectcem::default(),
             cursor_visual_style: CursorVisualStyle::default(),
+            configured_cursor_visual_style: CursorVisualStyle::default(),
             character_replace: DecSpecialGraphics::default(),
-            saved_character_replace: None,
+            saved_decsc: ScreenScoped::default(),
             write_tx: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
@@ -483,6 +508,7 @@ impl TerminalHandler {
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            host_capabilities: HostCapabilities::default(),
             fg_color_override: None,
             bg_color_override: None,
             cursor_color_override: None,
@@ -491,28 +517,26 @@ impl TerminalHandler {
             progress_updated_at: None,
             multipart_state: None,
             kitty_transfer: KittyTransfer::Idle,
-            virtual_placements: HashMap::new(),
-            real_placements: HashMap::new(),
-            placement_prune_base: RowNumber::ZERO,
+            virtual_placements: ScreenScoped::default(),
+            real_placements: ScreenScoped::default(),
+            placement_prune_base: ScreenScoped::new(RowNumber::ZERO, RowNumber::ALTERNATE_BASE),
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
-            tmux_reparse_queue: Vec::new(),
-            in_tmux_passthrough: false,
+            tmux_passthrough_queue: Vec::new(),
             modify_other_keys_level: 0,
             application_escape_key: ApplicationEscapeKey::Reset,
             in_band_resize_enabled: InBandResizeMode::Reset,
             sixel_display_mode: Decsdm::ScrollingMode,
             private_color_registers: PrivateColorRegisters::Private,
             nrc_mode: Decnrcm::NrcDisabled,
-            reverse_wrap: ReverseWrapAround::WrapAround,
+            reverse_wrap: ReverseWrapAround::default(),
             xt_rev_wrap2: XtRevWrap2::Disabled,
             vt52_mode: Decanm::Ansi,
             insert_mode: Irm::Replace,
             sixel_shared_palette: None,
             s8c1t_mode: S8c1t::SevenBit,
-            kitty_keyboard_stack: Vec::new(),
-            saved_kitty_keyboard_stack: None,
+            kitty_keyboard_stack: ScreenScoped::default(),
             pending_notifications: notify_99::PendingNotifications::new(),
         }
     }
@@ -534,6 +558,30 @@ impl TerminalHandler {
     /// Set the active theme palette.
     pub const fn set_theme(&mut self, theme: &'static ThemePalette) {
         self.theme = theme;
+    }
+
+    /// Get the host-dependent capability facts.
+    #[must_use]
+    pub const fn host_capabilities(&self) -> HostCapabilities {
+        self.host_capabilities
+    }
+
+    /// Set the host-dependent capability facts.
+    ///
+    /// Called with the GUI's value at pane spawn and again whenever a config
+    /// change alters it. Not touched by a terminal reset: these are facts about
+    /// the host, not terminal state.
+    ///
+    /// When the new value leaves OSC 99 unsupported, every in-flight OSC 99
+    /// chunk accumulator is discarded. Chunks received while unsupported are
+    /// dropped before reassembly, so without this a transfer begun while
+    /// supported could be completed by a later chunk after re-enabling,
+    /// splicing text from two separate eras of host configuration.
+    pub fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
+        if matches!(host_capabilities.osc99, Osc99Support::Unsupported) {
+            self.pending_notifications.clear();
+        }
+        self.host_capabilities = host_capabilities;
     }
 
     /// Get the current S8C1T mode.
@@ -623,52 +671,52 @@ impl TerminalHandler {
         Some(Self::PROGRESS_STALE_TIMEOUT.saturating_sub(updated_at.elapsed()))
     }
 
+    /// Set the configured cursor shape / blink style, and apply it.
+    ///
+    /// Used to seed the style from `config.cursor` when a pane is spawned and
+    /// to apply a live Settings change (issue #406).  Sets both the current
+    /// style and the configured baseline that [`Self::full_reset`] (RIS) and
+    /// [`Self::soft_reset`] (DECSTR) restore the current style to.  A
+    /// program's own DECSCUSR / `XTCBlink` request changes only the current
+    /// style, so it takes over normally afterwards and the next reset puts
+    /// the configured style back.
+    pub fn set_configured_cursor_visual_style(&mut self, style: CursorVisualStyle) {
+        self.configured_cursor_visual_style = style.clone();
+        self.cursor_visual_style = style;
+    }
+
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
-    /// Restores the handler and buffer to initial startup state.
-    /// Preserves the PTY write channel and terminal geometry/scrollback config.
+    /// Restores the handler and buffer to initial startup state, following
+    /// the reset table (`terminal_handler/reset.rs`): [`ResetKind::Hard`].
+    /// Preserves the PTY write channel and terminal geometry/scrollback
+    /// config.
     ///
-    /// If DECCOLM had changed the column width to 132, this resets it back
-    /// to 80 columns and sends a PTY resize notification.
+    /// The cursor style returns to the configured one
+    /// ([`Self::set_configured_cursor_visual_style`]), not the compiled
+    /// default.
+    ///
+    /// The following survive, because they describe the process or are
+    /// already-emitted events in transit, not the screen: queued window
+    /// commands, pending OSC 133 command events, the OSC 7 working directory
+    /// and the reported `$HISTFILE`.  The theme, font metrics, `?1046`
+    /// and the tmux passthrough queue survive as configuration or transport.
+    ///
+    /// If DECCOLM had changed the column width, this restores the width it
+    /// had before and sends a PTY resize notification.  If DECCOLM never
+    /// changed the width, the width is left alone (xterm resets the column
+    /// mode only `if c132 && IN132COLUMNS`).
     pub fn full_reset(&mut self) {
-        // If DECCOLM switched us to a different width, restore the pre-DECCOLM
-        // width.  Fall back to 80 if no prior width was saved.
         let prev_width = self.buffer.terminal_width();
-        let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
-        self.buffer.full_reset();
-        if prev_width != restore_width {
+        let deccolm_restore_width = self.pre_deccolm_width.take();
+        self.reset(ResetKind::Hard);
+        if let Some(restore_width) = deccolm_restore_width
+            && prev_width != restore_width
+        {
             self.buffer.set_column_mode(restore_width);
             self.apply_buffer_reflow_remap();
             self.send_pty_resize(restore_width);
         }
-        self.current_format = FormatTag::default();
-        self.show_cursor = Dectcem::default();
-        self.cursor_visual_style = CursorVisualStyle::default();
-        self.character_replace = DecSpecialGraphics::default();
-        self.saved_character_replace = None;
-        self.window_commands.clear();
-        self.pending_command_events.clear();
-        self.last_graphic_char = None;
-        self.current_working_directory = None;
-        self.shell_histfile = None;
-        self.ftcs_state = FtcsState::default();
-        self.last_exit_code = None;
-        self.palette.reset_all();
-        self.fg_color_override = None;
-        self.bg_color_override = None;
-        self.cursor_color_override = None;
-        self.pointer_shape = PointerShape::Default;
-        self.progress = ProgressReport::default();
-        self.progress_updated_at = None;
-        self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
-        self.virtual_placements.clear();
-        self.real_placements.clear();
-        self.prev_placeholder = None;
-        self.modify_other_keys_level = 0;
-        self.application_escape_key = ApplicationEscapeKey::Reset;
-        self.kitty_keyboard_stack.clear();
-        self.saved_kitty_keyboard_stack = None;
-        self.pending_notifications.clear();
     }
 
     /// Soft terminal reset (DECSTR — `CSI ! p`).
@@ -676,25 +724,27 @@ impl TerminalHandler {
     /// Resets the subset of modes, margins, and attributes listed in
     /// Table 5-9 of the VT510 Programmer Reference
     /// (<https://vt100.net/docs/vt510-rm/DECSTR.html>) to their power-on
-    /// defaults. Unlike [`Self::full_reset`] (RIS), this does **not** clear
-    /// screen content, scrollback, images, the palette, colour overrides,
-    /// the window title, the working directory, command blocks, tab stops,
-    /// the Kitty keyboard stack, or the alternate-screen flag — and it does
-    /// **not** move the live cursor.
+    /// defaults ([`ResetKind::Soft`], see `terminal_handler/reset.rs`).
+    /// Unlike [`Self::full_reset`] (RIS), this does **not** clear screen
+    /// content, scrollback, images, colour overrides, the window title,
+    /// the working directory, command blocks, tab stops, or the
+    /// alternate-screen flag — and it does **not** move the live cursor.
     ///
     /// ## Table 5-9 items implemented here
     /// - DECTCEM (text cursor enable) → cursor enabled
     /// - IRM (insert/replace) → replace mode
     /// - DECOM (origin mode) → absolute (off), without moving the live cursor
-    /// - DECAWM (autowrap) → **no** autowrap — note this is *not* the
-    ///   `Decawm` enum's `Default` (which is `AutoWrap`)
+    /// - DECAWM (autowrap) → autowrap **on**.  Table 5-9 literally says "no
+    ///   autowrap", but xterm (which notes the deviation), Ghostty, `WezTerm`
+    ///   and kitty all reset it to the default, which is on
     /// - DECNRCM (national replacement character sets) → disabled
     /// - DECSTBM (top/bottom margins) → top = row 1, bottom = page length
     /// - G0 DEC Special Graphics → default (off)
     /// - SGR (select graphic rendition) → normal rendition, for
     ///   subsequently-written characters
     /// - DECSC (saved cursor state) → home position, so a subsequent DECRC
-    ///   restores there
+    ///   restores there; only the **active** screen's saved cursor and
+    ///   saved charset are touched
     ///
     /// KAM (keyboard action mode, unlocked) has no representation in
     /// freminal and is a no-op (see the list below). DECCKM (cursor keys)
@@ -719,7 +769,7 @@ impl TerminalHandler {
     /// - Full G1/G2/G3 character-set designation — freminal only models a
     ///   single G0 DEC-special-graphics toggle, not independent G0–G3 slots
     ///
-    /// ## Deliberate deviation from Table 5-9
+    /// ## Deliberate deviations from Table 5-9
     /// Table 5-9 predates DECSLRM (left/right margins). freminal
     /// additionally resets DECLRMM to `Disabled` and the left/right
     /// margins to full width here. This is *not* required by Table 5-9;
@@ -730,10 +780,20 @@ impl TerminalHandler {
     /// vertical scroll region resets would be an inconsistent margin
     /// state.
     ///
-    /// Table 5-9 also predates OSC 9;4 progress reporting. freminal
-    /// additionally clears the OSC 9;4 progress state here — this is
-    /// freminal-private state with no VT510 representation at all, cleared
-    /// because issue #507 requires it, not because Table 5-9 mandates it.
+    /// Table 5-9 also predates these, which freminal resets because the
+    /// reference terminals do (the reset table in
+    /// `Documents/PLAN_VERSION_130.md` records each source):
+    /// - the cursor style → the configured one
+    ///   ([`Self::set_configured_cursor_visual_style`]) (xterm, Ghostty);
+    /// - `modifyOtherKeys` → level 0 (xterm, Ghostty, `WezTerm`);
+    /// - the OSC 4 palette overrides → the theme's palette (xterm, Ghostty,
+    ///   kitty);
+    /// - reverse wrap (`?45`) and extended reverse wrap (`?1045`) → off
+    ///   (xterm, Ghostty, `WezTerm`);
+    /// - the OSC 22 pointer shape → default, and **both** kitty keyboard
+    ///   stacks (main and alternate) → empty (kitty's `do_screen_reset`);
+    /// - the OSC 9;4 progress state, which is freminal-private (issue
+    ///   #507).
     ///
     /// ## Saved character set
     /// Table 5-9 resets the DECSC state to home position with default
@@ -742,56 +802,13 @@ impl TerminalHandler {
     /// default (`Some(DecSpecialGraphics::default())`), not left as `None`
     /// ("nothing saved"). Otherwise a program that designated DEC Special
     /// Graphics after DECSTR and then issued DECRC without its own DECSC
-    /// would keep the graphics set. RIS ([`Self::full_reset`]) still uses
-    /// `None`: it records no save at all, and xterm's behaviour for DECRC
-    /// with nothing saved is tracked separately in
-    /// `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+    /// would keep the graphics set. RIS ([`Self::full_reset`]) records no
+    /// save at all (`None` in both screens' slots); DECRC with nothing saved
+    /// homes the cursor and resets the SGR rendition and character set to
+    /// their defaults, as xterm and Ghostty do, so the two resets are
+    /// indistinguishable to a program.
     pub fn soft_reset(&mut self) {
-        self.show_cursor = Dectcem::Show;
-        self.insert_mode = Irm::Replace;
-        self.buffer.set_wrap(Decawm::NoAutoWrap);
-        self.nrc_mode = Decnrcm::NrcDisabled;
-
-        // Capture the live cursor's current screen position up front — every
-        // step below that touches DECOM or the scroll region homes the
-        // cursor as a side effect, and DECSTR must not move the live cursor.
-        let live_pos = self.buffer.cursor_screen_pos();
-
-        // DECOM -> Absolute (off). `Buffer::set_decom` homes the cursor as a
-        // side effect; capture that homed position into the *saved* cursor
-        // (DECSC state) via `save_cursor()` before undoing the side effect —
-        // Table 5-9 wants DECSC to be at home position after DECSTR, and the
-        // saved cursor's attributes are already default (nothing else in
-        // this codebase mutates them outside a save/restore round trip).
-        self.buffer.set_decom(Decom::NormalCursor);
-        self.buffer.save_cursor();
-        self.saved_character_replace = Some(DecSpecialGraphics::default());
-
-        // DECSTBM -> top = 1, bottom = page length. Also homes the cursor;
-        // restored below along with DECOM's homing.
-        self.buffer.reset_scroll_region_to_full();
-
-        // Deliberate deviation from Table 5-9 (see doc comment above):
-        // disabling DECLRMM also resets the left/right margins to full
-        // width, for consistency with the DECSTBM reset just above.
-        self.buffer.set_declrmm(Declrmm::Disabled);
-
-        // Restore the live cursor to exactly where it was.
-        self.buffer
-            .set_cursor_pos(Some(live_pos.x), Some(live_pos.y));
-
-        // SGR -> normal rendition, for subsequently-written characters.
-        self.current_format = FormatTag::default();
-        self.buffer.set_format(FormatTag::default());
-
-        // G0 DEC Special Graphics -> default (off).
-        self.character_replace = DecSpecialGraphics::default();
-
-        // Not on VT510 Table 5-9 — this is freminal-private state (OSC 9;4
-        // progress, issue #507), cleared here because issue #507 requires
-        // DECSTR to reset it, not because the spec mandates it.
-        self.progress = ProgressReport::default();
-        self.progress_updated_at = None;
+        self.reset(ResetKind::Soft);
     }
 
     /// Get a reference to the underlying buffer
@@ -835,7 +852,7 @@ impl TerminalHandler {
         };
 
         // Fast path: if no virtual placements exist, no placeholder can resolve.
-        if self.virtual_placements.is_empty() {
+        if self.active_virtual_placements().is_empty() {
             if let Some(last) = text.last() {
                 self.last_graphic_char = Some(*last);
             }
@@ -935,12 +952,12 @@ impl TerminalHandler {
 
         // Look up a matching virtual placement.
         let vp = self
-            .virtual_placements
+            .active_virtual_placements()
             .get(&(full_image_id, placement_id))
             .or_else(|| {
                 // Fall back to placement_id=0 (any virtual placement for this image).
                 if placement_id != 0 {
-                    self.virtual_placements.get(&(full_image_id, 0))
+                    self.active_virtual_placements().get(&(full_image_id, 0))
                 } else {
                     None
                 }
@@ -1081,10 +1098,12 @@ impl TerminalHandler {
         self.write_tx = Some(tx);
     }
 
-    /// Drain and return all queued raw-byte sequences from tmux passthrough
-    /// that need to be re-parsed by the ANSI parser.
-    pub fn take_tmux_reparse_queue(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.tmux_reparse_queue)
+    /// Drain and return all inner payloads queued by tmux DCS passthrough.
+    ///
+    /// Each entry is one complete, un-doubled escape sequence (starting with
+    /// `ESC`) that the caller must run through the ANSI parser.
+    pub fn take_tmux_passthrough_queue(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.tmux_passthrough_queue)
     }
 
     /// Return the current working directory reported by the shell via OSC 7, if any.
@@ -1135,10 +1154,11 @@ impl TerminalHandler {
 
     /// Returns the currently active Kitty keyboard protocol flags.
     ///
-    /// Returns `0` when the stack is empty (protocol not active).
+    /// Reads the stack for the screen the buffer currently shows.  Returns `0`
+    /// when that stack is empty (protocol not active).
     #[must_use]
     pub fn kitty_keyboard_flags(&self) -> u32 {
-        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
+        self.kitty_keyboard_stack.get(self.buffer.kind()).current()
     }
 
     /// Return the complete GUI data set: visible and scrollback content as
@@ -1300,6 +1320,53 @@ impl TerminalHandler {
         self.buffer.visible_image_placements(scroll_offset)
     }
 
+    /// The active screen's virtual (Unicode placeholder) placements.
+    ///
+    /// The kitty placement maps are per screen (kitty keeps one graphics
+    /// manager per screen), so every placement operation goes through the
+    /// active screen's map, selected by the buffer's own notion of which
+    /// screen is active.
+    const fn active_virtual_placements(&self) -> &HashMap<(u64, u32), VirtualPlacement> {
+        self.virtual_placements.get(self.buffer.kind())
+    }
+
+    /// Mutable form of [`Self::active_virtual_placements`].
+    const fn active_virtual_placements_mut(
+        &mut self,
+    ) -> &mut HashMap<(u64, u32), VirtualPlacement> {
+        self.virtual_placements.get_mut(self.buffer.kind())
+    }
+
+    /// The active screen's real (cell-stamped) placements; see
+    /// [`Self::active_virtual_placements`].
+    const fn active_real_placements(&self) -> &HashMap<(u64, u32), RealPlacement> {
+        self.real_placements.get(self.buffer.kind())
+    }
+
+    /// Mutable form of [`Self::active_real_placements`].
+    const fn active_real_placements_mut(&mut self) -> &mut HashMap<(u64, u32), RealPlacement> {
+        self.real_placements.get_mut(self.buffer.kind())
+    }
+
+    /// Blank the alternate screen and drop the kitty placements recorded
+    /// against it.
+    ///
+    /// The buffer clear empties the alternate image store, so a placement map
+    /// entry that survived would name an image that no longer exists.  Both
+    /// alternate-screen clears (`?1049` enter, `?1047` leave) go through here.
+    /// Valid only while the alternate screen is active, like the buffer's own
+    /// clear; on the primary screen it does nothing.
+    pub(super) fn clear_alternate_screen(&mut self) {
+        if self.buffer.kind() != BufferType::Alternate {
+            return;
+        }
+        self.buffer.clear_alternate_screen();
+        self.virtual_placements
+            .get_mut(BufferType::Alternate)
+            .clear();
+        self.real_placements.get_mut(BufferType::Alternate).clear();
+    }
+
     /// Like [`Self::visible_image_placements`] but extends the window upward by
     /// `extra_rows` (command-block fold support). The returned vector matches
     /// the extended `visible_chars` layout.
@@ -1320,7 +1387,7 @@ impl TerminalHandler {
             .buffer
             .visible_image_placements_extended(scroll_offset, extra_rows);
         let term_width = self.win_size().0;
-        if term_width > 0 && !self.real_placements.is_empty() {
+        if term_width > 0 && !self.active_real_placements().is_empty() {
             self.inject_virtual_parent_relatives(&mut placements, term_width);
         }
         placements
@@ -1355,11 +1422,11 @@ impl TerminalHandler {
             return;
         }
 
-        for (&(child_img, child_pid), child) in &self.real_placements {
+        for (&(child_img, child_pid), child) in self.active_real_placements() {
             let Some(parent_key) = child.parent else {
                 continue;
             };
-            if !self.virtual_placements.contains_key(&parent_key) {
+            if !self.active_virtual_placements().contains_key(&parent_key) {
                 // Real-parent child — already stamped into the buffer by
                 // Task 100.4a; nothing to derive here.
                 continue;
@@ -1450,20 +1517,38 @@ impl TerminalHandler {
     ///
     /// This is the main entry point for integrating with the parser.
     /// It dispatches each `TerminalOutput` variant to the appropriate handler method.
+    ///
+    /// A tmux DCS passthrough payload is only **queued** here
+    /// (see [`Self::take_tmux_passthrough_queue`]); the handler never executes
+    /// it. The payload runs only when `TerminalState` drives processing, which
+    /// drains the queue after each output and processes every payload through a
+    /// fresh parser. A caller that feeds a handler directly must drain the queue
+    /// itself, or a tmux payload has no effect.
     pub fn process_outputs(&mut self, outputs: &[TerminalOutput]) {
         for output in outputs {
-            self.process_output(output);
+            self.process_output_in_batch(output);
         }
-        // Once per batch, not per line feed: see the method's cost note.
+        self.finish_output_batch();
+    }
+
+    /// End-of-batch housekeeping for callers that drive
+    /// [`Self::process_output_in_batch`] one output at a time.
+    ///
+    /// Runs once per batch, not per line feed: see the cost note on
+    /// `prune_evicted_real_placements`.
+    pub(crate) fn finish_output_batch(&mut self) {
         self.prune_evicted_real_placements();
     }
 
-    /// Process a single `TerminalOutput` command
+    /// Process a single `TerminalOutput` command as part of a batch.
+    ///
+    /// The caller must call [`Self::finish_output_batch`] once after the last
+    /// output of the batch.
     // Inherently large: exhaustive match over all `TerminalOutput` variants. Each arm is
     // tightly coupled to buffer state. Splitting would require passing the full handler context
     // to sub-functions without any reduction in complexity.
     #[allow(clippy::too_many_lines)]
-    fn process_output(&mut self, output: &TerminalOutput) {
+    pub(crate) fn process_output_in_batch(&mut self, output: &TerminalOutput) {
         match output {
             // === Implemented Operations ===
             TerminalOutput::Data(bytes) => {
@@ -1591,22 +1676,53 @@ impl TerminalHandler {
             }
             TerminalOutput::Mode(mode) => match mode {
                 Mode::XtExtscrn(XtExtscrn::Alternate)
-                | Mode::AltScreen47(AltScreen47::Alternate)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
-                    self.handle_enter_alternate();
+                    self.handle_alternate_screen(
+                        AltScreenMode::SaveClear1049,
+                        AltScreenAction::Enter,
+                    );
                 }
-                Mode::XtExtscrn(XtExtscrn::Primary) | Mode::AltScreen47(AltScreen47::Primary)
+                Mode::XtExtscrn(XtExtscrn::Primary)
                     if self.allow_alt_screen == AllowAltScreen::Allow =>
                 {
-                    self.handle_leave_alternate();
+                    self.handle_alternate_screen(
+                        AltScreenMode::SaveClear1049,
+                        AltScreenAction::Leave,
+                    );
+                }
+                Mode::AltScreen47(AltScreen47::Alternate)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Enter);
+                }
+                Mode::AltScreen47(AltScreen47::Primary)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(AltScreenMode::Legacy47, AltScreenAction::Leave);
+                }
+                Mode::AltScreen1047(AltScreen1047::Alternate)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(
+                        AltScreenMode::Clearing1047,
+                        AltScreenAction::Enter,
+                    );
+                }
+                Mode::AltScreen1047(AltScreen1047::Primary)
+                    if self.allow_alt_screen == AllowAltScreen::Allow =>
+                {
+                    self.handle_alternate_screen(
+                        AltScreenMode::Clearing1047,
+                        AltScreenAction::Leave,
+                    );
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Save) => self.handle_save_cursor(),
                 Mode::SaveCursor1048(SaveCursor1048::Restore) => self.handle_restore_cursor(),
                 // Query variants: report current mode state via DECRPM response
                 Mode::Dectem(Dectcem::Query) => {
                     let current = &self.show_cursor;
-                    self.write_to_pty(&current.report(None));
+                    self.write_csi_response(&current.report(None));
                 }
                 Mode::Decawm(Decawm::Query) => {
                     let mode = if self.buffer.is_wrap_enabled() == Decawm::AutoWrap {
@@ -1614,7 +1730,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decawm::AutoWrap.report(Some(mode)));
+                    self.write_csi_response(&Decawm::AutoWrap.report(Some(mode)));
                 }
                 Mode::LineFeedMode(Lnm::Query) => {
                     let mode = if self.buffer.is_lnm_enabled() == Lnm::NewLine {
@@ -1622,7 +1738,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Lnm::NewLine.report(Some(mode)));
+                    self.write_csi_response(&Lnm::NewLine.report(Some(mode)));
                 }
                 Mode::XtExtscrn(XtExtscrn::Query) => {
                     let mode = if self.is_alternate_screen() {
@@ -1630,7 +1746,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtExtscrn::Alternate.report(Some(mode)));
+                    self.write_csi_response(&XtExtscrn::Alternate.report(Some(mode)));
                 }
                 Mode::AltScreen47(AltScreen47::Query) => {
                     let mode = if self.is_alternate_screen() {
@@ -1638,7 +1754,15 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&AltScreen47::Alternate.report(Some(mode)));
+                    self.write_csi_response(&AltScreen47::Alternate.report(Some(mode)));
+                }
+                Mode::AltScreen1047(AltScreen1047::Query) => {
+                    let mode = if self.is_alternate_screen() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_csi_response(&AltScreen1047::Alternate.report(Some(mode)));
                 }
                 Mode::SaveCursor1048(SaveCursor1048::Query) => {
                     // Report based on whether a cursor has actually been saved
@@ -1648,7 +1772,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&SaveCursor1048::Save.report(Some(mode)));
+                    self.write_csi_response(&SaveCursor1048::Save.report(Some(mode)));
                 }
                 Mode::XtCBlink(XtCBlink::Query) => {
                     let is_blinking = matches!(
@@ -1662,7 +1786,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtCBlink::Blinking.report(Some(mode)));
+                    self.write_csi_response(&XtCBlink::Blinking.report(Some(mode)));
                 }
                 Mode::UnknownQuery(params) => {
                     // Unknown mode — respond with Ps=0 (not recognized)
@@ -1685,7 +1809,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decom::OriginMode.report(Some(mode)));
+                    self.write_csi_response(&Decom::OriginMode.report(Some(mode)));
                 }
                 Mode::Deccolm(Deccolm::Column132)
                     if self.allow_column_mode_switch
@@ -1719,7 +1843,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Deccolm::Column132.report(Some(mode)));
+                    self.write_csi_response(&Deccolm::Column132.report(Some(mode)));
                 }
                 // ── DECLRMM — Left/Right Margin Mode (?69) ───────
                 Mode::Declrmm(Declrmm::Enabled) => {
@@ -1735,7 +1859,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Declrmm::Enabled.report(Some(mode)));
+                    self.write_csi_response(&Declrmm::Enabled.report(Some(mode)));
                 }
                 Mode::AllowColumnModeSwitch(AllowColumnModeSwitch::AllowColumnModeSwitch) => {
                     self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
@@ -1751,7 +1875,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(
+                    self.write_csi_response(
                         &AllowColumnModeSwitch::AllowColumnModeSwitch.report(Some(mode)),
                     );
                 }
@@ -1768,7 +1892,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decsdm::DisplayMode.report(Some(mode)));
+                    self.write_csi_response(&Decsdm::DisplayMode.report(Some(mode)));
                 }
                 // ── Allow Alternate Screen Switching (?1046) ──────────
                 Mode::AllowAltScreen(AllowAltScreen::Allow) => {
@@ -1783,7 +1907,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&AllowAltScreen::Allow.report(Some(mode)));
+                    self.write_csi_response(&AllowAltScreen::Allow.report(Some(mode)));
                 }
                 // ── Private Color Registers for Sixel (?1070) ────────
                 Mode::PrivateColorRegisters(PrivateColorRegisters::Private) => {
@@ -1800,7 +1924,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&PrivateColorRegisters::Private.report(Some(mode)));
+                    self.write_csi_response(&PrivateColorRegisters::Private.report(Some(mode)));
                 }
                 // ── DECNRCM — National Replacement Character Set (?42) ─
                 Mode::Decnrcm(Decnrcm::NrcEnabled) => {
@@ -1815,7 +1939,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&Decnrcm::NrcEnabled.report(Some(mode)));
+                    self.write_csi_response(&Decnrcm::NrcEnabled.report(Some(mode)));
                 }
                 // ── Reverse Wrap Around (?45) ─────────────────────
                 Mode::ReverseWrapAround(ReverseWrapAround::WrapAround) => {
@@ -1830,7 +1954,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&ReverseWrapAround::WrapAround.report(Some(mode)));
+                    self.write_csi_response(&ReverseWrapAround::WrapAround.report(Some(mode)));
                 }
                 // ── Extended Reverse Wrap (?1045) ─────────────────
                 Mode::XtRevWrap2(XtRevWrap2::Enabled) => {
@@ -1845,7 +1969,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&XtRevWrap2::Enabled.report(Some(mode)));
+                    self.write_csi_response(&XtRevWrap2::Enabled.report(Some(mode)));
                 }
                 // ── DECANM — ANSI/VT52 Mode (?2) ─────────────────
                 Mode::Decanm(Decanm::Vt52) => {
@@ -1860,7 +1984,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecSet
                     };
-                    self.write_to_pty(&Decanm::Ansi.report(Some(mode)));
+                    self.write_csi_response(&Decanm::Ansi.report(Some(mode)));
                 }
                 // ── Modes handled by TerminalState's mode-sync loop ──
                 // These are GUI/input-concern modes tracked in
@@ -1874,6 +1998,7 @@ impl TerminalHandler {
                 // allow_column_mode_switch permission, are also silently ignored.
                 Mode::XtExtscrn(XtExtscrn::Alternate | XtExtscrn::Primary)
                 | Mode::AltScreen47(AltScreen47::Alternate | AltScreen47::Primary)
+                | Mode::AltScreen1047(AltScreen1047::Alternate | AltScreen1047::Primary)
                 | Mode::Deccolm(Deccolm::Column132 | Deccolm::Column80)
                 | Mode::Decckm(_)
                 | Mode::BracketedPaste(_)
@@ -1904,7 +2029,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&ApplicationEscapeKey::Set.report(Some(mode)));
+                    self.write_csi_response(&ApplicationEscapeKey::Set.report(Some(mode)));
                 }
 
                 // ── In-Band Resize Notifications (?2048) ──────────────
@@ -1922,7 +2047,7 @@ impl TerminalHandler {
                     } else {
                         SetMode::DecRst
                     };
-                    self.write_to_pty(&InBandResizeMode::Set.report(Some(mode)));
+                    self.write_csi_response(&InBandResizeMode::Set.report(Some(mode)));
                 }
 
                 // ── Grapheme Clustering (?2027) — permanently on ────
@@ -1930,16 +2055,37 @@ impl TerminalHandler {
                 // graphemes(true), so Query always reports ";3$y"
                 // (permanently set). Set/Reset are in the catch-all above.
                 Mode::GraphemeClustering(GraphemeClustering::Query) => {
-                    self.write_to_pty(&GraphemeClustering::Unicode.report(None));
+                    self.write_csi_response(&GraphemeClustering::Unicode.report(None));
                 }
 
                 // ── Insert/Replace Mode (IRM, ANSI mode 4) ───────────
-                Mode::Irm(irm) => {
+                // DECRQM (`CSI 4 $ p`) is answered from the stored state and
+                // never stores `Irm::Query` (which would silently turn insert
+                // mode off).
+                Mode::Irm(Irm::Query) => {
+                    let mode = if self.insert_mode.is_insert() {
+                        SetMode::DecSet
+                    } else {
+                        SetMode::DecRst
+                    };
+                    self.write_csi_response(&Irm::Insert.report(Some(mode)));
+                }
+                Mode::Irm(irm @ (Irm::Insert | Irm::Replace)) => {
                     self.insert_mode = *irm;
                 }
 
+                // ── Scroll Mode (DECSCLM, ?4) — recognised, never settable ──
+                // Freminal does not implement smooth scrolling, so Set/Reset
+                // are not acted on (below), but DECRQM is answered: the mode
+                // is permanently reset (Ps=4) whatever the history.
+                Mode::Decsclm(Decsclm::Query) => {
+                    self.write_csi_response(&Decsclm::Query.report(None));
+                }
+
                 // ── Modes parsed but not yet acted on ─────────────────
-                Mode::NoOp | Mode::Decsclm(_) | Mode::Unknown(_) => {
+                Mode::NoOp
+                | Mode::Decsclm(Decsclm::SmoothScroll | Decsclm::FastScroll)
+                | Mode::Unknown(_) => {
                     tracing::warn!("Mode not acted on by TerminalHandler: {mode}");
                 }
             },
@@ -1960,6 +2106,9 @@ impl TerminalHandler {
             }
             TerminalOutput::CursorVisualStyle(style) => {
                 self.cursor_visual_style = style.clone();
+            }
+            TerminalOutput::CursorVisualStyleDefault => {
+                self.cursor_visual_style = self.configured_cursor_visual_style.clone();
             }
             TerminalOutput::WindowManipulation(wm) => {
                 self.handle_window_manipulation(wm);
@@ -2072,37 +2221,22 @@ impl TerminalHandler {
             TerminalOutput::KittyKeyboardQuery => {
                 let flags = self.kitty_keyboard_flags();
                 tracing::debug!("KittyKeyboardQuery received, flags={flags}");
-                self.write_to_pty(&format!("\x1b[?{flags}u"));
+                self.write_csi_response(&format!("?{flags}u"));
             }
             TerminalOutput::KittyKeyboardPush(flags) => {
-                if self.kitty_keyboard_stack.len() >= KittyKeyboardFlags::MAX_STACK_DEPTH {
-                    // Evict the oldest entry (bottom of the stack) per the spec.
-                    self.kitty_keyboard_stack.remove(0);
-                }
-                self.kitty_keyboard_stack.push(*flags);
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .push(*flags);
             }
             TerminalOutput::KittyKeyboardPop(n) => {
-                // u32 → usize is lossless on 32/64-bit Freminal targets.
-                let n = usize::value_from(*n)
-                    .unwrap_or(0)
-                    .min(self.kitty_keyboard_stack.len());
-                let new_len = self.kitty_keyboard_stack.len() - n;
-                self.kitty_keyboard_stack.truncate(new_len);
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .pop(*n);
             }
             TerminalOutput::KittyKeyboardSet { flags, mode } => {
-                let current = self.kitty_keyboard_flags();
-                let new_flags = match mode {
-                    1 => *flags,
-                    2 => current | *flags,
-                    3 => current & !*flags,
-                    _ => current,
-                };
-                if self.kitty_keyboard_stack.is_empty() {
-                    self.kitty_keyboard_stack.push(new_flags);
-                } else {
-                    let top = self.kitty_keyboard_stack.len() - 1;
-                    self.kitty_keyboard_stack[top] = new_flags;
-                }
+                self.kitty_keyboard_stack
+                    .get_mut(self.buffer.kind())
+                    .set(*flags, *mode);
             }
             TerminalOutput::ModifyOtherKeys(level) => {
                 self.modify_other_keys_level = *level;
@@ -2195,6 +2329,7 @@ mod tests {
     use freminal_common::{
         buffer_states::{
             fonts::{BlinkState, FontWeight},
+            modes::kitty_keyboard::KittyKeyboardFlags,
             osc::{AnsiOscType, UrlResponse},
             terminal_output::TerminalOutput,
             url::Url,
@@ -2466,11 +2601,11 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         handler.handle_data(b"Primary");
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         handler.handle_data(b"Alternate");
 
         // Verify we're in alternate buffer
-        handler.handle_leave_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
 
         // Should restore primary buffer
         // (exact verification requires exposing buffer state)
@@ -3887,7 +4022,7 @@ mod tests {
             handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(i)]);
         }
         // Stack should be at max depth, oldest entry evicted
-        assert!(handler.kitty_keyboard_stack.len() <= KittyKeyboardFlags::MAX_STACK_DEPTH);
+        assert_eq!(handler.kitty_keyboard_flags(), max_depth);
     }
 
     // ------------------------------------------------------------------
@@ -4212,6 +4347,26 @@ mod tests {
     }
 
     #[test]
+    fn host_capabilities_default_then_set_and_get() {
+        use freminal_common::host_capabilities::{
+            Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+        };
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(handler.host_capabilities(), HostCapabilities::default());
+        assert_eq!(handler.host_capabilities().osc99, Osc99Support::Unsupported);
+
+        let caps = HostCapabilities {
+            osc99: Osc99Support::Supported(Osc99Features {
+                activation_report: Osc99ActivationReport::NotReported,
+                close_events: Osc99CloseEvents::Reported,
+            }),
+        };
+        handler.set_host_capabilities(caps);
+        assert_eq!(handler.host_capabilities(), caps);
+    }
+
+    #[test]
     fn process_cursor_visual_style() {
         let mut handler = TerminalHandler::new(80, 24);
         handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
@@ -4498,14 +4653,19 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_shell_histfile() {
+    fn reset_keeps_shell_histfile() {
+        // `$HISTFILE` describes the process, not the screen (maintainer
+        // decision, Task 131 reset table), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
         handler.handle_osc(&AnsiOscType::ShellInfoHistFile(PathBuf::from(
             "/home/user/.zsh_history",
         )));
         assert!(handler.shell_histfile().is_some());
         handler.full_reset();
-        assert!(handler.shell_histfile().is_none());
+        assert_eq!(
+            handler.shell_histfile(),
+            Some(Path::new("/home/user/.zsh_history"))
+        );
     }
 
     // ------------------------------------------------------------------
@@ -4590,9 +4750,9 @@ mod tests {
     fn is_alternate_screen_accessor() {
         let mut handler = TerminalHandler::new(80, 24);
         assert!(!handler.is_alternate_screen());
-        handler.handle_enter_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Enter);
         assert!(handler.is_alternate_screen());
-        handler.handle_leave_alternate();
+        handler.handle_alternate_screen(AltScreenMode::SaveClear1049, AltScreenAction::Leave);
         assert!(!handler.is_alternate_screen());
     }
 
@@ -4621,9 +4781,9 @@ mod tests {
     }
 
     #[test]
-    fn take_tmux_reparse_queue() {
+    fn take_tmux_passthrough_queue() {
         let mut handler = TerminalHandler::new(80, 24);
-        let queue = handler.take_tmux_reparse_queue();
+        let queue = handler.take_tmux_passthrough_queue();
         assert_eq!(queue, [] as [Vec<u8>; 0]);
     }
 
@@ -5212,7 +5372,7 @@ mod tests {
     fn kitty_keyboard_set_unknown_mode_preserves_current() {
         let mut handler = TerminalHandler::new(80, 24);
         // Push initial flags
-        handler.kitty_keyboard_stack.push(0b0000_0101); // flags = 5
+        handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(0b0000_0101)]); // flags = 5
         // Mode=99 is not 1/2/3, so should keep current
         handler.process_outputs(&[TerminalOutput::KittyKeyboardSet {
             flags: 0xFF,
@@ -5243,7 +5403,7 @@ mod tests {
 
         let mut handler = TerminalHandler::new(80, 24);
         // Add a virtual placement so the placeholder path is taken
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (1, 0),
             VirtualPlacement {
                 image_id: 1,
@@ -5271,7 +5431,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Create a virtual placement
-        handler.virtual_placements.insert(
+        handler.active_virtual_placements_mut().insert(
             (1, 0),
             VirtualPlacement {
                 image_id: 1,

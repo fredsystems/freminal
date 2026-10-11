@@ -542,23 +542,17 @@ fn decsc_sets_saved_cursor_flag() {
     );
 }
 
-/// DECSC saves the cursor state; DECRC restores cursor *position* only.
+/// DECSC saves the SGR rendition; DECRC restores it (131.C1).
 ///
-/// In the current implementation `handle_restore_cursor` calls
-/// `buffer.restore_cursor()`, which restores the `CursorState` saved in the
-/// buffer (position, decorations, colors stored on the cursor struct itself).
-/// However, `TerminalHandler::current_format` is a *separate* field that is
-/// NOT part of the buffer's saved cursor state — it is the live SGR accumulator
-/// used when writing subsequent text. DECRC therefore does NOT restore
-/// `current_format` (i.e. the SGR state visible via `handler.current_format()`).
-///
-/// This is a known limitation. When SGR restoration is needed, callers must
-/// reissue the SGR sequences explicitly after DECRC.
+/// xterm's `CursorSave2` / `CursorRestoreFlags` save the SGR attributes and
+/// colours alongside the position, so DECRC brings back both the handler's
+/// `current_format` and the buffer's current tag.
 #[test]
 fn decsc_decrc_restores_sgr_attributes() {
     let mut h = VtTestHelper::new_default();
     // Apply bold + red fg.
     h.feed(b"\x1b[1;31m");
+    let saved = h.state.handler.current_format().clone();
     h.feed(b"\x1b7"); // DECSC — save
     // Reset attributes.
     h.feed(b"\x1b[0m");
@@ -570,18 +564,18 @@ fn decsc_decrc_restores_sgr_attributes() {
     );
     // Restore.
     h.feed(b"\x1b8"); // DECRC
-    // DECRC restores cursor position but NOT handler.current_format().
-    // The format remains at the post-reset (Normal) state.
     let fmt = h.state.handler.current_format();
-    assert_eq!(
-        fmt.font_weight,
-        FontWeight::Normal,
-        "DECRC does not restore handler.current_format — font_weight remains Normal"
-    );
-    assert_eq!(
+    assert_eq!(fmt.font_weight, FontWeight::Bold, "DECRC restores bold");
+    assert_ne!(
         fmt.colors.color,
         TerminalColor::Default,
-        "DECRC does not restore handler.current_format — foreground color remains default"
+        "DECRC restores the foreground colour"
+    );
+    assert_eq!(*fmt, saved, "the whole rendition is restored");
+    assert_eq!(
+        *h.state.handler.buffer().format(),
+        saved,
+        "the buffer's current tag follows the handler"
     );
 }
 

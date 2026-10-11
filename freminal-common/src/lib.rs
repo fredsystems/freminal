@@ -22,6 +22,8 @@
 //! - [`gui_theme`] — toolkit-agnostic GUI styling geometry (radii, strokes,
 //!   spacing); no colors, no egui dependency
 //! - [`buffer_states::fonts`] — font decoration and weight types
+//! - [`host_capabilities`] — host-dependent capability facts sent to the PTY
+//!   thread
 //! - [`pty_write`] — PTY write command types shared with the emulator
 
 #![deny(
@@ -72,6 +74,9 @@ pub mod cursor;
 pub mod geometry;
 /// Toolkit-agnostic GUI styling geometry (corner radii, strokes, spacing).
 pub mod gui_theme;
+/// Registry of host-dependent capability facts the PTY thread cannot know by
+/// itself (configuration and platform).
+pub mod host_capabilities;
 /// Bounded, allocation-free `key=value` tokenizer for kitty-style metadata.
 pub mod key_value;
 /// Configurable key bindings: actions, key combos, and the binding map.

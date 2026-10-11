@@ -35,14 +35,14 @@ impl ReportMode for XtExtscrn {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Primary => String::from("\x1b[?1049;2$y"),
-                Self::Alternate => String::from("\x1b[?1049;1$y"),
-                Self::Query => String::from("\x1b[?1049;0$y"),
+                Self::Primary => String::from("?1049;2$y"),
+                Self::Alternate => String::from("?1049;1$y"),
+                Self::Query => String::from("?1049;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?1049;1$y"),
-                SetMode::DecRst => String::from("\x1b[?1049;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?1049;0$y"),
+                SetMode::DecSet => String::from("?1049;1$y"),
+                SetMode::DecRst => String::from("?1049;2$y"),
+                SetMode::DecQuery => String::from("?1049;0$y"),
             },
         )
     }
@@ -58,7 +58,7 @@ impl fmt::Display for XtExtscrn {
     }
 }
 
-/// Legacy alternate screen (?47 / ?1047) — switch buffer without explicit
+/// Legacy alternate screen (?47) — switch buffer without explicit
 /// cursor save/restore.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum AltScreen47 {
@@ -84,14 +84,14 @@ impl ReportMode for AltScreen47 {
         let param = "47";
         override_mode.map_or_else(
             || match self {
-                Self::Primary => format!("\x1b[?{param};2$y"),
-                Self::Alternate => format!("\x1b[?{param};1$y"),
-                Self::Query => format!("\x1b[?{param};0$y"),
+                Self::Primary => format!("?{param};2$y"),
+                Self::Alternate => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => format!("\x1b[?{param};1$y"),
-                SetMode::DecRst => format!("\x1b[?{param};2$y"),
-                SetMode::DecQuery => format!("\x1b[?{param};0$y"),
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
             },
         )
     }
@@ -103,6 +103,61 @@ impl fmt::Display for AltScreen47 {
             Self::Primary => f.write_str("AltScreen47 (RESET) Primary Screen"),
             Self::Alternate => f.write_str("AltScreen47 (SET) Alternate Screen"),
             Self::Query => f.write_str("AltScreen47 (QUERY)"),
+        }
+    }
+}
+
+/// Alternate screen (?1047) — switch buffer without explicit cursor
+/// save/restore.  Distinct from [`AltScreen47`] so DECRQM replies carry the
+/// queried mode number.
+///
+/// Entering only switches to the alternate screen (like `?47`); the
+/// alternate screen is not cleared on enter.  Leaving clears the alternate
+/// screen first (when it is active) and then switches back to the primary
+/// screen.
+#[derive(Debug, Eq, PartialEq, Default, Clone)]
+pub enum AltScreen1047 {
+    #[default]
+    Primary,
+    Alternate,
+    Query,
+}
+
+impl AltScreen1047 {
+    #[must_use]
+    pub const fn new(mode: &SetMode) -> Self {
+        match mode {
+            SetMode::DecSet => Self::Alternate,
+            SetMode::DecRst => Self::Primary,
+            SetMode::DecQuery => Self::Query,
+        }
+    }
+}
+
+impl ReportMode for AltScreen1047 {
+    fn report(&self, override_mode: Option<SetMode>) -> String {
+        let param = "1047";
+        override_mode.map_or_else(
+            || match self {
+                Self::Primary => format!("?{param};2$y"),
+                Self::Alternate => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
+            },
+            |override_mode| match override_mode {
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
+            },
+        )
+    }
+}
+
+impl fmt::Display for AltScreen1047 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => f.write_str("AltScreen1047 (RESET) Primary Screen"),
+            Self::Alternate => f.write_str("AltScreen1047 (SET) Alternate Screen"),
+            Self::Query => f.write_str("AltScreen1047 (QUERY)"),
         }
     }
 }
@@ -132,14 +187,14 @@ impl ReportMode for SaveCursor1048 {
         let param = "1048";
         override_mode.map_or_else(
             || match self {
-                Self::Restore => format!("\x1b[?{param};2$y"),
-                Self::Save => format!("\x1b[?{param};1$y"),
-                Self::Query => format!("\x1b[?{param};0$y"),
+                Self::Restore => format!("?{param};2$y"),
+                Self::Save => format!("?{param};1$y"),
+                Self::Query => format!("?{param};0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => format!("\x1b[?{param};1$y"),
-                SetMode::DecRst => format!("\x1b[?{param};2$y"),
-                SetMode::DecQuery => format!("\x1b[?{param};0$y"),
+                SetMode::DecSet => format!("?{param};1$y"),
+                SetMode::DecRst => format!("?{param};2$y"),
+                SetMode::DecQuery => format!("?{param};0$y"),
             },
         )
     }

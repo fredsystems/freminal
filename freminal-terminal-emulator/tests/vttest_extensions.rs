@@ -332,14 +332,15 @@ fn decscusr_vertical_bar_steady() {
     assert_eq!(style, CursorVisualStyle::VerticalLineCursorSteady);
 }
 
-/// DECSCUSR Ps=0 resets to the default (blinking block).
+/// DECSCUSR Ps=0 restores the configured style (kitty, Ghostty, `WezTerm`);
+/// with no configuration that is the compiled default, a steady block.
 #[test]
 fn decscusr_zero_resets_to_default() {
     let mut h = VtTestHelper::new_default();
     h.feed(b"\x1b[4 q"); // set to underline steady first
-    h.feed(b"\x1b[0 q"); // reset to default
+    h.feed(b"\x1b[0 q"); // reset to the configured default
     let style = h.state.handler.cursor_visual_style();
-    assert_eq!(style, CursorVisualStyle::BlockCursorBlink);
+    assert_eq!(style, CursorVisualStyle::default());
 }
 
 // ─── DECTCEM — Cursor Visibility ─────────────────────────────────────────────
@@ -485,6 +486,10 @@ fn alt_screen_primary_content_preserved() {
     // Alternate screen starts blank.
     h.assert_row(0, "");
     h.assert_row(1, "");
+
+    // The cursor keeps its screen position across the switch (xterm,
+    // Ghostty, WezTerm), so home it before writing at the top.
+    h.feed(b"\x1b[H");
 
     // Write something to the alternate screen.
     h.feed_str("Alternate content\r\n");

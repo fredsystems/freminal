@@ -24,14 +24,14 @@ impl ReportMode for Decscnm {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::NormalDisplay => String::from("\x1b[?5;2$y"),
-                Self::ReverseDisplay => String::from("\x1b[?5;1$y"),
-                Self::Query => String::from("\x1b[?5;0$y"),
+                Self::NormalDisplay => String::from("?5;2$y"),
+                Self::ReverseDisplay => String::from("?5;1$y"),
+                Self::Query => String::from("?5;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?5;1$y"),
-                SetMode::DecRst => String::from("\x1b[?5;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?5;0$y"),
+                SetMode::DecSet => String::from("?5;1$y"),
+                SetMode::DecRst => String::from("?5;2$y"),
+                SetMode::DecQuery => String::from("?5;0$y"),
             },
         )
     }

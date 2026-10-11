@@ -45,7 +45,6 @@
 //! grab-bag instead of the one real concept above.
 
 use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
-use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::recording::RecordingSwap;
 use tracing::{error, trace};
@@ -349,18 +348,19 @@ pub(super) struct WindowManipulationEvents {
     /// OSC 99 stateful notifications collected from every pane this frame,
     /// routed after the drain loop (Task 99.5a) alongside
     /// `osc_notifications`. Each item is paired with a clone of the
-    /// originating pane's `pty_write_tx` (Task 99.5c Gap 2) so the
-    /// reverse-path write (Task 99.6) can target the right pane.
+    /// originating pane's `reply_tx` (a `Weak` handle, so a closed
+    /// pane's PTY consumer is never kept alive by a pending notification)
+    /// so the reverse-path reply can target the right pane.
     pub(super) osc99_notifications: Vec<(
         freminal_common::buffer_states::window_manipulation::Notification99Data,
-        crossbeam_channel::Sender<PtyWrite>,
+        std::sync::Weak<crossbeam_channel::Sender<InputEvent>>,
     )>,
-    /// OSC 99 app→terminal control sequences (p=close/p=alive/p=?) collected
+    /// OSC 99 app→terminal control sequences (p=close/p=alive) collected
     /// from every pane this frame (Task 99.5c), answered after the drain
     /// loop.
     pub(super) osc99_controls: Vec<(
         crate::gui::notifications::Osc99Control,
-        crossbeam_channel::Sender<PtyWrite>,
+        std::sync::Weak<crossbeam_channel::Sender<InputEvent>>,
     )>,
     /// OSC 52 clipboard events (remote write / blocked read) collected from
     /// every pane this frame, routed to a toast after the drain loop (issue
@@ -439,7 +439,7 @@ pub(super) fn drain_window_manipulation_commands(
                 let shell_set = rendering::handle_window_manipulation(
                     ui,
                     &pane.window_cmd_rx,
-                    &pane.pty_write_tx,
+                    &pane.reply_tx,
                     font_width,
                     font_height,
                     window_content_rect,
@@ -553,6 +553,7 @@ mod tests {
         Pane {
             id,
             arc_swap,
+            reply_tx: Arc::new(input_tx.clone()),
             input_tx,
             pty_write_tx,
             window_cmd_rx,

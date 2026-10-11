@@ -11,7 +11,6 @@ use egui_glow::CallbackFn;
 use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
-use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::{GlContextState, WindowId};
@@ -835,6 +834,7 @@ impl freminal_windowing::App for FreminalGui {
                         &self.config.cursor.shape,
                         self.config.cursor.blink,
                     ),
+                    host_capabilities: super::host_capabilities::host_capabilities(&self.config),
                 },
                 &repaint_handle,
                 initial_size,
@@ -4448,11 +4448,11 @@ impl FreminalGui {
                     window_focused: window_focus.is_focused(),
                     window_minimized,
                 };
-                // `tx` (the originating pane's `pty_write_tx` clone) is
-                // threaded into the reverse-write path (Task 99.6): the
-                // notification thread uses it to write activation/close
-                // reports back to the pane that produced this OSC 99
-                // sequence.
+                // `tx` (a `Weak` handle to the originating pane's reply
+                // sender) is threaded into the reverse-reply path: the
+                // notification thread upgrades it per send to deliver
+                // activation/close replies to the pane that produced this
+                // OSC 99 sequence, without keeping that pane alive.
                 for (data, tx) in &events.osc99_notifications {
                     crate::gui::notifications::NotificationRouter::route_osc99(
                         data,
@@ -4468,7 +4468,7 @@ impl FreminalGui {
         }
 
         // Answer OSC 99 control sequences collected above (Task 99.6 for
-        // Close/Alive; the Query capability handshake is Task 99.7). Run
+        // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
         // after the display-routing block above so its `osc99_live` borrow
         // has already been released.
         for (control, tx) in &events.osc99_controls {
@@ -4476,16 +4476,7 @@ impl FreminalGui {
                 Osc99ControlKind::Alive => {
                     // Answer the poll with the current live notification ids.
                     if let Ok(live) = self.osc99_live.try_borrow() {
-                        let ids = crate::gui::notifications::live_ids_sorted(&live);
-                        let bytes = crate::gui::notifications::osc99_alive_report(
-                            control.id.as_deref(),
-                            &ids,
-                        );
-                        send_or_log!(
-                            tx,
-                            PtyWrite::Write(bytes),
-                            "Failed to send OSC 99 alive report"
-                        );
+                        crate::gui::notifications::send_osc99_alive(&live, control.id.clone(), tx);
                     }
                 }
                 Osc99ControlKind::Close => {
@@ -4501,18 +4492,6 @@ impl FreminalGui {
                     {
                         crate::gui::notifications::forget_osc99(&mut live, id);
                     }
-                }
-                Osc99ControlKind::Query => {
-                    // OSC 99 p=? capability handshake (Task 99.7): answer
-                    // with freminal's truthfully-advertised OSC 99
-                    // capabilities.
-                    let bytes =
-                        crate::gui::notifications::osc99_query_response(control.id.as_deref());
-                    send_or_log!(
-                        tx,
-                        PtyWrite::Write(bytes),
-                        "Failed to send OSC 99 capability response"
-                    );
                 }
             }
         }
@@ -4570,6 +4549,7 @@ impl FreminalGui {
                     &self.config.cursor.shape,
                     self.config.cursor.blink,
                 ),
+                host_capabilities: super::host_capabilities::host_capabilities(&self.config),
             },
             &repaint_handle,
             initial_size,

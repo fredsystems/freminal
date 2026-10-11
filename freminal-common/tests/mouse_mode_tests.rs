@@ -51,25 +51,19 @@ fn test_encoding_default() {
 #[test]
 fn test_encoding_report_x11_dec_set() {
     // i32::from(X11 != X11) == 0
-    assert_eq!(
-        MouseEncoding::X11.report(Some(SetMode::DecSet)),
-        "\x1b[?0;0$y"
-    );
+    assert_eq!(MouseEncoding::X11.report(Some(SetMode::DecSet)), "?0;0$y");
 }
 
 #[test]
 fn test_encoding_report_x11_dec_rst() {
     // X11 == X11 → branch returns 0
-    assert_eq!(
-        MouseEncoding::X11.report(Some(SetMode::DecRst)),
-        "\x1b[?0;0$y"
-    );
+    assert_eq!(MouseEncoding::X11.report(Some(SetMode::DecRst)), "?0;0$y");
 }
 
 #[test]
 fn test_encoding_report_x11_none() {
     // None treated same as DecRst; X11 == X11 → 0
-    assert_eq!(MouseEncoding::X11.report(None), "\x1b[?0;0$y");
+    assert_eq!(MouseEncoding::X11.report(None), "?0;0$y");
 }
 
 #[test]
@@ -77,7 +71,7 @@ fn test_encoding_report_sgr_dec_set() {
     // i32::from(Sgr != X11) == 1
     assert_eq!(
         MouseEncoding::Sgr.report(Some(SetMode::DecSet)),
-        "\x1b[?1006;1$y"
+        "?1006;1$y"
     );
 }
 
@@ -86,7 +80,7 @@ fn test_encoding_report_sgr_dec_rst() {
     // Sgr != X11 → 2
     assert_eq!(
         MouseEncoding::Sgr.report(Some(SetMode::DecRst)),
-        "\x1b[?1006;2$y"
+        "?1006;2$y"
     );
 }
 
@@ -94,7 +88,7 @@ fn test_encoding_report_sgr_dec_rst() {
 fn test_encoding_report_sgr_dec_query() {
     assert_eq!(
         MouseEncoding::Sgr.report(Some(SetMode::DecQuery)),
-        "\x1b[?1006;0$y"
+        "?1006;0$y"
     );
 }
 
@@ -103,7 +97,7 @@ fn test_encoding_report_utf8_dec_set() {
     // i32::from(Utf8 != X11) == 1
     assert_eq!(
         MouseEncoding::Utf8.report(Some(SetMode::DecSet)),
-        "\x1b[?1005;1$y"
+        "?1005;1$y"
     );
 }
 
@@ -112,7 +106,7 @@ fn test_encoding_report_sgr_pixels_dec_set() {
     // i32::from(SgrPixels != X11) == 1
     assert_eq!(
         MouseEncoding::SgrPixels.report(Some(SetMode::DecSet)),
-        "\x1b[?1016;1$y"
+        "?1016;1$y"
     );
 }
 
@@ -165,7 +159,7 @@ fn test_track_report_no_tracking_dec_set() {
     // NoTracking == NoTracking → i32::from(false) == 0
     assert_eq!(
         MouseTrack::NoTracking.report(Some(SetMode::DecSet)),
-        "\x1b[?0;0$y"
+        "?0;0$y"
     );
 }
 
@@ -174,7 +168,7 @@ fn test_track_report_no_tracking_dec_rst() {
     // NoTracking == NoTracking → 0
     assert_eq!(
         MouseTrack::NoTracking.report(Some(SetMode::DecRst)),
-        "\x1b[?0;0$y"
+        "?0;0$y"
     );
 }
 
@@ -183,7 +177,7 @@ fn test_track_report_xt_mse_x11_dec_set() {
     // XtMseX11 != NoTracking and != Query(1000) → i32::from(true) == 1
     assert_eq!(
         MouseTrack::XtMseX11.report(Some(SetMode::DecSet)),
-        "\x1b[?1000;1$y"
+        "?1000;1$y"
     );
 }
 
@@ -192,21 +186,21 @@ fn test_track_report_xt_mse_x11_dec_rst() {
     // XtMseX11 is neither NoTracking nor Query(1000) → 2
     assert_eq!(
         MouseTrack::XtMseX11.report(Some(SetMode::DecRst)),
-        "\x1b[?1000;2$y"
+        "?1000;2$y"
     );
 }
 
 #[test]
 fn test_track_report_xt_mse_x11_none() {
     // None treated as DecRst; XtMseX11 is neither NoTracking nor Query → 2
-    assert_eq!(MouseTrack::XtMseX11.report(None), "\x1b[?1000;2$y");
+    assert_eq!(MouseTrack::XtMseX11.report(None), "?1000;2$y");
 }
 
 #[test]
 fn test_track_report_xt_mse_x11_dec_query() {
     assert_eq!(
         MouseTrack::XtMseX11.report(Some(SetMode::DecQuery)),
-        "\x1b[?1000;0$y"
+        "?1000;0$y"
     );
 }
 
@@ -215,7 +209,7 @@ fn test_track_report_query_1000_dec_set() {
     // mode_number == 1000; Query(1000) == Query(mode_number) → i32::from(false) == 0
     assert_eq!(
         MouseTrack::Query(1000).report(Some(SetMode::DecSet)),
-        "\x1b[?1000;0$y"
+        "?1000;0$y"
     );
 }
 
@@ -224,7 +218,7 @@ fn test_track_report_query_1000_dec_rst() {
     // Query(1000) == Query(mode_number=1000) → 0
     assert_eq!(
         MouseTrack::Query(1000).report(Some(SetMode::DecRst)),
-        "\x1b[?1000;0$y"
+        "?1000;0$y"
     );
 }
 
@@ -233,6 +227,6 @@ fn test_track_report_xt_mse_any_dec_set() {
     // XtMseAny != NoTracking and != Query(1003) → i32::from(true) == 1
     assert_eq!(
         MouseTrack::XtMseAny.report(Some(SetMode::DecSet)),
-        "\x1b[?1003;1$y"
+        "?1003;1$y"
     );
 }

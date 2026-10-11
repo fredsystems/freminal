@@ -376,10 +376,10 @@ fn decrqm_grapheme_clustering_permanently_set() {
 fn decrqm_lnm_default_reset() {
     // LNM (mode 20) is a standard ANSI mode, not a DEC private mode.
     // It must be queried via ANSI DECRQM (CSI 20 $p, no `?` prefix).
-    // The response still uses the `?` prefix per DEC convention.
+    // The response is the ANSI form `CSI 20 ; Ps $ y`, also without `?`.
     assert_eq!(
         decrqm_ansi(20),
-        decrpm_dec(20, 2),
+        b"\x1b[20;2$y".to_vec(),
         "LNM default must be reset (status=2)"
     );
 }

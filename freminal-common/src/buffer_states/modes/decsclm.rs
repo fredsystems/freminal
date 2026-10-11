@@ -11,6 +11,12 @@ use core::fmt;
 /// Controls smooth (slow) vs jump (fast) scrolling.
 /// When set, scrolling is smooth (one line at a time, visibly animated).
 /// When reset (default), scrolling is fast (jump scroll — multiple lines at once).
+///
+/// Freminal recognises DECSCLM but never implements smooth scrolling: the
+/// mode cannot be set. Per DECRPM semantics a recognised mode that can never
+/// be set is "permanently reset" (Ps=4), so `report` always answers
+/// `?4;4$y` regardless of variant or override (cf. `?2027`, which reports 3,
+/// permanently set).
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub enum Decsclm {
     SmoothScroll,
@@ -21,7 +27,7 @@ pub enum Decsclm {
 
 impl ReportMode for Decsclm {
     fn report(&self, _override_mode: Option<SetMode>) -> String {
-        String::from("\x1b[?4;0$y")
+        String::from("?4;4$y")
     }
 }
 

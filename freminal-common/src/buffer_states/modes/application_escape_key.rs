@@ -44,14 +44,14 @@ impl ReportMode for ApplicationEscapeKey {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Reset => String::from("\x1b[?7727;2$y"),
-                Self::Set => String::from("\x1b[?7727;1$y"),
-                Self::Query => String::from("\x1b[?7727;0$y"),
+                Self::Reset => String::from("?7727;2$y"),
+                Self::Set => String::from("?7727;1$y"),
+                Self::Query => String::from("?7727;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?7727;1$y"),
-                SetMode::DecRst => String::from("\x1b[?7727;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?7727;0$y"),
+                SetMode::DecSet => String::from("?7727;1$y"),
+                SetMode::DecRst => String::from("?7727;2$y"),
+                SetMode::DecQuery => String::from("?7727;0$y"),
             },
         )
     }
@@ -108,17 +108,17 @@ mod tests {
 
     #[test]
     fn report_reset_no_override() {
-        assert_eq!(ApplicationEscapeKey::Reset.report(None), "\x1b[?7727;2$y");
+        assert_eq!(ApplicationEscapeKey::Reset.report(None), "?7727;2$y");
     }
 
     #[test]
     fn report_set_no_override() {
-        assert_eq!(ApplicationEscapeKey::Set.report(None), "\x1b[?7727;1$y");
+        assert_eq!(ApplicationEscapeKey::Set.report(None), "?7727;1$y");
     }
 
     #[test]
     fn report_query_no_override() {
-        assert_eq!(ApplicationEscapeKey::Query.report(None), "\x1b[?7727;0$y");
+        assert_eq!(ApplicationEscapeKey::Query.report(None), "?7727;0$y");
     }
 
     // ── ReportMode (with override) ──────────────────────────────────
@@ -127,7 +127,7 @@ mod tests {
     fn report_override_dec_set() {
         assert_eq!(
             ApplicationEscapeKey::Reset.report(Some(SetMode::DecSet)),
-            "\x1b[?7727;1$y"
+            "?7727;1$y"
         );
     }
 
@@ -135,7 +135,7 @@ mod tests {
     fn report_override_dec_rst() {
         assert_eq!(
             ApplicationEscapeKey::Reset.report(Some(SetMode::DecRst)),
-            "\x1b[?7727;2$y"
+            "?7727;2$y"
         );
     }
 
@@ -143,7 +143,7 @@ mod tests {
     fn report_override_dec_query() {
         assert_eq!(
             ApplicationEscapeKey::Set.report(Some(SetMode::DecQuery)),
-            "\x1b[?7727;0$y"
+            "?7727;0$y"
         );
     }
 

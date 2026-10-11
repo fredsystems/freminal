@@ -950,7 +950,12 @@ fn bench_scrollback_render(c: &mut Criterion) {
 // Benchmark: alternate screen switch (24.1)
 // ---------------------------------------------------------------
 fn bench_alternate_screen_switch(c: &mut Criterion) {
-    // Measure the cost of enter_alternate and leave_alternate on a populated buffer.
+    // Measure the cost of entering and leaving the alternate screen on a
+    // populated buffer, in the shape `?1049h` / `?1049l` drive: DECSC, switch,
+    // clear on the way in; switch, DECRC on the way out. The IDs are the
+    // pre-131.5 ones so the before/after comparison lines up. Every routine
+    // returns the buffer so criterion drops it outside the timed region: the
+    // measurement is the switch, not the deallocation of two screens.
     let primary_data = gen_ascii_tchars(80 * 100); // 100 lines in primary
     let alt_data = gen_ascii_tchars(80 * 24); // full alternate screen
 
@@ -964,7 +969,11 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
                 buf
             },
             |mut buf| {
-                buf.enter_alternate(0);
+                buf.save_cursor();
+                buf.switch_to_alternate();
+                buf.clear_alternate_screen();
+                // Returned, so the buffer is dropped outside the timed region.
+                buf
             },
             BatchSize::SmallInput,
         );
@@ -975,12 +984,38 @@ fn bench_alternate_screen_switch(c: &mut Criterion) {
             || {
                 let mut buf = Buffer::new(80, 24);
                 buf.insert_text(&primary_data);
-                buf.enter_alternate(0);
+                buf.save_cursor();
+                buf.switch_to_alternate();
+                buf.clear_alternate_screen();
                 buf.insert_text(&alt_data);
                 buf
             },
             |mut buf| {
-                std::hint::black_box(buf.leave_alternate());
+                buf.switch_to_primary();
+                buf.restore_cursor();
+                buf
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Re-entry onto an alternate screen that is already parked with content:
+    // the persisted path, a pure move of the parked store with no allocation
+    // of a fresh blank screen.
+    group.bench_function("alternate_reenter", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(80, 24);
+                buf.insert_text(&primary_data);
+                buf.switch_to_alternate();
+                buf.clear_alternate_screen();
+                buf.insert_text(&alt_data);
+                buf.switch_to_primary();
+                buf
+            },
+            |mut buf| {
+                buf.switch_to_alternate();
+                buf
             },
             BatchSize::SmallInput,
         );

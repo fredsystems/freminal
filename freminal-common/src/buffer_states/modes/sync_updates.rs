@@ -43,14 +43,14 @@ impl ReportMode for SynchronizedUpdates {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Draw => String::from("\x1b[?2026;2$y"),
-                Self::DontDraw => String::from("\x1b[?2026;1$y"),
-                Self::Query => String::from("\x1b[?2026;0$y"),
+                Self::Draw => String::from("?2026;2$y"),
+                Self::DontDraw => String::from("?2026;1$y"),
+                Self::Query => String::from("?2026;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet => String::from("\x1b[?2026;1$y"),
-                SetMode::DecRst => String::from("\x1b[?2026;2$y"),
-                SetMode::DecQuery => String::from("\x1b[?2026;0$y"),
+                SetMode::DecSet => String::from("?2026;1$y"),
+                SetMode::DecRst => String::from("?2026;2$y"),
+                SetMode::DecQuery => String::from("?2026;0$y"),
             },
         )
     }

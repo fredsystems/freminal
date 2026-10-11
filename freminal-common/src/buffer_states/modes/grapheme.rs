@@ -38,12 +38,12 @@ impl ReportMode for GraphemeClustering {
     fn report(&self, override_mode: Option<SetMode>) -> String {
         override_mode.map_or_else(
             || match self {
-                Self::Unicode | Self::Legacy => String::from("\x1b[?2027;3$y"),
-                Self::Query => String::from("\x1b[?2027;0$y"),
+                Self::Unicode | Self::Legacy => String::from("?2027;3$y"),
+                Self::Query => String::from("?2027;0$y"),
             },
             |override_mode| match override_mode {
-                SetMode::DecSet | SetMode::DecRst => String::from("\x1b[?2027;3$y"),
-                SetMode::DecQuery => String::from("\x1b[?2027;0$y"),
+                SetMode::DecSet | SetMode::DecRst => String::from("?2027;3$y"),
+                SetMode::DecQuery => String::from("?2027;0$y"),
             },
         )
     }

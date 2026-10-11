@@ -889,6 +889,7 @@ mod tests {
                 freminal_common::buffer_states::line_draw::DecSpecialGraphics::Replace,
             ),
             CursorVisualStyle(freminal_common::cursor::CursorVisualStyle::BlockCursorSteady),
+            CursorVisualStyleDefault,
             WindowManipulation(
                 freminal_common::buffer_states::window_manipulation::WindowManipulation::DeIconifyWindow,
             ),

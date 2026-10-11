@@ -10,6 +10,7 @@
 //! (`get_cursor_screen_pos`, `cursor_screen_y`), and DECSC/DECRC save/restore.
 
 use freminal_common::buffer_states::{
+    buffer_type::BufferType,
     cursor::{CursorPos, CursorState},
     modes::{declrmm::Declrmm, decom::Decom},
     row_number::RowNumber,
@@ -33,11 +34,19 @@ use crate::buffer::Buffer;
 /// retained rows. Because the saved row never names a stored row, scrolling,
 /// eviction, reflow and a switch between the primary and alternate screens
 /// cannot invalidate it; a resize only matters through the clamp on restore.
+///
+/// Each screen has its own slot (`Buffer::saved_cursor` for the active screen,
+/// `ParkedScreen::saved_cursor` for the parked one), so a switch parks the
+/// outgoing screen's slot with it rather than carrying it across; a DECSC on
+/// one screen is never restored by a DECRC on the other.
 #[derive(Debug, Clone)]
 pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
     /// coordinates.
     pub(in crate::buffer) cursor: CursorState,
+    /// The origin-mode (DECOM) state at the time of the save. xterm's
+    /// `DECSC_FLAGS` include `ORIGIN`, so DECRC restores it.
+    pub(in crate::buffer) decom: Decom,
 }
 
 impl Buffer {
@@ -55,6 +64,26 @@ impl Buffer {
     #[must_use]
     pub fn next_row_number(&self) -> RowNumber {
         self.rows.next_number()
+    }
+
+    /// The live row-number span `(base, next_number)` of the *parked* store of
+    /// `screen`, or `None` when `screen` is the active screen or has never been
+    /// parked (the alternate screen before its first use).
+    ///
+    /// A row of the parked screen is numbered `n` and still retained iff
+    /// `base <= n < next_number`. This lets a caller that keeps state anchored
+    /// to a parked screen's rows (the kitty placement maps) judge that state
+    /// after a resize that trimmed or evicted rows of the parked store.
+    #[must_use]
+    pub fn parked_row_span(&self, screen: BufferType) -> Option<(RowNumber, RowNumber)> {
+        if screen == self.kind {
+            return None;
+        }
+        let parked = match screen {
+            BufferType::Primary => self.parked_primary.as_ref(),
+            BufferType::Alternate => self.parked_alternate.as_ref(),
+        }?;
+        Some((parked.rows.base(), parked.rows.next_number()))
     }
 
     /// Logical number of the row at retained index `index` of the active screen.
@@ -232,17 +261,26 @@ impl Buffer {
     /// Implements DECSC – Save Cursor.
     ///
     /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
-    /// with its associated `CursorState`.
+    /// with its associated `CursorState` and the DECOM (origin mode) state.
     pub fn save_cursor(&mut self) {
         let mut cursor = self.cursor.clone();
         cursor.pos = self.cursor_screen_pos();
-        self.saved_cursor = Some(SavedCursor { cursor });
+        self.saved_cursor = Some(SavedCursor {
+            cursor,
+            decom: self.decom_enabled,
+        });
     }
 
     /// Implements DECRC – Restore Cursor.
     ///
-    /// Restores the previously saved cursor. If no cursor has been saved, this
-    /// is a no-op.
+    /// Restores the previously saved cursor and the saved DECOM state. DECOM
+    /// is restored directly, **without** the homing that [`Self::set_decom`]
+    /// performs, because the saved position is the one that must win.
+    ///
+    /// If nothing has been saved on the active screen, this behaves as if a
+    /// default cursor at screen home had been saved, with DECOM off: the
+    /// cursor goes home with default cursor state (xterm `CursorRestoreFlags`
+    /// with `sc->saved == False`, Ghostty `restoreCursor`).
     ///
     /// The saved position is screen-relative, so the cursor returns to the
     /// same screen row and column however much output has scrolled, evicted
@@ -251,28 +289,42 @@ impl Buffer {
     /// between save and restore never produces an out-of-bounds cursor, and
     /// the cursor is never placed in off-screen scrollback.
     ///
-    /// The same screen position is used on whichever screen is active when
-    /// DECRC runs, so a save made on one screen restores sensibly on the
-    /// other.
+    /// The slot is per screen: each screen has its own DECSC slot, parked and
+    /// restored with the screen (xterm `sc[]`, Ghostty `saved_cursor` per
+    /// screen). A save made on one screen is therefore **not** visible on the
+    /// other, and a DECRC on a screen that has not saved behaves as above even
+    /// if the other screen has.
     pub fn restore_cursor(&mut self) {
-        if let Some(saved) = self.saved_cursor.clone() {
-            let screen_y = saved.cursor.pos.y.min(self.height.saturating_sub(1));
-            let buffer_y = self.visible_window_start(0) + screen_y;
+        let saved = self.saved_cursor.clone().unwrap_or_else(|| SavedCursor {
+            cursor: CursorState::default(),
+            decom: Decom::NormalCursor,
+        });
+        let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
 
-            // Ensure rows exist up to the target position, as CUP does.
-            while buffer_y >= self.rows.len() {
-                self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
-            }
-
-            self.cursor = saved.cursor;
-            // Clamp to current dimensions after restore.
-            if self.width > 0 {
-                self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
-            }
-            self.cursor.pos.y = buffer_y;
-            self.debug_assert_invariants();
+        self.cursor = saved.cursor;
+        self.decom_enabled = saved.decom;
+        // Clamp to current dimensions after restore.
+        if self.width > 0 {
+            self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
         }
-        // No saved cursor → silent no-op.
+        self.cursor.pos.y = buffer_y;
+        self.debug_assert_invariants();
+    }
+
+    /// Index into `self.rows` of the live-window row at `screen_y`, clamped to
+    /// the screen height, growing the store with `ScrollFill` rows until that
+    /// row exists (as CUP does).
+    ///
+    /// Shared by DECRC and the alternate-screen switch, which both place the
+    /// cursor at a screen row recorded on another store.
+    pub(in crate::buffer) fn buffer_row_for_screen_row(&mut self, screen_y: usize) -> usize {
+        let screen_y = screen_y.min(self.height.saturating_sub(1));
+        let buffer_y = self.visible_window_start(0) + screen_y;
+
+        while buffer_y >= self.rows.len() {
+            self.push_row(RowOrigin::ScrollFill, RowJoin::NewLogicalLine);
+        }
+        buffer_y
     }
 
     /// Cursor Y expressed in "screen coordinates" (0..height-1).
