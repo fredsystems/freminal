@@ -398,6 +398,8 @@
               # devShell does not build heavy dev-only tools.
               ciRustTools = [
                 pkgs.tombi
+                # Test runner behind `cargo xtask test` / `pc` (issue #538).
+                pkgs.cargo-nextest
                 pkgs.cargo-deny
                 pkgs.cargo-machete
                 pkgs.cargo-make

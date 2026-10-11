@@ -400,9 +400,14 @@ fn check_readme() -> Result<()> {
 }
 
 /// Generate code coverage report
+///
+/// Runs the tests under `cargo-nextest` (`llvm-cov nextest`), the same runner
+/// as [`test_libs`]. Doctests are not included, as they were not under plain
+/// `cargo llvm-cov` either.
 fn coverage() -> Result<()> {
     run_cargo(vec![
         "llvm-cov",
+        "nextest",
         "--lcov",
         "--output-path",
         "target/lcov.info",
@@ -524,6 +529,13 @@ fn test_docs() -> Result<()> {
 
 /// Run lib tests for the workspace's default packages
 ///
+/// Runs under `cargo-nextest` (configured in `.config/nextest.toml`), which
+/// executes each test in its own process scheduled across every core and
+/// every test binary at once. `cargo test` runs the binaries one after
+/// another, so its wall time is the sum of the binaries; nextest's is roughly
+/// the slowest single test (~22s -> ~5s here, issue #538). nextest cannot run
+/// doctests, so [`test_docs`] still uses `cargo test --doc`.
+///
 /// Uses explicit target flags instead of `--all-targets` to exclude
 /// benchmarks.  `--all-targets` is equivalent to `--lib --bins --tests
 /// --benches --examples`; including `--benches` causes Criterion harnesses
@@ -532,7 +544,8 @@ fn test_docs() -> Result<()> {
 /// separately by `bench_compile()`.
 fn test_libs() -> Result<()> {
     run_cargo(vec![
-        "test",
+        "nextest",
+        "run",
         "--lib",
         "--bins",
         "--tests",
@@ -563,7 +576,14 @@ fn test_default_features() -> Result<()> {
     // doesn't leak into this pass — we need to verify the code compiles and
     // passes tests with NO optional features enabled.
     run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo_no_features(vec!["test", "--lib", "--bins", "--tests", "--examples"])?;
+    run_cargo_no_features(vec![
+        "nextest",
+        "run",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--examples",
+    ])?;
     run_cargo_no_features(vec!["test", "--doc"])?;
     Ok(())
 }

@@ -1,0 +1,22 @@
+# cargo-nextest configuration (issue #538).
+#
+# nextest runs every test in its own process, scheduled across all cores and
+# all test binaries at once. `cargo test` instead runs the test binaries one
+# after another, so wall time was the sum of the binaries rather than the
+# slowest single test.
+#
+# Doctests are not supported by nextest; `cargo xtask test` runs them
+# separately with `cargo test --doc`.
+
+[profile.default]
+# Never retry. A test that passes on retry is a flaky test, and flaky tests are
+# bugs to root-cause, not to paper over.
+retries = 0
+
+# Flag any test running longer than 30s, and kill it after 4 periods (2 min)
+# so a hung test fails the run instead of stalling it. The slowest test in the
+# suite takes ~2s, so either threshold firing means something is wrong.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Report every failure in the run, not just the first.
+fail-fast = false
