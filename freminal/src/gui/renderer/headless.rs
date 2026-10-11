@@ -39,7 +39,7 @@ use conv2::ConvUtil;
 
 use super::gl_facade::Gl;
 use super::gl_facade::recording::GlCall;
-use super::gpu::TerminalRenderer;
+use super::gpu::{PaneBackground, TerminalRenderer};
 use super::toast_pass::{ToastQuad, ToastRenderer};
 use super::toast_text_pass::{ToastTextRenderer, ToastTextRun};
 use super::vertex::{
@@ -139,6 +139,13 @@ pub struct SyntheticFrame {
     pub cursor: CursorPresence,
     /// Whether this frame draws a toast overlay.
     pub toast: ToastPresence,
+    /// The OSC 11 pane base fill (Task 132.11) as 8-bit `[r, g, b]`, or
+    /// `None` for no override (the theme's background, no fill drawn).
+    pub base_fill: Option<[u8; 3]>,
+    /// Extra pixels `(right, bottom)` added to the viewport beyond the cell
+    /// grid, modelling the sub-cell remainder a real pane's `terminal_rect`
+    /// has to the right of and below its last cell. Defaults to `(0, 0)`.
+    pub remainder_px: (u32, u32),
 }
 
 impl SyntheticFrame {
@@ -151,6 +158,8 @@ impl SyntheticFrame {
             rows,
             cursor: CursorPresence::Shown,
             toast: ToastPresence::Absent,
+            base_fill: None,
+            remainder_px: (0, 0),
         }
     }
 
@@ -164,6 +173,30 @@ impl SyntheticFrame {
     #[must_use]
     pub const fn with_toast(self, toast: ToastPresence) -> Self {
         Self { toast, ..self }
+    }
+
+    /// Override the pane base fill (the OSC 11 default-background override).
+    #[must_use]
+    pub const fn with_base_fill(self, base_fill: Option<[u8; 3]>) -> Self {
+        Self { base_fill, ..self }
+    }
+
+    /// Add a sub-cell remainder strip `(right, bottom)` px to the viewport.
+    #[must_use]
+    pub const fn with_remainder(self, remainder_px: (u32, u32)) -> Self {
+        Self {
+            remainder_px,
+            ..self
+        }
+    }
+
+    /// The [`PaneBackground`] this frame draws with: fully opaque, with the
+    /// frame's base fill (if any) normalised to `0.0..=1.0`.
+    fn pane_background(&self) -> PaneBackground {
+        PaneBackground {
+            opacity: 1.0,
+            base_fill: self.base_fill.map(PaneBackground::fill_channels),
+        }
     }
 }
 
@@ -252,13 +285,19 @@ impl HeadlessRenderer {
     /// pbuffer to match the viewport this driver will render into, and it
     /// has to do so *before* creating the GL context. That ordering works
     /// because [`Self::new`] touches no GL.
+    ///
+    /// Includes [`SyntheticFrame::remainder_px`]: the viewport is the cell
+    /// grid plus the sub-cell remainder strip, as a real pane's is.
     pub fn viewport_px(&self, frame: &SyntheticFrame) -> (i32, i32) {
+        let (rem_w, rem_h) = frame.remainder_px;
         let w = frame
             .cols
-            .saturating_mul(self.font_manager.cell_width().value_as().unwrap_or(0));
+            .saturating_mul(self.font_manager.cell_width().value_as().unwrap_or(0))
+            .saturating_add(rem_w.value_as().unwrap_or(0));
         let h = frame
             .rows
-            .saturating_mul(self.font_manager.cell_height().value_as().unwrap_or(0));
+            .saturating_mul(self.font_manager.cell_height().value_as().unwrap_or(0))
+            .saturating_add(rem_h.value_as().unwrap_or(0));
         (w.value_as().unwrap_or(0), h.value_as().unwrap_or(0))
     }
 
@@ -356,7 +395,7 @@ impl HeadlessRenderer {
             vp_h,
             cell_width_f32,
             cell_height_f32,
-            1.0,
+            frame.pane_background(),
             1.0,
             BackgroundImageMode::default(),
             None,
@@ -428,7 +467,7 @@ impl HeadlessRenderer {
             vp_h,
             cell_width_f32,
             cell_height_f32,
-            1.0,
+            frame.pane_background(),
             1.0,
             BackgroundImageMode::default(),
             None,

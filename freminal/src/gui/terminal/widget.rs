@@ -42,9 +42,9 @@ use super::{
         frame_drain::WindowFocus,
         renderer::{
             BackgroundFrame, CursorBlinkPhase, CursorDrawParams, CursorVertRange, FgRenderOptions,
-            GlRetireQueue, ImageDrawEntry, MatchHighlight, TerminalRenderer, WindowPostRenderer,
-            build_background_instances, build_cursor_verts_only, build_foreground_instances,
-            build_image_verts, gl_facade::Gl,
+            GlRetireQueue, ImageDrawEntry, MatchHighlight, PaneBackground, TerminalRenderer,
+            WindowPostRenderer, build_background_instances, build_cursor_verts_only,
+            build_foreground_instances, build_image_verts, gl_facade::Gl,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -1305,6 +1305,13 @@ pub struct RenderState {
     pub(super) cell_height_px: f32,
     /// Background opacity (0.0–1.0), for the instanced background shader.
     pub(super) bg_opacity: f32,
+    /// OSC 11 base fill (Task 132.11): the pane's resolved default
+    /// background as `[r, g, b]` in `0.0..=1.0`, or `None` when it equals the
+    /// configured theme's (nothing is drawn underneath the cells then).
+    ///
+    /// Set by the full-rebuild block alongside [`Self::bg_opacity`] and, like
+    /// it, retained for cursor-only frames so they redraw the same fill.
+    pub(super) base_fill: Option<[f32; 3]>,
     /// Background image opacity (0.0–1.0).
     pub(super) bg_image_opacity: f32,
     /// Background image fit mode.
@@ -1409,6 +1416,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         cell_width_px: 0.0,
         cell_height_px: 0.0,
         bg_opacity: 1.0,
+        base_fill: None,
         bg_image_opacity: 0.5,
         bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
         window_post,
@@ -3883,6 +3891,10 @@ impl FreminalTerminalWidget {
                     rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
                     rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
                     rs_ref.bg_opacity = bg_opacity;
+                    rs_ref.base_fill = PaneBackground::base_fill_for(
+                        snap.theme.background,
+                        snap.resolved_colors.background,
+                    );
                     rs_ref.bg_image_opacity = bg_image_opacity;
                     rs_ref.bg_image_mode = bg_image_mode;
                     drop(rs);
@@ -4200,7 +4212,10 @@ impl FreminalTerminalWidget {
                     let img_len = rs.image_verts.len();
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
-                    let opacity = rs.bg_opacity;
+                    let background = PaneBackground {
+                        opacity: rs.bg_opacity,
+                        base_fill: rs.base_fill,
+                    };
                     let bg_image_opacity = rs.bg_image_opacity;
                     let bg_image_mode = rs.bg_image_mode;
                     // Split borrow: renderer + atlas are disjoint from the
@@ -4241,7 +4256,7 @@ impl FreminalTerminalWidget {
                                 vp.height_px,
                                 cw,
                                 ch,
-                                opacity,
+                                background,
                                 bg_image_opacity,
                                 bg_image_mode,
                                 restore_fbo,
@@ -4262,7 +4277,7 @@ impl FreminalTerminalWidget {
                             vp.height_px,
                             cw,
                             ch,
-                            opacity,
+                            background,
                             bg_image_opacity,
                             bg_image_mode,
                             restore_fbo,
@@ -4274,7 +4289,10 @@ impl FreminalTerminalWidget {
                     // the mutable renderer and atlas.
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
-                    let opacity = rs.bg_opacity;
+                    let background = PaneBackground {
+                        opacity: rs.bg_opacity,
+                        base_fill: rs.base_fill,
+                    };
                     let bg_image_opacity = rs.bg_image_opacity;
                     let bg_image_mode = rs.bg_image_mode;
                     let rs_ref: &mut RenderState = &mut rs;
@@ -4299,7 +4317,7 @@ impl FreminalTerminalWidget {
                                 vp.height_px,
                                 cw,
                                 ch,
-                                opacity,
+                                background,
                                 bg_image_opacity,
                                 bg_image_mode,
                                 restore_fbo,
@@ -4321,7 +4339,7 @@ impl FreminalTerminalWidget {
                             vp.height_px,
                             cw,
                             ch,
-                            opacity,
+                            background,
                             bg_image_opacity,
                             bg_image_mode,
                             restore_fbo,
@@ -6258,6 +6276,7 @@ mod subtask_1_7_tests {
             cell_width_px: 0.0,
             cell_height_px: 0.0,
             bg_opacity: 1.0,
+            base_fill: None,
             bg_image_opacity: 0.5,
             bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
             window_post: Arc::new(Mutex::new(WindowPostRenderer::new())),

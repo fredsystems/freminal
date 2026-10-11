@@ -4116,7 +4116,7 @@ orchestrator. A sub-agent that ends without a report is treated as unverified: i
 inspected and the work is finished by a fresh agent, re-decomposed, or discarded.
 
 Order: 132.1, 132.2, 132.3, 132.4, 132.5, 132.6, 132.7, 132.8, 132.9, 132.10, 132.C1, 132.11,
-132.12, 132.13, 132.14. The adversarial review of the whole branch follows 132.14; its findings
+132.12, 132.13, 132.14, 132.C4. The adversarial review of the whole branch follows 132.14; its findings
 become further `132.Cn` entries.
 
 ### 132 Subtasks
@@ -4548,6 +4548,25 @@ Deliverable: the doc changes, markdownlint clean.
   combination to whatever lint gate is cheapest so it cannot regress.
 - **Scheduling:** routed to Task 147 (147.26).
 
+#### 132.C4 — Per-draw quad uploads are missing from the upload byte counts
+
+- **Surfaced:** 132.11 review (2026-10-11). The background-image half predates Task 132.
+- **Impact:** under `frame-profiling`, `TerminalRenderer::draw_with_verts` /
+  `draw_with_cursor_only_update` return `UploadByteCounts` that omit the quads uploaded at draw
+  time: the background-image quad (`draw_background_image`, every frame with an image) and the
+  OSC 11 base-fill quad (`draw_base_fill`, every frame with an override). The Task 125
+  bandwidth measurements therefore under-count those frames.
+- **Scope of fix:** `freminal/src/gui/renderer/profiling.rs` (a new category, its `total`,
+  `merge` and flush output), `freminal/src/gui/renderer/gpu.rs` (return the bytes from both
+  draw helpers and fold them in).
+- **Suggested approach:** one `background_quad_vbo_bytes` category for both quads (they are
+  the same kind of per-draw, one-quad upload); the draw helpers return the byte count they
+  uploaded.
+- **Verification:** a `frame-profiling` test that a frame with a base fill reports exactly
+  144 extra bytes in the new category, and a frame with neither reports 0; existing totals
+  unchanged otherwise.
+- **Scheduling:** resolved within Task 132, after 132.14.
+
 ### 132 Status notes
 
 - **132.1 (done).** Benches added; criterion baseline `pre132` saved. Medians: parse_sgr_heavy
@@ -4581,6 +4600,15 @@ Deliverable: the doc changes, markdownlint clean.
 - **132.C1 (done).** Reproduced first (five `frame_dirty` tests failed without the trigger).
   `ScreenInversion` replaces the raw `bool` in the snapshot and throughout the renderer
   (`effective_fg`/`effective_bg` no longer take a bool parameter).
+- **132.11 (done).** `PaneBackground { opacity, base_fill }` replaces the `bg_opacity`
+  parameter of both draw entry points. The fill is drawn with the decoration program from a
+  dedicated `base_fill_vbo` (init count 261 → 262: one `create_buffer`); with no override no
+  GL call is made and every per-frame recording count is unchanged. Pixel tests (fill covers
+  cells and the remainder strip, glyphs over it, scissored partial present, cursor-only arm
+  repaints it on a cleared framebuffer) ran under `.#gl-pixel`. Translucent windows: the
+  override is drawn at `background_opacity` over the theme panel fill, so at opacity < 1 a
+  `(1 − opacity)` share of the theme background shows through; accepted. Its upload is not in
+  the `frame-profiling` byte counts (132.C4).
 
 ---
 

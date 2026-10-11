@@ -94,7 +94,7 @@ fn owned_names(r: &TerminalRenderer) -> Vec<Name> {
     names.extend(programs.into_iter().flatten().map(Name::Program));
     let vaos = [r.bg_inst_vao, r.deco_vao, r.fg_vao, r.img_vao, r.bg_img_vao];
     names.extend(vaos.into_iter().flatten().map(Name::Vao));
-    let mut buffers = vec![r.bg_unit_quad_vbo, r.bg_img_vbo];
+    let mut buffers = vec![r.bg_unit_quad_vbo, r.bg_img_vbo, r.base_fill_vbo];
     buffers.extend(r.bg_inst_vbo);
     buffers.extend(r.deco_vbo);
     buffers.extend(r.fg_vbo);

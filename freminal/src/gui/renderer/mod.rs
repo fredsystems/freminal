@@ -78,7 +78,7 @@ pub mod toast_text_pass;
 pub mod vertex;
 
 pub use gl_init_state::GlInitState;
-pub use gpu::{TerminalRenderer, WindowPostRenderer};
+pub use gpu::{PaneBackground, TerminalRenderer, WindowPostRenderer};
 pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};
 pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};

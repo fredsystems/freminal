@@ -1036,9 +1036,10 @@ pub(super) fn evaluate_frame_dirty_state(
     // nothing on screen for a bounded region to leave intact. In the normal
     // flow that case already implies `ChangedRows::All` (a fresh
     // `PaneRenderCache` starts with no epoch baseline), but that is an
-    // invariant spanning two independently-owned structures --
-    // `RenderState` is per-window, `PaneRenderCache` per-pane -- so it is
-    // asserted here rather than relied upon.
+    // invariant spanning two independently-maintained structures --
+    // `RenderState` (GL-side, shared with the paint callback) and
+    // `PaneRenderCache` (frame-decision side), both held per pane -- so it
+    // is asserted here rather than relied upon.
     let bounded_change = !matches!(rows_changed, ChangedRows::All)
         && !never_built
         && !theme_changed
