@@ -98,12 +98,21 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  # Run clippy with `-D warnings` on every target OS, on stable + MSRV.
-  # `cargo xtask check` runs clippy (a superset of `cargo check`) with
+  # Run clippy with `-D warnings` on every target OS on stable, and verify the
+  # workspace compiles on the MSRV.
+  #
+  # Stable: `cargo xtask check` runs clippy (a superset of `cargo check`) with
   # warnings denied, so this matrix is a genuine cross-platform
   # fail-on-warning gate — it catches OS-specific warnings (e.g. `dead_code`
   # for a function whose only non-test caller is behind `#[cfg(...)]` on
   # another platform) that would otherwise only surface downstream.
+  #
+  # MSRV: `cargo xtask check-msrv` runs plain `cargo check` (no clippy, warnings
+  # not denied). The MSRV contract is "it builds on `rust-version`"; linting
+  # with the MSRV clippy as well forced code to satisfy two drifting lint sets
+  # at once, and since no local gate runs that clippy, its failures only ever
+  # appeared here (issue #540). Keep the MSRV entry in sync with
+  # `rust-version` in the workspace `Cargo.toml`.
   check:
     name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
     needs: skip-if-clean
@@ -125,12 +134,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: ${{ matrix.toolchain }}
-          # `cargo xtask check` runs clippy. dtolnay/rust-toolchain omits
-          # clippy for pinned-version toolchains (only the named @stable /
-          # @nightly entry points bundle it), so request it explicitly.
+          # `cargo xtask check` runs clippy on stable. dtolnay/rust-toolchain
+          # omits clippy for pinned-version toolchains (only the named
+          # @stable / @nightly entry points bundle it), so request it
+          # explicitly; harmless on the MSRV leg, which does not use it.
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo xtask check
+      - if: ${{ matrix.toolchain == 'stable' }}
+        run: cargo xtask check
+      - if: ${{ matrix.toolchain != 'stable' }}
+        run: cargo xtask check-msrv
 
   # Run the test suite natively on every target platform. The `check`
   # matrix above only compiles (`cargo xtask check`); it never runs the

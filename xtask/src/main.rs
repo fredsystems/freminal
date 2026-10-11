@@ -88,6 +88,10 @@ enum Command {
     #[command(visible_alias = "c")]
     Check,
 
+    /// Verify the workspace compiles on the MSRV toolchain (`cargo check`, no clippy)
+    #[command(visible_alias = "cm")]
+    CheckMsrv,
+
     /// Run clippy for the x86_64-pc-windows-gnu target (Windows cross-check)
     #[command(visible_alias = "cw")]
     CheckWindows,
@@ -217,6 +221,7 @@ impl Command {
             Self::CI => ci(),
             Self::Build => build(),
             Self::Check => check(),
+            Self::CheckMsrv => check_msrv(),
             Self::CheckWindows => check_windows(),
             Self::Deny => deny(),
             Self::Machete => machete(),
@@ -305,6 +310,23 @@ fn check() -> Result<()> {
         "-D",
         "warnings",
     ])
+}
+
+/// Verify the workspace compiles on the MSRV toolchain.
+///
+/// Deliberately `cargo check`, **not** clippy, and warnings are **not**
+/// denied. The MSRV contract is "freminal builds on `rust-version`", not
+/// "the MSRV toolchain's clippy agrees with current clippy". Linting with two
+/// clippy versions under `-D warnings` forces code to satisfy the
+/// intersection of two drifting lint sets (which sometimes conflict, e.g.
+/// MSRV `must_use_candidate` vs current `double_must_use`), and no local gate
+/// runs the MSRV clippy, so those failures only ever surfaced in CI
+/// (issue #540). Clippy with `-D warnings` runs on stable only (`check`).
+///
+/// The caller selects the toolchain (CI: `dtolnay/rust-toolchain` pinned to
+/// the `rust-version` in the workspace `Cargo.toml`).
+fn check_msrv() -> Result<()> {
+    run_cargo(vec!["check", "--all-targets", "--all-features"])
 }
 
 /// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
