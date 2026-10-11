@@ -4513,6 +4513,41 @@ Deliverable: the doc changes, markdownlint clean.
   `CSI ? 5 l` does too; existing DECSCNM tests pass.
 - **Scheduling:** after 132.10 (same seam); resolved within Task 132.
 
+#### 132.C2 — The full-rebuild damage mapping in `show()` is untested
+
+- **Surfaced:** 132.10 review (2026-10-11). Predates Task 132.
+- **Impact:** `PaneFrameDamage` for a full pane rebuild is decided inline in
+  `TerminalWidget::show()` (`widget.rs`, the `FullRebuildDamage::Full => pane_rect_damage`
+  arm). It needs a live egui `Ui`, so no test proves that any pane-wide trigger
+  (`theme_changed`, `resolved_colors_changed`, `dims_changed`, …) reports
+  `Region(pane rect)` rather than `Full`. The links on either side are tested
+  (`frame_dirty.rs` decides `content_changed`; `frame_damage.rs` aggregates `Region`).
+- **Scope of fix:** `freminal/src/gui/terminal/widget.rs`.
+- **Suggested approach:** the mapping from `(FullRebuildDamage, Option<PaneDamageRect>,
+  EmptyBoundedDamage inputs)` to `PaneFrameDamage` is a decision with real branches (the
+  `Bounded` arm's search-only fallback); per `freminal-extend-or-extract`, give it a named
+  function because it is a decision, not only to test it, then unit-test every arm.
+- **Verification:** a test per arm, including `Full` with and without a degenerate pane rect.
+- **Scheduling:** routed to Task 147 (147.25).
+
+#### 132.C3 — `--features gl-pixel` builds with dead-code warnings
+
+- **Surfaced:** 132.10 review (2026-10-11), running the pixel goldens in `.#gl-pixel`.
+  Predates Task 132 (`gl_facade/` is untouched on this branch).
+- **Impact:** `cargo test -p freminal --features gl-pixel` warns that several `Gl` facade
+  methods, `RecordingState::next_query` and four `RecordingState` query methods are never
+  used. Clippy with `--all-features` is clean because `frame-profiling` uses them; the
+  `gl-pixel`-only combination (what the `gl-pixel` CI job builds) is not.
+- **Scope of fix:** `freminal/src/gui/renderer/gl_facade/{facade,recording}.rs` (feature
+  gates).
+- **Suggested approach:** gate the query-related facade and recording items on the feature
+  that uses them (`frame-profiling`), or on `any(test, …)` as appropriate; do not add
+  `allow(dead_code)`.
+- **Verification:** `cargo build -p freminal --features gl-pixel --all-targets` and the
+  `--features frame-profiling` build are both warning-free; add the `gl-pixel`-only
+  combination to whatever lint gate is cheapest so it cannot regress.
+- **Scheduling:** routed to Task 147 (147.26).
+
 ### 132 Status notes
 
 - **132.1 (done).** Benches added; criterion baseline `pre132` saved. Medians: parse_sgr_heavy
@@ -4536,6 +4571,13 @@ Deliverable: the doc changes, markdownlint clean.
   themes as unchanged (a `&'static` to a `const` theme has no stable address, so pointer
   equality alone is insufficient), and the cursor slot never invalidates. build_snapshot vs
   `pre132`: dirty −4.9%, clean +1.3%, partial −10.8% (all within noise).
+- **132.10 (done).** Every terminal-content colour resolves through `ResolvedColors`; the
+  command-duration label also follows the resolved foreground (orchestrator change: it is
+  drawn on the terminal surface). Kept theme-based, with reason: cursor (cursor-only path),
+  gutter status and progress colours (chrome). `resolved_colors_changed` is proven to set
+  `content_changed` and veto the bounded path; the inline `show()` mapping from a full rebuild
+  to `Region(pane rect)` has no unit test for any trigger (132.C2). Pixel goldens compared and
+  matched under `.#gl-pixel` (llvmpipe). Instance benches vs `pre132`: all within ±4.4%.
 
 ---
 
@@ -5131,6 +5173,35 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Depends on:** 147.3 and 147.4 (snapshot input-mode transport and the encoder helpers),
   and 147.21 (same mode files).
 
+#### 147.25 — Unit-test the full-rebuild damage mapping in `show()`
+
+- **Source:** Task 132 cleanup entry 132.C2 (surfaced in the 132.10 review). Predates 132.
+- **Defect today:** the decision from `FullRebuildDamage` (plus the pane rect and the
+  empty-bounded fallback inputs) to `PaneFrameDamage` is inline in `TerminalWidget::show()`,
+  which needs a live egui `Ui`. No test proves that a pane-wide trigger reports
+  `Region(pane rect)` rather than `Full`, so a regression of 124.21 finding 2 would not be
+  caught.
+- **Scope:** `freminal/src/gui/terminal/widget.rs`.
+- **Fix:** give the decision a named function (it is a branching decision, not a helper
+  extracted only for a test; see `freminal-extend-or-extract`) and call it from `show()`.
+- **Tests:** one per arm: `Full` with a pane rect gives `Region`; `Full` with a degenerate
+  rect gives `Full`; each `Bounded` empty-fallback branch.
+- **Depends on:** nothing.
+
+#### 147.26 — `--features gl-pixel` dead-code warnings in `gl_facade`
+
+- **Source:** Task 132 cleanup entry 132.C3 (surfaced running the pixel goldens in
+  `.#gl-pixel`). Predates 132.
+- **Defect today:** building `freminal` with `--features gl-pixel` alone warns that several
+  `Gl` facade methods, `RecordingState::next_query` and four `RecordingState` query methods
+  are never used. Clippy with `--all-features` hides it because `frame-profiling` uses them.
+- **Scope:** `freminal/src/gui/renderer/gl_facade/facade.rs`, `recording.rs`.
+- **Fix:** gate the query items on the feature(s) that use them; no `allow(dead_code)`.
+- **Tests / verification:** `cargo build -p freminal --features gl-pixel --all-targets` and
+  `--features frame-profiling` are both warning-free; add the `gl-pixel`-only combination to
+  a lint gate so it cannot regress.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -5207,7 +5278,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19 is independent.
+- 147.19, 147.25 and 147.26 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a

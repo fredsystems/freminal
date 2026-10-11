@@ -104,7 +104,7 @@ pub(super) struct FrameDirtyObservations {
 /// 124.14b-ii), and `search_changed` (Task 124.14d) — including
 /// [`ChangedRows::None`] with only a selection, hover, and/or search change
 /// and no row change at all. `ChangedRows::All`, `theme_changed`,
-/// `dims_changed`, `folds_changed`, and every other independently-global
+/// `resolved_colors_changed`, `dims_changed`, `folds_changed`, and every other independently-global
 /// trigger (`text_blink_changed`, `image_frame_changed`,
 /// `image_pixels_changed`) still yield [`Self::ReevaluateFullRebuild`]
 /// (124.21's exhaustive audit, narrowed by one entry each at 124.14b-i,
@@ -594,6 +594,28 @@ pub(super) fn evaluate_frame_dirty_state(
     let theme_changed = cache
         .previous_theme
         .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
+    // Terminal-content colours (OSC 4 palette, OSC 10/11/17/19 dynamic
+    // colours) are baked per-vertex exactly as the theme is, so a change in
+    // the resolved set stales every vertex of THIS pane. Detection is by
+    // pointer: the PTY side (`ColorState`, Task 132.9) keeps handing out the
+    // same `Arc<ResolvedColors>` until a content colour actually changes, so
+    // `Arc::ptr_eq` is both cheap and free of false positives. A fresh `Arc`
+    // with byte-identical contents WOULD count as a change -- that is
+    // acceptable (it only costs one redundant rebuild) and the PTY side never
+    // produces it.
+    //
+    // Damage classification (`freminal-damage-model`): BOUNDABLE-NOW at pane
+    // level -- the complete extent is "every vertex of this pane", i.e. the
+    // pane's own rect, which is already known at the decision point (same
+    // shape as `theme_changed`). It therefore takes the pane full-rebuild
+    // path, which reports `PaneFrameDamage::Region(pane rect)` via
+    // `full_pane_rebuild_damage_rect` (`widget.rs`). It must NOT make the
+    // pane report `PaneFrameDamage::Full`, and it must not affect sibling
+    // panes or chrome (the colours are per-pane state, not shared).
+    let resolved_colors_changed = cache
+        .previous_resolved_colors
+        .as_ref()
+        .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.resolved_colors));
     // Detect terminal grid resize (cols or rows changed).  The cell
     // background and foreground instance VBOs hold per-cell vertices
     // that encode column indices and pixel positions based on the
@@ -609,11 +631,16 @@ pub(super) fn evaluate_frame_dirty_state(
     let folds_changed = fold_epoch != cache.previous_fold_epoch;
     // The primary content-change signal (Task 124.12): diff this frame's
     // per-row epochs against the epochs recorded at the last full rebuild.
-    // `theme_changed`, `dims_changed` and `folds_changed` stay separate ORs
-    // because they are genuinely global triggers, not row-level content —
-    // deliberately NOT folded into `rows_changed` itself.
+    // `theme_changed`, `resolved_colors_changed`, `dims_changed` and
+    // `folds_changed` stay separate ORs because they are pane-wide triggers,
+    // not row-level content — deliberately NOT folded into `rows_changed`
+    // itself.
     let rows_changed = diff_row_epochs(cache.last_rendered_row_epochs.as_ref(), &snap.row_epochs);
-    let content_changed = theme_changed || dims_changed || folds_changed || rows_changed.any();
+    let content_changed = theme_changed
+        || resolved_colors_changed
+        || dims_changed
+        || folds_changed
+        || rows_changed.any();
 
     // Apply the eviction rules to the stored selection first (Task 125.17):
     // an evicted endpoint clamps to the oldest retained row, a selection with
@@ -948,9 +975,9 @@ pub(super) fn evaluate_frame_dirty_state(
         && !never_built;
 
     // Task 124.14: a full rebuild whose damage is provably bounded, rather
-    // than the whole pane. `content_changed` ORs four independent triggers
-    // together (`theme_changed`, `dims_changed`, `folds_changed`,
-    // `rows_changed.any()`); this frame's damage can only be named as a
+    // than the whole pane. `content_changed` ORs five independent triggers
+    // together (`theme_changed`, `resolved_colors_changed`, `dims_changed`,
+    // `folds_changed`, `rows_changed.any()`); this frame's damage can only be named as a
     // known set of rows when `rows_changed` is not `ChangedRows::All` (a
     // `ChangedRows::All` answer -- no baseline, or a window-size change --
     // is not a row list at all, so there is nothing to bound to) and none
@@ -999,6 +1026,7 @@ pub(super) fn evaluate_frame_dirty_state(
     let bounded_change = !matches!(rows_changed, ChangedRows::All)
         && !never_built
         && !theme_changed
+        && !resolved_colors_changed
         && !dims_changed
         && !folds_changed
         && !text_blink_changed
@@ -1084,8 +1112,21 @@ mod evaluate_frame_dirty_state_tests {
     /// tests can mutate a single entry to simulate exactly one row
     /// changing, and so a length mismatch (a resize) is distinguishable
     /// from "no epochs recorded at all".
+    ///
+    /// Every snapshot shares ONE `Arc<ResolvedColors>` (a per-thread
+    /// singleton), because that is what production does: the PTY side
+    /// reuses the same `Arc` until a content colour actually changes, and
+    /// the resolved-colour trigger (Task 132.10) compares by pointer. Tests
+    /// that build two snapshots to model "the same screen, one frame apart"
+    /// must therefore not get two unrelated `Arc`s from
+    /// `TerminalSnapshot::empty()`.
     fn base_snapshot() -> TerminalSnapshot {
+        thread_local! {
+            static SHARED_COLORS: Arc<freminal_common::colors::ResolvedColors> =
+                TerminalSnapshot::empty().resolved_colors;
+        }
         let mut snap = TerminalSnapshot::empty();
+        snap.resolved_colors = SHARED_COLORS.with(Arc::clone);
         snap.term_width = 10;
         snap.term_height = 5;
         snap.total_rows = 5;
@@ -1105,6 +1146,7 @@ mod evaluate_frame_dirty_state_tests {
     ) -> PaneRenderCache {
         let mut cache = PaneRenderCache::new();
         cache.previous_theme = Some(snap.theme);
+        cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
         cache.previous_term_width = snap.term_width;
         cache.previous_term_height = snap.term_height;
         cache.previous_fold_epoch = 0;
@@ -2552,6 +2594,171 @@ mod evaluate_frame_dirty_state_tests {
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
         assert!(outcome.observations.content_changed);
+    }
+
+    // ── resolved-colour trigger (Task 132.10) ────────────────────────────
+
+    /// `snap` with a brand-new `Arc<ResolvedColors>` whose palette[1] differs
+    /// from the original, leaving everything else untouched.
+    fn with_recoloured_palette(snap: &TerminalSnapshot) -> TerminalSnapshot {
+        let mut recoloured = snap.clone();
+        let mut colors = (*snap.resolved_colors).clone();
+        colors.palette[1] = (1, 2, 3);
+        recoloured.resolved_colors = Arc::new(colors);
+        recoloured
+    }
+
+    #[test]
+    fn same_resolved_colors_arc_reports_no_change() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(
+            !outcome.observations.content_changed,
+            "an unchanged Arc<ResolvedColors> must not register as a content change"
+        );
+    }
+
+    #[test]
+    fn new_resolved_colors_arc_forces_full_rebuild() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let changed = with_recoloured_palette(&snap);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn resolved_colors_change_beats_cursor_change() {
+        // A palette change AND a cursor-blink change on the same frame:
+        // `content_changed` must veto the cursor-only fast path, because the
+        // palette is baked into every vertex of the pane.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let changed = with_recoloured_palette(&snap);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn resolved_colors_change_vetoes_bounded_rebuild() {
+        // One changed row would normally be `Bounded` (see
+        // `single_changed_row_selects_bounded`-style tests). A simultaneous
+        // palette change makes every row stale, so the row list is not a
+        // complete extent and the bound must be vetoed.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_built_with_empty_deco_verts();
+
+        // Control: the row change alone IS bounded, so the veto below is
+        // attributable to the colour change and nothing else.
+        let mut rows_only = snap.clone();
+        bump_one_row_epoch(&mut rows_only);
+        let control = call(
+            &rows_only,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+        assert_eq!(control.rebuild, VertexRebuild::Bounded);
+
+        let mut changed = with_recoloured_palette(&snap);
+        bump_one_row_epoch(&mut changed);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn identical_contents_in_a_new_arc_still_count_as_changed() {
+        // Pointer semantics: the trigger is `Arc::ptr_eq`, not value
+        // equality. The PTY side (`ColorState`) guarantees it reuses the
+        // same `Arc` until a content colour really changes, so a fresh
+        // allocation is always a real change in production. This pins the
+        // pointer semantics so a "cheaper" value comparison is not
+        // substituted without noticing it would cost 780 bytes per frame.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut cloned = snap.clone();
+        cloned.resolved_colors = Arc::new((*snap.resolved_colors).clone());
+        assert_eq!(*cloned.resolved_colors, *snap.resolved_colors);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &cloned,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn missing_resolved_colors_baseline_reports_changed() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_resolved_colors = None;
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn invalidate_theme_cache_clears_resolved_colors_baseline() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        assert!(cache.previous_resolved_colors.is_some());
+        cache.invalidate_theme_cache();
+        assert!(cache.previous_resolved_colors.is_none());
+        assert!(cache.previous_theme.is_none());
     }
 
     #[test]

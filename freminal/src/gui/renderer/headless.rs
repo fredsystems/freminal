@@ -53,6 +53,7 @@ use crate::gui::shaping::ShapingCache;
 use crate::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors};
 use freminal_common::config::BackgroundImageMode;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -300,6 +301,11 @@ impl HeadlessRenderer {
         );
 
         let cursor = synthetic_cursor(frame);
+        let colors = ResolvedColors::resolve(
+            &CATPPUCCIN_MOCHA,
+            &ColorPalette::default(),
+            &DynamicColorOverrides::default(),
+        );
         let mut bg = Vec::new();
         let mut deco = Vec::new();
         let _cursor_range = build_background_instances(
@@ -317,7 +323,7 @@ impl HeadlessRenderer {
                 match_highlights: &[],
                 command_block_hover_rows: None,
                 term_width_cols: frame.cols,
-                theme: &CATPPUCCIN_MOCHA,
+                colors: &colors,
                 reverse_screen: false,
             },
             &mut bg,
@@ -332,7 +338,7 @@ impl HeadlessRenderer {
             cell_height,
             ascent,
             &FgRenderOptions::all_visible(None),
-            &CATPPUCCIN_MOCHA,
+            &colors,
             &mut fg,
         );
 

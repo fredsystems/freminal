@@ -21,6 +21,7 @@ use freminal_common::{
         command_block::CommandStatus, pointer_shape::PointerShape, progress::ProgressState,
         row_number::RowNumber, tchar::TChar, url::Url,
     },
+    colors::ResolvedColors,
     config::{Config, UnfocusedCursorStyle},
     send_or_log,
     themes::ThemePalette,
@@ -1566,6 +1567,13 @@ pub struct PaneRenderCache {
     /// we must force a full rebuild so foreground/background vertex colors
     /// are re-resolved against the new palette.
     pub(super) previous_theme: Option<&'static ThemePalette>,
+    /// The `Arc<ResolvedColors>` from the last full vertex rebuild.  The PTY
+    /// side keeps the same `Arc` until a content colour (OSC 4 palette, OSC
+    /// 10/11/17/19 dynamic colour, or a theme change) actually changes, so a
+    /// pointer inequality means every baked vertex colour of this pane is
+    /// stale and a full rebuild is required.  `None` before the first
+    /// rebuild or after [`Self::invalidate_theme_cache`].
+    pub(super) previous_resolved_colors: Option<Arc<ResolvedColors>>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild. Logical row
     /// numbers (Task 125.17), so it is stable across eviction and scrolling.
@@ -1821,6 +1829,7 @@ impl PaneRenderCache {
             last_rendered_visible: None,
             last_rendered_row_epochs: None,
             previous_theme: None,
+            previous_resolved_colors: None,
             previous_selection: None,
             previous_screen_selection: None,
             previous_selection_screen_rows: None,
@@ -1927,8 +1936,9 @@ impl PaneRenderCache {
 
     /// Invalidate the cached theme pointer so the next frame forces a full
     /// vertex rebuild with the new palette colors.
-    pub const fn invalidate_theme_cache(&mut self) {
+    pub fn invalidate_theme_cache(&mut self) {
         self.previous_theme = None;
+        self.previous_resolved_colors = None;
     }
 
     /// Force a full vertex rebuild on the next frame by clearing the cached
@@ -3808,7 +3818,7 @@ impl FreminalTerminalWidget {
                             match_highlights: &search_highlights,
                             command_block_hover_rows,
                             term_width_cols: snap.term_width,
-                            theme: snap.theme,
+                            colors: &snap.resolved_colors,
                             // Task 115.2: DECSCNM (whole-screen reverse video)
                             // composes with per-cell SGR-7 by XOR inside the
                             // vertex builders via `effective_fg`/`effective_bg`.
@@ -3836,7 +3846,7 @@ impl FreminalTerminalWidget {
                         cell_h,
                         self.font_manager.ascent(),
                         &fg_opts,
-                        snap.theme,
+                        &snap.resolved_colors,
                         &mut rs_ref.fg_instances,
                     );
                     build_image_verts(
@@ -3879,6 +3889,7 @@ impl FreminalTerminalWidget {
                     cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
                     cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
                     cache.previous_theme = Some(snap.theme);
+                    cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
                     // Captured BEFORE the overwrite below so the damage
                     // build a few lines down can still see where THIS
                     // frame's selection was painted last time (Task
@@ -4571,7 +4582,10 @@ impl FreminalTerminalWidget {
             let win_start = flat_window_start;
             let win_end = win_start + snap.term_height.saturating_add(snap.window_extra_rows);
             let running_extent = running_block_extent(snap);
-            let (fg_r, fg_g, fg_b) = snap.theme.foreground;
+            // Drawn on the terminal surface, so it follows the pane's resolved
+            // foreground (OSC 10 override or theme) to stay legible on an
+            // OSC 11 background.
+            let (fg_r, fg_g, fg_b) = snap.resolved_colors.foreground;
             // Muted: ~60% alpha so the label reads without overpowering
             // the underlying cell content.
             let label_color = egui::Color32::from_rgba_unmultiplied(fg_r, fg_g, fg_b, 153);
@@ -5824,7 +5838,11 @@ mod patch_cursor_only_deco_verts_tests {
     };
     use crate::gui::terminal::cursor_appearance::CursorAppearance;
     use crate::gui::{colors::cursor_f, shaping::ShapedLine};
-    use freminal_common::{cursor::CursorVisualStyle, themes::CATPPUCCIN_MOCHA};
+    use freminal_common::{
+        colors::{ColorPalette, DynamicColorOverrides, ResolvedColors},
+        cursor::CursorVisualStyle,
+        themes::CATPPUCCIN_MOCHA,
+    };
     use freminal_terminal_emulator::LineWidth;
     use std::sync::Arc;
 
@@ -5905,7 +5923,11 @@ mod patch_cursor_only_deco_verts_tests {
                 match_highlights: &[],
                 command_block_hover_rows: None,
                 term_width_cols: 0,
-                theme: &CATPPUCCIN_MOCHA,
+                colors: &ResolvedColors::resolve(
+                    &CATPPUCCIN_MOCHA,
+                    &ColorPalette::default(),
+                    &DynamicColorOverrides::default(),
+                ),
                 reverse_screen: false,
             },
             &mut instances,

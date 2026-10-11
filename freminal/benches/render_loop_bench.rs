@@ -40,7 +40,7 @@ use freminal::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::cursor::StateColors;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
-use freminal_common::colors::TerminalColor;
+use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors, TerminalColor};
 use freminal_common::config::Config;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -48,6 +48,19 @@ use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::Arc;
 use std::time::Duration;
+
+// ---------------------------------------------------------------
+// Shared resolved colours
+// ---------------------------------------------------------------
+/// Resolved terminal-content colours for the bench theme, with no OSC 4 /
+/// dynamic overrides. Built once per bench function, outside the timed loop.
+fn mocha_colors() -> ResolvedColors {
+    ResolvedColors::resolve(
+        &CATPPUCCIN_MOCHA,
+        &ColorPalette::default(),
+        &DynamicColorOverrides::default(),
+    )
+}
 
 // ---------------------------------------------------------------
 // Criterion configuration
@@ -845,6 +858,7 @@ fn build_shaped_lines_for_indexed_size(
 // bench_bg_instances — instanced background buffer builder
 // ---------------------------------------------------------------
 fn bench_bg_instances(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_bg");
@@ -892,7 +906,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
+                            colors: &colors,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -912,6 +926,7 @@ fn bench_bg_instances(c: &mut Criterion) {
 // bench_fg_instances — instanced foreground buffer builder
 // ---------------------------------------------------------------
 fn bench_fg_instances(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_fg");
@@ -939,7 +954,7 @@ fn bench_fg_instances(c: &mut Criterion) {
                             cell_height,
                             ascent,
                             &opts,
-                            &CATPPUCCIN_MOCHA,
+                            &colors,
                             &mut instances,
                         );
                         std::hint::black_box(instances.len());
@@ -959,6 +974,7 @@ fn bench_fg_instances(c: &mut Criterion) {
 // `48;5;M`) output (Task 132.1 baseline).
 // ---------------------------------------------------------------
 fn bench_bg_instances_indexed(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_bg_indexed");
@@ -1006,7 +1022,7 @@ fn bench_bg_instances_indexed(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
+                            colors: &colors,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -1023,6 +1039,7 @@ fn bench_bg_instances_indexed(c: &mut Criterion) {
 }
 
 fn bench_fg_instances_indexed(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_fg_indexed");
@@ -1050,7 +1067,7 @@ fn bench_fg_instances_indexed(c: &mut Criterion) {
                             cell_height,
                             ascent,
                             &opts,
-                            &CATPPUCCIN_MOCHA,
+                            &colors,
                             &mut instances,
                         );
                         std::hint::black_box(instances.len());
@@ -1077,6 +1094,7 @@ fn bench_fg_instances_indexed(c: &mut Criterion) {
 // a future per-row incremental build could recover; it is not itself an
 // incremental build (none exists yet).
 fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let mut group = c.benchmark_group("instanced_bg_partial_dirty");
@@ -1129,7 +1147,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
+                            colors: &colors,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -1164,7 +1182,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
+                            colors: &colors,
                             reverse_screen: false,
                         },
                         &mut instances,
@@ -1190,6 +1208,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
 // `shaped_lines` slice vs. a slice of exactly one row, quantifying the
 // per-row headroom a future incremental foreground build could recover.
 fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let (lines, fm) = build_shaped_lines_for_size(width, height);
@@ -1209,7 +1228,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
         cell_height,
         ascent,
         &opts,
-        &CATPPUCCIN_MOCHA,
+        &colors,
         &mut all_rows_instances,
     );
 
@@ -1225,7 +1244,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
                     cell_height,
                     ascent,
                     &opts,
-                    &CATPPUCCIN_MOCHA,
+                    &colors,
                     &mut all_rows_instances,
                 );
                 std::hint::black_box(all_rows_instances.len());
@@ -1244,7 +1263,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
         cell_height,
         ascent,
         &opts,
-        &CATPPUCCIN_MOCHA,
+        &colors,
         &mut one_row_instances,
     );
     group.bench_function(
@@ -1258,7 +1277,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
                     cell_height,
                     ascent,
                     &opts,
-                    &CATPPUCCIN_MOCHA,
+                    &colors,
                     &mut one_row_instances,
                 );
                 std::hint::black_box(one_row_instances.len());
@@ -1270,6 +1289,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
 }
 
 fn bench_fg_atlas_rasterization(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let (lines, fm) = build_shaped_lines_for_size(width, height);
@@ -1297,7 +1317,7 @@ fn bench_fg_atlas_rasterization(c: &mut Criterion) {
                         cell_height,
                         ascent,
                         &opts,
-                        &CATPPUCCIN_MOCHA,
+                        &colors,
                         &mut instances,
                     );
                     std::hint::black_box(instances.len());
