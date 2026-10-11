@@ -641,7 +641,10 @@ implementation choice.
   alternate screen (`?1049h`, or `?1047l` on the alternate) empties the alternate
   map. RIS clears both screens' maps. Placing an image at the alternate screen's
   bottom row scrolls the screen as a line feed would, instead of growing the
-  store (Task 131.C5).
+  store (Task 131.C5). Because the alternate screen persists while parked, a
+  parked alternate keeps its image store and placements until it is cleared
+  (`?1049h`, `?1047l`) or RIS, as kitty's alternate graphics manager does across
+  toggles. A real screen switch also ends the placeholder continuity run.
 
 **Closed after Task 100:**
 

@@ -480,6 +480,13 @@ Kitty handler; non-Kitty APCs are logged and ignored, which is spec-compliant.
 output universally uses 7-bit sequences, so the default is appropriate. The remaining gap is
 that S8C1T is off by default; there is no user-facing config to change this. Kitty graphics replies honour S8C1T (8-bit APC / ST framing when active) since Task 129.13.
 
+**Mode changes take effect per read.** A read from the PTY is parsed in one pass before any of
+it is applied, so a change of parser mode (S8C1T / S7C1T, DECANM entering or leaving VT52, and
+the parser half of RIS) affects the _next_ read: bytes after the change in the same read were
+already parsed under the old mode. Applications that switch mode and then immediately emit
+sequences in the new mode within one write can be misread. Unscheduled; recorded by the Task
+131 adversarial review.
+
 ---
 
 ## C0 Mid-Sequence Handling

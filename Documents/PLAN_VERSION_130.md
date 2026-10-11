@@ -3477,11 +3477,33 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
   DECRQM reports 1047. Two test files outside the stated scope
   (`mode_dispatch_tests.rs`, `terminal_handler_integration.rs`) needed mechanical assertion
   updates that the parse split forced; accepted.
+- **131.5 — Complete (2026-10-10), commit `b320677d`.**
+  - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
+  - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
+    position and leave the margins alone. `clear_alternate_screen` installs a fresh store
+    at the old store's `next_number`.
+  - Parked screens are resized eagerly. `full_reset` keeps both namespaces monotonic.
+  - Every test that pinned the old semantics was updated (the list is in the commit), and
+    new buffer tests were added in `screen_switch_tests.rs`.
+  - Accepted nit: a first-ever entry builds a blank store and then the clear builds another.
+    That skips `height` row numbers in a 63-bit space and costs one allocation.
+  - **Benchmark finding:** `bench_alternate_screen_switch` dropped the buffer inside the
+    timed closure, so its old figures (~37 µs) measured deallocation, not the switch. Each
+    routine now returns the buffer.
+  - Against `before_131_5`, measured in the old shape before that bench fix, no change was
+    statistically significant (every p > 0.05; medians moved +1.7% for `enter_alternate`
+    and −16% for `leave_alternate`, both within noise). Because the old shape measured
+    deallocation and the switch API itself changed, **no valid pre-change baseline exists**
+    for the corrected bench shape (adversarial-review finding 8).
+  - Corrected measurements: `enter_alternate` ~1.0 µs, `leave_alternate` ~0.16 µs,
+    `alternate_reenter` ~0.16 µs. `bench_alt_screen_transition_e2e`: no significant change
+    (~16–18 µs).
+  - The stale `handle_leave_alternate` comment noted here was removed by 131.7.
 - **131.6 — Complete (2026-10-10), commit `91a663f8`.**
   - `handle_alternate_screen(mode, action)` implements the `?47` / `?1047` / `?1049`
     decisions exactly.
   - The DECSC charset slot is `ScreenScoped`.
-  - 17 new tests in `tests/alt_screen_modes.rs`.
+  - New tests in `tests/alt_screen_modes.rs`.
   - The DECSTR active-screen charset slot has no dedicated test yet; 131.8 adds one.
 - **131.7 — Complete (2026-10-10), commit `70b9bfcb`.**
   - The virtual and real placement maps and the prune base are `ScreenScoped`, and every
@@ -3510,26 +3532,6 @@ Verification: the pre-commit markdownlint and prettier hooks pass on the three f
 - **131.9 — Complete (2026-10-10), commit `4071e616`.** 43 end-to-end tests through
   `build_snapshot`.
 - **131.10 — Complete (2026-10-10), commit `9d0dae4d`.** COVERAGE, GAPS and the kitty reference.
-- **131.5 — Complete (2026-10-10), commit `b320677d`.**
-  - `ParkedScreen` (with `reflow_anchor`) replaces `SavedPrimaryState`.
-  - `switch_to_alternate` / `switch_to_primary` are idempotent, keep the cursor's screen
-    position and leave the margins alone. `clear_alternate_screen` installs a fresh store
-    at the old store's `next_number`.
-  - Parked screens are resized eagerly. `full_reset` keeps both namespaces monotonic.
-  - Every test that pinned the old semantics was updated (the list is in the commit), and
-    26 new buffer tests were added in `screen_switch_tests.rs`.
-  - Accepted nit: a first-ever entry builds a blank store and then the clear builds another.
-    That skips `height` row numbers in a 63-bit space and costs one allocation.
-  - **Benchmark finding:** `bench_alternate_screen_switch` dropped the buffer inside the
-    timed closure, so its old figures (~37 µs) measured deallocation, not the switch. Each
-    routine now returns the buffer.
-  - Against `before_131_5`, measured in the old shape before that bench fix, no change was
-    significant (every p > 0.05, medians within ±2%, `leave_alternate` −16%).
-  - Corrected measurements: `enter_alternate` ~1.0 µs, `leave_alternate` ~0.16 µs,
-    `alternate_reenter` ~0.16 µs. `bench_alt_screen_transition_e2e`: no significant change
-    (~16–18 µs).
-  - For 131.7: the comment in `handle_leave_alternate` still says the alternate rows "are
-    gone"; 131.7 rewrites that code.
 
 ### 131 Adversarial review (2026-10-10)
 
@@ -3629,7 +3631,8 @@ Notes:
   Table 5-9. xterm's own comment records the deviation.
 - RIS keeps the colour overrides it resets today (OSC 10/11/12: kitty, Ghostty and WezTerm
   reset them). DECSTR keeps them (xterm).
-- The pure transport and cache fields (`write_tx`, `placement_prune_base`,
+- The pure transport and cache fields (`write_tx`, `placement_prune_base` — kept on DECSTR,
+  re-based on RIS together with the cleared maps —
   `row_epoch_counter`, `cell_pixel_*`, `theme`, `tmux_passthrough_queue`) are kept, as is
   `allow_alt_screen` (xterm does not reset it).
 
@@ -3732,6 +3735,9 @@ Notes:
     the image (or the last row).
   - The primary behaviour is unchanged.
 - **Scheduling:** within Task 131, after 131.7.
+- **Status: Resolved (2026-10-10), commit `193fd200`.** Routed to Task 135: placement
+  scrolls the whole screen and ignores DECSTBM on both screens (adversarial-review
+  finding 3), which is part of the cursor-after-placement rule Task 135 owns.
 
 ---
 
