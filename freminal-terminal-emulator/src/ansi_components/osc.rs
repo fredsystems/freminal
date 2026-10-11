@@ -9,16 +9,17 @@ use crate::ansi_components::tracer::{
 };
 use crate::error::AnsiParseError;
 use freminal_common::buffer_states::ftcs::{is_known_ftcs_marker, parse_ftcs_params};
-use freminal_common::buffer_states::osc::{
-    AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
-};
+use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType, OscTarget, UrlResponse};
 use freminal_common::buffer_states::pointer_shape::PointerShape;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::osc_clipboard::handle_osc_clipboard;
+use super::osc_colors::{
+    handle_osc_dynamic_colors, handle_osc_palette_color, handle_osc_reset_dynamic_color,
+    handle_osc_reset_palette,
+};
 use super::osc_iterm2::handle_osc_iterm2;
 use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_99, handle_osc_notify_777};
-use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 use super::osc_shell_info::handle_osc_shell_info;
 
 /// Default maximum size of an OSC sequence, in bytes.
@@ -499,21 +500,16 @@ fn dispatch_osc_target(
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     match *osc_target {
-        OscTarget::Background => with_osc_tokens(raw_params, output, |params, out| {
-            out.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::from(&params)),
-            ));
-        }),
-        OscTarget::Foreground => with_osc_tokens(raw_params, output, |params, out| {
-            out.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::from(&params)),
-            ));
-        }),
-        OscTarget::CursorColor => with_osc_tokens(raw_params, output, |params, out| {
-            out.push(TerminalOutput::OscResponse(
-                AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::from(&params)),
-            ));
-        }),
+        // OSC 10-19 — dynamic colour set / query; OSC 110-119 — reset. Parsed
+        // from the raw bytes (a colour name may contain spaces).
+        OscTarget::DynamicColors(start_code) => {
+            handle_osc_dynamic_colors(start_code, raw_params, output);
+            ParserOutcome::Finished
+        }
+        OscTarget::ResetDynamicColor(reset_code) => {
+            handle_osc_reset_dynamic_color(reset_code, output);
+            ParserOutcome::Finished
+        }
         OscTarget::TitleBar | OscTarget::IconName => {
             push_osc_text(raw_params, output, AnsiOscType::SetTitleBar)
         }
@@ -524,34 +520,20 @@ fn dispatch_osc_target(
         OscTarget::Clipboard => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_clipboard(&params, raw_params, out);
         }),
-        OscTarget::PaletteColor => with_osc_tokens(raw_params, output, |params, out| {
-            handle_osc_palette_color(&params, raw_params, out);
-        }),
-        OscTarget::ResetPaletteColor => with_osc_tokens(raw_params, output, |params, out| {
-            handle_osc_reset_palette(&params, out);
-        }),
+        OscTarget::PaletteColor => {
+            handle_osc_palette_color(raw_params, output);
+            ParserOutcome::Finished
+        }
+        OscTarget::ResetPaletteColor => {
+            handle_osc_reset_palette(raw_params, output);
+            ParserOutcome::Finished
+        }
         OscTarget::RemoteHost => push_osc_text(raw_params, output, AnsiOscType::RemoteHost),
         OscTarget::Url => handle_osc_url(raw_params, output),
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => with_osc_tokens(raw_params, output, |params, out| {
             handle_osc_pointer_shape(&params, out);
         }),
-        OscTarget::ResetCursorColor => {
-            output.push(TerminalOutput::OscResponse(AnsiOscType::ResetCursorColor));
-            ParserOutcome::Finished
-        }
-        OscTarget::ResetForeground => {
-            output.push(TerminalOutput::OscResponse(
-                AnsiOscType::ResetForegroundColor,
-            ));
-            ParserOutcome::Finished
-        }
-        OscTarget::ResetBackground => {
-            output.push(TerminalOutput::OscResponse(
-                AnsiOscType::ResetBackgroundColor,
-            ));
-            ParserOutcome::Finished
-        }
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, output);
             ParserOutcome::Finished
@@ -574,18 +556,11 @@ fn dispatch_osc_target(
             handle_osc_notify_99(raw_params, output);
             ParserOutcome::Finished
         }
-        // Known-but-unimplemented OSC targets.  These are recognised
-        // sequences sent by common programs (vim/neovim, zsh, tmux) that
-        // Freminal cannot meaningfully act on (X11 mouse colors, Tektronix
-        // graphics, color-scheme notifications).  Logged at warn with the
-        // full raw sequence so the unhandled surface can be audited.
-        OscTarget::MouseForeground
-        | OscTarget::MouseBackground
-        | OscTarget::TekForeground
-        | OscTarget::TekBackground
-        | OscTarget::HighlightBackground
-        | OscTarget::HighlightForeground
-        | OscTarget::ColorSchemeNotification => {
+        // Known-but-unimplemented OSC target.  A recognised sequence sent by
+        // common programs (zsh) that Freminal cannot meaningfully act on
+        // (color-scheme notifications).  Logged at warn with the full raw
+        // sequence so the unhandled surface can be audited.
+        OscTarget::ColorSchemeNotification => {
             warn_unimplemented_osc(osc_target, raw_params);
             ParserOutcome::Finished
         }
@@ -674,9 +649,13 @@ mod tests {
     use crate::ansi::{FreminalAnsiParser, ParserOutcome};
     use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
+    use freminal_common::buffer_states::osc_color::{
+        ColorRequest, DynamicColorOp, PaletteColorOp, PaletteReset,
+    };
     use freminal_common::buffer_states::pointer_shape::PointerShape;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::url::Url;
+    use freminal_common::colors::DynamicColorSlot;
 
     fn feed_osc(payload: &[u8]) -> Vec<TerminalOutput> {
         let mut parser = AnsiOscParser::new();
@@ -707,39 +686,41 @@ mod tests {
 
     // ------------------------------------------------------------------
     // OSC 10 / 11 / 12 — foreground / background / cursor color queries
+    // (the full value grammar is tested in `osc_colors`)
     // ------------------------------------------------------------------
+
+    fn dynamic_query(slot: DynamicColorSlot) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::DynamicColors(vec![DynamicColorOp {
+            slot,
+            request: ColorRequest::Query,
+        }]))
+    }
 
     #[test]
     fn osc10_foreground_query() {
         // OSC 10 ; ? BEL
-        let output = feed_osc(b"10;?\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::RequestColorQueryForeground(_))
-        ));
+        assert_eq!(
+            feed_osc(b"10;?\x07"),
+            [dynamic_query(DynamicColorSlot::Foreground)]
+        );
     }
 
     #[test]
     fn osc11_background_query() {
         // OSC 11 ; ? BEL
-        let output = feed_osc(b"11;?\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::RequestColorQueryBackground(_))
-        ));
+        assert_eq!(
+            feed_osc(b"11;?\x07"),
+            [dynamic_query(DynamicColorSlot::Background)]
+        );
     }
 
     #[test]
     fn osc12_cursor_color_query() {
         // OSC 12 ; ? BEL
-        let output = feed_osc(b"12;?\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::RequestColorQueryCursor(_))
-        ));
+        assert_eq!(
+            feed_osc(b"12;?\x07"),
+            [dynamic_query(DynamicColorSlot::Cursor)]
+        );
     }
 
     // ------------------------------------------------------------------
@@ -811,11 +792,15 @@ mod tests {
     #[test]
     fn osc4_dispatched_correctly() {
         let output = feed_osc(b"4;7;rgb:ff/00/00\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::SetPaletteColor(7, 0xff, 0x00, 0x00))
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::PaletteColors(
+                vec![PaletteColorOp {
+                    index: 7,
+                    request: ColorRequest::Set((0xff, 0x00, 0x00)),
+                }]
+            ))]
+        );
     }
 
     // ------------------------------------------------------------------
@@ -825,11 +810,12 @@ mod tests {
     #[test]
     fn osc104_dispatched_correctly() {
         let output = feed_osc(b"104\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::ResetPaletteColor(None))
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(
+                AnsiOscType::ResetPaletteColors(PaletteReset::All)
+            )]
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1012,33 +998,36 @@ mod tests {
     fn osc112_reset_cursor_color() {
         // OSC 112 BEL — reset cursor color
         let output = feed_osc(b"112\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::ResetCursorColor)
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::ResetDynamicColor(
+                DynamicColorSlot::Cursor
+            ))]
+        );
     }
 
     #[test]
     fn osc110_reset_foreground() {
         // OSC 110 BEL — reset foreground color
         let output = feed_osc(b"110\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::ResetForegroundColor)
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::ResetDynamicColor(
+                DynamicColorSlot::Foreground
+            ))]
+        );
     }
 
     #[test]
     fn osc111_reset_background() {
         // OSC 111 BEL — reset background color
         let output = feed_osc(b"111\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::ResetBackgroundColor)
-        ));
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::ResetDynamicColor(
+                DynamicColorSlot::Background
+            ))]
+        );
     }
 
     // ── OSC 8 (URL) ─────────────────────────────────────────────────────────
@@ -1286,26 +1275,48 @@ mod tests {
 
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
-        // OSC 52 clipboard, plus the colour, palette and pointer-shape
-        // targets that tokenise. (Titles and OSC 7 no longer tokenise; see
-        // the 129.6 tests below. Neither does OSC 8; see the 129.7 tests
-        // below. Neither does OSC 133; see the 129.8 tests below.)
-        for payload in [
-            &b"52;c;\xe9\x07"[..],
-            b"10;\xe9\x07",
-            b"11;\xe9\x07",
-            b"12;\xe9\x07",
-            b"4;1;\xe9\x07",
-            b"104;\xe9\x07",
-            b"22;\xe9\x07",
-        ] {
+        // OSC 52 clipboard and the pointer-shape target, which tokenise.
+        // (Titles and OSC 7 no longer tokenise; see the 129.6 tests below.
+        // Neither does OSC 8; see the 129.7 tests below. Neither does OSC 133;
+        // see the 129.8 tests below. Neither do the colour targets; see the
+        // 132.13 tests below.)
+        for payload in [&b"52;c;\xe9\x07"[..], b"22;\xe9\x07"] {
             assert_invalid(payload);
         }
     }
 
+    // ── Colour targets split the raw body (Task 132.13) ─────────────────────
+
     #[test]
-    fn non_utf8_in_later_segment_of_tokenising_target_is_invalid() {
-        assert_invalid(b"4;1;ok;\xe9\x07");
+    fn colour_targets_with_non_utf8_byte_are_skipped_not_invalid() {
+        // A non-UTF-8 value is an invalid colour spec: skipped, never
+        // `Invalid`. (OSC 10-12, 4 and 104 used to tokenise.)
+        for payload in [
+            &b"10;\xe9\x07"[..],
+            b"11;\xe9\x07",
+            b"12;\xe9\x07",
+            b"4;1;\xe9\x07",
+            b"104;\xe9\x07",
+            b"110;\xe9\x07",
+        ] {
+            let (output, outcome) = feed_osc_with_outcome(payload);
+            assert_no_invalid(&output, &outcome);
+        }
+    }
+
+    #[test]
+    fn non_utf8_in_later_pair_of_osc4_keeps_the_valid_pair() {
+        let (output, outcome) = feed_osc_with_outcome(b"4;1;red;2;\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(
+            output,
+            [TerminalOutput::OscResponse(AnsiOscType::PaletteColors(
+                vec![PaletteColorOp {
+                    index: 1,
+                    request: ColorRequest::Set((255, 0, 0)),
+                }]
+            ))]
+        );
     }
 
     #[test]

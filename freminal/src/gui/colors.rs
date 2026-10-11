@@ -5,7 +5,7 @@
 
 use conv2::ConvUtil;
 use egui::Color32;
-use freminal_common::colors::TerminalColor;
+use freminal_common::colors::{ResolvedColors, TerminalColor};
 use freminal_common::themes::ThemePalette;
 
 /// Convert an `(r, g, b)` tuple to a `Color32`.
@@ -29,16 +29,18 @@ const fn rgb_to_f32(rgb: (u8, u8, u8)) -> [f32; 4] {
 //  Theme-derived accessors used by renderer.rs
 // ---------------------------------------------------------------------------
 
-/// Selection background color as `[f32; 4]` from the active theme.
+/// Selection background color as `[f32; 4]`, resolved from the pane's
+/// [`ResolvedColors`] (theme value or OSC 17 override).
 #[must_use]
-pub const fn selection_bg_f(theme: &ThemePalette) -> [f32; 4] {
-    rgb_to_f32(theme.selection_bg)
+pub const fn selection_bg_f(colors: &ResolvedColors) -> [f32; 4] {
+    rgb_to_f32(colors.selection_background)
 }
 
-/// Selection foreground color as `[f32; 4]` from the active theme.
+/// Selection foreground color as `[f32; 4]`, resolved from the pane's
+/// [`ResolvedColors`] (theme value or OSC 19 override).
 #[must_use]
-pub const fn selection_fg_f(theme: &ThemePalette) -> [f32; 4] {
-    rgb_to_f32(theme.selection_fg)
+pub const fn selection_fg_f(colors: &ResolvedColors) -> [f32; 4] {
+    rgb_to_f32(colors.selection_foreground)
 }
 
 /// Cursor color as `[f32; 4]` from the active theme, with optional override.
@@ -76,13 +78,13 @@ pub const fn search_current_bg_f() -> [f32; 4] {
 /// Background tint for the OSC 133 command block currently under the
 /// mouse cursor, as `[f32; 4]`.
 ///
-/// Derived from the theme's selection color at reduced alpha (≈25%) so
+/// Derived from the resolved selection color at reduced alpha (≈25%) so
 /// the hover indicator is visually distinct from a real selection while
 /// still using a color the user has implicitly approved. The lower
 /// alpha also keeps the underlying text readable.
 #[must_use]
-pub const fn command_block_hover_bg_f(theme: &ThemePalette) -> [f32; 4] {
-    let [r, g, b, _] = rgb_to_f32(theme.selection_bg);
+pub const fn command_block_hover_bg_f(colors: &ResolvedColors) -> [f32; 4] {
+    let [r, g, b, _] = rgb_to_f32(colors.selection_background);
     [r, g, b, 0.25]
 }
 
@@ -128,8 +130,10 @@ pub fn internal_color_to_egui(
 
         TerminalColor::Custom(r, g, b) => Color32::from_rgb(r, g, b),
 
-        // PaletteIndex should have been resolved by the handler before reaching
-        // the GUI.  If it somehow arrives here, fall back to the default palette.
+        // This egui path serves chrome only; terminal cells (which keep their
+        // `PaletteIndex`) resolve through `ResolvedColors` in
+        // `internal_color_to_gl`. For totality, resolve against the theme's
+        // default palette (no OSC 4 overrides are visible here).
         TerminalColor::PaletteIndex(_idx) => {
             let resolved = color.resolve_palette_default(theme);
             return internal_color_to_egui(resolved, make_faint, theme);
@@ -165,6 +169,9 @@ pub fn internal_color_to_egui_with_alpha(
 
 /// Map a `TerminalColor` to an `[f32; 4]` RGBA value for GL vertex attributes.
 ///
+/// The colour is resolved through the pane's [`ResolvedColors`], so OSC 4
+/// palette overrides and OSC 10/11/17/19 dynamic overrides are honoured.
+///
 /// Faint dimming is applied by halving the alpha channel (`base[3] * 0.5`).
 /// This differs from the egui path ([`internal_color_to_egui`]), which uses
 /// `Color32::gamma_multiply(0.5)` and therefore dims the RGB channels instead.
@@ -172,45 +179,9 @@ pub fn internal_color_to_egui_with_alpha(
 pub fn internal_color_to_gl(
     color: TerminalColor,
     make_faint: bool,
-    theme: &ThemePalette,
+    colors: &ResolvedColors,
 ) -> [f32; 4] {
-    let base = match color {
-        TerminalColor::Default
-        | TerminalColor::DefaultUnderlineColor
-        | TerminalColor::DefaultCursorColor => rgb_to_f32(theme.foreground),
-
-        TerminalColor::DefaultBackground => rgb_to_f32(theme.background),
-
-        TerminalColor::Black => rgb_to_f32(theme.ansi[0]),
-        TerminalColor::Red => rgb_to_f32(theme.ansi[1]),
-        TerminalColor::Green => rgb_to_f32(theme.ansi[2]),
-        TerminalColor::Yellow => rgb_to_f32(theme.ansi[3]),
-        TerminalColor::Blue => rgb_to_f32(theme.ansi[4]),
-        TerminalColor::Magenta => rgb_to_f32(theme.ansi[5]),
-        TerminalColor::Cyan => rgb_to_f32(theme.ansi[6]),
-        TerminalColor::White => rgb_to_f32(theme.ansi[7]),
-
-        TerminalColor::BrightBlack => rgb_to_f32(theme.ansi[8]),
-        TerminalColor::BrightRed => rgb_to_f32(theme.ansi[9]),
-        TerminalColor::BrightGreen => rgb_to_f32(theme.ansi[10]),
-        TerminalColor::BrightYellow => rgb_to_f32(theme.ansi[11]),
-        TerminalColor::BrightBlue => rgb_to_f32(theme.ansi[12]),
-        TerminalColor::BrightMagenta => rgb_to_f32(theme.ansi[13]),
-        TerminalColor::BrightCyan => rgb_to_f32(theme.ansi[14]),
-        TerminalColor::BrightWhite => rgb_to_f32(theme.ansi[15]),
-
-        TerminalColor::Custom(r, g, b) => [
-            f32::from(r) / 255.0,
-            f32::from(g) / 255.0,
-            f32::from(b) / 255.0,
-            1.0,
-        ],
-
-        TerminalColor::PaletteIndex(_idx) => {
-            let resolved = color.resolve_palette_default(theme);
-            return internal_color_to_gl(resolved, make_faint, theme);
-        }
-    };
+    let base = rgb_to_f32(colors.rgb(color));
 
     if make_faint {
         [base[0], base[1], base[2], base[3] * 0.5]
@@ -226,9 +197,19 @@ pub fn internal_color_to_gl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use freminal_common::colors::{ColorPalette, DynamicColorOverrides, DynamicColorSlot};
     use freminal_common::themes;
 
     const THEME: &ThemePalette = &themes::CATPPUCCIN_MOCHA;
+
+    /// `ResolvedColors` for the test theme with no OSC 4 / dynamic overrides.
+    fn resolved() -> ResolvedColors {
+        ResolvedColors::resolve(
+            THEME,
+            &ColorPalette::default(),
+            &DynamicColorOverrides::default(),
+        )
+    }
 
     /// Helper: `Color32` from a theme (r,g,b) tuple.
     fn c32(rgb: (u8, u8, u8)) -> Color32 {
@@ -279,17 +260,17 @@ mod tests {
             );
         }
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::Default, false, THEME),
+            internal_color_to_gl(TerminalColor::Default, false, &resolved()),
             f4(THEME.foreground),
             "Default",
         );
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::DefaultBackground, false, THEME),
+            internal_color_to_gl(TerminalColor::DefaultBackground, false, &resolved()),
             f4(THEME.background),
             "DefaultBackground",
         );
         assert_gl_eq(
-            internal_color_to_gl(TerminalColor::Red, false, THEME),
+            internal_color_to_gl(TerminalColor::Red, false, &resolved()),
             f4(THEME.ansi[1]),
             "Red",
         );
@@ -298,8 +279,8 @@ mod tests {
     /// Faint dimming halves the alpha in the GL path.
     #[test]
     fn faint_dims_alpha_gl() {
-        let normal = internal_color_to_gl(TerminalColor::Red, false, THEME);
-        let faint = internal_color_to_gl(TerminalColor::Red, true, THEME);
+        let normal = internal_color_to_gl(TerminalColor::Red, false, &resolved());
+        let faint = internal_color_to_gl(TerminalColor::Red, true, &resolved());
         assert!(normal[3].mul_add(-0.5, faint[3]).abs() < f32::EPSILON);
         // RGB channels unchanged.
         assert!((faint[0] - normal[0]).abs() < f32::EPSILON);
@@ -313,7 +294,8 @@ mod tests {
         let c = internal_color_to_egui(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false, THEME);
         assert_eq!(c, Color32::from_rgb(0xAB, 0xCD, 0xEF));
 
-        let gl_val = internal_color_to_gl(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false, THEME);
+        let gl_val =
+            internal_color_to_gl(TerminalColor::Custom(0xAB, 0xCD, 0xEF), false, &resolved());
         let tolerance = 1.0 / 255.0 + f32::EPSILON;
         assert!((gl_val[0] - f32::from(0xAB_u8) / 255.0).abs() < tolerance);
         assert!((gl_val[1] - f32::from(0xCD_u8) / 255.0).abs() < tolerance);
@@ -328,7 +310,7 @@ mod tests {
         let c = internal_color_to_egui(TerminalColor::PaletteIndex(1), false, THEME);
         assert_eq!(c, c32(THEME.ansi[1]));
 
-        let gl_val = internal_color_to_gl(TerminalColor::PaletteIndex(1), false, THEME);
+        let gl_val = internal_color_to_gl(TerminalColor::PaletteIndex(1), false, &resolved());
         let expected = f4(THEME.ansi[1]);
         assert!(
             gl_val
@@ -344,7 +326,7 @@ mod tests {
     fn f32_matches_color32_for_theme() {
         let check = |label: &str, color: TerminalColor| {
             let c32 = internal_color_to_egui(color, false, THEME);
-            let gl = internal_color_to_gl(color, false, THEME);
+            let gl = internal_color_to_gl(color, false, &resolved());
             let rgba = c32.to_array();
             let tolerance = 1.0 / 255.0 + f32::EPSILON;
             assert!(
@@ -384,7 +366,7 @@ mod tests {
     /// Theme-derived accessors produce correct values.
     #[test]
     fn theme_accessor_fns() {
-        let sel_bg = selection_bg_f(THEME);
+        let sel_bg = selection_bg_f(&resolved());
         let expected = f4(THEME.selection_bg);
         assert!(
             sel_bg
@@ -394,7 +376,7 @@ mod tests {
             "selection_bg_f mismatch"
         );
 
-        let sel_fg_color = selection_fg_f(THEME);
+        let sel_fg_color = selection_fg_f(&resolved());
         let expected = f4(THEME.selection_fg);
         assert!(
             sel_fg_color
@@ -450,5 +432,76 @@ mod tests {
         let under =
             internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, THEME, -1.0);
         assert_eq!(under.a(), 0);
+    }
+
+    fn assert_gl_eq(actual: [f32; 4], expected: [f32; 4], label: &str) {
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(a, e)| (a - e).abs() < f32::EPSILON),
+            "{label}: expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    /// An OSC 4 override of palette[1] recolours both `Red` and `PaletteIndex(1)`.
+    #[test]
+    fn gl_follows_palette_override() {
+        let mut palette = ColorPalette::default();
+        palette.set(1, 10, 20, 30);
+        let colors = ResolvedColors::resolve(THEME, &palette, &DynamicColorOverrides::default());
+        let expected = f4((10, 20, 30));
+        assert_gl_eq(
+            internal_color_to_gl(TerminalColor::Red, false, &colors),
+            expected,
+            "Red",
+        );
+        assert_gl_eq(
+            internal_color_to_gl(TerminalColor::PaletteIndex(1), false, &colors),
+            expected,
+            "PaletteIndex(1)",
+        );
+    }
+
+    /// Dynamic fg/bg overrides recolour the `Default*` variants in the GL path.
+    #[test]
+    fn gl_follows_dynamic_fg_bg_override() {
+        let mut dynamic = DynamicColorOverrides::default();
+        dynamic.set(DynamicColorSlot::Foreground, (1, 2, 3));
+        dynamic.set(DynamicColorSlot::Background, (4, 5, 6));
+        let colors = ResolvedColors::resolve(THEME, &ColorPalette::default(), &dynamic);
+        assert_gl_eq(
+            internal_color_to_gl(TerminalColor::Default, false, &colors),
+            f4((1, 2, 3)),
+            "Default",
+        );
+        assert_gl_eq(
+            internal_color_to_gl(TerminalColor::DefaultUnderlineColor, false, &colors),
+            f4((1, 2, 3)),
+            "DefaultUnderlineColor",
+        );
+        assert_gl_eq(
+            internal_color_to_gl(TerminalColor::DefaultBackground, false, &colors),
+            f4((4, 5, 6)),
+            "DefaultBackground",
+        );
+    }
+
+    /// Selection and hover accessors follow the dynamic selection overrides.
+    #[test]
+    fn selection_accessors_follow_dynamic_overrides() {
+        let mut dynamic = DynamicColorOverrides::default();
+        dynamic.set(DynamicColorSlot::SelectionBackground, (7, 8, 9));
+        dynamic.set(DynamicColorSlot::SelectionForeground, (10, 11, 12));
+        let colors = ResolvedColors::resolve(THEME, &ColorPalette::default(), &dynamic);
+        assert_gl_eq(selection_bg_f(&colors), f4((7, 8, 9)), "selection_bg_f");
+        assert_gl_eq(selection_fg_f(&colors), f4((10, 11, 12)), "selection_fg_f");
+        let hover = command_block_hover_bg_f(&colors);
+        let base = f4((7, 8, 9));
+        assert_gl_eq(
+            hover,
+            [base[0], base[1], base[2], 0.25],
+            "command_block_hover_bg_f",
+        );
     }
 }

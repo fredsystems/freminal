@@ -3,9 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use freminal_common::colors::{
-    ColorPalette, TerminalColor, cube_component, default_index_to_rgb, lookup_256_color_by_index,
-};
+use freminal_common::colors::{ColorPalette, TerminalColor, default_palette_rgb};
 use freminal_common::themes::{self, CATPPUCCIN_MOCHA};
 use proptest::{prop_assert, prop_assert_eq, proptest};
 use std::fmt::Write;
@@ -20,93 +18,126 @@ fn theme() -> &'static themes::ThemePalette {
 // ---------- Deterministic Unit Tests ----------
 //
 
+/// The xterm cube channel levels, independently written out for the tests.
+const XTERM_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+
 #[test]
 fn lookup_standard_colors_complete() {
-    // Standard ANSI 0–15 now return Custom(r,g,b) from the theme palette
+    // Standard ANSI 0-15 return Custom(r,g,b) from the theme palette
     let t = theme();
-    for i in 0..=15 {
-        let (r, g, b) = t.ansi[i];
-        assert_eq!(
-            lookup_256_color_by_index(i, t),
-            TerminalColor::Custom(r, g, b),
-            "ANSI index {i} mismatch"
-        );
+    let palette = ColorPalette::default();
+    for i in 0u8..=15 {
+        let (r, g, b) = t.ansi[usize::from(i)];
+        assert_eq!(palette.rgb(i, t), (r, g, b), "ANSI index {i} mismatch");
+        assert_eq!(default_palette_rgb(i, t), (r, g, b), "ANSI index {i}");
     }
 }
 
 #[test]
 fn lookup_grayscale_range() {
     let t = theme();
-    // 232 → rgb(8,8,8)
-    assert_eq!(
-        lookup_256_color_by_index(232, t),
-        TerminalColor::Custom(8, 8, 8)
-    );
+    let palette = ColorPalette::default();
+    // 232 -> rgb(8,8,8)
+    assert_eq!(palette.rgb(232, t), (8, 8, 8));
 
-    // 255 → rgb(238,238,238)
-    assert_eq!(
-        lookup_256_color_by_index(255, t),
-        TerminalColor::Custom(238, 238, 238)
-    );
-}
-
-#[test]
-fn lookup_out_of_range_defaults_to_custom_or_default() {
-    let t = theme();
-    // Out of range values map to Custom or Default
-    let c = lookup_256_color_by_index(300, t);
-    // Should be a Custom or Default (depending on your policy)
-    match c {
-        TerminalColor::Custom(_, _, _) | TerminalColor::Default => {}
-        _ => panic!("unexpected color variant for out-of-range index: {c:?}"),
-    }
+    // 255 -> rgb(238,238,238)
+    assert_eq!(palette.rgb(255, t), (238, 238, 238));
 }
 
 #[test]
 fn lookup_color_cube_sample() {
     let t = theme();
-    // Example index in color cube range
-    let idx = 40;
-    let result = lookup_256_color_by_index(idx, t);
-    if let TerminalColor::Custom(r, g, b) = result {
-        let expected_r = cube_component(idx, 36);
-        let expected_g = cube_component(idx, 6);
-        let expected_b = cube_component(idx, 1);
+    // Index 40 = cube offset 24 -> r=0, g=4, b=0
+    let result = ColorPalette::default().rgb(40, t);
+    assert_eq!(result, (0x00, 0xd7, 0x00));
+}
 
-        assert_eq!(r as usize, expected_r);
-        assert_eq!(g as usize, expected_g);
-        assert_eq!(b as usize, expected_b);
-    } else {
-        panic!("Expected Custom color, got {result:?}");
+#[test]
+fn cube_steps_match_legacy_formula() {
+    // The step table replaced `(14135 + 10280 * i) / 256` (0 for i == 0).
+    // Index 16 + 36 * i is the cube's red ramp with g = b = 0.
+    let t = theme();
+    for i in 0u32..6 {
+        let legacy = if i == 0 { 0 } else { (14135 + 10280 * i) / 256 };
+        let idx = u8::try_from(16 + 36 * i).unwrap();
+        let (r, g, b) = default_palette_rgb(idx, t);
+        assert_eq!(u32::from(r), legacy, "red step {i}");
+        assert_eq!((g, b), (0, 0));
+        assert_eq!(r, XTERM_STEPS[usize::try_from(i).unwrap()]);
     }
 }
 
 #[test]
-fn cube_component_values_basic() {
-    assert_eq!(cube_component(16, 36), 0);
-    assert_eq!(cube_component(52, 36), ((14135 + 10280) / 256));
-    assert_eq!(cube_component(88, 36), ((14135 + 10280 * 2) / 256));
+fn greyscale_matches_legacy_formula() {
+    // The ramp replaced `(2056 + 2570 * k) / 256`; it must equal 8 + 10 * k.
+    let t = theme();
+    for k in 0u32..24 {
+        let legacy = (2056 + 2570 * k) / 256;
+        let idx = u8::try_from(232 + k).unwrap();
+        assert_eq!(default_palette_rgb(idx, t), {
+            let v = u8::try_from(legacy).unwrap();
+            (v, v, v)
+        });
+        let v = u8::try_from(8 + 10 * k).unwrap();
+        assert_eq!(default_palette_rgb(idx, t), (v, v, v));
+    }
 }
 
 #[test]
-fn default_colors_to_regular() {
+fn one_table_two_paths_agree_for_every_index() {
+    let t = theme();
+    let palette = ColorPalette::default();
+    for i in 0u8..=255 {
+        let (r, g, b) = default_palette_rgb(i, t);
+        assert_eq!(palette.rgb(i, t), (r, g, b), "{i}");
+        assert_eq!(
+            TerminalColor::PaletteIndex(i).resolve_palette_default(t),
+            TerminalColor::Custom(r, g, b),
+            "{i}"
+        );
+    }
+}
+
+#[test]
+fn index_16_is_black_even_when_theme_black_is_not() {
+    let t = theme();
+    // Catppuccin Mocha's ansi[0] is not black.
+    assert_eq!(t.ansi[0], (0x45, 0x47, 0x5a));
+    assert_eq!(default_palette_rgb(16, t), (0, 0, 0));
+    assert_eq!(ColorPalette::default().rgb(16, t), (0, 0, 0));
     assert_eq!(
-        TerminalColor::Default.default_to_regular(),
-        TerminalColor::White
+        TerminalColor::PaletteIndex(16).resolve_palette_default(t),
+        TerminalColor::Custom(0, 0, 0)
     );
-    assert_eq!(
-        TerminalColor::DefaultUnderlineColor.default_to_regular(),
-        TerminalColor::White
-    );
-    assert_eq!(
-        TerminalColor::DefaultCursorColor.default_to_regular(),
-        TerminalColor::White
-    );
-    assert_eq!(
-        TerminalColor::DefaultBackground.default_to_regular(),
-        TerminalColor::Black
-    );
-    assert_eq!(TerminalColor::Red.default_to_regular(), TerminalColor::Red);
+}
+
+#[test]
+fn default_palette_spot_values() {
+    let t = theme();
+    assert_eq!(default_palette_rgb(17, t), (0x00, 0x00, 0x5f));
+    assert_eq!(default_palette_rgb(196, t), (0xff, 0x00, 0x00));
+    assert_eq!(default_palette_rgb(231, t), (0xff, 0xff, 0xff));
+    assert_eq!(default_palette_rgb(232, t), (0x08, 0x08, 0x08));
+    assert_eq!(default_palette_rgb(244, t), (0x80, 0x80, 0x80));
+    assert_eq!(default_palette_rgb(255, t), (0xee, 0xee, 0xee));
+}
+
+#[test]
+fn default_palette_matches_xterm_cube_and_greyscale() {
+    let t = theme();
+    for i in 16u8..=231 {
+        let n = usize::from(i - 16);
+        let expected = (
+            XTERM_STEPS[n / 36],
+            XTERM_STEPS[(n / 6) % 6],
+            XTERM_STEPS[n % 6],
+        );
+        assert_eq!(default_palette_rgb(i, t), expected, "cube index {i}");
+    }
+    for i in 232u8..=255 {
+        let v = 8 + 10 * (i - 232);
+        assert_eq!(default_palette_rgb(i, t), (v, v, v), "grey index {i}");
+    }
 }
 
 #[test]
@@ -226,14 +257,15 @@ fn palette_default_is_all_none_overrides() {
     let palette = ColorPalette::default();
     // Default palette should produce theme colors for ANSI indices.
     let (r0, g0, b0) = t.ansi[0];
-    assert_eq!(palette.lookup(0, t), TerminalColor::Custom(r0, g0, b0));
+    assert_eq!(palette.rgb(0, t), (r0, g0, b0));
     let (r1, g1, b1) = t.ansi[1];
-    assert_eq!(palette.lookup(1, t), TerminalColor::Custom(r1, g1, b1));
+    assert_eq!(palette.rgb(1, t), (r1, g1, b1));
     let (r15, g15, b15) = t.ansi[15];
-    assert_eq!(palette.lookup(15, t), TerminalColor::Custom(r15, g15, b15));
+    assert_eq!(palette.rgb(15, t), (r15, g15, b15));
     // Color cube index
-    let c = palette.lookup(196, t);
-    assert!(matches!(c, TerminalColor::Custom(..)));
+    let (r, g, b) = palette.rgb(196, t);
+    assert_eq!((r, g, b), default_palette_rgb(196, t));
+    assert_eq!((r, g, b), (0xff, 0x00, 0x00));
 }
 
 #[test]
@@ -242,13 +274,10 @@ fn palette_set_overrides_default() {
     let mut palette = ColorPalette::default();
     // Override index 0 with a custom color
     palette.set(0, 0x12, 0x34, 0x56);
-    assert_eq!(
-        palette.lookup(0, t),
-        TerminalColor::Custom(0x12, 0x34, 0x56)
-    );
+    assert_eq!(palette.rgb(0, t), (0x12, 0x34, 0x56));
     // Other indices are unaffected
     let (r1, g1, b1) = t.ansi[1];
-    assert_eq!(palette.lookup(1, t), TerminalColor::Custom(r1, g1, b1));
+    assert_eq!(palette.rgb(1, t), (r1, g1, b1));
 }
 
 #[test]
@@ -256,14 +285,11 @@ fn palette_reset_restores_default() {
     let t = theme();
     let mut palette = ColorPalette::default();
     palette.set(5, 0xAA, 0xBB, 0xCC);
-    assert_eq!(
-        palette.lookup(5, t),
-        TerminalColor::Custom(0xAA, 0xBB, 0xCC)
-    );
+    assert_eq!(palette.rgb(5, t), (0xAA, 0xBB, 0xCC));
     palette.reset(5);
     // After reset, index 5 = Magenta from theme
     let (r, g, b) = t.ansi[5];
-    assert_eq!(palette.lookup(5, t), TerminalColor::Custom(r, g, b));
+    assert_eq!(palette.rgb(5, t), (r, g, b));
 }
 
 #[test]
@@ -275,9 +301,11 @@ fn palette_reset_all_clears_all_overrides() {
     palette.set(255, 7, 8, 9);
     palette.reset_all();
     let (r0, g0, b0) = t.ansi[0];
-    assert_eq!(palette.lookup(0, t), TerminalColor::Custom(r0, g0, b0));
-    assert_eq!(palette.lookup(100, t), lookup_256_color_by_index(100, t));
-    assert_eq!(palette.lookup(255, t), lookup_256_color_by_index(255, t));
+    assert_eq!(palette.rgb(0, t), (r0, g0, b0));
+    let (r, g, b) = default_palette_rgb(100, t);
+    assert_eq!(palette.rgb(100, t), (r, g, b));
+    let (r, g, b) = default_palette_rgb(255, t);
+    assert_eq!(palette.rgb(255, t), (r, g, b));
 }
 
 #[test]
@@ -344,52 +372,43 @@ fn palette_index_resolve_non_palette_is_identity() {
     );
 }
 
-#[test]
-fn palette_index_default_to_regular_identity() {
-    // PaletteIndex is not a "default" variant, so default_to_regular returns self
-    assert_eq!(
-        TerminalColor::PaletteIndex(5).default_to_regular(),
-        TerminalColor::PaletteIndex(5)
-    );
-}
-
 // ------------------------------------------------------------------
-// default_index_to_rgb tests
+// default_palette_rgb tests
 // ------------------------------------------------------------------
 
 #[test]
-fn default_index_to_rgb_named_colors() {
+fn default_palette_rgb_named_colors() {
     let t = theme();
     // Catppuccin Mocha Black
-    assert_eq!(default_index_to_rgb(0, t), (0x45, 0x47, 0x5a));
+    assert_eq!(default_palette_rgb(0, t), (0x45, 0x47, 0x5a));
     // Catppuccin Mocha Red
-    assert_eq!(default_index_to_rgb(1, t), (0xf3, 0x8b, 0xa8));
+    assert_eq!(default_palette_rgb(1, t), (0xf3, 0x8b, 0xa8));
     // Catppuccin Mocha BrightWhite
-    assert_eq!(default_index_to_rgb(15, t), (0xba, 0xc2, 0xde));
+    assert_eq!(default_palette_rgb(15, t), (0xba, 0xc2, 0xde));
 }
 
 #[test]
-fn default_index_to_rgb_greyscale_ramp() {
+fn default_palette_rgb_greyscale_ramp() {
     let t = theme();
     // Index 232 is the start of the greyscale ramp
-    let (r, g, b) = default_index_to_rgb(232, t);
+    let (r, g, b) = default_palette_rgb(232, t);
     assert_eq!(r, g);
     assert_eq!(g, b);
 
     // Index 255 is the end of the greyscale ramp
-    let (r2, g2, b2) = default_index_to_rgb(255, t);
+    let (r2, g2, b2) = default_palette_rgb(255, t);
     assert_eq!(r2, g2);
     assert_eq!(g2, b2);
     assert!(r2 > r); // brighter
 }
 
 #[test]
-fn default_index_to_rgb_color_cube() {
+fn default_palette_rgb_color_cube() {
     let t = theme();
-    // Index 16 is rgb(0,0,0) in the color cube
-    assert_eq!(default_index_to_rgb(16, t), (0, 0, 0));
+    // Index 16 is rgb(0,0,0) in the color cube (not the theme's black)
+    assert_eq!(default_palette_rgb(16, t), (0, 0, 0));
     // Index 196 is a red in the color cube
-    let (r, _g, _b) = default_index_to_rgb(196, t);
+    let (r, _g, _b) = default_palette_rgb(196, t);
     assert!(r > 0);
 }
 
@@ -399,28 +418,29 @@ fn default_index_to_rgb_color_cube() {
 
 proptest! {
     #[test]
-    fn grayscale_monotonic(index in 232usize..=254usize) {
+    fn grayscale_monotonic(index in 232u8..=254u8) {
         let t = &CATPPUCCIN_MOCHA;
-        let c1 = lookup_256_color_by_index(index, t);
-        let c2 = lookup_256_color_by_index(index + 1, t);
+        let (r1, g1, b1) = default_palette_rgb(index, t);
+        let (r2, _, _) = default_palette_rgb(index + 1, t);
 
-        match (c1, c2) {
-            (TerminalColor::Custom(r1,g1,b1), TerminalColor::Custom(r2,_,_)) => {
-                prop_assert_eq!(r1, g1);
-                prop_assert_eq!(g1, b1);
-                prop_assert!(r2 >= r1);
-            }
-            _ => prop_assert!(false, "Expected Custom colors"),
-        }
+        prop_assert_eq!(r1, g1);
+        prop_assert_eq!(g1, b1);
+        prop_assert!(r2 >= r1);
     }
 
     #[test]
-    fn cube_component_cycles(value in 16usize..=230usize, modifier in proptest::sample::select(vec![36usize, 6usize, 1usize])) {
-        let c = cube_component(value, modifier);
-        prop_assert!(c <= 255);
+    fn cube_channels_are_step_levels(index in 16u8..=231u8) {
+        let t = &CATPPUCCIN_MOCHA;
+        let (r, g, b) = default_palette_rgb(index, t);
+        prop_assert!(XTERM_STEPS.contains(&r));
+        prop_assert!(XTERM_STEPS.contains(&g));
+        prop_assert!(XTERM_STEPS.contains(&b));
 
-        let wrap = cube_component(value + modifier * 6, modifier);
-        prop_assert_eq!(wrap, c);
+        // The cube cycles: blue repeats every 6 entries.
+        if index <= 225 {
+            let (_, _, b6) = default_palette_rgb(index + 6, t);
+            prop_assert_eq!(b6, b);
+        }
     }
 
     #[test]

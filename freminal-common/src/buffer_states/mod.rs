@@ -35,6 +35,8 @@ pub mod mode;
 pub mod modes;
 /// OSC parameter types and inline-image data.
 pub mod osc;
+/// OSC 4 / 104 / 10-19 / 110-119 colour-control request types.
+pub mod osc_color;
 /// OSC 99 (kitty desktop notifications) parser and typed command types.
 pub mod osc_notify_99;
 /// `PointerShape` — typed cursor shape set by OSC 22.

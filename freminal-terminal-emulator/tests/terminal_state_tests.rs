@@ -9,15 +9,21 @@
 //! - `send_focus_event` (enabled/disabled, focused/unfocused)
 //! - `write` (ASCII, Enter, closed channel)
 //! - Alternate-screen scroll routing (ArrowUp/Down via `write`)
-//! - Mode accessors: `is_normal_display`, `should_repeat_keys`, `skip_draw_always`
+//! - Mode accessors: `screen_inversion`, `should_repeat_keys`, `skip_draw_always`
 
 #![allow(clippy::unwrap_used)]
 
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
-        alternate_scroll::AlternateScroll, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
-        decscnm::Decscnm, keypad::KeypadMode, s8c1t::S8c1t, sync_updates::SynchronizedUpdates,
+        alternate_scroll::AlternateScroll,
+        decarm::Decarm,
+        decbkm::Decbkm,
+        decckm::Decckm,
+        decscnm::{Decscnm, ScreenInversion},
+        keypad::KeypadMode,
+        s8c1t::S8c1t,
+        sync_updates::SynchronizedUpdates,
         xtmsewin::XtMseWin,
     },
     buffer_states::{tchar::TChar, window_manipulation::WindowManipulation},
@@ -231,27 +237,29 @@ fn test_alternate_screen_write_arrow_down() {
     );
 }
 
-// ─── is_normal_display ───────────────────────────────────────────────────────
+// ─── screen_inversion ────────────────────────────────────────────────────────
 
 /// The default state must report a normal (non-inverted) display.
 #[test]
-fn test_is_normal_display_default() {
+fn test_screen_inversion_default() {
     let (state, _rx) = make_state();
-    assert!(
-        state.modes.invert_screen.is_normal_display(),
-        "is_normal_display must be true in the default state"
+    assert_eq!(
+        state.modes.invert_screen.screen_inversion(),
+        ScreenInversion::Normal,
+        "screen inversion must be Normal in the default state"
     );
 }
 
 /// After setting `modes.invert_screen` to `Decscnm::ReverseDisplay`,
-/// `is_normal_display` must return `false`.
+/// `screen_inversion` must return `Reversed`.
 #[test]
-fn test_is_normal_display_after_reverse() {
+fn test_screen_inversion_after_reverse() {
     let (mut state, _rx) = make_state();
     state.modes.invert_screen = Decscnm::ReverseDisplay;
-    assert!(
-        !state.modes.invert_screen.is_normal_display(),
-        "is_normal_display must be false when invert_screen is ReverseDisplay"
+    assert_eq!(
+        state.modes.invert_screen.screen_inversion(),
+        ScreenInversion::Reversed,
+        "screen inversion must be Reversed when invert_screen is ReverseDisplay"
     );
 }
 

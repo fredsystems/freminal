@@ -100,14 +100,13 @@ impl TerminalHandler {
                     .push(WindowManipulation::SetTitleBarText(title.clone()));
             }
 
-            // OSC 10/11/12 foreground/background/cursor color query, set, and reset.
-            AnsiOscType::RequestColorQueryBackground(_)
-            | AnsiOscType::RequestColorQueryForeground(_)
-            | AnsiOscType::RequestColorQueryCursor(_)
-            | AnsiOscType::ResetForegroundColor
-            | AnsiOscType::ResetBackgroundColor
-            | AnsiOscType::ResetCursorColor => {
-                self.handle_osc_fg_bg_color(osc);
+            // Colour control: OSC 4 / 104 (palette) and OSC 10-19 / 110-119
+            // (dynamic colours) set, query and reset.
+            AnsiOscType::PaletteColors(_)
+            | AnsiOscType::ResetPaletteColors(_)
+            | AnsiOscType::DynamicColors(_)
+            | AnsiOscType::ResetDynamicColor(_) => {
+                self.handle_osc_colors(osc);
             }
 
             // Remote host / CWD: OSC 7 ; file://hostname/path ST
@@ -162,27 +161,6 @@ impl TerminalHandler {
             AnsiOscType::QueryClipboard(sel) => {
                 self.window_commands
                     .push(WindowManipulation::QueryClipboard(sel.clone()));
-            }
-
-            // Palette manipulation: OSC 4 (set/query) and OSC 104 (reset)
-            AnsiOscType::SetPaletteColor(idx, r, g, b) => {
-                self.palette.set(*idx, *r, *g, *b);
-            }
-            AnsiOscType::QueryPaletteColor(idx) => {
-                let (r, g, b) = self.palette.rgb(*idx, self.theme);
-                let body = format!(
-                    "4;{idx};rgb:{:04x}/{:04x}/{:04x}",
-                    u16::from(r) * 257,
-                    u16::from(g) * 257,
-                    u16::from(b) * 257,
-                );
-                self.write_osc_response(&body);
-            }
-            AnsiOscType::ResetPaletteColor(Some(idx)) => {
-                self.palette.reset(*idx);
-            }
-            AnsiOscType::ResetPaletteColor(None) => {
-                self.palette.reset_all();
             }
 
             // OSC 22 — set pointer (mouse cursor) shape.
@@ -900,8 +878,50 @@ mod tests {
 
     #[test]
     fn unimplemented_osc_warn_omits_payload() {
-        let events = feed_and_capture(b"\x1b]13;SECRETPAYLOAD\x07");
+        // OSC 66 (colour-scheme notification) is recognised but unimplemented.
+        let events = feed_and_capture(b"\x1b]66;SECRETPAYLOAD\x07");
         assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn ignored_dynamic_colour_osc_logs_no_payload() {
+        // OSC 13 / 14 / 113 consume their value and are ignored (debug only).
+        for seq in [
+            &b"\x1b]13;SECRETPAYLOAD\x07"[..],
+            b"\x1b]14;SECRETPAYLOAD\x07",
+            b"\x1b]113;SECRETPAYLOAD\x07",
+        ] {
+            let events = feed_and_capture(seq);
+            assert!(
+                events
+                    .iter()
+                    .all(|(_, text)| !text.contains("SECRETPAYLOAD")),
+                "a log line leaked the payload for {seq:?}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_4_odd_field_count_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]4;1;red;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_104_invalid_index_warn_omits_payload() {
+        let events = feed_and_capture(b"\x1b]104;SECRETPAYLOAD\x07");
+        assert_warns_without(&events, "SECRETPAYLOAD");
+    }
+
+    #[test]
+    fn osc_4_many_invalid_pairs_warn_once_per_sequence() {
+        let mut seq = b"\x1b]4".to_vec();
+        for _ in 0..50 {
+            seq.extend_from_slice(b";1;notacolor");
+        }
+        seq.push(0x07);
+        let events = feed_and_capture(&seq);
+        assert_eq!(warnings(&events).len(), 1, "got: {events:?}");
     }
 
     #[test]

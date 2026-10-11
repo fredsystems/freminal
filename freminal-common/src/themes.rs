@@ -1942,9 +1942,9 @@ mod tests {
     }
 
     #[test]
-    fn catppuccin_mocha_ansi_matches_default_index_to_rgb() {
-        // Verify each ANSI color matches the hardcoded values in
-        // freminal-common/src/colors.rs default_index_to_rgb()
+    fn catppuccin_mocha_ansi_matches_expected_values() {
+        // Pin the Catppuccin Mocha ANSI values; colour tests elsewhere
+        // (e.g. `freminal-common/tests/color_tests.rs`) rely on them.
         let expected: [(u8, u8, u8); 16] = [
             (0x45, 0x47, 0x5a), // 0  Black
             (0xf3, 0x8b, 0xa8), // 1  Red

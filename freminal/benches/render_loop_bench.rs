@@ -39,8 +39,9 @@ use freminal::gui::shaping::ShapingCache;
 use freminal::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::cursor::StateColors;
 use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
-use freminal_common::colors::TerminalColor;
+use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors, TerminalColor};
 use freminal_common::config::Config;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::CATPPUCCIN_MOCHA;
@@ -48,6 +49,19 @@ use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use std::sync::Arc;
 use std::time::Duration;
+
+// ---------------------------------------------------------------
+// Shared resolved colours
+// ---------------------------------------------------------------
+/// Resolved terminal-content colours for the bench theme, with no OSC 4 /
+/// dynamic overrides. Built once per bench function, outside the timed loop.
+fn mocha_colors() -> ResolvedColors {
+    ResolvedColors::resolve(
+        &CATPPUCCIN_MOCHA,
+        &ColorPalette::default(),
+        &DynamicColorOverrides::default(),
+    )
+}
 
 // ---------------------------------------------------------------
 // Criterion configuration
@@ -103,6 +117,32 @@ fn ansi_heavy_payload(num_lines: usize, width: usize) -> Vec<u8> {
             seg += 1;
         }
         // Reset colours at end of line
+        out.extend_from_slice(b"\x1b[0m");
+    }
+    out
+}
+
+/// Indexed-colour screen payload: every row is positioned with CUP and filled
+/// with 8-character segments, each preceded by `ESC[38;5;Nm ESC[48;5;Mm`.
+/// N cycles 0..=255 with stride 1, M with stride 7 (coprime with 256, so out
+/// of phase with N).  Equivalent to `sgr_indexed_payload` in
+/// `buffer_benches.rs` (Task 132.1), shaped as a full screen.
+fn indexed_screen_payload(num_lines: usize, width: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut seg = 0usize;
+    for row in 1..=num_lines {
+        out.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+        let mut col = 0;
+        while col < width {
+            let n = seg % 256;
+            let m = (seg * 7) % 256;
+            out.extend_from_slice(format!("\x1b[38;5;{n}m\x1b[48;5;{m}m").as_bytes());
+            for _ in 0..8.min(width - col) {
+                out.push(b'a' + (col % 26) as u8);
+                col += 1;
+            }
+            seg += 1;
+        }
         out.extend_from_slice(b"\x1b[0m");
     }
     out
@@ -779,10 +819,47 @@ fn build_shaped_lines_for_background_corpus(
     (lines, fm)
 }
 
+/// Build shaped lines from a real emulator snapshot produced by feeding the
+/// indexed-colour screen payload (`ESC[38;5;Nm` / `ESC[48;5;Mm` runs).
+///
+/// Unlike `build_shaped_lines_for_size`, the tags come from the parser and
+/// handler, so they carry whatever colour representation the emulator emits
+/// for indexed colours.
+fn build_shaped_lines_for_indexed_size(
+    width: usize,
+    height: usize,
+) -> (
+    Vec<std::sync::Arc<freminal::gui::shaping::ShapedLine>>,
+    FontManager,
+) {
+    let mut terminal = make_terminal();
+    terminal.internal.set_win_size(width, height, 8, 16);
+    terminal
+        .internal
+        .handle_incoming_data(&indexed_screen_payload(height, width));
+    let snap = terminal.build_snapshot();
+
+    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+    let mut cache = ShapingCache::new();
+    #[allow(clippy::cast_precision_loss)]
+    let cell_w = fm.cell_width() as f32;
+    let lines = cache.shape_visible(
+        &snap.visible_chars,
+        &snap.visible_tags,
+        width,
+        &mut fm,
+        cell_w,
+        false,
+        &[],
+    );
+    (lines, fm)
+}
+
 // ---------------------------------------------------------------
 // bench_bg_instances — instanced background buffer builder
 // ---------------------------------------------------------------
 fn bench_bg_instances(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_bg");
@@ -830,8 +907,8 @@ fn bench_bg_instances(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
-                            reverse_screen: false,
+                            colors: &colors,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -850,6 +927,7 @@ fn bench_bg_instances(c: &mut Criterion) {
 // bench_fg_instances — instanced foreground buffer builder
 // ---------------------------------------------------------------
 fn bench_fg_instances(c: &mut Criterion) {
+    let colors = mocha_colors();
     let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
 
     let mut group = c.benchmark_group("instanced_fg");
@@ -877,7 +955,120 @@ fn bench_fg_instances(c: &mut Criterion) {
                             cell_height,
                             ascent,
                             &opts,
-                            &CATPPUCCIN_MOCHA,
+                            &colors,
+                            &mut instances,
+                        );
+                        std::hint::black_box(instances.len());
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_bg_instances_indexed / bench_fg_instances_indexed — same builders as
+// above, fed by a real emulator snapshot of indexed-colour (`38;5;N` /
+// `48;5;M`) output (Task 132.1 baseline).
+// ---------------------------------------------------------------
+fn bench_bg_instances_indexed(c: &mut Criterion) {
+    let colors = mocha_colors();
+    let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
+
+    let mut group = c.benchmark_group("instanced_bg_indexed");
+
+    for &(width, height) in sizes {
+        let (lines, fm) = build_shaped_lines_for_indexed_size(width, height);
+        let total_cells = (width * height) as u64;
+
+        group.throughput(Throughput::Elements(total_cells));
+
+        let cell_width = fm.cell_width();
+        let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
+        let underline_offset = fm.underline_offset();
+        let strikeout_offset = fm.strikeout_offset();
+        let stroke_size = fm.stroke_size();
+
+        let cursor = CursorDrawParams {
+            appearance: CursorAppearance::Solid(CursorVisualStyle::BlockCursorSteady),
+            col: 0.0,
+            row: 0.0,
+            color: cursor_f(&CATPPUCCIN_MOCHA, None),
+            x_scale: 1.0,
+            blink_on: CursorBlinkPhase::On,
+        };
+
+        group.bench_function(
+            BenchmarkId::new("build_bg_instances", format!("{width}x{height}")),
+            |b| {
+                let mut instances = Vec::new();
+                let mut deco = Vec::new();
+                b.iter(|| {
+                    let _cursor_range = build_background_instances(
+                        &BackgroundFrame {
+                            shaped_lines: &lines,
+                            cell_width,
+                            cell_height,
+                            ascent,
+                            underline_offset,
+                            strikeout_offset,
+                            stroke_size,
+                            cursor: &cursor,
+                            selection: None,
+                            selection_is_block: false,
+                            match_highlights: &[],
+                            command_block_hover_rows: None,
+                            term_width_cols: 0,
+                            colors: &colors,
+                            screen_inversion: ScreenInversion::Normal,
+                        },
+                        &mut instances,
+                        &mut deco,
+                    );
+                    std::hint::black_box(instances.len());
+                    std::hint::black_box(deco.len());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_fg_instances_indexed(c: &mut Criterion) {
+    let colors = mocha_colors();
+    let sizes: &[(usize, usize)] = &[(80, 24), (200, 50)];
+
+    let mut group = c.benchmark_group("instanced_fg_indexed");
+
+    for &(width, height) in sizes {
+        let (lines, fm) = build_shaped_lines_for_indexed_size(width, height);
+        let total_cells = (width * height) as u64;
+
+        group.throughput(Throughput::Elements(total_cells));
+
+        let cell_height = fm.cell_height();
+        let ascent = fm.ascent();
+        let opts = FgRenderOptions::all_visible(None);
+
+        group.bench_function(
+            BenchmarkId::new("build_fg_instances", format!("{width}x{height}")),
+            |b| {
+                b.iter_batched(
+                    || (GlyphAtlas::default(), Vec::new()),
+                    |(mut atlas, mut instances)| {
+                        build_foreground_instances(
+                            &lines,
+                            &mut atlas,
+                            &fm,
+                            cell_height,
+                            ascent,
+                            &opts,
+                            &colors,
                             &mut instances,
                         );
                         std::hint::black_box(instances.len());
@@ -904,6 +1095,7 @@ fn bench_fg_instances(c: &mut Criterion) {
 // a future per-row incremental build could recover; it is not itself an
 // incremental build (none exists yet).
 fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let mut group = c.benchmark_group("instanced_bg_partial_dirty");
@@ -956,8 +1148,8 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
-                            reverse_screen: false,
+                            colors: &colors,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -991,8 +1183,8 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             match_highlights: &[],
                             command_block_hover_rows: None,
                             term_width_cols: 0,
-                            theme: &CATPPUCCIN_MOCHA,
-                            reverse_screen: false,
+                            colors: &colors,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -1017,6 +1209,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
 // `shaped_lines` slice vs. a slice of exactly one row, quantifying the
 // per-row headroom a future incremental foreground build could recover.
 fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let (lines, fm) = build_shaped_lines_for_size(width, height);
@@ -1036,7 +1229,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
         cell_height,
         ascent,
         &opts,
-        &CATPPUCCIN_MOCHA,
+        &colors,
         &mut all_rows_instances,
     );
 
@@ -1052,7 +1245,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
                     cell_height,
                     ascent,
                     &opts,
-                    &CATPPUCCIN_MOCHA,
+                    &colors,
                     &mut all_rows_instances,
                 );
                 std::hint::black_box(all_rows_instances.len());
@@ -1071,7 +1264,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
         cell_height,
         ascent,
         &opts,
-        &CATPPUCCIN_MOCHA,
+        &colors,
         &mut one_row_instances,
     );
     group.bench_function(
@@ -1085,7 +1278,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
                     cell_height,
                     ascent,
                     &opts,
-                    &CATPPUCCIN_MOCHA,
+                    &colors,
                     &mut one_row_instances,
                 );
                 std::hint::black_box(one_row_instances.len());
@@ -1097,6 +1290,7 @@ fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
 }
 
 fn bench_fg_atlas_rasterization(c: &mut Criterion) {
+    let colors = mocha_colors();
     let width = 200;
     let height = 50;
     let (lines, fm) = build_shaped_lines_for_size(width, height);
@@ -1124,7 +1318,7 @@ fn bench_fg_atlas_rasterization(c: &mut Criterion) {
                         cell_height,
                         ascent,
                         &opts,
-                        &CATPPUCCIN_MOCHA,
+                        &colors,
                         &mut instances,
                     );
                     std::hint::black_box(instances.len());
@@ -1523,6 +1717,8 @@ criterion_group!(
         bench_shaping_crossframe,
         bench_bg_instances,
         bench_fg_instances,
+        bench_bg_instances_indexed,
+        bench_fg_instances_indexed,
         bench_bg_instances_partial_dirty,
         bench_fg_instances_partial_dirty,
         bench_fg_atlas_rasterization,

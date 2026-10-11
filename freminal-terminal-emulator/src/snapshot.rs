@@ -26,6 +26,7 @@ use freminal_common::{
             decarm::Decarm,
             decbkm::Decbkm,
             decckm::Decckm,
+            decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
@@ -36,6 +37,7 @@ use freminal_common::{
         row_number::RowNumber,
         tchar::TChar,
     },
+    colors::{ColorPalette, DynamicColorOverrides, ResolvedColors},
     cursor::CursorVisualStyle,
     themes::ThemePalette,
 };
@@ -69,7 +71,7 @@ pub struct BufferExtent {
 /// `visible_chars` and `visible_tags` are wrapped in `Arc` so that cloning a
 /// snapshot (or handing the same content to a second snapshot on the clean
 /// path) is a cheap atomic refcount increment rather than a full `Vec` copy.
-#[allow(clippy::struct_excessive_bools)] // Eight independent rendering/bookkeeping bools; enums would add noise
+#[allow(clippy::struct_excessive_bools)] // Six independent rendering/bookkeeping bools; enums would add noise
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     /// Flattened visible character content, already converted from `Row`/`Cell`.
@@ -128,8 +130,12 @@ pub struct TerminalSnapshot {
     /// `true` when the alternate screen buffer is currently active.
     pub is_alternate_screen: bool,
 
-    /// `true` when the display is in normal (non-inverted) mode.
-    pub is_normal_display: bool,
+    /// Whether the screen is displayed in normal or reverse video (DECSCNM
+    /// `?5`).
+    ///
+    /// The renderer bakes this into the per-vertex colours, so a change here
+    /// stales every vertex of the pane.
+    pub screen_inversion: ScreenInversion,
 
     /// Terminal width in character columns.
     pub term_width: usize,
@@ -360,6 +366,15 @@ pub struct TerminalSnapshot {
     /// theme without holding any lock.
     pub theme: &'static ThemePalette,
 
+    /// The fully resolved content colours: the theme, OSC 4 palette
+    /// overrides and OSC 10/11/17/19 dynamic overrides folded into RGB.
+    ///
+    /// The `Arc` is shared between snapshots until a content colour actually
+    /// changes, so the GUI detects a change with `Arc::ptr_eq`. The cursor
+    /// colour (OSC 12) is not part of this value; it travels separately in
+    /// [`Self::cursor_color_override`].
+    pub resolved_colors: Arc<ResolvedColors>,
+
     /// Dynamic cursor color override (set via OSC 12; reset via OSC 112).
     ///
     /// When `Some`, the cursor should be rendered in this color instead of
@@ -452,7 +467,7 @@ impl TerminalSnapshot {
             show_cursor: false,
             cursor_visual_style: CursorVisualStyle::default(),
             is_alternate_screen: false,
-            is_normal_display: true,
+            screen_inversion: ScreenInversion::Normal,
             term_width: 0,
             term_height: 0,
             total_rows: 0,
@@ -483,6 +498,11 @@ impl TerminalSnapshot {
             prompt_rows: Arc::from([]),
             command_blocks: Arc::from(Vec::<CommandBlock>::new()),
             theme: &freminal_common::themes::CATPPUCCIN_MOCHA,
+            resolved_colors: Arc::new(ResolvedColors::resolve(
+                &freminal_common::themes::CATPPUCCIN_MOCHA,
+                &ColorPalette::default(),
+                &DynamicColorOverrides::default(),
+            )),
             images: Arc::new(HashMap::new()),
             visible_image_placements: Arc::new(Vec::new()),
             visible_line_widths: Arc::new(Vec::new()),
@@ -508,6 +528,15 @@ mod tests {
             TerminalSnapshot::empty().application_escape_key,
             ApplicationEscapeKey::Reset
         );
+    }
+
+    #[test]
+    fn empty_resolved_colors_match_the_default_theme() {
+        let snap = TerminalSnapshot::empty();
+        let theme = &freminal_common::themes::CATPPUCCIN_MOCHA;
+        assert_eq!(snap.resolved_colors.foreground, theme.foreground);
+        assert_eq!(snap.resolved_colors.background, theme.background);
+        assert_eq!(snap.resolved_colors.palette[1], theme.ansi[1]);
     }
 
     #[test]

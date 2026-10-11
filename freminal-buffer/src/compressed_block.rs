@@ -254,6 +254,56 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_palette_index_colors() {
+        let tag = freminal_common::buffer_states::format_tag::FormatTag::default();
+
+        let mut row_a = Row::new(10);
+        let mut fg_tag = tag.clone();
+        fg_tag.colors.set_color(TerminalColor::PaletteIndex(196));
+        row_a.insert_text(0, &[TChar::Ascii(b'a'), TChar::Ascii(b'b')], &fg_tag);
+
+        let mut row_b = Row::new(10);
+        let mut bg_tag = tag.clone();
+        bg_tag
+            .colors
+            .set_background_color(TerminalColor::PaletteIndex(82));
+        row_b.insert_text(0, &[TChar::Ascii(b'c')], &bg_tag);
+
+        let mut row_c = Row::new(10);
+        let mut all_tag = tag;
+        all_tag.colors.set_color(TerminalColor::PaletteIndex(1));
+        all_tag
+            .colors
+            .set_background_color(TerminalColor::PaletteIndex(255));
+        all_tag
+            .colors
+            .set_underline_color(TerminalColor::PaletteIndex(7));
+        row_c.insert_text(0, &[TChar::Ascii(b'd'), TChar::Ascii(b'e')], &all_tag);
+
+        let rows = [row_a, row_b, row_c];
+        assert_block_round_trip_exact(&rows);
+
+        // `cells()` equality already covers the colours; pin the palette
+        // indices explicitly so a lossy encoding cannot hide behind it.
+        let compact: Vec<CompactRow> = rows
+            .iter()
+            .map(|r| CompactRow::from_row(r).expect("row should be compactable"))
+            .collect();
+        let decoded = CompressedBlock::from_rows(&compact)
+            .decompress()
+            .expect("block should decompress");
+        let last = decoded[2].to_row();
+        let cell = &last.cells()[0];
+        let tag = cell.tag();
+        assert_eq!(tag.colors.color, TerminalColor::PaletteIndex(1));
+        assert_eq!(
+            tag.colors.background_color,
+            TerminalColor::PaletteIndex(255)
+        );
+        assert_eq!(tag.colors.underline_color, TerminalColor::PaletteIndex(7));
+    }
+
+    #[test]
     fn round_trip_wide_chars() {
         let mut row = Row::new(10);
         let tag = freminal_common::buffer_states::format_tag::FormatTag::default();

@@ -4,20 +4,6 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::{buffer_states::fonts::UnderlineStyle, colors::TerminalColor};
-use thiserror::Error;
-
-/// Errors produced when parsing an SGR (Select Graphic Rendition) sequence.
-#[derive(Debug, Error, Eq, PartialEq, Clone)]
-pub enum SgrParseError {
-    /// A direct-color component (R/G/B) exceeded the u8 range.
-    #[error("SGR color component {component} = {value} exceeds u8::MAX (255)")]
-    ColorComponentOutOfRange {
-        /// Which component was out of range ("r", "g", or "b").
-        component: &'static str,
-        /// The out-of-range value received.
-        value: usize,
-    },
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum SelectGraphicRendition {
@@ -185,42 +171,9 @@ impl SelectGraphicRendition {
             _ => Self::Unknown(val),
         }
     }
-
-    /// Create a new `SelectGraphicRendition` from a `usize` and three `usize` values representing
-    /// the red, green and blue components of a custom color.
-    ///
-    /// # Errors
-    /// Will return an error if any of the `usize` values are greater than `u8::MAX`.
-    pub fn from_usize_color(
-        val: usize,
-        r: usize,
-        g: usize,
-        b: usize,
-    ) -> Result<Self, SgrParseError> {
-        let r = u8::try_from(r).map_err(|_| SgrParseError::ColorComponentOutOfRange {
-            component: "r",
-            value: r,
-        })?;
-        let g = u8::try_from(g).map_err(|_| SgrParseError::ColorComponentOutOfRange {
-            component: "g",
-            value: g,
-        })?;
-        let b = u8::try_from(b).map_err(|_| SgrParseError::ColorComponentOutOfRange {
-            component: "b",
-            value: b,
-        })?;
-
-        match val {
-            38 => Ok(Self::Foreground(TerminalColor::Custom(r, g, b))),
-            48 => Ok(Self::Background(TerminalColor::Custom(r, g, b))),
-            58 => Ok(Self::UnderlineColor(TerminalColor::Custom(r, g, b))),
-            _ => Ok(Self::Unknown(val)),
-        }
-    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -329,41 +282,6 @@ mod tests {
         assert_eq!(
             SelectGraphicRendition::from_usize(55),
             SelectGraphicRendition::NotOverlined
-        );
-    }
-
-    // --- from_usize_color coverage ---
-
-    #[test]
-    fn from_usize_color_58_underline_custom() {
-        let result = SelectGraphicRendition::from_usize_color(58, 10, 20, 30).unwrap();
-        assert_eq!(
-            result,
-            SelectGraphicRendition::UnderlineColor(TerminalColor::Custom(10, 20, 30))
-        );
-    }
-
-    #[test]
-    fn from_usize_color_unknown_val() {
-        let result = SelectGraphicRendition::from_usize_color(99, 0, 0, 0).unwrap();
-        assert_eq!(result, SelectGraphicRendition::Unknown(99));
-    }
-
-    #[test]
-    fn from_usize_color_38_foreground_custom() {
-        let result = SelectGraphicRendition::from_usize_color(38, 255, 128, 0).unwrap();
-        assert_eq!(
-            result,
-            SelectGraphicRendition::Foreground(TerminalColor::Custom(255, 128, 0))
-        );
-    }
-
-    #[test]
-    fn from_usize_color_48_background_custom() {
-        let result = SelectGraphicRendition::from_usize_color(48, 0, 64, 128).unwrap();
-        assert_eq!(
-            result,
-            SelectGraphicRendition::Background(TerminalColor::Custom(0, 64, 128))
         );
     }
 }

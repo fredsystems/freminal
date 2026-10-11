@@ -63,18 +63,22 @@ fn partial_truecolor_sequences_are_gracefully_handled() {
     }
 }
 
-/// Verify that out-of-range truecolor values gracefully fall back to defaults or no-op
+/// Out-of-range truecolor components are masked to their low 8 bits
+/// (999 & 0xFF = 231), matching kitty. Masking is not a failure: the
+/// sequence is complete, so a colour is emitted.
 #[test]
-fn invalid_truecolor_falls_back_to_default_behavior() {
+fn out_of_range_truecolor_is_masked_to_8_bits() {
+    use freminal_common::colors::TerminalColor;
+    use freminal_common::sgr::SelectGraphicRendition;
+
     let mut parser = FreminalAnsiParser::new();
     let outputs = parser.push(b"\x1b[38;2;999;999;999m");
 
-    // The parser shouldn’t panic; it may either ignore invalid SGR or produce a neutral output.
-    // Both are acceptable forms of graceful degradation.
-    assert!(
-        outputs.iter().all(|o| !matches!(o, TerminalOutput::Sgr(_))) || outputs.is_empty(),
-        "invalid truecolor sequence should be ignored or degraded safely, got: {:?}",
-        outputs
+    assert_eq!(
+        outputs,
+        vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
+            TerminalColor::Custom(231, 231, 231)
+        ))]
     );
 }
 

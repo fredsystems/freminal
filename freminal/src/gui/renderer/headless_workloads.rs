@@ -142,10 +142,15 @@ fn init_dominates_a_single_frame() {
     // `GL_VERSION` once to detect timer-query capability. The recording
     // arm's empty version string resolves `Unavailable`, so that is the
     // only extra call; no query is ever issued.
+    //
+    // Task 132.11: the pane base-fill VBO (`create_buffer`) is created
+    // alongside the decoration pass, one call more than before (261 / 262
+    // previously). It is the only init call 132.11 adds, and no per-frame
+    // count changes while no OSC 11 override is active.
     let expected_init_calls = if cfg!(feature = "gpu-profiling") {
-        262
+        263
     } else {
-        261
+        262
     };
     assert_eq!(
         init.total, expected_init_calls,
@@ -418,4 +423,93 @@ fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
         two.total,
         one.total
     );
+}
+
+/// Task 132.11: the OSC 11 pane base fill is free when absent and costs
+/// exactly one draw and one upload when present.
+///
+/// Stands in for: a pane whose resolved default background differs from the
+/// configured theme's (`PaneBackground::base_fill` is `Some`), drawn on both
+/// the full-rebuild arm and the cursor-only arm of the terminal
+/// `PaintCallback`. The no-override case is the common one, and the claim
+/// that matters there is that it made no GL call it did not make before.
+mod base_fill {
+    use super::*;
+
+    const FILL: Option<[u8; 3]> = Some([0x12, 0x34, 0x56]);
+
+    #[test]
+    fn no_override_makes_exactly_todays_calls_on_a_full_frame() {
+        let plain = record_steady_state(&standard(), 1).expect("plain frame");
+        let explicit_none = record_steady_state(&standard().with_base_fill(None), 1)
+            .expect("explicit no-override frame");
+
+        assert_eq!(
+            plain, explicit_none,
+            "no override must produce a byte-identical call log"
+        );
+        let m = Metrics::of(&plain);
+        assert_eq!(
+            (m.total, m.draws, m.state_changes, m.uploads),
+            (53, 2, 21, 5)
+        );
+    }
+
+    #[test]
+    fn an_override_adds_exactly_one_draw_and_one_upload_on_a_full_frame() {
+        let plain = Metrics::of(&record_steady_state(&standard(), 1).expect("plain frame"));
+        let filled = record_steady_state(&standard().with_base_fill(FILL), 1).expect("fill frame");
+        let m = Metrics::of(&filled);
+
+        assert_eq!(m.draws, plain.draws + 1, "one extra draw: the fill quad");
+        assert_eq!(m.uploads, plain.uploads + 1, "one extra upload: the quad");
+        assert_eq!(
+            filled
+                .iter()
+                .filter(|c| c.method == "buffer_data_u8_slice")
+                .count(),
+            1,
+            "the fill is uploaded with a single buffer_data_u8_slice"
+        );
+    }
+
+    #[test]
+    fn the_fill_is_the_first_draw_of_the_frame_and_covers_six_vertices() {
+        let filled = record_steady_state(&standard().with_base_fill(FILL), 1).expect("fill frame");
+        let first_draw = filled
+            .iter()
+            .find(|c| DRAW_CALL_METHODS.contains(&c.method))
+            .expect("a frame draws");
+
+        assert_eq!(first_draw.method, "draw_arrays");
+        assert_eq!(
+            first_draw.payload,
+            GlCallPayload::Draw {
+                vertices: 6,
+                instances: 1
+            },
+            "the first draw is the 6-vertex fill quad, ahead of every cell \
+             background instance"
+        );
+    }
+
+    #[test]
+    fn no_override_makes_exactly_todays_calls_on_a_cursor_only_frame() {
+        let plain = record_cursor_only(&standard(), 1).expect("plain cursor-only");
+        let explicit_none = record_cursor_only(&standard().with_base_fill(None), 1)
+            .expect("explicit no-override cursor-only");
+
+        assert_eq!(plain, explicit_none);
+    }
+
+    #[test]
+    fn an_override_adds_exactly_one_draw_and_one_upload_on_a_cursor_only_frame() {
+        let plain = Metrics::of(&record_cursor_only(&standard(), 1).expect("plain cursor-only"));
+        let filled = Metrics::of(
+            &record_cursor_only(&standard().with_base_fill(FILL), 1).expect("fill cursor-only"),
+        );
+
+        assert_eq!(filled.draws, plain.draws + 1);
+        assert_eq!(filled.uploads, plain.uploads + 1);
+    }
 }

@@ -409,6 +409,10 @@ pub struct UploadByteCounts {
     pub decoration_vbo_bytes: u64,
     /// Bytes uploaded to the inline-image vertex VBO.
     pub image_vertex_vbo_bytes: u64,
+    /// Bytes uploaded at draw time for the full-viewport background quads
+    /// -- the background-image quad and the OSC 11 base-fill quad, each a
+    /// single quad re-uploaded every frame it is drawn (Task 132.C4).
+    pub background_quad_vbo_bytes: u64,
     /// Bytes uploaded to inline-image textures.
     pub image_texture_bytes: u64,
     /// Bytes uploaded as a full glyph-atlas texture upload.
@@ -426,6 +430,7 @@ impl UploadByteCounts {
             .saturating_add(self.foreground_instance_vbo_bytes)
             .saturating_add(self.decoration_vbo_bytes)
             .saturating_add(self.image_vertex_vbo_bytes)
+            .saturating_add(self.background_quad_vbo_bytes)
             .saturating_add(self.image_texture_bytes)
             .saturating_add(self.atlas_full_bytes)
             .saturating_add(self.atlas_subrect_bytes)
@@ -448,6 +453,9 @@ impl UploadByteCounts {
             image_vertex_vbo_bytes: self
                 .image_vertex_vbo_bytes
                 .saturating_add(other.image_vertex_vbo_bytes),
+            background_quad_vbo_bytes: self
+                .background_quad_vbo_bytes
+                .saturating_add(other.background_quad_vbo_bytes),
             image_texture_bytes: self
                 .image_texture_bytes
                 .saturating_add(other.image_texture_bytes),
@@ -985,11 +993,12 @@ mod tests {
             foreground_instance_vbo_bytes: 2,
             decoration_vbo_bytes: 3,
             image_vertex_vbo_bytes: 4,
+            background_quad_vbo_bytes: 8,
             image_texture_bytes: 5,
             atlas_full_bytes: 6,
             atlas_subrect_bytes: 7,
         };
-        assert_eq!(counts.total(), 28);
+        assert_eq!(counts.total(), 36);
     }
 
     #[test]
@@ -997,12 +1006,14 @@ mod tests {
         let a = sample_uploads(10);
         let b = UploadByteCounts {
             atlas_subrect_bytes: 5,
+            background_quad_vbo_bytes: 144,
             ..UploadByteCounts::default()
         };
-        let merged = a.merge(b);
+        let merged = a.merge(b).merge(b);
         assert_eq!(merged.foreground_instance_vbo_bytes, 10);
-        assert_eq!(merged.atlas_subrect_bytes, 5);
-        assert_eq!(merged.total(), 15);
+        assert_eq!(merged.atlas_subrect_bytes, 10);
+        assert_eq!(merged.background_quad_vbo_bytes, 288);
+        assert_eq!(merged.total(), 308);
     }
 
     #[test]

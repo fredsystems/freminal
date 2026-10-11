@@ -50,20 +50,21 @@ fn test_get_color_reverse_off() {
 
 #[test]
 fn test_get_color_reverse_on_default() {
-    // ReverseVideo::On → returns background_color.default_to_regular().
-    // DefaultBackground.default_to_regular() == Black.
+    // ReverseVideo::On → returns the stored background, unchanged. A default
+    // background stays `DefaultBackground` (the renderer resolves it through
+    // the pane's current default background colour).
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.color(), TerminalColor::Black);
+    assert_eq!(sc.color(), TerminalColor::DefaultBackground);
 }
 
 #[test]
 fn test_get_color_reverse_on_custom_colors() {
-    // Custom background_color passes through default_to_regular unchanged.
+    // Named colours are swapped verbatim.
     let sc = StateColors::default()
         .with_color(TerminalColor::Red)
         .with_background_color(TerminalColor::Blue)
         .with_reverse_video(ReverseVideo::On);
-    // get_color() returns background_color.default_to_regular() = Blue (unchanged)
+    // color() returns the stored background (Blue).
     assert_eq!(sc.color(), TerminalColor::Blue);
 }
 
@@ -79,20 +80,21 @@ fn test_get_background_color_reverse_off() {
 
 #[test]
 fn test_get_background_color_reverse_on_default() {
-    // ReverseVideo::On → returns color.default_to_regular().
-    // Default.default_to_regular() == White.
+    // ReverseVideo::On → returns the stored foreground, unchanged. A default
+    // foreground stays `Default` (the renderer resolves it through the pane's
+    // current default foreground colour).
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.background_color(), TerminalColor::White);
+    assert_eq!(sc.background_color(), TerminalColor::Default);
 }
 
 #[test]
 fn test_get_background_color_reverse_on_custom_colors() {
-    // Custom color passes through default_to_regular unchanged.
+    // Named colours are swapped verbatim.
     let sc = StateColors::default()
         .with_color(TerminalColor::Red)
         .with_background_color(TerminalColor::Blue)
         .with_reverse_video(ReverseVideo::On);
-    // get_background_color() returns color.default_to_regular() = Red (unchanged)
+    // background_color() returns the stored foreground (Red).
     assert_eq!(sc.background_color(), TerminalColor::Red);
 }
 
@@ -108,10 +110,40 @@ fn test_get_underline_color_reverse_off() {
 
 #[test]
 fn test_get_underline_color_reverse_on() {
-    // ReverseVideo::On → returns background_color.default_to_regular().
-    // DefaultBackground.default_to_regular() == Black.
+    // ReverseVideo::On with no explicit underline colour: the stored
+    // `DefaultUnderlineColor` is returned unchanged, so the renderer can make
+    // it follow the effective (SGR 7 and DECSCNM composed) foreground.
     let sc = StateColors::default().with_reverse_video(ReverseVideo::On);
-    assert_eq!(sc.underline_color(), TerminalColor::Black);
+    assert_eq!(sc.underline_color(), TerminalColor::DefaultUnderlineColor);
+}
+
+#[test]
+fn test_get_underline_color_reverse_on_named_bg_is_not_substituted() {
+    // A named background is not substituted for a default underline colour.
+    let sc = StateColors::default()
+        .with_background_color(TerminalColor::Cyan)
+        .with_reverse_video(ReverseVideo::On);
+    assert_eq!(sc.underline_color(), TerminalColor::DefaultUnderlineColor);
+}
+
+#[test]
+fn test_reverse_on_swaps_default_fg_with_named_bg() {
+    // Default fg + Blue bg reversed → Blue fg, Default bg.
+    let sc = StateColors::default()
+        .with_background_color(TerminalColor::Blue)
+        .with_reverse_video(ReverseVideo::On);
+    assert_eq!(sc.color(), TerminalColor::Blue);
+    assert_eq!(sc.background_color(), TerminalColor::Default);
+}
+
+#[test]
+fn test_reverse_on_swaps_named_fg_with_default_bg() {
+    // Red fg + default bg reversed → DefaultBackground fg, Red bg.
+    let sc = StateColors::default()
+        .with_color(TerminalColor::Red)
+        .with_reverse_video(ReverseVideo::On);
+    assert_eq!(sc.color(), TerminalColor::DefaultBackground);
+    assert_eq!(sc.background_color(), TerminalColor::Red);
 }
 
 #[test]

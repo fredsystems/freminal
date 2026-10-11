@@ -215,6 +215,38 @@ pub fn capture_after_cursor_only_frames(
     Ok(read_back(off.gl(), width, height))
 }
 
+/// Render `frame` once, clear the framebuffer to transparent black, draw one
+/// **cursor-only** frame, and capture the result.
+///
+/// Added for 132.11. [`capture_after_cursor_only_frames`] draws on a
+/// framebuffer that already holds the full frame's pixels, so it cannot tell
+/// whether the cursor-only arm paints a pane's base fill itself or merely
+/// leaves the previous frame's fill in place. The clear in between removes
+/// that ambiguity: whatever is in the capture was drawn by the cursor-only
+/// frame, and nothing else. That is the production situation (a cursor-only
+/// present is cleared to the theme colour, then repainted from retained
+/// state), so a base fill missing from this arm would show as an unfilled
+/// pane.
+///
+/// # Errors
+///
+/// As [`capture`].
+pub fn capture_cursor_only_over_cleared_framebuffer(
+    frame: &SyntheticFrame,
+) -> Result<PixelFrame, PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(frame)?;
+    let gl = Gl::real(off.gl());
+
+    driver.draw_frame(&gl, frame);
+    unsafe {
+        off.gl().clear_color(0.0, 0.0, 0.0, 0.0);
+        off.gl().clear(glow::COLOR_BUFFER_BIT);
+    }
+    driver.draw_cursor_only(&gl, frame);
+
+    Ok(read_back(off.gl(), width, height))
+}
+
 /// Draw `first` into a fresh offscreen context (unscissored), capture it,
 /// then draw `second` on top with `SCISSOR_TEST` restricted to `scissor`.
 ///
@@ -1256,5 +1288,283 @@ mod unfocused_cursor_tests {
             return;
         };
         super::tests::check_or_update_golden("cursor_active_solid_inactive_hollow", &composite);
+    }
+}
+
+/// Task 132.11: the OSC 11 pane base fill, pixel-verified.
+///
+/// A call-count test (`headless_workloads::base_fill`) proves the fill is
+/// *issued*; only a readback proves it lands on the right pixels, over the
+/// right extent, and underneath everything else.
+///
+/// Every frame here hides the cursor unless stated, so the only things in
+/// the framebuffer are the fill and the synthetic grid's glyphs. The
+/// synthetic grid draws a glyph in every cell, but a cell's top-left pixel
+/// lies outside its glyph's quad, so it shows whatever is underneath.
+#[cfg(test)]
+mod base_fill_pixel_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::super::headless::{CursorPresence, SyntheticFrame};
+    use super::{
+        PixelFrame, capture, capture_after_cursor_only_frames,
+        capture_cursor_only_over_cleared_framebuffer, capture_scissored_overdraw,
+    };
+
+    const COLS: usize = 20;
+    const ROWS: usize = 6;
+    const FILL: [u8; 3] = [200, 60, 30];
+    const FILL_RGBA: [u8; 4] = [200, 60, 30, 255];
+    /// Sub-cell remainder, right and below the grid, in pixels.
+    const REMAINDER: (u32, u32) = (7, 5);
+
+    fn plain() -> SyntheticFrame {
+        SyntheticFrame::new(COLS, ROWS)
+            .with_cursor(CursorPresence::Hidden)
+            .with_remainder(REMAINDER)
+    }
+
+    fn filled() -> SyntheticFrame {
+        plain().with_base_fill(Some(FILL))
+    }
+
+    /// `(cell_w, cell_h)` of a capture of [`plain`] / [`filled`], derived
+    /// from the pixels rather than from the font manager so the assertion
+    /// cannot share a bug with the code under test.
+    fn cell_size(frame: &PixelFrame) -> (u32, u32) {
+        let grid_w = frame.width - REMAINDER.0;
+        let grid_h = frame.height - REMAINDER.1;
+        (
+            grid_w / u32::try_from(COLS).unwrap(),
+            grid_h / u32::try_from(ROWS).unwrap(),
+        )
+    }
+
+    /// A pixel inside cell `(col, row)` that no glyph reaches: its top-left
+    /// corner.
+    fn cell_corner(frame: &PixelFrame, col: u32, row: u32) -> (u32, u32) {
+        let (cw, ch) = cell_size(frame);
+        (col * cw, row * ch)
+    }
+
+    /// (1) An unoverridden frame draws nothing in a cell corner, and an
+    /// overridden one reads back exactly the override at a cell pixel AND
+    /// everywhere in the remainder strip -- the strip is where a fill
+    /// sized to the cell grid rather than the viewport would leave a hole.
+    #[test]
+    fn the_fill_covers_cells_and_the_whole_remainder_strip_exactly() {
+        let Some(bare) = super::tests::capture_or_skip(&plain(), "base-fill-bare") else {
+            return;
+        };
+        let with_fill = capture(&filled()).expect("filled capture");
+
+        // The premise: without an override the corner is untouched, so
+        // matching the fill below is the fill's doing.
+        let (cx, cy) = cell_corner(&bare, 3, 2);
+        assert_eq!(bare.pixel(cx, cy), Some([0, 0, 0, 0]), "premise: bare cell");
+
+        assert_eq!(
+            with_fill.pixel(cx, cy),
+            Some(FILL_RGBA),
+            "a cell pixel must read back exactly the override"
+        );
+        for (x, y) in [(0, 0), (cx, cy), cell_corner(&with_fill, 19, 5)] {
+            assert_eq!(
+                with_fill.pixel(x, y),
+                Some(FILL_RGBA),
+                "cell pixel ({x}, {y})"
+            );
+        }
+
+        let (grid_w, grid_h) = (
+            with_fill.width - REMAINDER.0,
+            with_fill.height - REMAINDER.1,
+        );
+        for y in 0..with_fill.height {
+            for x in 0..with_fill.width {
+                if x >= grid_w || y >= grid_h {
+                    assert_eq!(
+                        with_fill.pixel(x, y),
+                        Some(FILL_RGBA),
+                        "remainder pixel ({x}, {y}) must carry the fill: the \
+                         quad covers the whole viewport, not just the grid"
+                    );
+                    assert_eq!(
+                        bare.pixel(x, y),
+                        Some([0, 0, 0, 0]),
+                        "premise: bare remainder pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// (2) The fill is underneath: glyphs are drawn over it.
+    ///
+    /// Font-independent ordering property over two captures of the same
+    /// glyph-bearing frame, without and with a base fill. This harness
+    /// enables no `GL_BLEND`, so a glyph quad *overwrites* its whole
+    /// rectangle, including the texels with no coverage, which come out
+    /// fully transparent. The property is therefore stated on what the
+    /// glyph pass wrote, not on a blend:
+    ///
+    /// - where the bare capture is opaque (full glyph coverage), the filled
+    ///   capture is the identical pixel: the glyph is drawn over the fill;
+    /// - where the bare capture is fully transparent (no coverage), the
+    ///   filled capture is either exactly the fill (no glyph quad reached
+    ///   it) or exactly the bare pixel (a glyph quad overwrote it) -- never
+    ///   anything else, so nothing else corrupts the fill;
+    /// - partially covered pixels are not compared.
+    #[test]
+    fn glyphs_are_drawn_over_the_fill_and_empty_pixels_show_it() {
+        let Some(bare) = super::tests::capture_or_skip(&plain(), "base-fill-under-glyphs") else {
+            return;
+        };
+        let with_fill = capture(&filled()).expect("filled capture");
+        assert_eq!(
+            (bare.width, bare.height),
+            (with_fill.width, with_fill.height)
+        );
+
+        let mut covered = 0usize;
+        let mut shows_fill = 0usize;
+        for y in 0..bare.height {
+            for x in 0..bare.width {
+                let before = bare.pixel(x, y).unwrap();
+                let after = with_fill.pixel(x, y).unwrap();
+                match before[3] {
+                    255 => {
+                        covered += 1;
+                        assert_ne!(
+                            before, FILL_RGBA,
+                            "premise: pixel ({x}, {y}) must be distinguishable from the fill"
+                        );
+                        assert_eq!(
+                            after, before,
+                            "fully covered pixel ({x}, {y}) must be the glyph, drawn over the fill"
+                        );
+                    }
+                    0 => {
+                        if after == FILL_RGBA {
+                            shows_fill += 1;
+                        } else {
+                            assert_eq!(
+                                after, before,
+                                "uncovered pixel ({x}, {y}) must be the fill or what the \
+                                 glyph pass itself wrote"
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            covered > 0,
+            "premise: the frame must have fully covered glyph pixels"
+        );
+        assert!(
+            shows_fill > 0,
+            "premise: the frame must have uncovered pixels that show the fill"
+        );
+    }
+
+    /// (3) A scissored full draw of a filled frame over an unfilled one
+    /// fills exactly the scissor rect and changes nothing outside it.
+    #[test]
+    fn a_scissored_fill_changes_only_pixels_inside_the_scissor() {
+        let Some(probe) = super::tests::capture_or_skip(&plain(), "base-fill-scissor") else {
+            return;
+        };
+        let (w, h) = (probe.width, probe.height);
+        let (vp_w, vp_h) = (i32::try_from(w).unwrap(), i32::try_from(h).unwrap());
+        // Scissor is bottom-left origin: an interior rect.
+        let (sx, sy, sw, sh) = (vp_w / 4, vp_h / 4, vp_w / 2, vp_h / 2);
+
+        let (before, after) = capture_scissored_overdraw(&plain(), &filled(), (sx, sy, sw, sh))
+            .expect("scissored overdraw capture");
+
+        // Image coordinates (top-left origin) of the scissor rect.
+        let (ix0, ix1) = (u32::try_from(sx).unwrap(), u32::try_from(sx + sw).unwrap());
+        let iy0 = u32::try_from(vp_h - (sy + sh)).unwrap();
+        let iy1 = u32::try_from(vp_h - sy).unwrap();
+
+        // A cell corner strictly inside the rect.
+        let (cw, ch) = cell_size(&before);
+        let (col, row) = ((ix0 / cw) + 1, (iy0 / ch) + 1);
+        let (px, py) = (col * cw, row * ch);
+        assert!(
+            (ix0..ix1).contains(&px) && (iy0..iy1).contains(&py),
+            "probe ({px}, {py}) must lie inside the scissor"
+        );
+        assert_eq!(before.pixel(px, py), Some([0, 0, 0, 0]), "premise");
+        assert_eq!(
+            after.pixel(px, py),
+            Some(FILL_RGBA),
+            "inside the scissor the fill must land"
+        );
+
+        for y in 0..h {
+            for x in 0..w {
+                let inside = (ix0..ix1).contains(&x) && (iy0..iy1).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        before.pixel(x, y),
+                        after.pixel(x, y),
+                        "pixel ({x}, {y}) is outside the scissor and must be \
+                         unchanged by the filled second draw"
+                    );
+                }
+            }
+        }
+    }
+
+    /// (4a) A filled frame followed by cursor-only frames equals the filled
+    /// frame alone.
+    #[test]
+    fn the_fill_survives_cursor_only_frames() {
+        let Some(single) = super::tests::capture_or_skip(&filled(), "base-fill-cursor-only") else {
+            return;
+        };
+        let after_cursor_only =
+            capture_after_cursor_only_frames(&filled(), 3).expect("cursor-only capture");
+
+        assert_eq!(
+            single.differing_pixels(&after_cursor_only, 0),
+            Some(0),
+            "a filled frame must be pixel-identical after cursor-only frames"
+        );
+        let (cx, cy) = cell_corner(&after_cursor_only, 3, 2);
+        assert_eq!(after_cursor_only.pixel(cx, cy), Some(FILL_RGBA));
+    }
+
+    /// (4b) The cursor-only arm paints the fill itself. On a framebuffer
+    /// cleared after the full frame, the cursor-only draw alone must put the
+    /// fill back everywhere a cell backgrounds nothing, remainder included;
+    /// and with no override it must put nothing there.
+    #[test]
+    fn the_cursor_only_arm_repaints_the_fill_on_a_cleared_framebuffer() {
+        let Some(repainted) = super::tests::capture_or_skip(&filled(), "base-fill-cursor-repaint")
+        else {
+            return;
+        };
+        drop(repainted);
+        let cursor_only = capture_cursor_only_over_cleared_framebuffer(&filled())
+            .expect("cursor-only over cleared framebuffer");
+        let (cx, cy) = cell_corner(&cursor_only, 3, 2);
+        assert_eq!(cursor_only.pixel(cx, cy), Some(FILL_RGBA), "cell pixel");
+        assert_eq!(
+            cursor_only.pixel(cursor_only.width - 1, cursor_only.height - 1),
+            Some(FILL_RGBA),
+            "bottom-right remainder pixel"
+        );
+
+        let bare = capture_cursor_only_over_cleared_framebuffer(&plain())
+            .expect("bare cursor-only over cleared framebuffer");
+        assert_eq!(
+            bare.pixel(cx, cy),
+            Some([0, 0, 0, 0]),
+            "with no override the cursor-only arm must draw nothing underneath"
+        );
     }
 }

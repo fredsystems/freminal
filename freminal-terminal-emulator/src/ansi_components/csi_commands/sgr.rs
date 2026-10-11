@@ -3,10 +3,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::iter::Peekable;
-use std::vec::IntoIter;
+use std::slice::Iter;
 
 use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi_components::csi_commands::sgr_color::{
+    SgrColorError, SgrColorForm, parse_sgr_color,
+};
 use crate::ansi_components::tracer::escape_sequence_for_log;
 use freminal_common::buffer_states::fonts::UnderlineStyle;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -37,13 +39,15 @@ pub fn ansi_parser_inner_csi_finished_sgr(
         return ParserOutcome::Finished;
     }
 
-    // Use an index-based loop because some SGR codes (38, 48, 58) consume
-    // multiple subsequent semicolon-separated segments as their parameters.
+    // Some SGR codes (38, 48, 58) consume multiple subsequent
+    // semicolon-separated segments as their parameters.
     let parsed = parse_all_segments(&segments);
-    let mut iter = parsed.into_iter().peekable();
+    let mut iter = parsed.iter();
 
     while let Some(val) = iter.next() {
-        dispatch_sgr_value(val, &mut iter, output);
+        if dispatch_sgr_value(val, &mut iter, output) == SgrFlow::Stop {
+            break;
+        }
     }
 
     ParserOutcome::Finished
@@ -78,76 +82,113 @@ enum SegmentValue {
     Colon(Vec<u8>),
 }
 
+/// Whether the remaining parameters of an SGR sequence should still be
+/// processed after handling one parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SgrFlow {
+    /// Carry on with the next parameter.
+    Continue,
+    /// Drop every remaining parameter of this sequence. Parameters before the
+    /// current one have already been emitted and still apply.
+    Stop,
+}
+
 /// Dispatch a single SGR value, consuming additional iterator items for
 /// multi-param codes (38, 48, 58 in semicolon form).
 fn dispatch_sgr_value(
-    value: SegmentValue,
-    iter: &mut Peekable<IntoIter<SegmentValue>>,
+    value: &SegmentValue,
+    iter: &mut Iter<'_, SegmentValue>,
     output: &mut Vec<TerminalOutput>,
-) {
+) -> SgrFlow {
     match value {
-        SegmentValue::Colon(raw) => process_colon_segment(&raw, output),
-        SegmentValue::Simple(None) => output.push(TerminalOutput::Invalid),
-        SegmentValue::Simple(Some(param)) => {
-            dispatch_simple_param(param, iter, output);
+        SegmentValue::Colon(raw) => process_colon_segment(raw, output),
+        SegmentValue::Simple(None) => {
+            output.push(TerminalOutput::Invalid);
+            SgrFlow::Continue
         }
+        SegmentValue::Simple(Some(param)) => dispatch_simple_param(*param, iter, output),
     }
 }
 
-/// Handle a plain numeric SGR parameter.  For 38/48/58, consume subsequent
-/// segments from the iterator as color subparameters (semicolon form).
+/// Handle a plain numeric SGR parameter.  For 38/48/58, extract the colour
+/// from the following semicolon-form segments.
 fn dispatch_simple_param(
     param: usize,
-    iter: &mut Peekable<IntoIter<SegmentValue>>,
+    iter: &mut Iter<'_, SegmentValue>,
     output: &mut Vec<TerminalOutput>,
-) {
+) -> SgrFlow {
     match param {
-        38 | 48 | 58 => {
-            // Collect remaining simple values for the color handler
-            let mut color_params: Vec<Option<usize>> = Vec::new();
-            consume_color_params(iter, &mut color_params);
-            let mut color_iter = color_params.into_iter();
-            handle_custom_color(output, &mut color_iter, param, false);
-        }
+        38 | 48 | 58 => handle_semicolon_color(param, iter, output),
         _ => {
             output.push(TerminalOutput::Sgr(SelectGraphicRendition::from_usize(
                 param,
             )));
+            SgrFlow::Continue
         }
     }
 }
 
-/// Consume subsequent `Simple` segments from the iterator that belong to a
-/// semicolon-form color specification (mode + up to 4 values).
-fn consume_color_params(iter: &mut Peekable<IntoIter<SegmentValue>>, out: &mut Vec<Option<usize>>) {
-    // Peek at the next segment to get the color mode.  If it's not a simple
-    // value, bail without consuming — the segment will be dispatched normally
-    // by the caller's main loop.
-    let mode = match iter.peek() {
-        Some(SegmentValue::Simple(v)) => *v,
-        _ => return,
-    };
-    // Safe to consume after peeking.
-    iter.next();
-    out.push(mode);
+/// The most `Simple` segments a semicolon-form colour can use after its
+/// `38`/`48`/`58`: the colour type plus `R;G;B`.
+const MAX_SEMICOLON_COLOR_VALUES: usize = 4;
 
-    // Determine how many more values to consume based on the mode
-    let count = match mode {
-        Some(2) => 3, // r, g, b
-        Some(5) => 1, // palette index
-        _ => return,  // unknown mode, stop
-    };
+/// Extract a semicolon-form colour (`38;5;N`, `38;2;R;G;B`, and the `48` /
+/// `58` equivalents) following a `38`/`48`/`58` that was just read.
+///
+/// Peeks up to [`MAX_SEMICOLON_COLOR_VALUES`] following `Simple` segments
+/// without consuming them, then consumes exactly the ones the colour used. An
+/// incomplete colour consumes everything it peeked and emits nothing. An
+/// unknown colour type emits nothing and stops the rest of the sequence.
+fn handle_semicolon_color(
+    primary: usize,
+    iter: &mut Iter<'_, SegmentValue>,
+    output: &mut Vec<TerminalOutput>,
+) -> SgrFlow {
+    let mut window = [None; MAX_SEMICOLON_COLOR_VALUES];
+    let mut len = 0;
+    for (slot, segment) in window.iter_mut().zip(iter.clone()) {
+        let SegmentValue::Simple(value) = segment else {
+            break;
+        };
+        *slot = *value;
+        len += 1;
+    }
+    let window = window.get(..len).unwrap_or_default();
 
-    for _ in 0..count {
-        match iter.peek() {
-            Some(SegmentValue::Simple(_)) => {
-                if let Some(SegmentValue::Simple(v)) = iter.next() {
-                    out.push(v);
-                }
-            }
-            _ => break, // colon segment or end — stop without consuming
+    match parse_sgr_color(window, SgrColorForm::Semicolon) {
+        Ok(extracted) => {
+            output.push(color_sgr(primary, extracted.color));
+            advance(iter, extracted.consumed);
+            SgrFlow::Continue
+        }
+        Err(SgrColorError::Incomplete) => {
+            advance(iter, len);
+            SgrFlow::Continue
+        }
+        Err(SgrColorError::UnknownType(kind)) => {
+            warn!("Unhandled SGR color type: parsed SGR {primary};{kind}; dropping the rest");
+            SgrFlow::Stop
         }
     }
+}
+
+/// Discard the next `count` segments from `iter`.
+fn advance(iter: &mut Iter<'_, SegmentValue>, count: usize) {
+    for _ in 0..count {
+        let _ = iter.next();
+    }
+}
+
+/// Build the SGR that applies `color` to the channel selected by `primary`
+/// (`38` foreground, `48` background, anything else underline colour).
+const fn color_sgr(primary: usize, color: TerminalColor) -> TerminalOutput {
+    // Only ever called with 38, 48 or 58; matching 38/48 explicitly and
+    // treating the remainder as 58 avoids an unreachable arm.
+    TerminalOutput::Sgr(match primary {
+        38 => SelectGraphicRendition::Foreground(color),
+        48 => SelectGraphicRendition::Background(color),
+        _ => SelectGraphicRendition::UnderlineColor(color),
+    })
 }
 
 /// Process a single semicolon-delimited segment that contains colons.
@@ -161,28 +202,24 @@ fn consume_color_params(iter: &mut Peekable<IntoIter<SegmentValue>>, out: &mut V
 /// - `48:2:...:R:G:B` — truecolor background
 /// - `58:2:...:R:G:B` — truecolor underline color
 /// - `38:5:IDX` / `48:5:IDX` / `58:5:IDX` — 256-color palette
-fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) {
+fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) -> SgrFlow {
     let Ok(parts) = segment
         .split(|b| *b == b':')
         .map(parse_param_as::<usize>)
         .collect::<Result<Vec<Option<usize>>, _>>()
     else {
         output.push(TerminalOutput::Invalid);
-        return;
+        return SgrFlow::Continue;
     };
 
     let Some(primary) = parts.first().copied().flatten() else {
         output.push(TerminalOutput::Sgr(SelectGraphicRendition::Reset));
-        return;
+        return SgrFlow::Continue;
     };
 
     match primary {
         4 => handle_underline_subparam(&parts, output),
-        38 | 48 | 58 => {
-            let mut iter: IntoIter<Option<usize>> = parts.into_iter();
-            let _ = iter.next(); // skip the primary (38/48/58)
-            handle_custom_color(output, &mut iter, primary, true);
-        }
+        38 | 48 | 58 => return handle_colon_color(primary, &parts, output),
         _ => {
             // Unknown colon form — emit the primary as a plain SGR and warn.
             warn!(
@@ -192,6 +229,30 @@ fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) {
             output.push(TerminalOutput::Sgr(SelectGraphicRendition::from_usize(
                 primary,
             )));
+        }
+    }
+    SgrFlow::Continue
+}
+
+/// Extract a colon-form colour (`38:5:N`, `38:2:[CS:]R:G:B`, and the `48` /
+/// `58` equivalents). `parts` includes the leading `38`/`48`/`58`. An
+/// incomplete colour emits nothing; an unknown colour type emits nothing and
+/// stops the rest of the sequence.
+fn handle_colon_color(
+    primary: usize,
+    parts: &[Option<usize>],
+    output: &mut Vec<TerminalOutput>,
+) -> SgrFlow {
+    let values = parts.get(1..).unwrap_or_default();
+    match parse_sgr_color(values, SgrColorForm::Colon) {
+        Ok(extracted) => {
+            output.push(color_sgr(primary, extracted.color));
+            SgrFlow::Continue
+        }
+        Err(SgrColorError::Incomplete) => SgrFlow::Continue,
+        Err(SgrColorError::UnknownType(kind)) => {
+            warn!("Unhandled SGR color type: parsed SGR {primary}:{kind}; dropping the rest");
+            SgrFlow::Stop
         }
     }
 }
@@ -208,100 +269,6 @@ fn handle_underline_subparam(parts: &[Option<usize>], output: &mut Vec<TerminalO
     } else {
         // 4:0 means "no underline" — same as SGR 24
         output.push(TerminalOutput::Sgr(SelectGraphicRendition::NotUnderlined));
-    }
-}
-
-fn default_color(output: &mut Vec<TerminalOutput>, custom_color_control_code: usize) {
-    // NOTE: Per xterm/VTE convention, bare 38/48/58 with no subparam resets the respective
-    // color channel. This is not explicitly specified in ECMA-48 but is de facto standard
-    // across all major terminal emulators.
-
-    output.push(match custom_color_control_code {
-        38 => TerminalOutput::Sgr(SelectGraphicRendition::Foreground(TerminalColor::Default)),
-        48 => TerminalOutput::Sgr(SelectGraphicRendition::Background(
-            TerminalColor::DefaultBackground,
-        )),
-        // instead of matching directly on 58, we'll match on a wildcard. This helps with codecov because it thought
-        // we were testing `_` in the match statement when it's impossible to end up here with a value other than 58
-        _ => TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
-            TerminalColor::DefaultUnderlineColor,
-        )),
-    });
-}
-
-pub fn handle_custom_color(
-    output: &mut Vec<TerminalOutput>,
-    param_iter: &mut IntoIter<Option<usize>>,
-    param: usize,
-    split_by_colon: bool,
-) {
-    // if control code is 38, 48 or 58 we need to read the next param
-    // otherwise, store the param as is
-    let custom_color_control_code = param;
-
-    let next = param_iter.next();
-    let Some(param) = next.flatten() else {
-        // No mode parameter after 38/48/58 → treat as a reset for that channel
-        default_color(output, custom_color_control_code);
-        return;
-    };
-
-    match param {
-        // Truecolor: 2;r;g;b  or  2:r:g:b
-        2 => {
-            // Some colon-splitters may leave an extra token after the 2; skip it if present.
-            if param_iter.len() > 3 && split_by_colon {
-                let _ = param_iter.next();
-            }
-
-            let r = param_iter.next().flatten().unwrap_or(0);
-            let g = param_iter.next().flatten().unwrap_or(0);
-            let b = param_iter.next().flatten().unwrap_or(0);
-
-            match SelectGraphicRendition::from_usize_color(custom_color_control_code, r, g, b) {
-                Ok(sgr) => output.push(TerminalOutput::Sgr(sgr)),
-                Err(e) => {
-                    // The raw SGR byte slice is not reachable at this depth
-                    // (only the already-parsed channel values survive), so log
-                    // the parsed reconstruction instead: SGR <cc>;2;r;g;b.
-                    warn!(
-                        "Invalid RGB SGR sequence: {e}; parsed SGR {custom_color_control_code};2;{r};{g};{b}"
-                    );
-                    output.push(TerminalOutput::Invalid);
-                }
-            }
-        }
-
-        // 256-color: 5;idx
-        5 => {
-            let lookup = param_iter.next().flatten().unwrap_or(0);
-
-            // Clamp to 0–255 and emit a PaletteIndex.  The handler
-            // resolves it against the mutable ColorPalette.
-            let idx = u8::try_from(lookup & 0xFF).unwrap_or(0);
-            let color = TerminalColor::PaletteIndex(idx);
-
-            match custom_color_control_code {
-                38 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
-                    color,
-                ))),
-                48 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::Background(
-                    color,
-                ))),
-                58 => output.push(TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
-                    color,
-                ))),
-                _ => output.push(TerminalOutput::Invalid),
-            }
-        }
-
-        _ => {
-            // Unhandled color-mode selector after 38/48/58 (only 2 and 5 are
-            // defined). Raw bytes are not reachable here; log the parsed
-            // reconstruction: SGR <cc>;<mode>.
-            warn!("Unhandled SGR color mode: parsed SGR {custom_color_control_code};{param}");
-            output.push(TerminalOutput::Invalid);
-        }
     }
 }
 
@@ -395,45 +362,15 @@ mod tests {
     }
 
     #[test]
-    fn sgr_bare_38_no_subparams_resets_fg_to_default() {
-        // bare `38` (no mode after) → Foreground(Default)
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_sgr(b"38", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(
-            output,
-            vec![TerminalOutput::Sgr(SelectGraphicRendition::Foreground(
-                TerminalColor::Default
-            ))]
-        );
-    }
-
-    #[test]
-    fn sgr_bare_48_no_subparams_resets_bg_to_default() {
-        // bare `48` → Background(DefaultBackground)
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_sgr(b"48", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(
-            output,
-            vec![TerminalOutput::Sgr(SelectGraphicRendition::Background(
-                TerminalColor::DefaultBackground
-            ))]
-        );
-    }
-
-    #[test]
-    fn sgr_bare_58_no_subparams_resets_underline_color_to_default() {
-        // bare `58` → UnderlineColor(DefaultUnderlineColor)
-        let mut output = Vec::new();
-        let result = ansi_parser_inner_csi_finished_sgr(b"58", &mut output);
-        assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(
-            output,
-            vec![TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
-                TerminalColor::DefaultUnderlineColor
-            ))]
-        );
+    fn sgr_bare_38_48_58_emit_nothing() {
+        // A bare colour introducer is incomplete: nothing is emitted (kitty),
+        // in particular no reset to the default colour.
+        for seq in [&b"38"[..], b"48", b"58"] {
+            let mut output = Vec::new();
+            let result = ansi_parser_inner_csi_finished_sgr(seq, &mut output);
+            assert_eq!(result, ParserOutcome::Finished);
+            assert_eq!(output, vec![], "bare {seq:?} must emit nothing");
+        }
     }
 
     #[test]
@@ -489,27 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn sgr_unknown_color_mode_emits_invalid() {
-        // `38;9;1;2;3` → mode=9 is unknown → Invalid for the color, then remaining
-        // params (1=Bold, 2=Faint, 3=Italic) are processed normally.
+    fn sgr_unknown_color_type_drops_rest_of_sequence() {
+        // `38;9;1;2;3` → type 9 is unknown: nothing is emitted for the colour
+        // and the remaining params (1, 2, 3) are dropped too.
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_sgr(b"38;9;1;2;3", &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert_eq!(
-            output,
-            vec![
-                TerminalOutput::Invalid,
-                TerminalOutput::Sgr(
-                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Bold
-                ),
-                TerminalOutput::Sgr(
-                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Faint
-                ),
-                TerminalOutput::Sgr(
-                    crate::ansi_components::csi_commands::sgr::SelectGraphicRendition::Italic
-                ),
-            ]
-        );
+        assert_eq!(output, vec![]);
     }
 
     #[test]
@@ -545,6 +468,132 @@ mod tests {
             output,
             vec![TerminalOutput::Sgr(SelectGraphicRendition::UnderlineColor(
                 TerminalColor::PaletteIndex(42)
+            ))]
+        );
+    }
+
+    // --- Parser-level colour extraction (full `CSI ... m`) ---
+
+    fn fg(color: TerminalColor) -> TerminalOutput {
+        TerminalOutput::Sgr(SelectGraphicRendition::Foreground(color))
+    }
+
+    fn sgr(value: SelectGraphicRendition) -> TerminalOutput {
+        TerminalOutput::Sgr(value)
+    }
+
+    #[test]
+    fn csi_indexed_colour_is_masked_to_8_bits() {
+        assert_eq!(
+            parse_csi_sequence(b"38;5;256m"),
+            vec![fg(TerminalColor::PaletteIndex(0))]
+        );
+        assert_eq!(
+            parse_csi_sequence(b"38;5;300m"),
+            vec![fg(TerminalColor::PaletteIndex(44))]
+        );
+    }
+
+    #[test]
+    fn csi_incomplete_colours_emit_nothing() {
+        for seq in [
+            &b"38;5m"[..],
+            b"38m",
+            b"48m",
+            b"58m",
+            b"38;2;1;2m",
+            b"38:5m",
+            b"38:2:1:2m",
+        ] {
+            assert_eq!(
+                parse_csi_sequence(seq),
+                vec![],
+                "incomplete colour {:?} must emit nothing",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn csi_direct_colour_components_are_masked_to_8_bits() {
+        assert_eq!(
+            parse_csi_sequence(b"38;2;300;0;0m"),
+            vec![fg(TerminalColor::Custom(44, 0, 0))]
+        );
+    }
+
+    #[test]
+    fn csi_direct_colour_colon_forms() {
+        for seq in [
+            &b"38:2:1:2:3m"[..],
+            b"38:2::1:2:3m",
+            b"38:2:9:1:2:3m",
+            // Extra trailing sub-params after a complete colour are ignored.
+            b"38:2:9:1:2:3:4m",
+        ] {
+            assert_eq!(
+                parse_csi_sequence(seq),
+                vec![fg(TerminalColor::Custom(1, 2, 3))],
+                "colon colour {:?}",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn csi_colon_indexed_colour_ignores_extra_subparams() {
+        assert_eq!(
+            parse_csi_sequence(b"38:5:1:2m"),
+            vec![fg(TerminalColor::PaletteIndex(1))]
+        );
+    }
+
+    #[test]
+    fn csi_unknown_colour_type_emits_nothing_and_drops_rest() {
+        assert_eq!(parse_csi_sequence(b"38;4;1;1m"), vec![]);
+        assert_eq!(parse_csi_sequence(b"38;0;1m"), vec![]);
+        assert_eq!(parse_csi_sequence(b"38:4:1;1m"), vec![]);
+    }
+
+    #[test]
+    fn csi_params_before_unknown_colour_type_are_kept() {
+        assert_eq!(
+            parse_csi_sequence(b"1;38;4;1m"),
+            vec![sgr(SelectGraphicRendition::Bold)]
+        );
+    }
+
+    #[test]
+    fn csi_incomplete_colour_does_not_drop_earlier_params() {
+        assert_eq!(
+            parse_csi_sequence(b"1;38;5m"),
+            vec![sgr(SelectGraphicRendition::Bold)]
+        );
+    }
+
+    #[test]
+    fn csi_params_after_complete_colour_are_processed() {
+        assert_eq!(
+            parse_csi_sequence(b"38;5;1;1m"),
+            vec![
+                fg(TerminalColor::PaletteIndex(1)),
+                sgr(SelectGraphicRendition::Bold),
+            ]
+        );
+    }
+
+    #[test]
+    fn csi_background_and_underline_indexed_colours() {
+        assert_eq!(
+            parse_csi_sequence(b"48;5;7m"),
+            vec![sgr(SelectGraphicRendition::Background(
+                TerminalColor::PaletteIndex(7)
+            ))]
+        );
+        assert_eq!(
+            parse_csi_sequence(b"58;5;7m"),
+            vec![sgr(SelectGraphicRendition::UnderlineColor(
+                TerminalColor::PaletteIndex(7)
             ))]
         );
     }

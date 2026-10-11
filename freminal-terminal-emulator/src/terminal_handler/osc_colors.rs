@@ -3,102 +3,97 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! OSC color management for [`TerminalHandler`].
+//! OSC colour control for [`TerminalHandler`].
 //!
-//! This module contains all functions responsible for handling OSC 10/11/12
-//! foreground, background, and cursor color queries and overrides, as well as
-//! the corresponding OSC 110/111/112 reset sequences:
+//! This module applies the parsed OSC 4 / 104 (palette) and OSC 10-19 /
+//! 110-119 (dynamic colour) requests to the handler's colour state and answers
+//! the queries:
 //!
-//! - [`TerminalHandler::handle_osc_fg_bg_color`] — main entry point for
-//!   OSC 10/11/12/110/111/112 color query, set, and reset sequences.
+//! - [`TerminalHandler::handle_osc_colors`] — entry point for the
+//!   [`AnsiOscType::PaletteColors`], [`AnsiOscType::ResetPaletteColors`],
+//!   [`AnsiOscType::DynamicColors`] and [`AnsiOscType::ResetDynamicColor`]
+//!   variants.
+//!
+//! Every colour reply carries 16 bits per channel (`rgb:RRRR/GGGG/BBBB`, each
+//! 8-bit value scaled by 257), as xterm, kitty and Ghostty do.
 
-use freminal_common::{
-    buffer_states::osc::{AnsiOscInternalType, AnsiOscType},
-    colors::parse_color_spec,
+use freminal_common::buffer_states::{
+    osc::AnsiOscType,
+    osc_color::{ColorRequest, PaletteReset},
 };
 
 use super::TerminalHandler;
-use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
+
+/// Format an 8-bit colour as the 16-bit-per-channel `rgb:RRRR/GGGG/BBBB` spec
+/// used in OSC colour replies. Each channel is the 8-bit value times 257, so
+/// `0xff` becomes `0xffff`.
+fn rgb_spec_16bit((r, g, b): (u8, u8, u8)) -> String {
+    format!(
+        "rgb:{:04x}/{:04x}/{:04x}",
+        u16::from(r) * 257,
+        u16::from(g) * 257,
+        u16::from(b) * 257,
+    )
+}
 
 impl TerminalHandler {
-    /// Handle OSC 10/11/12 foreground/background/cursor color query, set,
-    /// and reset (OSC 110/111/112).
+    /// Apply an OSC colour-control request and answer its queries.
     ///
-    /// Extracted from `handle_osc` to keep that function within the 100-line clippy limit.
+    /// Operations are applied in wire order, and each query is answered at the
+    /// point it is reached, so `4;1;red;1;?` reports the colour it just set.
     ///
-    /// - `RequestColorQuery*(Query)`: respond with the effective color
-    ///   (override or theme default).
-    /// - `RequestColorQuery*(String(spec))`: parse the X11 color spec and
-    ///   store as an override.
-    /// - `ResetForegroundColor` / `ResetBackgroundColor` / `ResetCursorColor`:
-    ///   clear the corresponding override so subsequent queries return the
-    ///   theme color.
-    pub(super) fn handle_osc_fg_bg_color(&mut self, osc: &AnsiOscType) {
+    /// - `PaletteColors`: `Set` overrides the palette entry; `Query` replies
+    ///   `4;{index};rgb:RRRR/GGGG/BBBB`.
+    /// - `ResetPaletteColors`: clears every override, or the listed entries.
+    /// - `DynamicColors`: `Set` overrides the slot; `Query` replies
+    ///   `{code};rgb:RRRR/GGGG/BBBB` from the effective colour (override or
+    ///   theme default), where `code` is the slot's OSC number.
+    /// - `ResetDynamicColor`: clears the slot's override.
+    ///
+    /// Any other variant is ignored.
+    pub(super) fn handle_osc_colors(&mut self, osc: &AnsiOscType) {
         match osc {
-            // OSC 11 query: respond with the effective background color.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.bg_color_override.unwrap_or(self.theme.background);
-                self.write_osc_response(&format!("11;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 10 query: respond with the effective foreground color.
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.fg_color_override.unwrap_or(self.theme.foreground);
-                self.write_osc_response(&format!("10;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 12 query: respond with the effective cursor color.
-            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query) => {
-                let (r, g, b) = self.cursor_color_override.unwrap_or(self.theme.cursor);
-                self.write_osc_response(&format!("12;rgb:{r:02x}/{g:02x}/{b:02x}"));
-            }
-            // OSC 11 set: store a dynamic background color override.
-            AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.bg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 11: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 11: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+            AnsiOscType::PaletteColors(ops) => {
+                for op in ops {
+                    match op.request {
+                        ColorRequest::Set(rgb) => self.color_state.set_palette(op.index, rgb),
+                        ColorRequest::Query => {
+                            let rgb = self.color_state.palette_rgb(op.index);
+                            self.write_osc_response(&format!(
+                                "4;{};{}",
+                                op.index,
+                                rgb_spec_16bit(rgb)
+                            ));
+                        }
+                    }
                 }
             }
-            // OSC 10 set: store a dynamic foreground color override.
-            AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.fg_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 10: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 10: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+            AnsiOscType::ResetPaletteColors(PaletteReset::All) => {
+                self.color_state.reset_palette_all();
+            }
+            AnsiOscType::ResetPaletteColors(PaletteReset::Indices(indices)) => {
+                for index in indices {
+                    self.color_state.reset_palette(*index);
                 }
             }
-            // OSC 12 set: store a dynamic cursor color override.
-            AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::String(spec)) => {
-                if let Some(rgb) = parse_color_spec(spec) {
-                    self.cursor_color_override = Some(rgb);
-                } else {
-                    tracing::warn!("OSC 12: unrecognised color spec");
-                    tracing::debug!(
-                        "OSC 12: unrecognised color spec: {:?}",
-                        lossy_sequence_for_log_bounded(spec.as_bytes())
-                    );
+            AnsiOscType::DynamicColors(ops) => {
+                for op in ops {
+                    match op.request {
+                        ColorRequest::Set(rgb) => self.color_state.set_dynamic(op.slot, rgb),
+                        ColorRequest::Query => {
+                            let rgb = self.color_state.effective_dynamic(op.slot);
+                            self.write_osc_response(&format!(
+                                "{};{}",
+                                op.slot.osc_code(),
+                                rgb_spec_16bit(rgb)
+                            ));
+                        }
+                    }
                 }
             }
-            // OSC 110: reset dynamic foreground color override.
-            AnsiOscType::ResetForegroundColor => {
-                self.fg_color_override = None;
+            AnsiOscType::ResetDynamicColor(slot) => {
+                self.color_state.reset_dynamic(*slot);
             }
-            // OSC 111: reset dynamic background color override.
-            AnsiOscType::ResetBackgroundColor => {
-                self.bg_color_override = None;
-            }
-            // OSC 112: reset dynamic cursor color override.
-            AnsiOscType::ResetCursorColor => {
-                self.cursor_color_override = None;
-            }
-            // Unknown internal-type variants and unreachable arms — silently ignore.
             _ => {}
         }
     }
@@ -108,352 +103,519 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{
-        buffer_states::osc::{AnsiOscInternalType, AnsiOscType},
-        pty_write::PtyWrite,
+        buffer_states::modes::s8c1t::S8c1t, colors::DynamicColorSlot, pty_write::PtyWrite,
+        themes::CATPPUCCIN_MOCHA,
     };
 
     use super::super::TerminalHandler;
+    use super::rgb_spec_16bit;
+    use crate::ansi::FreminalAnsiParser;
+
+    type Rx = crossbeam_channel::Receiver<PtyWrite>;
+
+    fn handler_with_rx() -> (TerminalHandler, Rx) {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Feed `bytes` through the full ANSI parser and into the handler.
+    fn feed(handler: &mut TerminalHandler, bytes: &[u8]) {
+        let outputs = FreminalAnsiParser::new().push(bytes);
+        handler.process_outputs(&outputs);
+    }
+
+    /// Every PTY write queued so far, in order.
+    fn replies(rx: &Rx) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Ok(PtyWrite::Write(bytes)) = rx.try_recv() {
+            out.push(bytes);
+        }
+        out
+    }
+
+    /// The exact 7-bit reply for `body`: `ESC ] body ESC \`.
+    fn reply(body: &str) -> Vec<u8> {
+        let mut v = b"\x1b]".to_vec();
+        v.extend_from_slice(body.as_bytes());
+        v.extend_from_slice(b"\x1b\\");
+        v
+    }
+
+    fn fg(handler: &TerminalHandler) -> (u8, u8, u8) {
+        handler
+            .color_state
+            .effective_dynamic(DynamicColorSlot::Foreground)
+    }
+
+    fn bg(handler: &TerminalHandler) -> (u8, u8, u8) {
+        handler
+            .color_state
+            .effective_dynamic(DynamicColorSlot::Background)
+    }
 
     // ------------------------------------------------------------------
-    // OSC 10/11/12 — foreground/background/cursor color query
+    // 16-bit reply formatting
     // ------------------------------------------------------------------
 
     #[test]
-    fn osc_fg_query_returns_theme_default_when_no_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
+    fn rgb_spec_16bit_scales_each_channel_by_257() {
+        assert_eq!(rgb_spec_16bit((0, 0, 0)), "rgb:0000/0000/0000");
+        assert_eq!(rgb_spec_16bit((255, 255, 255)), "rgb:ffff/ffff/ffff");
+        assert_eq!(rgb_spec_16bit((0x12, 0x34, 0x56)), "rgb:1212/3434/5656");
+        assert_eq!(rgb_spec_16bit((1, 0x80, 0xfe)), "rgb:0101/8080/fefe");
+    }
 
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::Query,
-        ));
+    // ------------------------------------------------------------------
+    // OSC 10 / 11 / 12 / 17 / 19 queries
+    // ------------------------------------------------------------------
 
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        // Default theme foreground for Catppuccin Mocha is (205, 214, 244).
-        // 205*257=52685=0xcdd, scaled: 205 → cd_cd; but X11 uses full 16-bit (205*257=52685=0xcdcd)
-        // Format: ESC ] 10 ; rgb:rr/gg/bb ESC \  (7-bit mode, 2-byte hex per channel)
-        assert!(
-            response.contains("10;rgb:"),
-            "response should be an OSC 10 color reply: {response:?}"
+    #[test]
+    fn osc_fg_query_returns_theme_default_in_16_bit() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;?\x1b\\");
+        let expected = format!("10;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.foreground));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
+
+    #[test]
+    fn osc_bg_query_returns_theme_default_in_16_bit() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]11;?\x1b\\");
+        let expected = format!("11;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.background));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
+
+    #[test]
+    fn osc_cursor_query_returns_theme_default_in_16_bit() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]12;?\x1b\\");
+        let expected = format!("12;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.cursor));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
+
+    #[test]
+    fn osc17_and_osc19_queries_return_theme_selection_colours() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]17;?\x1b\\\x1b]19;?\x1b\\");
+        assert_eq!(
+            replies(&rx),
+            vec![
+                reply(&format!(
+                    "17;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.selection_bg)
+                )),
+                reply(&format!(
+                    "19;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.selection_fg)
+                )),
+            ]
         );
     }
 
     #[test]
-    fn osc_bg_query_returns_theme_default_when_no_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            response.contains("11;rgb:"),
-            "response should be an OSC 11 color reply: {response:?}"
+    fn osc19_query_reply_is_theme_selection_fg_times_257() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]19;?\x1b\\");
+        let (r, g, b) = CATPPUCCIN_MOCHA.selection_fg;
+        let expected = format!(
+            "19;rgb:{:04x}/{:04x}/{:04x}",
+            u16::from(r) * 257,
+            u16::from(g) * 257,
+            u16::from(b) * 257
         );
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
     }
 
     #[test]
-    fn osc_cursor_query_returns_theme_default_when_no_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            response.contains("12;rgb:"),
-            "response should be an OSC 12 color reply: {response:?}"
+    fn osc10_two_queries_reply_in_order() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;?;?\x1b\\");
+        assert_eq!(
+            replies(&rx),
+            vec![
+                reply(&format!(
+                    "10;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.foreground)
+                )),
+                reply(&format!(
+                    "11;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.background)
+                )),
+            ]
         );
     }
+
+    // ------------------------------------------------------------------
+    // OSC 10 / 11 / 12 / 17 / 19 set
+    // ------------------------------------------------------------------
 
     #[test]
     fn osc_fg_set_stores_override_and_query_returns_it() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        // Set foreground to red via rgb: spec.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
-        ));
-
-        // Query should return the override.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            response.contains("10;rgb:ff/00/00"),
-            "response should reflect the set override: {response:?}"
-        );
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;rgb:ff/00/00\x1b\\");
+        feed(&mut handler, b"\x1b]10;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("10;rgb:ffff/0000/0000")]);
     }
 
     #[test]
     fn osc_bg_set_stores_override_and_query_returns_it() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::String("rgb:00/ff/00".to_string()),
-        ));
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            response.contains("11;rgb:00/ff/00"),
-            "response should reflect the set override: {response:?}"
-        );
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]11;rgb:00/ff/00\x1b\\");
+        feed(&mut handler, b"\x1b]11;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("11;rgb:0000/ffff/0000")]);
     }
 
     #[test]
     fn osc_cursor_set_stores_override_and_query_returns_it() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::String("rgb:00/00/ff".to_string()),
-        ));
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            response.contains("12;rgb:00/00/ff"),
-            "response should reflect the set override: {response:?}"
-        );
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]12;rgb:00/00/ff\x1b\\");
+        feed(&mut handler, b"\x1b]12;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("12;rgb:0000/0000/ffff")]);
     }
 
     #[test]
-    fn osc_110_resets_fg_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        // Set an override.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
-        ));
-
-        // Reset it (OSC 110).
-        handler.handle_osc_fg_bg_color(&AnsiOscType::ResetForegroundColor);
-
-        // Query should now return the theme default, not the override.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response after reset");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        // The theme default is not rgb:ff/00/00.
-        assert!(
-            !response.contains("10;rgb:ff/00/00"),
-            "after OSC 110 reset, response should not contain the old override: {response:?}"
-        );
-        assert!(
-            response.contains("10;rgb:"),
-            "response should still be an OSC 10 color reply: {response:?}"
-        );
+    fn osc12_query_reply_is_16_bit_not_8_bit() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]12;rgb:12/34/56\x1b\\");
+        feed(&mut handler, b"\x1b]12;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("12;rgb:1212/3434/5656")]);
     }
 
     #[test]
-    fn osc_111_resets_bg_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::String("rgb:00/ff/00".to_string()),
-        ));
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::ResetBackgroundColor);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response after reset");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            !response.contains("11;rgb:00/ff/00"),
-            "after OSC 111 reset, response should not contain the old override: {response:?}"
-        );
-        assert!(
-            response.contains("11;rgb:"),
-            "response should still be an OSC 11 color reply: {response:?}"
-        );
+    fn osc10_two_values_set_foreground_and_background() {
+        let (mut handler, _rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;red;blue\x1b\\");
+        assert_eq!(fg(&handler), (255, 0, 0));
+        assert_eq!(bg(&handler), (0, 0, 255));
     }
 
     #[test]
-    fn osc_112_resets_cursor_override() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
+    fn osc11_colour_name_with_spaces_sets_background() {
+        let (mut handler, _rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]11;dark slate gray\x1b\\");
+        assert_eq!(bg(&handler), (47, 79, 79));
+    }
 
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::String("rgb:00/00/ff".to_string()),
-        ));
+    #[test]
+    fn osc13_values_set_nothing() {
+        let (mut handler, rx) = handler_with_rx();
+        let (fg0, bg0) = (fg(&handler), bg(&handler));
+        feed(&mut handler, b"\x1b]13;red;blue\x1b\\");
+        assert_eq!((fg(&handler), bg(&handler)), (fg0, bg0));
+        assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
+    }
 
-        handler.handle_osc_fg_bg_color(&AnsiOscType::ResetCursorColor);
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::Query,
-        ));
-
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response after reset");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        assert!(
-            !response.contains("12;rgb:00/00/ff"),
-            "after OSC 112 reset, response should not contain the old override: {response:?}"
+    #[test]
+    fn osc15_ignored_codes_precede_a_set_selection_background() {
+        let (mut handler, rx) = handler_with_rx();
+        let (fg0, bg0) = (fg(&handler), bg(&handler));
+        // 15 and 16 consume `x` and `y`; 17 takes the colour.
+        feed(&mut handler, b"\x1b]15;x;y;#ff0000\x1b\\");
+        assert_eq!(
+            handler
+                .color_state
+                .effective_dynamic(DynamicColorSlot::SelectionBackground),
+            (255, 0, 0)
         );
-        assert!(
-            response.contains("12;rgb:"),
-            "response should still be an OSC 12 color reply: {response:?}"
-        );
+        assert_eq!((fg(&handler), bg(&handler)), (fg0, bg0));
+
+        feed(&mut handler, b"\x1b]17;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("17;rgb:ffff/0000/0000")]);
+    }
+
+    #[test]
+    fn osc17_set_then_query_and_osc19_set() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]17;#ff0000\x1b\\");
+        feed(&mut handler, b"\x1b]17;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("17;rgb:ffff/0000/0000")]);
+
+        feed(&mut handler, b"\x1b]19;#00ff00\x1b\\");
+        feed(&mut handler, b"\x1b]19;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("19;rgb:0000/ffff/0000")]);
     }
 
     #[test]
     fn osc_fg_set_invalid_spec_is_ignored() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;rgb:ff/00/00\x1b\\");
+        feed(&mut handler, b"\x1b]10;not-a-color\x1b\\");
+        feed(&mut handler, b"\x1b]10;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("10;rgb:ffff/0000/0000")]);
+    }
 
-        // Set a valid override first.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
-        ));
+    // ------------------------------------------------------------------
+    // OSC 110-119
+    // ------------------------------------------------------------------
 
-        // Attempt to set an invalid spec — override should remain unchanged.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::String("not-a-color".to_string()),
-        ));
+    #[test]
+    fn osc_110_resets_fg_override() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;rgb:ff/00/00\x1b\\");
+        feed(&mut handler, b"\x1b]110\x1b\\");
+        feed(&mut handler, b"\x1b]10;?\x1b\\");
+        let expected = format!("10;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.foreground));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
 
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::Query,
-        ));
+    #[test]
+    fn osc_111_resets_bg_override() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]11;rgb:00/ff/00\x1b\\");
+        feed(&mut handler, b"\x1b]111\x1b\\");
+        feed(&mut handler, b"\x1b]11;?\x1b\\");
+        let expected = format!("11;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.background));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
 
-        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
-            panic!("expected PtyWrite::Write response");
-        };
-        let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
-        // The previous valid override (ff/00/00) should still be active.
-        assert!(
-            response.contains("10;rgb:ff/00/00"),
-            "invalid spec should not overwrite a valid override: {response:?}"
+    #[test]
+    fn osc_112_resets_cursor_override() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]12;rgb:00/00/ff\x1b\\");
+        feed(&mut handler, b"\x1b]112\x1b\\");
+        feed(&mut handler, b"\x1b]12;?\x1b\\");
+        let expected = format!("12;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.cursor));
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
+
+    #[test]
+    fn osc_117_and_119_reset_the_selection_overrides() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]17;#ff0000\x1b\\\x1b]19;#00ff00\x1b\\");
+        feed(&mut handler, b"\x1b]117\x1b\\");
+        feed(&mut handler, b"\x1b]17;?\x1b\\\x1b]19;?\x1b\\");
+        assert_eq!(
+            replies(&rx),
+            vec![
+                reply(&format!(
+                    "17;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.selection_bg)
+                )),
+                reply("19;rgb:0000/ffff/0000"),
+            ]
+        );
+
+        feed(&mut handler, b"\x1b]119\x1b\\");
+        feed(&mut handler, b"\x1b]19;?\x1b\\");
+        assert_eq!(
+            replies(&rx),
+            vec![reply(&format!(
+                "19;{}",
+                rgb_spec_16bit(CATPPUCCIN_MOCHA.selection_fg)
+            ))]
         );
     }
 
     #[test]
-    fn full_reset_clears_fg_bg_cursor_overrides() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
-        handler.set_write_tx(tx);
+    fn osc_113_to_116_and_118_change_nothing() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;red\x1b\\\x1b]11;blue\x1b\\");
+        for code in [113, 114, 115, 116, 118] {
+            feed(&mut handler, format!("\x1b]{code}\x1b\\").as_bytes());
+        }
+        assert_eq!(fg(&handler), (255, 0, 0));
+        assert_eq!(bg(&handler), (0, 0, 255));
+        assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
+    }
 
-        // Set all three overrides.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::String("rgb:ff/00/00".to_string()),
-        ));
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::String("rgb:00/ff/00".to_string()),
-        ));
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::String("rgb:00/00/ff".to_string()),
-        ));
+    #[test]
+    fn full_reset_clears_every_dynamic_override() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]10;rgb:ff/00/00\x1b\\");
+        feed(&mut handler, b"\x1b]11;rgb:00/ff/00\x1b\\");
+        feed(&mut handler, b"\x1b]12;rgb:00/00/ff\x1b\\");
 
-        // full_reset clears all overrides.
         handler.full_reset();
 
-        // All queries should now return theme defaults, not the set overrides.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryForeground(
-            AnsiOscInternalType::Query,
-        ));
-        let Ok(PtyWrite::Write(fg_bytes)) = rx.try_recv() else {
-            panic!("expected fg PtyWrite::Write response after full_reset");
-        };
-        let fg_response = String::from_utf8(fg_bytes).expect("fg response must be valid UTF-8");
-        assert!(
-            !fg_response.contains("10;rgb:ff/00/00"),
-            "full_reset must clear fg override: {fg_response:?}"
+        feed(
+            &mut handler,
+            b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]12;?\x1b\\",
         );
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryBackground(
-            AnsiOscInternalType::Query,
-        ));
-        let Ok(PtyWrite::Write(bg_bytes)) = rx.try_recv() else {
-            panic!("expected bg PtyWrite::Write response after full_reset");
-        };
-        let bg_response = String::from_utf8(bg_bytes).expect("bg response must be valid UTF-8");
-        assert!(
-            !bg_response.contains("11;rgb:00/ff/00"),
-            "full_reset must clear bg override: {bg_response:?}"
-        );
-
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::Query,
-        ));
-        let Ok(PtyWrite::Write(cur_bytes)) = rx.try_recv() else {
-            panic!("expected cursor PtyWrite::Write response after full_reset");
-        };
-        let cur_response =
-            String::from_utf8(cur_bytes).expect("cursor response must be valid UTF-8");
-        assert!(
-            !cur_response.contains("12;rgb:00/00/ff"),
-            "full_reset must clear cursor override: {cur_response:?}"
+        assert_eq!(
+            replies(&rx),
+            vec![
+                reply(&format!(
+                    "10;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.foreground)
+                )),
+                reply(&format!(
+                    "11;{}",
+                    rgb_spec_16bit(CATPPUCCIN_MOCHA.background)
+                )),
+                reply(&format!("12;{}", rgb_spec_16bit(CATPPUCCIN_MOCHA.cursor))),
+            ]
         );
     }
 
     #[test]
     fn cursor_color_override_accessor_reflects_set_value() {
-        let mut handler = TerminalHandler::new(80, 24);
-
-        // Initially no override.
+        let (mut handler, _rx) = handler_with_rx();
         assert_eq!(handler.cursor_color_override(), None);
 
-        // Set a cursor color.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::RequestColorQueryCursor(
-            AnsiOscInternalType::String("rgb:12/34/56".to_string()),
-        ));
+        feed(&mut handler, b"\x1b]12;rgb:12/34/56\x1b\\");
         assert_eq!(handler.cursor_color_override(), Some((0x12, 0x34, 0x56)));
 
-        // Reset it.
-        handler.handle_osc_fg_bg_color(&AnsiOscType::ResetCursorColor);
+        feed(&mut handler, b"\x1b]112\x1b\\");
         assert_eq!(handler.cursor_color_override(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Reply framing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn query_reply_is_exact_seven_bit_bytes_with_st() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]11;rgb:12/34/56\x07");
+        feed(&mut handler, b"\x1b]11;?\x07");
+        assert_eq!(
+            replies(&rx),
+            vec![b"\x1b]11;rgb:1212/3434/5656\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn query_reply_uses_eight_bit_c1_framing_under_s8c1t() {
+        let (mut handler, rx) = handler_with_rx();
+        handler.set_s8c1t_mode(S8c1t::EightBit);
+        feed(&mut handler, b"\x1b]11;rgb:12/34/56\x07");
+        feed(&mut handler, b"\x1b]11;?\x07");
+        assert_eq!(
+            replies(&rx),
+            vec![b"\x9d11;rgb:1212/3434/5656\x9c".to_vec()]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 4
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc4_set_and_query_in_one_sequence() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]4;1;red;2;?\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), (255, 0, 0));
+        let (r, g, b) = CATPPUCCIN_MOCHA.ansi[2];
+        let expected = format!(
+            "4;2;rgb:{:04x}/{:04x}/{:04x}",
+            u16::from(r) * 257,
+            u16::from(g) * 257,
+            u16::from(b) * 257
+        );
+        assert_eq!(replies(&rx), vec![reply(&expected)]);
+    }
+
+    #[test]
+    fn osc4_applies_pairs_in_order_so_a_query_sees_the_earlier_set() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]4;1;red;1;?\x1b\\");
+        assert_eq!(replies(&rx), vec![reply("4;1;rgb:ffff/0000/0000")]);
+    }
+
+    #[test]
+    fn osc4_multiple_queries_reply_in_order() {
+        let (mut handler, rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]4;3;#0a0b0c;5;#ffffff;3;?;5;?\x1b\\");
+        assert_eq!(
+            replies(&rx),
+            vec![
+                reply("4;3;rgb:0a0a/0b0b/0c0c"),
+                reply("4;5;rgb:ffff/ffff/ffff"),
+            ]
+        );
+    }
+
+    #[test]
+    fn osc4_odd_field_count_drops_the_whole_sequence() {
+        let (mut handler, _rx) = handler_with_rx();
+        let before = handler.color_state.palette_rgb(1);
+        feed(&mut handler, b"\x1b]4;1;red;2\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), before);
+    }
+
+    #[test]
+    fn osc4_out_of_range_index_skips_only_that_pair() {
+        let (mut handler, _rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]4;300;red;2;blue\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(2), (0, 0, 255));
+    }
+
+    #[test]
+    fn osc4_invalid_spec_skips_only_that_pair() {
+        let (mut handler, _rx) = handler_with_rx();
+        let before = handler.color_state.palette_rgb(1);
+        feed(&mut handler, b"\x1b]4;1;notacolor;2;blue\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), before);
+        assert_eq!(handler.color_state.palette_rgb(2), (0, 0, 255));
+    }
+
+    #[test]
+    fn osc4_accepts_colour_names_with_spaces_and_wide_gamut_specs() {
+        let (mut handler, _rx) = handler_with_rx();
+        feed(&mut handler, b"\x1b]4;1;dark slate gray\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), (47, 79, 79));
+        feed(&mut handler, b"\x1b]4;1;oklch(0.5 0.1 180)\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), (0, 117, 101));
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 104
+    // ------------------------------------------------------------------
+
+    fn set_three_entries(handler: &mut TerminalHandler) -> [(u8, u8, u8); 3] {
+        let defaults = [1u8, 2, 3].map(|i| handler.color_state.palette_rgb(i));
+        feed(handler, b"\x1b]4;1;#010101;2;#020202;3;#030303\x1b\\");
+        defaults
+    }
+
+    #[test]
+    fn osc104_with_indices_resets_each() {
+        let (mut handler, _rx) = handler_with_rx();
+        let defaults = set_three_entries(&mut handler);
+        feed(&mut handler, b"\x1b]104;1;2\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), defaults[0]);
+        assert_eq!(handler.color_state.palette_rgb(2), defaults[1]);
+        assert_eq!(handler.color_state.palette_rgb(3), (3, 3, 3));
+    }
+
+    #[test]
+    fn osc104_without_index_resets_all() {
+        let (mut handler, _rx) = handler_with_rx();
+        let defaults = set_three_entries(&mut handler);
+        feed(&mut handler, b"\x1b]104\x1b\\");
+        for (i, d) in [1u8, 2, 3].into_iter().zip(defaults) {
+            assert_eq!(handler.color_state.palette_rgb(i), d);
+        }
+    }
+
+    #[test]
+    fn osc104_with_trailing_semicolon_resets_all() {
+        let (mut handler, _rx) = handler_with_rx();
+        let defaults = set_three_entries(&mut handler);
+        feed(&mut handler, b"\x1b]104;\x1b\\");
+        for (i, d) in [1u8, 2, 3].into_iter().zip(defaults) {
+            assert_eq!(handler.color_state.palette_rgb(i), d);
+        }
+    }
+
+    #[test]
+    fn osc104_skips_invalid_fields_and_resets_the_rest() {
+        let (mut handler, _rx) = handler_with_rx();
+        let defaults = set_three_entries(&mut handler);
+        feed(&mut handler, b"\x1b]104;x;3\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(3), defaults[2]);
+        assert_eq!(handler.color_state.palette_rgb(1), (1, 1, 1));
+        assert_eq!(handler.color_state.palette_rgb(2), (2, 2, 2));
+    }
+
+    #[test]
+    fn osc104_with_no_valid_index_resets_nothing() {
+        let (mut handler, _rx) = handler_with_rx();
+        let _ = set_three_entries(&mut handler);
+        feed(&mut handler, b"\x1b]104;x;300\x1b\\");
+        assert_eq!(handler.color_state.palette_rgb(1), (1, 1, 1));
+        assert_eq!(handler.color_state.palette_rgb(3), (3, 3, 3));
     }
 }

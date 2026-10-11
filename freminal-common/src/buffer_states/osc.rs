@@ -8,8 +8,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::buffer_states::{
-    ftcs::FtcsMarker, pointer_shape::PointerShape, progress::ProgressUpdate, url::Url,
+    ftcs::FtcsMarker,
+    osc_color::{DynamicColorOp, PaletteColorOp, PaletteReset},
+    pointer_shape::PointerShape,
+    progress::ProgressUpdate,
+    url::Url,
 };
+use crate::colors::DynamicColorSlot;
 use crate::key_value::{KeyValueItem, KeyValueSeparator, tokenize};
 use std::fmt;
 
@@ -85,53 +90,10 @@ pub struct ITerm2InlineImageData {
     pub data: Vec<u8>,
 }
 
-#[derive(Eq, PartialEq, Debug, Clone)]
-pub enum AnsiOscInternalType {
-    Query,
-    //SetColor(Color32),
-    String(String),
-    Unknown(Option<AnsiOscToken>),
-}
-
-impl std::fmt::Display for AnsiOscInternalType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Query => write!(f, "Query"),
-            //Self::SetColor(value) => write!(f, "SetColor({value:?})"),
-            Self::String(value) => write!(f, "{value}"),
-            Self::Unknown(value) => write!(f, "Unknown({value:?})"),
-        }
-    }
-}
-
-impl From<&Vec<Option<AnsiOscToken>>> for AnsiOscInternalType {
-    fn from(value: &Vec<Option<AnsiOscToken>>) -> Self {
-        // The first value is the type of the OSC sequence
-        // if the first value is b'?', then it is a query
-        // otherwise, it is a set but we'll leave that as unknown for now
-
-        value
-            .get(1)
-            .map_or(Self::Unknown(None), |value| match value {
-                Some(AnsiOscToken::String(value)) => {
-                    if value.as_str() == "?" {
-                        Self::Query
-                    } else {
-                        Self::String(value.clone())
-                    }
-                }
-                Some(value) => Self::Unknown(Some(value.clone())),
-                None => Self::Unknown(None),
-            })
-    }
-}
-
 #[derive(Eq, PartialEq, Debug)]
 pub enum OscTarget {
     TitleBar,
     IconName,
-    Background,
-    Foreground,
     // https://iterm2.com/documentation-escape-codes.html
     Ftcs,
     Clipboard,
@@ -139,31 +101,14 @@ pub enum OscTarget {
     ResetPaletteColor,
     RemoteHost,
     Url,
-    /// OSC 12 — set or query the cursor color.
-    CursorColor,
-    ResetCursorColor,
-    /// OSC 110 — reset text foreground color to the theme default.
-    ResetForeground,
-    /// OSC 111 — reset text background color to the theme default.
-    ResetBackground,
-    /// OSC 13 — mouse cursor foreground color (X11 concept; not applicable to
-    /// GPU-rendered terminals).  Recognised and silently consumed.
-    MouseForeground,
-    /// OSC 14 — mouse cursor background color (X11 concept; not applicable to
-    /// GPU-rendered terminals).  Recognised and silently consumed.
-    MouseBackground,
-    /// OSC 15 — Tektronix foreground color (legacy VT100 graphics mode;
-    /// unimplemented).  Recognised and silently consumed.
-    TekForeground,
-    /// OSC 16 — Tektronix cursor/background color (legacy VT100 graphics mode;
-    /// unimplemented).  Recognised and silently consumed.
-    TekBackground,
-    /// OSC 17 — highlight (selection) background color.  Recognised and
-    /// silently consumed; candidate for future response implementation.
-    HighlightBackground,
-    /// OSC 19 — highlight (selection) foreground color.  Recognised and
-    /// silently consumed; candidate for future response implementation.
-    HighlightForeground,
+    /// OSC 10-19 — set or query one or more dynamic colours.
+    ///
+    /// Carries the OSC number the sequence started with (`10..=19`). The first
+    /// value applies to that code, each following value to the next code.
+    DynamicColors(u16),
+    /// OSC 110-119 — reset the dynamic colour for code `n - 100`. Carries the
+    /// OSC number (`110..=119`).
+    ResetDynamicColor(u16),
     /// OSC 22 — set/reset the X11 pointer (mouse cursor) shape.  One-way
     /// command, no response expected.
     PointerShape,
@@ -236,25 +181,15 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(8) => Self::Url,
             AnsiOscToken::OscValue(9) => Self::Notify9,
             AnsiOscToken::OscValue(99) => Self::Notify99,
-            AnsiOscToken::OscValue(11) => Self::Background,
-            AnsiOscToken::OscValue(10) => Self::Foreground,
-            AnsiOscToken::OscValue(12) => Self::CursorColor,
-            AnsiOscToken::OscValue(13) => Self::MouseForeground,
-            AnsiOscToken::OscValue(14) => Self::MouseBackground,
-            AnsiOscToken::OscValue(15) => Self::TekForeground,
-            AnsiOscToken::OscValue(16) => Self::TekBackground,
-            AnsiOscToken::OscValue(17) => Self::HighlightBackground,
-            AnsiOscToken::OscValue(19) => Self::HighlightForeground,
+            AnsiOscToken::OscValue(code @ 10..=19) => Self::DynamicColors(*code),
             AnsiOscToken::OscValue(22) => Self::PointerShape,
             AnsiOscToken::OscValue(52) => Self::Clipboard,
             AnsiOscToken::OscValue(66) => Self::ColorSchemeNotification,
             AnsiOscToken::OscValue(104) => Self::ResetPaletteColor,
-            AnsiOscToken::OscValue(112) => Self::ResetCursorColor,
+            AnsiOscToken::OscValue(code @ 110..=119) => Self::ResetDynamicColor(*code),
             AnsiOscToken::OscValue(133) => Self::Ftcs,
             AnsiOscToken::OscValue(1337) => Self::ITerm2,
             AnsiOscToken::OscValue(1338) => Self::ShellInfo,
-            AnsiOscToken::OscValue(110) => Self::ResetForeground,
-            AnsiOscToken::OscValue(111) => Self::ResetBackground,
             AnsiOscToken::OscValue(777) => Self::Notify777,
             _ => Self::Unknown,
         }
@@ -324,17 +259,12 @@ impl UrlResponse {
 pub enum AnsiOscType {
     #[default]
     NoOp,
-    RequestColorQueryBackground(AnsiOscInternalType),
-    RequestColorQueryForeground(AnsiOscInternalType),
     Ftcs(FtcsMarker),
     // NOTE: OSC 0 and 2 are conflated as title-bar-only. If tabs are added,
     // OSC 0 should also set the icon name and OSC 2 should set only the title.
     SetTitleBar(String),
     Url(UrlResponse),
     RemoteHost(String),
-    /// OSC 12 — query or set the cursor color.
-    RequestColorQueryCursor(AnsiOscInternalType),
-    ResetCursorColor,
     /// OSC 1337 File= inline image (iTerm2 protocol).
     ITerm2FileInline(ITerm2InlineImageData),
     /// OSC 1337 `MultipartFile`= begin (iTerm2 multipart protocol).
@@ -352,16 +282,15 @@ pub enum AnsiOscType {
     SetClipboard(String, String),
     /// OSC 52 clipboard query: selection name.
     QueryClipboard(String),
-    /// OSC 4 set palette color: index, r, g, b.
-    SetPaletteColor(u8, u8, u8, u8),
-    /// OSC 4 query palette color at index.
-    QueryPaletteColor(u8),
-    /// OSC 104 reset palette color at index, or all if `None`.
-    ResetPaletteColor(Option<u8>),
-    /// OSC 110 — reset the dynamic foreground color override.
-    ResetForegroundColor,
-    /// OSC 111 — reset the dynamic background color override.
-    ResetBackgroundColor,
+    /// OSC 4 — the set / query operations of one sequence, in wire order.
+    PaletteColors(Vec<PaletteColorOp>),
+    /// OSC 104 — reset the whole palette, or the listed entries.
+    ResetPaletteColors(PaletteReset),
+    /// OSC 10-19 — the set / query operations of one sequence that apply to a
+    /// supported dynamic colour slot, in wire order.
+    DynamicColors(Vec<DynamicColorOp>),
+    /// OSC 110 / 111 / 112 / 117 / 119 — reset one dynamic colour slot.
+    ResetDynamicColor(DynamicColorSlot),
     /// OSC 22 — set the pointer (mouse cursor) shape.
     ///
     /// An empty name or `"default"` resets to the OS default.
@@ -419,20 +348,10 @@ impl std::fmt::Display for AnsiOscType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoOp => write!(f, "NoOp"),
-            Self::RequestColorQueryBackground(value) => {
-                write!(f, "RequestColorQueryBackground({value:?})")
-            }
-            Self::RequestColorQueryForeground(value) => {
-                write!(f, "RequestColorQueryForeground({value:?})")
-            }
             Self::Url(url) => write!(f, "Url({url})"),
             Self::SetTitleBar(value) => write!(f, "SetTitleBar({value:?})"),
             Self::Ftcs(marker) => write!(f, "Ftcs ({marker})"),
             Self::RemoteHost(value) => write!(f, "RemoteHost ({value:?})"),
-            Self::RequestColorQueryCursor(value) => {
-                write!(f, "RequestColorQueryCursor({value:?})")
-            }
-            Self::ResetCursorColor => write!(f, "ResetCursorColor"),
             Self::ITerm2FileInline(data) => {
                 write!(
                     f,
@@ -456,13 +375,10 @@ impl std::fmt::Display for AnsiOscType {
             Self::ITerm2Unknown => write!(f, "ITerm2Unknown"),
             Self::SetClipboard(sel, content) => write!(f, "SetClipboard({sel:?}, {content:?})"),
             Self::QueryClipboard(sel) => write!(f, "QueryClipboard({sel:?})"),
-            Self::SetPaletteColor(idx, r, g, b) => {
-                write!(f, "SetPaletteColor({idx}, {r}, {g}, {b})")
-            }
-            Self::QueryPaletteColor(idx) => write!(f, "QueryPaletteColor({idx})"),
-            Self::ResetPaletteColor(idx) => write!(f, "ResetPaletteColor({idx:?})"),
-            Self::ResetForegroundColor => write!(f, "ResetForegroundColor"),
-            Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
+            Self::PaletteColors(ops) => write!(f, "PaletteColors({ops:?})"),
+            Self::ResetPaletteColors(reset) => write!(f, "ResetPaletteColors({reset:?})"),
+            Self::DynamicColors(ops) => write!(f, "DynamicColors({ops:?})"),
+            Self::ResetDynamicColor(slot) => write!(f, "ResetDynamicColor({slot:?})"),
             Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
             Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
             Self::Notify {
@@ -500,6 +416,7 @@ impl FromStr for AnsiOscToken {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::buffer_states::osc_color::ColorRequest;
 
     // ------------------------------------------------------------------
     // ImageDimension::parse tests
@@ -623,34 +540,6 @@ mod tests {
     #[test]
     fn display_auto() {
         assert_eq!(ImageDimension::Auto.to_string(), "auto");
-    }
-
-    // ------------------------------------------------------------------
-    // AnsiOscInternalType Display tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn display_osc_internal_query() {
-        assert_eq!(AnsiOscInternalType::Query.to_string(), "Query");
-    }
-
-    #[test]
-    fn display_osc_internal_unknown_none() {
-        let s = AnsiOscInternalType::Unknown(None).to_string();
-        assert!(s.contains("Unknown"), "got: {s}");
-    }
-
-    #[test]
-    fn display_osc_internal_unknown_some() {
-        let token = AnsiOscToken::String("hello".to_string());
-        let s = AnsiOscInternalType::Unknown(Some(token)).to_string();
-        assert!(s.contains("Unknown"), "got: {s}");
-    }
-
-    #[test]
-    fn display_osc_internal_string() {
-        let s = AnsiOscInternalType::String("xterm".to_string()).to_string();
-        assert_eq!(s, "xterm");
     }
 
     // ------------------------------------------------------------------
@@ -822,13 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn display_ansi_osc_set_palette_color() {
-        let s = AnsiOscType::SetPaletteColor(1, 255, 128, 0).to_string();
-        assert!(s.contains("SetPaletteColor"), "got: {s}");
-        assert!(s.contains("255"), "got: {s}");
-    }
-
-    #[test]
     fn display_ansi_osc_set_pointer_shape() {
         let s =
             AnsiOscType::SetPointerShape(crate::buffer_states::pointer_shape::PointerShape::Text)
@@ -847,42 +729,6 @@ mod tests {
     fn display_ansi_osc_query_clipboard() {
         let s = AnsiOscType::QueryClipboard("c".to_string()).to_string();
         assert!(s.contains("QueryClipboard"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_reset_palette_color_none() {
-        let s = AnsiOscType::ResetPaletteColor(None).to_string();
-        assert!(s.contains("ResetPaletteColor"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_reset_palette_color_some() {
-        let s = AnsiOscType::ResetPaletteColor(Some(3)).to_string();
-        assert!(s.contains("ResetPaletteColor"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_reset_foreground_color() {
-        assert_eq!(
-            AnsiOscType::ResetForegroundColor.to_string(),
-            "ResetForegroundColor"
-        );
-    }
-
-    #[test]
-    fn display_ansi_osc_reset_background_color() {
-        assert_eq!(
-            AnsiOscType::ResetBackgroundColor.to_string(),
-            "ResetBackgroundColor"
-        );
-    }
-
-    #[test]
-    fn display_ansi_osc_reset_cursor_color() {
-        assert_eq!(
-            AnsiOscType::ResetCursorColor.to_string(),
-            "ResetCursorColor"
-        );
     }
 
     #[test]
@@ -906,18 +752,6 @@ mod tests {
     // ------------------------------------------------------------------
     // AnsiOscType Display: remaining uncovered variants
     // ------------------------------------------------------------------
-
-    #[test]
-    fn display_ansi_osc_request_color_query_background() {
-        let s = AnsiOscType::RequestColorQueryBackground(AnsiOscInternalType::Query).to_string();
-        assert!(s.contains("RequestColorQueryBackground"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_request_color_query_foreground() {
-        let s = AnsiOscType::RequestColorQueryForeground(AnsiOscInternalType::Query).to_string();
-        assert!(s.contains("RequestColorQueryForeground"), "got: {s}");
-    }
 
     #[test]
     fn display_ansi_osc_ftcs() {
@@ -951,12 +785,6 @@ mod tests {
     fn display_ansi_osc_remote_host() {
         let s = AnsiOscType::RemoteHost("user@host".to_string()).to_string();
         assert!(s.contains("RemoteHost"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_request_color_query_cursor() {
-        let s = AnsiOscType::RequestColorQueryCursor(AnsiOscInternalType::Query).to_string();
-        assert!(s.contains("RequestColorQueryCursor"), "got: {s}");
     }
 
     #[test]
@@ -998,13 +826,6 @@ mod tests {
         let s = AnsiOscType::ITerm2FilePart(vec![0u8; 16]).to_string();
         assert!(s.contains("ITerm2FilePart"), "got: {s}");
         assert!(s.contains("16"), "got: {s}");
-    }
-
-    #[test]
-    fn display_ansi_osc_query_palette_color() {
-        let s = AnsiOscType::QueryPaletteColor(7).to_string();
-        assert!(s.contains("QueryPaletteColor"), "got: {s}");
-        assert!(s.contains('7'), "got: {s}");
     }
 
     // ------------------------------------------------------------------
@@ -1053,58 +874,81 @@ mod tests {
     }
 
     #[test]
-    fn osc_target_from_token_background() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(11)),
-            OscTarget::Background
-        );
+    fn display_ansi_osc_palette_colors() {
+        let s = AnsiOscType::PaletteColors(vec![PaletteColorOp {
+            index: 7,
+            request: ColorRequest::Set((255, 128, 0)),
+        }])
+        .to_string();
+        assert!(s.contains("PaletteColors"), "got: {s}");
+        assert!(s.contains("255"), "got: {s}");
     }
 
     #[test]
-    fn osc_target_from_token_foreground() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(10)),
-            OscTarget::Foreground
-        );
+    fn display_ansi_osc_reset_palette_colors() {
+        let all = AnsiOscType::ResetPaletteColors(PaletteReset::All).to_string();
+        assert!(all.contains("ResetPaletteColors"), "got: {all}");
+        let some = AnsiOscType::ResetPaletteColors(PaletteReset::Indices(vec![3])).to_string();
+        assert!(some.contains("Indices"), "got: {some}");
     }
 
     #[test]
-    fn osc_target_from_token_cursor_color() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(12)),
-            OscTarget::CursorColor
-        );
+    fn display_ansi_osc_dynamic_colors() {
+        let s = AnsiOscType::DynamicColors(vec![DynamicColorOp {
+            slot: DynamicColorSlot::Background,
+            request: ColorRequest::Query,
+        }])
+        .to_string();
+        assert!(s.contains("DynamicColors"), "got: {s}");
+        assert!(s.contains("Background"), "got: {s}");
     }
 
     #[test]
-    fn osc_target_from_token_mouse_fg_bg_tek() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(13)),
-            OscTarget::MouseForeground
-        );
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(14)),
-            OscTarget::MouseBackground
-        );
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(15)),
-            OscTarget::TekForeground
-        );
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(16)),
-            OscTarget::TekBackground
-        );
+    fn display_ansi_osc_reset_dynamic_color() {
+        let s = AnsiOscType::ResetDynamicColor(DynamicColorSlot::Cursor).to_string();
+        assert!(s.contains("ResetDynamicColor"), "got: {s}");
+        assert!(s.contains("Cursor"), "got: {s}");
     }
 
     #[test]
-    fn osc_target_from_token_highlight() {
+    fn osc_target_from_token_dynamic_colors_covers_10_to_19() {
+        for code in 10..=19u16 {
+            assert_eq!(
+                OscTarget::from(&AnsiOscToken::OscValue(code)),
+                OscTarget::DynamicColors(code),
+                "OSC {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_target_from_token_reset_dynamic_color_covers_110_to_119() {
+        for code in 110..=119u16 {
+            assert_eq!(
+                OscTarget::from(&AnsiOscToken::OscValue(code)),
+                OscTarget::ResetDynamicColor(code),
+                "OSC {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_target_from_token_neighbours_of_the_colour_ranges_are_unchanged() {
         assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(17)),
-            OscTarget::HighlightBackground
+            OscTarget::from(&AnsiOscToken::OscValue(9)),
+            OscTarget::Notify9
         );
         assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(19)),
-            OscTarget::HighlightForeground
+            OscTarget::from(&AnsiOscToken::OscValue(20)),
+            OscTarget::Unknown
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(109)),
+            OscTarget::Unknown
+        );
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(120)),
+            OscTarget::Unknown
         );
     }
 
@@ -1141,14 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn osc_target_from_token_reset_cursor() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(112)),
-            OscTarget::ResetCursorColor
-        );
-    }
-
-    #[test]
     fn osc_target_from_token_ftcs() {
         assert_eq!(
             OscTarget::from(&AnsiOscToken::OscValue(133)),
@@ -1169,18 +1005,6 @@ mod tests {
         assert_eq!(
             OscTarget::from(&AnsiOscToken::OscValue(1338)),
             OscTarget::ShellInfo
-        );
-    }
-
-    #[test]
-    fn osc_target_from_token_reset_fg_bg() {
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(110)),
-            OscTarget::ResetForeground
-        );
-        assert_eq!(
-            OscTarget::from(&AnsiOscToken::OscValue(111)),
-            OscTarget::ResetBackground
         );
     }
 

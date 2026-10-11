@@ -851,7 +851,7 @@ impl TerminalEmulator {
         // the live cursor line is not visible on screen.
         let show_cursor = self.internal.show_cursor() && scroll_offset == 0;
         let cursor_visual_style = self.internal.cursor_visual_style();
-        let is_normal_display = self.internal.is_normal_display();
+        let screen_inversion = self.internal.screen_inversion();
 
         // ── Blink detection ──────────────────────────────────────────────────
         let has_blinking_text = visible_tags
@@ -881,6 +881,7 @@ impl TerminalEmulator {
         let prompt_rows = Arc::<[RowNumber]>::from(self.internal.handler.buffer().prompt_rows());
         let command_blocks = self.snapshot_command_blocks();
         let theme = self.internal.handler.theme();
+        let resolved_colors = self.internal.handler.resolved_colors();
 
         // ── Inline image data ────────────────────────────────────────────────
         let (images, visible_image_placements) =
@@ -956,7 +957,7 @@ impl TerminalEmulator {
             show_cursor,
             cursor_visual_style,
             is_alternate_screen,
-            is_normal_display,
+            screen_inversion,
             term_width,
             term_height,
             total_rows,
@@ -987,6 +988,7 @@ impl TerminalEmulator {
             prompt_rows,
             command_blocks,
             theme,
+            resolved_colors,
             images,
             visible_image_placements,
             visible_line_widths,

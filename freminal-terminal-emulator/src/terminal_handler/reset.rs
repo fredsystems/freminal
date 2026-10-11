@@ -121,15 +121,11 @@ impl TerminalHandler {
             shell_histfile: _,            // describes the process, not the screen: survives both
             ftcs_state,
             last_exit_code,
-            palette,
+            color_state,
             allow_column_mode_switch,
             allow_alt_screen: _, // xterm does not reset it: survives both
             pre_deccolm_width,
-            theme: _,             // configuration: survives both
             host_capabilities: _, // host facts (config + platform), not terminal state: survives both
-            fg_color_override,
-            bg_color_override,
-            cursor_color_override,
             pointer_shape,
             progress,
             progress_updated_at,
@@ -163,7 +159,8 @@ impl TerminalHandler {
         *cursor_visual_style = configured_cursor_visual_style.clone();
         *character_replace = DecSpecialGraphics::default();
         *current_format = FormatTag::default();
-        palette.reset_all();
+        // The theme inside `color_state` is configuration: it survives both.
+        color_state.reset_palette_all();
         *pointer_shape = PointerShape::Default;
         *progress = ProgressReport::default();
         *progress_updated_at = None;
@@ -188,9 +185,8 @@ impl TerminalHandler {
                 *last_exit_code = None;
                 *allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
                 *pre_deccolm_width = None;
-                *fg_color_override = None;
-                *bg_color_override = None;
-                *cursor_color_override = None;
+                // Foreground, background, cursor and selection overrides.
+                color_state.reset_dynamic_all();
                 *multipart_state = None;
                 *kitty_transfer = KittyTransfer::Idle;
                 clear_kitty_placements(virtual_placements, real_placements, placement_prune_base);
