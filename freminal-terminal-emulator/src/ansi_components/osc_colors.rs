@@ -333,6 +333,38 @@ mod tests {
     }
 
     #[test]
+    fn osc4_many_extreme_chroma_entries_all_parse_to_the_same_colour() {
+        // An adversarial body: a finite but astronomically large chroma
+        // repeated for every palette index.  Each entry must still parse
+        // (to the same gamut-mapped colour) rather than being dropped.
+        let single = feed_osc(b"4;0;oklch(0.5 1e308 30)\x07");
+        let [TerminalOutput::OscResponse(AnsiOscType::PaletteColors(ops))] = single.as_slice()
+        else {
+            panic!("expected one PaletteColors response, got {single:?}");
+        };
+        let [
+            PaletteColorOp {
+                request: Set(colour),
+                ..
+            },
+        ] = ops.as_slice()
+        else {
+            panic!("expected one Set op, got {ops:?}");
+        };
+        let colour = *colour;
+
+        let mut payload = b"4".to_vec();
+        for index in 0..=255_u8 {
+            payload.extend_from_slice(format!(";{index};oklch(0.5 1e308 30)").as_bytes());
+        }
+        payload.push(0x07);
+
+        let expected: Vec<(u8, ColorRequest)> =
+            (0..=255_u8).map(|index| (index, Set(colour))).collect();
+        assert_eq!(feed_osc(&payload), palette(&expected));
+    }
+
+    #[test]
     fn osc4_query_palette_color() {
         assert_eq!(feed_osc(b"4;5;?\x07"), palette(&[(5, Query)]));
     }

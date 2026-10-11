@@ -157,10 +157,36 @@ const LAB_AB_PERCENT_BASIS: f64 = 125.0;
 const JND: f64 = 0.02;
 /// Chroma search tolerance (CSS Color 4 §14.2.2).
 const GAMUT_EPSILON: f64 = 0.0001;
-/// Upper bound on binary-search steps.  Each step halves the chroma interval,
-/// so even the widest finite `f64` chroma narrows to [`GAMUT_EPSILON`] in
-/// fewer than 1,100 steps; the bound only guarantees termination.
-const MAX_GAMUT_ITERATIONS: usize = 1_100;
+/// Probe chroma above which a bisection probe is known to take the
+/// `max = probe` branch without any colour conversion being needed; see the
+/// fast-forward in [`gamut_map_oklch`].
+const FORCED_STEP_CHROMA: f64 = 1.0;
+/// Upper bound on binary-search steps.
+///
+/// After the fast-forward in [`gamut_map_oklch`] the search interval is at
+/// most `2 * FORCED_STEP_CHROMA` wide, and every step halves it, so
+/// [`GAMUT_EPSILON`] is reached in 15 steps.  The bound only guarantees
+/// termination; the compile-time assertion below proves it is never the
+/// reason the search stops.
+const MAX_GAMUT_ITERATIONS: usize = 32;
+
+/// Upper bound on fast-forward halvings.  The widest finite `f64` is below
+/// `2^1024`, so at most 1,024 halvings bring any chroma to `<= 2.0`; the
+/// bound only guarantees termination.
+const FAST_FORWARD_MAX_STEPS: usize = 1_100;
+
+const _: () = {
+    let mut width = 2.0 * FORCED_STEP_CHROMA;
+    let mut step = 0;
+    while step < MAX_GAMUT_ITERATIONS {
+        width /= 2.0;
+        step += 1;
+    }
+    assert!(
+        width <= GAMUT_EPSILON,
+        "MAX_GAMUT_ITERATIONS must be enough for the epsilon stop to be reached"
+    );
+};
 
 /// Parse the text following the `oklch(` prefix, including the closing `)`.
 ///
@@ -480,6 +506,33 @@ fn gamut_map_oklch(origin: Vec3) -> Vec3 {
     let mut max = chroma;
     let mut min_in_gamut = true;
 
+    // Fast-forward over probes that cannot change the outcome.  `chroma` is
+    // finite but unbounded (`oklch(0.5 1e308 30)` parses), and bisecting it
+    // directly costs ~1,000 colour conversions per value.
+    //
+    // At loop entry `min == 0.0` and `min_in_gamut` is true, so the first
+    // probe is `midpoint(0, max) == max / 2` exactly (`f64::midpoint` with a
+    // zero operand is `max / 2.0` for every magnitude; pinned by a test).
+    // For a probe chroma `p > FORCED_STEP_CHROMA` (1.0):
+    //   * the largest OKLab chroma of any sRGB colour is about 0.32, so the
+    //     colour is out of gamut and `deltaEOK(clip(c), c) >= p - 0.33`,
+    //     which is far above `JND`; or
+    //   * the conversion overflows to a non-finite value, in which case
+    //     `e < JND` is false.
+    // Either way the original algorithm takes the `max = probe` branch (and
+    // `min`, `min_in_gamut` are untouched), so doing that step as a pure
+    // halving, with no conversion, is exact.  Afterwards `max <= 2.0`.
+    for _ in 0..FAST_FORWARD_MAX_STEPS {
+        if max / 2.0 <= FORCED_STEP_CHROMA {
+            break;
+        }
+        max /= 2.0;
+    }
+    // `clipped` needs no fix-up for the skipped steps: if any step was
+    // skipped, `max` is now in `(1.0, 2.0]`, so the first real probe
+    // (`max / 2`, in `(0.5, 1.0]`) is out of gamut, takes the clip path
+    // below, and overwrites `clipped` before any exit that returns it.
+
     for _ in 0..MAX_GAMUT_ITERATIONS {
         if max - min <= GAMUT_EPSILON {
             break;
@@ -702,6 +755,119 @@ mod tests {
             rgb("oklch(0.5 1e308 1e308)"),
             Ok(_) | Err(ColorSpecError::InvalidWideGamutComponent)
         ));
+    }
+
+    /// The original, unaccelerated CSS Color 4 §14.2.2 bisection: no
+    /// fast-forward, and the step cap that the widest finite `f64` chroma
+    /// needs.  The oracle the production algorithm must match bit for bit.
+    fn reference_gamut_map_oklch(origin: Vec3) -> Vec3 {
+        const REFERENCE_MAX_ITERATIONS: usize = 1_100;
+        let [lightness, chroma, hue] = origin;
+        if lightness >= 1.0 {
+            return [1.0, 1.0, 1.0];
+        }
+        if lightness <= 0.0 {
+            return [0.0, 0.0, 0.0];
+        }
+        let origin_srgb = oklab_to_srgb(oklch_to_oklab(origin));
+        if in_gamut(origin_srgb) {
+            return origin_srgb;
+        }
+        let clip = |srgb: Vec3| srgb.map(|v| v.clamp(0.0, 1.0));
+        let mut clipped = clip(origin_srgb);
+        let mut e = delta_e_ok(srgb_to_oklab(clipped), oklch_to_oklab(origin));
+        if e < JND {
+            return clipped;
+        }
+        let mut min = 0.0_f64;
+        let mut max = chroma;
+        let mut min_in_gamut = true;
+        for _ in 0..REFERENCE_MAX_ITERATIONS {
+            if max - min <= GAMUT_EPSILON {
+                break;
+            }
+            let probe = f64::midpoint(min, max);
+            let current_oklab = oklch_to_oklab([lightness, probe, hue]);
+            let current_srgb = oklab_to_srgb(current_oklab);
+            if min_in_gamut && in_gamut(current_srgb) {
+                min = probe;
+                continue;
+            }
+            clipped = clip(current_srgb);
+            e = delta_e_ok(srgb_to_oklab(clipped), current_oklab);
+            if e < JND {
+                if JND - e < GAMUT_EPSILON {
+                    return clipped;
+                }
+                min_in_gamut = false;
+                min = probe;
+            } else {
+                max = probe;
+            }
+        }
+        clipped
+    }
+
+    #[test]
+    fn fast_forward_is_bit_identical_to_the_unaccelerated_algorithm() {
+        let chromas = [
+            0.3, 0.9, 1.0, 1.0001, 1.7, 2.0, 2.0001, 3.0, 50.0, 1e4, 1e100, 1e308,
+        ];
+        for chroma in chromas {
+            for l_step in 1_u16..40 {
+                let lightness = f64::from(l_step) / 40.0;
+                for h_step in 0_u16..36 {
+                    let hue = f64::from(h_step) * 10.0;
+                    let origin = [lightness, chroma, hue];
+                    let got = gamut_map_oklch(origin).map(f64::to_bits);
+                    let want = reference_gamut_map_oklch(origin).map(f64::to_bits);
+                    assert_eq!(got, want, "L={lightness} C={chroma} h={hue}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn midpoint_with_zero_is_exact_halving() {
+        let mut samples = vec![
+            f64::MAX,
+            f64::MAX / 2.0,
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE * 2.0,
+            f64::MIN_POSITIVE * 3.0,
+            f64::from_bits(1),
+            f64::from_bits(2),
+            f64::from_bits(3),
+            1e308,
+            1e-310,
+            1.0,
+            3.0,
+        ];
+        let mut x = 1e-320_f64;
+        for _ in 0..700 {
+            samples.push(x);
+            samples.push(x * 1.234_567_89);
+            x *= 7.3;
+        }
+        for x in samples {
+            assert_eq!(
+                f64::midpoint(0.0, x).to_bits(),
+                (x / 2.0).to_bits(),
+                "midpoint(0, {x:e})"
+            );
+        }
+    }
+
+    #[test]
+    fn iteration_bound_exceeds_what_the_epsilon_stop_needs() {
+        // 2.0 is the widest interval after the fast-forward; each step
+        // halves it.  The compile-time assertion next to the constant is the
+        // authority; this pins the same arithmetic as an observable test.
+        let steps_needed = (1_u16..=64)
+            .find(|&n| 2.0 * FORCED_STEP_CHROMA / 2.0_f64.powi(i32::from(n)) <= GAMUT_EPSILON)
+            .unwrap_or(u16::MAX);
+        assert_eq!(steps_needed, 15);
+        assert!(usize::from(steps_needed) < MAX_GAMUT_ITERATIONS);
     }
 
     proptest! {

@@ -2912,6 +2912,31 @@ mod tests {
         ]
     }
 
+    /// Assert two RGBA colours are the same value, compared bit-for-bit.
+    ///
+    /// Exact equality is intended: both `got` and `expected` come from the
+    /// same `u8 -> f32` arithmetic (`f32::from(c) / 255.0`), so identical
+    /// inputs yield identical bits and any difference is a real colour
+    /// mismatch, not rounding noise.  Comparing bit patterns states that
+    /// intent explicitly instead of relying on float `==`.
+    fn assert_same_rgba(got: [f32; 4], expected: [f32; 4], what: &str) {
+        assert_eq!(
+            got.map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "{what}: got {got:?}, expected {expected:?}"
+        );
+    }
+
+    /// Assert two RGBA colours differ; the bitwise counterpart of
+    /// [`assert_same_rgba`].
+    fn assert_different_rgba(got: [f32; 4], other: [f32; 4], what: &str) {
+        assert_ne!(
+            got.map(f32::to_bits),
+            other.map(f32::to_bits),
+            "{what}: both are {got:?}"
+        );
+    }
+
     /// Run `build_background_instances` for `lines` with explicit resolved
     /// colours, an optional selection, and `screen_inversion`.
     fn bg_with_colors(
@@ -3117,14 +3142,14 @@ mod tests {
             None,
             ScreenInversion::Normal,
         );
-        assert_eq!(got, rgba((11, 22, 33)));
+        assert_same_rgba(got, rgba((11, 22, 33)), "named red palette override");
     }
 
     #[test]
     fn fg_foreground_override_changes_default_glyph() {
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (1, 2, 3))]);
         let got = first_fg_instance_color(default_colors(), &colors, None, ScreenInversion::Normal);
-        assert_eq!(got, rgba((1, 2, 3)));
+        assert_same_rgba(got, rgba((1, 2, 3)), "foreground override");
     }
 
     #[test]
@@ -3136,7 +3161,7 @@ mod tests {
             None,
             ScreenInversion::Normal,
         );
-        assert_eq!(got, rgba((40, 50, 60)));
+        assert_same_rgba(got, rgba((40, 50, 60)), "palette index 200 entry");
     }
 
     #[test]
@@ -3148,7 +3173,7 @@ mod tests {
             Some((0, 0, 0, 0)),
             ScreenInversion::Normal,
         );
-        assert_eq!(got, rgba((9, 8, 7)));
+        assert_same_rgba(got, rgba((9, 8, 7)), "selection foreground override");
     }
 
     #[test]
@@ -3157,7 +3182,7 @@ mod tests {
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Background, (3, 2, 1))]);
         let got =
             first_fg_instance_color(default_colors(), &colors, None, ScreenInversion::Reversed);
-        assert_eq!(got, rgba((3, 2, 1)));
+        assert_same_rgba(got, rgba((3, 2, 1)), "DECSCNM resolved background");
     }
 
     #[test]
@@ -3241,12 +3266,12 @@ mod tests {
         let reversed = default_colors().with_reverse_video(ReverseVideo::On);
         let plain = overridden_colors(&[], &[]);
         let got = first_fg_instance_color(reversed, &plain, None, ScreenInversion::Normal);
-        assert_eq!(got, rgba(plain.background));
-        assert_ne!(got, rgba(plain.palette[0]), "must not be ANSI 0");
+        assert_same_rgba(got, rgba(plain.background), "SGR 7 default background");
+        assert_different_rgba(got, rgba(plain.palette[0]), "must not be ANSI 0");
 
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Background, (3, 2, 1))]);
         let got = first_fg_instance_color(reversed, &colors, None, ScreenInversion::Normal);
-        assert_eq!(got, rgba((3, 2, 1)));
+        assert_same_rgba(got, rgba((3, 2, 1)), "SGR 7 OSC 11 background override");
     }
 
     #[test]
@@ -3267,7 +3292,7 @@ mod tests {
         assert!(bg.is_empty(), "double reversal must skip the bg quad");
 
         let got = first_fg_instance_color(reversed, &colors, None, ScreenInversion::Reversed);
-        assert_eq!(got, rgba((7, 8, 9)));
+        assert_same_rgba(got, rgba((7, 8, 9)), "double reversal default foreground");
     }
 
     #[test]

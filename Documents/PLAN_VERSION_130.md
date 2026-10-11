@@ -4611,6 +4611,26 @@ Resolved within Task 132; details under "132 Adversarial review".
 
 Findings R5, R8 (pixel ordering test), R10. Resolved within Task 132.
 
+#### 132.C8 — PR #539 CI and review: MSRV `float_cmp`; unbounded gamut search
+
+- **Surfaced:** PR #539 CI (`Check … 1.96.0` on all four platforms) and a Copilot review
+  comment (high severity), 2026-10-11.
+- **MSRV:** clippy 1.96.0 flags `float_cmp` on nine `[f32; 4]` equality assertions added to
+  `vertex.rs` tests; the local stable toolchain (1.99) does not, so neither the orchestrator's
+  checks nor either review caught it. Fixed with bit-exact `assert_same_rgba` /
+  `assert_different_rgba` helpers. MSRV clippy is now runnable locally through the flake's
+  rust-overlay (`rust-bin.stable."1.96.0"`), and was clean before the push.
+- **Gamut search (missed by both reviews):** a finite chroma up to ~1e308 made
+  `gamut_map_oklch` run ~1,037 conversion-plus-deltaEOK steps, and one OSC 4 body can carry
+  thousands of entries, so output could stall the PTY thread. Fixed bit-exactly: every probe
+  above chroma 1.0 provably takes the `max = probe` branch (out of gamut, deltaEOK > JND, or
+  non-finite), so those steps are done as plain halvings; the bisection is then capped at 32
+  steps with a compile-time proof that the epsilon stop is reached first. A test compares
+  against the unaccelerated algorithm bit for bit (C up to 1e308), the orchestrator's
+  independent 3000-vector oracle still matches exactly, and a 256-entry adversarial OSC 4
+  body parses correctly.
+- **Scheduling:** resolved within Task 132.
+
 ### 132 Adversarial review (2026-10-11)
 
 One CODE-REVIEW pass over `main...HEAD` after 132.C4. No blockers.
