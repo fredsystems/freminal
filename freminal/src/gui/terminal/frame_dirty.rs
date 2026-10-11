@@ -104,7 +104,7 @@ pub(super) struct FrameDirtyObservations {
 /// 124.14b-ii), and `search_changed` (Task 124.14d) — including
 /// [`ChangedRows::None`] with only a selection, hover, and/or search change
 /// and no row change at all. `ChangedRows::All`, `theme_changed`,
-/// `resolved_colors_changed`, `dims_changed`, `folds_changed`, and every other independently-global
+/// `resolved_colors_changed`, `screen_inversion_changed`, `dims_changed`, `folds_changed`, and every other independently-global
 /// trigger (`text_blink_changed`, `image_frame_changed`,
 /// `image_pixels_changed`) still yield [`Self::ReevaluateFullRebuild`]
 /// (124.21's exhaustive audit, narrowed by one entry each at 124.14b-i,
@@ -616,6 +616,20 @@ pub(super) fn evaluate_frame_dirty_state(
         .previous_resolved_colors
         .as_ref()
         .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.resolved_colors));
+    // DECSCNM (`CSI ? 5 h/l`) is composed into every baked vertex colour
+    // (`effective_fg` / `effective_bg`), so toggling it stales every vertex of
+    // THIS pane even though no row content, theme or palette changed. Without
+    // this term a bare `?5h` left the pane in its old colours until something
+    // else forced a rebuild (Task 132.C1).
+    //
+    // Damage classification (`freminal-damage-model`): BOUNDABLE-NOW at pane
+    // level -- the complete extent is "every vertex of this pane", i.e. the
+    // pane's own rect, already known at the decision point (same shape as
+    // `resolved_colors_changed`). It takes the pane full-rebuild path, which
+    // reports `PaneFrameDamage::Region(pane rect)` via
+    // `full_pane_rebuild_damage_rect` (`widget.rs`), not
+    // `PaneFrameDamage::Full`; siblings and chrome are unaffected.
+    let screen_inversion_changed = cache.previous_screen_inversion != Some(snap.screen_inversion);
     // Detect terminal grid resize (cols or rows changed).  The cell
     // background and foreground instance VBOs hold per-cell vertices
     // that encode column indices and pixel positions based on the
@@ -631,13 +645,14 @@ pub(super) fn evaluate_frame_dirty_state(
     let folds_changed = fold_epoch != cache.previous_fold_epoch;
     // The primary content-change signal (Task 124.12): diff this frame's
     // per-row epochs against the epochs recorded at the last full rebuild.
-    // `theme_changed`, `resolved_colors_changed`, `dims_changed` and
-    // `folds_changed` stay separate ORs because they are pane-wide triggers,
+    // `theme_changed`, `resolved_colors_changed`, `screen_inversion_changed`,
+    // `dims_changed` and `folds_changed` stay separate ORs because they are pane-wide triggers,
     // not row-level content — deliberately NOT folded into `rows_changed`
     // itself.
     let rows_changed = diff_row_epochs(cache.last_rendered_row_epochs.as_ref(), &snap.row_epochs);
     let content_changed = theme_changed
         || resolved_colors_changed
+        || screen_inversion_changed
         || dims_changed
         || folds_changed
         || rows_changed.any();
@@ -975,13 +990,14 @@ pub(super) fn evaluate_frame_dirty_state(
         && !never_built;
 
     // Task 124.14: a full rebuild whose damage is provably bounded, rather
-    // than the whole pane. `content_changed` ORs five independent triggers
-    // together (`theme_changed`, `resolved_colors_changed`, `dims_changed`,
-    // `folds_changed`, `rows_changed.any()`); this frame's damage can only be named as a
+    // than the whole pane. `content_changed` ORs six independent triggers
+    // together (`theme_changed`, `resolved_colors_changed`,
+    // `screen_inversion_changed`, `dims_changed`, `folds_changed`,
+    // `rows_changed.any()`); this frame's damage can only be named as a
     // known set of rows when `rows_changed` is not `ChangedRows::All` (a
     // `ChangedRows::All` answer -- no baseline, or a window-size change --
     // is not a row list at all, so there is nothing to bound to) and none
-    // of the other five full-repaint triggers this decision already checks
+    // of the other full-repaint triggers this decision already checks
     // for `cursor_only` fired either. Those are exactly 124.21's audit
     // boundary, narrowed by one entry each at 124.14b-i, 124.14b-ii, and
     // 124.14d: `selection_changed`, `hover_changed`, and `search_changed`
@@ -1027,6 +1043,7 @@ pub(super) fn evaluate_frame_dirty_state(
         && !never_built
         && !theme_changed
         && !resolved_colors_changed
+        && !screen_inversion_changed
         && !dims_changed
         && !folds_changed
         && !text_blink_changed
@@ -1087,6 +1104,7 @@ mod evaluate_frame_dirty_state_tests {
         CursorAppearanceInputs, CursorVisibility, EchoState, resolve_cursor_appearance,
     };
     use crate::gui::view_state::SearchState;
+    use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::CommandBlocksConfig;
     use freminal_common::config::UnfocusedCursorStyle;
@@ -1147,6 +1165,7 @@ mod evaluate_frame_dirty_state_tests {
         let mut cache = PaneRenderCache::new();
         cache.previous_theme = Some(snap.theme);
         cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
+        cache.previous_screen_inversion = Some(snap.screen_inversion);
         cache.previous_term_width = snap.term_width;
         cache.previous_term_height = snap.term_height;
         cache.previous_fold_epoch = 0;
@@ -2759,6 +2778,158 @@ mod evaluate_frame_dirty_state_tests {
         cache.invalidate_theme_cache();
         assert!(cache.previous_resolved_colors.is_none());
         assert!(cache.previous_theme.is_none());
+    }
+
+    // ── screen-inversion (DECSCNM) trigger (Task 132.C1) ──────────────────
+
+    /// `snap` identical except for its `screen_inversion`.
+    fn with_screen_inversion(
+        snap: &TerminalSnapshot,
+        inversion: ScreenInversion,
+    ) -> TerminalSnapshot {
+        let mut changed = snap.clone();
+        changed.screen_inversion = inversion;
+        changed
+    }
+
+    #[test]
+    fn unchanged_screen_inversion_reports_no_change() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(
+            !outcome.observations.content_changed,
+            "an unchanged screen inversion must not register as a content change"
+        );
+    }
+
+    /// The DECSCNM bug: `CSI ? 5 h` with no other output changed nothing the
+    /// dirty tracker looked at, so the pane kept its old colours.
+    #[test]
+    fn toggling_screen_inversion_to_reversed_forces_full_rebuild() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let changed = with_screen_inversion(&snap, ScreenInversion::Reversed);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn toggling_screen_inversion_back_to_normal_forces_full_rebuild() {
+        let reversed = with_screen_inversion(&base_snapshot(), ScreenInversion::Reversed);
+        let cache = settled_cache(&reversed, true, solid());
+        let normal = with_screen_inversion(&reversed, ScreenInversion::Normal);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &normal,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn screen_inversion_change_vetoes_bounded_rebuild() {
+        // A single changed row is `Bounded` on its own; a simultaneous
+        // DECSCNM toggle recolours every vertex of the pane, so the row list
+        // is not a complete extent.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let mut view_state = ViewState::new();
+        let render_state = render_state_built_with_empty_deco_verts();
+
+        let mut rows_only = snap.clone();
+        bump_one_row_epoch(&mut rows_only);
+        let control = call(
+            &rows_only,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+        assert_eq!(control.rebuild, VertexRebuild::Bounded);
+
+        let mut changed = with_screen_inversion(&snap, ScreenInversion::Reversed);
+        bump_one_row_epoch(&mut changed);
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn screen_inversion_change_beats_cursor_change() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, solid());
+        let changed = with_screen_inversion(&snap, ScreenInversion::Reversed);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &changed,
+            &mut view_state,
+            &cache,
+            &render_state,
+            false,
+            solid(),
+        );
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn missing_screen_inversion_baseline_reports_changed() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_screen_inversion = None;
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, solid());
+
+        assert!(outcome.observations.content_changed);
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn invalidate_theme_cache_clears_screen_inversion_baseline() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, solid());
+        cache.previous_screen_inversion = Some(ScreenInversion::Normal);
+        cache.invalidate_theme_cache();
+        assert!(cache.previous_screen_inversion.is_none());
     }
 
     #[test]

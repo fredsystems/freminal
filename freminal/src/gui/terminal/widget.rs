@@ -18,8 +18,8 @@ use crate::gui::{
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{
-        command_block::CommandStatus, pointer_shape::PointerShape, progress::ProgressState,
-        row_number::RowNumber, tchar::TChar, url::Url,
+        command_block::CommandStatus, modes::decscnm::ScreenInversion, pointer_shape::PointerShape,
+        progress::ProgressState, row_number::RowNumber, tchar::TChar, url::Url,
     },
     colors::ResolvedColors,
     config::{Config, UnfocusedCursorStyle},
@@ -1574,6 +1574,12 @@ pub struct PaneRenderCache {
     /// stale and a full rebuild is required.  `None` before the first
     /// rebuild or after [`Self::invalidate_theme_cache`].
     pub(super) previous_resolved_colors: Option<Arc<ResolvedColors>>,
+    /// The DECSCNM display mode from the last full vertex rebuild.  The mode
+    /// is composed into every baked vertex colour (`effective_fg` /
+    /// `effective_bg`), so a change means every vertex of this pane is stale
+    /// and a full rebuild is required.  `None` before the first rebuild or
+    /// after [`Self::invalidate_theme_cache`].
+    pub(super) previous_screen_inversion: Option<ScreenInversion>,
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild. Logical row
     /// numbers (Task 125.17), so it is stable across eviction and scrolling.
@@ -1830,6 +1836,7 @@ impl PaneRenderCache {
             last_rendered_row_epochs: None,
             previous_theme: None,
             previous_resolved_colors: None,
+            previous_screen_inversion: None,
             previous_selection: None,
             previous_screen_selection: None,
             previous_selection_screen_rows: None,
@@ -1939,6 +1946,7 @@ impl PaneRenderCache {
     pub fn invalidate_theme_cache(&mut self) {
         self.previous_theme = None;
         self.previous_resolved_colors = None;
+        self.previous_screen_inversion = None;
     }
 
     /// Force a full vertex rebuild on the next frame by clearing the cached
@@ -3822,9 +3830,7 @@ impl FreminalTerminalWidget {
                             // Task 115.2: DECSCNM (whole-screen reverse video)
                             // composes with per-cell SGR-7 by XOR inside the
                             // vertex builders via `effective_fg`/`effective_bg`.
-                            // `is_normal_display` is `true` for normal display,
-                            // so DECSCNM-active is its negation.
-                            reverse_screen: !snap.is_normal_display,
+                            screen_inversion: snap.screen_inversion,
                         },
                         &mut rs_ref.bg_instances,
                         &mut rs_ref.deco_verts,
@@ -3837,7 +3843,7 @@ impl FreminalTerminalWidget {
                         text_blink_fast_visible: view_state.text_blink_fast_visible,
                         // Task 115.2: see the matching `BackgroundFrame`
                         // construction above for the XOR-compose rationale.
-                        reverse_screen: !snap.is_normal_display,
+                        screen_inversion: snap.screen_inversion,
                     };
                     build_foreground_instances(
                         &rendered_shaped_lines,
@@ -3890,6 +3896,7 @@ impl FreminalTerminalWidget {
                     cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
                     cache.previous_theme = Some(snap.theme);
                     cache.previous_resolved_colors = Some(Arc::clone(&snap.resolved_colors));
+                    cache.previous_screen_inversion = Some(snap.screen_inversion);
                     // Captured BEFORE the overwrite below so the damage
                     // build a few lines down can still see where THIS
                     // frame's selection was painted last time (Task
@@ -5839,6 +5846,7 @@ mod patch_cursor_only_deco_verts_tests {
     use crate::gui::terminal::cursor_appearance::CursorAppearance;
     use crate::gui::{colors::cursor_f, shaping::ShapedLine};
     use freminal_common::{
+        buffer_states::modes::decscnm::ScreenInversion,
         colors::{ColorPalette, DynamicColorOverrides, ResolvedColors},
         cursor::CursorVisualStyle,
         themes::CATPPUCCIN_MOCHA,
@@ -5928,7 +5936,7 @@ mod patch_cursor_only_deco_verts_tests {
                     &ColorPalette::default(),
                     &DynamicColorOverrides::default(),
                 ),
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,

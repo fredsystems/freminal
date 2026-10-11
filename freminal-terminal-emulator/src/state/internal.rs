@@ -18,6 +18,7 @@ use freminal_common::{
             decckm::Decckm,
             decnkm::Decnkm,
             decsclm::Decsclm,
+            decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
@@ -148,8 +149,8 @@ impl TerminalState {
     }
 
     #[must_use]
-    pub(crate) const fn is_normal_display(&self) -> bool {
-        self.modes.invert_screen.is_normal_display()
+    pub(crate) const fn screen_inversion(&self) -> ScreenInversion {
+        self.modes.invert_screen.screen_inversion()
     }
 
     #[must_use]

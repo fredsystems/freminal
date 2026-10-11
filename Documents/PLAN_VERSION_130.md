@@ -4578,6 +4578,9 @@ Deliverable: the doc changes, markdownlint clean.
   `content_changed` and veto the bounded path; the inline `show()` mapping from a full rebuild
   to `Region(pane rect)` has no unit test for any trigger (132.C2). Pixel goldens compared and
   matched under `.#gl-pixel` (llvmpipe). Instance benches vs `pre132`: all within ±4.4%.
+- **132.C1 (done).** Reproduced first (five `frame_dirty` tests failed without the trigger).
+  `ScreenInversion` replaces the raw `bool` in the snapshot and throughout the renderer
+  (`effective_fg`/`effective_bg` no longer take a bool parameter).
 
 ---
 

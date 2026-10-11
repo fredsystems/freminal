@@ -11,6 +11,7 @@
 
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::colors::ResolvedColors;
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_terminal_emulator::LineWidth;
@@ -105,12 +106,11 @@ const fn x_scale(lw: LineWidth) -> f32 {
 #[inline]
 const fn effective_fg(
     colors: &freminal_common::buffer_states::cursor::StateColors,
-    reverse_screen: bool,
+    screen_inversion: ScreenInversion,
 ) -> freminal_common::colors::TerminalColor {
-    if reverse_screen {
-        colors.background_color()
-    } else {
-        colors.color()
+    match screen_inversion {
+        ScreenInversion::Reversed => colors.background_color(),
+        ScreenInversion::Normal => colors.color(),
     }
 }
 
@@ -118,12 +118,11 @@ const fn effective_fg(
 #[inline]
 const fn effective_bg(
     colors: &freminal_common::buffer_states::cursor::StateColors,
-    reverse_screen: bool,
+    screen_inversion: ScreenInversion,
 ) -> freminal_common::colors::TerminalColor {
-    if reverse_screen {
-        colors.color()
-    } else {
-        colors.background_color()
+    match screen_inversion {
+        ScreenInversion::Reversed => colors.color(),
+        ScreenInversion::Normal => colors.background_color(),
     }
 }
 
@@ -159,8 +158,8 @@ pub(crate) const BG_INSTANCE_FLOATS: usize = 6;
 /// Options controlling per-glyph foreground rendering.
 ///
 /// Bundled to keep `build_foreground_instances` within the 7-argument lint limit.
-// Four independent, short-lived rendering-intent flags (selection shape,
-// two blink-visibility phases, DECSCNM state); a state machine would couple
+// Three independent, short-lived rendering-intent flags (selection shape,
+// two blink-visibility phases); a state machine would couple
 // unrelated concerns and obscure intent.
 #[allow(clippy::struct_excessive_bools)]
 pub struct FgRenderOptions {
@@ -176,10 +175,10 @@ pub struct FgRenderOptions {
     pub text_blink_slow_visible: bool,
     /// Whether fast-blink (SGR 6) text is currently in its visible phase.
     pub text_blink_fast_visible: bool,
-    /// `true` when DECSCNM (whole-screen reverse video) is active for this
+    /// Whether DECSCNM (whole-screen reverse video) is active for this
     /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
     /// [`effective_bg`] (Task 115.2).
-    pub reverse_screen: bool,
+    pub screen_inversion: ScreenInversion,
 }
 
 impl FgRenderOptions {
@@ -192,7 +191,7 @@ impl FgRenderOptions {
             selection_is_block: false,
             text_blink_slow_visible: true,
             text_blink_fast_visible: true,
-            reverse_screen: false,
+            screen_inversion: ScreenInversion::Normal,
         }
     }
 }
@@ -480,10 +479,10 @@ pub struct BackgroundFrame<'a> {
     /// selection colour in this builder resolves through it; the cursor
     /// colour is carried separately in [`CursorDrawParams`].
     pub colors: &'a ResolvedColors,
-    /// `true` when DECSCNM (whole-screen reverse video) is active for this
+    /// Whether DECSCNM (whole-screen reverse video) is active for this
     /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
     /// [`effective_bg`] (Task 115.2).
-    pub reverse_screen: bool,
+    pub screen_inversion: ScreenInversion,
 }
 
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
@@ -537,7 +536,7 @@ pub fn build_background_instances(
     let command_block_hover_rows = frame.command_block_hover_rows;
     let term_width_cols = frame.term_width_cols;
     let colors = frame.colors;
-    let reverse_screen = frame.reverse_screen;
+    let screen_inversion = frame.screen_inversion;
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
     deco.clear();
@@ -558,7 +557,7 @@ pub fn build_background_instances(
             // (swapped-from-foreground) effective background and must be
             // drawn, while a cell whose effective background becomes
             // DefaultBackground must still be skipped.
-            let bg_color_raw = effective_bg(&run.colors, reverse_screen);
+            let bg_color_raw = effective_bg(&run.colors, screen_inversion);
 
             // Skip default backgrounds (transparent — the terminal base color
             // is rendered as a panel clear, not explicit quads).
@@ -614,7 +613,7 @@ pub fn build_background_instances(
                     freminal_common::colors::TerminalColor::DefaultUnderlineColor
                 ) {
                     internal_color_to_gl(
-                        effective_fg(&run.colors, reverse_screen),
+                        effective_fg(&run.colors, screen_inversion),
                         is_faint,
                         colors,
                     )
@@ -648,7 +647,7 @@ pub fn build_background_instances(
                 // SGR-7 composed) foreground so it stays visible under
                 // whole-screen reverse video.
                 let fg_color = internal_color_to_gl(
-                    effective_fg(&run.colors, reverse_screen),
+                    effective_fg(&run.colors, screen_inversion),
                     is_faint,
                     colors,
                 );
@@ -852,7 +851,7 @@ pub fn build_foreground_instances(
             // (already resolved in `colors.color()`) with whole-screen
             // DECSCNM by XOR via `effective_fg`.
             let normal_fg = internal_color_to_gl(
-                effective_fg(&run.colors, opts.reverse_screen),
+                effective_fg(&run.colors, opts.screen_inversion),
                 is_faint,
                 colors,
             );
@@ -2094,7 +2093,7 @@ mod tests {
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 colors: &mocha_colors(),
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,
@@ -2103,15 +2102,15 @@ mod tests {
     }
 
     /// Sibling of [`bg_instances_test`] that additionally accepts a
-    /// `reverse_screen` flag (Task 115.3), so DECSCNM composition tests can
+    /// `screen_inversion` (Task 115.3), so DECSCNM composition tests can
     /// exercise `build_background_instances` without duplicating every other
     /// `BackgroundFrame` field. All other fields are hardcoded to match
     /// `bg_instances_test`'s defaults exactly (8x16 cells, no cursor, no
-    /// selection), so `reverse_screen: false` here must reproduce
+    /// selection), so `screen_inversion: ScreenInversion::Normal` here must reproduce
     /// `bg_instances_test`'s output byte-for-byte.
     fn bg_instances_test_rev(
         lines: &[Arc<ShapedLine>],
-        reverse_screen: bool,
+        screen_inversion: ScreenInversion,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
@@ -2131,7 +2130,7 @@ mod tests {
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 colors: &mocha_colors(),
-                reverse_screen,
+                screen_inversion,
             },
             &mut instances,
             &mut deco,
@@ -2140,28 +2139,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    //  DECSCNM (reverse_screen) / SGR-7 composition tests (Task 115.3)
+    //  DECSCNM (screen_inversion) / SGR-7 composition tests (Task 115.3)
     //
     //  Truth table exercised below (fg = cell foreground, bg = cell
     //  background):
-    //    reverse_screen=false, SGR-7 Off -> bg instance color = bg (control)
-    //    reverse_screen=true,  SGR-7 Off -> bg instance color = fg (swapped)
-    //    reverse_screen=true,  SGR-7 On  -> bg instance color = bg (XOR cancels)
-    //    reverse_screen=false, SGR-7 On  -> bg instance color = fg (SGR-7 alone,
+    //    screen_inversion=Normal,   SGR-7 Off -> bg instance color = bg (control)
+    //    screen_inversion=Reversed, SGR-7 Off -> bg instance color = fg (swapped)
+    //    screen_inversion=Reversed, SGR-7 On  -> bg instance color = bg (XOR cancels)
+    //    screen_inversion=Normal,   SGR-7 On  -> bg instance color = fg (SGR-7 alone,
     //                                       covered by pre-existing StateColors
     //                                       tests, not repeated here)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bg_reverse_screen_off_uses_cell_background() {
-        // Control case: reverse_screen=false, SGR-7 Off. The emitted bg
+    fn bg_screen_inversion_off_uses_cell_background() {
+        // Control case: screen_inversion=Normal,   SGR-7 Off. The emitted bg
         // instance color must be the cell's own background (today's
         // behavior, unchanged).
         let colors = default_colors()
             .with_color(TerminalColor::Red)
             .with_background_color(TerminalColor::Blue);
         let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
-        let (bg, _deco) = bg_instances_test_rev(&[line], false);
+        let (bg, _deco) = bg_instances_test_rev(&[line], ScreenInversion::Normal);
         assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
         let expected = internal_color_to_gl(TerminalColor::Blue, false, &mocha_colors());
         assert_eq!(
@@ -2172,27 +2171,27 @@ mod tests {
     }
 
     #[test]
-    fn bg_reverse_screen_on_uses_cell_foreground() {
-        // Defect fix: reverse_screen=true, SGR-7 Off. DECSCNM alone swaps
+    fn bg_screen_inversion_on_uses_cell_foreground() {
+        // Defect fix: screen_inversion=Reversed,SGR-7 Off. DECSCNM alone swaps
         // fg/bg, so the emitted bg instance color must be the cell's
         // FOREGROUND color.
         let colors = default_colors()
             .with_color(TerminalColor::Red)
             .with_background_color(TerminalColor::Blue);
         let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
-        let (bg, _deco) = bg_instances_test_rev(&[line], true);
+        let (bg, _deco) = bg_instances_test_rev(&[line], ScreenInversion::Reversed);
         assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
         let expected = internal_color_to_gl(TerminalColor::Red, false, &mocha_colors());
         assert_eq!(
             &bg[2..6],
             expected.as_slice(),
-            "reverse_screen alone should swap in the cell foreground"
+            "screen_inversion alone should swap in the cell foreground"
         );
     }
 
     #[test]
-    fn bg_reverse_screen_on_with_sgr7_on_cancels() {
-        // XOR case: reverse_screen=true AND SGR-7 On. The two swaps cancel,
+    fn bg_screen_inversion_on_with_sgr7_on_cancels() {
+        // XOR case: screen_inversion=Reversed AND SGR-7 On. The two swaps cancel,
         // so the emitted bg instance color must be the cell's original
         // background again.
         let colors = default_colors()
@@ -2200,22 +2199,22 @@ mod tests {
             .with_background_color(TerminalColor::Blue)
             .with_reverse_video(ReverseVideo::On);
         let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
-        let (bg, _deco) = bg_instances_test_rev(&[line], true);
+        let (bg, _deco) = bg_instances_test_rev(&[line], ScreenInversion::Reversed);
         assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
         let expected = internal_color_to_gl(TerminalColor::Blue, false, &mocha_colors());
         assert_eq!(
             &bg[2..6],
             expected.as_slice(),
-            "SGR-7 On + reverse_screen=true should cancel back to the original background"
+            "SGR-7 On + screen_inversion=Reversed should cancel back to the original background"
         );
     }
 
     #[test]
-    fn bg_reverse_screen_false_matches_baseline() {
-        // Proves adding `reverse_screen` with value `false` changed nothing:
+    fn bg_screen_inversion_normal_matches_baseline() {
+        // Proves adding `screen_inversion` with value `Normal` changed nothing:
         // the pre-115.2 helper (`bg_instances_test`, hardcoded
-        // `reverse_screen: false`) and the new helper called with
-        // `reverse_screen: false` must produce byte-identical output.
+        // `screen_inversion: ScreenInversion::Normal`) and the new helper called with
+        // `screen_inversion: ScreenInversion::Normal` must produce byte-identical output.
         let colors = default_colors()
             .with_color(TerminalColor::Red)
             .with_background_color(TerminalColor::Blue);
@@ -2231,7 +2230,8 @@ mod tests {
             CursorPos::default(),
             &CursorVisualStyle::BlockCursorSteady,
         );
-        let (bg_rev_false, deco_rev_false) = bg_instances_test_rev(&[line_b], false);
+        let (bg_rev_false, deco_rev_false) =
+            bg_instances_test_rev(&[line_b], ScreenInversion::Normal);
 
         assert_eq!(bg_baseline, bg_rev_false, "bg instances must be identical");
         assert_eq!(
@@ -2255,16 +2255,40 @@ mod tests {
         let colors_on = colors_off.with_reverse_video(ReverseVideo::On);
 
         // SGR-7 Off:
-        assert_eq!(effective_fg(&colors_off, false), TerminalColor::Red);
-        assert_eq!(effective_bg(&colors_off, false), TerminalColor::Blue);
-        assert_eq!(effective_fg(&colors_off, true), TerminalColor::Blue);
-        assert_eq!(effective_bg(&colors_off, true), TerminalColor::Red);
+        assert_eq!(
+            effective_fg(&colors_off, ScreenInversion::Normal),
+            TerminalColor::Red
+        );
+        assert_eq!(
+            effective_bg(&colors_off, ScreenInversion::Normal),
+            TerminalColor::Blue
+        );
+        assert_eq!(
+            effective_fg(&colors_off, ScreenInversion::Reversed),
+            TerminalColor::Blue
+        );
+        assert_eq!(
+            effective_bg(&colors_off, ScreenInversion::Reversed),
+            TerminalColor::Red
+        );
 
         // SGR-7 On:
-        assert_eq!(effective_fg(&colors_on, false), TerminalColor::Blue);
-        assert_eq!(effective_bg(&colors_on, false), TerminalColor::Red);
-        assert_eq!(effective_fg(&colors_on, true), TerminalColor::Red);
-        assert_eq!(effective_bg(&colors_on, true), TerminalColor::Blue);
+        assert_eq!(
+            effective_fg(&colors_on, ScreenInversion::Normal),
+            TerminalColor::Blue
+        );
+        assert_eq!(
+            effective_bg(&colors_on, ScreenInversion::Normal),
+            TerminalColor::Red
+        );
+        assert_eq!(
+            effective_fg(&colors_on, ScreenInversion::Reversed),
+            TerminalColor::Red
+        );
+        assert_eq!(
+            effective_bg(&colors_on, ScreenInversion::Reversed),
+            TerminalColor::Blue
+        );
     }
 
     #[test]
@@ -2875,12 +2899,12 @@ mod tests {
     }
 
     /// Run `build_background_instances` for `lines` with explicit resolved
-    /// colours, an optional selection, and `reverse_screen`.
+    /// colours, an optional selection, and `screen_inversion`.
     fn bg_with_colors(
         lines: &[Arc<ShapedLine>],
         colors: &ResolvedColors,
         selection: Option<(usize, usize, usize, usize)>,
-        reverse_screen: bool,
+        screen_inversion: ScreenInversion,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
@@ -2900,7 +2924,7 @@ mod tests {
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 colors,
-                reverse_screen,
+                screen_inversion,
             },
             &mut instances,
             &mut deco,
@@ -2915,7 +2939,7 @@ mod tests {
         cell_colors: StateColors,
         colors: &ResolvedColors,
         selection: Option<(usize, usize, usize, usize)>,
-        reverse_screen: bool,
+        screen_inversion: ScreenInversion,
     ) -> [f32; 4] {
         let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
         let mut atlas = GlyphAtlas::new(256, 1024);
@@ -2938,7 +2962,7 @@ mod tests {
             fm.ascent(),
             &FgRenderOptions {
                 selection,
-                reverse_screen,
+                screen_inversion,
                 ..FgRenderOptions::all_visible(None)
             },
             colors,
@@ -2960,7 +2984,7 @@ mod tests {
             FontDecorationFlags::empty(),
         );
         let colors = overridden_colors(&[(1, (11, 22, 33))], &[]);
-        let (bg, _) = bg_with_colors(&[line], &colors, None, false);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
         assert_eq!(&bg[2..6], rgba((11, 22, 33)).as_slice());
     }
 
@@ -2973,7 +2997,7 @@ mod tests {
             FontDecorationFlags::empty(),
         );
         let colors = overridden_colors(&[(200, (40, 50, 60))], &[]);
-        let (bg, _) = bg_with_colors(&[line], &colors, None, false);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
         assert_eq!(&bg[2..6], rgba((40, 50, 60)).as_slice());
 
         // Without the override the cell still resolves through the table.
@@ -2984,7 +3008,7 @@ mod tests {
             default_colors().with_background_color(TerminalColor::PaletteIndex(200)),
             FontDecorationFlags::empty(),
         );
-        let (bg, _) = bg_with_colors(&[line], &plain, None, false);
+        let (bg, _) = bg_with_colors(&[line], &plain, None, ScreenInversion::Normal);
         assert_eq!(&bg[2..6], rgba(plain.palette[200]).as_slice());
     }
 
@@ -2995,7 +3019,7 @@ mod tests {
         // the bg instance.
         let line = make_line(1, 8.0, default_colors(), FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (7, 8, 9))]);
-        let (bg, _) = bg_with_colors(&[line], &colors, None, true);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
         assert_eq!(bg.len(), BG_INSTANCE_FLOATS);
         assert_eq!(&bg[2..6], rgba((7, 8, 9)).as_slice());
     }
@@ -3013,7 +3037,7 @@ mod tests {
             FontDecorationFlags::empty(),
         );
         let colors = overridden_colors(&[(1, (11, 22, 33)), (4, (44, 55, 66))], &[]);
-        let (bg, _) = bg_with_colors(&[line], &colors, None, true);
+        let (bg, _) = bg_with_colors(&[line], &colors, None, ScreenInversion::Reversed);
         assert_eq!(&bg[2..6], rgba((11, 22, 33)).as_slice());
     }
 
@@ -3031,7 +3055,7 @@ mod tests {
         );
 
         let line = make_line(1, 8.0, default_colors(), flags);
-        let (_, deco) = bg_with_colors(&[line], &colors, None, false);
+        let (_, deco) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
         // Two quads: underline then strikethrough; both use the foreground.
         assert_eq!(deco.len(), 2 * VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
         assert_eq!(&deco[2..6], rgba((1, 2, 3)).as_slice(), "underline");
@@ -3048,7 +3072,7 @@ mod tests {
             default_colors().with_underline_color(TerminalColor::Green),
             flags,
         );
-        let (_, deco) = bg_with_colors(&[line], &colors, None, false);
+        let (_, deco) = bg_with_colors(&[line], &colors, None, ScreenInversion::Normal);
         assert_eq!(
             &deco[2..6],
             rgba((90, 91, 92)).as_slice(),
@@ -3060,7 +3084,12 @@ mod tests {
     fn selection_background_override_changes_selection_quad() {
         let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
         let colors = overridden_colors(&[], &[(DynamicColorSlot::SelectionBackground, (5, 6, 7))]);
-        let (_, deco) = bg_with_colors(&[line], &colors, Some((0, 0, 2, 0)), false);
+        let (_, deco) = bg_with_colors(
+            &[line],
+            &colors,
+            Some((0, 0, 2, 0)),
+            ScreenInversion::Normal,
+        );
         assert_eq!(deco.len(), VERTS_PER_QUAD * DECO_VERTEX_FLOATS);
         assert_eq!(&deco[2..6], rgba((5, 6, 7)).as_slice());
     }
@@ -3072,7 +3101,7 @@ mod tests {
             default_colors().with_color(TerminalColor::Red),
             &colors,
             None,
-            false,
+            ScreenInversion::Normal,
         );
         assert_eq!(got, rgba((11, 22, 33)));
     }
@@ -3080,7 +3109,7 @@ mod tests {
     #[test]
     fn fg_foreground_override_changes_default_glyph() {
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Foreground, (1, 2, 3))]);
-        let got = first_fg_instance_color(default_colors(), &colors, None, false);
+        let got = first_fg_instance_color(default_colors(), &colors, None, ScreenInversion::Normal);
         assert_eq!(got, rgba((1, 2, 3)));
     }
 
@@ -3091,7 +3120,7 @@ mod tests {
             default_colors().with_color(TerminalColor::PaletteIndex(200)),
             &colors,
             None,
-            false,
+            ScreenInversion::Normal,
         );
         assert_eq!(got, rgba((40, 50, 60)));
     }
@@ -3099,7 +3128,12 @@ mod tests {
     #[test]
     fn fg_selection_foreground_override_changes_selected_glyph() {
         let colors = overridden_colors(&[], &[(DynamicColorSlot::SelectionForeground, (9, 8, 7))]);
-        let got = first_fg_instance_color(default_colors(), &colors, Some((0, 0, 0, 0)), false);
+        let got = first_fg_instance_color(
+            default_colors(),
+            &colors,
+            Some((0, 0, 0, 0)),
+            ScreenInversion::Normal,
+        );
         assert_eq!(got, rgba((9, 8, 7)));
     }
 
@@ -3107,7 +3141,8 @@ mod tests {
     fn fg_decscnm_swaps_to_resolved_background() {
         // DECSCNM makes a Default-fg glyph use the (resolved) background.
         let colors = overridden_colors(&[], &[(DynamicColorSlot::Background, (3, 2, 1))]);
-        let got = first_fg_instance_color(default_colors(), &colors, None, true);
+        let got =
+            first_fg_instance_color(default_colors(), &colors, None, ScreenInversion::Reversed);
         assert_eq!(got, rgba((3, 2, 1)));
     }
 
@@ -3133,7 +3168,7 @@ mod tests {
                 command_block_hover_rows: Some((0, 0)),
                 term_width_cols: 4,
                 colors: &colors,
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,
@@ -3438,7 +3473,7 @@ mod tests {
                 command_block_hover_rows: None,
                 term_width_cols: 0,
                 colors: &mocha_colors(),
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,
@@ -3799,7 +3834,7 @@ mod tests {
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             colors: &mocha_colors(),
-                            reverse_screen: false,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -3845,7 +3880,7 @@ mod tests {
                     command_block_hover_rows: None,
                     term_width_cols: 0,
                     colors: &mocha_colors(),
-                    reverse_screen: false,
+                    screen_inversion: ScreenInversion::Normal,
                 },
                 &mut instances,
                 &mut deco,
@@ -4224,7 +4259,7 @@ mod tests {
                 command_block_hover_rows: Some((0, 0)),
                 term_width_cols: 80,
                 colors: &mocha_colors(),
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,
@@ -4283,7 +4318,7 @@ mod tests {
                 command_block_hover_rows: Some((0, 0)),
                 term_width_cols: 0,
                 colors: &mocha_colors(),
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut instances,
             &mut deco,

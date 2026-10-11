@@ -52,6 +52,7 @@ use crate::gui::font_manager::FontManager;
 use crate::gui::shaping::ShapingCache;
 use crate::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors};
 use freminal_common::config::BackgroundImageMode;
@@ -324,7 +325,7 @@ impl HeadlessRenderer {
                 command_block_hover_rows: None,
                 term_width_cols: frame.cols,
                 colors: &colors,
-                reverse_screen: false,
+                screen_inversion: ScreenInversion::Normal,
             },
             &mut bg,
             &mut deco,

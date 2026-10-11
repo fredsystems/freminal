@@ -34,6 +34,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -385,39 +386,42 @@ fn total_rows_grows_as_output_fills_buffer() {
     );
 }
 
-// ─── 12. is_normal_display flag ───────────────────────────────────────────────
+// ─── 12. screen_inversion ─────────────────────────────────────────────────────
 
 #[test]
-fn is_normal_display_true_by_default() {
+fn screen_inversion_normal_by_default() {
     let (mut emu, _rx) = make_emulator();
     let snap = emu.build_snapshot();
-    assert!(
-        snap.is_normal_display,
+    assert_eq!(
+        snap.screen_inversion,
+        ScreenInversion::Normal,
         "display must be in normal (non-inverted) mode by default"
     );
 }
 
 #[test]
-fn is_normal_display_false_after_decscnm_set() {
+fn screen_inversion_reversed_after_decscnm_set() {
     let (mut emu, _rx) = make_emulator();
     // ESC [ ? 5 h  → DECSCNM (reverse video / inverted display) on
     emu.handle_incoming_data(b"\x1b[?5h");
     let snap = emu.build_snapshot();
-    assert!(
-        !snap.is_normal_display,
-        "is_normal_display must be false after DECSCNM is set"
+    assert_eq!(
+        snap.screen_inversion,
+        ScreenInversion::Reversed,
+        "screen_inversion must be Reversed after DECSCNM is set"
     );
 }
 
 #[test]
-fn is_normal_display_restored_after_decscnm_reset() {
+fn screen_inversion_restored_after_decscnm_reset() {
     let (mut emu, _rx) = make_emulator();
     emu.handle_incoming_data(b"\x1b[?5h"); // enable reverse video
     emu.handle_incoming_data(b"\x1b[?5l"); // disable it again
     let snap = emu.build_snapshot();
-    assert!(
-        snap.is_normal_display,
-        "is_normal_display must be restored to true after DECSCNM is unset"
+    assert_eq!(
+        snap.screen_inversion,
+        ScreenInversion::Normal,
+        "screen_inversion must be restored to Normal after DECSCNM is unset"
     );
 }
 

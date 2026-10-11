@@ -47,10 +47,27 @@ impl Decscnm {
         }
     }
 
+    /// The display mode as transported to the renderer.
+    ///
+    /// `Query` is a transient request marker that is never stored as the
+    /// current mode, so mapping it to [`ScreenInversion::Normal`] exists only
+    /// to keep this function total.
     #[must_use]
-    pub const fn is_normal_display(&self) -> bool {
-        matches!(self, Self::NormalDisplay)
+    pub const fn screen_inversion(&self) -> ScreenInversion {
+        match self {
+            Self::ReverseDisplay => ScreenInversion::Reversed,
+            Self::NormalDisplay | Self::Query => ScreenInversion::Normal,
+        }
     }
+}
+
+/// Whether the screen is displayed in normal or reverse video (DECSCNM),
+/// as transported to the renderer. Unlike [`Decscnm`] it has no `Query` state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ScreenInversion {
+    #[default]
+    Normal,
+    Reversed,
 }
 
 impl fmt::Display for Decscnm {
@@ -60,5 +77,36 @@ impl fmt::Display for Decscnm {
             Self::ReverseDisplay => write!(f, "Reverse Display"),
             Self::Query => write!(f, "Query"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_display_maps_to_normal() {
+        assert_eq!(
+            Decscnm::NormalDisplay.screen_inversion(),
+            ScreenInversion::Normal
+        );
+    }
+
+    #[test]
+    fn reverse_display_maps_to_reversed() {
+        assert_eq!(
+            Decscnm::ReverseDisplay.screen_inversion(),
+            ScreenInversion::Reversed
+        );
+    }
+
+    #[test]
+    fn query_maps_to_normal() {
+        assert_eq!(Decscnm::Query.screen_inversion(), ScreenInversion::Normal);
+    }
+
+    #[test]
+    fn default_screen_inversion_is_normal() {
+        assert_eq!(ScreenInversion::default(), ScreenInversion::Normal);
     }
 }

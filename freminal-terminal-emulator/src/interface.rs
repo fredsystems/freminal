@@ -851,7 +851,7 @@ impl TerminalEmulator {
         // the live cursor line is not visible on screen.
         let show_cursor = self.internal.show_cursor() && scroll_offset == 0;
         let cursor_visual_style = self.internal.cursor_visual_style();
-        let is_normal_display = self.internal.is_normal_display();
+        let screen_inversion = self.internal.screen_inversion();
 
         // ── Blink detection ──────────────────────────────────────────────────
         let has_blinking_text = visible_tags
@@ -957,7 +957,7 @@ impl TerminalEmulator {
             show_cursor,
             cursor_visual_style,
             is_alternate_screen,
-            is_normal_display,
+            screen_inversion,
             term_width,
             term_height,
             total_rows,

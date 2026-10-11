@@ -26,6 +26,7 @@ use freminal_common::{
             decarm::Decarm,
             decbkm::Decbkm,
             decckm::Decckm,
+            decscnm::ScreenInversion,
             keypad::KeypadMode,
             lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
@@ -70,7 +71,7 @@ pub struct BufferExtent {
 /// `visible_chars` and `visible_tags` are wrapped in `Arc` so that cloning a
 /// snapshot (or handing the same content to a second snapshot on the clean
 /// path) is a cheap atomic refcount increment rather than a full `Vec` copy.
-#[allow(clippy::struct_excessive_bools)] // Eight independent rendering/bookkeeping bools; enums would add noise
+#[allow(clippy::struct_excessive_bools)] // Six independent rendering/bookkeeping bools; enums would add noise
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {
     /// Flattened visible character content, already converted from `Row`/`Cell`.
@@ -129,8 +130,12 @@ pub struct TerminalSnapshot {
     /// `true` when the alternate screen buffer is currently active.
     pub is_alternate_screen: bool,
 
-    /// `true` when the display is in normal (non-inverted) mode.
-    pub is_normal_display: bool,
+    /// Whether the screen is displayed in normal or reverse video (DECSCNM
+    /// `?5`).
+    ///
+    /// The renderer bakes this into the per-vertex colours, so a change here
+    /// stales every vertex of the pane.
+    pub screen_inversion: ScreenInversion,
 
     /// Terminal width in character columns.
     pub term_width: usize,
@@ -462,7 +467,7 @@ impl TerminalSnapshot {
             show_cursor: false,
             cursor_visual_style: CursorVisualStyle::default(),
             is_alternate_screen: false,
-            is_normal_display: true,
+            screen_inversion: ScreenInversion::Normal,
             term_width: 0,
             term_height: 0,
             total_rows: 0,

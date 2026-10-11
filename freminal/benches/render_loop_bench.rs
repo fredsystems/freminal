@@ -39,6 +39,7 @@ use freminal::gui::shaping::ShapingCache;
 use freminal::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::cursor::StateColors;
 use freminal_common::buffer_states::format_tag::FormatTag;
+use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::colors::{ColorPalette, DynamicColorOverrides, ResolvedColors, TerminalColor};
 use freminal_common::config::Config;
@@ -907,7 +908,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             colors: &colors,
-                            reverse_screen: false,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -1023,7 +1024,7 @@ fn bench_bg_instances_indexed(c: &mut Criterion) {
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             colors: &colors,
-                            reverse_screen: false,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -1148,7 +1149,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             colors: &colors,
-                            reverse_screen: false,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,
@@ -1183,7 +1184,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
                             command_block_hover_rows: None,
                             term_width_cols: 0,
                             colors: &colors,
-                            reverse_screen: false,
+                            screen_inversion: ScreenInversion::Normal,
                         },
                         &mut instances,
                         &mut deco,

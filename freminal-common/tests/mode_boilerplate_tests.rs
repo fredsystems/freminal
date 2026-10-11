@@ -539,7 +539,7 @@ test_mode_type!(
 );
 
 // ===========================================================================
-// Decscnm (?5) — standard tests + is_normal_display()
+// Decscnm (?5) — standard tests (screen_inversion() is tested in decscnm.rs)
 // ===========================================================================
 mod decscnm_tests {
     use super::*;
@@ -619,22 +619,6 @@ mod decscnm_tests {
     #[test]
     fn display_query_variant() {
         assert_eq!(format!("{}", Decscnm::Query), "Query");
-    }
-
-    // is_normal_display()
-    #[test]
-    fn is_normal_display_for_normal_display() {
-        assert!(Decscnm::NormalDisplay.is_normal_display());
-    }
-
-    #[test]
-    fn is_normal_display_for_reverse_display() {
-        assert!(!Decscnm::ReverseDisplay.is_normal_display());
-    }
-
-    #[test]
-    fn is_normal_display_for_query() {
-        assert!(!Decscnm::Query.is_normal_display());
     }
 }
 
