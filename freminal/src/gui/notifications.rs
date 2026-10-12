@@ -21,7 +21,7 @@
 //! helpers. The system leg additionally requires that `notify-rust` is the
 //! intended sink; the toast leg never spawns a thread.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::sync::Weak;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,8 +46,8 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99Leg, Osc99PaneState, Osc99Registry,
-    PaneKeyboardFocus, PaneVisibility,
+    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
+    Osc99Registry, PaneKeyboardFocus, PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -651,7 +651,7 @@ impl NotificationRouter {
         request: &Osc99DisplayRequest,
         config: &NotificationsConfig,
         ctx: Osc99DisplayContext,
-        icon_cache: &mut HashMap<String, Vec<u8>>,
+        icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
     ) -> Vec<Osc99Effect> {
         let data = &request.data;
@@ -672,12 +672,19 @@ impl NotificationRouter {
         // (displayed) notification referencing the same `g=` key with bytes
         // omitted can resolve the icon.
         //
-        // Only the macOS/Windows system leg consumes the resolved bytes
-        // today; Task 138.14 hands them to the Linux/BSD service.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        // The notification handed to the legs carries the resolved bytes in
+        // `icon_data` (cloned only when the `g=` cache supplied them), so
+        // the Linux/BSD notification service and the macOS/Windows system
+        // leg both see the icon the program meant.
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        Self::resolve_icon_bytes(data, icon_cache);
+        let displayed: Cow<'_, Notification99Data> = match resolved_icon {
+            Some(bytes) if data.icon_data.is_none() => Cow::Owned(Notification99Data {
+                icon_data: Some(bytes),
+                ..data.clone()
+            }),
+            _ => Cow::Borrowed(data),
+        };
+        let data = displayed.as_ref();
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
             return Vec::new();
@@ -710,7 +717,7 @@ impl NotificationRouter {
             // macOS/Windows: fire-and-forget, shown here. Linux/BSD: shown by
             // the `ShowLinuxSystem` effect `register` returns below.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            Self::show_system_osc99(data, resolved_icon, Weak::clone(&request.reply_tx));
+            Self::show_system_osc99(data, data.icon_data.clone(), Weak::clone(&request.reply_tx));
             // Only Linux/BSD observe a close or activation (through the
             // notification service); elsewhere the system notification is
             // fire-and-forget. `cfg!` rather than `#[cfg]` so both variants
@@ -749,71 +756,18 @@ impl NotificationRouter {
     ///   icon-by-name).
     fn resolve_icon_bytes(
         data: &Notification99Data,
-        icon_cache: &mut HashMap<String, Vec<u8>>,
+        icon_cache: &mut Osc99IconCache,
     ) -> Option<Vec<u8>> {
         if let Some(bytes) = &data.icon_data {
             if let Some(key) = &data.icon_cache_key {
-                Self::insert_icon_cache_bounded(icon_cache, key.clone(), bytes.clone());
+                icon_cache.insert(key.clone(), bytes.clone());
             }
             Some(bytes.clone())
         } else {
             data.icon_cache_key
                 .as_ref()
-                .and_then(|key| icon_cache.get(key).cloned())
+                .and_then(|key| icon_cache.get(key).map(<[u8]>::to_vec))
         }
-    }
-
-    /// Insert into the session icon cache, enforcing a bound so a program
-    /// that repeatedly transmits distinct `g=` cache keys with icon bytes
-    /// cannot grow this map without limit for the lifetime of the GUI
-    /// process (terminal escape-sequence input is untrusted). Mirrors the
-    /// quota-style bounding used by the kitty graphics image store: when
-    /// either the entry-count or total-byte cap would be exceeded, existing
-    /// entries are evicted until the new one fits (or the cache is emptied,
-    /// in which case a later `g=`-only reference simply misses and the
-    /// program must re-transmit).
-    fn insert_icon_cache_bounded(
-        icon_cache: &mut HashMap<String, Vec<u8>>,
-        key: String,
-        bytes: Vec<u8>,
-    ) {
-        /// Max number of distinct `g=` icon entries retained per session.
-        const MAX_ICON_CACHE_ENTRIES: usize = 64;
-        /// Max total icon bytes retained per session (4 MiB).
-        const MAX_ICON_CACHE_BYTES: usize = 4 * 1024 * 1024;
-
-        // A single icon larger than the whole budget is not cacheable.
-        if bytes.len() > MAX_ICON_CACHE_BYTES {
-            icon_cache.remove(&key);
-            return;
-        }
-
-        // Account for a replace of an existing key.
-        let existing = icon_cache.get(&key).map_or(0, Vec::len);
-        let mut total: usize = icon_cache
-            .values()
-            .map(Vec::len)
-            .sum::<usize>()
-            .saturating_sub(existing);
-
-        // Evict until both the incoming bytes and one more entry fit.
-        while (total.saturating_add(bytes.len()) > MAX_ICON_CACHE_BYTES
-            || icon_cache.len() >= MAX_ICON_CACHE_ENTRIES)
-            && !icon_cache.is_empty()
-        {
-            let Some(victim) = icon_cache
-                .iter()
-                .find(|(k, _)| *k != &key)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            if let Some(removed) = icon_cache.remove(&victim) {
-                total = total.saturating_sub(removed.len());
-            }
-        }
-
-        icon_cache.insert(key, bytes);
     }
 }
 
@@ -1032,7 +986,7 @@ mod tests {
         config: &NotificationsConfig,
         ctx: Osc99DisplayContext,
         toasts: &mut ToastStack,
-        icon_cache: &mut HashMap<String, Vec<u8>>,
+        icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
     ) {
         route_osc99_with_system(
@@ -1053,7 +1007,7 @@ mod tests {
         config: &NotificationsConfig,
         ctx: Osc99DisplayContext,
         toasts: &mut ToastStack,
-        icon_cache: &mut HashMap<String, Vec<u8>>,
+        icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
         system: &mut dyn Osc99SystemBackend,
     ) {
@@ -1225,7 +1179,7 @@ mod tests {
         ] {
             let config = enabled_config(0.0);
             let mut toasts = ToastStack::default();
-            let mut icon_cache = HashMap::new();
+            let mut icon_cache = Osc99IconCache::default();
             let mut registry = Osc99Registry::default();
             let data = Notification99Data {
                 urgency,
@@ -1253,7 +1207,7 @@ mod tests {
         // routing is pinned by the stack gaining exactly one keyed toast.
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             title: "The title".to_owned(),
@@ -1853,7 +1807,7 @@ mod tests {
     fn route_osc99_master_gate_disabled_does_nothing() {
         let config = NotificationsConfig::default(); // enabled = false
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -1880,7 +1834,7 @@ mod tests {
             ..NotificationsConfig::default()
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -1901,7 +1855,7 @@ mod tests {
     fn route_osc99_occasion_always_displays_regardless_of_focus() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99(); // occasion: Always
 
@@ -1926,7 +1880,7 @@ mod tests {
     fn route_and_count_toasts(data: &Notification99Data, ctx: Osc99DisplayContext) -> usize {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         route_osc99_into(
             &osc99_request(data),
@@ -2119,7 +2073,7 @@ mod tests {
 
     #[test]
     fn route_osc99_icon_cache_populated_from_transmitted_bytes() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let data = Notification99Data {
             icon_data: Some(vec![1, 2, 3, 4]),
             icon_cache_key: Some("k".to_owned()),
@@ -2129,12 +2083,12 @@ mod tests {
         let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
 
         assert_eq!(resolved, Some(vec![1, 2, 3, 4]));
-        assert_eq!(icon_cache.get("k"), Some(&vec![1, 2, 3, 4]));
+        assert_eq!(icon_cache.get("k"), Some([1u8, 2, 3, 4].as_slice()));
     }
 
     #[test]
     fn route_osc99_icon_cache_reused_on_subsequent_g_only_notification() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         icon_cache.insert("k".to_owned(), vec![9, 9, 9]);
 
         let data = Notification99Data {
@@ -2150,7 +2104,7 @@ mod tests {
 
     #[test]
     fn route_osc99_icon_cache_miss_returns_none() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let data = Notification99Data {
             icon_data: None,
             icon_cache_key: Some("missing".to_owned()),
@@ -2165,7 +2119,7 @@ mod tests {
 
     #[test]
     fn route_osc99_no_icon_data_or_key_returns_none() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let data = default_n99();
 
         assert_eq!(
@@ -2178,7 +2132,7 @@ mod tests {
     fn route_osc99_registers_instance_with_reporting_flags_when_id_present() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             id: Some("n1".to_owned()),
@@ -2209,7 +2163,7 @@ mod tests {
     fn route_osc99_registers_id_less_instance() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99(); // id: None
 
@@ -2232,7 +2186,7 @@ mod tests {
     fn route_osc99_title_and_body_push_a_toast() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -2255,7 +2209,7 @@ mod tests {
         // reconciliation is concerned, it never happened.
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             id: Some("n2".to_owned()),
@@ -2287,7 +2241,7 @@ mod tests {
     #[test]
     fn route_osc99_filtered_notification_produces_no_effects_and_registers_nothing() {
         let config = enabled_config(0.0);
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         set_filter(&mut registry, &["title:^Spam"]);
         let data = Notification99Data {
@@ -2329,7 +2283,7 @@ mod tests {
     fn route_osc99_unfiltered_notification_still_displays_beside_a_filtered_one() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         set_filter(&mut registry, &["title:^Spam"]);
         let spam = Notification99Data {
@@ -2370,7 +2324,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         set_filter(&mut registry, &["all"]);
 
@@ -2391,7 +2345,7 @@ mod tests {
     fn route_osc99_replacing_the_filter_takes_effect_for_the_next_notification() {
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -2428,7 +2382,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             id: Some("n3".to_owned()),
@@ -2455,7 +2409,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -2482,7 +2436,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             id: Some("toast-only".to_owned()),
@@ -2516,7 +2470,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
             id: Some("tracked".to_owned()),
@@ -2554,7 +2508,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
@@ -2583,7 +2537,7 @@ mod tests {
             ..enabled_config(0.0)
         };
         let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
+        let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
         let mut system = RecordingSystemBackend::default();
         let data = Notification99Data {
@@ -2614,6 +2568,56 @@ mod tests {
         assert_eq!(entry.open_legs, [Osc99Leg::LinuxSystem]);
     }
 
+    /// The notification handed to the desktop-notification backend carries the
+    /// resolved icon bytes: the transmitted ones, and the cached ones when a
+    /// later notification refers to them by `g=` alone.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn route_osc99_hands_resolved_icon_bytes_to_the_system_backend() {
+        use crate::gui::osc99::RecordingSystemBackend;
+
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::System,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        let mut system = RecordingSystemBackend::default();
+        let transmitted = Notification99Data {
+            icon_data: Some(vec![1, 2, 3]),
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+        let by_key = Notification99Data {
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+        let uncached = Notification99Data {
+            icon_cache_key: Some("other".to_owned()),
+            ..default_n99()
+        };
+
+        for data in [&transmitted, &by_key, &uncached] {
+            route_osc99_with_system(
+                &osc99_request(data),
+                &config,
+                focused_ctx(),
+                &mut toasts,
+                &mut icon_cache,
+                &mut registry,
+                &mut system,
+            );
+        }
+
+        let icons: Vec<Option<Vec<u8>>> = system
+            .shown
+            .iter()
+            .map(|shown| shown.notification.icon_data.clone())
+            .collect();
+        assert_eq!(icons, [Some(vec![1, 2, 3]), Some(vec![1, 2, 3]), None]);
+    }
+
     /// A toast-only routing never reaches the desktop-notification backend.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
@@ -2633,53 +2637,13 @@ mod tests {
             &config,
             focused_ctx(),
             &mut toasts,
-            &mut HashMap::new(),
+            &mut Osc99IconCache::default(),
             &mut registry,
             &mut system,
         );
 
         assert_eq!(system.shown, Vec::new());
         assert_eq!(toasts.len(), 1);
-    }
-
-    #[test]
-    fn icon_cache_bounded_by_entry_count() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
-        // Insert well beyond the entry cap; the map must never exceed it.
-        for i in 0..500u32 {
-            let data = Notification99Data {
-                icon_data: Some(vec![0u8; 16]),
-                icon_cache_key: Some(format!("k{i}")),
-                ..default_n99()
-            };
-            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
-            assert!(
-                icon_cache.len() <= 64,
-                "icon cache exceeded entry cap: {}",
-                icon_cache.len()
-            );
-        }
-    }
-
-    #[test]
-    fn icon_cache_bounded_by_total_bytes() {
-        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
-        // Each icon is 256 KiB; the 4 MiB budget holds ~16, so repeated
-        // inserts of distinct keys must keep total bytes bounded.
-        let chunk = 256 * 1024;
-        for i in 0..64u32 {
-            let data = Notification99Data {
-                icon_data: Some(vec![0u8; chunk]),
-                icon_cache_key: Some(format!("b{i}")),
-                ..default_n99()
-            };
-            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
-            let total: usize = icon_cache.values().map(Vec::len).sum();
-            assert!(
-                total <= 4 * 1024 * 1024,
-                "icon cache exceeded byte budget: {total}"
-            );
-        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]

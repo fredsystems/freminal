@@ -394,9 +394,9 @@ struct FreminalGui {
 
     /// Session cache of transmitted OSC 99 icon data, keyed by the `g=` cache
     /// key. Populated when a notification transmits icon bytes with a `g=`; later
-    /// notifications sending `g=` alone reuse the cached bytes. Session lifetime
-    /// (never persisted). Single-threaded GUI, so `RefCell` suffices.
-    osc99_icon_cache: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>,
+    /// notifications sending `g=` alone reuse the cached bytes. Bounded, with
+    /// least-recently-used eviction. Session lifetime (never persisted). Single-threaded GUI, so `RefCell` suffices.
+    osc99_icon_cache: std::cell::RefCell<osc99::Osc99IconCache>,
 
     /// Displayed OSC 99 notifications, scoped per pane, for `p=alive` /
     /// `p=close` handling. A pure state machine; see [`osc99::Osc99Registry`].
@@ -617,7 +617,7 @@ impl FreminalGui {
             welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
-            osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
+            osc99_icon_cache: std::cell::RefCell::new(osc99::Osc99IconCache::default()),
             osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             #[cfg(all(unix, not(target_os = "macos")))]

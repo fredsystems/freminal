@@ -56,8 +56,13 @@ use freminal_windowing::{RepaintProxy, WindowId};
 use zbus::MatchRule;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::{Message, Type as MessageType};
-use zbus::zvariant::Value;
+use zbus::zvariant::{Array, Structure, Value};
 
+use super::icon_lookup::XdgIconLookup;
+use super::presentation::{
+    Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint, choose_icon,
+    decode_icon_image, escape_body_markup, sound_hint,
+};
 use super::{Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend, Osc99SystemDispatch};
 
 /// The well-known bus name of the notification daemon.
@@ -270,17 +275,68 @@ const fn urgency_byte(urgency: NotificationUrgency) -> u8 {
     }
 }
 
-/// The `hints` argument of `Notify`. Task 138.14 adds the presentation hints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The icon-theme name of freminal's own icon, as `assets/freminal.desktop`
+/// names it. The last resort of icon resolution.
+const FREMINAL_ICON_NAME: &str = "freminal";
+
+/// The wire value of the `suppress-sound` hint when it is sent: the hint's
+/// presence with `true` is the request, so there is no `false` to send.
+const SUPPRESS_SOUND_WIRE: bool = true;
+
+/// The `has_alpha` field of the `image-data` structure: the pixels are always
+/// RGBA.
+const IMAGE_HAS_ALPHA_WIRE: bool = true;
+
+/// The `bits_per_sample` field of the `image-data` structure.
+const IMAGE_BITS_PER_SAMPLE: i32 = 8;
+
+/// The `channels` field of the `image-data` structure (R, G, B, A).
+const IMAGE_CHANNELS: i32 = 4;
+
+/// The `hints` argument of `Notify`, before it becomes an `a{sv}` dictionary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NotifyHints {
     /// The `urgency` hint.
     urgency: u8,
+    /// The `category` hint.
+    category: Option<String>,
+    /// The `suppress-sound` / `sound-name` hint.
+    sound: Osc99SoundHint,
+    /// The `image-data` hint, for transmitted icon data.
+    image: Option<Osc99IconImage>,
 }
 
 impl NotifyHints {
     /// The wire form: an `a{sv}` dictionary.
-    fn to_map(self) -> HashMap<&'static str, Value<'static>> {
-        HashMap::from([("urgency", Value::from(self.urgency))])
+    fn to_map(&self) -> HashMap<&'static str, Value<'static>> {
+        let mut map = HashMap::from([("urgency", Value::from(self.urgency))]);
+        if let Some(category) = &self.category {
+            map.insert("category", Value::from(category.clone()));
+        }
+        match &self.sound {
+            Osc99SoundHint::None => {}
+            Osc99SoundHint::Suppress => {
+                map.insert("suppress-sound", Value::from(SUPPRESS_SOUND_WIRE));
+            }
+            Osc99SoundHint::Named(name) => {
+                map.insert("sound-name", Value::from(name.clone()));
+            }
+        }
+        if let Some(image) = &self.image {
+            // `(iiibiiay)`: width, height, rowstride, has_alpha,
+            // bits_per_sample, channels, data.
+            let structure = Structure::from((
+                image.width,
+                image.height,
+                image.rowstride,
+                IMAGE_HAS_ALPHA_WIRE,
+                IMAGE_BITS_PER_SAMPLE,
+                IMAGE_CHANNELS,
+                Array::from(image.rgba.as_slice()),
+            ));
+            map.insert("image-data", Value::Structure(structure));
+        }
+        map
     }
 }
 
@@ -295,6 +351,37 @@ struct NotifyArgs {
     actions: Vec<String>,
     hints: NotifyHints,
     expire_timeout: i32,
+}
+
+impl NotifyArgs {
+    /// The `app_icon` and `image-data` for `notification`.
+    fn icon(
+        lookup: &dyn Osc99IconLookup,
+        notification: &Notification99Data,
+    ) -> (String, Option<Osc99IconImage>) {
+        let choice = choose_icon(
+            &notification.icon_names,
+            notification.icon_data.as_deref(),
+            notification.app_name.as_deref(),
+            lookup,
+        );
+        let freminal_icon = || (FREMINAL_ICON_NAME.to_owned(), None);
+        match choice {
+            Some(Osc99IconChoice::Named(name)) => (name, None),
+            Some(Osc99IconChoice::Data(bytes)) => decode_icon_image(&bytes).map_or_else(
+                || {
+                    tracing::debug!("OSC 99: the transmitted icon did not decode");
+                    notification
+                        .icon_names
+                        .first()
+                        .map_or_else(freminal_icon, |name| (name.clone(), None))
+                },
+                |image| (String::new(), Some(image)),
+            ),
+            // No rule found an icon: the last one is freminal's own.
+            None => freminal_icon(),
+        }
+    }
 }
 
 /// What a `Close` command has to do, given the dispatcher's bookkeeping.
@@ -361,7 +448,6 @@ impl Osc99SignalSender {
 }
 
 /// The dispatcher's bookkeeping, free of any bus or thread.
-#[derive(Debug, Default)]
 struct DispatcherState {
     /// Whose notification signals are believed.
     daemon_owner: Osc99SignalSender,
@@ -371,9 +457,23 @@ struct DispatcherState {
     by_dbus_id: HashMap<u32, Osc99InstanceId>,
     /// What the daemon can do; assumed until it answers.
     capabilities: Osc99DaemonCapabilities,
+    /// What the icon and `.desktop` scans know; scanned on first use.
+    icon_lookup: Box<dyn Osc99IconLookup + Send>,
 }
 
 impl DispatcherState {
+    /// A state with no instances, the assumed capabilities, and `icon_lookup`
+    /// to resolve icons with.
+    fn new(daemon_owner: Osc99SignalSender, icon_lookup: Box<dyn Osc99IconLookup + Send>) -> Self {
+        Self {
+            daemon_owner,
+            by_instance: HashMap::new(),
+            by_dbus_id: HashMap::new(),
+            capabilities: Osc99DaemonCapabilities::default(),
+            icon_lookup,
+        }
+    }
+
     /// Record the daemon's `GetCapabilities` answer.
     fn set_capabilities(&mut self, advertised: &[String]) {
         self.capabilities = Osc99DaemonCapabilities::from_advertised(advertised);
@@ -384,7 +484,9 @@ impl DispatcherState {
     /// `replaces_id` is the replaced instance's D-Bus id, or `0` when there is
     /// none (or it is not known). The `actions` array is the `default` action
     /// followed by one 1-based action per button, and is sent only when the
-    /// daemon has the `actions` capability.
+    /// daemon has the `actions` capability. The icon, sound, category and
+    /// body follow `presentation`; the body is escaped only when the daemon
+    /// has the `body-markup` capability.
     fn notify_args(
         &self,
         replaces: Option<Osc99InstanceId>,
@@ -411,6 +513,12 @@ impl DispatcherState {
             Osc99Expiry::Never => 0,
             Osc99Expiry::After(ms) => i32::try_from(ms.get()).unwrap_or(i32::MAX),
         };
+        let (app_icon, image) = NotifyArgs::icon(self.icon_lookup.as_ref(), notification);
+        let body = notification.body.clone().unwrap_or_default();
+        let body = match self.capabilities.body_markup {
+            Osc99DaemonSupport::Supported => escape_body_markup(&body),
+            Osc99DaemonSupport::Unsupported => body,
+        };
         NotifyArgs {
             app_name: notification
                 .app_name
@@ -419,13 +527,15 @@ impl DispatcherState {
             replaces_id: replaces
                 .and_then(|old| self.by_instance.get(&old).copied())
                 .unwrap_or(0),
-            // Task 138.14 resolves icons.
-            app_icon: String::new(),
+            app_icon,
             summary: notification.title.clone(),
-            body: notification.body.clone().unwrap_or_default(),
+            body,
             actions,
             hints: NotifyHints {
                 urgency: urgency_byte(notification.urgency),
+                category: category_hint(&notification.notification_types).map(str::to_owned),
+                sound: sound_hint(&notification.sound),
+                image,
             },
             expire_timeout,
         }
@@ -673,7 +783,7 @@ impl Osc99DbusService {
     /// [`Osc99DbusEvent::Closed`].
     #[must_use]
     pub fn spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle {
-        start(connect_session, waker)
+        start(connect_session, waker, Box::new(XdgIconLookup::from_env()))
     }
 
     /// Start the service on an existing connection (a peer-to-peer one, in
@@ -683,7 +793,29 @@ impl Osc99DbusService {
         connection: Connection,
         waker: Box<dyn Fn() + Send>,
     ) -> Osc99DbusHandle {
-        start(move || Ok(connection), waker)
+        start(move || Ok(connection), waker, Box::new(NoIconLookup))
+    }
+}
+
+/// An icon lookup that knows nothing, so a test touches no filesystem.
+#[cfg(test)]
+struct NoIconLookup;
+
+#[cfg(test)]
+impl Osc99IconLookup for NoIconLookup {
+    fn icon_exists(&self, _name: &str) -> bool {
+        false
+    }
+
+    fn desktop_icon(&self, _app_name: &str) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+impl Default for DispatcherState {
+    fn default() -> Self {
+        Self::new(Osc99SignalSender::default(), Box::new(NoIconLookup))
     }
 }
 
@@ -695,8 +827,13 @@ fn connect_session() -> zbus::Result<Connection> {
         .build()
 }
 
-/// Start the dispatcher thread, which obtains its connection from `connect`.
-fn start<C>(connect: C, waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle
+/// Start the dispatcher thread, which obtains its connection from `connect`
+/// and resolves icons with `icon_lookup` (scanning lazily, on that thread).
+fn start<C>(
+    connect: C,
+    waker: Box<dyn Fn() + Send>,
+    icon_lookup: Box<dyn Osc99IconLookup + Send>,
+) -> Osc99DbusHandle
 where
     C: FnOnce() -> zbus::Result<Connection> + Send + 'static,
 {
@@ -709,7 +846,7 @@ where
 
     let spawned = std::thread::Builder::new()
         .name("freminal-osc99-dbus".to_owned())
-        .spawn(move || run_dispatcher(connect, &command_rx, &sink));
+        .spawn(move || run_dispatcher(connect, &command_rx, &sink, icon_lookup));
     if let Err(e) = spawned {
         // The closure (and the command receiver in it) is dropped, so every
         // later show fails at the handle.
@@ -729,12 +866,16 @@ where
 
 /// The dispatcher thread: connect, then serve commands until the GUI drops its
 /// command sender.
-fn run_dispatcher<C>(connect: C, commands: &Receiver<DbusCommand>, sink: &EventSink)
-where
+fn run_dispatcher<C>(
+    connect: C,
+    commands: &Receiver<DbusCommand>,
+    sink: &EventSink,
+    icon_lookup: Box<dyn Osc99IconLookup + Send>,
+) where
     C: FnOnce() -> zbus::Result<Connection>,
 {
     match connect_and_subscribe(connect) {
-        Ok((connection, signals)) => serve(&connection, commands, signals, sink),
+        Ok((connection, signals)) => serve(&connection, commands, signals, sink, icon_lookup),
         Err(e) => {
             tracing::warn!("OSC 99: system notifications are unavailable: {e}");
             sink.emit(Osc99DbusEvent::Unavailable);
@@ -827,11 +968,9 @@ fn serve(
     commands: &Receiver<DbusCommand>,
     signals: Receiver<PumpSignal>,
     sink: &EventSink,
+    icon_lookup: Box<dyn Osc99IconLookup + Send>,
 ) {
-    let mut state = DispatcherState {
-        daemon_owner: resolve_daemon_owner(connection),
-        ..DispatcherState::default()
-    };
+    let mut state = DispatcherState::new(resolve_daemon_owner(connection), icon_lookup);
     match fetch_capabilities(connection) {
         Ok(advertised) => {
             state.set_capabilities(&advertised);
@@ -1104,6 +1243,8 @@ mod tests {
     use freminal_common::buffer_states::osc99_notification::{
         Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Sound,
     };
+    use std::collections::HashSet;
+
     use zbus::zvariant::OwnedValue;
 
     use super::*;
@@ -1168,8 +1309,275 @@ mod tests {
         assert_eq!(args.app_name, "my-app");
         assert_eq!(args.summary, "Title");
         assert_eq!(args.body, "Body");
+        // `f=` matched no icon, so the last rule applies: freminal's own.
+        assert_eq!(args.app_icon, "freminal");
+        assert_eq!(
+            args.hints,
+            NotifyHints {
+                urgency: 2,
+                category: None,
+                sound: Osc99SoundHint::None,
+                image: None,
+            }
+        );
+    }
+
+    // ── Presentation: icon, sound, category, markup ─────────────────────
+
+    /// An icon lookup over fixed sets, touching no filesystem.
+    struct FakeLookup {
+        icons: HashSet<String>,
+        desktop: HashMap<String, String>,
+    }
+
+    impl Osc99IconLookup for FakeLookup {
+        fn icon_exists(&self, name: &str) -> bool {
+            self.icons.contains(name)
+        }
+
+        fn desktop_icon(&self, app_name: &str) -> Option<String> {
+            self.desktop.get(app_name).cloned()
+        }
+    }
+
+    fn state_with_icons(icons: &[&str], desktop: &[(&str, &str)]) -> DispatcherState {
+        DispatcherState::new(
+            Osc99SignalSender::default(),
+            Box::new(FakeLookup {
+                icons: icons.iter().map(|icon| (*icon).to_owned()).collect(),
+                desktop: desktop
+                    .iter()
+                    .map(|(app, icon)| ((*app).to_owned(), (*icon).to_owned()))
+                    .collect(),
+            }),
+        )
+    }
+
+    /// A `width` x `height` PNG of one opaque colour.
+    fn png(width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
+        let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        pixels.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )?;
+        Ok(bytes)
+    }
+
+    #[test]
+    fn notify_args_escape_the_body_only_with_body_markup() {
+        let body = Notification99Data {
+            body: Some("a<b>&c".to_owned()),
+            ..notification()
+        };
+
+        let mut state = DispatcherState::default();
+        state.set_capabilities(&strings(&["body", "body-markup"]));
+        assert_eq!(
+            state.notify_args(None, &body).body,
+            "a<\u{200c}b>&\u{200c}c"
+        );
+
+        state.set_capabilities(&strings(&["body"]));
+        assert_eq!(state.notify_args(None, &body).body, "a<b>&c");
+    }
+
+    #[test]
+    fn notify_args_assume_body_markup_until_the_daemon_answers() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                body: Some("<".to_owned()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.body, "<\u{200c}");
+    }
+
+    #[test]
+    fn notify_args_hint_the_first_non_empty_category() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                notification_types: strings(&["", "email.arrived", "im"]),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.hints.category.as_deref(), Some("email.arrived"));
+    }
+
+    #[test]
+    fn notify_args_map_sounds_to_hints() {
+        let state = DispatcherState::default();
+        for (sound, expected) in [
+            (Osc99Sound::System, Osc99SoundHint::None),
+            (Osc99Sound::Silent, Osc99SoundHint::Suppress),
+            (
+                Osc99Sound::Named("warn".to_owned()),
+                Osc99SoundHint::Named("dialog-warning".to_owned()),
+            ),
+            (
+                Osc99Sound::Named("bell".to_owned()),
+                Osc99SoundHint::Named("bell".to_owned()),
+            ),
+        ] {
+            let args = state.notify_args(
+                None,
+                &Notification99Data {
+                    sound: sound.clone(),
+                    ..notification()
+                },
+            );
+            assert_eq!(args.hints.sound, expected, "{sound:?}");
+        }
+    }
+
+    #[test]
+    fn hints_become_the_wire_dictionary() {
+        let hints = NotifyHints {
+            urgency: 1,
+            category: Some("im".to_owned()),
+            sound: Osc99SoundHint::Suppress,
+            image: None,
+        };
+        let map = hints.to_map();
+        let mut keys: Vec<_> = map.keys().copied().collect();
+        keys.sort_unstable();
+
+        assert_eq!(keys, ["category", "suppress-sound", "urgency"]);
+        assert_eq!(map.get("suppress-sound"), Some(&Value::from(true)));
+        assert_eq!(map.get("urgency"), Some(&Value::from(1u8)));
+
+        let named = NotifyHints {
+            sound: Osc99SoundHint::Named("dialog-error".to_owned()),
+            ..hints
+        };
+        let map = named.to_map();
+        assert_eq!(
+            map.get("sound-name"),
+            Some(&Value::from("dialog-error".to_owned()))
+        );
+        assert!(!map.contains_key("suppress-sound"));
+    }
+
+    #[test]
+    fn notify_args_use_an_existing_icon_name_over_data() -> TestResult {
+        let state = state_with_icons(&["mail-unread"], &[]);
+        let args = state.notify_args(
+            None,
+            &Notification99Data {
+                icon_names: strings(&["mail-unread"]),
+                icon_data: Some(png(2, 2)?),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "mail-unread");
+        assert_eq!(args.hints.image, None);
+        Ok(())
+    }
+
+    #[test]
+    fn notify_args_send_decoded_data_as_image_data() -> TestResult {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                icon_names: strings(&["unknown"]),
+                icon_data: Some(png(3, 2)?),
+                ..notification()
+            },
+        );
+
         assert_eq!(args.app_icon, "");
-        assert_eq!(args.hints, NotifyHints { urgency: 2 });
+        let image = args.hints.image.ok_or("no image hint")?;
+        assert_eq!((image.width, image.height, image.rowstride), (3, 2, 12));
+        assert_eq!(image.rgba.len(), 3 * 2 * 4);
+        Ok(())
+    }
+
+    #[test]
+    fn notify_args_downscale_a_large_image() -> TestResult {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                icon_data: Some(png(2000, 1000)?),
+                ..notification()
+            },
+        );
+
+        let image = args.hints.image.ok_or("no image hint")?;
+        assert_eq!(
+            (image.width, image.height, image.rowstride),
+            (256, 128, 1024)
+        );
+        assert_eq!(image.rgba.len(), 256 * 128 * 4);
+        Ok(())
+    }
+
+    #[test]
+    fn notify_args_fall_back_to_the_first_name_when_the_data_does_not_decode() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                icon_names: strings(&["unknown", "other"]),
+                icon_data: Some(b"not an image".to_vec()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "unknown");
+        assert_eq!(args.hints.image, None);
+    }
+
+    #[test]
+    fn notify_args_without_names_and_with_undecodable_data_use_the_freminal_icon() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                app_name: Some("my-app".to_owned()),
+                icon_data: Some(b"not an image".to_vec()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "freminal");
+        assert_eq!(args.hints.image, None);
+    }
+
+    #[test]
+    fn notify_args_take_the_icon_of_the_desktop_file_matching_the_app() {
+        let state = state_with_icons(&[], &[("my-app", "my-app-icon")]);
+        let args = state.notify_args(
+            None,
+            &Notification99Data {
+                app_name: Some("my-app".to_owned()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "my-app-icon");
+    }
+
+    #[test]
+    fn notify_args_default_to_the_freminal_icon_without_an_app_name() {
+        let args = DispatcherState::default().notify_args(None, &notification());
+
+        assert_eq!(args.app_icon, "freminal");
+    }
+
+    #[test]
+    fn notify_args_use_the_freminal_icon_when_the_app_matches_no_desktop_file() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                app_name: Some("unknown-app".to_owned()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "freminal");
     }
 
     #[test]
@@ -1857,12 +2265,30 @@ mod tests {
     struct RecordedNotify {
         app_name: String,
         replaces_id: u32,
+        app_icon: String,
         summary: String,
         body: String,
         actions: Vec<String>,
         urgency: Option<u8>,
+        /// The key of every hint, sorted.
+        hint_keys: Vec<String>,
+        category: Option<String>,
+        sound_name: Option<String>,
+        /// `(width, height, rowstride, has_alpha, bits_per_sample, channels,
+        /// data length)` of the `image-data` hint.
+        image: Option<RecordedImage>,
         expire_timeout: i32,
         assigned_id: u32,
+    }
+
+    /// The `image-data` hint's `(iiibiiay)` structure, summarised.
+    type RecordedImage = (i32, i32, i32, bool, i32, i32, usize);
+
+    fn recorded_image(value: &OwnedValue) -> Option<RecordedImage> {
+        let structure = Structure::try_from(Value::from(value.try_clone().ok()?)).ok()?;
+        let (w, h, stride, alpha, bits, channels, data) =
+            <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(structure).ok()?;
+        Some((w, h, stride, alpha, bits, channels, data.len()))
     }
 
     /// The `Notify` arguments, as the fake daemon deserialises them.
@@ -1936,7 +2362,7 @@ mod tests {
             };
             match member.as_str() {
                 "Notify" => {
-                    let (app_name, replaces_id, _icon, summary, body, actions, hints, timeout) =
+                    let (app_name, replaces_id, app_icon, summary, body, actions, hints, timeout) =
                         message.body().deserialize::<NotifyBody>()?;
                     if summary == UNANSWERED_SUMMARY {
                         continue;
@@ -1951,15 +2377,26 @@ mod tests {
                     }
                     let mut notifies = log.notifies.lock().unwrap_or_else(PoisonError::into_inner);
                     let assigned_id = u32::try_from(notifies.len()).map_or(u32::MAX, |n| n + 1);
+                    let mut hint_keys: Vec<String> = hints.keys().cloned().collect();
+                    hint_keys.sort();
                     notifies.push(RecordedNotify {
                         app_name,
                         replaces_id,
+                        app_icon,
                         summary,
                         body,
                         actions,
                         urgency: hints
                             .get("urgency")
                             .and_then(|value| u8::try_from(value).ok()),
+                        hint_keys,
+                        category: hints
+                            .get("category")
+                            .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
+                        sound_name: hints
+                            .get("sound-name")
+                            .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
+                        image: hints.get("image-data").and_then(recorded_image),
                         expire_timeout: timeout,
                         assigned_id,
                     });
@@ -2159,10 +2596,15 @@ mod tests {
             [RecordedNotify {
                 app_name: "freminal".to_owned(),
                 replaces_id: 0,
+                app_icon: "freminal".to_owned(),
                 summary: "Title".to_owned(),
                 body: "Body".to_owned(),
                 actions: strings(&["default", "", "1", "A", "2", "B"]),
                 urgency: Some(2),
+                hint_keys: strings(&["urgency"]),
+                category: None,
+                sound_name: None,
+                image: None,
                 expire_timeout: 5000,
                 assigned_id: 1,
             }]
@@ -2189,6 +2631,75 @@ mod tests {
         for _ in 0..4 {
             woken.recv_timeout(EVENT_TIMEOUT)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn presentation_hints_arrive_over_the_wire() -> TestResult {
+        let rig = rig(&["body", "actions", "sound"])?;
+        let (waker, _woken) = counting_waker();
+        let mut handle = Osc99DbusService::spawn_with_connection(rig.client.clone(), waker);
+        assert!(matches!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(_)
+        ));
+
+        assert_eq!(
+            handle.show(
+                instance(1),
+                None,
+                &Notification99Data {
+                    icon_data: Some(png(4, 3)?),
+                    notification_types: strings(&["email.arrived"]),
+                    sound: Osc99Sound::Named("info".to_owned()),
+                    ..notification()
+                },
+            ),
+            Osc99SystemDispatch::Queued
+        );
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        let recorded = rig.recorded();
+        assert_eq!(recorded.len(), 1);
+        let notify = &recorded[0];
+        assert_eq!(
+            notify.hint_keys,
+            strings(&["category", "image-data", "sound-name", "urgency"])
+        );
+        assert_eq!(notify.category.as_deref(), Some("email.arrived"));
+        assert_eq!(notify.sound_name.as_deref(), Some("dialog-information"));
+        assert_eq!(notify.image, Some((4, 3, 16, true, 8, 4, 4 * 3 * 4)));
+        assert_eq!(notify.app_icon, "");
+        Ok(())
+    }
+
+    #[test]
+    fn a_silent_notification_sends_suppress_sound() -> TestResult {
+        let rig = rig(&["body", "actions"])?;
+        let (waker, _woken) = counting_waker();
+        let mut handle = Osc99DbusService::spawn_with_connection(rig.client.clone(), waker);
+        assert!(matches!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(_)
+        ));
+
+        assert_eq!(
+            handle.show(
+                instance(1),
+                None,
+                &Notification99Data {
+                    sound: Osc99Sound::Silent,
+                    ..notification()
+                },
+            ),
+            Osc99SystemDispatch::Queued
+        );
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        assert_eq!(
+            rig.recorded()[0].hint_keys,
+            strings(&["suppress-sound", "urgency"])
+        );
         Ok(())
     }
 
@@ -2511,7 +3022,11 @@ mod tests {
     #[test]
     fn an_unreachable_bus_reports_unavailable_once_and_fails_every_show() -> TestResult {
         let (waker, woken) = counting_waker();
-        let mut handle = start(|| Err(zbus::Error::Failure("no bus".to_owned())), waker);
+        let mut handle = start(
+            || Err(zbus::Error::Failure("no bus".to_owned())),
+            waker,
+            Box::new(NoIconLookup),
+        );
 
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
 
@@ -2556,7 +3071,11 @@ mod tests {
     #[test]
     fn a_request_after_the_dispatcher_is_gone_returns_failed_and_queues_no_event() -> TestResult {
         let (waker, _woken) = counting_waker();
-        let mut handle = start(|| Err(zbus::Error::Failure("no bus".to_owned())), waker);
+        let mut handle = start(
+            || Err(zbus::Error::Failure("no bus".to_owned())),
+            waker,
+            Box::new(NoIconLookup),
+        );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
 
         // Replace the command sender with one whose receiver is already gone,

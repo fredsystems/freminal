@@ -12,6 +12,11 @@
 #[cfg(all(unix, not(target_os = "macos")))]
 mod dbus_service;
 mod filter;
+mod icon_cache;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod icon_lookup;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod presentation;
 mod registry;
 
 use std::sync::Weak;
@@ -34,6 +39,7 @@ use crate::gui::toast::{
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use dbus_service::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
+pub use icon_cache::Osc99IconCache;
 pub use registry::Osc99Registry;
 
 /// The registry's identity for one displayed notification.

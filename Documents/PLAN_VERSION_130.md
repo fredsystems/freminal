@@ -5051,7 +5051,9 @@ deliberately differs from kitty is marked **(differs from kitty)**.
   - A close or action for a D-Bus id with no live instance is ignored (this covers replaced
     notifications).
 - The `image-data` hint key is used unconditionally; notification spec 1.2 daemons are
-  universal. A decoded icon larger than 1024×1024 is downscaled to 256×256 before sending.
+  universal. A decoded icon with a side over 256 is downscaled to fit 256×256 before sending
+  (superseded at 138.14 from "over 1024", for transport cost). Decoding is limited to
+  4096×4096 and 64 MiB.
 
 **macOS / Windows system leg.**
 
@@ -6019,6 +6021,23 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     machine (daemon `:1.21`), using temporary ignored tests that were not committed. A real
     show and `CloseNotification` produced `Shown` then `Closed`. 5,000 forged
     `NotificationClosed` signals from a second connection produced no event.
+- **138.14 (done).** Presentation is pure (`presentation.rs`). The XDG scans
+  (`icon_lookup.rs`) are lazy and run on the dispatcher thread.
+  - The scans follow symlinks, which NixOS profiles need, but enter each canonical directory
+    only once. They are bounded at depth 6, 100k icon names and 20k `.desktop` files.
+  - `Osc99IconCache` is LRU (64 entries / 4 MiB). Resolved bytes reach every system leg
+    through `icon_data`.
+  - When no rule finds an icon, `app_icon` is `freminal`. Tests use an empty lookup and never
+    touch the real filesystem.
+  - Orchestrator review fixes, both decisions:
+    - Icon decoding goes through `ImageReader` with strict limits: 4096×4096 and a 64 MiB
+      allocation cap. A 1 MiB PNG declaring 30000×30000 is rejected; a header-patched test
+      covers this.
+    - `image-data` is downscaled whenever a side exceeds 256, because zvariant encodes the
+      byte array as one `Value` per byte; a 1024² icon would cost about 100 MB in transit.
+      The plan's "over 1024 → 256" is superseded.
+  - Sound hints are sent whatever the daemon's `sound` capability says (daemons ignore
+    unknown hints). The advertisement follows the capability (138.17).
 
 ---
 
