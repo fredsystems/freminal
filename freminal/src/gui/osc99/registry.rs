@@ -1042,7 +1042,11 @@ mod tests {
     }
 
     #[test]
-    fn toast_spec_explicit_expiry_wins_over_urgency() {
+    fn toast_spec_explicit_expiry_leaves_the_deadline_to_the_registry() {
+        // A `w=` toast stays until dismissed: the exact deadline is the
+        // registry's (see `the_deadline_closes_a_toast_whose_own_lifetime_is_longer`),
+        // so the toast must not carry a second clock that hovering could
+        // extend past it. This holds whatever the urgency.
         let Some(ms) = NonZeroU32::new(5000) else {
             panic!("5000 is non-zero");
         };
@@ -1054,7 +1058,7 @@ mod tests {
         ] {
             assert_eq!(
                 spec_for(urgency, five_seconds).lifetime,
-                ToastLifetime::Fixed(Duration::from_secs(5)),
+                ToastLifetime::UntilDismissed,
                 "urgency {urgency:?}"
             );
             assert_eq!(

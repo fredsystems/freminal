@@ -17,10 +17,15 @@
 //!
 //! Toasts auto-expire after a kind-dependent duration unless the user hovers
 //! over them, in which case the timer is paused.  Error toasts expire after
-//! 15 seconds, warnings after 10, and info after 6.  The user can dismiss any
-//! toast immediately by clicking anywhere on it; for an ordinary (unkeyed)
-//! toast the "x" glyph shown at the pill's right edge is a visual affordance
-//! for this, not a separate hit target.
+//! 15 seconds, warnings after 10, and info after 6.  Hovering holds a toast
+//! only while it has a timer to hold: [`ToastLifetime::KindDefault`] and
+//! [`ToastLifetime::Fixed`]. A toast that never expires on its own
+//! ([`ToastLifetime::UntilDismissed`]) has nothing to pause, and an OSC 99
+//! `w=` toast is one of those, because its deadline is enforced by the OSC 99
+//! registry, not by the toast. The user can dismiss any toast immediately by
+//! clicking anywhere on it (the pointer shows a hand over the whole pill); for
+//! an ordinary (unkeyed) toast the "x" glyph shown at the pill's right edge
+//! is a visual affordance for this, not a separate hit target.
 //!
 //! A toast may also carry an opaque [`ToastKey`] (see
 //! [`ToastStack::push_keyed`]). Keyed toasts have a caller-chosen
@@ -50,11 +55,12 @@ use crate::gui::panes::PaneId;
 
 mod buttons;
 mod hit;
+mod input;
 mod layout;
 #[cfg(test)]
 mod test_support;
 
-use self::hit::ToastClickPart;
+use self::hit::{PointerOver, ToastClickPart, ToastTarget};
 
 // ---------------------------------------------------------------------------
 //  Animation constants
@@ -80,6 +86,10 @@ const SLIDE_IN_PTS: f32 = 24.0;
 
 /// Scale factor a toast animates in from on entry (1.0 = full size, settled).
 const SCALE_IN: f32 = 0.92;
+
+/// The shortest a [`ToastLifetime::Fixed`] toast lives: long enough for the
+/// entry animation and the exit fade to both complete.
+const MIN_FIXED_LIFETIME: Duration = ANIM_IN.saturating_add(ANIM_OUT);
 
 /// Grace window after the last hover during which a toast is held fully
 /// visible (its removal timer paused). After this grace, a toast that hover
@@ -190,10 +200,17 @@ pub(super) enum ToastLifetime {
     /// The toast kind's default ([`ToastKind::default_duration`]). Every
     /// unkeyed toast uses this.
     KindDefault,
-    /// An explicit duration.
+    /// An explicit duration, never shorter than [`MIN_FIXED_LIFETIME`]
+    /// ([`ANIM_IN`] + [`ANIM_OUT`]): a shorter value is raised to it where the
+    /// lifetime is evaluated (see [`Toast::total_lifetime`]), so the entry and
+    /// exit animations always fit. Hovering holds the toast, like
+    /// [`Self::KindDefault`].
     Fixed(Duration),
-    /// Never expires; only a click, eviction or [`ToastStack::close_keyed`]
-    /// removes it.
+    /// Never expires on its own, so hovering has no timer to hold; only a
+    /// click, eviction (last, see [`ToastStack::push_entry`]) or
+    /// [`ToastStack::close_keyed`] removes it. The owner of such a toast is
+    /// responsible for any deadline: OSC 99 `w=` toasts use this and the
+    /// registry closes them through `CloseToast`.
     UntilDismissed,
 }
 
@@ -217,15 +234,6 @@ pub(super) struct ToastEvent {
     pub key: ToastKey,
     /// What happened.
     pub kind: ToastEventKind,
-}
-
-/// Outcome of [`ToastStack::replace_keyed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToastReplace {
-    /// A toast with the old key existed and was updated in place.
-    Replaced,
-    /// No toast had the old key; a new one was pushed instead.
-    Pushed,
 }
 
 /// The most buttons a toast keeps. Further labels are dropped (the PTY side
@@ -263,8 +271,11 @@ pub(super) struct Toast {
     buttons: Vec<String>,
     /// Icon override; `None` shows the kind's own icon (see [`Self::icon`]).
     icon: Option<ChromeIcon>,
-    /// Monotonic id used as the egui widget id seed, so each toast has
-    /// a stable id across frames even after list reordering.
+    /// Monotonic id (from [`ToastStack::alloc_id`]) that ties a layout output
+    /// and a click back to this toast: it is stable across frames and
+    /// survives other toasts being removed or the list being reordered. It is
+    /// not an egui widget id; the interaction areas are keyed by position in
+    /// the laid-out list.
     id: u64,
     /// When the toast was created.  Drives the entry animation only; a
     /// keyed replace keeps it so the toast does not re-enter.
@@ -344,10 +355,16 @@ impl Toast {
 
     /// Total nominal lifetime, or `None` if the toast never expires on its
     /// own ([`ToastLifetime::UntilDismissed`]).
-    const fn total_lifetime(&self) -> Option<Duration> {
+    ///
+    /// A [`ToastLifetime::Fixed`] duration is raised to
+    /// [`MIN_FIXED_LIFETIME`]: both [`Self::is_expired`] and [`Self::anim`]
+    /// read the lifetime only through here, so they agree on the clamp and a
+    /// short toast cannot be removed before its entry animation finishes or
+    /// start fading before it has finished entering.
+    fn total_lifetime(&self) -> Option<Duration> {
         match self.lifetime {
             ToastLifetime::KindDefault => Some(self.kind.default_duration()),
-            ToastLifetime::Fixed(duration) => Some(duration),
+            ToastLifetime::Fixed(duration) => Some(duration.max(MIN_FIXED_LIFETIME)),
             ToastLifetime::UntilDismissed => None,
         }
     }
@@ -584,8 +601,12 @@ impl ToastPlacement {
 pub(super) struct ToastStack {
     entries: Vec<Toast>,
     next_id: u64,
-    /// Cached "is any toast currently mid-animation" signal (subtask
-    /// 121.14), recomputed at the end of every [`Self::show`] call and
+    /// Cached "does the pointer-motion repaint gate need to treat toasts as
+    /// live" signal (subtask 121.14): `true` while any toast is
+    /// mid-animation, or while the pointer is over a toast (so a hover fill
+    /// or hand cursor is cleared by the motion that leaves it, not up to a
+    /// settled-cadence frame later). Recomputed at the end of every
+    /// [`Self::show`] call and
     /// consulted by [`Self::is_animating`]. `App::pointer_motion_needs_repaint`
     /// runs OUTSIDE any frame (from `event_loop`'s `CursorMoved` handling),
     /// where [`Self::measure_inputs`] cannot be called — this field is what
@@ -595,9 +616,15 @@ pub(super) struct ToastStack {
     /// Events produced by keyed toasts since the last
     /// [`Self::take_events`]. Unkeyed toasts never add to this.
     events: Vec<ToastEvent>,
+    /// The toast part the primary button was pressed on, while it is held
+    /// (see `ToastStack::track_press`). A click is acted on only if the
+    /// release lands on the same part. `None` when no press is in progress, or
+    /// the press began outside every toast.
+    press: Option<ToastTarget>,
 }
 
-/// Maximum simultaneous toasts.  Older ones are evicted.
+/// Maximum simultaneous toasts.  Older ones are evicted (see
+/// [`ToastStack::push_entry`] for which).
 const MAX_TOASTS: usize = 5;
 
 /// The font sizes (physical pixels) and `pixels_per_point` scale
@@ -712,8 +739,9 @@ impl ToastStack {
     }
 
     /// Whether any toast on the stack is currently mid-animation (entry/exit
-    /// fade+slide+scale), as of the most recent [`Self::show`] call or
-    /// [`Self::push`] (subtask 121.14).
+    /// fade+slide+scale) or under the pointer (so its hover fill and cursor
+    /// need a frame when the pointer leaves), as of the most recent
+    /// [`Self::show`] call or [`Self::push`] (subtask 121.14).
     ///
     /// Mere presence (`!is_empty()`) is NOT sufficient grounds to treat a
     /// toast as needing continuous repaints — a toast spends most of its
@@ -761,18 +789,21 @@ impl ToastStack {
     /// **its lifetime restarts**: keeping the age would make a toast updated
     /// every second expire mid-update. No event is produced for `old`.
     ///
+    /// If another toast already holds `new_key`, that toast is closed first
+    /// (a `Closed` event for `new_key`), so a key never names two toasts.
+    ///
     /// If no toast is keyed `old`, behaves as [`Self::push_keyed`] with
-    /// [`ToastPlacement::TOP_RIGHT`] and returns [`ToastReplace::Pushed`].
-    /// (No placement parameter: with one this method would exceed the
-    /// `too_many_arguments` limit, and a replaced toast always keeps its own.)
+    /// [`ToastPlacement::TOP_RIGHT`]. (No placement parameter: with one this
+    /// method would exceed the `too_many_arguments` limit, and a replaced
+    /// toast always keeps its own.)
     pub(super) fn replace_keyed(
         &mut self,
         old: ToastKey,
         new_key: ToastKey,
         content: ToastContent,
         lifetime: ToastLifetime,
-    ) -> ToastReplace {
-        self.replace_keyed_at(Instant::now(), old, new_key, content, lifetime)
+    ) {
+        self.replace_keyed_at(Instant::now(), old, new_key, content, lifetime);
     }
 
     /// [`Self::replace_keyed`] with an injected `now` (the new `life_start`),
@@ -784,10 +815,28 @@ impl ToastStack {
         new_key: ToastKey,
         content: ToastContent,
         lifetime: ToastLifetime,
-    ) -> ToastReplace {
+    ) {
+        // Close any toast already holding `new_key`, except the one being
+        // replaced (which may be re-keyed to the key it already has).
+        let target_id = self
+            .entries
+            .iter()
+            .find(|t| t.key == Some(old))
+            .map(|t| t.id);
+        let mut closed = Vec::new();
+        self.entries.retain(|t| {
+            if t.key == Some(new_key) && Some(t.id) != target_id {
+                closed.push(new_key);
+                false
+            } else {
+                true
+            }
+        });
+        self.record_closed(closed);
+
         let Some(toast) = self.entries.iter_mut().find(|t| t.key == Some(old)) else {
             self.push_keyed(new_key, content, lifetime, ToastPlacement::TOP_RIGHT);
-            return ToastReplace::Pushed;
+            return;
         };
         let ToastContent {
             kind,
@@ -797,6 +846,11 @@ impl ToastStack {
             icon,
         } = content;
         buttons.truncate(MAX_TOAST_BUTTONS);
+        let content_changed = toast.kind != kind
+            || toast.title != title
+            || toast.detail != detail
+            || toast.buttons != buttons
+            || toast.icon != icon;
         toast.key = Some(new_key);
         toast.kind = kind;
         toast.title = title;
@@ -805,7 +859,13 @@ impl ToastStack {
         toast.icon = icon;
         toast.lifetime = lifetime;
         toast.life_start = now;
-        ToastReplace::Replaced
+        if content_changed {
+            // A changed toast is repainted with its new text and size, and
+            // the restarted lifetime can bring a fading toast back to full
+            // opacity; neither is visible to the pointer-motion repaint gate
+            // until the next `show`, so re-arm it now (as `push_entry` does).
+            self.cached_is_animating = true;
+        }
     }
 
     /// Remove every toast keyed `key`, recording `Closed` for each. A no-op
@@ -892,13 +952,24 @@ impl ToastStack {
         self.push_entry(toast);
     }
 
-    /// Append `toast`, evicting the oldest entries beyond [`MAX_TOASTS`]
-    /// (recording `Closed` for each evicted keyed toast).
+    /// Append `toast`, evicting entries beyond [`MAX_TOASTS`] (recording
+    /// `Closed` for each evicted keyed toast).
+    ///
+    /// Eviction prefers the oldest toast that can expire on its own, so a
+    /// burst of transient toasts never pushes out an `UntilDismissed` one (an
+    /// OSC 99 notification the user has not yet answered). The toast just
+    /// pushed is never the one evicted while an older entry could be: when
+    /// every older toast is `UntilDismissed` the oldest of them goes, rather
+    /// than the notification being dropped before it was ever shown.
     fn push_entry(&mut self, toast: Toast) {
         self.entries.push(toast);
-        // Evict oldest entries beyond the cap.
         while self.entries.len() > MAX_TOASTS {
-            let evicted = self.entries.remove(0);
+            let older = self.entries.len() - 1;
+            let index = self.entries[..older]
+                .iter()
+                .position(|t| !matches!(t.lifetime, ToastLifetime::UntilDismissed))
+                .unwrap_or(0);
+            let evicted = self.entries.remove(index);
             self.record_closed(evicted.key);
         }
         // Subtask 121.14: eagerly mark the stack as animating. A freshly
@@ -938,6 +1009,11 @@ impl ToastStack {
     /// [`ToastFrameResources`]), used only for measuring/shaping — never
     /// touched from inside the `PaintCallback`.
     ///
+    /// A toast that would extend below `content_rect` is not laid out (see
+    /// `layout::layout_toasts`): it stays on the stack, undrawn and not
+    /// clickable, with its lifetime still running, until older toasts leave
+    /// and make room.
+    ///
     /// Clears auto-expired toasts and any the user dismissed by clicking
     /// anywhere within a toast's pill (its `hit_rect_logical`, computed by
     /// `layout_toasts`). Keyed toasts record their [`ToastEvent`]s as they
@@ -948,7 +1024,7 @@ impl ToastStack {
     /// 121.12: `Some(16ms)` while any toast is animating, `Some(250ms)` if
     /// the stack is non-empty but settled, `None` when empty) and the laid-
     /// out pill hit-rects (subtask 121.14, logical points, window space —
-    /// same rects [`Self::hit_test`] hit-tests against). THE CALLER MUST
+    /// same rects [`Self::interact`] hit-tests against). THE CALLER MUST
     /// SCHEDULE THE RETURNED DELAY AND CACHE THE RETURNED RECTS — this
     /// method deliberately does NOT call `ctx.request_repaint_after()`
     /// itself, because that would be invisible to `effective_repaint_delay`'s
@@ -1008,7 +1084,7 @@ impl ToastStack {
         // coordinates need no further translation to land in the right
         // place. Each toast's actual anchor is resolved per-window by
         // `layout_positioned` (via `resolve_anchor`) rather than hardcoded.
-        let outputs = self.layout_positioned(
+        let mut outputs = self.layout_positioned(
             &inputs,
             this_window_id,
             content_rect,
@@ -1028,7 +1104,11 @@ impl ToastStack {
         // are not a typing modal, so this deliberately does NOT touch the
         // `ui_overlay_open` / `suppress_input` global gate — only the exact
         // click that lands on a toast is consumed. (Review finding #3.)
-        self.hit_test(ctx, &outputs, now);
+        //
+        // `interact` also tracks the press, recolours the hovered/pressed
+        // button in `outputs` (so it must run before the quads below are
+        // built), and asks for the pointing hand over a toast.
+        let pointer_over = self.interact(ctx, &mut outputs, now);
 
         let text_instances = {
             let mut rs = render_state
@@ -1070,7 +1150,10 @@ impl ToastStack {
         //
         // Also caches `is_animating` (subtask 121.14) from the SAME
         // `entries.is_empty()` / `any_animating` decision, so the two never
-        // disagree.
+        // disagree. A pointer over a toast keeps the flag set (without
+        // changing the delay): the toast shows a hand cursor and possibly a
+        // button hover fill, and the motion that leaves it must repaint to
+        // clear them.
         let repaint_delay = if self.entries.is_empty() {
             self.cached_is_animating = false;
             None
@@ -1078,7 +1161,7 @@ impl ToastStack {
             self.cached_is_animating = true;
             Some(Duration::from_millis(16))
         } else {
-            self.cached_is_animating = false;
+            self.cached_is_animating = pointer_over == PointerOver::Toast;
             Some(Duration::from_millis(250))
         };
         ToastShowOutcome {
@@ -1147,11 +1230,11 @@ mod tests {
 
     // ── Subtask 121.14: `ToastStack::is_animating` / `cached_is_animating` ──
     //
-    // `ToastStack::show` needs a live `WindowId` (no public constructor
-    // outside the real winit event loop — see `layout_positioned`'s doc), so
-    // it cannot be driven headlessly here. These tests instead cover the
-    // reachable half: the cached flag's default and `push`'s eager-`true`
-    // write. The `show()`-side half (recomputing the flag from
+    // `ToastStack::show` registers a GL `PaintCallback` and needs the
+    // window's `FontManager` and toast render state, so it is not driven
+    // end to end here. These tests instead cover the reachable half: the
+    // cached flag's default and `push`'s eager-`true` write. The
+    // `show()`-side half (recomputing the flag from
     // `any_animating`) is covered instead at the `measure_inputs` level by
     // `measure_inputs_leaves_a_short_toast_unchanged` /
     // `measure_inputs_truncates_long_detail_and_pill_stays_within_max_width`
@@ -1731,7 +1814,7 @@ mod tests {
         let before = s.entries[1].clone();
 
         let later = before.created + Duration::from_secs(5);
-        let outcome = s.replace_keyed_at(
+        s.replace_keyed_at(
             later,
             ToastKey(2),
             ToastKey(20),
@@ -1744,7 +1827,6 @@ mod tests {
             },
             ToastLifetime::Fixed(Duration::from_secs(9)),
         );
-        assert_eq!(outcome, ToastReplace::Replaced);
         assert_eq!(s.len(), 3);
 
         let after = &s.entries[1];
@@ -1791,13 +1873,12 @@ mod tests {
     fn replace_keyed_with_an_absent_old_key_pushes() {
         let mut s = ToastStack::default();
         push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
-        let outcome = s.replace_keyed(
+        s.replace_keyed(
             ToastKey(99),
             ToastKey(5),
             info_content("new"),
             ToastLifetime::UntilDismissed,
         );
-        assert_eq!(outcome, ToastReplace::Pushed);
         assert_eq!(s.len(), 2);
         assert_eq!(s.entries[1].key, Some(ToastKey(5)));
         assert_eq!(s.entries[1].lifetime, ToastLifetime::UntilDismissed);
@@ -1810,7 +1891,7 @@ mod tests {
         let mut s = ToastStack::default();
         push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
         let id = s.entries[0].id;
-        let outcome = s.replace_keyed(
+        s.replace_keyed(
             ToastKey(1),
             ToastKey(2),
             ToastContent {
@@ -1819,7 +1900,6 @@ mod tests {
             },
             ToastLifetime::KindDefault,
         );
-        assert_eq!(outcome, ToastReplace::Replaced);
         assert_eq!(s.entries[0].id, id);
         assert_eq!(s.entries[0].key, Some(ToastKey(2)));
     }
@@ -1980,5 +2060,258 @@ mod tests {
         let mut s = ToastStack::default();
         s.error("e", None);
         assert_eq!(s.entries[0].buttons.len(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    //  138.C14: lifetime clamp, eviction order, replace edge cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_short_fixed_lifetime_is_raised_to_the_animation_span() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::Fixed(Duration::from_millis(50)));
+        let toast = &s.entries[0];
+        assert_eq!(toast.total_lifetime(), Some(MIN_FIXED_LIFETIME));
+        assert_eq!(MIN_FIXED_LIFETIME, ANIM_IN + ANIM_OUT);
+
+        let created = toast.created;
+        // Past the requested 50ms but inside the entry animation: still here.
+        assert!(!toast.is_expired(created + Duration::from_millis(200)));
+        // Entry has finished before the exit fade starts, so the toast is
+        // fully settled for an instant rather than fading in and out at once.
+        assert_eq!(
+            toast.anim(created + ANIM_IN),
+            SETTLED_ANIM,
+            "settled the moment entry ends"
+        );
+        // It lives exactly the clamped span, then goes.
+        assert!(!toast.is_expired(created + MIN_FIXED_LIFETIME));
+        assert!(toast.is_expired(created + MIN_FIXED_LIFETIME + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn a_fixed_lifetime_longer_than_the_span_is_left_alone() {
+        let mut s = ToastStack::default();
+        let long = Duration::from_secs(9);
+        push_keyed_info(&mut s, 1, ToastLifetime::Fixed(long));
+        assert_eq!(s.entries[0].total_lifetime(), Some(long));
+    }
+
+    #[test]
+    fn hovering_past_the_lifetime_holds_then_fades_then_closes() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 5, ToastLifetime::Fixed(Duration::from_secs(2)));
+        let created = s.entries[0].created;
+        // Hovered at 3s, a second past the 2s lifetime.
+        let hovered_at = created + Duration::from_secs(3);
+        s.entries[0].last_hovered = Some(hovered_at);
+
+        s.sweep_expired(hovered_at + Duration::from_millis(100));
+        assert_eq!(s.len(), 1, "held while the hover is recent");
+        s.sweep_expired(
+            hovered_at + HOVER_HOLD + ANIM_OUT.saturating_sub(Duration::from_millis(1)),
+        );
+        assert_eq!(s.len(), 1, "still fading");
+        assert_eq!(s.take_events(), NO_EVENTS);
+
+        s.sweep_expired(hovered_at + HOVER_HOLD + ANIM_OUT);
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![closed(5)]);
+    }
+
+    #[test]
+    fn eviction_prefers_the_oldest_toast_that_can_expire() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 0, ToastLifetime::UntilDismissed);
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        push_keyed_info(&mut s, 2, ToastLifetime::UntilDismissed);
+        push_keyed_info(&mut s, 3, ToastLifetime::Fixed(Duration::from_secs(9)));
+        push_keyed_info(&mut s, 4, ToastLifetime::UntilDismissed);
+        assert_eq!(s.take_events(), NO_EVENTS);
+
+        push_keyed_info(&mut s, 5, ToastLifetime::UntilDismissed);
+        assert_eq!(s.len(), MAX_TOASTS);
+        assert_eq!(
+            s.take_events(),
+            vec![closed(1)],
+            "the oldest non-UntilDismissed toast goes, not the oldest toast"
+        );
+        let keys: Vec<_> = s.entries.iter().filter_map(|t| t.key).collect();
+        assert_eq!(
+            keys,
+            [0, 2, 3, 4, 5].map(ToastKey),
+            "order of the survivors is kept"
+        );
+    }
+
+    #[test]
+    fn eviction_with_only_until_dismissed_toasts_removes_the_oldest() {
+        let mut s = ToastStack::default();
+        for key in 0..=u64::try_from(MAX_TOASTS).unwrap() {
+            push_keyed_info(&mut s, key, ToastLifetime::UntilDismissed);
+        }
+        assert_eq!(s.len(), MAX_TOASTS);
+        assert_eq!(s.take_events(), vec![closed(0)]);
+    }
+
+    #[test]
+    fn a_new_transient_toast_is_not_evicted_to_keep_older_until_dismissed_ones() {
+        // The just-pushed toast is the only one that could expire. Evicting it
+        // would drop the notification before it was ever shown, so the oldest
+        // UntilDismissed toast goes instead.
+        let mut s = ToastStack::default();
+        for key in 0..u64::try_from(MAX_TOASTS).unwrap() {
+            push_keyed_info(&mut s, key, ToastLifetime::UntilDismissed);
+        }
+        push_keyed_info(&mut s, 99, ToastLifetime::KindDefault);
+        assert_eq!(s.take_events(), vec![closed(0)]);
+        assert_eq!(s.entries.last().and_then(|t| t.key), Some(ToastKey(99)));
+    }
+
+    #[test]
+    fn eviction_of_an_unkeyed_expirable_toast_emits_nothing() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 0, ToastLifetime::UntilDismissed);
+        s.info("transient", None);
+        for key in 1..u64::try_from(MAX_TOASTS).unwrap() {
+            push_keyed_info(&mut s, key, ToastLifetime::UntilDismissed);
+        }
+        assert_eq!(s.len(), MAX_TOASTS);
+        assert_eq!(
+            s.take_events(),
+            NO_EVENTS,
+            "the unkeyed transient toast was the one evicted"
+        );
+        assert!(s.entries.iter().all(|t| t.key.is_some()));
+    }
+
+    #[test]
+    fn duplicate_keys_are_both_kept_and_close_keyed_closes_both() {
+        // `push_keyed` does not check for uniqueness (see its doc).
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 7, ToastLifetime::KindDefault);
+        push_keyed_info(&mut s, 7, ToastLifetime::KindDefault);
+        assert_eq!(s.len(), 2);
+        s.close_keyed(ToastKey(7));
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![closed(7), closed(7)]);
+    }
+
+    #[test]
+    fn replace_keyed_closes_another_toast_holding_the_new_key() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        push_keyed_info(&mut s, 2, ToastLifetime::KindDefault);
+        push_keyed_info(&mut s, 3, ToastLifetime::KindDefault);
+        s.take_events();
+        let replaced_id = s.entries[0].id;
+
+        // Re-key toast 1 to 3, which toast 3 already holds.
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(3),
+            info_content("merged"),
+            ToastLifetime::KindDefault,
+        );
+
+        assert_eq!(s.take_events(), vec![closed(3)], "the old holder closes");
+        assert_eq!(s.len(), 2);
+        let held: Vec<_> = s
+            .entries
+            .iter()
+            .filter(|t| t.key == Some(ToastKey(3)))
+            .collect();
+        assert_eq!(held.len(), 1, "the key names exactly one toast");
+        assert_eq!(held[0].id, replaced_id, "and it is the replaced toast");
+        assert_eq!(held[0].title, "merged");
+    }
+
+    #[test]
+    fn replace_keyed_with_the_same_key_closes_nothing() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        s.take_events();
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(1),
+            info_content("again"),
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn replace_keyed_with_an_absent_old_key_also_closes_a_holder_of_the_new_key() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 5, ToastLifetime::KindDefault);
+        s.take_events();
+        s.replace_keyed(
+            ToastKey(99),
+            ToastKey(5),
+            info_content("fresh"),
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.take_events(), vec![closed(5)]);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.entries[0].title, "fresh");
+    }
+
+    #[test]
+    fn replace_keyed_rearms_is_animating_only_when_the_content_changes() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        s.cached_is_animating = false;
+
+        // Identical content: nothing visible changes, so nothing is re-armed.
+        let same = info_content("toast 1");
+        s.replace_keyed(ToastKey(1), ToastKey(1), same, ToastLifetime::KindDefault);
+        assert!(!s.is_animating());
+
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(1),
+            info_content("different"),
+            ToastLifetime::KindDefault,
+        );
+        assert!(s.is_animating(), "changed text must be repainted");
+
+        s.cached_is_animating = false;
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(1),
+            ToastContent {
+                buttons: vec!["OK".to_owned()],
+                ..info_content("different")
+            },
+            ToastLifetime::KindDefault,
+        );
+        assert!(s.is_animating(), "changed buttons must be repainted");
+    }
+
+    #[test]
+    fn replacing_a_fading_toast_brings_it_back_to_full_opacity() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::Fixed(Duration::from_secs(10)));
+        let created = s.entries[0].created;
+        let fading = created + Duration::from_millis(9_800);
+        assert!(s.entries[0].anim(fading).opacity < 1.0, "premise: fading");
+
+        s.replace_keyed_at(
+            fading,
+            ToastKey(1),
+            ToastKey(1),
+            info_content("update"),
+            ToastLifetime::Fixed(Duration::from_secs(10)),
+        );
+
+        let toast = &s.entries[0];
+        assert!(!toast.is_expired(fading + Duration::from_millis(500)));
+        assert_eq!(
+            toast.anim(fading + Duration::from_millis(1)),
+            SETTLED_ANIM,
+            "no re-entry animation and no leftover fade"
+        );
+        assert!(toast.is_expired(fading + Duration::from_millis(10_001)));
     }
 }

@@ -6279,6 +6279,24 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     - buttons at ppp 2 mid-animation;
     - dismiss rect versus button rects;
     - `measure_buttons` truncation.
+- **Status:** done, for every item.
+  - **T1.** The hand cursor is set with `HoverAffordance::clickable()` on each toast area's
+    response (the cursor skill's sanctioned path; `output.cursor_icon` is never written).
+    Buttons get hover and pressed fills.
+  - **T9.** The press part is captured from the frame's own raw press event, because egui
+    clears `press_origin` on release.
+  - **T12.** `w=` toasts are `UntilDismissed`, and the registry owns the deadline.
+  - **T14.** A just-pushed toast is never the one evicted.
+  - **T16.** The oldest toast in a group is always placed, so a tall `UntilDismissed` toast
+    can still be dismissed.
+  - **`is_animating`.** The flag (which only drives repaint on pointer motion) stays set while
+    the pointer is over a toast, so hover state clears when the pointer leaves.
+  - **Structure.** `toast/input.rs` breaks the `layout` ↔ `buttons` cycle.
+  - **Orchestrator re-check.** Reverting the press-part check, the position fallback or
+    `.clickable()` makes the new headless tests fail.
+  - **Not changed.** The pre-existing `resolve_anchor(is_origin_window: bool)` parameter is
+    untouched; it predates Task 138 and only its stale justification doc was corrected. It is
+    routed to 147.29.
 
 #### 138.C15 — macOS/Windows untracked leg hardening
 
@@ -7290,6 +7308,16 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   sets the key and check it reaches the generated TOML.
 - **Depends on:** nothing.
 
+#### 147.29 — `resolve_anchor` takes a bool parameter
+
+- **Source:** Task 138.C14 (found while editing the toast layout). Predates 138.
+- **Defect today:** `freminal/src/gui/toast/layout.rs` `resolve_anchor(.., is_origin_window:
+  bool)` violates `freminal-state-representation` (no bool parameters).
+- **Scope:** `toast/layout.rs` and its tests: a two-variant named enum
+  (`ToastOriginWindow { This, Other }`).
+- **Tests:** the existing anchor tests, ported.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -7366,7 +7394,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26, 147.27 and 147.28 are independent.
+- 147.19, 147.26, 147.27, 147.28 and 147.29 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a

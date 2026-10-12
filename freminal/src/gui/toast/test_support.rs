@@ -5,8 +5,8 @@
 
 //! Fixtures shared by the toast module's test modules.
 
-use super::buttons::ToastButtonInput;
-use super::layout::{ToastGeometry, ToastLayoutInput, ToastLayoutOutput, layout_toasts};
+use super::input::{ToastButtonInput, ToastLayoutInput};
+use super::layout::{ToastGeometry, ToastLayoutOutput, layout_toasts};
 use super::{SCALE_IN, SLIDE_IN_PTS, ToastAnim, ToastKind, ToastPosition};
 use crate::gui::renderer::ToastTextMetrics;
 
@@ -22,14 +22,24 @@ pub(super) const ENTRY_ANIM: ToastAnim = ToastAnim {
     scale: SCALE_IN,
 };
 
+/// Whether a test toast has a detail line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DetailLine {
+    /// Title only.
+    Absent,
+    /// Title and a detail line.
+    Present,
+}
+
 /// Build a [`ToastLayoutInput`] from simple numbers, so layout tests
 /// never need real shaping/rasterisation.
 pub(super) fn test_input(
     id: u64,
     label_width: f32,
-    has_detail: bool,
+    detail_line: DetailLine,
     anim: ToastAnim,
 ) -> ToastLayoutInput {
+    let has_detail = detail_line == DetailLine::Present;
     ToastLayoutInput {
         id,
         kind: ToastKind::Info,
@@ -75,8 +85,8 @@ pub(super) fn test_window_rect() -> egui::Rect {
 }
 
 /// Build layout outputs for a single settled error toast (helper for the
-/// `topmost_hit` geometry tests). The interactive `hit_test` egui path
-/// itself needs a live egui context and is verified manually; these tests
+/// `topmost_hit` geometry tests). The interactive `hit_test` egui path is
+/// covered separately with a headless egui context (see `hit`'s tests); these
 /// cover the pure hit-precedence geometry it relies on.
 pub(super) fn single_toast_outputs(id: u64) -> Vec<ToastLayoutOutput> {
     let geom = ToastGeometry {
@@ -85,7 +95,7 @@ pub(super) fn single_toast_outputs(id: u64) -> Vec<ToastLayoutOutput> {
     };
     let visuals = egui::Visuals::dark();
     layout_toasts(
-        &[test_input(id, 100.0, false, SETTLED_ANIM)],
+        &[test_input(id, 100.0, DetailLine::Absent, SETTLED_ANIM)],
         ToastPosition::TopRightStack,
         geom,
         &visuals,
@@ -108,7 +118,7 @@ pub(super) fn button_input(label: &str, label_width: f32) -> ToastButtonInput {
 
 pub(super) fn buttons_output(
     buttons: Vec<ToastButtonInput>,
-    has_detail: bool,
+    detail_line: DetailLine,
     anim: ToastAnim,
     ppp: f32,
 ) -> ToastLayoutOutput {
@@ -116,7 +126,7 @@ pub(super) fn buttons_output(
         content_rect: test_window_rect(),
         active_pane_rect: None,
     };
-    let mut input = test_input(3, 100.0, has_detail, anim);
+    let mut input = test_input(3, 100.0, detail_line, anim);
     input.buttons = buttons;
     layout_toasts(
         &[input],

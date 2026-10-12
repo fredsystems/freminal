@@ -41,8 +41,16 @@ pub struct Osc99ToastSpec {
 /// Build the toast for `data`.
 ///
 /// - `Critical` urgency is an `Error` toast; everything else is `Info`.
-/// - `w=` > 0 is an exact duration, `w=0` stays until dismissed, and
-///   `w=-1` (or unset) follows urgency: `Critical` stays until dismissed,
+/// - `w=` > 0 and `w=0` both stay until dismissed, as far as the toast is
+///   concerned: the exact deadline of a positive `w=` is enforced by the
+///   registry (`Osc99Registry::tick`, which closes the toast through
+///   `CloseToast`), measured from registration. Giving the toast its own
+///   `Fixed` lifetime as well would run a second, slightly different clock
+///   (the toast's starts when it is first drawn, and hovering would extend
+///   it), so hovering a `w=` toast would hold it past the deadline the
+///   application asked for. Hovering therefore holds only toasts with a
+///   toast-owned timer: the default and the `Low` lifetime below.
+/// - `w=-1` (or unset) follows urgency: `Critical` stays until dismissed,
 ///   `Normal` uses the toast default, `Low` uses
 ///   [`OSC99_LOW_URGENCY_TOAST_LIFETIME`].
 /// - The icon is the first standard `n=` name's glyph (see
@@ -55,8 +63,7 @@ pub fn osc99_toast_spec(data: &Notification99Data) -> Osc99ToastSpec {
         NotificationUrgency::Low | NotificationUrgency::Normal => ToastKind::Info,
     };
     let lifetime = match data.expiry {
-        Osc99Expiry::After(ms) => ToastLifetime::Fixed(Duration::from_millis(u64::from(ms.get()))),
-        Osc99Expiry::Never => ToastLifetime::UntilDismissed,
+        Osc99Expiry::After(_) | Osc99Expiry::Never => ToastLifetime::UntilDismissed,
         Osc99Expiry::OsDefault => match data.urgency {
             NotificationUrgency::Critical => ToastLifetime::UntilDismissed,
             NotificationUrgency::Normal => ToastLifetime::KindDefault,

@@ -5,14 +5,18 @@
 
 //! Toast measurement, anchoring and layout: turns measured toasts into the
 //! GPU-facing pill quads, text runs and hit rects (see [`layout_toasts`]).
+//!
+//! The shared input types live in [`super::input`]; the button row's own
+//! geometry and fills live in [`super::buttons`].
 
 use std::time::Instant;
 
 use super::buttons::{
-    BUTTON_TOP_GAP_PTS, ToastButtonInput, button_flow, button_row_width, layout_buttons,
-    measure_buttons,
+    BUTTON_PAD_X_PTS, BUTTON_TOP_GAP_PTS, ButtonPaint, ButtonTint, MAX_BUTTON_WIDTH_PTS,
+    button_flow, button_row_width, layout_buttons, lighten,
 };
-use super::{ToastAnim, ToastKind, ToastMeasureSizes, ToastPosition, ToastStack};
+use super::input::{ToastButtonInput, ToastLayoutInput, ToastLayoutMetrics, text_block_height};
+use super::{ToastKind, ToastMeasureSizes, ToastPosition, ToastStack};
 use crate::gui::WindowId;
 use crate::gui::font_manager::FontManager;
 use crate::gui::icons::ChromeIcon;
@@ -35,10 +39,13 @@ use crate::gui::renderer::{
 // (egui's own coordinate space), so [`ToastStack::show`] can hit-test
 // pointer input against them without recomputing geometry.
 //
-// This module is pure and GL-free — no `FontManager`, no `glow::Context` —
-// so it is fully unit-testable with synthesized `ToastTextMetrics`. It is
-// wired into the frame by [`ToastStack::show`], which measures/shapes text
-// on the main thread, calls `layout_toasts`, and hands the resulting
+// `layout_toasts` and the geometry helpers it uses are pure and GL-free — no
+// `FontManager`, no `glow::Context` — so they are unit-testable with
+// synthesized `ToastTextMetrics`. The measuring half of this module
+// (`fit_text`, `measure_buttons`, [`ToastStack::measure_inputs`]) is not
+// pure: it shapes text through the main-thread `FontManager`, though it
+// still touches no GL. [`ToastStack::show`] measures/shapes text on the
+// main thread, calls `layout_toasts`, and hands the resulting
 // `ToastQuad`/`ToastTextRun` data to a single `PaintCallback`.
 
 /// Inner padding between a pill's edge and its content, logical points.
@@ -84,66 +91,6 @@ pub(super) struct ToastGeometry {
     pub active_pane_rect: Option<egui::Rect>,
 }
 
-/// Per-toast input to [`layout_toasts`]: its measured content plus its
-/// current animation phase.
-///
-/// Carries the exact text (`label_text`/`detail_text`, needed to build the
-/// actual [`ToastTextRun`]s), the physical pixel size each was measured at
-/// (`label_size_px`/`detail_size_px`/`icon_size_px` — needed so the run
-/// handed to [`ToastTextRenderer::build_instances`] later
-/// rasterizes at *exactly* the size [`ToastTextMetrics`] was measured at;
-/// any mismatch would desync the pill's width from the glyphs actually
-/// drawn), and each string's pre-measured [`ToastTextMetrics`] (needed for
-/// layout math). The caller measures text exactly once (via
-/// [`ToastTextRenderer::measure`]) and this function never
-/// re-shapes it.
-#[derive(Debug, Clone)]
-pub(super) struct ToastLayoutInput {
-    /// Stable id, matching [`Toast::id`](super::Toast::id), used to key the returned outputs
-    /// back to their source toast (e.g. for hit-testing dismiss clicks).
-    pub id: u64,
-    /// The toast's severity — drives color and icon.
-    pub kind: ToastKind,
-    /// The glyph drawn in the icon slot — the toast's icon override, or the
-    /// kind's own icon. [`Self::icon`] (below) is its measurement.
-    pub icon_glyph: ChromeIcon,
-    /// The exact `"Kind: title"` label string that was measured — already
-    /// whitespace-normalized and, if it would otherwise overflow the pill,
-    /// truncated with a trailing ellipsis (see [`fit_text`]). This is *the*
-    /// string handed to the emitted [`ToastTextRun`], so it is guaranteed to
-    /// fit the width [`Self::label`] (below) reports.
-    pub label_text: String,
-    /// The physical pixel size `label_text` was measured/rasterized at.
-    pub label_size_px: f32,
-    /// Measured `label_text`, in **physical** pixels (see [`ToastTextMetrics`]).
-    pub label: ToastTextMetrics,
-    /// The exact detail string that was measured — already
-    /// whitespace-normalized and fitted the same way as [`Self::label_text`]
-    /// (see [`fit_text`]). Empty when `has_detail` is `false`.
-    pub detail_text: String,
-    /// The physical pixel size `detail_text` was measured/rasterized at.
-    pub detail_size_px: f32,
-    /// Measured `detail_text`, in physical pixels. Zero-valued when
-    /// `has_detail` is `false`.
-    pub detail: ToastTextMetrics,
-    /// Whether this toast has a detail line to render.
-    pub has_detail: bool,
-    /// The physical pixel size the icon glyph was measured/rasterized at.
-    pub icon_size_px: f32,
-    /// Measured icon glyph (a single glyph), in physical pixels.
-    pub icon: ToastTextMetrics,
-    /// The physical pixel size the dismiss ("x") glyph was
-    /// measured/rasterized at.
-    pub close_size_px: f32,
-    /// Measured dismiss ("x") glyph, in physical pixels.
-    pub close: ToastTextMetrics,
-    /// This toast's current animation phase (see [`Toast::anim`](super::Toast::anim)).
-    pub anim: ToastAnim,
-    /// Measured button labels, in order. Empty for every unkeyed toast, and
-    /// then the toast's geometry is exactly that of a toast with no buttons.
-    pub buttons: Vec<ToastButtonInput>,
-}
-
 /// One laid-out toast, ready to hand to the toast/toast-text GPU passes.
 ///
 /// All fields describing GPU draw data (`pill`, `runs`) are in **physical**
@@ -164,7 +111,7 @@ pub(super) struct ToastLayoutOutput {
     /// Interactable pill rect, logical points, window space:
     /// `[min_x, min_y, max_x, max_y]`. The whole pill is the click target —
     /// a primary click anywhere within this rect closes the toast (see
-    /// [`ToastStack::hit_test`]). For an unkeyed toast the drawn "x" glyph
+    /// `ToastStack::interact`). For an unkeyed toast the drawn "x" glyph
     /// (in `runs`) is purely a visual affordance; for a keyed toast it is a
     /// separate hit region ([`Self::dismiss_rect_logical`]) that is tested
     /// first and reports `Closed` without `Activated`.
@@ -180,6 +127,10 @@ pub(super) struct ToastLayoutOutput {
     /// One hit rect per button, in label order (index _i_ is button _i_ + 1),
     /// logical points, window space, clamped into [`Self::hit_rect_logical`].
     pub button_rects_logical: Vec<[f32; 4]>,
+    /// Which way a button's fill moves off the pill (darker on light pills).
+    /// With [`Self::pill`]'s gradient stops this is all `hit::apply_button_states`
+    /// needs to recolour a button for hover/pressed.
+    pub button_tint: ButtonTint,
 }
 
 /// The maximum corner radius (in logical points) among the theme's
@@ -204,17 +155,6 @@ fn color32_to_rgba(color: egui::Color32) -> [f32; 4] {
         f32::from(straight[1]) / 255.0,
         f32::from(straight[2]) / 255.0,
         f32::from(straight[3]) / 255.0,
-    ]
-}
-
-/// Shift each color channel of `rgba` by `amount` (positive lightens,
-/// negative darkens), clamped to `0..=1`. Alpha is left untouched.
-pub(super) fn lighten(rgba: [f32; 4], amount: f32) -> [f32; 4] {
-    [
-        (rgba[0] + amount).clamp(0.0, 1.0),
-        (rgba[1] + amount).clamp(0.0, 1.0),
-        (rgba[2] + amount).clamp(0.0, 1.0),
-        rgba[3],
     ]
 }
 
@@ -317,6 +257,33 @@ pub(super) fn fit_text(
     best
 }
 
+/// Measure and fit each of `labels` as a button label at `size_px`, so a
+/// single button always fits [`MAX_BUTTON_WIDTH_PTS`].
+///
+/// Lives here, with [`fit_text`], rather than in `buttons`: it needs the
+/// shaping half of this module, and keeping it out of `buttons` is what lets
+/// `buttons` depend on `input` alone.
+fn measure_buttons(
+    labels: &[String],
+    renderer: &ToastTextRenderer,
+    size_px: f32,
+    ppp: f32,
+    font_manager: &mut FontManager,
+) -> Vec<ToastButtonInput> {
+    let budget = (2.0_f32.mul_add(-BUTTON_PAD_X_PTS, MAX_BUTTON_WIDTH_PTS) * ppp).max(1.0);
+    labels
+        .iter()
+        .map(|raw| {
+            let (label_text, label) = fit_text(renderer, raw, size_px, budget, font_manager);
+            ToastButtonInput {
+                label_text,
+                size_px,
+                label,
+            }
+        })
+        .collect()
+}
+
 /// The settled (pre-animation) pill width/height, in physical pixels, for
 /// one toast's measured content.
 fn settled_pill_size(input: &ToastLayoutInput, ppp: f32) -> (f32, f32) {
@@ -352,13 +319,49 @@ fn settled_pill_size(input: &ToastLayoutInput, ppp: f32) -> (f32, f32) {
     (width, height)
 }
 
-/// Height, physical pixels, of the label (and optional detail) block.
-pub(super) fn text_block_height(input: &ToastLayoutInput, detail_gap: f32) -> f32 {
-    let mut text_height = input.label.height;
-    if input.has_detail {
-        text_height += detail_gap + input.detail.height;
+/// How many of `sizes` (oldest first, `(width, height)` per toast, physical
+/// pixels) a stack at `position` can hold without extending past the bottom
+/// of its rect.
+///
+/// A top-right stack starts [`STACK_TOP_INSET_PTS`] below the content rect's
+/// top; a centered stack is centered on its rect, so it fits when its whole
+/// height does. Toasts are placed oldest first, so the toasts that do not fit
+/// are always the newest: they wait on the stack, undrawn, until older toasts
+/// leave and make room.
+///
+/// The oldest toast is always placed, even if it alone is taller than the
+/// rect: without that, a window too small for a tall `UntilDismissed` toast
+/// would hide a toast that nothing could expire and the user could not
+/// dismiss.
+fn placeable_count(
+    sizes: &[(f32, f32)],
+    position: ToastPosition,
+    geom: ToastGeometry,
+    ppp: f32,
+) -> usize {
+    let gap = TOAST_STACK_GAP_PTS * ppp;
+    let available = match position {
+        ToastPosition::TopRightStack => (geom.content_rect.height() - STACK_TOP_INSET_PTS) * ppp,
+        ToastPosition::WindowCentered => geom.content_rect.height() * ppp,
+        ToastPosition::PaneCentered => {
+            geom.active_pane_rect.unwrap_or(geom.content_rect).height() * ppp
+        }
+    };
+    let mut used = 0.0_f32;
+    let mut count = 0_usize;
+    for &(_, height) in sizes {
+        let next = if count == 0 {
+            height
+        } else {
+            used + gap + height
+        };
+        if count > 0 && next > available {
+            break;
+        }
+        used = next;
+        count += 1;
     }
-    text_height
+    count
 }
 
 /// Compute the settled (pre-animation) top-left origin, in physical pixels,
@@ -433,33 +436,6 @@ fn settled_origins(
     }
 }
 
-/// Precomputed, `pixels_per_point`-scaled layout constants shared across
-/// every toast in one [`layout_toasts`] call. Bundled into one struct so the
-/// per-toast helper functions stay under the `too_many_arguments` limit.
-pub(super) struct ToastLayoutMetrics {
-    /// `pixels_per_point`, kept alongside the already-scaled fields below
-    /// since logical-to-physical hit-rect conversion still needs it raw.
-    pub(super) ppp: f32,
-    /// [`PILL_PAD_X_PTS`], scaled to physical pixels.
-    pub(super) pad_x: f32,
-    /// [`PILL_PAD_Y_PTS`], scaled to physical pixels.
-    pub(super) pad_y: f32,
-    /// [`ICON_LABEL_GAP_PTS`], scaled to physical pixels.
-    icon_label_gap: f32,
-    /// [`CLOSE_SIZE_PTS`], scaled to physical pixels.
-    close_size: f32,
-    /// [`DETAIL_GAP_PTS`], scaled to physical pixels.
-    pub(super) detail_gap: f32,
-    /// The theme's corner radius (see [`corner_radius_pts`]), scaled to
-    /// physical pixels.
-    pub(super) corner_radius: f32,
-    /// The neutral chrome border width (from the theme's `window_stroke`,
-    /// Modern 1.0 / Retro 1.5 pt), scaled to physical pixels. Issue #433
-    /// redesign: replaces the removed glow as the pill's separation from the
-    /// terminal, and gives Modern/Retro a subtly different border weight.
-    border_width: f32,
-}
-
 /// The pill/border/text colors for one toast, derived from the active
 /// theme and its current animation opacity.
 ///
@@ -482,6 +458,9 @@ struct ToastColors {
     text_color: [f32; 4],
     /// Icon glyph color (tinted to the kind's semantic color).
     icon_color: [f32; 4],
+    /// Which way button fills move off the pill, so buttons stay visible on
+    /// both dark and light pills.
+    button_tint: ButtonTint,
 }
 
 /// Derive [`ToastColors`] for `kind` from the active theme, at the given
@@ -528,6 +507,7 @@ fn toast_colors(kind: ToastKind, visuals: &egui::Visuals, opacity: f32) -> Toast
         accent,
         text_color,
         icon_color,
+        button_tint: ButtonTint::for_background(background),
     }
 }
 
@@ -689,7 +669,10 @@ fn layout_one_toast(
         &pill,
         hit_rect_logical,
         metrics,
-        colors.text_color,
+        ButtonPaint {
+            text_color: colors.text_color,
+            tint: colors.button_tint,
+        },
     );
     runs.extend(buttons.runs);
 
@@ -717,6 +700,7 @@ fn layout_one_toast(
         dismiss_rect_logical,
         button_quads: buttons.quads,
         button_rects_logical: buttons.rects_logical,
+        button_tint: colors.button_tint,
     }
 }
 
@@ -726,6 +710,11 @@ fn layout_one_toast(
 /// Pure and GL-free (no `FontManager`, no `glow::Context`) — `inputs` already
 /// carries pre-measured [`ToastTextMetrics`] and each toast's animation
 /// phase, so this function only does geometry and color arithmetic.
+///
+/// Returns one output per toast that fits: toasts that would extend below the
+/// rect they are anchored in are left out (see `placeable_count`), so the
+/// result may be a prefix of `inputs`. Match outputs to toasts by
+/// [`ToastLayoutOutput::id`], not by position.
 pub(super) fn layout_toasts(
     inputs: &[ToastLayoutInput],
     position: ToastPosition,
@@ -753,12 +742,17 @@ pub(super) fn layout_toasts(
         border_width: visuals.window_stroke.width * ppp,
     };
 
-    let sizes: Vec<(f32, f32)> = inputs.iter().map(|i| settled_pill_size(i, ppp)).collect();
-    let origins = settled_origins(&sizes, position, geom, ppp);
+    let all_sizes: Vec<(f32, f32)> = inputs.iter().map(|i| settled_pill_size(i, ppp)).collect();
+    // Toasts that would extend below the rect are not laid out (see
+    // `placeable_count`); the placed ones are centered/anchored as a stack of
+    // their own.
+    let placed = placeable_count(&all_sizes, position, geom, ppp);
+    let sizes = &all_sizes[..placed];
+    let origins = settled_origins(sizes, position, geom, ppp);
 
     inputs
         .iter()
-        .zip(&sizes)
+        .zip(sizes)
         .zip(&origins)
         .map(|((input, &(width, height)), &(settled_x, settled_y))| {
             layout_one_toast(
@@ -776,10 +770,9 @@ pub(super) fn layout_toasts(
 /// `is_origin_window` is `true` iff the toast's origin window (see
 /// [`Toast::origin`](super::Toast::origin)) is the window currently rendering. Comparing
 /// `WindowId`s themselves is left to the caller
-/// ([`ToastStack::layout_positioned`]): `WindowId` only exposes a
-/// `winit`-backed constructor, so no second, distinct `WindowId` can be
-/// fabricated in a unit test — taking the comparison result as a `bool`
-/// here instead keeps this function unit-testable.
+/// ([`ToastStack::layout_positioned`], which is tested with two
+/// `WindowId::for_test` windows): this function takes only the comparison's
+/// result, so the anchor rules stay a pure function of plain values.
 ///
 /// - [`ToastPosition::TopRightStack`] and [`ToastPosition::WindowCentered`]
 ///   always resolve against `content_rect` (this window's content area);
@@ -888,15 +881,19 @@ const fn canonical_anchor(
 /// rect, and a window-centered toast) share one group and stack, rather than
 /// forming two independent groups that render on top of each other.
 ///
-/// Preserving input order is required: [`ToastStack::hit_test`] and
-/// `topmost_hit` rely on `outputs[i]` corresponding to the toast `inputs[i]`
-/// was built from, and on "newest last in the vec" meaning "drawn on top" —
-/// grouping toasts by anchor must never reorder them relative to each
-/// other.
+/// Preserving input order is required: the hit-testing in [`super::hit`]
+/// relies on "newest last in the vec" meaning "drawn on top" — grouping
+/// toasts by anchor must never reorder them relative to each other.
 ///
 /// Deliberately takes no [`Toast`](super::Toast)/[`WindowId`] — only the already-resolved
-/// `anchors` — so this (unlike [`ToastStack::layout_positioned`], its only
-/// caller) is unit-testable without fabricating a `WindowId`.
+/// `anchors` — so the grouping and scatter rules are testable without a
+/// stack ([`ToastStack::layout_positioned`], its only caller, has its own
+/// tests for the anchor resolution it adds).
+///
+/// Each group is laid out by [`layout_toasts`], which leaves out toasts that
+/// do not fit (see `placeable_count`), so the result can be shorter than
+/// `inputs`: it keeps `inputs`' relative order, and entries are matched to
+/// outputs by [`ToastLayoutOutput::id`].
 ///
 /// Groups are found via a linear scan rather than a hash map:
 /// [`layout_key`] carries `f32` rects, which must never be used as a hash
@@ -938,15 +935,12 @@ fn group_and_layout(
         }
     }
 
-    // Every original index was placed into exactly one group above, so
-    // every slot is `Some` here — `flatten` just unwraps them. The
-    // debug-assert keeps a future invariant break (a group whose
-    // `layout_toasts` returns fewer outputs than its indices) loud rather
-    // than silently shortening `outputs` and desyncing the
-    // `outputs[i] <-> entries[i]` mapping `hit_test`/`topmost_hit` rely on.
-    let laid_out: Vec<ToastLayoutOutput> = outputs.into_iter().flatten().collect();
-    debug_assert_eq!(laid_out.len(), inputs.len());
-    laid_out
+    // Every original index belonged to exactly one group; a slot is `None`
+    // only when its group left that toast out for lack of room, and
+    // `flatten` drops those. What is left is still in `inputs` order, which
+    // `hit_test`/`topmost_hit` rely on for "last in the vec is drawn on
+    // top" (they match toasts by id, so the gaps do not matter).
+    outputs.into_iter().flatten().collect()
 }
 
 impl ToastStack {
@@ -954,13 +948,10 @@ impl ToastStack {
     /// [`resolve_anchor`]) and delegate to [`group_and_layout`] to actually
     /// lay them out.
     ///
-    /// This method itself takes a real [`WindowId`], which — unlike
-    /// [`resolve_anchor`] and [`group_and_layout`] — cannot be fabricated in
-    /// a unit test (`WindowId` only exposes a `winit`-backed constructor,
-    /// private to `freminal-windowing`). It is therefore intentionally thin:
-    /// all its actual decision logic (anchor resolution, grouping, scatter)
-    /// lives in those two pure, directly-tested functions, leaving nothing
-    /// non-trivial un-exercised here.
+    /// All its decision logic lives in [`resolve_anchor`] and
+    /// [`group_and_layout`]; this method adds only the comparison of each
+    /// toast's origin window with `this_window_id`. It is tested with two
+    /// distinct `WindowId::for_test` windows.
     pub(super) fn layout_positioned(
         &self,
         inputs: &[ToastLayoutInput],
@@ -1111,9 +1102,10 @@ mod tests {
     use super::*;
     use crate::gui::toast::hit::rect_contains;
     use crate::gui::toast::test_support::{
-        ENTRY_ANIM, SETTLED_ANIM, button_input, buttons_output, rect_inside, test_input,
-        test_window_rect,
+        DetailLine, ENTRY_ANIM, SETTLED_ANIM, button_input, buttons_output, rect_inside,
+        test_input, test_window_rect,
     };
+    use crate::gui::toast::{ToastAnim, ToastPlacement};
     #[test]
     fn toast_colors_border_from_window_stroke_accent_from_semantic() {
         // Issue #433 redesign: the border is the neutral window_stroke color;
@@ -1334,8 +1326,8 @@ mod tests {
     #[test]
     fn top_right_stack_places_second_toast_below_first() {
         let inputs = [
-            test_input(0, 100.0, false, SETTLED_ANIM),
-            test_input(1, 100.0, false, SETTLED_ANIM),
+            test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(1, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let geom = ToastGeometry {
             content_rect: test_window_rect(),
@@ -1378,7 +1370,7 @@ mod tests {
 
         let ppp = 2.0;
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1415,7 +1407,7 @@ mod tests {
         visuals.window_stroke = egui::Stroke::new(1000.0, egui::Color32::from_rgb(90, 92, 96));
 
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, ENTRY_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, ENTRY_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1445,14 +1437,14 @@ mod tests {
         let visuals = egui::Visuals::dark();
 
         let narrow = layout_toasts(
-            &[test_input(0, 50.0, false, SETTLED_ANIM)],
+            &[test_input(0, 50.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
             1.0,
         );
         let wide = layout_toasts(
-            &[test_input(0, 200.0, false, SETTLED_ANIM)],
+            &[test_input(0, 200.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1462,7 +1454,7 @@ mod tests {
 
         // An extremely long label must clamp to the max pill width.
         let huge = layout_toasts(
-            &[test_input(0, 10_000.0, false, SETTLED_ANIM)],
+            &[test_input(0, 10_000.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1480,14 +1472,14 @@ mod tests {
         let visuals = egui::Visuals::dark();
 
         let without = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
             1.0,
         );
         let with_detail = layout_toasts(
-            &[test_input(0, 100.0, true, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Present, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1513,14 +1505,14 @@ mod tests {
         let visuals = egui::Visuals::dark();
 
         let entry = layout_toasts(
-            &[test_input(0, 100.0, false, ENTRY_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, ENTRY_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
             1.0,
         );
         let settled = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1552,7 +1544,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1586,7 +1578,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::WindowCentered,
             geom,
             &visuals,
@@ -1610,7 +1602,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::PaneCentered,
             geom,
             &visuals,
@@ -1634,7 +1626,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::PaneCentered,
             geom,
             &visuals,
@@ -1656,7 +1648,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1678,8 +1670,8 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let inputs = [
-            test_input(42, 100.0, false, SETTLED_ANIM),
-            test_input(7, 100.0, false, SETTLED_ANIM),
+            test_input(42, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(7, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let out = layout_toasts(&inputs, ToastPosition::TopRightStack, geom, &visuals, 1.0);
         assert_eq!(out[0].id, 42);
@@ -1695,7 +1687,7 @@ mod tests {
         let visuals = egui::Visuals::dark();
         let ppp = 1.0;
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -1748,11 +1740,10 @@ mod tests {
     // -----------------------------------------------------------------
     //
     // `resolve_anchor` takes the origin-window comparison as a pre-computed
-    // `bool` (`is_origin_window`) rather than a `WindowId` + `this_window_id`
-    // pair: `WindowId` only exposes a `winit`-backed constructor (private to
-    // `freminal-windowing`), so a second, distinct `WindowId` cannot be
-    // fabricated here. See `ToastStack::layout_positioned`, the only caller,
-    // for where the real `WindowId` comparison happens.
+    // `bool` (`is_origin_window`) rather than a `WindowId` pair, so the anchor
+    // rules stay a pure function of plain values. The `WindowId` comparison
+    // itself is in `ToastStack::layout_positioned`, tested further down with
+    // two `WindowId::for_test` windows.
 
     #[test]
     fn resolve_anchor_top_right_stack_uses_content_rect_and_ignores_pane() {
@@ -1872,9 +1863,8 @@ mod tests {
     //  group_and_layout — per-anchor grouping + order-preserving scatter
     // -----------------------------------------------------------------
     //
-    // Deliberately free of `Toast`/`WindowId` (see its own doc comment), so
-    // — unlike `ToastStack::layout_positioned`, its only caller — it is
-    // directly unit-testable.
+    // Deliberately free of `Toast`/`WindowId` (see its own doc comment): the
+    // grouping and scatter rules are tested here without a stack.
 
     #[test]
     fn group_and_layout_preserves_input_order_across_mixed_anchors() {
@@ -1888,9 +1878,9 @@ mod tests {
             active_pane_rect: None,
         };
         let inputs = [
-            test_input(1, 100.0, false, SETTLED_ANIM),
-            test_input(2, 100.0, false, SETTLED_ANIM),
-            test_input(3, 100.0, false, SETTLED_ANIM),
+            test_input(1, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(2, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(3, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let anchors = [
             (ToastPosition::TopRightStack, top_right_geom),
@@ -1900,8 +1890,8 @@ mod tests {
         let visuals = egui::Visuals::dark();
         let outputs = group_and_layout(&inputs, &anchors, &visuals, 1.0);
 
-        // Same length, and in `inputs`' original order — required by
-        // `hit_test`/`topmost_hit` (entries-order == outputs-order).
+        // Same length (all fit), and in `inputs`' original order — required by
+        // the hit-testing's "newest last is drawn on top".
         assert_eq!(outputs.len(), 3);
         assert_eq!(
             outputs.iter().map(|o| o.id).collect::<Vec<_>>(),
@@ -1921,8 +1911,8 @@ mod tests {
             active_pane_rect: None,
         };
         let inputs = [
-            test_input(10, 100.0, false, SETTLED_ANIM),
-            test_input(11, 100.0, false, SETTLED_ANIM),
+            test_input(10, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(11, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let anchors = [
             (ToastPosition::TopRightStack, geom),
@@ -1960,8 +1950,8 @@ mod tests {
             active_pane_rect: Some(pane_right_rect),
         };
         let inputs = [
-            test_input(1, 100.0, false, SETTLED_ANIM),
-            test_input(2, 100.0, false, SETTLED_ANIM),
+            test_input(1, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(2, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let anchors = [
             (ToastPosition::PaneCentered, geom_left),
@@ -1999,8 +1989,8 @@ mod tests {
             active_pane_rect: None,
         };
         let inputs = [
-            test_input(1, 100.0, false, SETTLED_ANIM),
-            test_input(2, 100.0, false, SETTLED_ANIM),
+            test_input(1, 100.0, DetailLine::Absent, SETTLED_ANIM),
+            test_input(2, 100.0, DetailLine::Absent, SETTLED_ANIM),
         ];
         let anchors = [
             (ToastPosition::PaneCentered, pane_geom),
@@ -2069,27 +2059,13 @@ mod tests {
     }
 
     #[test]
-    fn lighten_shifts_rgb_and_clamps_leaving_alpha_untouched() {
-        let base = [0.5, 0.5, 0.5, 0.9];
-        let lighter = lighten(base, 0.4);
-        assert!((lighter[0] - 0.9).abs() < f32::EPSILON);
-        assert!((lighter[3] - 0.9).abs() < f32::EPSILON);
-
-        let clamped = lighten(base, 10.0);
-        assert!((clamped[0] - 1.0).abs() < f32::EPSILON);
-
-        let darker = lighten(base, -10.0);
-        assert!(darker[0].abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn the_icon_run_draws_the_input_icon_glyph() {
         let geom = ToastGeometry {
             content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
-        let default_input = test_input(0, 100.0, false, SETTLED_ANIM);
+        let default_input = test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM);
         let overridden = ToastLayoutInput {
             icon_glyph: ChromeIcon::SystemMonitor,
             ..default_input.clone()
@@ -2114,8 +2090,13 @@ mod tests {
 
     #[test]
     fn a_button_row_grows_the_pill_to_hold_it() {
-        let plain = buttons_output(Vec::new(), false, SETTLED_ANIM, 1.0);
-        let with = buttons_output(vec![button_input("OK", 40.0)], false, SETTLED_ANIM, 1.0);
+        let plain = buttons_output(Vec::new(), DetailLine::Absent, SETTLED_ANIM, 1.0);
+        let with = buttons_output(
+            vec![button_input("OK", 40.0)],
+            DetailLine::Absent,
+            SETTLED_ANIM,
+            1.0,
+        );
         assert!(with.pill.height > plain.pill.height);
         let last = with.button_rects_logical[0];
         assert!(
@@ -2128,7 +2109,7 @@ mod tests {
     fn many_long_buttons_wrap_onto_rows_without_overlap_or_overflow() {
         for ppp in [1.0_f32, 2.0] {
             let buttons = (0..8).map(|i| button_input(&format!("long {i}"), 120.0 * ppp));
-            let out = buttons_output(buttons.collect(), true, SETTLED_ANIM, ppp);
+            let out = buttons_output(buttons.collect(), DetailLine::Present, SETTLED_ANIM, ppp);
 
             let rects = &out.button_rects_logical;
             assert_eq!(rects.len(), 8);
@@ -2161,13 +2142,13 @@ mod tests {
     #[test]
     fn dismiss_rect_is_inside_the_pill_and_contains_the_close_glyph_centre() {
         for ppp in [1.0_f32, 2.0] {
-            for has_detail in [false, true] {
+            for detail_line in [DetailLine::Absent, DetailLine::Present] {
                 let geom = ToastGeometry {
                     content_rect: test_window_rect(),
                     active_pane_rect: None,
                 };
                 let visuals = egui::Visuals::dark();
-                let input = test_input(0, 100.0, has_detail, SETTLED_ANIM);
+                let input = test_input(0, 100.0, detail_line, SETTLED_ANIM);
                 let out = layout_toasts(
                     std::slice::from_ref(&input),
                     ToastPosition::TopRightStack,
@@ -2192,7 +2173,7 @@ mod tests {
                 );
                 assert!(
                     rect_contains(dismiss, centre),
-                    "ppp={ppp} detail={has_detail}: {centre:?} not in {dismiss:?}"
+                    "ppp={ppp} detail={detail_line:?}: {centre:?} not in {dismiss:?}"
                 );
             }
         }
@@ -2206,7 +2187,7 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         let out = layout_toasts(
-            &[test_input(0, 100.0, false, ENTRY_ANIM)],
+            &[test_input(0, 100.0, DetailLine::Absent, ENTRY_ANIM)],
             ToastPosition::TopRightStack,
             geom,
             &visuals,
@@ -2216,5 +2197,405 @@ mod tests {
         let dismiss = out[0].dismiss_rect_logical;
         assert!(dismiss[0] >= hit[0] && dismiss[1] >= hit[1]);
         assert!(dismiss[2] <= hit[2] && dismiss[3] <= hit[3]);
+    }
+
+    // -----------------------------------------------------------------
+    //  138.C14: overflow, window-aware layout, measurement, light pills
+    // -----------------------------------------------------------------
+
+    /// A toast tall enough that a few of them overflow an ordinary window:
+    /// a detail line and eight wide buttons that wrap onto four rows.
+    fn tall_input(id: u64) -> ToastLayoutInput {
+        let mut input = test_input(id, 100.0, DetailLine::Present, SETTLED_ANIM);
+        input.buttons = (0..8)
+            .map(|i| button_input(&format!("button {i}"), 120.0))
+            .collect();
+        input
+    }
+
+    fn rect_of_height(height: f32) -> ToastGeometry {
+        ToastGeometry {
+            content_rect: egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, height),
+            ),
+            active_pane_rect: None,
+        }
+    }
+
+    fn ids(outputs: &[ToastLayoutOutput]) -> Vec<u64> {
+        outputs.iter().map(|o| o.id).collect()
+    }
+
+    #[test]
+    fn toasts_that_would_extend_below_the_content_rect_are_not_laid_out() {
+        let inputs: Vec<_> = (0..5).map(tall_input).collect();
+        let visuals = egui::Visuals::dark();
+        for ppp in [1.0_f32, 2.0] {
+            let geom = rect_of_height(600.0);
+            let out = layout_toasts(&inputs, ToastPosition::TopRightStack, geom, &visuals, ppp);
+
+            assert!(
+                !out.is_empty() && out.len() < inputs.len(),
+                "ppp={ppp}: some but not all fit, got {}",
+                out.len()
+            );
+            // Oldest first: what waits is always the newest.
+            assert_eq!(
+                ids(&out),
+                (0..u64::try_from(out.len()).unwrap()).collect::<Vec<_>>()
+            );
+            let bottom = geom.content_rect.max.y;
+            for o in &out {
+                assert!(
+                    o.hit_rect_logical[3] <= bottom + 0.01,
+                    "ppp={ppp}: toast {} ends at {} past {bottom}",
+                    o.id,
+                    o.hit_rect_logical[3]
+                );
+            }
+            // One more would not have fit.
+            let one_more = layout_toasts(
+                &inputs[..=out.len()],
+                ToastPosition::TopRightStack,
+                geom,
+                &visuals,
+                ppp,
+            );
+            assert_eq!(one_more.len(), out.len(), "ppp={ppp}");
+        }
+    }
+
+    #[test]
+    fn a_taller_window_places_the_waiting_toasts() {
+        let inputs: Vec<_> = (0..5).map(tall_input).collect();
+        let visuals = egui::Visuals::dark();
+        let small = layout_toasts(
+            &inputs,
+            ToastPosition::TopRightStack,
+            rect_of_height(600.0),
+            &visuals,
+            1.0,
+        );
+        let large = layout_toasts(
+            &inputs,
+            ToastPosition::TopRightStack,
+            rect_of_height(2000.0),
+            &visuals,
+            1.0,
+        );
+        assert!(small.len() < 5);
+        assert_eq!(ids(&large), vec![0, 1, 2, 3, 4], "space freed, all placed");
+        // The toasts that were placed before keep their positions.
+        for (a, b) in small.iter().zip(&large) {
+            assert!((a.pill.y - b.pill.y).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn the_oldest_toast_is_placed_even_in_a_window_too_short_for_it() {
+        let inputs: Vec<_> = (0..3).map(tall_input).collect();
+        let out = layout_toasts(
+            &inputs,
+            ToastPosition::TopRightStack,
+            rect_of_height(80.0),
+            &egui::Visuals::dark(),
+            1.0,
+        );
+        assert_eq!(
+            ids(&out),
+            vec![0],
+            "an unexpirable toast must stay dismissable in a tiny window"
+        );
+    }
+
+    #[test]
+    fn a_centered_stack_that_overflows_is_trimmed_and_stays_inside_the_rect() {
+        let inputs: Vec<_> = (0..5).map(tall_input).collect();
+        let geom = rect_of_height(600.0);
+        let out = layout_toasts(
+            &inputs,
+            ToastPosition::WindowCentered,
+            geom,
+            &egui::Visuals::dark(),
+            1.0,
+        );
+        assert!(!out.is_empty() && out.len() < 5);
+        let top = out.first().map(|o| o.hit_rect_logical[1]).unwrap();
+        let bottom = out.last().map(|o| o.hit_rect_logical[3]).unwrap();
+        assert!(top >= -0.01, "starts inside the rect: {top}");
+        assert!(bottom <= 600.01, "ends inside the rect: {bottom}");
+    }
+
+    #[test]
+    fn group_and_layout_drops_only_the_toasts_that_do_not_fit_keeping_order() {
+        let content_rect = rect_of_height(600.0).content_rect;
+        let top_right = (
+            ToastPosition::TopRightStack,
+            ToastGeometry {
+                content_rect,
+                active_pane_rect: None,
+            },
+        );
+        let centered = (
+            ToastPosition::WindowCentered,
+            ToastGeometry {
+                content_rect,
+                active_pane_rect: None,
+            },
+        );
+        let mut inputs: Vec<_> = (1..=5).map(tall_input).collect();
+        inputs.push(test_input(6, 100.0, DetailLine::Absent, SETTLED_ANIM));
+        let mut anchors = vec![top_right; 5];
+        anchors.push(centered);
+
+        let out = group_and_layout(&inputs, &anchors, &egui::Visuals::dark(), 1.0);
+
+        assert_eq!(
+            ids(&out),
+            vec![1, 2, 3, 6],
+            "the two newest top-right toasts wait; the centered one is unaffected"
+        );
+    }
+
+    #[test]
+    fn layout_positioned_places_a_pane_toast_only_in_its_origin_window() {
+        let (window_a, window_b) = (WindowId::for_test(1), WindowId::for_test(2));
+        let pane = PaneId::first();
+        let pane_rect =
+            egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 200.0));
+        let resolver = |p: PaneId| (p == pane).then_some(pane_rect);
+
+        let mut stack = ToastStack::default();
+        stack.push_positioned(
+            ToastKind::Info,
+            "copied",
+            None,
+            ToastPlacement::pane_centered(window_a, pane),
+        );
+        let inputs = [test_input(
+            stack.entries[0].id,
+            100.0,
+            DetailLine::Absent,
+            SETTLED_ANIM,
+        )];
+        let visuals = egui::Visuals::dark();
+        let layout_in = |window| {
+            stack.layout_positioned(
+                &inputs,
+                window,
+                test_window_rect(),
+                &resolver,
+                &visuals,
+                1.0,
+            )
+        };
+        let centre = |out: &ToastLayoutOutput| {
+            let [x0, y0, x1, y1] = out.hit_rect_logical;
+            egui::pos2(x0.midpoint(x1), y0.midpoint(y1))
+        };
+
+        let in_a = layout_in(window_a);
+        let in_b = layout_in(window_b);
+
+        assert_eq!(in_a.len(), 1);
+        assert_eq!(in_b.len(), 1);
+        let pane_centre = centre(&in_a[0]);
+        assert!((pane_centre.x - pane_rect.center().x).abs() < 0.01);
+        assert!((pane_centre.y - pane_rect.center().y).abs() < 0.01);
+        // Another window falls back to centring on its own content rect.
+        let window_centre = centre(&in_b[0]);
+        assert!((window_centre.x - test_window_rect().center().x).abs() < 0.01);
+        assert!((window_centre.y - test_window_rect().center().y).abs() < 0.01);
+    }
+
+    #[test]
+    fn layout_positioned_falls_back_when_the_origin_pane_is_gone() {
+        let window = WindowId::for_test(1);
+        let mut stack = ToastStack::default();
+        stack.push_positioned(
+            ToastKind::Info,
+            "copied",
+            None,
+            ToastPlacement::pane_centered(window, PaneId::first()),
+        );
+        let inputs = [test_input(
+            stack.entries[0].id,
+            100.0,
+            DetailLine::Absent,
+            SETTLED_ANIM,
+        )];
+        let none = |_: PaneId| -> Option<egui::Rect> { None };
+        let out = stack.layout_positioned(
+            &inputs,
+            window,
+            test_window_rect(),
+            &none,
+            &egui::Visuals::dark(),
+            1.0,
+        );
+        let [x0, _, x1, _] = out[0].hit_rect_logical;
+        assert!((x0.midpoint(x1) - test_window_rect().center().x).abs() < 0.01);
+    }
+
+    #[test]
+    fn layout_positioned_keeps_entry_order_across_window_dependent_anchors() {
+        let (window_a, window_b) = (WindowId::for_test(1), WindowId::for_test(2));
+        let pane = PaneId::first();
+        let pane_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 300.0));
+        let resolver = |p: PaneId| (p == pane).then_some(pane_rect);
+
+        let mut stack = ToastStack::default();
+        stack.info("top right", None);
+        stack.push_positioned(
+            ToastKind::Info,
+            "pane",
+            None,
+            ToastPlacement::pane_centered(window_a, pane),
+        );
+        stack.error("top right too", None);
+        let inputs: Vec<_> = stack
+            .entries
+            .iter()
+            .map(|t| test_input(t.id, 100.0, DetailLine::Absent, SETTLED_ANIM))
+            .collect();
+        let expected: Vec<u64> = stack.entries.iter().map(|t| t.id).collect();
+        let visuals = egui::Visuals::dark();
+
+        for window in [window_a, window_b] {
+            let out = stack.layout_positioned(
+                &inputs,
+                window,
+                test_window_rect(),
+                &resolver,
+                &visuals,
+                1.0,
+            );
+            assert_eq!(ids(&out), expected);
+        }
+    }
+
+    #[test]
+    fn measure_buttons_fits_long_labels_within_the_button_width() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let labels = vec!["OK".to_owned(), "x".repeat(500), "two\nlines".to_owned()];
+        for ppp in [1.0_f32, 2.0] {
+            let buttons = measure_buttons(&labels, &renderer, 12.0 * ppp, ppp, &mut fm);
+            let budget = 2.0_f32.mul_add(-BUTTON_PAD_X_PTS, MAX_BUTTON_WIDTH_PTS) * ppp;
+
+            assert_eq!(buttons.len(), 3);
+            assert_eq!(buttons[0].label_text, "OK", "a short label is untouched");
+            assert!(
+                buttons[1].label_text.ends_with('…') && buttons[1].label_text.chars().count() < 500,
+                "ppp={ppp}: a long label is truncated with an ellipsis"
+            );
+            for b in &buttons {
+                assert!(
+                    b.label.width <= budget,
+                    "ppp={ppp}: {} wide exceeds {budget}",
+                    b.label.width
+                );
+                let expected_size = 12.0 * ppp;
+                assert!((b.size_px - expected_size).abs() < f32::EPSILON);
+            }
+            assert_eq!(
+                buttons[2].label_text, "two lines",
+                "whitespace is normalised"
+            );
+            // A fitted button never exceeds the maximum button width.
+            let widest = buttons
+                .iter()
+                .map(|b| b.label.width)
+                .fold(0.0_f32, f32::max);
+            let padded = (2.0 * BUTTON_PAD_X_PTS).mul_add(ppp, widest);
+            let max_width = MAX_BUTTON_WIDTH_PTS * ppp;
+            assert!(padded <= max_width + 0.01);
+        }
+    }
+
+    #[test]
+    fn buttons_darken_on_a_light_pill_and_lighten_on_a_dark_one() {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let mut input = test_input(0, 100.0, DetailLine::Absent, SETTLED_ANIM);
+        input.buttons = vec![button_input("OK", 40.0)];
+        for (visuals, tint) in [
+            (egui::Visuals::light(), ButtonTint::Darken),
+            (egui::Visuals::dark(), ButtonTint::Lighten),
+        ] {
+            let out = layout_toasts(
+                std::slice::from_ref(&input),
+                ToastPosition::TopRightStack,
+                geom,
+                &visuals,
+                1.0,
+            )
+            .remove(0);
+            assert_eq!(out.button_tint, tint);
+            let (pill, button) = (out.pill.color_top[0], out.button_quads[0].color_top[0]);
+            match tint {
+                ButtonTint::Darken => assert!(button < pill, "{button} not darker than {pill}"),
+                ButtonTint::Lighten => assert!(button > pill, "{button} not lighter than {pill}"),
+            }
+        }
+    }
+
+    const MID_ANIM: ToastAnim = ToastAnim {
+        opacity: 0.5,
+        slide_x: 12.0,
+        scale: 0.96,
+    };
+
+    #[test]
+    fn buttons_stay_inside_the_pill_at_ppp_two_mid_animation() {
+        for ppp in [1.0_f32, 2.0] {
+            for anim in [ENTRY_ANIM, MID_ANIM, SETTLED_ANIM] {
+                let buttons = (0..6).map(|i| button_input(&format!("b{i}"), 70.0 * ppp));
+                let out = buttons_output(buttons.collect(), DetailLine::Present, anim, ppp);
+                let pill = &out.pill;
+                for (quad, rect) in out.button_quads.iter().zip(&out.button_rects_logical) {
+                    assert!(
+                        quad.x >= pill.x - 0.01
+                            && quad.y >= pill.y - 0.01
+                            && quad.x + quad.width <= pill.x + pill.width + 0.01
+                            && quad.y + quad.height <= pill.y + pill.height + 0.01,
+                        "ppp={ppp} {anim:?}: quad {quad:?} outside pill {pill:?}"
+                    );
+                    assert!(
+                        rect_inside(*rect, out.hit_rect_logical),
+                        "ppp={ppp} {anim:?}: {rect:?}"
+                    );
+                    // The hit rect is the quad in logical points.
+                    let (left, top) = (rect[0] * ppp, rect[1] * ppp);
+                    assert!((left - quad.x).abs() < 0.01, "ppp={ppp} {anim:?}");
+                    assert!((top - quad.y).abs() < 0.01, "ppp={ppp} {anim:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dismiss_rect_never_overlaps_a_button_rect() {
+        for ppp in [1.0_f32, 2.0] {
+            for detail_line in [DetailLine::Absent, DetailLine::Present] {
+                for anim in [SETTLED_ANIM, MID_ANIM, ENTRY_ANIM] {
+                    for count in [1_usize, 3, 8] {
+                        let buttons =
+                            (0..count).map(|i| button_input(&format!("b{i}"), 60.0 * ppp));
+                        let out = buttons_output(buttons.collect(), detail_line, anim, ppp);
+                        for rect in &out.button_rects_logical {
+                            assert!(
+                                !rects_overlap(out.dismiss_rect_logical, *rect),
+                                "ppp={ppp} {detail_line:?} {anim:?} n={count}: dismiss {:?} vs button {rect:?}",
+                                out.dismiss_rect_logical
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

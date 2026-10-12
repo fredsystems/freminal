@@ -3,14 +3,18 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Toast button rows: measurement, flow (wrapping), and animated quad/rect/run layout.
+//! Toast button rows: flow (wrapping), animated quad/rect/run layout, and the
+//! hover/pressed fill states.
+//!
+//! This module depends only on [`super::input`]; measurement (which needs
+//! `layout::fit_text`) lives in `layout`.
 
-use super::layout::{ToastLayoutInput, ToastLayoutMetrics, fit_text, lighten, text_block_height};
-use crate::gui::font_manager::FontManager;
-use crate::gui::renderer::{ToastQuad, ToastTextMetrics, ToastTextRenderer, ToastTextRun};
+use super::ToastKind;
+use super::input::{ToastButtonInput, ToastLayoutInput, ToastLayoutMetrics, text_block_height};
+use crate::gui::renderer::{ToastQuad, ToastTextRun};
 
 /// Horizontal padding inside a button, on each side of its label.
-const BUTTON_PAD_X_PTS: f32 = 10.0;
+pub(super) const BUTTON_PAD_X_PTS: f32 = 10.0;
 /// Vertical padding inside a button, above and below its label.
 const BUTTON_PAD_Y_PTS: f32 = 4.0;
 /// Gap between buttons on one row.
@@ -21,20 +25,100 @@ const BUTTON_ROW_GAP_PTS: f32 = 6.0;
 pub(super) const BUTTON_TOP_GAP_PTS: f32 = 8.0;
 /// The widest a single button may be; longer labels are fitted with an
 /// ellipsis.
-const MAX_BUTTON_WIDTH_PTS: f32 = 160.0;
-/// How much lighter than the pill a button's fill is.
-const BUTTON_LIGHTEN: f32 = 0.08;
+pub(super) const MAX_BUTTON_WIDTH_PTS: f32 = 160.0;
 
-/// One measured toast button label, input to [`layout_toasts`](super::layout::layout_toasts).
-#[derive(Debug, Clone)]
-pub(super) struct ToastButtonInput {
-    /// The exact label that was measured, already whitespace-normalized and
-    /// fitted to [`MAX_BUTTON_WIDTH_PTS`] (see [`fit_text`]).
-    pub label_text: String,
-    /// The physical pixel size `label_text` was measured/rasterized at.
-    pub size_px: f32,
-    /// Measured `label_text`, in physical pixels.
-    pub label: ToastTextMetrics,
+/// Shift a button's fill moves away from the pill in its normal state.
+const BUTTON_SHIFT_NORMAL: f32 = 0.08;
+/// Shift while the pointer is over the button.
+const BUTTON_SHIFT_HOVERED: f32 = 0.16;
+/// Shift while the button is held down.
+const BUTTON_SHIFT_PRESSED: f32 = 0.24;
+
+/// Shift each color channel of `rgba` by `amount` (positive lightens,
+/// negative darkens), clamped to `0..=1`. Alpha is left untouched.
+pub(super) fn lighten(rgba: [f32; 4], amount: f32) -> [f32; 4] {
+    [
+        (rgba[0] + amount).clamp(0.0, 1.0),
+        (rgba[1] + amount).clamp(0.0, 1.0),
+        (rgba[2] + amount).clamp(0.0, 1.0),
+        rgba[3],
+    ]
+}
+
+/// Which way a button's fill moves away from the pill it sits on.
+///
+/// Making lighter a button on a light pill makes it vanish into the pill, so a
+/// light pill darkens its buttons instead (the same luma test that picks dark
+/// text, [`ToastKind::prefers_dark_text`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ButtonTint {
+    /// The fill is lighter than the pill (dark pills).
+    Lighten,
+    /// The fill is darker than the pill (light pills).
+    Darken,
+}
+
+impl ButtonTint {
+    /// The direction that keeps buttons visible on a pill filled with
+    /// `background`.
+    pub(super) fn for_background(background: egui::Color32) -> Self {
+        if ToastKind::prefers_dark_text(background) {
+            Self::Darken
+        } else {
+            Self::Lighten
+        }
+    }
+
+    /// `amount` with this tint's sign.
+    fn signed(self, amount: f32) -> f32 {
+        match self {
+            Self::Lighten => amount,
+            Self::Darken => -amount,
+        }
+    }
+}
+
+/// How a button currently looks to the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ButtonState {
+    /// Not under the pointer.
+    Normal,
+    /// Under the pointer, no press in progress elsewhere.
+    Hovered,
+    /// Pressed on this button and still held over it.
+    Pressed,
+}
+
+impl ButtonState {
+    /// The size of the fill shift for this state.
+    const fn shift(self) -> f32 {
+        match self {
+            Self::Normal => BUTTON_SHIFT_NORMAL,
+            Self::Hovered => BUTTON_SHIFT_HOVERED,
+            Self::Pressed => BUTTON_SHIFT_PRESSED,
+        }
+    }
+}
+
+/// A button's `(color_top, color_bottom)` fill for `state`, derived from the
+/// pill's own two gradient stops so the button keeps the pill's gradient.
+pub(super) fn button_fill(
+    pill_top: [f32; 4],
+    pill_bottom: [f32; 4],
+    tint: ButtonTint,
+    state: ButtonState,
+) -> ([f32; 4], [f32; 4]) {
+    let shift = tint.signed(state.shift());
+    (lighten(pill_top, shift), lighten(pill_bottom, shift))
+}
+
+/// The paint inputs a button row needs beyond geometry.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ButtonPaint {
+    /// The label colour.
+    pub text_color: [f32; 4],
+    /// Which way the fills move off the pill.
+    pub tint: ButtonTint,
 }
 
 /// The width of one button: its label plus padding, physical pixels.
@@ -109,14 +193,16 @@ pub(super) struct ToastButtonLayout {
 /// so they never drift from the pill during the entry animation. `pill` is the
 /// already-animated pill quad (its border and opacity are reused),
 /// `hit_rect` its logical hit rect (the button rects are clamped into it), and
-/// `text_color` the label colour.
+/// `paint` the label colour and fill direction. Quads are produced in the
+/// [`ButtonState::Normal`] fill; the hover/pressed fills are applied after
+/// layout (see `hit::apply_button_states`), once the pointer is known.
 pub(super) fn layout_buttons(
     input: &ToastLayoutInput,
     settled: [f32; 4],
     pill: &ToastQuad,
     hit_rect: [f32; 4],
     metrics: &ToastLayoutMetrics,
-    text_color: [f32; 4],
+    paint: ButtonPaint,
 ) -> ToastButtonLayout {
     let [settled_x, settled_y, width, height] = settled;
     let anim = input.anim;
@@ -130,6 +216,12 @@ pub(super) fn layout_buttons(
     let center_x = settled_x + width / 2.0;
     let center_y = settled_y + height / 2.0;
 
+    let (fill_top, fill_bottom) = button_fill(
+        pill.color_top,
+        pill.color_bottom,
+        paint.tint,
+        ButtonState::Normal,
+    );
     let mut layout = ToastButtonLayout {
         quads: Vec::with_capacity(input.buttons.len()),
         rects_logical: Vec::with_capacity(input.buttons.len()),
@@ -151,8 +243,8 @@ pub(super) fn layout_buttons(
             width: w,
             height: h,
             corner_radius: metrics.corner_radius.min(half_extent).max(0.0),
-            color_top: lighten(pill.color_top, BUTTON_LIGHTEN),
-            color_bottom: lighten(pill.color_bottom, BUTTON_LIGHTEN),
+            color_top: fill_top,
+            color_bottom: fill_bottom,
             border_color: pill.border_color,
             border_width: pill.border_width.min(half_extent).max(0.0),
             accent: [0.0; 4],
@@ -169,41 +261,19 @@ pub(super) fn layout_buttons(
             origin_x: x + (w - button.label.width) / 2.0,
             baseline_y: y + (h - button.label.height) / 2.0 + button.label.ascent,
             size_px: button.size_px,
-            color: text_color,
+            color: paint.text_color,
         });
     }
     layout
 }
 
-/// Measure and fit each of `labels` as a button label at `size_px`, so a
-/// single button always fits [`MAX_BUTTON_WIDTH_PTS`].
-pub(super) fn measure_buttons(
-    labels: &[String],
-    renderer: &ToastTextRenderer,
-    size_px: f32,
-    ppp: f32,
-    font_manager: &mut FontManager,
-) -> Vec<ToastButtonInput> {
-    let budget = (2.0_f32.mul_add(-BUTTON_PAD_X_PTS, MAX_BUTTON_WIDTH_PTS) * ppp).max(1.0);
-    labels
-        .iter()
-        .map(|raw| {
-            let (label_text, label) = fit_text(renderer, raw, size_px, budget, font_manager);
-            ToastButtonInput {
-                label_text,
-                size_px,
-                label,
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::*;
     use crate::gui::icons::ChromeIcon;
     use crate::gui::toast::test_support::{
-        ENTRY_ANIM, SETTLED_ANIM, button_input, buttons_output, rect_inside,
+        DetailLine, ENTRY_ANIM, SETTLED_ANIM, button_input, buttons_output, rect_inside,
     };
     // -----------------------------------------------------------------
     //  Buttons: layout, hit-testing, events, cap
@@ -213,7 +283,7 @@ mod tests {
     fn three_short_buttons_share_one_row_in_order_below_the_title() {
         let labels = ["One", "Two", "Three"];
         let buttons = labels.iter().map(|l| button_input(l, 40.0)).collect();
-        let out = buttons_output(buttons, false, SETTLED_ANIM, 1.0);
+        let out = buttons_output(buttons, DetailLine::Absent, SETTLED_ANIM, 1.0);
 
         assert_eq!(out.button_rects_logical.len(), 3);
         assert_eq!(out.button_quads.len(), 3);
@@ -255,7 +325,7 @@ mod tests {
         let buttons = (0..4)
             .map(|i| button_input(&format!("b{i}"), 60.0))
             .collect();
-        let out = buttons_output(buttons, false, ENTRY_ANIM, 1.0);
+        let out = buttons_output(buttons, DetailLine::Absent, ENTRY_ANIM, 1.0);
         for rect in &out.button_rects_logical {
             assert!(rect_inside(*rect, out.hit_rect_logical), "{rect:?}");
         }
@@ -266,17 +336,75 @@ mod tests {
         // Numbers from the pre-button formula at ppp 1: width is
         // 2*14 + icon 16 + 8 + label 100 + 8 + close 18 = 178; height is
         // max(40, 2*10 + 20) = 40, or 2*10 + 20 + 4 + 16 = 60 with a detail.
-        for (has_detail, height) in [(false, 40.0_f32), (true, 60.0)] {
-            let out = buttons_output(Vec::new(), has_detail, SETTLED_ANIM, 1.0);
+        for (detail_line, height) in [(DetailLine::Absent, 40.0_f32), (DetailLine::Present, 60.0)] {
+            let out = buttons_output(Vec::new(), detail_line, SETTLED_ANIM, 1.0);
             assert!((out.pill.width - 178.0).abs() < 0.01);
             assert!((out.pill.height - height).abs() < 0.01);
             assert!(out.button_quads.is_empty());
             assert_eq!(out.button_rects_logical.len(), 0);
-            assert_eq!(out.runs.len(), if has_detail { 4 } else { 3 });
+            assert_eq!(
+                out.runs.len(),
+                if detail_line == DetailLine::Present {
+                    4
+                } else {
+                    3
+                }
+            );
             assert_eq!(
                 out.runs.last().map(|r| r.text.clone()),
                 Some(ChromeIcon::Close.glyph())
             );
         }
+    }
+
+    #[test]
+    fn lighten_shifts_rgb_and_clamps_leaving_alpha_untouched() {
+        let base = [0.5, 0.5, 0.5, 0.9];
+        let lighter = lighten(base, 0.4);
+        assert!((lighter[0] - 0.9).abs() < f32::EPSILON);
+        assert!((lighter[3] - 0.9).abs() < f32::EPSILON);
+
+        let clamped = lighten(base, 10.0);
+        assert!((clamped[0] - 1.0).abs() < f32::EPSILON);
+
+        let darker = lighten(base, -10.0);
+        assert!(darker[0].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_tint_follows_the_pill_brightness() {
+        assert_eq!(
+            ButtonTint::for_background(egui::Color32::from_gray(30)),
+            ButtonTint::Lighten
+        );
+        assert_eq!(
+            ButtonTint::for_background(egui::Color32::from_gray(245)),
+            ButtonTint::Darken
+        );
+    }
+
+    #[test]
+    fn hover_and_pressed_fills_move_further_from_the_pill_than_normal() {
+        let pill = [0.5, 0.5, 0.5, 1.0];
+        for tint in [ButtonTint::Lighten, ButtonTint::Darken] {
+            let distance = |state| {
+                let (top, bottom) = button_fill(pill, pill, tint, state);
+                assert_eq!(top, bottom, "same stops in, same stops out");
+                (top[0] - pill[0]).abs()
+            };
+            let (normal, hovered, pressed) = (
+                distance(ButtonState::Normal),
+                distance(ButtonState::Hovered),
+                distance(ButtonState::Pressed),
+            );
+            assert!(
+                normal > 0.0 && hovered > normal && pressed > hovered,
+                "{tint:?}"
+            );
+        }
+        let (lighter, _) = button_fill(pill, pill, ButtonTint::Lighten, ButtonState::Hovered);
+        let (darker, _) = button_fill(pill, pill, ButtonTint::Darken, ButtonState::Hovered);
+        assert!(lighter[0] > pill[0] && darker[0] < pill[0]);
+        assert!((lighter[3] - pill[3]).abs() < f32::EPSILON, "alpha is kept");
     }
 }
