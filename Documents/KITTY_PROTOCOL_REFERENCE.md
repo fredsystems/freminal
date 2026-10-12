@@ -2,12 +2,12 @@
 
 Last updated: 2026-10-12 — Task 138 — the "Desktop notifications (OSC 99)"
 section is re-distilled from the kitty 0.49.2 page and rewritten to the shipped
-behaviour, which is conformant except for one gap (the standard icon names on the
-toast and macOS/Windows legs, Tasks 138.C4 and 138.C5): the per-key and per-payload behaviour, the reply formats,
-the `p=?` answer per routing, platform and daemon, the leg capability table,
-the documented differences from kitty and that gap. The Task 99 current-state
-notes and the alive-map deferral are removed (superseded). No other section
-changed.
+behaviour, which is conformant: the per-key and per-payload behaviour, the reply
+formats, the `p=?` answer per routing, platform and daemon, the leg capability
+table and the documented differences from kitty. The standard icon names are
+honoured on every leg (Tasks 138.C4 and 138.C5), so the "Remaining conformance
+gap" subsection is removed. The Task 99 current-state notes and the alive-map
+deferral are removed (superseded). No other section changed.
 
 Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
 (131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
@@ -76,7 +76,7 @@ achievable and verifiable.
 
 | Protocol                                | Milestone | Task(s)                                               | Status in this doc                                    |
 | --------------------------------------- | --------- | ----------------------------------------------------- | ----------------------------------------------------- |
-| Desktop notifications (OSC 99)          | v0.13.0   | 138 (conformance; 99 shipped)                         | Filled in; one gap: icon names (138.C4, 138.C5)       |
+| Desktop notifications (OSC 99)          | v0.13.0   | 138 (conformance; 99 shipped)                         | Filled in; conformant                                 |
 | Pointer shapes (OSC 22)                 | v0.13.0   | 139                                                   | Not covered                                           |
 | Underlines and SGR parity               | v0.13.0   | 140                                                   | Not covered                                           |
 | Graphics protocol                       | v0.13.1   | 135, 136 (conformance and placement; 13, 100 shipped) | Filled in                                             |
@@ -111,12 +111,11 @@ sounds, urgency, occasion, auto-expiry, filtering hints and a capability
 handshake.
 
 **Baseline: kitty 0.49.2** (this section was re-distilled from the upstream page
-on 2026-10-12). freminal conforms to it (Task 138, v0.13.0) except for one gap:
-the eight standard icon names are not rendered on the toast leg or the
-macOS/Windows system leg (see "Remaining conformance gap" below; Tasks 138.C4
-and 138.C5). Where freminal deliberately differs from kitty, the difference is
-listed under "Documented differences from kitty" below; everything else in this
-section is what the spec says and what freminal does.
+on 2026-10-12). freminal conforms to it (Task 138, v0.13.0, including the
+standard icon names on every leg, Tasks 138.C4 and 138.C5). Where freminal
+deliberately differs from kitty, the difference is listed under "Documented
+differences from kitty" below; everything else in this section is what the spec
+says and what freminal does.
 
 ### Envelope (OSC 99)
 
@@ -170,7 +169,7 @@ update, close and query actions 0.36.0.
 | `f` | Base64 UTF-8; invalid or empty is ignored. Sent as the D-Bus `app_name`, matched by `osc99_filters` (`app`), and the fallback for the `.desktop` icon lookup on Linux/BSD.                                                                 |
 | `g` | Sanitised like `i`. The icon cache is global (not per pane), least-recently-used, 64 entries and 4 MiB. A transmitted icon is cached before the `o=` gate, so a suppressed notification still fills it.                                    |
 | `i` | Sanitised: bytes outside `[A-Za-z0-9_+.-]` are removed and the result is cut to 512 bytes; an id that is empty afterwards is absent. `i=0` is an ordinary id.                                                                              |
-| `n` | Base64 UTF-8; invalid or empty is ignored. Resolved on Linux/BSD only (see icons below); the toast and the macOS/Windows system leg ignore names (Tasks 138.C4, 138.C5).                                                                   |
+| `n` | Base64 UTF-8; invalid or empty is ignored. The eight standard names are honoured on every leg; any other name is resolved on Linux/BSD only (see icons below).                                                                   |
 | `o` | Pane-aware (see occasions below). An unrecognised value is ignored.                                                                                                                                                                        |
 | `p` | An unknown value is its own payload type: its payload is discarded and its metadata and `d=` still apply.                                                                                                                                  |
 | `s` | Base64 UTF-8; invalid or empty is ignored. See sounds below.                                                                                                                                                                               |
@@ -334,8 +333,13 @@ freminal's answer:
 | Standard sound names | no    | daemon has `sound`   | no           | no             |
 | Body                 | yes   | daemon has `body`    | yes          | yes            |
 | Buttons              | yes   | daemon has `actions` | no           | no             |
-| Icons                | no    | yes                  | yes          | yes            |
+| Icon image data      | no    | yes                  | yes          | yes            |
 
+- The Icon image data row is the `icons` capability, which `p=?` advertises as
+  `icon`: it is about a transmitted `p=icon` payload. The eight standard icon
+  names (`n=`) are honoured on every leg whatever it says: a bundled-font glyph on
+  the toast, a rendered glyph image on macOS and Windows, a freedesktop icon on
+  Linux/BSD.
 - The routing combines its legs:
   - `toast` and `system` use their one leg.
   - `both` shows both legs together. A feature that one leg suffices for
@@ -414,10 +418,17 @@ freminal:
   standard names are advertised only when the daemon has `sound`.
 - **macOS and Windows sounds:** `silent` is silent; `system` and any named sound
   play the platform default. Standard sound names are not advertised.
-- **Icon gap:** the standard names above must be supported by every
-  implementation, but only the Linux/BSD system leg shows them today; see
-  "Remaining conformance gap".
-- **Toast:** no icons, no sounds. Urgency `2` is an error toast that stays until
+- **macOS and Windows icons:** names come first, as on Linux. The first `n=`
+  name that is one of the eight standard names is drawn from the bundled
+  `CaskaydiaCove` glyph for it to a 256x256 PNG (a white glyph, its coverage as
+  alpha, centred on an opaque `#5A5A5A` rounded square tile inside a margin, so
+  it reads on light and dark backgrounds) and shown as the notification image. With no standard name, or if drawing fails, a transmitted icon is shown.
+  A name that is not standard cannot be resolved on these platforms (`notify-rust`'s
+  `icon()` is a no-op on both) and is ignored.
+  Only the eight standard names are mandatory, so this is allowed.
+- **Toast:** the first `n=` name that is standard shows as its bundled-font
+  glyph in the toast's icon slot; any other name is ignored, and a transmitted
+  icon image is never shown. No sounds. Urgency `2` is an error toast that stays until
   dismissed, `1` is an info toast with its default lifetime, `0` is an info toast
   for 3 seconds (all three when `w=` is `-1` or unset; `w=` overrides).
 - **Occasions** are pane-aware. A pane is _focused_ when its OS window is focused,
@@ -460,11 +471,10 @@ is no `and` / `or` / `not`.
   interprets markup (`body-markup`), freminal inserts U+200C after every `<` and
   `&` so they cannot form a tag or an entity, as kitty does.
 
-### freminal current-state: notifications — conformant except icon names (Task 138, v0.13.0)
+### freminal current-state: notifications — conformant (Task 138, v0.13.0)
 
 The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
-(v0.13.0), with the shared groundwork of Tasks 128 to 132, apart from the
-standard icon names (below). The pieces:
+(v0.13.0), with the shared groundwork of Tasks 128 to 132. The pieces:
 
 - **Parser** (`freminal-common/src/buffer_states/osc_notify_99.rs`):
   `parse_osc_99` turns one sequence into an `Osc99Command` in which every field
@@ -484,7 +494,8 @@ standard icon names (below). The pieces:
   executor applies. It holds at most 128 instances.
 - **Legs:** the keyed toast (`freminal/src/gui/toast.rs`), the Linux/BSD zbus
   service (`osc99/dbus_service.rs`, `presentation.rs`, `icon_lookup.rs`), and the
-  untracked macOS/Windows backend (`osc99/untracked.rs`, `icon_tempfiles.rs`).
+  untracked macOS/Windows backend (`osc99/untracked.rs`, `icon_raster.rs`,
+  `icon_tempfiles.rs`).
 - **Routing and capabilities:** `route_osc99` in `freminal/src/gui/notifications.rs`
   applies the `o=` gate, the filters and `routing_osc99`;
   `freminal/src/gui/host_capabilities.rs` holds the leg tables and the pure
@@ -539,38 +550,21 @@ does, not copied. These are the places freminal deliberately differs:
    through libcanberra; freminal has no sound library and sends `sound-name` (and
    `suppress-sound`) to the daemon.
 
-### Remaining conformance gap: standard icon names
-
-The spec says the eight standard icon names (`error`, `warn`, `warning`, `info`,
-`question`, `help`, `file-manager`, `system-monitor`, `text-editor`) "must be
-supported by any terminal emulator implementing this spec". freminal honours them
-only on the Linux/BSD system leg, where they map to freedesktop icon names:
-
-- **Toast leg (every platform):** shows no icon at all, so a standard name is
-  not shown. Task 138.C4 shows the standard names as bundled-font glyphs in the
-  toast's icon slot.
-- **macOS/Windows system leg:** ignores `n=` names (it shows a transmitted icon,
-  `p=icon`). Task 138.C5 rasterises the same glyphs to a PNG and sends it as the
-  notification image.
-
-Until both land the OSC 99 rows in `ESCAPE_SEQUENCE_COVERAGE.md` stay 🚧 and
-`ESCAPE_SEQUENCE_GAPS.md` keeps a gap row. `p=?` still lists `icon` where
-transmitted icon data is shown (Linux/BSD and macOS/Windows system legs), because
-that key is about the `p=icon` payload.
-
 ### Platform limits
 
 macOS and Windows give a background thread no way to observe a notification, and
 freminal adds no lifecycle code there. Their system leg is untracked: no
 activation reports, no close tracking, no update in place, no programmatic close
-and no expiry enforced by freminal, no buttons, and icon names are not resolved
-(a transmitted icon is shown; see the gap above). `p=?` omits what they cannot
+and no expiry enforced by freminal, no buttons, and only the eight standard icon
+names are resolved (as drawn glyph images; otherwise a transmitted icon is
+shown). `p=?` omits what they cannot
 do: no `a`, no `c`, no `w`, no `buttons`, `s=system,silent`, and `u` on Windows
 only. A `c=1` request is answered with `p=close;untracked` at display, and
 `p=alive` lists the pane's ids until `p=close`, a positive `w=` deadline, the
 instance cap or the pane going away removes them. On Linux/BSD, `actions`
 (report, focus, buttons), `body` and `sound` follow the daemon. The toast, on
-every platform, plays no sounds (and shows no icons; see the gap above).
+every platform, plays no sounds and shows no transmitted icon images (standard
+icon names show as glyphs).
 
 ---
 

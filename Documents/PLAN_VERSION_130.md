@@ -5941,6 +5941,15 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   `check-windows` must pass.
 - **Scheduling:** in Task 138, after 138.C4. When both land, the OSC 99 docs rows move to ✅,
   and that change is part of 138.C5.
+- **Status:** done. `rasterize_chrome_icon_png` renders the bundled glyph with swash: white,
+  on an opaque `#5A5A5A` rounded tile, so it reads on light and dark notification
+  backgrounds.
+  - The original `#404040` glyph was changed at orchestrator review because it is invisible
+    on dark backgrounds. The orchestrator inspected the rendered PNGs visually.
+  - The untracked backend tries names first (the first standard name, rasterised at 256 px),
+    then transmitted data.
+  - The OSC 99 rows in COVERAGE and the kitty reference are now ✅, and the GAPS row is
+    removed.
 
 ### 138 Status notes
 

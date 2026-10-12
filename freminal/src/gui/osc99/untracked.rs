@@ -15,8 +15,16 @@
 //! the stand-in when the real backend is busy.
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::borrow::Cow;
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::icon_raster::rasterize_chrome_icon_png;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use crate::gui::icons::standard_icon_glyph;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::icon_tempfiles::{IconTempFiles, default_icon_dir};
@@ -89,6 +97,28 @@ pub const fn untracked_sound(sound: &Osc99Sound) -> Osc99PlatformSound {
     }
 }
 
+/// The side, in pixels, of the image a standard icon name is drawn to.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+const STANDARD_ICON_SIZE_PX: u32 = 256;
+
+/// The icon image to show for `data`, as encoded image bytes.
+///
+/// Names come first, as on Linux: the first `n=` name that is one of the OSC 99
+/// standard icon names is drawn from the bundled glyph (see
+/// [`rasterize_chrome_icon_png`]). Neither platform resolves a freedesktop icon
+/// name itself, so a name that is not a standard one is skipped. If no name is
+/// standard, or the glyph cannot be drawn, the transmitted icon data is used;
+/// with neither there is no image.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn untracked_icon_image(data: &Notification99Data) -> Option<Cow<'_, [u8]>> {
+    data.icon_names
+        .iter()
+        .find_map(|name| standard_icon_glyph(name))
+        .and_then(|icon| rasterize_chrome_icon_png(icon, STANDARD_ICON_SIZE_PX))
+        .map(Cow::Owned)
+        .or_else(|| data.icon_data.as_deref().map(Cow::Borrowed))
+}
+
 /// The backend for the platform freminal is running on.
 #[must_use]
 pub fn platform_untracked_backend() -> Box<dyn Osc99UntrackedBackend> {
@@ -125,9 +155,11 @@ const PLATFORM_DEFAULT_SOUND_NAME: &str = if cfg!(target_os = "macos") {
 ///   "reminder" toast). `notify-rust` has no `urgency` on macOS.
 /// - `w=` becomes the timeout. Windows honours it coarsely (short or long
 ///   toast); macOS ignores it.
-/// - An icon the program sent as bytes is shown from `icon_path`, the file the
-///   caller wrote for it. Otherwise the first transmitted icon name is set as
-///   the icon, which neither platform currently draws.
+/// - The icon image (a drawn standard icon name or transmitted bytes, see
+///   [`untracked_icon_image`]) is shown from `icon_path`, the file the caller
+///   wrote for it. With no image, the first transmitted icon name is set as
+///   the icon, which neither platform currently draws; only the standard names
+///   can be shown on these platforms.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn build_untracked_notification(
     data: &Notification99Data,
@@ -241,15 +273,13 @@ impl Default for NotifyRustUntrackedBackend {
 impl Osc99UntrackedBackend for NotifyRustUntrackedBackend {
     fn show(&mut self, data: &Notification99Data) {
         let icon_path =
-            data.icon_data
-                .as_deref()
-                .and_then(|bytes| match self.icons.path_for(bytes) {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        tracing::warn!("failed to write OSC 99 icon temp file: {e}");
-                        None
-                    }
-                });
+            untracked_icon_image(data).and_then(|bytes| match self.icons.path_for(&bytes) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    tracing::warn!("failed to write OSC 99 icon temp file: {e}");
+                    None
+                }
+            });
 
         let notification = build_untracked_notification(data, icon_path.as_deref());
         // macOS: off the GUI thread, see `deliver_on_thread`. Windows: inline,
@@ -316,6 +346,72 @@ mod tests {
         backend.show(&second);
 
         assert_eq!(backend.shown, [first, second]);
+    }
+
+    fn decoded_size(image: &[u8]) -> Option<(u32, u32)> {
+        image::load_from_memory(image)
+            .ok()
+            .map(|decoded| (decoded.width(), decoded.height()))
+    }
+
+    #[test]
+    fn a_standard_name_beats_transmitted_data() {
+        let data = Notification99Data {
+            icon_names: vec!["info".to_owned()],
+            icon_data: Some(vec![1, 2, 3]),
+            ..test_notification()
+        };
+
+        let image = untracked_icon_image(&data).unwrap();
+
+        assert_eq!(decoded_size(&image), Some((256, 256)));
+    }
+
+    #[test]
+    fn the_first_standard_name_wins_over_non_standard_names_before_it() {
+        let drawn = |names: &[&str]| {
+            untracked_icon_image(&Notification99Data {
+                icon_names: names.iter().map(|name| (*name).to_owned()).collect(),
+                ..test_notification()
+            })
+            .unwrap()
+            .into_owned()
+        };
+
+        assert_eq!(drawn(&["weather-clear", "error"]), drawn(&["error"]));
+        assert_ne!(drawn(&["error", "info"]), drawn(&["info"]));
+    }
+
+    #[test]
+    fn a_non_standard_name_falls_through_to_transmitted_data() {
+        let data = Notification99Data {
+            icon_names: vec!["weather-clear".to_owned()],
+            icon_data: Some(vec![1, 2, 3]),
+            ..test_notification()
+        };
+
+        assert_eq!(untracked_icon_image(&data).unwrap().as_ref(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn no_names_and_data_is_the_data() {
+        let data = Notification99Data {
+            icon_data: Some(vec![9, 8, 7]),
+            ..test_notification()
+        };
+
+        assert_eq!(untracked_icon_image(&data).unwrap().as_ref(), [9, 8, 7]);
+    }
+
+    #[test]
+    fn a_non_standard_name_without_data_has_no_image() {
+        let data = Notification99Data {
+            icon_names: vec!["weather-clear".to_owned()],
+            ..test_notification()
+        };
+
+        assert_eq!(untracked_icon_image(&data), None);
+        assert_eq!(untracked_icon_image(&test_notification()), None);
     }
 
     fn test_notification() -> Notification99Data {

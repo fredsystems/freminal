@@ -17,6 +17,8 @@ mod icon_cache;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod icon_lookup;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod icon_raster;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod icon_tempfiles;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod presentation;
