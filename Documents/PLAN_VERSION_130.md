@@ -6166,6 +6166,22 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The cfg covers non-Linux Unix targets freminal does not ship.
   - No fallback timer after `CloseNotification`: the notification spec requires the daemon
     to emit `NotificationClosed`.
+- **Status:** done, for every item.
+  - **Hints (Z10).** Serialised through `WireHints` / `WireImage` (`serde` + `zvariant::Type`
+    with `as_value`). The image bytes are borrowed straight onto the wire, with no `Value`
+    tree.
+  - **Decoding.**
+    - The decoded-icon LRU lives on `DispatcherState`.
+    - EXIF orientation is applied, with the allocation check re-added by hand on that decode
+      path.
+    - Resizing is premultiplied.
+  - **XDG scan.** It runs on a `freminal-osc99-icons` thread and falls through until it is
+    done.
+  - **`serde` dependency.** `serde` became a direct Linux/BSD dependency of `freminal`,
+    because the derive needs it; it was already a workspace dependency.
+  - **Real-bus check.** The orchestrator re-ran a real-session-bus smoke test (temporary, not
+    committed). A notification with an `image-data` hint, category, `suppress-sound`, the
+    desktop-entry hint and markup was accepted (`Shown`) and then closed.
 
 #### 138.C12 — Split `osc99/dbus_service.rs` into a directory (move only)
 

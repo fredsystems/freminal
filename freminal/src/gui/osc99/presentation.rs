@@ -10,13 +10,18 @@
 //! freedesktop notification spec has a place for. The filesystem is reached
 //! only through [`Osc99IconLookup`], which tests replace with a fake.
 
+use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 use image::imageops::FilterType;
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, RgbaImage};
 
 /// An icon wider or taller than this is downscaled before it is sent.
 ///
-/// The `image-data` hint reaches zbus as one `Value` per byte, so its transient
-/// cost is a large multiple of the pixel data. Capping the icon at 256x256
+/// Notification daemons show icons at a small size, and the `image-data` hint
+/// travels over the bus in every `Notify` call. Capping the icon at 256x256
 /// bounds the RGBA at 256 KiB.
 const DOWNSCALE_THRESHOLD: u32 = 256;
 
@@ -34,14 +39,20 @@ const MAX_DECODE_DIMENSION: u32 = 4096;
 /// dimension limits above are the firm bound.
 const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How many decoded icons [`Osc99DecodedIconCache`] keeps.
+const DECODED_ICON_CACHE_ENTRIES: usize = 8;
+
 /// Zero width non-joiner, inserted after the characters kitty escapes in a
 /// body for daemons that interpret markup.
 const ZERO_WIDTH_NON_JOINER: char = '\u{200c}';
 
 /// What the icon scan and the `.desktop` scan know about the system.
 pub trait Osc99IconLookup {
-    /// Whether the icon scan found an icon called `name` (case-insensitive).
-    fn icon_exists(&self, name: &str) -> bool;
+    /// The icon the icon scan found for `name` (case-insensitive), as the
+    /// icon file's stem is spelled on disk, or `None` when there is no such
+    /// icon. The on-disk spelling is what the daemon must be sent: icon lookup
+    /// in a theme is case-sensitive.
+    fn matched_icon(&self, name: &str) -> Option<String>;
 
     /// The `Icon=` of the `.desktop` file whose stem or `Name=` equals
     /// `app_name` (case-insensitive).
@@ -100,7 +111,8 @@ pub fn standard_icon_name(name: &str) -> Option<&'static str> {
 /// Pick the icon, in kitty's order.
 ///
 /// - Each name in `names`, in order: a standard name maps to its freedesktop
-///   name; any other name is used when `lookup` finds it.
+///   name; any other name is used, as `lookup` spells it, when `lookup` finds
+///   it.
 /// - If no name matched: the transmitted `data`, else the first name verbatim
 ///   (the daemon may know an icon the scan did not).
 /// - With no names: `data`, else the icon of the `.desktop` file matching
@@ -118,8 +130,8 @@ pub fn choose_icon(
         if let Some(standard) = standard_icon_name(name) {
             return Some(Osc99IconChoice::Named(standard.to_owned()));
         }
-        if lookup.icon_exists(name) {
-            return Some(Osc99IconChoice::Named(name.clone()));
+        if let Some(matched) = lookup.matched_icon(name) {
+            return Some(Osc99IconChoice::Named(matched));
         }
     }
     if let Some(data) = data {
@@ -155,12 +167,19 @@ pub fn sound_hint(sound: &Osc99Sound) -> Osc99SoundHint {
 
 /// Decode transmitted icon `bytes` (PNG, JPEG, GIF or WebP) to RGBA.
 ///
+/// WebP is accepted although kitty's spec names only PNG: it goes through the
+/// same bounded decoder, and being lenient about what a sender transmits costs
+/// nothing.
+///
 /// Decoding is bounded by [`MAX_DECODE_DIMENSION`] and
-/// [`MAX_DECODE_ALLOC_BYTES`]: an image over a limit is a decode failure. An
-/// image wider or taller than 256 pixels is downscaled to fit within 256x256,
-/// keeping its aspect ratio. `None` when the bytes do not decode (or break a
-/// limit) or the dimensions do not fit the hint's `i32` fields; the caller
-/// falls back to the next icon source.
+/// [`MAX_DECODE_ALLOC_BYTES`]: an image over a limit is a decode failure. The
+/// EXIF orientation, where the format carries one, is applied, so a photo
+/// taken sideways is shown upright. An image wider or taller than 256 pixels
+/// is downscaled to fit within 256x256, keeping its aspect ratio; the resize
+/// runs on premultiplied alpha, so the colour of a fully transparent pixel
+/// does not darken the edge of the opaque part. `None` when the bytes do not
+/// decode (or break a limit) or the dimensions do not fit the hint's `i32`
+/// fields; the caller falls back to the next icon source.
 #[must_use]
 pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -171,13 +190,22 @@ pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
     limits.max_image_height = Some(MAX_DECODE_DIMENSION);
     limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
     reader.limits(limits);
-    let decoded = reader.decode().ok()?.to_rgba8();
-    let (width, height) = decoded.dimensions();
+    // `ImageReader::decode` reserves the output image against `max_alloc`; the
+    // decoder route taken here (it exposes the orientation) must do it itself.
+    let mut decoder = reader.into_decoder().ok()?;
+    if decoder.total_bytes() > MAX_DECODE_ALLOC_BYTES {
+        return None;
+    }
+    // A broken orientation tag is not worth losing the icon over.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut dynamic = DynamicImage::from_decoder(decoder).ok()?;
+    dynamic.apply_orientation(orientation);
+    let upright = dynamic.into_rgba8();
+    let (width, height) = upright.dimensions();
     let rgba = if width > DOWNSCALE_THRESHOLD || height > DOWNSCALE_THRESHOLD {
-        let (target_width, target_height) = fit_within_target(width, height);
-        image::imageops::resize(&decoded, target_width, target_height, FilterType::Triangle)
+        downscale(upright)
     } else {
-        decoded
+        upright
     };
     let (width, height) = rgba.dimensions();
     let rowstride = width.checked_mul(4)?;
@@ -187,6 +215,107 @@ pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
         rowstride: i32::try_from(rowstride).ok()?,
         rgba: rgba.into_raw(),
     })
+}
+
+/// `image` fitted within [`DOWNSCALE_TARGET`] squared, keeping its aspect
+/// ratio. The filter averages colour channels without weighting them by
+/// alpha, so the image is premultiplied around it: otherwise the colour
+/// stored under transparent pixels bleeds into the edge.
+fn downscale(mut image: RgbaImage) -> RgbaImage {
+    let (width, height) = image.dimensions();
+    let (target_width, target_height) = fit_within_target(width, height);
+    premultiply_alpha(&mut image);
+    let mut resized =
+        image::imageops::resize(&image, target_width, target_height, FilterType::Triangle);
+    unpremultiply_alpha(&mut resized);
+    resized
+}
+
+/// Scale every pixel's colour by its alpha, rounding to nearest.
+fn premultiply_alpha(image: &mut RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel.0[3]);
+        for channel in &mut pixel.0[..3] {
+            let scaled = (u32::from(*channel) * alpha + 127) / 255;
+            *channel = u8::try_from(scaled).unwrap_or(u8::MAX);
+        }
+    }
+}
+
+/// Undo [`premultiply_alpha`]. A fully transparent pixel has no colour left.
+fn unpremultiply_alpha(image: &mut RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel.0[3]);
+        for channel in &mut pixel.0[..3] {
+            let restored = (u32::from(*channel) * 255 + alpha / 2)
+                .checked_div(alpha)
+                .unwrap_or(0);
+            *channel = u8::try_from(restored.min(255)).unwrap_or(u8::MAX);
+        }
+    }
+}
+
+/// What identifies a transmitted icon: a hash of its bytes and their length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IconKey {
+    hash: u64,
+    len: usize,
+}
+
+impl IconKey {
+    fn of(bytes: &[u8]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Self {
+            hash: hasher.finish(),
+            len: bytes.len(),
+        }
+    }
+}
+
+/// The last few decoded icons, so a program that sends the same icon with
+/// every notification does not have it decoded and downscaled each time.
+///
+/// Least recently used first out, keyed by a hash of the transmitted bytes. It
+/// is owned by one thread (the dispatcher), so there is no locking. A decode
+/// failure is not remembered: it is cheap, and bounded by the decode limits.
+#[derive(Debug, Default)]
+pub struct Osc99DecodedIconCache {
+    /// Least recently used at the front.
+    entries: VecDeque<(IconKey, Osc99IconImage)>,
+}
+
+impl Osc99DecodedIconCache {
+    /// [`decode_icon_image`] of `bytes`, from the cache when it holds them.
+    pub fn decode(&mut self, bytes: &[u8]) -> Option<Osc99IconImage> {
+        let key = IconKey::of(bytes);
+        if let Some(position) = self.entries.iter().position(|(cached, _)| *cached == key)
+            && let Some(entry) = self.entries.remove(position)
+        {
+            let image = entry.1.clone();
+            self.entries.push_back(entry);
+            return Some(image);
+        }
+        let image = decode_icon_image(bytes)?;
+        if self.entries.len() >= DECODED_ICON_CACHE_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((key, image.clone()));
+        Some(image)
+    }
+
+    /// How many icons are cached.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the icon transmitted as `bytes` is cached.
+    #[cfg(test)]
+    fn contains(&self, bytes: &[u8]) -> bool {
+        let key = IconKey::of(bytes);
+        self.entries.iter().any(|(cached, _)| *cached == key)
+    }
 }
 
 /// `width` x `height` scaled to fit within [`DOWNSCALE_TARGET`] squared,
@@ -226,20 +355,21 @@ pub fn escape_body_markup(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use super::*;
 
-    /// A lookup over fixed sets, touching no filesystem.
+    /// A lookup over fixed maps, touching no filesystem. `icons` maps the
+    /// name asked for to the on-disk stem that matches it.
     #[derive(Default)]
     struct FakeLookup {
-        icons: HashSet<String>,
+        icons: HashMap<String, String>,
         desktop: HashMap<String, String>,
     }
 
     impl Osc99IconLookup for FakeLookup {
-        fn icon_exists(&self, name: &str) -> bool {
-            self.icons.contains(name)
+        fn matched_icon(&self, name: &str) -> Option<String> {
+            self.icons.get(name).cloned()
         }
 
         fn desktop_icon(&self, app_name: &str) -> Option<String> {
@@ -253,7 +383,10 @@ mod tests {
 
     fn lookup_with_icons(icons: &[&str]) -> FakeLookup {
         FakeLookup {
-            icons: icons.iter().map(|icon| (*icon).to_owned()).collect(),
+            icons: icons
+                .iter()
+                .map(|icon| ((*icon).to_owned(), (*icon).to_owned()))
+                .collect(),
             ..FakeLookup::default()
         }
     }
@@ -300,6 +433,18 @@ mod tests {
             choice,
             Some(Osc99IconChoice::Named("mail-unread".to_owned()))
         );
+    }
+
+    #[test]
+    fn the_matched_on_disk_stem_is_what_is_chosen() {
+        let lookup = FakeLookup {
+            icons: HashMap::from([("mailicon".to_owned(), "MailIcon".to_owned())]),
+            ..FakeLookup::default()
+        };
+
+        let choice = choose_icon(&names(&["mailicon"]), None, None, &lookup);
+
+        assert_eq!(choice, Some(Osc99IconChoice::Named("MailIcon".to_owned())));
     }
 
     #[test]
@@ -538,5 +683,224 @@ mod tests {
         assert_eq!(escape_body_markup("plain text > 3"), "plain text > 3");
         assert_eq!(escape_body_markup(""), "");
         assert_eq!(escape_body_markup("<<"), "<\u{200c}<\u{200c}");
+    }
+
+    // ── Z9: decoding ────────────────────────────────────────────────────
+
+    /// A 512x512 image, fully transparent except an opaque white square, with
+    /// black stored under the transparent pixels (as many encoders do).
+    fn white_square_on_black_transparent() -> RgbaImage {
+        let mut pixels = RgbaImage::from_pixel(512, 512, image::Rgba([0, 0, 0, 0]));
+        for y in 100..401 {
+            for x in 100..401 {
+                pixels.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        pixels
+    }
+
+    fn encode_png(pixels: &RgbaImage) -> Result<Vec<u8>, image::ImageError> {
+        let mut bytes = Vec::new();
+        pixels.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )?;
+        Ok(bytes)
+    }
+
+    #[test]
+    fn downscaling_does_not_darken_the_edge_of_a_transparent_image()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = encode_png(&white_square_on_black_transparent())?;
+
+        let image = decode_icon_image(&bytes).ok_or("did not decode")?;
+
+        assert_eq!((image.width, image.height), (256, 256));
+        let mut partly_transparent = 0;
+        let mut opaque = 0;
+        for pixel in image.rgba.as_chunks::<4>().0 {
+            if pixel[3] > 0 {
+                assert!(
+                    pixel[0] >= 250 && pixel[1] >= 250 && pixel[2] >= 250,
+                    "a visible pixel {pixel:?} is darker than its source"
+                );
+                if pixel[3] < 255 {
+                    partly_transparent += 1;
+                } else {
+                    opaque += 1;
+                }
+            }
+        }
+        // The check above is not vacuous: there is an opaque core and an edge.
+        assert!(opaque > 0);
+        assert!(partly_transparent > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn premultiplying_and_restoring_keeps_opaque_and_clears_transparent_pixels() {
+        let mut pixels = RgbaImage::new(3, 1);
+        pixels.put_pixel(0, 0, image::Rgba([10, 20, 30, 255]));
+        pixels.put_pixel(1, 0, image::Rgba([200, 100, 50, 0]));
+        pixels.put_pixel(2, 0, image::Rgba([255, 255, 255, 128]));
+
+        premultiply_alpha(&mut pixels);
+
+        assert_eq!(pixels.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        assert_eq!(pixels.get_pixel(1, 0).0, [0, 0, 0, 0]);
+        assert_eq!(pixels.get_pixel(2, 0).0, [128, 128, 128, 128]);
+
+        unpremultiply_alpha(&mut pixels);
+
+        assert_eq!(pixels.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        assert_eq!(pixels.get_pixel(1, 0).0, [0, 0, 0, 0]);
+        assert_eq!(pixels.get_pixel(2, 0).0, [255, 255, 255, 128]);
+    }
+
+    /// The bytes of a little-endian EXIF block that holds only the
+    /// orientation tag.
+    fn exif_with_orientation(orientation: u16) -> Vec<u8> {
+        let mut exif = vec![b'I', b'I', 42, 0];
+        exif.extend_from_slice(&8u32.to_le_bytes()); // offset of the first IFD
+        exif.extend_from_slice(&1u16.to_le_bytes()); // one entry
+        exif.extend_from_slice(&0x0112u16.to_le_bytes()); // Orientation
+        exif.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+        exif.extend_from_slice(&1u32.to_le_bytes()); // count
+        exif.extend_from_slice(&orientation.to_le_bytes());
+        exif.extend_from_slice(&0u16.to_le_bytes()); // padding
+        exif.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+        exif
+    }
+
+    /// A 4x2 PNG carrying `orientation` in an `eXIf` chunk, red at its top
+    /// left and blue everywhere else.
+    fn png_with_orientation(orientation: u16) -> Result<Vec<u8>, image::ImageError> {
+        use image::ImageEncoder;
+
+        let mut pixels = RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 255, 255]));
+        pixels.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        encoder
+            .set_exif_metadata(exif_with_orientation(orientation))
+            .map_err(image::ImageError::Unsupported)?;
+        encoder.write_image(pixels.as_raw(), 4, 2, image::ExtendedColorType::Rgba8)?;
+        Ok(bytes)
+    }
+
+    /// The `(x, y)` of the red pixel of `image`.
+    fn red_pixel(image: &Osc99IconImage) -> Option<(usize, usize)> {
+        let width = usize::try_from(image.width).ok()?;
+        image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .position(|pixel| *pixel == [255, 0, 0, 255])
+            .map(|index| (index % width, index / width))
+    }
+
+    #[test]
+    fn an_image_without_an_orientation_tag_is_left_as_it_is()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let image = decode_icon_image(&png_with_orientation(1)?).ok_or("did not decode")?;
+
+        assert_eq!((image.width, image.height), (4, 2));
+        assert_eq!(red_pixel(&image), Some((0, 0)));
+        Ok(())
+    }
+
+    #[test]
+    fn the_exif_orientation_is_applied() -> Result<(), Box<dyn std::error::Error>> {
+        // Orientation 6: rotate 90 degrees clockwise. The 4x2 image becomes
+        // 2x4 and its top-left pixel moves to the top-right.
+        let image = decode_icon_image(&png_with_orientation(6)?).ok_or("did not decode")?;
+        assert_eq!((image.width, image.height), (2, 4));
+        assert_eq!(red_pixel(&image), Some((1, 0)));
+
+        // Orientation 3: rotate 180. The top-left pixel moves to the
+        // bottom-right.
+        let image = decode_icon_image(&png_with_orientation(3)?).ok_or("did not decode")?;
+        assert_eq!((image.width, image.height), (4, 2));
+        assert_eq!(red_pixel(&image), Some((3, 1)));
+
+        // Orientation 2: mirror horizontally.
+        let image = decode_icon_image(&png_with_orientation(2)?).ok_or("did not decode")?;
+        assert_eq!(red_pixel(&image), Some((3, 0)));
+        Ok(())
+    }
+
+    #[test]
+    fn an_orientation_tag_outside_the_valid_range_is_ignored()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let image = decode_icon_image(&png_with_orientation(9)?).ok_or("did not decode")?;
+
+        assert_eq!((image.width, image.height), (4, 2));
+        assert_eq!(red_pixel(&image), Some((0, 0)));
+        Ok(())
+    }
+
+    // ── Z9: the decoded-icon cache ──────────────────────────────────────
+
+    /// A 2x2 PNG whose colour is `shade`: a different `shade` is a different
+    /// icon.
+    fn shaded_png(shade: u8) -> Result<Vec<u8>, image::ImageError> {
+        encode_png(&RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([shade, 0, 0, 255]),
+        ))
+    }
+
+    #[test]
+    fn the_cache_decodes_the_same_as_the_function() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = shaded_png(9)?;
+        let mut cache = Osc99DecodedIconCache::default();
+
+        let first = cache.decode(&bytes);
+        let second = cache.decode(&bytes);
+
+        assert_eq!(first, decode_icon_image(&bytes));
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        assert_eq!(
+            cache.len(),
+            1,
+            "the second decode is a hit, not a new entry"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_cache_does_not_remember_a_decode_failure() {
+        let mut cache = Osc99DecodedIconCache::default();
+
+        assert_eq!(cache.decode(b"not an image"), None);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn the_cache_evicts_the_least_recently_used_icon_past_eight()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let icons = (0..10).map(shaded_png).collect::<Result<Vec<_>, _>>()?;
+        let mut cache = Osc99DecodedIconCache::default();
+        for icon in &icons[..8] {
+            cache.decode(icon).ok_or("did not decode")?;
+        }
+        assert_eq!(cache.len(), 8);
+
+        // A hit on the oldest makes it the newest, so the next oldest goes.
+        cache.decode(&icons[0]).ok_or("did not decode")?;
+        cache.decode(&icons[8]).ok_or("did not decode")?;
+
+        assert_eq!(cache.len(), 8);
+        assert!(cache.contains(&icons[0]), "a hit refreshes an entry");
+        assert!(!cache.contains(&icons[1]), "the least recently used goes");
+        assert!(cache.contains(&icons[8]));
+
+        cache.decode(&icons[9]).ok_or("did not decode")?;
+        assert!(!cache.contains(&icons[2]));
+        assert_eq!(cache.len(), 8);
+        Ok(())
     }
 }

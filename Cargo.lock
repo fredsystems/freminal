@@ -1577,6 +1577,7 @@ dependencies = [
  "rustc-hash",
  "rustybuzz",
  "self_cell",
+ "serde",
  "swash",
  "sysinfo",
  "tempfile",

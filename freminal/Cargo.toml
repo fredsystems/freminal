@@ -197,6 +197,7 @@ sysinfo.workspace = true
 # only needed by the in-process fake notification server in the service's
 # integration test, so it is enabled for tests alone.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+serde.workspace = true
 zbus.workspace = true
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]

@@ -100,16 +100,17 @@ use freminal_common::buffer_states::osc99_notification::{
 };
 use freminal_common::send_or_log;
 use freminal_windowing::{RepaintProxy, WindowId};
+use serde::{Serialize, Serializer};
 use zbus::MatchRule;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::{Message, Type as MessageType};
 use zbus::proxy::MethodFlags;
-use zbus::zvariant::{Array, Structure, Value};
+use zbus::zvariant::{Signature, Type, as_value};
 
 use super::icon_lookup::XdgIconLookup;
 use super::presentation::{
-    Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint, choose_icon,
-    decode_icon_image, escape_body_markup, sound_hint,
+    Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
+    category_hint, choose_icon, escape_body_markup, sound_hint,
 };
 use super::{
     Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId, Osc99LegActivation,
@@ -309,21 +310,34 @@ const fn urgency_byte(urgency: NotificationUrgency) -> u8 {
 /// names it. The last resort of icon resolution.
 const FREMINAL_ICON_NAME: &str = "freminal";
 
-/// The wire value of the `suppress-sound` hint when it is sent: the hint's
-/// presence with `true` is the request, so there is no `false` to send.
-const SUPPRESS_SOUND_WIRE: bool = true;
-
-/// The `has_alpha` field of the `image-data` structure: the pixels are always
-/// RGBA.
-const IMAGE_HAS_ALPHA_WIRE: bool = true;
-
 /// The `bits_per_sample` field of the `image-data` structure.
 const IMAGE_BITS_PER_SAMPLE: i32 = 8;
 
 /// The `channels` field of the `image-data` structure (R, G, B, A).
 const IMAGE_CHANNELS: i32 = 4;
 
-/// The `hints` argument of `Notify`, before it becomes an `a{sv}` dictionary.
+/// A boolean the wire format asks for and freminal only ever sends as `true`:
+/// `suppress-sound` is a request by being present, and the pixels of
+/// `image-data` always have an alpha channel. There is no `false` to carry, so
+/// the type has no value to get wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AlwaysTrue;
+
+impl Serialize for AlwaysTrue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl Type for AlwaysTrue {
+    const SIGNATURE: &'static Signature = <bool as Type>::SIGNATURE;
+}
+
+/// The `desktop-entry` hint: the name of freminal's `.desktop` file without
+/// its extension, which lets the daemon group and attribute the notification.
+const DESKTOP_ENTRY_HINT: &str = "freminal";
+
+/// The `hints` argument of `Notify`, as presentation decided it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NotifyHints {
     /// The `urgency` hint.
@@ -337,37 +351,72 @@ struct NotifyHints {
 }
 
 impl NotifyHints {
-    /// The wire form: an `a{sv}` dictionary.
-    fn to_map(&self) -> HashMap<&'static str, Value<'static>> {
-        let mut map = HashMap::from([("urgency", Value::from(self.urgency))]);
-        if let Some(category) = &self.category {
-            map.insert("category", Value::from(category.clone()));
+    /// The wire form: an `a{sv}` dictionary with the always-present hints and
+    /// those that are set. It borrows from `self`; nothing is copied.
+    fn to_wire(&self) -> WireHints<'_> {
+        let (suppress_sound, sound_name) = match &self.sound {
+            Osc99SoundHint::None => (None, None),
+            Osc99SoundHint::Suppress => (Some(AlwaysTrue), None),
+            Osc99SoundHint::Named(name) => (None, Some(name.clone())),
+        };
+        WireHints {
+            urgency: self.urgency,
+            category: self.category.clone(),
+            suppress_sound,
+            sound_name,
+            image_data: self.image.as_ref().map(WireImage::from),
+            desktop_entry: DESKTOP_ENTRY_HINT,
         }
-        match &self.sound {
-            Osc99SoundHint::None => {}
-            Osc99SoundHint::Suppress => {
-                map.insert("suppress-sound", Value::from(SUPPRESS_SOUND_WIRE));
-            }
-            Osc99SoundHint::Named(name) => {
-                map.insert("sound-name", Value::from(name.clone()));
-            }
-        }
-        if let Some(image) = &self.image {
-            // `(iiibiiay)`: width, height, rowstride, has_alpha,
-            // bits_per_sample, channels, data.
-            let structure = Structure::from((
-                image.width,
-                image.height,
-                image.rowstride,
-                IMAGE_HAS_ALPHA_WIRE,
-                IMAGE_BITS_PER_SAMPLE,
-                IMAGE_CHANNELS,
-                Array::from(image.rgba.as_slice()),
-            ));
-            map.insert("image-data", Value::Structure(structure));
-        }
-        map
     }
+}
+
+/// The `image-data` hint: the `(iiibiiay)` structure of width, height,
+/// rowstride, `has_alpha`, `bits_per_sample`, channels and data. The data is one
+/// byte array on the wire, never one variant per byte.
+#[derive(Debug, PartialEq, Eq, Serialize, Type)]
+struct WireImage<'a> {
+    width: i32,
+    height: i32,
+    rowstride: i32,
+    has_alpha: AlwaysTrue,
+    bits_per_sample: i32,
+    channels: i32,
+    data: &'a [u8],
+}
+
+impl<'a> From<&'a Osc99IconImage> for WireImage<'a> {
+    fn from(image: &'a Osc99IconImage) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            rowstride: image.rowstride,
+            has_alpha: AlwaysTrue,
+            bits_per_sample: IMAGE_BITS_PER_SAMPLE,
+            channels: IMAGE_CHANNELS,
+            data: &image.rgba,
+        }
+    }
+}
+
+/// [`NotifyHints`] as the `a{sv}` dictionary `Notify` takes. A hint that is
+/// not set is left out of the dictionary; each present value is a variant
+/// holding its own natural type.
+#[derive(Debug, PartialEq, Eq, Serialize, Type)]
+#[zvariant(signature = "a{sv}")]
+#[serde(rename_all = "kebab-case")]
+struct WireHints<'a> {
+    #[serde(with = "as_value")]
+    urgency: u8,
+    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    suppress_sound: Option<AlwaysTrue>,
+    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    sound_name: Option<String>,
+    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    image_data: Option<WireImage<'a>>,
+    #[serde(with = "as_value")]
+    desktop_entry: &'static str,
 }
 
 /// The arguments of one `Notify` call, in the order the method takes them.
@@ -385,31 +434,38 @@ struct NotifyArgs {
 
 impl NotifyArgs {
     /// The `app_icon` and `image-data` for `notification`.
+    ///
+    /// Transmitted icon data that does not decode counts as no data: the
+    /// icon is then the first name verbatim, else the `.desktop` icon of the
+    /// application, else freminal's own, as in [`choose_icon`].
     fn icon(
         lookup: &dyn Osc99IconLookup,
+        cache: &mut Osc99DecodedIconCache,
         notification: &Notification99Data,
     ) -> (String, Option<Osc99IconImage>) {
-        let choice = choose_icon(
-            &notification.icon_names,
-            notification.icon_data.as_deref(),
-            notification.app_name.as_deref(),
-            lookup,
-        );
+        let choose = |data: Option<&[u8]>| {
+            choose_icon(
+                &notification.icon_names,
+                data,
+                notification.app_name.as_deref(),
+                lookup,
+            )
+        };
         let freminal_icon = || (FREMINAL_ICON_NAME.to_owned(), None);
-        match choice {
+        let named = |choice| match choice {
             Some(Osc99IconChoice::Named(name)) => (name, None),
-            Some(Osc99IconChoice::Data(bytes)) => decode_icon_image(&bytes).map_or_else(
+            // No rule found an icon: the last one is freminal's own.
+            Some(Osc99IconChoice::Data(_)) | None => freminal_icon(),
+        };
+        match choose(notification.icon_data.as_deref()) {
+            Some(Osc99IconChoice::Data(bytes)) => cache.decode(&bytes).map_or_else(
                 || {
                     tracing::debug!("OSC 99: the transmitted icon did not decode");
-                    notification
-                        .icon_names
-                        .first()
-                        .map_or_else(freminal_icon, |name| (name.clone(), None))
+                    named(choose(None))
                 },
                 |image| (String::new(), Some(image)),
             ),
-            // No rule found an icon: the last one is freminal's own.
-            None => freminal_icon(),
+            choice => named(choice),
         }
     }
 }
@@ -580,8 +636,10 @@ struct DispatcherState {
     capabilities_asked_of: Option<String>,
     /// Whether the daemon answers.
     health: Osc99DaemonHealth,
-    /// What the icon and `.desktop` scans know; scanned on first use.
+    /// What the icon and `.desktop` scans know.
     icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    /// The icons transmitted recently, already decoded.
+    icon_cache: Osc99DecodedIconCache,
 }
 
 impl DispatcherState {
@@ -596,6 +654,7 @@ impl DispatcherState {
             capabilities_asked_of: None,
             health: Osc99DaemonHealth::Healthy,
             icon_lookup,
+            icon_cache: Osc99DecodedIconCache::default(),
         }
     }
 
@@ -665,7 +724,7 @@ impl DispatcherState {
     /// body follow `presentation`; the body is escaped only when the daemon
     /// has the `body-markup` capability.
     fn notify_args(
-        &self,
+        &mut self,
         replaces: Option<Osc99InstanceId>,
         notification: &Notification99Data,
     ) -> NotifyArgs {
@@ -690,7 +749,11 @@ impl DispatcherState {
             Osc99Expiry::Never => 0,
             Osc99Expiry::After(ms) => i32::try_from(ms.get()).unwrap_or(i32::MAX),
         };
-        let (app_icon, image) = NotifyArgs::icon(self.icon_lookup.as_ref(), notification);
+        let (app_icon, image) = NotifyArgs::icon(
+            self.icon_lookup.as_ref(),
+            &mut self.icon_cache,
+            notification,
+        );
         let body = notification.body.clone().unwrap_or_default();
         let body = match self.capabilities.body_markup {
             Osc99DaemonSupport::Supported => escape_body_markup(&body),
@@ -1052,8 +1115,8 @@ struct NoIconLookup;
 
 #[cfg(test)]
 impl Osc99IconLookup for NoIconLookup {
-    fn icon_exists(&self, _name: &str) -> bool {
-        false
+    fn matched_icon(&self, _name: &str) -> Option<String> {
+        None
     }
 
     fn desktop_icon(&self, _app_name: &str) -> Option<String> {
@@ -1088,7 +1151,7 @@ fn connect_session() -> zbus::Result<Link> {
 
 /// Start the dispatcher thread, which obtains its connection from `connect`
 /// (again, at most once per `reconnect_interval`, after it fails) and resolves
-/// icons with `icon_lookup` (scanning lazily, on that thread).
+/// icons with `icon_lookup` (whose scan runs on its own background thread).
 fn start<C>(
     connect: C,
     waker: Box<dyn Fn() + Send>,
@@ -1747,7 +1810,7 @@ fn notify(connection: &Connection, args: &NotifyArgs) -> zbus::Result<NotifyRepl
             args.summary.as_str(),
             args.body.as_str(),
             args.actions.as_slice(),
-            args.hints.to_map(),
+            args.hints.to_wire(),
             args.expire_timeout,
         ),
     )?;
@@ -1876,9 +1939,7 @@ mod tests {
         NotificationOccasion, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
         Osc99Sound,
     };
-    use std::collections::HashSet;
-
-    use zbus::zvariant::OwnedValue;
+    use zbus::zvariant::{OwnedValue, Structure, Value};
 
     use super::*;
 
@@ -1944,7 +2005,7 @@ mod tests {
 
     #[test]
     fn notify_args_carry_title_body_app_name_and_urgency() {
-        let state = DispatcherState::default();
+        let mut state = DispatcherState::default();
         let args = state.notify_args(
             None,
             &Notification99Data {
@@ -1975,13 +2036,14 @@ mod tests {
 
     /// An icon lookup over fixed sets, touching no filesystem.
     struct FakeLookup {
-        icons: HashSet<String>,
+        /// The name asked for to the on-disk stem that matches it.
+        icons: HashMap<String, String>,
         desktop: HashMap<String, String>,
     }
 
     impl Osc99IconLookup for FakeLookup {
-        fn icon_exists(&self, name: &str) -> bool {
-            self.icons.contains(name)
+        fn matched_icon(&self, name: &str) -> Option<String> {
+            self.icons.get(name).cloned()
         }
 
         fn desktop_icon(&self, app_name: &str) -> Option<String> {
@@ -1993,7 +2055,10 @@ mod tests {
         DispatcherState::new(
             Osc99SignalSender::Unfiltered,
             Box::new(FakeLookup {
-                icons: icons.iter().map(|icon| (*icon).to_owned()).collect(),
+                icons: icons
+                    .iter()
+                    .map(|icon| ((*icon).to_owned(), (*icon).to_owned()))
+                    .collect(),
                 desktop: desktop
                     .iter()
                     .map(|(app, icon)| ((*app).to_owned(), (*icon).to_owned()))
@@ -2059,7 +2124,7 @@ mod tests {
 
     #[test]
     fn notify_args_map_sounds_to_hints() {
-        let state = DispatcherState::default();
+        let mut state = DispatcherState::default();
         for (sound, expected) in [
             (Osc99Sound::System, Osc99SoundHint::None),
             (Osc99Sound::Silent, Osc99SoundHint::Suppress),
@@ -2083,37 +2148,117 @@ mod tests {
         }
     }
 
+    /// `hints` serialised as a D-Bus message body would carry them, and read
+    /// back as the receiving daemon reads them.
+    fn round_trip(hints: &WireHints<'_>) -> Result<HashMap<String, OwnedValue>, Box<dyn Error>> {
+        let context = zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0);
+        let data = zbus::zvariant::to_bytes(context, hints)?;
+        Ok(data.deserialize::<HashMap<String, OwnedValue>>()?.0)
+    }
+
+    /// The hint `key` as a `T`, when it is present and is one.
+    fn hint<T: TryFrom<OwnedValue>>(map: &HashMap<String, OwnedValue>, key: &str) -> Option<T> {
+        T::try_from(map.get(key)?.try_clone().ok()?).ok()
+    }
+
+    fn sorted_keys(map: &HashMap<String, OwnedValue>) -> Vec<&str> {
+        let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
     #[test]
-    fn hints_become_the_wire_dictionary() {
+    fn hints_become_the_wire_dictionary() -> TestResult {
         let hints = NotifyHints {
             urgency: 1,
             category: Some("im".to_owned()),
             sound: Osc99SoundHint::Suppress,
             image: None,
         };
-        let map = hints.to_map();
-        let mut keys: Vec<_> = map.keys().copied().collect();
-        keys.sort_unstable();
+        assert_eq!(<WireHints<'_> as Type>::SIGNATURE.to_string(), "a{sv}");
+        let map = round_trip(&hints.to_wire())?;
 
-        assert_eq!(keys, ["category", "suppress-sound", "urgency"]);
-        assert_eq!(map.get("suppress-sound"), Some(&Value::from(true)));
-        assert_eq!(map.get("urgency"), Some(&Value::from(1u8)));
+        assert_eq!(
+            sorted_keys(&map),
+            ["category", "desktop-entry", "suppress-sound", "urgency"]
+        );
+        assert_eq!(hint::<bool>(&map, "suppress-sound"), Some(true));
+        assert_eq!(hint::<u8>(&map, "urgency"), Some(1));
+        assert_eq!(hint::<String>(&map, "category").as_deref(), Some("im"));
 
         let named = NotifyHints {
             sound: Osc99SoundHint::Named("dialog-error".to_owned()),
             ..hints
         };
-        let map = named.to_map();
+        let map = round_trip(&named.to_wire())?;
         assert_eq!(
-            map.get("sound-name"),
-            Some(&Value::from("dialog-error".to_owned()))
+            hint::<String>(&map, "sound-name").as_deref(),
+            Some("dialog-error")
         );
         assert!(!map.contains_key("suppress-sound"));
+        Ok(())
+    }
+
+    #[test]
+    fn unset_hints_are_left_out_and_freminal_is_the_desktop_entry() -> TestResult {
+        let hints = NotifyHints {
+            urgency: 0,
+            category: None,
+            sound: Osc99SoundHint::None,
+            image: None,
+        };
+        let map = round_trip(&hints.to_wire())?;
+
+        assert_eq!(sorted_keys(&map), ["desktop-entry", "urgency"]);
+        assert_eq!(
+            hint::<String>(&map, "desktop-entry").as_deref(),
+            Some("freminal")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_image_hint_travels_as_one_byte_array_not_a_value_per_byte() -> TestResult {
+        let image = Osc99IconImage {
+            width: 256,
+            height: 256,
+            rowstride: 1024,
+            rgba: (0..256 * 256 * 4)
+                .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                .collect(),
+        };
+        let hints = NotifyHints {
+            urgency: 1,
+            category: None,
+            sound: Osc99SoundHint::None,
+            image: Some(image.clone()),
+        };
+
+        // Structurally: the wire hints borrow the pixel buffer. They hold no
+        // `Value` (and no copy) for it, so nothing per byte is built.
+        let wire = hints.to_wire();
+        let wire_image = wire.image_data.as_ref().ok_or("no image on the wire")?;
+        let held = hints.image.as_ref().ok_or("no image in the hints")?;
+        assert!(std::ptr::eq(wire_image.data.as_ptr(), held.rgba.as_ptr()));
+        assert_eq!(wire_image.data.len(), 256 * 256 * 4);
+
+        // On the wire: the same pixels, in the `(iiibiiay)` structure.
+        let map = round_trip(&wire)?;
+        let value = map.get("image-data").ok_or("no image-data hint")?;
+        let structure = Structure::try_from(Value::from(value.try_clone()?))?;
+        let (w, h, stride, alpha, bits, channels, data) =
+            <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(structure)?;
+        assert_eq!(
+            (w, h, stride, alpha, bits, channels),
+            (256, 256, 1024, true, 8, 4)
+        );
+        assert_eq!(data, image.rgba);
+        Ok(())
     }
 
     #[test]
     fn notify_args_use_an_existing_icon_name_over_data() -> TestResult {
-        let state = state_with_icons(&["mail-unread"], &[]);
+        let mut state = state_with_icons(&["mail-unread"], &[]);
         let args = state.notify_args(
             None,
             &Notification99Data {
@@ -2181,6 +2326,74 @@ mod tests {
     }
 
     #[test]
+    fn notify_args_send_the_matched_on_disk_stem() {
+        let mut state = DispatcherState::new(
+            Osc99SignalSender::Unfiltered,
+            Box::new(FakeLookup {
+                icons: HashMap::from([("mailicon".to_owned(), "MailIcon".to_owned())]),
+                desktop: HashMap::new(),
+            }),
+        );
+        let args = state.notify_args(
+            None,
+            &Notification99Data {
+                icon_names: strings(&["mailicon"]),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "MailIcon");
+    }
+
+    #[test]
+    fn notify_args_use_the_desktop_icon_when_the_data_does_not_decode() {
+        let mut state = state_with_icons(&[], &[("my-app", "my-app-icon")]);
+        let args = state.notify_args(
+            None,
+            &Notification99Data {
+                app_name: Some("my-app".to_owned()),
+                icon_data: Some(b"not an image".to_vec()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "my-app-icon");
+        assert_eq!(args.hints.image, None);
+    }
+
+    #[test]
+    fn notify_args_prefer_a_name_to_the_desktop_icon_when_the_data_does_not_decode() {
+        let mut state = state_with_icons(&[], &[("my-app", "my-app-icon")]);
+        let args = state.notify_args(
+            None,
+            &Notification99Data {
+                app_name: Some("my-app".to_owned()),
+                icon_names: strings(&["unknown"]),
+                icon_data: Some(b"not an image".to_vec()),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "unknown");
+    }
+
+    #[test]
+    fn notify_args_decode_the_same_icon_the_same_way_every_time() -> TestResult {
+        let mut state = DispatcherState::default();
+        let with_icon = Notification99Data {
+            icon_data: Some(png(3, 2)?),
+            ..notification()
+        };
+
+        let first = state.notify_args(None, &with_icon).hints.image;
+        let second = state.notify_args(None, &with_icon).hints.image;
+
+        assert!(first.is_some());
+        assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[test]
     fn notify_args_without_names_and_with_undecodable_data_use_the_freminal_icon() {
         let args = DispatcherState::default().notify_args(
             None,
@@ -2197,7 +2410,7 @@ mod tests {
 
     #[test]
     fn notify_args_take_the_icon_of_the_desktop_file_matching_the_app() {
-        let state = state_with_icons(&[], &[("my-app", "my-app-icon")]);
+        let mut state = state_with_icons(&[], &[("my-app", "my-app-icon")]);
         let args = state.notify_args(
             None,
             &Notification99Data {
@@ -2239,7 +2452,7 @@ mod tests {
 
     #[test]
     fn notify_args_map_each_urgency_to_its_byte() {
-        let state = DispatcherState::default();
+        let mut state = DispatcherState::default();
         for (urgency, byte) in [
             (NotificationUrgency::Low, 0),
             (NotificationUrgency::Normal, 1),
@@ -2297,8 +2510,8 @@ mod tests {
 
     #[test]
     fn notify_args_map_expiry_to_the_timeout() -> TestResult {
-        let state = DispatcherState::default();
-        let timeout = |expiry| {
+        let mut state = DispatcherState::default();
+        let mut timeout = |expiry| {
             state
                 .notify_args(
                     None,
@@ -3359,6 +3572,7 @@ mod tests {
         /// The key of every hint, sorted.
         hint_keys: Vec<String>,
         category: Option<String>,
+        desktop_entry: Option<String>,
         sound_name: Option<String>,
         /// `(width, height, rowstride, has_alpha, bits_per_sample, channels,
         /// data length)` of the `image-data` hint.
@@ -3480,6 +3694,9 @@ mod tests {
             hint_keys,
             category: hints
                 .get("category")
+                .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
+            desktop_entry: hints
+                .get("desktop-entry")
                 .and_then(|value| String::try_from(value.try_clone().ok()?).ok()),
             sound_name: hints
                 .get("sound-name")
@@ -3877,8 +4094,9 @@ mod tests {
                 body: "Body".to_owned(),
                 actions: strings(&["default", "", "1", "A", "2", "B"]),
                 urgency: Some(2),
-                hint_keys: strings(&["urgency"]),
+                hint_keys: strings(&["desktop-entry", "urgency"]),
                 category: None,
+                desktop_entry: Some("freminal".to_owned()),
                 sound_name: None,
                 image: None,
                 expire_timeout: 5000,
@@ -3934,9 +4152,16 @@ mod tests {
         let notify = &recorded[0];
         assert_eq!(
             notify.hint_keys,
-            strings(&["category", "image-data", "sound-name", "urgency"])
+            strings(&[
+                "category",
+                "desktop-entry",
+                "image-data",
+                "sound-name",
+                "urgency"
+            ])
         );
         assert_eq!(notify.category.as_deref(), Some("email.arrived"));
+        assert_eq!(notify.desktop_entry.as_deref(), Some("freminal"));
         assert_eq!(notify.sound_name.as_deref(), Some("dialog-information"));
         assert_eq!(notify.image, Some((4, 3, 16, true, 8, 4, 4 * 3 * 4)));
         assert_eq!(notify.app_icon, "");
@@ -3962,7 +4187,7 @@ mod tests {
 
         assert_eq!(
             rig.recorded()[0].hint_keys,
-            strings(&["suppress-sound", "urgency"])
+            strings(&["desktop-entry", "suppress-sound", "urgency"])
         );
         Ok(())
     }
