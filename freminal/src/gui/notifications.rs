@@ -417,9 +417,9 @@ impl NotificationRouter {
     /// work lives off the frame loop. A daemon that honours `image-data` uses
     /// that; one that only honours `icon` falls back to this name.
     ///
-    /// The OSC 99 path deliberately builds its own notification with a
-    /// *transmitted* icon (see [`build_osc99_notification`]) and must not be
-    /// routed through here.
+    /// The OSC 99 path does not go through this builder: its system leg is
+    /// presented by the `osc99` module, which carries a *transmitted* icon,
+    /// and it must not be routed through here.
     ///
     /// Split out as a pure builder (rather than inlined in the spawned thread)
     /// so the icon/appname/summary/body/urgency wiring is unit-testable
@@ -427,16 +427,13 @@ impl NotificationRouter {
     /// `cfg(test)`; see [`show_system`]).
     ///
     /// [`show_system`]: Self::show_system
-    /// [`build_osc99_notification`]: Self::build_osc99_notification
     fn build_system_notification(req: &NotificationRequest) -> notify_rust::Notification {
         let mut notification = notify_rust::Notification::new();
         notification
             .appname("freminal")
             // Secondary, name-based icon hint (see doc above). `.icon()` is
             // available on every platform in notify-rust 4.18 (a no-op where
-            // unsupported); it is the same name-based `.icon(name)` call
-            // `build_osc99_notification` uses in its no-transmitted-bytes
-            // branch. The primary inline-bytes icon is attached in
+            // unsupported). The primary inline-bytes icon is attached in
             // `show_system` on the background thread.
             .icon("freminal")
             .summary(req.summary())

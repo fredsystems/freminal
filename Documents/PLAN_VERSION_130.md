@@ -5833,6 +5833,15 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   directory only, and nothing outside `gui::toast` changes.
 - **Verification:** `git diff -M` shows moves; the test count is unchanged; clippy is clean.
 - **Scheduling:** in Task 138, after 138.18 and before the adversarial review.
+- **Status:** done. The files are `mod.rs` (1,903 lines), `layout.rs` (2,189), `buttons.rs`
+  (282), `hit.rs` (310) and `test_support.rs` (135). The 2,084-test count is identical
+  before and after. The orchestrator confirmed the move is move-only with a sorted-line
+  multiset diff: only visibility prefixes, imports and rustfmt re-wraps differ. Nothing is
+  visible outside `gui::toast`.
+  - The orchestrator compared rustdoc against `main` and found 15 intra-doc links the branch
+    had broken: 13 from this move and 2 from 138.16. All are fixed. Four links to private
+    sibling items became plain backticks rather than widening visibility. The branch adds no
+    rustdoc link warnings compared with `main`.
 
 #### 138.C2 — The OSC 99 signal pump does not filter signals by sender
 

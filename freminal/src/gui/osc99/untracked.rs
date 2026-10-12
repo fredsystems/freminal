@@ -9,7 +9,7 @@
 //! a `c=1` request with `untracked` at once, and never waits for the leg.
 //!
 //! The executor shows the notification through an [`Osc99UntrackedBackend`]:
-//! [`NotifyRustUntrackedBackend`] on macOS and Windows, and
+//! `NotifyRustUntrackedBackend` on macOS and Windows, and
 //! [`NoUntrackedBackend`] everywhere else (the registry never routes to the
 //! untracked leg on Linux/BSD, whose system leg is the zbus service) and as
 //! the stand-in when the real backend is busy.
