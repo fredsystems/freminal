@@ -53,6 +53,7 @@ pub(crate) mod icons;
 mod layout_ops;
 mod menu;
 mod notifications;
+mod osc99;
 pub mod paste_guard;
 mod platform;
 mod pointer_motion;

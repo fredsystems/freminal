@@ -2056,10 +2056,10 @@ impl freminal_windowing::App for FreminalGui {
                 font_width,
                 font_height,
                 WindowFocus::from_bool(window_focused),
+                window_id,
                 &self.config,
             );
             self.route_window_manipulation_events(
-                ui,
                 WindowFocus::from_bool(window_focused),
                 &window_manipulation_events,
             );
@@ -4401,7 +4401,6 @@ impl FreminalGui {
     /// `send_or_log!`. Do not fold them into one.
     fn route_window_manipulation_events(
         &self,
-        ui: &egui::Ui,
         window_focus: WindowFocus,
         events: &WindowManipulationEvents,
     ) {
@@ -4438,30 +4437,47 @@ impl FreminalGui {
         // borrowable here without conflicting with the drain's tab-list
         // borrow.
         if !events.osc99_notifications.is_empty() {
-            let window_minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-            if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
+            match (
                 self.toasts.try_borrow_mut(),
                 self.osc99_icon_cache.try_borrow_mut(),
                 self.osc99_live.try_borrow_mut(),
             ) {
-                let ctx = crate::gui::notifications::Osc99DisplayContext {
-                    window_focused: window_focus.is_focused(),
-                    window_minimized,
-                };
-                // `tx` (a `Weak` handle to the originating pane's reply
-                // sender) is threaded into the reverse-reply path: the
-                // notification thread upgrades it per send to deliver
-                // activation/close replies to the pane that produced this
-                // OSC 99 sequence, without keeping that pane alive.
-                for (data, tx) in &events.osc99_notifications {
-                    crate::gui::notifications::NotificationRouter::route_osc99(
-                        data,
-                        &self.config.notifications,
-                        ctx,
-                        &mut toasts,
-                        &mut icon_cache,
-                        &mut live,
-                        tx,
+                (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) => {
+                    // `reply_tx` (a `Weak` handle to the originating pane's
+                    // reply sender) is threaded into the reverse-reply path:
+                    // the notification thread upgrades it per send to deliver
+                    // activation/close replies to the pane that produced this
+                    // OSC 99 sequence, without keeping that pane alive. The
+                    // pane state gates `o=`; OS-window focus alone drives the
+                    // toast/system routing choice.
+                    for request in &events.osc99_notifications {
+                        tracing::trace!(
+                            origin = ?request.origin,
+                            pane_state = ?request.pane_state,
+                            "routing OSC 99 notification"
+                        );
+                        let ctx = crate::gui::notifications::Osc99DisplayContext {
+                            window_focus,
+                            pane: request.pane_state,
+                        };
+                        crate::gui::notifications::NotificationRouter::route_osc99(
+                            &request.data,
+                            &self.config.notifications,
+                            ctx,
+                            &mut toasts,
+                            &mut icon_cache,
+                            &mut live,
+                            &request.reply_tx,
+                        );
+                    }
+                }
+                (toasts, icon_cache, live) => {
+                    tracing::warn!(
+                        toast_stack_busy = toasts.is_err(),
+                        icon_cache_busy = icon_cache.is_err(),
+                        live_map_busy = live.is_err(),
+                        dropped = events.osc99_notifications.len(),
+                        "OSC 99: notification state busy; notifications dropped this frame"
                     );
                 }
             }
@@ -4471,7 +4487,9 @@ impl FreminalGui {
         // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
         // after the display-routing block above so its `osc99_live` borrow
         // has already been released.
-        for (control, tx) in &events.osc99_controls {
+        for request in &events.osc99_controls {
+            let control = &request.control;
+            tracing::trace!(origin = ?request.origin, kind = ?control.kind, "routing OSC 99 control");
             match control.kind {
                 Osc99ControlKind::Alive => {
                     // Answer the poll with the current live notification ids.
@@ -4479,7 +4497,12 @@ impl FreminalGui {
                         crate::gui::notifications::send_osc99_alive(
                             &live,
                             Some(control.id.clone()),
-                            tx,
+                            &request.reply_tx,
+                        );
+                    } else {
+                        tracing::warn!(
+                            id = control.id,
+                            "OSC 99: live notification map busy; p=alive not answered"
                         );
                     }
                 }
@@ -4493,6 +4516,11 @@ impl FreminalGui {
                     // notification thread with `c=1`).
                     if let Ok(mut live) = self.osc99_live.try_borrow_mut() {
                         crate::gui::notifications::forget_osc99(&mut live, &control.id);
+                    } else {
+                        tracing::warn!(
+                            id = control.id,
+                            "OSC 99: live notification map busy; p=close not applied"
+                        );
                     }
                 }
             }

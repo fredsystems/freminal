@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -11,7 +11,7 @@ use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
-use freminal_common::buffer_states::window_manipulation::{Notification99Data, WindowManipulation};
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::BellMode;
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::send_or_log;
@@ -21,6 +21,7 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, Window
 
 use crate::gui::chrome_style;
 use crate::gui::notifications::{NotificationRequest, Osc99Control};
+use crate::gui::osc99::{Osc99ControlRequest, Osc99DisplayRequest, Osc99PaneContext};
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
 /// spacing for the initial / window-creation style setup.
@@ -137,6 +138,9 @@ pub(super) struct WindowManipFlags {
     pub window_focused: bool,
     /// Whether this pane is the only pane in its tab (no splits).
     pub is_only_pane: bool,
+    /// Where this pane's OSC 99 requests come from and the pane's state this
+    /// frame, stamped onto every collected OSC 99 request.
+    pub osc99: Osc99PaneContext,
 }
 
 /// An OSC 52 clipboard event observed during a frame's window-manipulation
@@ -247,8 +251,8 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
-    osc99_notifications: &mut Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
-    osc99_controls: &mut Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
+    osc99_notifications: &mut Vec<Osc99DisplayRequest>,
+    osc99_controls: &mut Vec<Osc99ControlRequest>,
     osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
@@ -621,13 +625,22 @@ pub(super) fn handle_window_manipulation(
             // consumer alive: a strong `Sender` clone would hold the input
             // channel open after the pane closed.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push(((*data).clone(), Arc::downgrade(reply_tx)));
+                osc99_notifications.push(Osc99DisplayRequest {
+                    data: *data,
+                    reply_tx: Arc::downgrade(reply_tx),
+                    origin: flags.osc99.origin,
+                    pane_state: flags.osc99.pane_state,
+                });
             }
             // OSC 99 app→terminal control sequence (Task 99.5c). Collected
             // alongside a `Weak` reply handle for the originating pane and
             // answered after the drain loop.
             WindowManipulation::Osc99Control { id, kind } => {
-                osc99_controls.push((Osc99Control { id, kind }, Arc::downgrade(reply_tx)));
+                osc99_controls.push(Osc99ControlRequest {
+                    control: Osc99Control { id, kind },
+                    reply_tx: Arc::downgrade(reply_tx),
+                    origin: flags.osc99.origin,
+                });
             }
         }
     }
@@ -665,7 +678,14 @@ mod osc52_toast_text_tests {
 #[cfg(test)]
 mod window_manipulation_reply_tests {
     use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
-    use crate::gui::notifications::Osc99Control;
+    use crate::gui::frame_drain::WindowFocus;
+    use crate::gui::osc99::{
+        Osc99ControlRequest, Osc99DisplayRequest, Osc99Origin, Osc99PaneContext, Osc99PaneState,
+        PaneActivity, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
+        ZoomOcclusion,
+    };
+    use crate::gui::panes::PaneIdGenerator;
+    use freminal_windowing::WindowId;
     use std::sync::{Arc, Weak};
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -687,8 +707,8 @@ mod window_manipulation_reply_tests {
     struct Drained {
         replies: Vec<GuiReply>,
         osc52_events: Vec<Osc52ToastEvent>,
-        osc99_notifications: Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
-        osc99_controls: Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
+        osc99_notifications: Vec<Osc99DisplayRequest>,
+        osc99_controls: Vec<Osc99ControlRequest>,
         /// The pane's only strong sender; dropping it models the pane closing.
         pane_handle: Arc<Sender<InputEvent>>,
     }
@@ -699,6 +719,29 @@ mod window_manipulation_reply_tests {
     /// Clipboard reads are denied (`allow_clipboard_read: false`, the default),
     /// so no test depends on the host clipboard.
     fn drain_commands(commands: Vec<WindowManipulation>) -> Drained {
+        drain_commands_with(commands, test_osc99_context())
+    }
+
+    /// The OSC 99 context the plain [`drain_commands`] uses: window 1, the
+    /// first pane, focused and visible.
+    fn test_osc99_context() -> Osc99PaneContext {
+        let mut ids = PaneIdGenerator::new(0);
+        Osc99PaneContext {
+            origin: Osc99Origin {
+                window_id: WindowId::for_test(1),
+                pane_id: ids.next_id(),
+            },
+            pane_state: Osc99PaneState::compute(
+                WindowFocus::Focused,
+                WindowMinimized::Restored,
+                TabActivity::Active,
+                PaneActivity::Active,
+                ZoomOcclusion::NotOccluded,
+            ),
+        }
+    }
+
+    fn drain_commands_with(commands: Vec<WindowManipulation>, osc99: Osc99PaneContext) -> Drained {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
         let reply_tx = Arc::new(reply_tx);
@@ -713,6 +756,7 @@ mod window_manipulation_reply_tests {
             is_active: true,
             window_focused: true,
             is_only_pane: true,
+            osc99,
         };
         let mut title_stack = Vec::new();
         let mut tab_title = String::new();
@@ -792,6 +836,37 @@ mod window_manipulation_reply_tests {
     }
 
     #[test]
+    fn osc99_requests_carry_the_panes_origin_and_state() {
+        let mut ids = PaneIdGenerator::new(7);
+        let osc99 = Osc99PaneContext {
+            origin: Osc99Origin {
+                window_id: WindowId::for_test(42),
+                pane_id: ids.next_id(),
+            },
+            pane_state: Osc99PaneState {
+                focus: PaneKeyboardFocus::Unfocused,
+                visibility: PaneVisibility::Hidden,
+            },
+        };
+        let drained = drain_commands_with(
+            vec![
+                WindowManipulation::Notification99(Box::new(sample_notification())),
+                WindowManipulation::Osc99Control {
+                    id: "n1".to_owned(),
+                    kind: Osc99ControlKind::Close,
+                },
+            ],
+            osc99,
+        );
+
+        assert_eq!(drained.osc99_notifications.len(), 1);
+        assert_eq!(drained.osc99_notifications[0].origin, osc99.origin);
+        assert_eq!(drained.osc99_notifications[0].pane_state, osc99.pane_state);
+        assert_eq!(drained.osc99_controls.len(), 1);
+        assert_eq!(drained.osc99_controls[0].origin, osc99.origin);
+    }
+
+    #[test]
     fn osc99_handles_stop_upgrading_once_the_pane_handle_drops() {
         let drained = drain_commands(vec![
             WindowManipulation::Notification99(Box::new(sample_notification())),
@@ -807,8 +882,8 @@ mod window_manipulation_reply_tests {
             "OSC 99 commands are routed, not answered, here"
         );
 
-        let notification_handle = Weak::clone(&drained.osc99_notifications[0].1);
-        let control_handle = Weak::clone(&drained.osc99_controls[0].1);
+        let notification_handle = Weak::clone(&drained.osc99_notifications[0].reply_tx);
+        let control_handle = Weak::clone(&drained.osc99_controls[0].reply_tx);
 
         // While the pane lives, the collected handles reach its input channel.
         assert!(notification_handle.upgrade().is_some());

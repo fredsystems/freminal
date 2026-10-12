@@ -180,6 +180,9 @@ winit.workspace = true
 # dev dependencies
 [dev-dependencies]
 criterion.workspace = true
+# `test-utils` exposes `WindowId::for_test`, so unit tests can construct a
+# `WindowId` (it wraps a winit handle and has no production constructor).
+freminal-windowing = { path = "../freminal-windowing", features = ["test-utils"] }
 tempfile.workspace = true
 
 # Platform-specific: CWD readback for layout save / recording snapshots.

@@ -37,6 +37,8 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 use super::command_blocks::format_command_duration;
+use super::frame_drain::WindowFocus;
+use super::osc99::{Osc99PaneState, PaneKeyboardFocus, PaneVisibility};
 use super::toast::{ToastKind, ToastStack};
 
 /// A fully-formed notification ready to be routed.
@@ -633,16 +635,54 @@ pub(super) struct Osc99Control {
     pub kind: Osc99ControlKind,
 }
 
-/// Display-gate context for an OSC 99 notification.
+/// Display context for an OSC 99 notification.
 ///
-/// Carries the window state inputs needed to evaluate the `o=` occasion
-/// gate ([`NotificationRouter::occasion_allows_display`]).
+/// Carries the two kinds of state routing needs, which are deliberately
+/// distinct: the originating pane's state, for the protocol's `o=` occasion
+/// gate ([`occasion_allows_display`]), and OS-window focus, for freminal's own
+/// toast/system routing choice (`wants_toast` / `wants_system`).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Osc99DisplayContext {
-    /// Whether the source window currently has OS focus.
-    pub window_focused: bool,
-    /// Whether the source window is currently minimized.
-    pub window_minimized: bool,
+    /// Whether the source OS window currently has input focus. Routing only;
+    /// the `o=` gate uses [`Self::pane`].
+    pub window_focus: WindowFocus,
+    /// The originating pane's focus and visibility, for the `o=` gate.
+    pub pane: Osc99PaneState,
+}
+
+/// Outcome of the OSC 99 `o=` occasion check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Osc99DisplayDecision {
+    /// The notification may be displayed.
+    Show,
+    /// The notification must not be displayed.
+    Suppress,
+}
+
+/// Evaluate the OSC 99 `o=` occasion gate for the originating pane.
+///
+/// - `Always` — always show.
+/// - `Unfocused` — show only when the pane lacks keyboard focus (so a
+///   notification from a background tab, or an inactive pane, shows even in a
+///   focused window).
+/// - `Invisible` — show only when the pane lacks keyboard focus *and* is not
+///   visible (so an inactive pane that is still on screen suppresses it).
+pub(super) const fn occasion_allows_display(
+    occasion: NotificationOccasion,
+    pane: Osc99PaneState,
+) -> Osc99DisplayDecision {
+    let unfocused = matches!(pane.focus, PaneKeyboardFocus::Unfocused);
+    let hidden = matches!(pane.visibility, PaneVisibility::Hidden);
+    let show = match occasion {
+        NotificationOccasion::Always => true,
+        NotificationOccasion::Unfocused => unfocused,
+        NotificationOccasion::Invisible => unfocused && hidden,
+    };
+    if show {
+        Osc99DisplayDecision::Show
+    } else {
+        Osc99DisplayDecision::Suppress
+    }
 }
 
 /// Monotonic counter disambiguating concurrent OSC 99 icon temp files within
@@ -694,7 +734,7 @@ impl NotificationRouter {
         // omitted can resolve the icon.
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
 
-        if !Self::occasion_allows_display(data.occasion, ctx) {
+        if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
             return;
         }
 
@@ -703,8 +743,8 @@ impl NotificationRouter {
         // toast leg, the system leg, and the live-map tracking below all
         // agree on the same decision.
         let routing = config.routing_osc99;
-        let wants_toast = routing.wants_toast(ctx.window_focused);
-        let wants_system = routing.wants_system(ctx.window_focused);
+        let wants_toast = routing.wants_toast(ctx.window_focus.is_focused());
+        let wants_system = routing.wants_system(ctx.window_focus.is_focused());
 
         if wants_toast {
             let summary = if data.title.is_empty() {
@@ -762,25 +802,6 @@ impl NotificationRouter {
             live.insert(id.clone(), entry);
         }
     }
-    /// Evaluate the OSC 99 `o=` occasion gate.
-    ///
-    /// - `Always` — always display.
-    /// - `Unfocused` — display only when the source window lacks focus.
-    /// - `Invisible` — display only when the source window is minimized.
-    ///   Background-tab occlusion is out of scope for 99.5a (documented, not
-    ///   silently dropped — see the 99.5 execution decisions in
-    ///   `PLAN_VERSION_110.md`).
-    const fn occasion_allows_display(
-        occasion: NotificationOccasion,
-        ctx: Osc99DisplayContext,
-    ) -> bool {
-        match occasion {
-            NotificationOccasion::Always => true,
-            NotificationOccasion::Unfocused => !ctx.window_focused,
-            NotificationOccasion::Invisible => ctx.window_minimized,
-        }
-    }
-
     /// Resolve the icon bytes to display, applying the `g=` cache.
     ///
     /// - Transmitted bytes (`icon_data`) always win and are cached under
@@ -1361,7 +1382,7 @@ mod tests {
             NotificationRouter::route_osc99(
                 &data,
                 &config,
-                osc99_ctx(true, false),
+                focused_ctx(),
                 &mut toasts,
                 &mut icon_cache,
                 &mut live,
@@ -1388,7 +1409,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -1937,11 +1958,20 @@ mod tests {
         }
     }
 
-    fn osc99_ctx(window_focused: bool, window_minimized: bool) -> Osc99DisplayContext {
-        Osc99DisplayContext {
-            window_focused,
-            window_minimized,
-        }
+    const fn pane_state(focus: PaneKeyboardFocus, visibility: PaneVisibility) -> Osc99PaneState {
+        Osc99PaneState { focus, visibility }
+    }
+
+    const fn osc99_ctx(window_focus: WindowFocus, pane: Osc99PaneState) -> Osc99DisplayContext {
+        Osc99DisplayContext { window_focus, pane }
+    }
+
+    /// A focused window whose originating pane is the focused, visible one.
+    const fn focused_ctx() -> Osc99DisplayContext {
+        osc99_ctx(
+            WindowFocus::Focused,
+            pane_state(PaneKeyboardFocus::Focused, PaneVisibility::Visible),
+        )
     }
 
     #[test]
@@ -1956,7 +1986,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -1985,7 +2015,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2008,7 +2038,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2022,102 +2052,201 @@ mod tests {
         );
     }
 
-    #[test]
-    fn route_osc99_occasion_unfocused_gates_on_focus() {
+    /// Route `data` with `ctx` into a fresh toast stack and return how many
+    /// toasts it produced.
+    fn route_and_count_toasts(data: &Notification99Data, ctx: Osc99DisplayContext) -> usize {
         let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
+        NotificationRouter::route_osc99(
+            data,
+            &config,
+            ctx,
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+        toasts.len()
+    }
+
+    #[test]
+    fn route_osc99_occasion_unfocused_gates_on_pane_focus() {
         let data = Notification99Data {
             occasion: NotificationOccasion::Unfocused,
             ..default_n99()
         };
 
-        // Focused: must NOT display.
-        let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
-        let mut live = HashMap::new();
-        let tx: Weak<Sender<InputEvent>> = Weak::new();
-        NotificationRouter::route_osc99(
-            &data,
-            &config,
-            osc99_ctx(true, false),
-            &mut toasts,
-            &mut icon_cache,
-            &mut live,
-            &tx,
-        );
         assert_eq!(
-            toasts.len(),
+            route_and_count_toasts(&data, focused_ctx()),
             0,
-            "unfocused occasion must not fire while focused"
+            "unfocused occasion must not fire for the focused pane"
         );
-        assert!(live.is_empty());
 
-        // Unfocused: must display.
-        let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
-        let mut live = HashMap::new();
-        let tx: Weak<Sender<InputEvent>> = Weak::new();
-        NotificationRouter::route_osc99(
-            &data,
-            &config,
-            osc99_ctx(false, false),
-            &mut toasts,
-            &mut icon_cache,
-            &mut live,
-            &tx,
+        let background_tab = osc99_ctx(
+            WindowFocus::Focused,
+            pane_state(PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden),
         );
         assert_eq!(
-            toasts.len(),
+            route_and_count_toasts(&data, background_tab),
             1,
-            "unfocused occasion must fire while unfocused"
+            "unfocused occasion must fire for a background-tab pane of a focused window"
         );
     }
 
     #[test]
-    fn route_osc99_occasion_invisible_gates_on_minimized() {
-        let config = enabled_config(0.0);
+    fn route_osc99_occasion_invisible_gates_on_pane_visibility() {
         let data = Notification99Data {
             occasion: NotificationOccasion::Invisible,
             ..default_n99()
         };
 
-        // Not minimized: must NOT display.
-        let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
-        let mut live = HashMap::new();
-        let tx: Weak<Sender<InputEvent>> = Weak::new();
-        NotificationRouter::route_osc99(
-            &data,
-            &config,
-            osc99_ctx(true, false),
-            &mut toasts,
-            &mut icon_cache,
-            &mut live,
-            &tx,
+        let inactive_but_visible = osc99_ctx(
+            WindowFocus::Focused,
+            pane_state(PaneKeyboardFocus::Unfocused, PaneVisibility::Visible),
         );
         assert_eq!(
-            toasts.len(),
+            route_and_count_toasts(&data, inactive_but_visible),
             0,
-            "invisible occasion must not fire while visible"
+            "invisible occasion must not fire for a pane that is on screen"
         );
 
-        // Minimized: must display.
-        let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
-        let mut live = HashMap::new();
-        let tx: Weak<Sender<InputEvent>> = Weak::new();
-        NotificationRouter::route_osc99(
-            &data,
-            &config,
-            osc99_ctx(true, true),
-            &mut toasts,
-            &mut icon_cache,
-            &mut live,
-            &tx,
+        let hidden = osc99_ctx(
+            WindowFocus::Focused,
+            pane_state(PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden),
         );
         assert_eq!(
-            toasts.len(),
+            route_and_count_toasts(&data, hidden),
             1,
-            "invisible occasion must fire while minimized"
+            "invisible occasion must fire for a hidden pane"
+        );
+    }
+
+    #[test]
+    fn route_osc99_routing_still_follows_os_window_focus_not_pane_state() {
+        // Default routing is focus-aware; the pane state must not influence
+        // which leg is chosen, only the OS-window focus does. A focused
+        // window with an unfocused hidden pane still wants a toast.
+        let data = default_n99();
+        let ctx = osc99_ctx(
+            WindowFocus::Focused,
+            pane_state(PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden),
+        );
+        assert_eq!(route_and_count_toasts(&data, ctx), 1);
+    }
+
+    // The `o=` decision table: (occasion, focus, visibility) -> decision.
+    #[test]
+    fn occasion_allows_display_decision_table() {
+        use NotificationOccasion::{Always, Invisible, Unfocused};
+        use Osc99DisplayDecision::{Show, Suppress};
+        use PaneKeyboardFocus::{Focused, Unfocused as NoFocus};
+        use PaneVisibility::{Hidden, Visible};
+
+        let table = [
+            // Always shows in every state.
+            (Always, Focused, Visible, Show),
+            (Always, Focused, Hidden, Show),
+            (Always, NoFocus, Visible, Show),
+            (Always, NoFocus, Hidden, Show),
+            // `unfocused`: active pane of a focused window suppresses; a
+            // background tab or inactive pane shows, visible or not.
+            (Unfocused, Focused, Visible, Suppress),
+            (Unfocused, Focused, Hidden, Suppress),
+            (Unfocused, NoFocus, Visible, Show),
+            (Unfocused, NoFocus, Hidden, Show),
+            // `invisible`: only an unfocused, hidden pane shows. A
+            // non-active pane in the active tab is visible -> suppressed; a
+            // pane hidden by another pane's zoom, or by an unfocused window,
+            // shows.
+            (Invisible, Focused, Visible, Suppress),
+            (Invisible, Focused, Hidden, Suppress),
+            (Invisible, NoFocus, Visible, Suppress),
+            (Invisible, NoFocus, Hidden, Show),
+        ];
+        for (occasion, focus, visibility, expected) in table {
+            assert_eq!(
+                occasion_allows_display(occasion, pane_state(focus, visibility)),
+                expected,
+                "{occasion:?} / {focus:?} / {visibility:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn occasion_allows_display_matches_the_named_scenarios() {
+        use crate::gui::osc99::{PaneActivity, TabActivity, WindowMinimized, ZoomOcclusion};
+        let state = |window, tab, pane, zoom| {
+            Osc99PaneState::compute(window, WindowMinimized::Restored, tab, pane, zoom)
+        };
+        let nz = ZoomOcclusion::NotOccluded;
+
+        // unfocused: background tab of a focused window -> Show.
+        assert_eq!(
+            occasion_allows_display(
+                NotificationOccasion::Unfocused,
+                state(
+                    WindowFocus::Focused,
+                    TabActivity::Background,
+                    PaneActivity::Active,
+                    nz
+                )
+            ),
+            Osc99DisplayDecision::Show
+        );
+        // unfocused: active pane of a focused window -> Suppress.
+        assert_eq!(
+            occasion_allows_display(
+                NotificationOccasion::Unfocused,
+                state(
+                    WindowFocus::Focused,
+                    TabActivity::Active,
+                    PaneActivity::Active,
+                    nz
+                )
+            ),
+            Osc99DisplayDecision::Suppress
+        );
+        // invisible: non-active pane in the active tab, no zoom -> Suppress.
+        assert_eq!(
+            occasion_allows_display(
+                NotificationOccasion::Invisible,
+                state(
+                    WindowFocus::Focused,
+                    TabActivity::Active,
+                    PaneActivity::Inactive,
+                    nz
+                )
+            ),
+            Osc99DisplayDecision::Suppress
+        );
+        // invisible: pane hidden by another pane's zoom -> Show.
+        assert_eq!(
+            occasion_allows_display(
+                NotificationOccasion::Invisible,
+                state(
+                    WindowFocus::Focused,
+                    TabActivity::Active,
+                    PaneActivity::Inactive,
+                    ZoomOcclusion::Occluded
+                )
+            ),
+            Osc99DisplayDecision::Show
+        );
+        // invisible: window unfocused -> Show.
+        assert_eq!(
+            occasion_allows_display(
+                NotificationOccasion::Invisible,
+                state(
+                    WindowFocus::Unfocused,
+                    TabActivity::Active,
+                    PaneActivity::Active,
+                    nz
+                )
+            ),
+            Osc99DisplayDecision::Show
         );
     }
 
@@ -2195,7 +2324,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2219,7 +2348,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2241,7 +2370,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2270,7 +2399,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2302,7 +2431,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2328,7 +2457,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2362,7 +2491,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2397,7 +2526,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,
@@ -2428,7 +2557,7 @@ mod tests {
         NotificationRouter::route_osc99(
             &data,
             &config,
-            osc99_ctx(true, false),
+            focused_ctx(),
             &mut toasts,
             &mut icon_cache,
             &mut live,

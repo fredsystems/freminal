@@ -5801,6 +5801,20 @@ None yet.
 - **138.4 (done).** The reply is built from every `Osc99Features` field in kitty's key order,
   with exhaustive matches. For the 138.1 defaults the reply now carries `u` before `p`, and `p`
   in kitty's order. Its content is unchanged until 138.17 changes the inputs.
+- **138.5 (done).** The sub-agent stopped correctly because `freminal_windowing::WindowId`
+  had no test constructor. The orchestrator re-scoped the subtask: `WindowId::for_test(n)`
+  sits behind a new `freminal-windowing` feature, `test-utils` (the `-support` suffix is
+  rejected by `clippy::cargo`), which `freminal`'s dev-dependencies enable. Production builds
+  never enable it. Other changes:
+  - `route_window_manipulation_events` lost its `ui` parameter (minimisation moved into the
+    drain); the `WindowId` comes back with the 138.9 focus executor.
+  - The new `gui/osc99` types are `pub` inside the private module (`redundant_pub_crate`).
+  - `Osc99DisplayContext` holds `WindowFocus` and `Osc99PaneState` (no `bool`s).
+  - A focused-but-minimised window reports Focused and Hidden.
+  - Zoom and split occlusion are tested through the pure per-pane helper, because a split
+    tree needs a PTY per pane.
+  - Orchestrator change: the drained `Notification99Data` is moved out of its `Box`, not
+    cloned.
 
 ---
 
