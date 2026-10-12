@@ -626,10 +626,12 @@ fn strip_osc99_controls(text: &str) -> String {
     text.chars().filter(|&c| !is_osc99_control(c)).collect()
 }
 
-/// Limit `text` to `max_chars` characters (Unicode scalar values), as kitty's
-/// `limit_size` does: a longer string is cut after its first `max_chars`
-/// characters, with no marker. A string that already fits is returned
-/// unchanged.
+/// Limit `text` to `max_chars` characters (Unicode scalar values): a longer
+/// string is cut after its first `max_chars` characters, with no marker. A
+/// string that already fits is returned unchanged.
+///
+/// This is the cut kitty's `limit_size` makes, but freminal applies it after
+/// stripping (see [`sanitize_osc99_text`]), where kitty applies it before.
 fn limit_osc99_text(mut text: String, max_chars: usize) -> String {
     if let Some((cut, _)) = text.char_indices().nth(max_chars) {
         text.truncate(cut);
@@ -638,6 +640,14 @@ fn limit_osc99_text(mut text: String, max_chars: usize) -> String {
 }
 
 /// Strip then limit one piece of text (title, body).
+///
+/// The order is a deliberate difference from kitty, which limits the text when
+/// it is committed and strips control characters later. Stripping first means
+/// the limit counts only characters that are kept, so a text with control
+/// characters among its first `max_chars` keeps more printable characters
+/// than kitty would. Promoting the body into the title when the title strips
+/// to nothing (see [`build_finalized`]) is likewise freminal's choice, not
+/// kitty's behaviour. Neither is exact kitty parity.
 fn sanitize_osc99_text(text: &str, max_chars: usize) -> String {
     limit_osc99_text(strip_osc99_controls(text), max_chars)
 }
@@ -1221,11 +1231,20 @@ impl TerminalHandler {
     /// the rest of the transfer, final chunk included, emits nothing.
     ///
     /// Chunks without an id share the single unidentified slot, which may
-    /// belong to an unrelated transfer or to none: a rejected id-less chunk
-    /// abandons that slot only when something is in it.
+    /// belong to an unrelated transfer or to none. A rejected id-less
+    /// non-final chunk (`d=0`) tombstones that slot even when nothing was
+    /// pending, because it is the start or middle of a transfer whose
+    /// remaining chunks must be discarded: otherwise a later chunk would
+    /// assemble a truncated notification. The tombstone costs nothing, and the
+    /// transfer's final chunk removes it. A rejected id-less final chunk has
+    /// nothing after it to swallow, so with nothing in the slot it changes
+    /// nothing; with something in the slot it ends that transfer.
     fn reject_osc99_chunk(&mut self, id: Option<&str>, chunk_state: Osc99ChunkState) {
-        if id.is_none() && !self.pending_osc99.contains(None) {
-            tracing::trace!("OSC 99: rejected chunk without an id, nothing pending");
+        if id.is_none()
+            && chunk_state == Osc99ChunkState::Done
+            && !self.pending_osc99.contains(None)
+        {
+            tracing::trace!("OSC 99: rejected final chunk without an id, nothing pending");
             return;
         }
         tracing::debug!(

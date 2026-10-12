@@ -1264,11 +1264,12 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_id_less_chunk_abandons_an_accumulating_unidentified_slot_only() {
+    fn a_rejected_id_less_chunk_abandons_the_unidentified_slot() {
         let (mut state, _rx) = osc99_state();
-        // Nothing pending: a rejected id-less chunk leaves no tombstone behind
-        // to swallow the next, unrelated, id-less notification.
-        osc99_send(&mut state, &osc99_over_cap_metadata(""), "x");
+        // A rejected id-less final chunk with nothing pending is a no-op: no
+        // tombstone is left to swallow the next id-less notification.
+        let over_cap_final = vec!["u=1"; 65].join(":");
+        osc99_send(&mut state, &over_cap_final, "x");
         assert!(state.handler.pending_osc99.is_empty());
         osc99_send(&mut state, "", "shown");
         assert_eq!(osc99_titles(&state), ["shown"]);
@@ -1285,6 +1286,36 @@ mod tests {
         assert!(state.handler.pending_osc99.is_empty());
     }
 
+    #[test]
+    fn a_rejected_id_less_first_chunk_tombstones_the_rest_of_the_transfer() {
+        let (mut state, rx) = osc99_state();
+        // Nothing is pending, yet the rejected `d=0` chunk starts a transfer
+        // whose remaining chunks must not assemble a truncated notification.
+        osc99_send(&mut state, &osc99_over_cap_metadata(""), "head ");
+        assert!(matches!(
+            state.handler.pending_osc99.get(None),
+            Some(super::super::notify_99::PendingEntry::Dropped)
+        ));
+        state.handler.pending_osc99.assert_costs_consistent();
+        assert_eq!(state.handler.pending_osc99.total_cost(), 0);
+
+        // The final chunk would otherwise show "tail" as a notification.
+        osc99_send(&mut state, "d=1", "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+        assert!(osc99_written(&rx).is_empty(), "no reply for a dropped one");
+
+        // The slot is reusable: a fresh id-less notification is displayed.
+        osc99_send(&mut state, "", "fresh");
+        assert_eq!(osc99_titles(&state), ["fresh"]);
+        state.handler.pending_osc99.assert_costs_consistent();
+    }
+
+    /// A rejection for size is reachable only by a direct call to the parser:
+    /// the OSC accumulator drops any body over 1 MiB before OSC 99 sees it, so
+    /// over the wire a sequence this large never gets here. Spec-conforming
+    /// senders use chunks of at most 4096 bytes. This test builds the
+    /// rejection directly to pin what the handler does with it.
     #[test]
     fn a_rejected_oversized_chunk_tombstones_the_transfer() {
         let mut handler = osc99_supported_handler();

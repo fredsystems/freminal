@@ -6502,6 +6502,9 @@ review of the cleanup diff follows.
     affected. Reviewed and documented, not a defect. The P4 status wording and the
     rejected-oversized test's doc say that the path is reachable only from a direct call.
 - **Tests:** a long `f=` is ignored; a rejected id-less `d=0` chunk tombstones the slot.
+- **Status:** done. A rejected id-less final chunk still ends an accumulating unidentified
+  transfer, as it did before, and is a no-op only when nothing is pending. The name cap
+  counts characters, not bytes.
 
 #### 138.C19 — GUI follow-ups from the confirmation review
 

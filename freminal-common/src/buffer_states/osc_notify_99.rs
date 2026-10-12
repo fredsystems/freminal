@@ -132,6 +132,12 @@ pub enum Osc99ParseError {
     /// The metadata + payload region exceeded [`MAX_OSC99_SEQUENCE_BYTES`].
     /// Rejected before any allocation/decode to bound memory use on
     /// untrusted terminal input.
+    ///
+    /// Reachable only by a direct call to the parser: the OSC accumulator
+    /// drops any body over 1 MiB before OSC 99 sees it, and a body that
+    /// reaches the parser is therefore already within this cap.  Spec-
+    /// conforming senders use chunks of at most 4096 bytes, so only a
+    /// non-conforming sender is affected, and it is dropped silently upstream.
     SequenceTooLarge {
         /// The size of the metadata + payload region, in bytes.
         bytes: usize,
@@ -182,6 +188,10 @@ impl fmt::Display for Osc99ParseError {
 /// handler-wide caps (see `notify_99.rs`). 1 MiB equals the handler's icon
 /// payload cap, so one sequence can carry an icon of any size the handler
 /// would accept, while pathological input is refused.
+///
+/// This equals the OSC accumulator's own 1 MiB body cap, which is applied
+/// first, so on the live path this guard never fires; it protects direct
+/// callers of the parser.
 pub const MAX_OSC99_SEQUENCE_BYTES: usize = 1_048_576;
 
 /// Maximum number of `key=value` items accepted in one OSC 99 metadata region.
@@ -194,6 +204,17 @@ pub const MAX_OSC99_METADATA_ITEMS: usize = 64;
 
 /// Maximum length, in bytes, of a sanitised `i=` / `g=` identifier.
 const MAX_OSC99_ID_BYTES: usize = 512;
+
+/// Maximum length, in Unicode scalar values, of a decoded `f=` / `s=` / `n=` /
+/// `t=` value.
+///
+/// These scalar metadata values are not charged to the handler's pending
+/// budget, so the parser bounds each one here.  A decoded value longer than
+/// this is ignored (that key only; the rest of the sequence still applies),
+/// exactly as an undecodable value is.  A value of exactly this length is
+/// accepted.  No real application name, icon name, sound name or type tag is
+/// anywhere near this long.
+const MAX_OSC99_NAME_CHARS: usize = 256;
 
 /// A fully-parsed OSC 99 notification command (one escape sequence).
 ///
@@ -316,13 +337,17 @@ pub fn resolve_osc99_actions(
 
 /// Base64-decode `value` and require the result to be non-empty UTF-8.
 ///
-/// `None` when the value is not valid base64, does not decode to UTF-8, or
-/// decodes to the empty string; the caller then ignores the key.  An empty
-/// name carries no information (kitty treats an empty `f=` / `s=` as unset),
-/// and an empty `n=` / `t=` entry must not become an icon name or a type.
+/// `None` when the value is not valid base64, does not decode to UTF-8,
+/// decodes to the empty string, or decodes to more than
+/// [`MAX_OSC99_NAME_CHARS`] characters; the caller then ignores the key.  An
+/// empty name carries no information (kitty treats an empty `f=` / `s=` as
+/// unset), and an empty `n=` / `t=` entry must not become an icon name or a
+/// type.
 fn decode_base64_utf8(value: &[u8]) -> Option<String> {
     let bytes = crate::base64::decode(value).ok()?;
-    String::from_utf8(bytes).ok().filter(|s| !s.is_empty())
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|s| !s.is_empty() && s.chars().count() <= MAX_OSC99_NAME_CHARS)
 }
 
 /// Whether `byte` is allowed in an `i=` / `g=` identifier: `[A-Za-z0-9_+.-]`.
@@ -1011,6 +1036,40 @@ mod tests {
         assert_eq!(cmd.sound, None);
         assert_eq!(cmd.notification_types, [] as [String; 0]);
         assert_eq!(cmd.urgency, Some(NotificationUrgency::Critical));
+    }
+
+    #[test]
+    fn over_long_name_values_are_ignored_while_the_rest_applies() {
+        let long = crate::base64::encode("a".repeat(MAX_OSC99_NAME_CHARS + 44).as_bytes());
+        let cmd = parse(&format!("i=x:f={long}:s={long}:n={long}:t={long}:u=2"));
+        assert_eq!(cmd.app_name, None);
+        assert_eq!(cmd.sound, None);
+        assert_eq!(cmd.icon_names, [] as [String; 0]);
+        assert_eq!(cmd.notification_types, [] as [String; 0]);
+        assert_eq!(cmd.id, Some("x".to_owned()));
+        assert_eq!(cmd.urgency, Some(NotificationUrgency::Critical));
+    }
+
+    #[test]
+    fn name_values_of_exactly_the_limit_are_accepted() {
+        let name = "a".repeat(MAX_OSC99_NAME_CHARS);
+        let enc = crate::base64::encode(name.as_bytes());
+        let cmd = parse(&format!("f={enc}:s={enc}:n={enc}:t={enc}"));
+        assert_eq!(cmd.app_name, Some(name.clone()));
+        assert_eq!(cmd.sound, Some(name.clone()));
+        assert_eq!(cmd.icon_names, vec![name.clone()]);
+        assert_eq!(cmd.notification_types, vec![name]);
+    }
+
+    #[test]
+    fn name_limit_counts_characters_not_bytes() {
+        // 256 two-byte characters: 512 bytes, but exactly at the limit.
+        let name = "é".repeat(MAX_OSC99_NAME_CHARS);
+        let enc = crate::base64::encode(name.as_bytes());
+        assert_eq!(parse(&format!("f={enc}")).app_name, Some(name));
+        let over = "é".repeat(MAX_OSC99_NAME_CHARS + 1);
+        let enc = crate::base64::encode(over.as_bytes());
+        assert_eq!(parse(&format!("f={enc}")).app_name, None);
     }
 
     #[test]

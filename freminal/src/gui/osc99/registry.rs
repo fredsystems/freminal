@@ -111,8 +111,12 @@ pub enum Osc99Closing {
     /// No close has been requested and the instance has not been activated.
     Open,
     /// The instance was closed (`p=close`, expiry) or activated; it waits for
-    /// its open legs' `Closed` events. It is no longer alive for `p=alive`, and
-    /// a further activation or `p=close` is ignored.
+    /// its open legs' `Closed` events. A further activation or `p=close` is
+    /// ignored. `p=alive` lists an instance while it has an open leg that has
+    /// not been asked to close, which is independent of this state: an
+    /// activated `c=1` instance whose desktop notification is still displayed
+    /// stays listed, while a closed or expired one, whose legs were all asked
+    /// to close, is not.
     Requested,
 }
 
