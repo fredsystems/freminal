@@ -39,8 +39,9 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
-    Osc99Registry, PaneKeyboardFocus, PaneVisibility,
+    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg,
+    Osc99LinuxDaemon, Osc99PaneState, Osc99Registry, Osc99Request, PaneKeyboardFocus,
+    PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -560,6 +561,45 @@ pub(super) struct Osc99DisplayContext {
     pub pane: Osc99PaneState,
     /// The display time. An `w=` expiry is measured from it.
     pub now: Instant,
+    /// What is known about the Linux/BSD notification daemon. A
+    /// system leg the daemon cannot show falls back to the toast leg
+    /// ([`resolve_osc99_legs`]). Ignored on macOS and Windows, whose system
+    /// leg does not use the daemon.
+    pub daemon: Osc99LinuxDaemon,
+}
+
+/// The legs an OSC 99 notification is displayed on: the toast and/or system
+/// legs `routing` picks for `window_focus`, with the Linux/BSD system leg
+/// replaced by the toast leg when `daemon` is
+/// [`Osc99LinuxDaemon::Unavailable`] (no daemon could show it, and the
+/// capability advertisement already promises the toast leg only), without
+/// listing the toast leg twice.
+///
+/// `system_leg` is the platform's system leg, a parameter so the fallback is
+/// testable on every platform.
+fn resolve_osc99_legs(
+    routing: NotificationRouting,
+    window_focus: WindowFocus,
+    system_leg: Osc99Leg,
+    daemon: Osc99LinuxDaemon,
+) -> Vec<Osc99Leg> {
+    let focused = window_focus.is_focused();
+    let mut legs = Vec::with_capacity(2);
+    if routing.wants_toast(focused) {
+        legs.push(Osc99Leg::Toast);
+    }
+    if routing.wants_system(focused) {
+        let leg = if system_leg == Osc99Leg::LinuxSystem && daemon == Osc99LinuxDaemon::Unavailable
+        {
+            Osc99Leg::Toast
+        } else {
+            system_leg
+        };
+        if !legs.contains(&leg) {
+            legs.push(leg);
+        }
+    }
+    legs
 }
 
 /// Outcome of the OSC 99 `o=` occasion check.
@@ -686,33 +726,24 @@ impl NotificationRouter {
         }
 
         // Toast/system legs honour `routing_osc99` (3.3/3.4), mirroring
-        // `route`'s focus-aware gating. Bind each leg's gate once so the
-        // toast leg, the system leg, and the registry below all agree on the
-        // same decision.
-        let routing = config.routing_osc99;
-        let wants_toast = routing.wants_toast(ctx.window_focus.is_focused());
-        let wants_system = routing.wants_system(ctx.window_focus.is_focused());
-
-        let mut legs: Vec<Osc99Leg> = Vec::with_capacity(2);
-
-        // The toast leg is shown by the effects `register` returns below.
-        if wants_toast {
-            legs.push(Osc99Leg::Toast);
-        }
-
-        if wants_system {
-            // Both system legs are shown by the effects `register` returns
-            // below. Only Linux/BSD observe a close or activation (through the
-            // notification service); elsewhere the system notification is
-            // fire-and-forget and shown through the untracked backend. `cfg!`
-            // rather than `#[cfg]` so both variants are constructed on every
-            // platform.
-            legs.push(if cfg!(all(unix, not(target_os = "macos"))) {
-                Osc99Leg::LinuxSystem
-            } else {
-                Osc99Leg::UntrackedSystem
-            });
-        }
+        // `route`'s focus-aware gating. One decision picks the legs, so the
+        // toast leg, the system leg, and the registry below all agree. The
+        // legs are shown by the effects `register` returns below. Only
+        // Linux/BSD observe a close or activation (through the notification
+        // service); elsewhere the system notification is fire-and-forget and
+        // shown through the untracked backend. `cfg!` rather than `#[cfg]` so
+        // both variants are constructed on every platform.
+        let system_leg = if cfg!(all(unix, not(target_os = "macos"))) {
+            Osc99Leg::LinuxSystem
+        } else {
+            Osc99Leg::UntrackedSystem
+        };
+        let legs = resolve_osc99_legs(
+            config.routing_osc99,
+            ctx.window_focus,
+            system_leg,
+            ctx.daemon,
+        );
 
         // A notification displayed on no leg (routed `Disabled`) never
         // happened as far as later `p=alive` / `p=close` handling goes.
@@ -729,6 +760,68 @@ impl NotificationRouter {
             );
         }
         Vec::new()
+    }
+
+    /// Route one OSC 99 request of a frame's ordered list and return the
+    /// effects to execute.
+    ///
+    /// The caller routes the frame's requests strictly in arrival order, one
+    /// call each, so a `p=close` or `p=alive` sees exactly the instances the
+    /// requests before it created, and a display sees the icons the primings
+    /// before it stored:
+    /// - [`Osc99Request::Display`] goes through [`Self::route_osc99`], with
+    ///   the request's own pane state for the `o=` gate;
+    /// - [`Osc99Request::Control`] answers `p=alive` from, and closes for
+    ///   `p=close` in, `registry`;
+    /// - [`Osc99Request::PrimeIcon`] stores the bytes in `icon_cache` and
+    ///   returns no effects.
+    pub(super) fn route_osc99_request(
+        request: &Osc99Request,
+        config: &NotificationsConfig,
+        window_focus: WindowFocus,
+        daemon: Osc99LinuxDaemon,
+        icon_cache: &mut Osc99IconCache,
+        registry: &mut Osc99Registry,
+    ) -> Vec<Osc99Effect> {
+        match request {
+            Osc99Request::Display(notification) => {
+                tracing::trace!(
+                    origin = ?notification.origin,
+                    pane_state = ?notification.pane_state,
+                    "routing OSC 99 notification"
+                );
+                let ctx = Osc99DisplayContext {
+                    window_focus,
+                    pane: notification.pane_state,
+                    now: Instant::now(),
+                    daemon,
+                };
+                Self::route_osc99(notification, config, ctx, icon_cache, registry)
+            }
+            Osc99Request::Control(control) => {
+                tracing::trace!(
+                    origin = ?control.origin,
+                    kind = ?control.control.kind,
+                    "routing OSC 99 control"
+                );
+                match control.control.kind {
+                    // Answer the poll with the requesting pane's live ids.
+                    Osc99ControlKind::Alive => registry.alive(
+                        control.origin,
+                        control.control.id.clone(),
+                        control.reply_tx.clone(),
+                    ),
+                    // App-driven close: close the pane's toast, if shown; the
+                    // close report follows when the toast's `Closed` event
+                    // arrives.
+                    Osc99ControlKind::Close => registry.close(control.origin, &control.control.id),
+                }
+            }
+            Osc99Request::PrimeIcon(prime) => {
+                prime.store_in(icon_cache);
+                Vec::new()
+            }
+        }
     }
 
     /// Resolve the icon bytes to display, applying the `g=` cache.
@@ -765,8 +858,8 @@ impl NotificationRouter {
 mod tests {
     use super::*;
     use crate::gui::osc99::{
-        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99Filter, Osc99Origin,
-        Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
+        NoSystemBackend, NoUntrackedBackend, Osc99ControlRequest, Osc99EffectSink, Osc99Filter,
+        Osc99IconPrime, Osc99Origin, Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
     };
     use freminal_common::buffer_states::osc99_notification::{
         NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
@@ -1520,6 +1613,7 @@ mod tests {
             window_focus,
             pane,
             now: Instant::now(),
+            daemon: Osc99LinuxDaemon::assumed(),
         }
     }
 
@@ -2228,6 +2322,333 @@ mod tests {
         };
         assert_eq!(entry.id(), Some("tracked"));
         assert_eq!(entry.shown_legs(), [Osc99Leg::Toast, system_leg]);
+    }
+
+    const NO_DAEMON: Osc99LinuxDaemon = Osc99LinuxDaemon::Unavailable;
+
+    #[test]
+    fn legs_follow_routing_when_the_daemon_is_available() {
+        let daemon =
+            Osc99LinuxDaemon::Available(crate::gui::osc99::Osc99DaemonCapabilities::ASSUMED);
+        let legs =
+            |routing, focus| resolve_osc99_legs(routing, focus, Osc99Leg::LinuxSystem, daemon);
+        assert_eq!(
+            legs(NotificationRouting::Both, WindowFocus::Focused),
+            [Osc99Leg::Toast, Osc99Leg::LinuxSystem]
+        );
+        assert_eq!(
+            legs(NotificationRouting::System, WindowFocus::Focused),
+            [Osc99Leg::LinuxSystem]
+        );
+        assert_eq!(
+            legs(
+                NotificationRouting::SystemWhenUnfocused,
+                WindowFocus::Unfocused
+            ),
+            [Osc99Leg::LinuxSystem]
+        );
+        assert_eq!(
+            legs(
+                NotificationRouting::SystemWhenUnfocused,
+                WindowFocus::Focused
+            ),
+            [Osc99Leg::Toast]
+        );
+        assert_eq!(
+            legs(NotificationRouting::Disabled, WindowFocus::Focused),
+            Vec::<Osc99Leg>::new()
+        );
+    }
+
+    #[test]
+    fn unfocused_system_when_unfocused_falls_back_to_the_toast_with_the_bus_down() {
+        // G8: the system leg was the only one chosen, and nothing can show it.
+        assert_eq!(
+            resolve_osc99_legs(
+                NotificationRouting::SystemWhenUnfocused,
+                WindowFocus::Unfocused,
+                Osc99Leg::LinuxSystem,
+                NO_DAEMON,
+            ),
+            [Osc99Leg::Toast]
+        );
+    }
+
+    #[test]
+    fn system_routing_falls_back_to_the_toast_with_the_bus_down() {
+        // `System` plus no daemon never reaches routing at runtime (the
+        // capability combine makes it `Unsupported`), but routing is still
+        // defined for it.
+        assert_eq!(
+            resolve_osc99_legs(
+                NotificationRouting::System,
+                WindowFocus::Focused,
+                Osc99Leg::LinuxSystem,
+                NO_DAEMON,
+            ),
+            [Osc99Leg::Toast]
+        );
+    }
+
+    #[test]
+    fn both_routing_lists_the_toast_leg_once_with_the_bus_down() {
+        assert_eq!(
+            resolve_osc99_legs(
+                NotificationRouting::Both,
+                WindowFocus::Focused,
+                Osc99Leg::LinuxSystem,
+                NO_DAEMON,
+            ),
+            [Osc99Leg::Toast]
+        );
+    }
+
+    #[test]
+    fn the_untracked_system_leg_ignores_the_linux_daemon() {
+        assert_eq!(
+            resolve_osc99_legs(
+                NotificationRouting::Both,
+                WindowFocus::Focused,
+                Osc99Leg::UntrackedSystem,
+                NO_DAEMON,
+            ),
+            [Osc99Leg::Toast, Osc99Leg::UntrackedSystem]
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn route_osc99_with_the_bus_down_registers_and_shows_the_toast_leg_only() {
+        use crate::gui::osc99::RecordingSystemBackend;
+
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::SystemWhenUnfocused,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        let mut system = RecordingSystemBackend::default();
+        let data = Notification99Data {
+            id: Some("down".to_owned()),
+            ..default_n99()
+        };
+        let ctx = Osc99DisplayContext {
+            daemon: NO_DAEMON,
+            ..osc99_ctx(
+                WindowFocus::Unfocused,
+                pane_state(PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden),
+            )
+        };
+
+        route_osc99_with_system(
+            &osc99_request(&data),
+            &config,
+            ctx,
+            &mut toasts,
+            &mut icon_cache,
+            &mut registry,
+            &mut system,
+        );
+
+        assert!(system.shown.is_empty(), "no desktop notification is sent");
+        assert_eq!(toasts.len(), 1, "the toast leg shows instead");
+        let [entry] = registry.instances() else {
+            panic!("the notification must be registered");
+        };
+        assert_eq!(entry.open_legs(), [Osc99Leg::Toast]);
+    }
+
+    /// Route `requests` strictly in order, as the app does for a frame, and
+    /// collect every effect.
+    fn route_in_order(
+        requests: &[Osc99Request],
+        config: &NotificationsConfig,
+        icon_cache: &mut Osc99IconCache,
+        registry: &mut Osc99Registry,
+    ) -> Vec<Osc99Effect> {
+        let mut effects = Vec::new();
+        for request in requests {
+            effects.extend(NotificationRouter::route_osc99_request(
+                request,
+                config,
+                WindowFocus::Focused,
+                Osc99LinuxDaemon::assumed(),
+                icon_cache,
+                registry,
+            ));
+        }
+        effects
+    }
+
+    fn control_request(id: &str, kind: Osc99ControlKind) -> Osc99Request {
+        Osc99Request::Control(Osc99ControlRequest {
+            control: Osc99Control {
+                id: id.to_owned(),
+                kind,
+            },
+            reply_tx: Weak::new(),
+            origin: Osc99Origin {
+                window_id: freminal_windowing::WindowId::for_test(1),
+                pane_id: crate::gui::panes::PaneId::first(),
+            },
+        })
+    }
+
+    fn display_request(id: &str, title: &str) -> Osc99Request {
+        Osc99Request::Display(Box::new(osc99_request(&Notification99Data {
+            id: Some(id.to_owned()),
+            title: title.to_owned(),
+            ..default_n99()
+        })))
+    }
+
+    /// The ids a `p=alive` answer lists, among `effects`.
+    fn alive_ids(effects: &[Osc99Effect]) -> Vec<String> {
+        let [
+            Osc99Effect::Reply {
+                reply: GuiReply::Osc99Alive { live_ids, .. },
+                ..
+            },
+        ] = effects
+        else {
+            panic!("expected exactly one alive reply, got {effects:?}");
+        };
+        live_ids.clone()
+    }
+
+    #[test]
+    fn a_close_then_a_new_display_of_the_same_id_in_one_frame_leaves_the_new_one_live() {
+        // G1: the close must act on the instance that existed when it was
+        // sent, not on the one displayed after it.
+        let config = enabled_config(0.0);
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        route_in_order(
+            &[display_request("x", "old")],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        route_in_order(
+            &[
+                control_request("x", Osc99ControlKind::Close),
+                display_request("x", "new"),
+            ],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        let alive = route_in_order(
+            &[control_request("poll", Osc99ControlKind::Alive)],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+        assert_eq!(alive_ids(&alive), ["x"], "the new instance is live");
+    }
+
+    #[test]
+    fn an_alive_poll_does_not_list_a_display_that_follows_it_in_the_frame() {
+        let config = enabled_config(0.0);
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+
+        let effects = route_in_order(
+            &[
+                control_request("poll", Osc99ControlKind::Alive),
+                display_request("y", "later"),
+            ],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        let alive: Vec<Osc99Effect> = effects
+            .into_iter()
+            .filter(|effect| matches!(effect, Osc99Effect::Reply { .. }))
+            .collect();
+        assert_eq!(alive_ids(&alive), Vec::<String>::new());
+        assert_eq!(registry.instances().len(), 1, "the display still happened");
+    }
+
+    #[test]
+    fn an_icon_priming_before_a_display_is_used_by_that_display() {
+        // Routed `System` so the icon reaches a system-leg effect on every
+        // platform (the toast leg would only carry a glyph).
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::System,
+            ..enabled_config(0.0)
+        };
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        let g_only = Osc99Request::Display(Box::new(osc99_request(&Notification99Data {
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        })));
+
+        let effects = route_in_order(
+            &[
+                Osc99Request::PrimeIcon(Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![7, 7, 7],
+                }),
+                g_only,
+            ],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        let shown = effects.iter().find_map(|effect| match effect {
+            Osc99Effect::ShowLinuxSystem { notification, .. }
+            | Osc99Effect::ShowUntrackedSystem(notification) => Some(notification),
+            _ => None,
+        });
+        let Some(shown) = shown else {
+            panic!("expected a system show, got {effects:?}");
+        };
+        assert_eq!(shown.icon_data.as_deref(), Some([7u8, 7, 7].as_slice()));
+    }
+
+    #[test]
+    fn a_display_before_its_icon_priming_does_not_see_the_icon() {
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::System,
+            ..enabled_config(0.0)
+        };
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        let g_only = Osc99Request::Display(Box::new(osc99_request(&Notification99Data {
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        })));
+
+        let effects = route_in_order(
+            &[
+                g_only,
+                Osc99Request::PrimeIcon(Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![7, 7, 7],
+                }),
+            ],
+            &config,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        let shown = effects.iter().find_map(|effect| match effect {
+            Osc99Effect::ShowLinuxSystem { notification, .. }
+            | Osc99Effect::ShowUntrackedSystem(notification) => Some(notification),
+            _ => None,
+        });
+        let Some(shown) = shown else {
+            panic!("expected a system show, got {effects:?}");
+        };
+        assert_eq!(shown.icon_data, None, "the priming came too late");
+        assert_eq!(icon_cache.get("k"), Some([7u8, 7, 7].as_slice()));
     }
 
     #[test]

@@ -408,6 +408,17 @@ struct FreminalGui {
     /// Single-threaded GUI, so `RefCell` suffices.
     osc99_focus_requests: std::cell::RefCell<Vec<osc99::Osc99Origin>>,
 
+    /// OSC 99 requests a frame could not route because a cell they need was
+    /// busy, oldest first. The next frame routes them before its own, so
+    /// nothing is dropped and the order is kept (Task 138.C10, G14).
+    /// Single-threaded GUI, so `RefCell` suffices.
+    deferred_osc99_requests: std::cell::RefCell<Vec<osc99::Osc99Request>>,
+
+    /// An `osc99_filters` change the registry could not take because its cell
+    /// was busy, applied at the next opportunity (Task 138.C10, D9). Holds
+    /// only the latest. Single-threaded GUI, so `RefCell` suffices.
+    pending_osc99_filter: std::cell::RefCell<Option<osc99::Osc99Filter>>,
+
     /// What is known about the Linux/BSD notification daemon: assumed until
     /// the service reports its `GetCapabilities` answer or that the bus is
     /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
@@ -638,6 +649,8 @@ impl FreminalGui {
             osc99_icon_cache: std::cell::RefCell::new(osc99::Osc99IconCache::default()),
             osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
+            deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
+            pending_osc99_filter: std::cell::RefCell::new(None),
             osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
             osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend()),
             #[cfg(all(unix, not(target_os = "macos")))]

@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
-use freminal_common::buffer_states::osc99_notification::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::send_or_log;
@@ -23,6 +22,7 @@ use super::frame_drain::{
     drain_window_manipulation_commands, process_dead_panes,
 };
 use super::geometry_interop;
+use super::osc99::Osc99Request;
 use super::panes;
 use super::pointer_motion::{
     self, PaneSnapshotInputs, PointerMotionInputs, PointerObservations,
@@ -42,6 +42,21 @@ use super::view_state;
 use super::visual_preview::ShaderErrorRoute;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
+
+/// How many OSC 99 requests may wait in `FreminalGui::deferred_osc99_requests`
+/// for a busy cell to free up. A cell is only ever busy transiently, so
+/// reaching this means something is badly wrong; the newest requests beyond it
+/// are dropped rather than letting the queue grow without bound.
+const MAX_DEFERRED_OSC99_REQUESTS: usize = 256;
+
+/// Whether one OSC 99 request was routed or has to wait for a free cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc99Routed {
+    /// The request was routed and its effects applied.
+    Done,
+    /// A cell the request needs was busy; nothing changed.
+    Busy,
+}
 
 /// What `on_close_requested` should do about a window that may own an open
 /// Settings window (issue #401).
@@ -903,7 +918,7 @@ impl freminal_windowing::App for FreminalGui {
                         window_post,
                         repaint_handle,
                     );
-                    self.windows.insert(window_id, win);
+                    self.insert_terminal_window(window_id, win);
 
                     self.emit_window_create_recording(window_id, inner_size);
                 }
@@ -1068,6 +1083,9 @@ impl freminal_windowing::App for FreminalGui {
         // Drop the window's state (its panes retire their GL renderers) but
         // keep the handles to destroy the window's remaining GL state: this
         // call has no GL context current, `on_window_destroying` will.
+        // Stop the OSC 99 wake-up targeting the closing window.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.unregister(window_id);
         if let Some(win) = self.windows.remove(&window_id) {
             self.closing_window_gl
                 .insert(window_id, win.into_gl_teardown());
@@ -1102,6 +1120,10 @@ impl freminal_windowing::App for FreminalGui {
         gl: &glow::Context,
         context: GlContextState,
     ) {
+        // Idempotent with `on_close_requested`; this also covers a window that
+        // is destroyed without a close request.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.unregister(window_id);
         let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
             self.windows
                 .remove(&window_id)
@@ -2085,7 +2107,7 @@ impl freminal_windowing::App for FreminalGui {
                 WindowFocus::from_bool(window_focused),
                 &window_manipulation_events,
             );
-            self.wake_for_osc99_focus_requests(ui.ctx());
+            self.wake_for_osc99_pending_work(ui.ctx());
 
             // ── Multi-pane rendering loop ────────────────────────────
             //
@@ -3983,7 +4005,7 @@ impl freminal_windowing::App for FreminalGui {
         self.route_osc99_toast_events();
         // An activation that asked for focus queued it; the drain at the top
         // of `update()` needs a frame to run in.
-        self.wake_for_osc99_focus_requests(ctx);
+        self.wake_for_osc99_pending_work(ctx);
 
         // ── Retired GL objects need one more frame (125.C2 review) ──────────
         // A pane closed during this update retired its renderer after the
@@ -4437,10 +4459,10 @@ impl FreminalGui {
     /// drain: OSC 9/777 notifications go through
     /// [`crate::gui::notifications::NotificationRouter::route`], OSC 52
     /// clipboard events surface as a toast via [`Self::route_freminal_toast`],
-    /// OSC 99 stateful notifications go through
-    /// [`crate::gui::notifications::NotificationRouter::route_osc99`], and
-    /// OSC 99 control sequences (alive/close/query) get PTY-written
-    /// responses.
+    /// every OSC 99 request (stateful notifications, `p=alive` / `p=close`
+    /// controls, icon primings) goes through
+    /// [`crate::gui::notifications::NotificationRouter::route_osc99_request`],
+    /// in arrival order; controls get PTY-written responses.
     ///
     /// Called after `drain_window_manipulation_commands` returns, i.e. after
     /// its mutable borrow of the tab list has ended, so `self.config`,
@@ -4448,10 +4470,12 @@ impl FreminalGui {
     /// `self.osc99_registry`) are all borrowable here without conflicting with
     /// that borrow.
     ///
-    /// The four routing destinations are kept as four separate blocks
-    /// deliberately (Task 122.8 prohibition): they route to different
-    /// destinations, and the OSC 99 control block writes PTY responses via
-    /// `send_or_log!`. Do not fold them into one.
+    /// The three routing destinations (OSC 9/777 toasts, OSC 52 toasts, and
+    /// OSC 99 requests) are kept as three separate blocks deliberately (Task
+    /// 122.8 prohibition): they route to different destinations. The OSC 99
+    /// block routes displays, controls and icon primings as ONE ordered list
+    /// (Task 138.C10, G1); its controls write PTY responses through the
+    /// effects they return. Do not fold the blocks into one.
     fn route_window_manipulation_events(
         &self,
         window_focus: WindowFocus,
@@ -4485,153 +4509,129 @@ impl FreminalGui {
             );
         }
 
+        // Install an `osc99_filters` change a busy registry deferred, before
+        // this frame's notifications are filtered.
+        super::settings_dispatch::apply_pending_osc99_filter(
+            &self.osc99_registry,
+            &self.pending_osc99_filter,
+        );
+
         // Drop registry instances whose pane is gone. Every frame: the scan
         // is bounded by the registry's cap, and a busy cell only defers the
         // prune to the next frame, so it is worth a warning only when there
         // is OSC 99 work this frame.
-        let has_osc99_work = !events.osc99_notifications.is_empty()
-            || !events.osc99_controls.is_empty()
-            || !events.osc99_icon_primes.is_empty();
         match self.osc99_registry.try_borrow_mut() {
             Ok(mut registry) => registry.prune_dead_panes(),
-            Err(_) if has_osc99_work => {
+            Err(_) if !events.osc99_requests.is_empty() => {
                 tracing::warn!("OSC 99: notification registry busy; dead panes not pruned");
             }
             Err(_) => {}
         }
 
-        // Store icon bytes sent for the `g=` cache before this frame's
-        // notifications are routed, so one that names the key finds them.
-        self.store_osc99_icon_primes(&events.osc99_icon_primes);
+        // Route every OSC 99 request of the frame (displays, `p=close` /
+        // `p=alive` controls, icon primings) in the order the panes emitted
+        // them. The `p=?` handshake never gets here: the PTY thread answers
+        // it (Task 130.5).
+        self.route_osc99_requests(window_focus, &events.osc99_requests);
+    }
 
-        // Route OSC 99 stateful notifications collected above (Task 99.5a).
-        self.route_osc99_display_requests(window_focus, &events.osc99_notifications);
+    /// Route the OSC 99 requests a frame's drain collected, strictly in
+    /// arrival order (Task 138.C10, G1), preceded by the requests an earlier
+    /// frame had to defer.
+    ///
+    /// Each request borrows the toast stack, the icon cache and the registry
+    /// for itself alone and releases the registry before its effects are
+    /// applied, because applying them can feed failed desktop-notification
+    /// shows back to it. A request that finds a cell busy is deferred, along
+    /// with every request after it so the order is kept, to the next frame
+    /// (up to [`MAX_DEFERRED_OSC99_REQUESTS`]); that frame is requested by
+    /// [`Self::wake_for_osc99_pending_work`].
+    ///
+    /// A deferred request is routed with the window focus of the frame that
+    /// finally routes it, not the frame that collected it.
+    fn route_osc99_requests(&self, window_focus: WindowFocus, fresh: &[Osc99Request]) {
+        let deferred = self.deferred_osc99_requests.try_borrow_mut().map_or_else(
+            |_| {
+                tracing::warn!("OSC 99: deferred request queue busy; routing only this frame's");
+                Vec::new()
+            },
+            |mut queue| std::mem::take(&mut *queue),
+        );
+        if deferred.is_empty() && fresh.is_empty() {
+            return;
+        }
 
-        // Answer OSC 99 control sequences collected above (Task 99.6 for
-        // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
-        // after the display-routing block above so its `osc99_registry` borrow
-        // has already been released.
-        for request in &events.osc99_controls {
-            let control = &request.control;
-            tracing::trace!(origin = ?request.origin, kind = ?control.kind, "routing OSC 99 control");
-            // Both cells before any mutation: a `Close` changes the registry
-            // and its effects change the toast stack, so a busy cell must
-            // leave both untouched.
-            let (Ok(mut toasts), Ok(mut registry)) = (
-                self.toasts.try_borrow_mut(),
-                self.osc99_registry.try_borrow_mut(),
-            ) else {
-                tracing::warn!(
-                    id = control.id,
-                    kind = ?control.kind,
-                    "OSC 99: toast stack or notification registry busy; control not applied"
-                );
+        let mut still_deferred: Vec<Osc99Request> = Vec::new();
+        for request in deferred.iter().chain(fresh) {
+            // Anything behind a deferred request waits with it.
+            if still_deferred.is_empty()
+                && self.route_osc99_request(window_focus, request) == Osc99Routed::Done
+            {
                 continue;
-            };
-            let effects = match control.kind {
-                // Answer the poll with the requesting pane's live ids.
-                Osc99ControlKind::Alive => {
-                    registry.alive(request.origin, control.id.clone(), request.reply_tx.clone())
-                }
-                // App-driven close: close the pane's toast, if shown; the
-                // close report follows when the toast's `Closed` event arrives.
-                Osc99ControlKind::Close => registry.close(request.origin, &control.id),
-            };
-            drop(registry);
-            self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+            }
+            still_deferred.push(request.clone());
         }
-    }
-
-    /// Store the icon bytes a frame's drain collected for the OSC 99 `g=`
-    /// cache. The cache bounds its own size; a busy cell drops the priming
-    /// for this frame, and the program re-transmits when a later
-    /// `g=`-only notification misses.
-    fn store_osc99_icon_primes(&self, primes: &[rendering::Osc99IconPrime]) {
-        if primes.is_empty() {
+        if still_deferred.is_empty() {
             return;
         }
-        let Ok(mut icon_cache) = self.osc99_icon_cache.try_borrow_mut() else {
+
+        if still_deferred.len() > MAX_DEFERRED_OSC99_REQUESTS {
             tracing::warn!(
-                dropped = primes.len(),
-                "OSC 99: icon cache busy; icon priming dropped this frame"
+                dropped = still_deferred.len() - MAX_DEFERRED_OSC99_REQUESTS,
+                "OSC 99: deferred request queue full; newest requests dropped"
             );
-            return;
-        };
-        for prime in primes {
-            prime.store_in(&mut icon_cache);
+            still_deferred.truncate(MAX_DEFERRED_OSC99_REQUESTS);
+        }
+        if let Ok(mut queue) = self.deferred_osc99_requests.try_borrow_mut() {
+            *queue = still_deferred;
+        } else {
+            tracing::warn!(
+                dropped = still_deferred.len(),
+                "OSC 99: deferred request queue busy; requests dropped"
+            );
         }
     }
 
-    /// Route the OSC 99 stateful notifications a frame's drain collected
-    /// (Task 99.5a): for each, the router decides the legs and the registry
-    /// returns the effects that show them.
+    /// Route one OSC 99 request: the router decides (display) or answers
+    /// (control, priming) from the registry and the icon cache, and the
+    /// effects it returns are applied to the toast stack and the
+    /// desktop-notification service.
     ///
     /// `self.config`, the toast stack, and the OSC 99 session maps are
     /// borrowable here without conflicting with the drain's tab-list borrow.
-    /// The registry is checked free up front, but borrowed per request and
-    /// released before the effects are applied, because applying them can feed
-    /// failed desktop-notification shows back to it.
-    fn route_osc99_display_requests(
+    /// All three cells are checked before anything changes, so a busy cell
+    /// leaves the request untouched for a retry. Each request's `reply_tx`
+    /// (a `Weak` handle to the originating pane's reply sender) is threaded
+    /// into the reverse-reply path: the registry upgrades it per send to
+    /// deliver activation/close replies to the pane that produced this OSC 99
+    /// sequence, without keeping that pane alive. The pane state gates `o=`;
+    /// OS-window focus alone drives the toast/system routing choice, and the
+    /// daemon state turns a system leg nobody can show into the toast leg.
+    fn route_osc99_request(
         &self,
         window_focus: WindowFocus,
-        requests: &[crate::gui::osc99::Osc99DisplayRequest],
-    ) {
-        if requests.is_empty() {
-            return;
-        }
-        match (
+        request: &Osc99Request,
+    ) -> Osc99Routed {
+        let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut registry)) = (
             self.toasts.try_borrow_mut(),
             self.osc99_icon_cache.try_borrow_mut(),
             self.osc99_registry.try_borrow_mut(),
-        ) {
-            (Ok(mut toasts), Ok(mut icon_cache), Ok(registry)) => {
-                drop(registry);
-                // Each request's `reply_tx` (a `Weak` handle to the
-                // originating pane's reply sender) is threaded into the
-                // reverse-reply path: the registry upgrades it per send to
-                // deliver activation/close replies to the pane that
-                // produced this OSC 99 sequence, without keeping that pane
-                // alive. The pane state gates `o=`; OS-window focus
-                // alone drives the toast/system routing choice.
-                for request in requests {
-                    tracing::trace!(
-                        origin = ?request.origin,
-                        pane_state = ?request.pane_state,
-                        "routing OSC 99 notification"
-                    );
-                    let ctx = crate::gui::notifications::Osc99DisplayContext {
-                        window_focus,
-                        pane: request.pane_state,
-                        now: std::time::Instant::now(),
-                    };
-                    let Ok(mut registry) = self.osc99_registry.try_borrow_mut() else {
-                        tracing::warn!(
-                            id = ?request.data.id,
-                            "OSC 99: notification registry busy; notification dropped"
-                        );
-                        continue;
-                    };
-                    let effects = crate::gui::notifications::NotificationRouter::route_osc99(
-                        request,
-                        &self.config.notifications,
-                        ctx,
-                        &mut icon_cache,
-                        &mut registry,
-                    );
-                    drop(registry);
-                    self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
-                }
-            }
-            (toasts, icon_cache, registry) => {
-                tracing::warn!(
-                    toast_stack_busy = toasts.is_err(),
-                    icon_cache_busy = icon_cache.is_err(),
-                    registry_busy = registry.is_err(),
-                    dropped = requests.len(),
-                    "OSC 99: notification state busy; notifications dropped this frame"
-                );
-            }
-        }
+        ) else {
+            tracing::warn!("OSC 99: notification state busy; request deferred to the next frame");
+            return Osc99Routed::Busy;
+        };
+        let effects = crate::gui::notifications::NotificationRouter::route_osc99_request(
+            request,
+            &self.config.notifications,
+            window_focus,
+            self.osc99_daemon.get(),
+            &mut icon_cache,
+            &mut registry,
+        );
+        drop(registry);
+        drop(icon_cache);
+        self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+        Osc99Routed::Done
     }
 
     /// Close the OSC 99 notifications whose `w=` deadline has passed, execute
@@ -4780,10 +4780,10 @@ impl FreminalGui {
     ///
     /// A daemon that did not change is ignored, so the one `warn!` for an
     /// unreachable bus is logged once even if the event repeats. With the
-    /// daemon unavailable, `System` routing becomes `Unsupported`, `Both`
-    /// the toast leg only, and `SystemWhenUnfocused` promises no optional
-    /// feature; failed shows end the system leg on their own
-    /// (`ShowFailed`).
+    /// daemon unavailable, `System` routing becomes `Unsupported`, while
+    /// `Both` and `SystemWhenUnfocused` fall back to the toast leg (routing
+    /// substitutes it for the system leg, see
+    /// [`crate::gui::notifications::Osc99DisplayContext::daemon`]).
     #[cfg(all(unix, not(target_os = "macos")))]
     fn set_osc99_daemon(&self, new: crate::gui::osc99::Osc99LinuxDaemon, current: &PerWindowState) {
         let old = self.osc99_daemon.replace(new);
@@ -4792,8 +4792,9 @@ impl FreminalGui {
         }
         if matches!(new, crate::gui::osc99::Osc99LinuxDaemon::Unavailable) {
             warn!(
-                "OSC 99: the desktop-notification service is unavailable; the system leg is \
-                 disabled and System routing no longer advertises OSC 99"
+                "OSC 99: the desktop-notification service is unavailable; System routing \
+                 stops advertising OSC 99, and Both and SystemWhenUnfocused fall back to \
+                 the toast leg"
             );
         }
         if let Some(capabilities) =
@@ -4918,10 +4919,7 @@ impl FreminalGui {
                 );
             }
         }
-        crate::gui::osc99::Osc99FailedSystemLegs {
-            shows: sink.failed_system_shows,
-            closes: sink.failed_system_closes,
-        }
+        sink.take_failed()
     }
 
     /// Feed the shows and closes the desktop-notification service could not
@@ -4979,14 +4977,19 @@ impl FreminalGui {
         }
     }
 
-    /// Ask for one more frame when OSC 99 focus requests are waiting, so the
-    /// next `update()` drains them even on an otherwise idle window.
-    fn wake_for_osc99_focus_requests(&self, ctx: &egui::Context) {
-        if self
+    /// Ask for one more frame when OSC 99 work is waiting for one, so the
+    /// next `update()` does it even on an otherwise idle window: focus
+    /// requests to drain, or requests a busy cell deferred.
+    fn wake_for_osc99_pending_work(&self, ctx: &egui::Context) {
+        let focus_waiting = self
             .osc99_focus_requests
             .try_borrow()
-            .is_ok_and(|queue| !queue.is_empty())
-        {
+            .is_ok_and(|queue| !queue.is_empty());
+        let requests_deferred = self
+            .deferred_osc99_requests
+            .try_borrow()
+            .is_ok_and(|queue| !queue.is_empty());
+        if focus_waiting || requests_deferred {
             ctx.request_repaint();
         }
     }
@@ -4994,8 +4997,9 @@ impl FreminalGui {
     /// Perform the focus requests queued by activated OSC 99 notifications.
     ///
     /// For each requested pane: find its window, switch to the pane's tab,
-    /// unzoom, make it the active pane ([`focus_pane_in_tabs`]), then raise
-    /// the OS window and repaint it. A missing window or pane is skipped.
+    /// unzoom, make it the active pane ([`focus_pane_in_tabs`]), then
+    /// un-minimise and raise the OS window and repaint it. A missing window
+    /// or pane is skipped.
     ///
     /// [`focus_pane_in_tabs`]: crate::gui::actions::focus_pane_in_tabs
     fn drain_osc99_focus_requests(&mut self, handle: &freminal_windowing::WindowHandle<'_>) {
@@ -5012,6 +5016,16 @@ impl FreminalGui {
             };
             match crate::gui::actions::focus_pane_in_tabs(&mut win.tabs, origin.pane_id) {
                 crate::gui::actions::PaneFocusOutcome::Focused => {
+                    // Un-minimise first: a minimised window ignores a focus
+                    // request on some platforms. The window's minimised state
+                    // is only known to its own egui context, which is not the
+                    // one rendering now, so the request is always made;
+                    // winit makes it a no-op for a window that is not
+                    // minimised (Windows and macOS compare the real state;
+                    // X11 sends the same activation `focus_window` does;
+                    // Wayland cannot un-minimise and logs that it ignored the
+                    // request).
+                    handle.set_minimized(origin.window_id, false);
                     handle.focus_window(origin.window_id);
                     handle.request_repaint(origin.window_id);
                 }
@@ -5149,7 +5163,23 @@ impl FreminalGui {
             window_post,
             repaint_handle,
         );
+        self.insert_terminal_window(window_id, win);
+    }
+
+    /// Add a newly created terminal window's state to `self.windows` and make
+    /// the OSC 99 notification service's wake-up able to reach it.
+    ///
+    /// Every creation of a terminal window goes through here. The Settings
+    /// window has no [`PerWindowState`] and never does, so it is never
+    /// registered: a wake sent to it would drain nothing. The per-frame
+    /// re-inserts in `update()` are not creations and use `self.windows`
+    /// directly. The window is unregistered when it closes (`on_close_requested`
+    /// and `on_window_destroying`; unregistering a window that was never
+    /// registered, such as the Settings window, is harmless).
+    pub(super) fn insert_terminal_window(&mut self, window_id: WindowId, win: PerWindowState) {
         self.windows.insert(window_id, win);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.register(window_id);
     }
 
     /// Render the fatal-error panel for a window that has no

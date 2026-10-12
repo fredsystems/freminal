@@ -51,8 +51,8 @@ use freminal_windowing::WindowId;
 use tracing::{error, trace};
 
 use super::osc99::{
-    Osc99ControlRequest, Osc99DisplayRequest, Osc99Origin, Osc99PaneContext, Osc99PaneState,
-    PaneActivity, TabActivity, WindowMinimized, ZoomOcclusion,
+    Osc99Origin, Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, TabActivity,
+    WindowMinimized, ZoomOcclusion,
 };
 use super::panes::{self, PaneId};
 use super::tabs::TabManager;
@@ -350,22 +350,18 @@ pub(super) struct WindowManipulationEvents {
     /// OSC 9 / OSC 777 notifications collected from every pane this frame,
     /// routed after the drain loop (Task 76.4).
     pub(super) osc_notifications: Vec<crate::gui::notifications::NotificationRequest>,
-    /// OSC 99 stateful notifications collected from every pane this frame,
-    /// routed after the drain loop (Task 99.5a) alongside
-    /// `osc_notifications`. Each request carries a `Weak` clone of the
-    /// originating pane's `reply_tx` (so a closed pane's PTY consumer is
-    /// never kept alive by a pending notification), the pane's
-    /// [`Osc99Origin`], and its [`Osc99PaneState`] for the `o=` check
-    /// (Task 138.5).
-    pub(super) osc99_notifications: Vec<Osc99DisplayRequest>,
-    /// OSC 99 app→terminal control sequences (p=close/p=alive) collected
-    /// from every pane this frame (Task 99.5c), answered after the drain
-    /// loop.
-    pub(super) osc99_controls: Vec<Osc99ControlRequest>,
-    /// OSC 99 icon bytes transmitted under a `g=` key with no text to show,
-    /// collected from every pane this frame. They are stored in the icon
-    /// cache before this frame's notifications are routed.
-    pub(super) osc99_icon_primes: Vec<rendering::Osc99IconPrime>,
+    /// Every OSC 99 request collected from every pane this frame, in the
+    /// order the panes emitted them (Task 138.C10, G1), routed after the
+    /// drain loop in that order:
+    /// - displays (Task 99.5a). Each carries a `Weak` clone of the
+    ///   originating pane's `reply_tx` (so a closed pane's PTY consumer is
+    ///   never kept alive by a pending notification), the pane's
+    ///   [`Osc99Origin`], and its [`Osc99PaneState`] for the `o=` check
+    ///   (Task 138.5);
+    /// - app-to-terminal controls (`p=close` / `p=alive`, Task 99.5c);
+    /// - icon bytes transmitted under a `g=` key with no text to show, which
+    ///   a later display in the same list may name.
+    pub(super) osc99_requests: Vec<Osc99Request>,
     /// OSC 52 clipboard events (remote write / blocked read) collected from
     /// every pane this frame, routed to a toast after the drain loop (issue
     /// #433).
@@ -460,9 +456,7 @@ pub(super) fn drain_window_manipulation_commands(
 
     let mut events = WindowManipulationEvents {
         osc_notifications: Vec::new(),
-        osc99_notifications: Vec::new(),
-        osc99_controls: Vec::new(),
-        osc99_icon_primes: Vec::new(),
+        osc99_requests: Vec::new(),
         osc52_events: Vec::new(),
     };
 
@@ -520,9 +514,7 @@ pub(super) fn drain_window_manipulation_commands(
                         osc99,
                     },
                     &mut events.osc_notifications,
-                    &mut events.osc99_notifications,
-                    &mut events.osc99_controls,
-                    &mut events.osc99_icon_primes,
+                    &mut events.osc99_requests,
                     &mut events.osc52_events,
                 );
                 if shell_set {
@@ -545,7 +537,9 @@ mod tests {
         DeadPaneOutcome, WindowFocus, drain_command_finished_events,
         drain_window_manipulation_commands, osc99_pane_state,
     };
-    use crate::gui::osc99::{PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized};
+    use crate::gui::osc99::{
+        Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
+    };
     use crate::gui::panes::{Pane, PaneId, PaneIdGenerator};
     use crate::gui::pty::CommandFinishedEvent;
     use crate::gui::tabs::{Tab, TabId, TabManager};
@@ -946,8 +940,7 @@ mod tests {
         // This scenario produces no OSC 9/99/52 events; a title-only frame
         // must not spuriously populate any of the routed vectors.
         assert!(events.osc_notifications.is_empty());
-        assert!(events.osc99_notifications.is_empty());
-        assert!(events.osc99_controls.is_empty());
+        assert!(events.osc99_requests.is_empty());
         assert!(events.osc52_events.is_empty());
     }
 
@@ -1025,6 +1018,20 @@ mod tests {
         }
     }
 
+    /// The display requests among a frame's OSC 99 requests, in order.
+    fn osc99_displays(
+        events: &super::WindowManipulationEvents,
+    ) -> Vec<&crate::gui::osc99::Osc99DisplayRequest> {
+        events
+            .osc99_requests
+            .iter()
+            .filter_map(|request| match request {
+                Osc99Request::Display(display) => Some(display.as_ref()),
+                Osc99Request::Control(_) | Osc99Request::PrimeIcon(_) => None,
+            })
+            .collect()
+    }
+
     /// Drain a frame where both the active and the background tab's pane
     /// emitted an OSC 99 notification, with the given window focus.
     fn drain_osc99_from_two_tabs(
@@ -1082,11 +1089,12 @@ mod tests {
     fn drain_computes_osc99_origin_and_state_per_pane_across_tabs() {
         let (events, active_id, bg_id) = drain_osc99_from_two_tabs(WindowFocus::Focused);
 
-        assert_eq!(events.osc99_notifications.len(), 2);
+        let displays = osc99_displays(&events);
+        assert_eq!(displays.len(), 2);
         let by_pane = |id: PaneId| {
-            events
-                .osc99_notifications
+            displays
                 .iter()
+                .copied()
                 .find(|r| r.origin.pane_id == id)
                 .unwrap_or_else(|| panic!("a request from pane {id:?}"))
         };
@@ -1111,21 +1119,23 @@ mod tests {
             }
         });
 
-        assert_eq!(events.osc99_icon_primes.len(), 2);
-        for prime in &events.osc99_icon_primes {
+        assert_eq!(events.osc99_requests.len(), 2);
+        for request in &events.osc99_requests {
+            let Osc99Request::PrimeIcon(prime) = request else {
+                panic!("expected an icon priming, got {request:?}");
+            };
             assert_eq!(prime.key, "k");
             assert_eq!(prime.data, [1, 2, 3]);
         }
-        assert!(events.osc99_notifications.is_empty());
-        assert!(events.osc99_controls.is_empty());
     }
 
     #[test]
     fn drain_marks_every_pane_unfocused_and_hidden_when_the_window_is_unfocused() {
         let (events, _, _) = drain_osc99_from_two_tabs(WindowFocus::Unfocused);
 
-        assert_eq!(events.osc99_notifications.len(), 2);
-        for request in &events.osc99_notifications {
+        let displays = osc99_displays(&events);
+        assert_eq!(displays.len(), 2);
+        for request in displays {
             assert_eq!(request.pane_state.focus, PaneKeyboardFocus::Unfocused);
             assert_eq!(request.pane_state.visibility, PaneVisibility::Hidden);
         }

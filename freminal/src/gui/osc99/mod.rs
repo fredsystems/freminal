@@ -425,6 +425,17 @@ impl Osc99FailedSystemLegs {
     }
 }
 
+impl Osc99EffectSink<'_> {
+    /// Take the shows and closes the backend could not queue, leaving the
+    /// sink's lists empty.
+    pub fn take_failed(&mut self) -> Osc99FailedSystemLegs {
+        Osc99FailedSystemLegs {
+            shows: std::mem::take(&mut self.failed_system_shows),
+            closes: std::mem::take(&mut self.failed_system_closes),
+        }
+    }
+}
+
 /// Execute `effects` in order against `sink`.
 pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink<'_>) {
     for effect in effects {
@@ -642,6 +653,45 @@ pub struct Osc99ControlRequest {
     pub reply_tx: Weak<Sender<InputEvent>>,
     /// The pane the control came from.
     pub origin: Osc99Origin,
+}
+
+/// Icon bytes an OSC 99 notification transmitted under a `g=` cache key
+/// without any text to show (`WindowManipulation::Osc99CacheIcon`), collected
+/// by the per-frame drain so the caller can store them in the session's icon
+/// cache, which the per-pane loop cannot reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Osc99IconPrime {
+    /// The cache key (`g=`), sanitised.
+    pub key: String,
+    /// The icon image bytes.
+    pub data: Vec<u8>,
+}
+
+impl Osc99IconPrime {
+    /// Store the icon in `cache` under its key, as the most recently used
+    /// entry. The cache applies its own bounds.
+    pub fn store_in(&self, cache: &mut Osc99IconCache) {
+        cache.insert(self.key.clone(), self.data.clone());
+    }
+}
+
+/// One OSC 99 request collected by the per-frame drain.
+///
+/// A frame's requests are kept in ONE ordered list, in the order the panes
+/// emitted them, and routed strictly in that order. Keeping display, control
+/// and icon-priming requests in separate lists lost the order between them:
+/// `p=close;i=x` followed by a new `i=x` display would close the new
+/// instance, `p=alive` would answer with instances shown after it, and a
+/// priming that preceded a display could be stored after it.
+#[derive(Debug, Clone)]
+pub enum Osc99Request {
+    /// A notification to display. Boxed: it is far larger than the other
+    /// variants.
+    Display(Box<Osc99DisplayRequest>),
+    /// A `p=close` / `p=alive` control.
+    Control(Osc99ControlRequest),
+    /// Icon bytes for the `g=` cache.
+    PrimeIcon(Osc99IconPrime),
 }
 
 #[cfg(test)]

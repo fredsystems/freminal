@@ -6143,6 +6143,22 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
       it.
   - **Left for 138.C10b, because they need `app_impl.rs`:** the routing half of G8, the fold
     of `Osc99FailedSystemLegs`, the busy-cell defer and the daemon-warning wording.
+  - **138.C10b (done):**
+    - **G1.** One ordered `Vec<Osc99Request>` (display, control, icon priming) is routed in
+      arrival order.
+    - **G6 / Z3.** `Osc99Wake` tracks live terminal windows, registered at creation and
+      removed on close or destroy, and falls back to any live window. The focus drain
+      un-minimises before focusing; `set_minimized(false)` is a no-op on a window that is not
+      minimised (winit 0.30.13, verified by reading the source).
+    - **G8 routing.** `resolve_osc99_legs` substitutes the toast leg when the Linux leg is
+      unavailable.
+    - **D9.** A pending filter is retried every frame.
+    - **G14.** Busy cells defer requests (at most 256, with a repaint wake), and the warning
+      wording is corrected.
+    - Deferred requests use the window focus of the frame that routes them. This only matters
+      for a busy cell, which cannot happen single-threaded.
+    - `Osc99FailedSystemLegs` is still not folded (its registry tests construct it), so the
+      fold moves to 138.C13.
 
 #### 138.C11 — Linux presentation fixes
 
@@ -6217,6 +6233,7 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     toast and system events, feed back failed legs, drain focus requests.
   - `osc99/mod.rs` is split into `pane_state.rs`, `effects.rs` and `toast_spec.rs`.
   - The stale "four separate blocks" doc is fixed.
+  - `Osc99FailedSystemLegs` is folded into the sink's vectors (moved here from 138.C10).
 
 #### 138.C14 — Toast interaction and layout fixes
 

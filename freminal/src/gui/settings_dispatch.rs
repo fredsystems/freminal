@@ -3,12 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::cell::RefCell;
+
 use freminal_common::config::Config;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::{error, warn};
 
 use super::FreminalGui;
+use super::osc99::{Osc99Filter, Osc99Registry};
 use super::settings::SettingsAction;
 use super::visual_preview::{
     self, FONT_PREVIEW_DEBOUNCE, FontPreview, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, VisualPreview,
@@ -30,22 +33,82 @@ fn with_current<W>(
     windows.into_iter().chain(current)
 }
 
+/// What became of an `osc99_filters` change handed to
+/// [`install_osc99_filter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Osc99FilterInstall {
+    /// The registry took the filter.
+    Applied,
+    /// The registry was busy: the filter waits in the pending slot for
+    /// [`apply_pending_osc99_filter`].
+    Deferred,
+    /// The registry and the pending slot were both busy, so the change is
+    /// lost until the setting changes again. Nothing holds the slot across a
+    /// call, so this does not happen in practice.
+    Dropped,
+}
+
+/// Install `filter` as the registry's user filter, or park it in `pending`
+/// (replacing any older parked filter: only the latest change matters) when
+/// the registry is busy. A successful install also clears `pending`, so an
+/// older parked filter can never overwrite a newer one.
+fn install_osc99_filter(
+    registry: &RefCell<Osc99Registry>,
+    pending: &RefCell<Option<Osc99Filter>>,
+    filter: Osc99Filter,
+) -> Osc99FilterInstall {
+    if let Ok(mut registry) = registry.try_borrow_mut() {
+        registry.set_filter(filter);
+        if let Ok(mut pending) = pending.try_borrow_mut() {
+            *pending = None;
+        }
+        return Osc99FilterInstall::Applied;
+    }
+    pending
+        .try_borrow_mut()
+        .map_or(Osc99FilterInstall::Dropped, |mut pending| {
+            *pending = Some(filter);
+            Osc99FilterInstall::Deferred
+        })
+}
+
+/// Install the filter parked by [`install_osc99_filter`], if there is one and
+/// the registry is free now. A busy registry leaves it parked for the next
+/// attempt.
+pub(super) fn apply_pending_osc99_filter(
+    registry: &RefCell<Osc99Registry>,
+    pending: &RefCell<Option<Osc99Filter>>,
+) {
+    let (Ok(mut registry), Ok(mut pending)) = (registry.try_borrow_mut(), pending.try_borrow_mut())
+    else {
+        return;
+    };
+    if let Some(filter) = pending.take() {
+        registry.set_filter(filter);
+    }
+}
+
 impl FreminalGui {
     /// Recompile the OSC 99 user filter when `new_cfg` changes
     /// `[notifications] osc99_filters`, logging each invalid rule.
     ///
     /// Compares against `self.config`, so it must run before `self.config`
-    /// is replaced.
+    /// is replaced. A busy registry parks the filter, and the next frame's
+    /// [`apply_pending_osc99_filter`] installs it, so the change is not lost.
     fn apply_osc99_filters(&self, new_cfg: &Config) {
         if new_cfg.notifications.osc99_filters == self.config.notifications.osc99_filters {
             return;
         }
         let filter =
             super::osc99::Osc99Filter::compile_logged(&new_cfg.notifications.osc99_filters);
-        if let Ok(mut registry) = self.osc99_registry.try_borrow_mut() {
-            registry.set_filter(filter);
-        } else {
-            warn!("OSC 99 registry busy; osc99_filters change not applied");
+        match install_osc99_filter(&self.osc99_registry, &self.pending_osc99_filter, filter) {
+            Osc99FilterInstall::Applied => {}
+            Osc99FilterInstall::Deferred => {
+                warn!("OSC 99 registry busy; osc99_filters change deferred to the next frame");
+            }
+            Osc99FilterInstall::Dropped => {
+                warn!("OSC 99 registry and pending filter busy; osc99_filters change not applied");
+            }
         }
     }
 
@@ -1256,7 +1319,133 @@ impl FreminalGui {
 
 #[cfg(test)]
 mod tests {
-    use super::with_current;
+    use std::cell::RefCell;
+
+    use freminal_common::buffer_states::osc99_notification::{
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
+    };
+
+    use super::{
+        Osc99FilterInstall, apply_pending_osc99_filter, install_osc99_filter, with_current,
+    };
+    use crate::gui::osc99::{Osc99Filter, Osc99FilterVerdict, Osc99Registry};
+
+    /// A filter that drops every notification.
+    fn drop_all() -> Osc99Filter {
+        let (filter, errors) = Osc99Filter::compile(&["all".to_owned()]);
+        assert_eq!(errors, Vec::new());
+        filter
+    }
+
+    fn verdict(registry: &RefCell<Osc99Registry>) -> Osc99FilterVerdict {
+        let data = Notification99Data {
+            id: None,
+            title: "Title".to_owned(),
+            body: None,
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
+            app_name: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
+        };
+        registry.borrow().filter_verdict(&data)
+    }
+
+    #[test]
+    fn a_free_registry_takes_the_filter_at_once_and_clears_the_pending_slot() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(Some(Osc99Filter::default()));
+
+        let outcome = install_osc99_filter(&registry, &pending, drop_all());
+
+        assert_eq!(outcome, Osc99FilterInstall::Applied);
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Drop);
+        assert!(pending.borrow().is_none());
+    }
+
+    #[test]
+    fn a_busy_registry_parks_the_filter_and_a_later_attempt_applies_it() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        let outcome = install_osc99_filter(&registry, &pending, drop_all());
+        assert_eq!(outcome, Osc99FilterInstall::Deferred);
+        // Still busy: the retry leaves the filter parked.
+        apply_pending_osc99_filter(&registry, &pending);
+        assert!(pending.borrow().is_some(), "a busy retry keeps it parked");
+        drop(held);
+
+        assert_eq!(
+            verdict(&registry),
+            Osc99FilterVerdict::Keep,
+            "not applied while busy"
+        );
+        apply_pending_osc99_filter(&registry, &pending);
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Drop);
+        assert!(pending.borrow().is_none(), "the parked filter is consumed");
+    }
+
+    #[test]
+    fn only_the_latest_deferred_filter_is_applied() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        install_osc99_filter(&registry, &pending, drop_all());
+        install_osc99_filter(&registry, &pending, Osc99Filter::default());
+        drop(held);
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
+
+    #[test]
+    fn a_direct_install_after_a_deferral_beats_the_stale_parked_filter() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        install_osc99_filter(&registry, &pending, drop_all());
+        drop(held);
+        // The setting changed again while nothing was busy.
+        install_osc99_filter(&registry, &pending, Osc99Filter::default());
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
+
+    #[test]
+    fn a_busy_registry_and_pending_slot_drop_the_change() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let _held_registry = registry.borrow_mut();
+        let _held_pending = pending.borrow_mut();
+        assert_eq!(
+            install_osc99_filter(&registry, &pending, drop_all()),
+            Osc99FilterInstall::Dropped
+        );
+    }
+
+    #[test]
+    fn applying_with_nothing_parked_changes_nothing() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
 
     #[test]
     fn with_current_visits_the_in_flight_window_once_after_the_map() {
