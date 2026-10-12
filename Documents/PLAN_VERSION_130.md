@@ -5223,7 +5223,8 @@ Each subtask is done in four steps:
 A sub-agent that ends without a report is treated as unverified. Its tree state is inspected,
 and the work is then finished by a fresh agent, re-decomposed, or discarded.
 
-Order: 138.1 → 138.18 in number order (138.7 runs as 138.7a then 138.7b). The adversarial
+Order: 138.1 → 138.18 in number order (138.7 runs as 138.7a then 138.7b; 138.17, the pure
+capability tables, runs before 138.15, which wires them). The adversarial
 review of the whole branch follows
 138.18, and its findings become `138.Cn` entries.
 
@@ -6038,6 +6039,20 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
       The plan's "over 1024 → 256" is superseded.
   - Sound hints are sent whatever the daemon's `sound` capability says (daemons ignore
     unknown hints). The advertisement follows the capability (138.17).
+- **138.17 (done, before 138.15).** Legs are expressed as `Osc99Features` values. The pure
+  functions are `toast_leg`, `system_leg(platform, daemon)`, `union`, `intersection` and
+  `combine(routing, platform, daemon)`, with no wildcard arms.
+  - The daemon-capability types moved to `osc99/capabilities.rs` for all platforms, with
+    `Osc99LinuxDaemon` and `Osc99Platform::current()`.
+  - With the Linux leg unavailable, `System` is `Unsupported` and `Both` is the toast leg.
+    `SystemWhenUnfocused` is `Supported` with every optional feature off.
+  - `Osc99LinuxDaemon::assumed()` is `Unavailable` off Linux/BSD, so that no variant goes
+    unconstructed.
+  - `body_markup` is gated to Linux/BSD, its only reader.
+  - The full reply string is covered by 138.4's features-to-string table, because the reply
+    builder is private to the emulator crate.
+  - Interim: a one-argument `host_capabilities(config)` wrapper (passing `assumed()`) remains
+    because `tab_spawning.rs` was out of scope; 138.15 removes it.
 
 ---
 

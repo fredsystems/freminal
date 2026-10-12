@@ -834,7 +834,10 @@ impl freminal_windowing::App for FreminalGui {
                         &self.config.cursor.shape,
                         self.config.cursor.blink,
                     ),
-                    host_capabilities: super::host_capabilities::host_capabilities(&self.config),
+                    host_capabilities: super::host_capabilities::host_capabilities_with_daemon(
+                        &self.config,
+                        super::osc99::Osc99LinuxDaemon::assumed(),
+                    ),
                 },
                 &repaint_handle,
                 initial_size,
@@ -4986,7 +4989,10 @@ impl FreminalGui {
                     &self.config.cursor.shape,
                     self.config.cursor.blink,
                 ),
-                host_capabilities: super::host_capabilities::host_capabilities(&self.config),
+                host_capabilities: super::host_capabilities::host_capabilities_with_daemon(
+                    &self.config,
+                    super::osc99::Osc99LinuxDaemon::assumed(),
+                ),
             },
             &repaint_handle,
             initial_size,

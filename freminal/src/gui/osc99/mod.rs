@@ -9,6 +9,7 @@
 //! pane was in ([`Osc99PaneState`]), and the request structs that carry both
 //! from the per-frame drain to the router.
 
+mod capabilities;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod dbus_service;
 mod filter;
@@ -36,6 +37,9 @@ use crate::gui::toast::{
     ToastContent, ToastEventKind, ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack,
 };
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub use capabilities::Osc99DaemonCapabilities;
+pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use dbus_service::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};

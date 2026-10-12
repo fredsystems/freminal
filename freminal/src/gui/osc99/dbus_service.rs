@@ -63,7 +63,10 @@ use super::presentation::{
     Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint, choose_icon,
     decode_icon_image, escape_body_markup, sound_hint,
 };
-use super::{Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend, Osc99SystemDispatch};
+use super::{
+    Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId, Osc99LegActivation,
+    Osc99SystemBackend, Osc99SystemDispatch,
+};
 
 /// The well-known bus name of the notification daemon.
 const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
@@ -91,43 +94,6 @@ const OSC99_DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_BUTTON_ACTIONS: usize = 8;
 
 // ── Public vocabulary ──────────────────────────────────────────────────────
-
-/// Whether the notification daemon has a capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99DaemonSupport {
-    /// The daemon advertises the capability (or it is assumed, before the
-    /// daemon has answered).
-    Supported,
-    /// The daemon does not advertise the capability.
-    Unsupported,
-}
-
-/// The `GetCapabilities` entries the OSC 99 system leg cares about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Osc99DaemonCapabilities {
-    /// `body`: the daemon shows a notification body.
-    pub body: Osc99DaemonSupport,
-    /// `actions`: the daemon shows and reports actions (buttons and the
-    /// default action).
-    pub actions: Osc99DaemonSupport,
-    /// `body-markup`: the daemon renders markup in the body.
-    pub body_markup: Osc99DaemonSupport,
-    /// `sound`: the daemon plays notification sounds.
-    pub sound: Osc99DaemonSupport,
-}
-
-impl Default for Osc99DaemonCapabilities {
-    /// What is assumed until the daemon answers `GetCapabilities`: kitty
-    /// assumes `body`, `actions` and `body-markup`, and no `sound`.
-    fn default() -> Self {
-        Self {
-            body: Osc99DaemonSupport::Supported,
-            actions: Osc99DaemonSupport::Supported,
-            body_markup: Osc99DaemonSupport::Supported,
-            sound: Osc99DaemonSupport::Unsupported,
-        }
-    }
-}
 
 impl Osc99DaemonCapabilities {
     /// The capabilities a daemon advertised in its `GetCapabilities` reply.
