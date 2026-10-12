@@ -19,7 +19,18 @@ use freminal_common::host_capabilities::{
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
 
-const TAIL: &str = "o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+/// The reply for the 138.1 default features, given the optional `a=` and
+/// `c=1` parts (which depend on the test's reported flags).
+fn reply(a_key: &str, c_key: &str) -> String {
+    format!(
+        "{a_key}o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:{c_key}w=1:s=system,silent"
+    )
+}
+
+/// The reply when both activation and close events are reported.
+fn full_reply() -> String {
+    reply("a=report:", "c=1:")
+}
 
 fn caps(
     activation_report: Osc99ActivationReport,
@@ -83,7 +94,7 @@ fn query_while_unsupported_writes_nothing_and_pushes_no_command() {
 fn query_with_full_features_replies_with_exact_bytes_and_no_command() {
     let (mut state, rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;a=report:c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{}\x1b\\", full_reply());
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
 }
@@ -95,7 +106,7 @@ fn query_with_activation_not_reported_omits_a_key() {
         Osc99CloseEvents::Reported,
     ));
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{}\x1b\\", reply("", "c=1:"));
     assert_eq!(drain(&rx), expected.into_bytes());
 }
 
@@ -106,7 +117,7 @@ fn query_with_close_not_reported_omits_c_key() {
         Osc99CloseEvents::NotReported,
     ));
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;a=report:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{}\x1b\\", reply("a=report:", ""));
     assert_eq!(drain(&rx), expected.into_bytes());
 }
 
@@ -117,7 +128,7 @@ fn query_with_neither_reported_starts_with_occasion_key() {
         Osc99CloseEvents::NotReported,
     ));
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{}\x1b\\", reply("", ""));
     assert_eq!(drain(&rx), expected.into_bytes());
 }
 
@@ -251,7 +262,7 @@ fn query_for_a_tombstoned_id_is_answered_while_supported() {
     assert!(state.window_commands.is_empty());
 
     state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=1:p=?;a=report:c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=1:p=?;{}\x1b\\", full_reply());
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
 }
@@ -273,7 +284,7 @@ fn query_for_a_tombstoned_id_leaves_the_tombstone_in_place() {
 fn query_with_d0_is_answered_at_once() {
     let (mut state, rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?:d=0;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;a=report:c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{}\x1b\\", full_reply());
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
 }
@@ -288,7 +299,7 @@ fn query_on_a_saturated_pending_map_is_answered() {
     assert!(drain(&rx).is_empty());
 
     state.handle_incoming_data(b"\x1b]99;i=q:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=q:p=?;a=report:c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=q:p=?;{}\x1b\\", full_reply());
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
 }

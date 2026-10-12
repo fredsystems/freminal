@@ -5796,8 +5796,11 @@ None yet.
   nothing. Orchestrator change, and a plan correction: a complete chunk for a key with no
   pending entry is finalised without entering the store. The plan text asked for an
   eviction, which would have destroyed another key's in-progress transfer for no reason.
-  Verification from this subtask on uses `cargo nextest run --all` (main moved to nextest in
-  PR #541).
+  Verification from this subtask on uses `cargo xtask test`, which runs nextest plus the
+  doctests (main moved to nextest in PR #541).
+- **138.4 (done).** The reply is built from every `Osc99Features` field in kitty's key order,
+  with exhaustive matches. For the 138.1 defaults the reply now carries `u` before `p`, and `p`
+  in kitty's order. Its content is unchanged until 138.17 changes the inputs.
 
 ---
 

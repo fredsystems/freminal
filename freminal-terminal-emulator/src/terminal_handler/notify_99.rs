@@ -28,7 +28,9 @@ use freminal_common::buffer_states::osc99_notification::{
 };
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
-    Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents,
+    Osc99Features, Osc99FocusAction, Osc99IconSupport, Osc99SoundNames, Osc99Support,
+    Osc99UrgencySupport,
 };
 
 use super::TerminalHandler;
@@ -385,41 +387,82 @@ impl FinalizedNotification {
 ///
 /// The result is the part after the `;` in
 /// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`: colon-separated `key=value`
-/// pairs in a stable order, with no leading or trailing `:`. It advertises
-/// only what is genuinely implemented (the truthful-advertisement rule from
-/// Task 76):
+/// pairs in kitty's key order, with no leading or trailing `:`. Every key is
+/// derived from `features`, so the reply advertises only what the host
+/// genuinely implements:
 ///
-/// - `a=report` (NOT `focus` — `a=focus` is parsed but freminal
-///   does not act on it), present only when activation can be reported. With
-///   no supported actions the `a` key is omitted entirely, per the spec's
-///   query table ("If no actions are supported, the `a` key must be
-///   absent");
+/// - `a=` the supported activation actions, as a comma list in the order
+///   `focus,report`. `focus` is present only when activating a notification
+///   focuses the source window; `report` only when activation can be reported.
+///   With no supported action the `a` key is omitted entirely, per the spec's
+///   query table ("If no actions are supported, the `a` key must be absent");
+/// - `o=always,unfocused,invisible` (all three occasions, always present);
+/// - `u=0,1,2` (urgency levels), present only when urgency is honoured;
+/// - `p=` the payload types, in the order
+///   `title,body,?,close,icon,alive,buttons`. `title`, `?`, `close` and
+///   `alive` are always present; `body`, `icon` and `buttons` are present only
+///   when the host displays them;
 /// - `c=1` (close reports), present only when close events can be reported;
-/// - `o=` all three occasions;
-/// - `p=` the payload types freminal handles (display types plus the control
-///   types it answers);
-/// - `s=system,silent` (forwarded freedesktop sound-name hints — freminal
-///   forwards the name, playback is the daemon's concern);
-/// - `u=0,1,2` (urgency levels — advertised even though the setter is
-///   unavailable on macOS, matching Task 76's handling of the same gap);
-/// - `w=1` (auto-expiry, wired via `.timeout()`).
-///
-/// Full conformance of the advertised set against the spec is Task 138.
+/// - `w=1` (auto-expiry), present only when the requested expiry is honoured;
+/// - `s=` the sound names: `system,silent` when only the well-known names are
+///   understood, plus `error,info,question,warn,warning` when the standard
+///   names are understood too.
 pub(in crate::terminal_handler) fn osc99_query_reply_body(features: Osc99Features) -> String {
-    let mut keys: Vec<&str> = Vec::with_capacity(7);
-    if features.activation_report == Osc99ActivationReport::Reported {
-        keys.push("a=report");
+    let mut keys: Vec<String> = Vec::with_capacity(7);
+
+    let mut actions: Vec<&str> = Vec::with_capacity(2);
+    match features.activation_focus {
+        Osc99FocusAction::Supported => actions.push("focus"),
+        Osc99FocusAction::Unsupported => {}
     }
-    if features.close_events == Osc99CloseEvents::Reported {
-        keys.push("c=1");
+    match features.activation_report {
+        Osc99ActivationReport::Reported => actions.push("report"),
+        Osc99ActivationReport::NotReported => {}
     }
-    keys.extend([
-        "o=always,unfocused,invisible",
-        "p=title,body,icon,buttons,alive,close,?",
-        "s=system,silent",
-        "u=0,1,2",
-        "w=1",
-    ]);
+    if !actions.is_empty() {
+        keys.push(format!("a={}", actions.join(",")));
+    }
+
+    keys.push("o=always,unfocused,invisible".to_owned());
+
+    match features.urgency {
+        Osc99UrgencySupport::Supported => keys.push("u=0,1,2".to_owned()),
+        Osc99UrgencySupport::Unsupported => {}
+    }
+
+    let mut payload_types: Vec<&str> = Vec::with_capacity(7);
+    payload_types.push("title");
+    match features.body {
+        Osc99BodySupport::Supported => payload_types.push("body"),
+        Osc99BodySupport::Unsupported => {}
+    }
+    payload_types.extend(["?", "close"]);
+    match features.icons {
+        Osc99IconSupport::Supported => payload_types.push("icon"),
+        Osc99IconSupport::Unsupported => {}
+    }
+    payload_types.push("alive");
+    match features.buttons {
+        Osc99ButtonSupport::Supported => payload_types.push("buttons"),
+        Osc99ButtonSupport::Unsupported => {}
+    }
+    keys.push(format!("p={}", payload_types.join(",")));
+
+    match features.close_events {
+        Osc99CloseEvents::Reported => keys.push("c=1".to_owned()),
+        Osc99CloseEvents::NotReported => {}
+    }
+
+    match features.auto_expiry {
+        Osc99AutoExpiry::Supported => keys.push("w=1".to_owned()),
+        Osc99AutoExpiry::Unsupported => {}
+    }
+
+    keys.push(match features.sound_names {
+        Osc99SoundNames::SystemAndSilent => "s=system,silent".to_owned(),
+        Osc99SoundNames::Standard => "s=system,silent,error,info,question,warn,warning".to_owned(),
+    });
+
     keys.join(":")
 }
 
@@ -2154,80 +2197,153 @@ mod tests {
         assert_eq!(store.identified_len(), 0);
     }
 
-    // ── 130.5: osc99_query_reply_body ─────────────────────────────────────────
+    // ── 138.4: osc99_query_reply_body ─────────────────────────────────────────
 
-    const REPLY_TAIL: &str = "o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+    const ALL_SUPPORTED_REPLY: &str = "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning";
 
-    #[test]
-    fn query_reply_body_full_features_matches_legacy_string() {
-        let features = Osc99Features {
+    /// Every feature supported, with the standard sound names.
+    fn all_supported() -> Osc99Features {
+        Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::Reported,
-            activation_focus: Osc99FocusAction::Unsupported,
+            activation_focus: Osc99FocusAction::Supported,
             auto_expiry: Osc99AutoExpiry::Supported,
             urgency: Osc99UrgencySupport::Supported,
-            sound_names: Osc99SoundNames::SystemAndSilent,
+            sound_names: Osc99SoundNames::Standard,
             body: Osc99BodySupport::Supported,
             buttons: Osc99ButtonSupport::Supported,
             icons: Osc99IconSupport::Supported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1"
-        );
+        }
     }
 
-    #[test]
-    fn query_reply_body_activation_not_reported_omits_a_key() {
-        let features = Osc99Features {
-            activation_report: Osc99ActivationReport::NotReported,
-            close_events: Osc99CloseEvents::Reported,
-            activation_focus: Osc99FocusAction::Unsupported,
-            auto_expiry: Osc99AutoExpiry::Supported,
-            urgency: Osc99UrgencySupport::Supported,
-            sound_names: Osc99SoundNames::SystemAndSilent,
-            body: Osc99BodySupport::Supported,
-            buttons: Osc99ButtonSupport::Supported,
-            icons: Osc99IconSupport::Supported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            format!("c=1:{REPLY_TAIL}")
-        );
-    }
-
-    #[test]
-    fn query_reply_body_close_not_reported_omits_c_key() {
-        let features = Osc99Features {
-            activation_report: Osc99ActivationReport::Reported,
-            close_events: Osc99CloseEvents::NotReported,
-            activation_focus: Osc99FocusAction::Unsupported,
-            auto_expiry: Osc99AutoExpiry::Supported,
-            urgency: Osc99UrgencySupport::Supported,
-            sound_names: Osc99SoundNames::SystemAndSilent,
-            body: Osc99BodySupport::Supported,
-            buttons: Osc99ButtonSupport::Supported,
-            icons: Osc99IconSupport::Supported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            format!("a=report:{REPLY_TAIL}")
-        );
-    }
-
-    #[test]
-    fn query_reply_body_neither_reported_starts_with_occasion() {
-        let features = Osc99Features {
+    /// Every feature unsupported, with only the well-known sound names.
+    fn none_supported() -> Osc99Features {
+        Osc99Features {
             activation_report: Osc99ActivationReport::NotReported,
             close_events: Osc99CloseEvents::NotReported,
             activation_focus: Osc99FocusAction::Unsupported,
-            auto_expiry: Osc99AutoExpiry::Supported,
-            urgency: Osc99UrgencySupport::Supported,
+            auto_expiry: Osc99AutoExpiry::Unsupported,
+            urgency: Osc99UrgencySupport::Unsupported,
             sound_names: Osc99SoundNames::SystemAndSilent,
-            body: Osc99BodySupport::Supported,
-            buttons: Osc99ButtonSupport::Supported,
-            icons: Osc99IconSupport::Supported,
-        };
-        assert_eq!(osc99_query_reply_body(features), REPLY_TAIL);
+            body: Osc99BodySupport::Unsupported,
+            buttons: Osc99ButtonSupport::Unsupported,
+            icons: Osc99IconSupport::Unsupported,
+        }
+    }
+
+    #[test]
+    fn query_reply_body_table() {
+        let cases: Vec<(&str, Osc99Features, &str)> = vec![
+            ("all supported", all_supported(), ALL_SUPPORTED_REPLY),
+            (
+                "none supported",
+                none_supported(),
+                "o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "focus only",
+                Osc99Features {
+                    activation_focus: Osc99FocusAction::Supported,
+                    ..none_supported()
+                },
+                "a=focus:o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "report only",
+                Osc99Features {
+                    activation_report: Osc99ActivationReport::Reported,
+                    ..none_supported()
+                },
+                "a=report:o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "standard sounds only",
+                Osc99Features {
+                    sound_names: Osc99SoundNames::Standard,
+                    ..none_supported()
+                },
+                "o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no body",
+                Osc99Features {
+                    body: Osc99BodySupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no icon",
+                Osc99Features {
+                    icons: Osc99IconSupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no buttons",
+                Osc99Features {
+                    buttons: Osc99ButtonSupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no urgency",
+                Osc99Features {
+                    urgency: Osc99UrgencySupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no close events",
+                Osc99Features {
+                    close_events: Osc99CloseEvents::NotReported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no auto expiry",
+                Osc99Features {
+                    auto_expiry: Osc99AutoExpiry::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:s=system,silent,error,info,question,warn,warning",
+            ),
+        ];
+        for (name, features, expected) in cases {
+            assert_eq!(osc99_query_reply_body(features), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn query_reply_body_all_supported_is_the_full_reply() {
+        assert_eq!(osc99_query_reply_body(all_supported()), ALL_SUPPORTED_REPLY);
+    }
+
+    #[test]
+    fn query_reply_body_none_supported_has_no_a_key() {
+        let body = osc99_query_reply_body(none_supported());
+        assert!(body.starts_with("o="), "reply: {body}");
+    }
+
+    #[test]
+    fn query_reply_body_focus_only_begins_with_a_focus() {
+        let body = osc99_query_reply_body(Osc99Features {
+            activation_focus: Osc99FocusAction::Supported,
+            ..none_supported()
+        });
+        assert!(body.starts_with("a=focus:"), "reply: {body}");
+    }
+
+    #[test]
+    fn query_reply_body_report_only_begins_with_a_report() {
+        let body = osc99_query_reply_body(Osc99Features {
+            activation_report: Osc99ActivationReport::Reported,
+            ..none_supported()
+        });
+        assert!(body.starts_with("a=report:"), "reply: {body}");
     }
 }
