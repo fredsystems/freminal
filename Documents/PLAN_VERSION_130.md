@@ -6083,6 +6083,19 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The two method-timeout tests are removed. They depended on a 2 s bound on calls the fake
     does answer, and the timeout itself is zbus behaviour. The error paths are covered by the
     error-reply tests.
+- **Status:** done, for every item.
+  - **`NO_AUTO_START` calls.** zbus's flag-taking blocking call has no timeout, so
+    `GetNameOwner` and `GetCapabilities` run on a short-lived `freminal-osc99-call` helper
+    thread bounded at 25 s.
+  - **Reused D-Bus id.** The evicted instance gets `Closed`, so its registry leg cannot stay
+    open.
+  - **Rig.** It stamps sender headers on p2p messages, so the bus-mode owner logic is
+    exercised end to end.
+  - **Re-checks by the orchestrator.**
+    - Deliberately broken versions of Z1, Z2, Z4 and Z13 are each caught.
+    - `freminal` passed 15 consecutive runs, and the service tests 40 runs under CPU load.
+    - The real-session-bus smoke tests were run again (temporary, not committed):
+      capabilities, show, 3,000 forged closes ignored, real close.
 
 #### 138.C10 — Registry, routing and GUI-glue correctness
 
