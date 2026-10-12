@@ -24,7 +24,7 @@
 //! [`FreminalGui::route_window_manipulation_events`] (`app_impl.rs`)
 //! deliberately stays behind: it takes `&self` and touches enough
 //! `FreminalGui` fields (`toasts`, `config`, `osc99_icon_cache`,
-//! `osc99_live`, plus the `route_freminal_toast` method) that converting it
+//! `osc99_registry`, plus the `route_freminal_toast` method) that converting it
 //! to a free function taking explicit references would either balloon the
 //! signature or require threading `&FreminalGui` through anyway, which
 //! defeats the point. `WindowManipulationEvents` (the struct it reads) and

@@ -9,16 +9,65 @@
 //! pane was in ([`Osc99PaneState`]), and the request structs that carry both
 //! from the per-frame drain to the router.
 
+mod registry;
+
 use std::sync::Weak;
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
-use freminal_terminal_emulator::io::InputEvent;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use freminal_windowing::WindowId;
 
 use crate::gui::frame_drain::WindowFocus;
-use crate::gui::notifications::Osc99Control;
+use crate::gui::notifications::{Osc99Control, send_reply_weak};
 use crate::gui::panes::PaneId;
+
+pub use registry::Osc99Registry;
+
+/// The registry's identity for one displayed notification.
+///
+/// Unlike the application's `i=` id (which may be absent, reused, or shared
+/// by different panes), an instance id is unique for the process lifetime and
+/// is minted by [`Osc99Registry::register`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Osc99InstanceId(u64);
+
+/// Where a notification was shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99Leg {
+    /// The in-window toast.
+    Toast,
+    /// A desktop notification whose close and activation freminal observes
+    /// (Linux/BSD, via the D-Bus handle).
+    LinuxSystem,
+    /// A desktop notification whose close and activation freminal cannot
+    /// observe (macOS and Windows).
+    UntrackedSystem,
+}
+
+/// Something the registry asks the GUI to do.
+///
+/// The registry is a pure state machine and returns effects; the executor
+/// ([`apply_osc99_effects`]) performs them.
+#[derive(Debug)]
+pub enum Osc99Effect {
+    /// Write `reply` to the pane behind `reply_tx`.
+    Reply {
+        /// A `Weak` handle to the pane's reply sender.
+        reply_tx: Weak<Sender<InputEvent>>,
+        /// The reply to serialise.
+        reply: GuiReply,
+    },
+}
+
+/// Execute `effects` in order.
+pub fn apply_osc99_effects(effects: Vec<Osc99Effect>) {
+    for effect in effects {
+        match effect {
+            Osc99Effect::Reply { reply_tx, reply } => send_reply_weak(&reply_tx, reply),
+        }
+    }
+}
 
 /// The pane an OSC 99 request came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

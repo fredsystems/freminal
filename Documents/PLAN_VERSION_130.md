@@ -5815,6 +5815,13 @@ None yet.
     tree needs a PTY per pane.
   - Orchestrator change: the drained `Notification99Data` is moved out of its `Box`, not
     cloned.
+- **138.6 (done).** `Osc99Registry` keeps a `Vec` in registration order, so the oldest is
+  index 0. Lookups are linear, bounded by the 128-instance cap. Toast-only and id-less
+  notifications are now registered. Until 138.7, a dismissed toast or an OS-dismissed
+  notification is still listed by `p=alive`; the old code had the same over-reporting for
+  system notifications. Instance fields with no reader yet are read by a `trace!` when the
+  instance is forgotten, so no `dead_code` allow is needed; 138.7 adds the real readers.
+  Orchestrator change: a stale `osc99_live` mention in the `frame_drain.rs` module doc.
 
 ---
 
