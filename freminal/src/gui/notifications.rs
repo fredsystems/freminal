@@ -1065,6 +1065,7 @@ mod tests {
                 system,
                 focus_requests: Vec::new(),
                 failed_system_shows: Vec::new(),
+                failed_system_closes: Vec::new(),
             },
         );
     }

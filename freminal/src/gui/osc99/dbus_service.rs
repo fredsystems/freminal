@@ -28,11 +28,16 @@
 //! Every state transition lives in the pure [`DispatcherState`], which has no
 //! bus and no threads and is unit-tested directly.
 //!
-//! Presentation (icons, sounds, category, markup) is Task 138.14; update and
-//! close through the service are Task 138.13.
+//! Update in place sends the replaced instance's D-Bus id as `replaces_id`.
+//! Close calls `CloseNotification` and lets the daemon's `NotificationClosed`
+//! signal produce the [`Osc99DbusEvent::Closed`]; an instance with no D-Bus id
+//! (its show failed, or it was replaced) is reported closed at once.
+//!
+//! Presentation (icons, sounds, category, markup) is Task 138.14.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, select};
 use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
@@ -45,7 +50,7 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::{Message, Type as MessageType};
 use zbus::zvariant::Value;
 
-use super::{Osc99InstanceId, Osc99LegActivation, Osc99ShowDispatch, Osc99SystemBackend};
+use super::{Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend, Osc99SystemDispatch};
 
 /// The well-known bus name of the notification daemon.
 const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
@@ -55,6 +60,13 @@ const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const NOTIFICATIONS_INTERFACE: &str = "org.freedesktop.Notifications";
 /// The `app_name` sent when the notification names no application (`f=`).
 const DEFAULT_APP_NAME: &str = "freminal";
+/// How long a D-Bus method call waits for its reply before it fails. This is
+/// the libdbus default reply timeout. zbus's blocking calls have no timeout of
+/// their own, so without it a daemon that never answers would block the
+/// dispatcher thread forever and silently end the Linux leg. A timed-out
+/// `Notify` becomes [`Osc99DbusEvent::ShowFailed`], and a timed-out
+/// `CloseNotification` falls back to [`Osc99DbusEvent::Closed`].
+const OSC99_DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 /// The most button actions sent: OSC 99 keeps at most eight buttons, and
 /// action keys `"1"`-`"8"` are the only ones mapped back.
 const MAX_BUTTON_ACTIONS: usize = 8;
@@ -271,6 +283,16 @@ struct NotifyArgs {
     expire_timeout: i32,
 }
 
+/// What a `Close` command has to do, given the dispatcher's bookkeeping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseTarget {
+    /// The daemon displays the instance as this id: call `CloseNotification`.
+    CallDaemon(u32),
+    /// The instance has no D-Bus id (never shown, show failed, replaced, or
+    /// already closed), so there is nothing to call and no signal will come.
+    AlreadyGone,
+}
+
 /// A signal the pump forwards to the dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PumpSignal {
@@ -376,6 +398,16 @@ impl DispatcherState {
         }
     }
 
+    /// What closing `instance` calls for: the daemon's id when it displays
+    /// the instance, otherwise [`CloseTarget::AlreadyGone`].
+    fn close_target(&self, instance: Osc99InstanceId) -> CloseTarget {
+        self.by_instance
+            .get(&instance)
+            .map_or(CloseTarget::AlreadyGone, |dbus_id| {
+                CloseTarget::CallDaemon(*dbus_id)
+            })
+    }
+
     /// The event for an `ActionInvoked` signal. The mappings stay: a
     /// `NotificationClosed` normally follows. `None` for an id with no live
     /// instance or an action freminal never registered.
@@ -408,7 +440,7 @@ impl DispatcherState {
 
 // ── Handle ─────────────────────────────────────────────────────────────────
 
-/// A request from the GUI to the dispatcher. Task 138.13 adds `Close`.
+/// A request from the GUI to the dispatcher.
 #[derive(Debug)]
 enum DbusCommand {
     /// Display `notification` for `instance`, replacing `replaces`'.
@@ -417,6 +449,10 @@ enum DbusCommand {
         replaces: Option<Osc99InstanceId>,
         notification: Box<Notification99Data>,
     },
+    /// Close `instance`'s notification. The dispatcher answers with
+    /// [`Osc99DbusEvent::Closed`] (from the daemon's signal, or at once when
+    /// there is nothing to close).
+    Close { instance: Osc99InstanceId },
 }
 
 /// The GUI's end of the service.
@@ -437,26 +473,37 @@ impl Osc99DbusHandle {
     }
 }
 
+impl Osc99DbusHandle {
+    /// Queue `command`. A dispatcher that is gone will never answer, so the
+    /// caller must end the instance's system leg itself.
+    fn dispatch(&self, command: DbusCommand, what: &'static str) -> Osc99SystemDispatch {
+        match self.commands.send(command) {
+            Ok(()) => Osc99SystemDispatch::Queued,
+            Err(e) => {
+                tracing::warn!("OSC 99: notification service is gone; {what} failed: {e}");
+                Osc99SystemDispatch::Failed
+            }
+        }
+    }
+}
+
 impl Osc99SystemBackend for Osc99DbusHandle {
     fn show(
         &mut self,
         instance: Osc99InstanceId,
         replaces: Option<Osc99InstanceId>,
         notification: &Notification99Data,
-    ) -> Osc99ShowDispatch {
+    ) -> Osc99SystemDispatch {
         let command = DbusCommand::Show {
             instance,
             replaces,
             notification: Box::new(notification.clone()),
         };
-        match self.commands.send(command) {
-            Ok(()) => Osc99ShowDispatch::Queued,
-            Err(e) => {
-                // No event will follow: the caller ends the leg itself.
-                tracing::warn!("OSC 99: notification service is gone; show failed: {e}");
-                Osc99ShowDispatch::Failed
-            }
-        }
+        self.dispatch(command, "show")
+    }
+
+    fn close(&mut self, instance: Osc99InstanceId) -> Osc99SystemDispatch {
+        self.dispatch(DbusCommand::Close { instance }, "close")
     }
 }
 
@@ -500,11 +547,12 @@ impl Osc99DbusService {
     ///
     /// Never blocks: connecting happens on the dispatcher thread. If the bus
     /// cannot be reached the handle reports [`Osc99DbusEvent::Unavailable`]
-    /// once, a single warning is logged, and every later show answers
-    /// [`Osc99DbusEvent::ShowFailed`].
+    /// once, a single warning is logged, every later show answers
+    /// [`Osc99DbusEvent::ShowFailed`], and every later close answers
+    /// [`Osc99DbusEvent::Closed`].
     #[must_use]
     pub fn spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle {
-        start(Connection::session, waker)
+        start(connect_session, waker)
     }
 
     /// Start the service on an existing connection (a peer-to-peer one, in
@@ -516,6 +564,14 @@ impl Osc99DbusService {
     ) -> Osc99DbusHandle {
         start(move || Ok(connection), waker)
     }
+}
+
+/// Connect to the session bus with [`OSC99_DBUS_METHOD_TIMEOUT`] on every
+/// method call.
+fn connect_session() -> zbus::Result<Connection> {
+    zbus::blocking::connection::Builder::session()?
+        .method_timeout(OSC99_DBUS_METHOD_TIMEOUT)
+        .build()
 }
 
 /// Start the dispatcher thread, which obtains its connection from `connect`.
@@ -561,7 +617,7 @@ where
         Err(e) => {
             tracing::warn!("OSC 99: system notifications are unavailable: {e}");
             sink.emit(Osc99DbusEvent::Unavailable);
-            fail_every_show(commands, sink);
+            fail_every_command(commands, sink);
         }
     }
 }
@@ -590,11 +646,17 @@ where
     Ok((connection, signal_rx))
 }
 
-/// Answer every show with `ShowFailed` until the GUI drops its sender.
-fn fail_every_show(commands: &Receiver<DbusCommand>, sink: &EventSink) {
+/// Answer every show with `ShowFailed` and every close with `Closed` until
+/// the GUI drops its sender: with no bus, nothing is displayed, so nothing
+/// needs closing.
+fn fail_every_command(commands: &Receiver<DbusCommand>, sink: &EventSink) {
     for command in commands {
-        let DbusCommand::Show { instance, .. } = command;
-        sink.emit(Osc99DbusEvent::ShowFailed { instance });
+        match command {
+            DbusCommand::Show { instance, .. } => {
+                sink.emit(Osc99DbusEvent::ShowFailed { instance });
+            }
+            DbusCommand::Close { instance } => sink.emit(Osc99DbusEvent::Closed { instance }),
+        }
     }
 }
 
@@ -650,12 +712,26 @@ fn handle_command(
     sink: &EventSink,
     command: DbusCommand,
 ) {
-    let DbusCommand::Show {
-        instance,
-        replaces,
-        notification,
-    } = command;
-    let args = state.notify_args(replaces, &notification);
+    match command {
+        DbusCommand::Show {
+            instance,
+            replaces,
+            notification,
+        } => show_notification(connection, state, sink, instance, replaces, &notification),
+        DbusCommand::Close { instance } => close_instance(connection, state, sink, instance),
+    }
+}
+
+/// Carry out a `Show`: call `Notify` and record or report the outcome.
+fn show_notification(
+    connection: &Connection,
+    state: &mut DispatcherState,
+    sink: &EventSink,
+    instance: Osc99InstanceId,
+    replaces: Option<Osc99InstanceId>,
+    notification: &Notification99Data,
+) {
+    let args = state.notify_args(replaces, notification);
     match notify(connection, &args) {
         Ok(dbus_id) => {
             state.record_shown(instance, replaces, dbus_id);
@@ -673,6 +749,31 @@ fn handle_command(
     }
 }
 
+/// Carry out a `Close`.
+///
+/// An instance the daemon displays is closed with `CloseNotification`, and the
+/// daemon's `NotificationClosed` signal then produces the `Closed` event. If
+/// the call fails the signal may never come, so the mappings are dropped and
+/// `Closed` is emitted here (kitty's fallback). An instance with no D-Bus id
+/// is reported closed at once.
+fn close_instance(
+    connection: &Connection,
+    state: &mut DispatcherState,
+    sink: &EventSink,
+    instance: Osc99InstanceId,
+) {
+    match state.close_target(instance) {
+        CloseTarget::CallDaemon(dbus_id) => {
+            if let Err(e) = close_notification(connection, dbus_id) {
+                tracing::warn!("OSC 99: CloseNotification failed: {e}");
+                state.forget_instance(instance);
+                sink.emit(Osc99DbusEvent::Closed { instance });
+            }
+        }
+        CloseTarget::AlreadyGone => sink.emit(Osc99DbusEvent::Closed { instance }),
+    }
+}
+
 /// Call `GetCapabilities`.
 fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<String>> {
     let reply = connection.call_method(
@@ -683,6 +784,18 @@ fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<String>> {
         &(),
     )?;
     reply.body().deserialize::<Vec<String>>()
+}
+
+/// Call `CloseNotification` for the daemon's `dbus_id`.
+fn close_notification(connection: &Connection, dbus_id: u32) -> zbus::Result<()> {
+    connection.call_method(
+        Some(NOTIFICATIONS_SERVICE),
+        NOTIFICATIONS_PATH,
+        Some(NOTIFICATIONS_INTERFACE),
+        "CloseNotification",
+        &dbus_id,
+    )?;
+    Ok(())
 }
 
 /// Call `Notify`, returning the daemon's id for the notification.
@@ -755,6 +868,7 @@ mod tests {
     use std::error::Error;
     use std::num::NonZeroU32;
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1123,6 +1237,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn close_target_of_a_shown_instance_is_the_daemons_id() {
+        let mut state = DispatcherState::default();
+        state.record_shown(instance(1), None, 7);
+
+        assert_eq!(state.close_target(instance(1)), CloseTarget::CallDaemon(7));
+    }
+
+    #[test]
+    fn close_target_of_a_never_shown_instance_is_already_gone() {
+        let state = DispatcherState::default();
+
+        assert_eq!(state.close_target(instance(1)), CloseTarget::AlreadyGone);
+    }
+
+    #[test]
+    fn close_target_after_a_failed_show_is_already_gone() {
+        // A failed show records nothing; a failed replacing show also drops
+        // the replaced instance's mappings (see `show_notification`).
+        let mut state = DispatcherState::default();
+        state.record_shown(instance(1), None, 7);
+        state.forget_instance(instance(1));
+
+        assert_eq!(state.close_target(instance(1)), CloseTarget::AlreadyGone);
+        assert_eq!(
+            state.close_target(instance(2)),
+            CloseTarget::AlreadyGone,
+            "the failed instance itself was never recorded"
+        );
+    }
+
+    #[test]
+    fn close_target_of_a_replaced_instance_is_already_gone() {
+        let mut state = DispatcherState::default();
+        state.record_shown(instance(1), None, 7);
+
+        state.record_shown(instance(2), Some(instance(1)), 8);
+
+        assert_eq!(state.close_target(instance(1)), CloseTarget::AlreadyGone);
+        assert_eq!(state.close_target(instance(2)), CloseTarget::CallDaemon(8));
+    }
+
+    #[test]
+    fn close_target_after_the_daemon_closed_the_instance_is_already_gone() {
+        let mut state = DispatcherState::default();
+        state.record_shown(instance(1), None, 7);
+        let _ = state.on_closed(7);
+
+        assert_eq!(state.close_target(instance(1)), CloseTarget::AlreadyGone);
+    }
+
+    #[test]
+    fn close_target_follows_the_instance_after_an_activation() {
+        let mut state = DispatcherState::default();
+        state.record_shown(instance(1), None, 7);
+        let _ = state.on_action(7, "default");
+
+        assert_eq!(
+            state.close_target(instance(1)),
+            CloseTarget::CallDaemon(7),
+            "an activation does not close the notification"
+        );
+    }
+
     // ── Signal parsing ──────────────────────────────────────────────────
 
     /// A signal message from the notification daemon, awaiting its body.
@@ -1198,20 +1376,55 @@ mod tests {
         i32,
     );
 
+    /// The summary the fake daemon refuses to display (`Notify` errors).
+    const REJECTED_SUMMARY: &str = "rejected";
+    /// The summary whose `Notify` the fake daemon never answers.
+    const UNANSWERED_SUMMARY: &str = "unanswered";
+    /// The method timeout of the client in tests that need a call to time out.
+    /// The timeout itself is deterministic because the fake never replies. It
+    /// is not shorter because the same timeout also bounds the calls the fake
+    /// *does* answer, and a loaded machine can delay those by a few hundred
+    /// milliseconds.
+    const SHORT_METHOD_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// What the fake daemon saw and how it should behave.
+    #[derive(Default)]
+    struct DaemonLog {
+        /// Every `Notify` it displayed, in call order.
+        notifies: Mutex<Vec<RecordedNotify>>,
+        /// The id of every `CloseNotification` call, in call order.
+        closes: Mutex<Vec<u32>>,
+        /// Answer `CloseNotification` with an error instead of closing.
+        fail_close: AtomicBool,
+        /// Never answer `CloseNotification`.
+        ignore_close: AtomicBool,
+    }
+
     /// Serve `org.freedesktop.Notifications` on `daemon` until its connection
-    /// closes: `Notify` records the call and returns an incrementing id,
-    /// `GetCapabilities` answers `capabilities`, `CloseNotification` and
-    /// `GetServerInformation` answer plausibly.
+    /// closes.
+    ///
+    /// - `Notify` records the call and returns a fresh, incrementing id (even
+    ///   for a replacement), errors for [`REJECTED_SUMMARY`], and never
+    ///   answers [`UNANSWERED_SUMMARY`].
+    /// - `CloseNotification` records the id, then replies and emits
+    ///   `NotificationClosed(id, 3)` as a real daemon does, errors when
+    ///   `fail_close` is set, and never answers when `ignore_close` is set.
+    /// - `GetCapabilities` answers `capabilities`.
+    ///
+    /// `messages` must have been created before the client could send its
+    /// first call: a message stream only sees messages that arrive after it
+    /// exists.
     ///
     /// Hand-written rather than a `#[zbus::interface]`: the macro's expansion
     /// of the eight-argument `Notify` trips pedantic lints that cannot be
     /// silenced without an `allow`.
     fn serve_fake_daemon(
         daemon: &Connection,
-        notifies: &Mutex<Vec<RecordedNotify>>,
+        messages: MessageIterator,
+        log: &DaemonLog,
         capabilities: &[String],
     ) -> zbus::Result<()> {
-        for message in MessageIterator::from(daemon) {
+        for message in messages {
             let message = message?;
             if message.message_type() != MessageType::MethodCall {
                 continue;
@@ -1224,12 +1437,19 @@ mod tests {
                 "Notify" => {
                     let (app_name, replaces_id, _icon, summary, body, actions, hints, timeout) =
                         message.body().deserialize::<NotifyBody>()?;
-                    let mut notifies = notifies.lock().unwrap_or_else(PoisonError::into_inner);
-                    let assigned_id = if replaces_id == 0 {
-                        u32::try_from(notifies.len()).map_or(u32::MAX, |n| n + 1)
-                    } else {
-                        replaces_id
-                    };
+                    if summary == UNANSWERED_SUMMARY {
+                        continue;
+                    }
+                    if summary == REJECTED_SUMMARY {
+                        daemon.reply_error(
+                            &header,
+                            "org.freedesktop.DBus.Error.Failed",
+                            &"rejected",
+                        )?;
+                        continue;
+                    }
+                    let mut notifies = log.notifies.lock().unwrap_or_else(PoisonError::into_inner);
+                    let assigned_id = u32::try_from(notifies.len()).map_or(u32::MAX, |n| n + 1);
                     notifies.push(RecordedNotify {
                         app_name,
                         replaces_id,
@@ -1246,7 +1466,32 @@ mod tests {
                     daemon.reply(&header, &assigned_id)?;
                 }
                 "GetCapabilities" => daemon.reply(&header, &capabilities)?,
-                "CloseNotification" => daemon.reply(&header, &())?,
+                "CloseNotification" => {
+                    let dbus_id = message.body().deserialize::<u32>()?;
+                    log.closes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(dbus_id);
+                    if log.ignore_close.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    if log.fail_close.load(Ordering::SeqCst) {
+                        daemon.reply_error(
+                            &header,
+                            "org.freedesktop.DBus.Error.Failed",
+                            &"cannot close",
+                        )?;
+                    } else {
+                        daemon.reply(&header, &())?;
+                        daemon.emit_signal(
+                            None::<&str>,
+                            NOTIFICATIONS_PATH,
+                            NOTIFICATIONS_INTERFACE,
+                            "NotificationClosed",
+                            &(dbus_id, 3u32),
+                        )?;
+                    }
+                }
                 "GetServerInformation" => {
                     daemon.reply(&header, &("fake", "freminal-tests", "0", "1.2"))?;
                 }
@@ -1257,14 +1502,22 @@ mod tests {
     }
 
     /// A connected client and fake-daemon pair over a socket pair, plus the
-    /// daemon's record of the `Notify` calls it served.
+    /// daemon's record of the calls it served.
     struct Rig {
         client: Connection,
         daemon: Connection,
-        notifies: Arc<Mutex<Vec<RecordedNotify>>>,
+        log: Arc<DaemonLog>,
     }
 
     fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
+        rig_with_timeout(advertised, None)
+    }
+
+    /// A rig whose client gives up on a method call after `method_timeout`.
+    fn rig_with_timeout(
+        advertised: &[&str],
+        method_timeout: Option<Duration>,
+    ) -> Result<Rig, Box<dyn Error>> {
         let (server_stream, client_stream) = UnixStream::pair()?;
         let guid = zbus::Guid::generate();
 
@@ -1275,34 +1528,52 @@ mod tests {
                 .p2p()
                 .build()
         });
-        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_stream)
-            .p2p()
-            .build()?;
+        let mut client_builder =
+            zbus::blocking::connection::Builder::async_io_unix_stream(client_stream).p2p();
+        if let Some(timeout) = method_timeout {
+            client_builder = client_builder.method_timeout(timeout);
+        }
+        let client = client_builder.build()?;
         let daemon = server
             .join()
             .map_err(|_| "the fake daemon thread panicked")??;
+        // Subscribe before anything can call: the client only starts talking
+        // once the service is spawned, after this function returns, and a
+        // stream created later (say, on the daemon thread) would miss a call
+        // that arrived first, leaving the client waiting forever.
+        let messages = MessageIterator::from(&daemon);
 
-        let notifies = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(DaemonLog::default());
         let capabilities = strings(advertised);
         let daemon_side = daemon.clone();
-        let record = Arc::clone(&notifies);
+        let record = Arc::clone(&log);
         std::thread::Builder::new()
             .name("fake-notification-daemon".to_owned())
             .spawn(move || {
-                if let Err(e) = serve_fake_daemon(&daemon_side, &record, &capabilities) {
+                if let Err(e) = serve_fake_daemon(&daemon_side, messages, &record, &capabilities) {
                     tracing::debug!("fake notification daemon stopped: {e}");
                 }
             })?;
         Ok(Rig {
             client,
             daemon,
-            notifies,
+            log,
         })
     }
 
     impl Rig {
         fn recorded(&self) -> Vec<RecordedNotify> {
-            self.notifies
+            self.log
+                .notifies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        /// The id of every `CloseNotification` call the daemon served.
+        fn closes(&self) -> Vec<u32> {
+            self.log
+                .closes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
@@ -1372,7 +1643,7 @@ mod tests {
                     ..with_buttons(&["A", "B"])
                 },
             ),
-            Osc99ShowDispatch::Queued
+            Osc99SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
@@ -1432,7 +1703,7 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(1), None, &with_buttons(&["A"])),
-            Osc99ShowDispatch::Queued
+            Osc99SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
@@ -1456,7 +1727,7 @@ mod tests {
         ));
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99ShowDispatch::Queued
+            Osc99SystemDispatch::Queued
         );
         assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
 
@@ -1484,6 +1755,258 @@ mod tests {
         Ok(())
     }
 
+    /// Start the service against a fresh rig and consume the `Capabilities`
+    /// event, so a test begins with an empty event queue.
+    fn started(
+        advertised: &[&str],
+    ) -> Result<(Rig, Osc99DbusHandle, Receiver<()>), Box<dyn Error>> {
+        started_with(rig(advertised)?)
+    }
+
+    /// [`started`] for an existing rig.
+    fn started_with(rig: Rig) -> Result<(Rig, Osc99DbusHandle, Receiver<()>), Box<dyn Error>> {
+        let (waker, woken) = counting_waker();
+        let handle = Osc99DbusService::spawn_with_connection(rig.client.clone(), waker);
+        assert!(matches!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(_)
+        ));
+        Ok((rig, handle, woken))
+    }
+
+    #[test]
+    fn close_calls_close_notification_once_and_the_daemons_signal_becomes_closed() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        assert_eq!(
+            handle.show(instance(1), None, &notification()),
+            Osc99SystemDispatch::Queued
+        );
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(1)
+            }
+        );
+        let dbus_id = rig.recorded()[0].assigned_id;
+
+        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), [dbus_id], "exactly one call, with the id");
+        assert!(
+            handle.try_events().next().is_none(),
+            "one Closed: the signal, not also a local one"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_update_replaces_the_old_id_and_the_old_ids_close_produces_no_event() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        let _ = handle.show(instance(2), Some(instance(1)), &notification());
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(2)
+            }
+        );
+
+        let recorded = rig.recorded();
+        assert_eq!(recorded[1].replaces_id, recorded[0].assigned_id);
+        assert_ne!(
+            recorded[1].assigned_id, recorded[0].assigned_id,
+            "the fake daemon hands out a fresh id, so the two are distinguishable"
+        );
+
+        // The old id closes first, then the new one: the new one's `Closed`
+        // is the first event, so the old id's was ignored by the same
+        // dispatcher, in order.
+        rig.emit_closed(recorded[0].assigned_id, 2)?;
+        rig.emit_closed(recorded[1].assigned_id, 2)?;
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(2)
+            }
+        );
+        assert!(handle.try_events().next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn closing_a_replaced_instance_reports_closed_without_calling_the_daemon() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        let _ = handle.show(instance(2), Some(instance(1)), &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        let _ = handle.close(instance(1));
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), Vec::<u32>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn close_after_a_failed_show_emits_closed_at_once_without_calling_the_daemon() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        let _ = handle.show(
+            instance(1),
+            None,
+            &Notification99Data {
+                title: REJECTED_SUMMARY.to_owned(),
+                ..notification()
+            },
+        );
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::ShowFailed {
+                instance: instance(1)
+            }
+        );
+
+        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+
+        // A later round trip proves no `CloseNotification` was in flight: the
+        // dispatcher handles commands in order.
+        let _ = handle.show(instance(2), None, &notification());
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(2)
+            }
+        );
+        assert_eq!(rig.closes(), Vec::<u32>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn close_of_a_never_shown_instance_emits_closed_at_once() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body"])?;
+
+        let _ = handle.close(instance(9));
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(9)
+            }
+        );
+        assert_eq!(rig.closes(), Vec::<u32>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failing_close_notification_call_falls_back_to_closed() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        rig.log.fail_close.store(true, Ordering::SeqCst);
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        let dbus_id = rig.recorded()[0].assigned_id;
+
+        let _ = handle.close(instance(1));
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), [dbus_id], "the call was attempted once");
+
+        // The mappings were dropped, so a late signal for the id is ignored.
+        let _ = handle.show(instance(2), None, &notification());
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(2)
+            }
+        );
+        rig.emit_closed(dbus_id, 1)?;
+        rig.emit_closed(rig.recorded()[1].assigned_id, 1)?;
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(2)
+            }
+        );
+        assert!(handle.try_events().next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_notify_the_daemon_never_answers_times_out_into_show_failed() -> TestResult {
+        let (rig, mut handle, _woken) =
+            started_with(rig_with_timeout(&["body"], Some(SHORT_METHOD_TIMEOUT))?)?;
+
+        let _ = handle.show(
+            instance(1),
+            None,
+            &Notification99Data {
+                title: UNANSWERED_SUMMARY.to_owned(),
+                ..notification()
+            },
+        );
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::ShowFailed {
+                instance: instance(1)
+            }
+        );
+        // The dispatcher survived the timeout and still serves commands.
+        let _ = handle.show(instance(2), None, &notification());
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(2)
+            }
+        );
+        assert_eq!(rig.recorded().len(), 1, "only the answered Notify counts");
+        Ok(())
+    }
+
+    #[test]
+    fn a_close_notification_the_daemon_never_answers_times_out_into_closed() -> TestResult {
+        let (rig, mut handle, _woken) =
+            started_with(rig_with_timeout(&["body"], Some(SHORT_METHOD_TIMEOUT))?)?;
+        rig.log.ignore_close.store(true, Ordering::SeqCst);
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        let dbus_id = rig.recorded()[0].assigned_id;
+
+        let _ = handle.close(instance(1));
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), [dbus_id], "the call was attempted once");
+        Ok(())
+    }
+
     #[test]
     fn an_unreachable_bus_reports_unavailable_once_and_fails_every_show() -> TestResult {
         let (waker, woken) = counting_waker();
@@ -1493,12 +2016,12 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99ShowDispatch::Queued,
+            Osc99SystemDispatch::Queued,
             "queued; the dispatcher answers ShowFailed itself"
         );
         assert_eq!(
             handle.show(instance(2), None, &notification()),
-            Osc99ShowDispatch::Queued
+            Osc99SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
@@ -1512,14 +2035,25 @@ mod tests {
                 instance: instance(2)
             }
         );
-        for _ in 0..3 {
+        assert_eq!(
+            handle.close(instance(3)),
+            Osc99SystemDispatch::Queued,
+            "queued; the dispatcher answers Closed itself"
+        );
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(3)
+            }
+        );
+        for _ in 0..4 {
             woken.recv_timeout(EVENT_TIMEOUT)?;
         }
         Ok(())
     }
 
     #[test]
-    fn a_show_after_the_dispatcher_is_gone_returns_failed_and_queues_no_event() -> TestResult {
+    fn a_request_after_the_dispatcher_is_gone_returns_failed_and_queues_no_event() -> TestResult {
         let (waker, _woken) = counting_waker();
         let mut handle = start(|| Err(zbus::Error::Failure("no bus".to_owned())), waker);
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
@@ -1532,13 +2066,19 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(5), None, &notification()),
-            Osc99ShowDispatch::Failed
+            Osc99SystemDispatch::Failed
         );
         assert_eq!(
             handle.try_events().next(),
             None,
             "no local event: the caller ends the leg"
         );
+        assert_eq!(
+            handle.close(instance(5)),
+            Osc99SystemDispatch::Failed,
+            "a close fails the same way"
+        );
+        assert_eq!(handle.try_events().next(), None);
         Ok(())
     }
 }

@@ -5986,6 +5986,27 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - `Capabilities` and `Unavailable` are logged only; 138.15 consumes them.
   - Signals are not filtered by sender; see 138.C2.
   - The stale `host_capabilities.rs` doc is fixed by 138.15.
+- **138.13 (done).**
+  - **Close and update.** `CloseLinuxSystem` and `DbusCommand::Close` (through the pure
+    `close_target`) are in place, as is the `Closed` fallback when a call fails or no id is
+    known. Failed closes are fed back as `Closed`.
+  - **Legs on close and activation.** `p=close`, expiry and cap eviction close every open leg.
+    An update that drops the Linux leg closes the old notification. An activation closes the
+    instance's other legs.
+  - **Activation with `c=1`.** The instance enters `Requested` and reports once, after every
+    leg has closed. As in kitty, freminal does not close the activated desktop notification
+    itself.
+  - **Flake (root-caused).** The orchestrator's re-runs caught a load-dependent test flake,
+    about 1 in 6 full `freminal` runs. The fake daemon's message stream was created on its
+    thread after the client could already have called it, so the call was lost and the client
+    blocked.
+    - Fix: the rig subscribes before the service starts.
+    - Hardening exposed by the same analysis: production calls now carry a 25 s method timeout
+      (the libdbus default), so a hung daemon cannot block the dispatcher forever. Two
+      deterministic timeout tests cover it.
+    - After the fix: 28 consecutive full `freminal` runs and 20 service-only runs all passed.
+  - One out-of-scope edit was accepted: a sink struct literal in the `notifications.rs` test
+    helper.
 
 ---
 

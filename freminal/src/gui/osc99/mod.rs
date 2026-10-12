@@ -189,6 +189,14 @@ pub enum Osc99Effect {
     },
     /// Remove `instance`'s toast (a no-op if it is already gone).
     CloseToast(Osc99InstanceId),
+    /// Ask the desktop-notification service to close `instance`'s desktop
+    /// notification. Its `Closed` event arrives later; a close that cannot be
+    /// queued is fed back as one by the caller (see
+    /// [`Osc99EffectSink::failed_system_closes`]).
+    ///
+    /// Only the Linux/BSD service ever produces the leg this closes, but the
+    /// registry is platform-independent, so the variant exists everywhere.
+    CloseLinuxSystem(Osc99InstanceId),
     /// Show `instance` on the Linux/BSD system leg, updating `replaces`'
     /// notification in place when that is set.
     ShowLinuxSystem {
@@ -206,13 +214,13 @@ pub enum Osc99Effect {
     FocusPane(Osc99Origin),
 }
 
-/// Whether a backend accepted a show request.
+/// Whether a backend accepted a show or close request.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99ShowDispatch {
+pub enum Osc99SystemDispatch {
     /// The request was queued; its outcome arrives later as an
     /// [`Osc99SystemLegEvent`]. Only the Linux/BSD service (and the test
-    /// backend) ever queues a show, so the variant exists only there.
+    /// backend) ever queues a request, so the variant exists only there.
     #[cfg(any(all(unix, not(target_os = "macos")), test))]
     Queued,
     /// The request could not even be queued, so no event will ever follow.
@@ -232,13 +240,17 @@ pub trait Osc99SystemBackend {
         instance: Osc99InstanceId,
         replaces: Option<Osc99InstanceId>,
         notification: &Notification99Data,
-    ) -> Osc99ShowDispatch;
+    ) -> Osc99SystemDispatch;
+
+    /// Close `instance`'s desktop notification. A queued close ends in a
+    /// `Closed` event, whether the daemon closed it or it was already gone.
+    fn close(&mut self, instance: Osc99InstanceId) -> Osc99SystemDispatch;
 }
 
 /// The backend on a build or moment with no system-notification service: it
-/// displays nothing and reports every show as [`Osc99ShowDispatch::Failed`],
-/// so the registry ends the leg instead of waiting for an event that cannot
-/// come.
+/// displays nothing and reports every show and close as
+/// [`Osc99SystemDispatch::Failed`], so the registry ends the leg instead of
+/// waiting for an event that cannot come.
 ///
 /// macOS and Windows never route to [`Osc99Leg::LinuxSystem`], so for them it
 /// is never called. On Linux/BSD it stands in while the service's handle is
@@ -252,12 +264,20 @@ impl Osc99SystemBackend for NoSystemBackend {
         instance: Osc99InstanceId,
         _replaces: Option<Osc99InstanceId>,
         _notification: &Notification99Data,
-    ) -> Osc99ShowDispatch {
+    ) -> Osc99SystemDispatch {
         tracing::trace!(
             instance = instance.0,
             "OSC 99: no system notification service; show failed"
         );
-        Osc99ShowDispatch::Failed
+        Osc99SystemDispatch::Failed
+    }
+
+    fn close(&mut self, instance: Osc99InstanceId) -> Osc99SystemDispatch {
+        tracing::trace!(
+            instance = instance.0,
+            "OSC 99: no system notification service; close failed"
+        );
+        Osc99SystemDispatch::Failed
     }
 }
 
@@ -273,14 +293,17 @@ pub struct RecordedShow {
     pub notification: Notification99Data,
 }
 
-/// A backend that records every show, for tests. It reports
-/// [`Osc99ShowDispatch::Queued`] unless `fail_shows` is set.
+/// A backend that records every show and close, for tests. It reports
+/// [`Osc99SystemDispatch::Queued`] for both unless `fail_shows` is set (which
+/// fails shows only).
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub struct RecordingSystemBackend {
     /// Every show, in call order.
     pub shown: Vec<RecordedShow>,
-    /// Report every show as [`Osc99ShowDispatch::Failed`] (after recording it).
+    /// Every closed instance, in call order.
+    pub closed: Vec<Osc99InstanceId>,
+    /// Report every show as [`Osc99SystemDispatch::Failed`] (after recording it).
     pub fail_shows: bool,
 }
 
@@ -291,17 +314,22 @@ impl Osc99SystemBackend for RecordingSystemBackend {
         instance: Osc99InstanceId,
         replaces: Option<Osc99InstanceId>,
         notification: &Notification99Data,
-    ) -> Osc99ShowDispatch {
+    ) -> Osc99SystemDispatch {
         self.shown.push(RecordedShow {
             instance,
             replaces,
             notification: notification.clone(),
         });
         if self.fail_shows {
-            Osc99ShowDispatch::Failed
+            Osc99SystemDispatch::Failed
         } else {
-            Osc99ShowDispatch::Queued
+            Osc99SystemDispatch::Queued
         }
+    }
+
+    fn close(&mut self, instance: Osc99InstanceId) -> Osc99SystemDispatch {
+        self.closed.push(instance);
+        Osc99SystemDispatch::Queued
     }
 }
 
@@ -323,6 +351,31 @@ pub struct Osc99EffectSink<'a> {
     /// that effect (the field exists there only because the executor is
     /// shared).
     pub failed_system_shows: Vec<Osc99InstanceId>,
+    /// Instances whose [`Osc99Effect::CloseLinuxSystem`] the backend could not
+    /// queue, in effect order. The caller feeds each back to the registry as a
+    /// `Closed` event, because no real one will come. Always empty on macOS and
+    /// Windows, as for [`Self::failed_system_shows`].
+    pub failed_system_closes: Vec<Osc99InstanceId>,
+}
+
+/// The instances whose system-leg requests the backend could not queue, as
+/// collected by one run of the executor. No service event will ever follow
+/// them, so the caller feeds each back to the registry (a failed show as
+/// `ShowFailed`, a failed close as `Closed`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Osc99FailedSystemLegs {
+    /// Instances whose [`Osc99Effect::ShowLinuxSystem`] failed.
+    pub shows: Vec<Osc99InstanceId>,
+    /// Instances whose [`Osc99Effect::CloseLinuxSystem`] failed.
+    pub closes: Vec<Osc99InstanceId>,
+}
+
+impl Osc99FailedSystemLegs {
+    /// Whether nothing failed.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.shows.is_empty() && self.closes.is_empty()
+    }
 }
 
 /// Execute `effects` in order against `sink`.
@@ -363,9 +416,15 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                 replaces,
                 notification,
             } => {
-                if sink.system.show(instance, replaces, &notification) == Osc99ShowDispatch::Failed
+                if sink.system.show(instance, replaces, &notification)
+                    == Osc99SystemDispatch::Failed
                 {
                     sink.failed_system_shows.push(instance);
+                }
+            }
+            Osc99Effect::CloseLinuxSystem(instance) => {
+                if sink.system.close(instance) == Osc99SystemDispatch::Failed {
+                    sink.failed_system_closes.push(instance);
                 }
             }
             Osc99Effect::FocusPane(origin) => sink.focus_requests.push(origin),

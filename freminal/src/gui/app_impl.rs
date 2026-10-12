@@ -4754,8 +4754,8 @@ impl FreminalGui {
 
     /// Execute OSC 99 `effects` against `toasts` and the desktop-notification
     /// service, queue the panes they ask to focus on
-    /// `self.osc99_focus_requests`, and end the system leg of every show the
-    /// service could not queue.
+    /// `self.osc99_focus_requests`, and end the system leg of every show or
+    /// close the service could not queue.
     ///
     /// The service is started here, the first time a
     /// [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem)
@@ -4763,10 +4763,11 @@ impl FreminalGui {
     /// Platforms without the service apply that effect to a backend that
     /// fails every show; it is never produced there.
     ///
-    /// A show that could not even be queued will never produce a service
-    /// event, so it is fed back to the registry as a failed show (Linux/BSD
-    /// only) once the sink and service borrows are released. **The caller must
-    /// not hold the registry borrow** when calling this.
+    /// A show or close that could not even be queued will never produce a
+    /// service event, so a failed show is fed back to the registry as
+    /// `ShowFailed` and a failed close as `Closed` (Linux/BSD only) once the
+    /// sink and service borrows are released. **The caller must not hold the
+    /// registry borrow** when calling this.
     ///
     /// The effect executor has no window access, so focus is performed later,
     /// by [`Self::drain_osc99_focus_requests`] at the top of the next
@@ -4780,7 +4781,7 @@ impl FreminalGui {
         self.start_osc99_dbus_for(&effects);
 
         let mut no_system = crate::gui::osc99::NoSystemBackend;
-        let failed_shows = {
+        let failed = {
             #[cfg(all(unix, not(target_os = "macos")))]
             let mut dbus = self.osc99_dbus.try_borrow_mut().ok();
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -4796,28 +4797,31 @@ impl FreminalGui {
         };
 
         #[cfg(all(unix, not(target_os = "macos")))]
-        if !failed_shows.is_empty() {
-            self.end_failed_osc99_system_shows(&failed_shows, toasts);
+        if !failed.is_empty() {
+            self.end_failed_osc99_system_legs(&failed, toasts);
         }
-        // Only the Linux/BSD service is ever asked to show; elsewhere the
-        // executor never produces that effect, so nothing can have failed.
+        // Only the Linux/BSD service is ever asked to show or close; elsewhere
+        // the executor never produces those effects, so nothing can have
+        // failed.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
-        debug_assert_eq!(failed_shows, Vec::new());
+        debug_assert!(failed.is_empty());
     }
 
     /// Run `effects` through the executor against `system`, queue the focus
-    /// requests, and return the instances whose show `system` could not queue.
+    /// requests, and return the instances whose show or close `system` could
+    /// not queue.
     fn execute_osc99_effects(
         &self,
         effects: Vec<crate::gui::osc99::Osc99Effect>,
         toasts: &mut crate::gui::toast::ToastStack,
         system: &mut dyn crate::gui::osc99::Osc99SystemBackend,
-    ) -> Vec<crate::gui::osc99::Osc99InstanceId> {
+    ) -> crate::gui::osc99::Osc99FailedSystemLegs {
         let mut sink = crate::gui::osc99::Osc99EffectSink {
             toasts,
             system,
             focus_requests: Vec::new(),
             failed_system_shows: Vec::new(),
+            failed_system_closes: Vec::new(),
         };
         crate::gui::osc99::apply_osc99_effects(effects, &mut sink);
         if !sink.focus_requests.is_empty() {
@@ -4830,39 +4834,50 @@ impl FreminalGui {
                 );
             }
         }
-        sink.failed_system_shows
+        crate::gui::osc99::Osc99FailedSystemLegs {
+            shows: sink.failed_system_shows,
+            closes: sink.failed_system_closes,
+        }
     }
 
-    /// Feed shows the desktop-notification service could not queue back to the
-    /// registry as failed shows, and execute what it returns.
+    /// Feed the shows and closes the desktop-notification service could not
+    /// queue back to the registry (a failed show as `ShowFailed`, a failed
+    /// close as `Closed`), and execute what it returns.
     ///
-    /// Terminates after one pass by construction: a failed show only closes
-    /// the Linux leg, so the registry returns at most a close report, never
-    /// another [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem).
+    /// Terminates after one pass by construction: a failed show or close only
+    /// closes the Linux leg, so the registry returns at most a close report,
+    /// never another [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem)
+    /// or [`Osc99Effect::CloseLinuxSystem`](crate::gui::osc99::Osc99Effect::CloseLinuxSystem).
     /// The follow-up effects are therefore executed against a backend that
-    /// fails every show, and a failure there (which cannot happen) is only
+    /// fails every request, and a failure there (which cannot happen) is only
     /// logged. A busy registry drops the feedback with a warning.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn end_failed_osc99_system_shows(
+    fn end_failed_osc99_system_legs(
         &self,
-        failed: &[crate::gui::osc99::Osc99InstanceId],
+        failed: &crate::gui::osc99::Osc99FailedSystemLegs,
         toasts: &mut crate::gui::toast::ToastStack,
     ) {
+        use crate::gui::osc99::Osc99SystemLegEvent;
+
         let Ok(mut registry) = self.osc99_registry.try_borrow_mut() else {
             tracing::warn!(
-                dropped = failed.len(),
-                "OSC 99: registry busy; failed desktop-notification shows not ended"
+                dropped_shows = failed.shows.len(),
+                dropped_closes = failed.closes.len(),
+                "OSC 99: registry busy; failed desktop-notification requests not ended"
             );
             return;
         };
-        let effects: Vec<crate::gui::osc99::Osc99Effect> = failed
+        let shows = failed
+            .shows
             .iter()
-            .flat_map(|instance| {
-                registry.on_system_event(
-                    *instance,
-                    crate::gui::osc99::Osc99SystemLegEvent::ShowFailed,
-                )
-            })
+            .map(|instance| (*instance, Osc99SystemLegEvent::ShowFailed));
+        let closes = failed
+            .closes
+            .iter()
+            .map(|instance| (*instance, Osc99SystemLegEvent::Closed));
+        let effects: Vec<crate::gui::osc99::Osc99Effect> = shows
+            .chain(closes)
+            .flat_map(|(instance, event)| registry.on_system_event(instance, event))
             .collect();
         drop(registry);
 
@@ -4871,7 +4886,7 @@ impl FreminalGui {
         if !refailed.is_empty() {
             tracing::debug!(
                 ?refailed,
-                "OSC 99: a failed show produced another show; ignored (cannot happen)"
+                "OSC 99: a failed show or close produced another system request; ignored (cannot happen)"
             );
         }
     }
