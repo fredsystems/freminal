@@ -33,6 +33,7 @@ pub(super) fn test_input(
     ToastLayoutInput {
         id,
         kind: ToastKind::Info,
+        icon_glyph: ToastKind::Info.icon(),
         label_text: "Info: hello".to_owned(),
         label_size_px: 16.0,
         label: ToastTextMetrics {

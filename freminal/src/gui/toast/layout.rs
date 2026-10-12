@@ -104,6 +104,9 @@ pub(super) struct ToastLayoutInput {
     pub id: u64,
     /// The toast's severity — drives color and icon.
     pub kind: ToastKind,
+    /// The glyph drawn in the icon slot — the toast's icon override, or the
+    /// kind's own icon. [`Self::icon`] (below) is its measurement.
+    pub icon_glyph: ChromeIcon,
     /// The exact `"Kind: title"` label string that was measured — already
     /// whitespace-normalized and, if it would otherwise overflow the pill,
     /// truncated with a trailing ellipsis (see [`fit_text`]). This is *the*
@@ -566,7 +569,7 @@ fn build_text_runs(
     let icon_origin_x = x + metrics.pad_x;
     let icon_baseline_y = y + metrics.pad_y + input.icon.ascent;
     let mut runs = vec![ToastTextRun {
-        text: input.kind.icon().glyph(),
+        text: input.icon_glyph.glyph(),
         origin_x: icon_origin_x,
         baseline_y: icon_baseline_y,
         size_px: input.icon_size_px,
@@ -1020,7 +1023,8 @@ impl ToastStack {
             let label_text = format!("{}: {}", toast.kind.label(), toast.title);
             let has_detail = toast.detail.is_some();
             let detail_text = toast.detail.clone().unwrap_or_default();
-            let icon_text = toast.kind.icon().glyph();
+            let icon_glyph = toast.icon();
+            let icon_text = icon_glyph.glyph();
             let close_text = ChromeIcon::Close.glyph();
 
             // Icon and close glyph are single fixed glyphs (never
@@ -1081,6 +1085,7 @@ impl ToastStack {
             inputs.push(ToastLayoutInput {
                 id: toast.id,
                 kind: toast.kind,
+                icon_glyph,
                 label_text,
                 label_size_px,
                 label,
@@ -2075,6 +2080,32 @@ mod tests {
 
         let darker = lighten(base, -10.0);
         assert!(darker[0].abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_icon_run_draws_the_input_icon_glyph() {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let visuals = egui::Visuals::dark();
+        let default_input = test_input(0, 100.0, false, SETTLED_ANIM);
+        let overridden = ToastLayoutInput {
+            icon_glyph: ChromeIcon::SystemMonitor,
+            ..default_input.clone()
+        };
+        let run_text = |input: &ToastLayoutInput| {
+            let out = layout_toasts(
+                std::slice::from_ref(input),
+                ToastPosition::TopRightStack,
+                geom,
+                &visuals,
+                1.0,
+            );
+            out[0].runs[0].text.clone()
+        };
+        assert_eq!(run_text(&default_input), ToastKind::Info.icon().glyph());
+        assert_eq!(run_text(&overridden), ChromeIcon::SystemMonitor.glyph());
     }
 
     fn rects_overlap(a: [f32; 4], b: [f32; 4]) -> bool {

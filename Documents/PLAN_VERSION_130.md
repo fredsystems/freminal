@@ -5908,6 +5908,21 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Verification:** unit tests for the mapping, that the spec carries the override, and that
   layout uses the override glyph. The glyph-resolves test covers every new `ChromeIcon`.
 - **Scheduling:** in Task 138, before the adversarial review.
+- **Status:** done. The new glyphs, all FontAwesome codepoints proven present in the bundled
+  font, are:
+
+  | Variant         | Codepoint | Nerd Font name        |
+  | --------------- | --------- | --------------------- |
+  | `Error`         | U+F057    | `nf-fa-times_circle`  |
+  | `Info`          | U+F05A    | `nf-fa-info_circle`   |
+  | `Question`      | U+F059    | `nf-fa-question_circle` |
+  | `Help`          | U+F1CD    | `nf-fa-life_ring`     |
+  | `FileManager`   | U+F07C    | `nf-fa-folder_open`   |
+  | `SystemMonitor` | U+F0E4    | `nf-fa-tachometer`    |
+  | `TextEditor`    | U+F15C    | `nf-fa-file_text`     |
+
+  `standard_icon_glyph` lives in `icons.rs` (all platforms). `Toast::icon()` is the single
+  source for measuring and drawing, and the accent colour stays per kind.
 
 #### 138.C5 — Standard icon names on the macOS/Windows system leg
 

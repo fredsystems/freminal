@@ -246,6 +246,9 @@ pub(super) struct ToastContent {
     pub detail: Option<String>,
     /// Button labels, in order. Only the first [`MAX_TOAST_BUTTONS`] are kept.
     pub buttons: Vec<String>,
+    /// Icon drawn instead of the kind's own icon. `None` keeps the kind
+    /// icon; the accent colour follows the kind either way.
+    pub icon: Option<ChromeIcon>,
 }
 
 /// A single toast entry in the stack.
@@ -258,6 +261,8 @@ pub(super) struct Toast {
     detail: Option<String>,
     /// Button labels (keyed toasts only; at most [`MAX_TOAST_BUTTONS`]).
     buttons: Vec<String>,
+    /// Icon override; `None` shows the kind's own icon (see [`Self::icon`]).
+    icon: Option<ChromeIcon>,
     /// Monotonic id used as the egui widget id seed, so each toast has
     /// a stable id across frames even after list reordering.
     id: u64,
@@ -296,6 +301,7 @@ impl Toast {
             title,
             detail,
             buttons: Vec::new(),
+            icon: None,
             id,
             created: now,
             life_start: now,
@@ -311,6 +317,22 @@ impl Toast {
         self.key = Some(key);
         self.lifetime = lifetime;
         self
+    }
+
+    /// Override the icon drawn in the toast's icon slot.
+    const fn with_icon(mut self, icon: Option<ChromeIcon>) -> Self {
+        self.icon = icon;
+        self
+    }
+
+    /// The glyph drawn in the icon slot: the override when there is one,
+    /// otherwise the kind's icon. The single source for both measuring and
+    /// drawing.
+    const fn icon(&self) -> ChromeIcon {
+        match self.icon {
+            Some(icon) => icon,
+            None => self.kind.icon(),
+        }
     }
 
     /// Give this toast button labels, keeping at most [`MAX_TOAST_BUTTONS`].
@@ -723,9 +745,11 @@ impl ToastStack {
             title,
             detail,
             buttons,
+            icon,
         } = content;
         let toast = Toast::new(kind, title, detail, self.alloc_id(), placement)
             .keyed(key, lifetime)
+            .with_icon(icon)
             .with_buttons(buttons);
         self.push_entry(toast);
     }
@@ -770,6 +794,7 @@ impl ToastStack {
             title,
             detail,
             mut buttons,
+            icon,
         } = content;
         buttons.truncate(MAX_TOAST_BUTTONS);
         toast.key = Some(new_key);
@@ -777,6 +802,7 @@ impl ToastStack {
         toast.title = title;
         toast.detail = detail;
         toast.buttons = buttons;
+        toast.icon = icon;
         toast.lifetime = lifetime;
         toast.life_start = now;
         ToastReplace::Replaced
@@ -1284,6 +1310,7 @@ mod tests {
             title: "t".to_owned(),
             detail: None,
             buttons: Vec::new(),
+            icon: None,
             id: 0,
             created,
             life_start: created,
@@ -1305,6 +1332,7 @@ mod tests {
             title: "t".to_owned(),
             detail: None,
             buttons: Vec::new(),
+            icon: None,
             id: 0,
             created,
             life_start: created,
@@ -1328,6 +1356,7 @@ mod tests {
             title: "t".to_owned(),
             detail: None,
             buttons: Vec::new(),
+            icon: None,
             id: 0,
             created,
             life_start: created,
@@ -1350,6 +1379,7 @@ mod tests {
             title: "t".to_owned(),
             detail: None,
             buttons: Vec::new(),
+            icon: None,
             id: 0,
             created,
             life_start: created,
@@ -1539,6 +1569,7 @@ mod tests {
             title: title.to_owned(),
             detail: None,
             buttons: Vec::new(),
+            icon: None,
         }
     }
 
@@ -1709,6 +1740,7 @@ mod tests {
                 title: "updated".to_owned(),
                 detail: Some("d".to_owned()),
                 buttons: Vec::new(),
+                icon: None,
             },
             ToastLifetime::Fixed(Duration::from_secs(9)),
         );
@@ -1792,6 +1824,54 @@ mod tests {
         assert_eq!(s.entries[0].key, Some(ToastKey(2)));
     }
 
+    #[test]
+    fn toast_icon_is_the_override_or_the_kind_icon() {
+        let mut s = ToastStack::default();
+        s.info("unkeyed", None);
+        s.push_keyed(
+            ToastKey(1),
+            ToastContent {
+                icon: Some(ChromeIcon::FileManager),
+                ..info_content("override")
+            },
+            ToastLifetime::KindDefault,
+            ToastPlacement::TOP_RIGHT,
+        );
+        push_keyed_info(&mut s, 2, ToastLifetime::KindDefault);
+        assert_eq!(s.entries[0].icon(), ToastKind::Info.icon());
+        assert_eq!(s.entries[1].icon(), ChromeIcon::FileManager);
+        assert_eq!(s.entries[2].icon(), ToastKind::Info.icon());
+        assert_eq!(
+            s.entries[1].kind,
+            ToastKind::Info,
+            "the override does not change the kind (and so not the accent)"
+        );
+    }
+
+    #[test]
+    fn replace_keyed_swaps_and_clears_the_icon() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        let with_icon = |icon| ToastContent {
+            icon,
+            ..info_content("x")
+        };
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(2),
+            with_icon(Some(ChromeIcon::Help)),
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.entries[0].icon(), ChromeIcon::Help);
+        s.replace_keyed(
+            ToastKey(2),
+            ToastKey(3),
+            with_icon(None),
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.entries[0].icon(), ToastKind::Info.icon());
+    }
+
     // -----------------------------------------------------------------
     //  Click handling: stack-level `apply_click` + pure `click_target`
     // -----------------------------------------------------------------
@@ -1866,6 +1946,7 @@ mod tests {
         let many: Vec<String> = (0..12).map(|i| format!("b{i}")).collect();
         let content = ToastContent {
             buttons: many.clone(),
+            icon: None,
             ..info_content("t")
         };
         let mut s = ToastStack::default();

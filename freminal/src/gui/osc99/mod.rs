@@ -34,6 +34,7 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use freminal_windowing::WindowId;
 
 use crate::gui::frame_drain::WindowFocus;
+use crate::gui::icons::{ChromeIcon, standard_icon_glyph};
 use crate::gui::notifications::{Osc99Control, send_reply_weak};
 use crate::gui::panes::PaneId;
 use crate::gui::toast::{
@@ -148,6 +149,9 @@ pub struct Osc99ToastSpec {
     /// The button labels (`p=buttons`), in order. The toast keeps at most
     /// eight.
     pub buttons: Vec<String>,
+    /// The glyph for the first `n=` name that is a standard icon name, names
+    /// in order. `None` leaves the toast's kind icon.
+    pub icon: Option<ChromeIcon>,
 }
 
 /// Build the toast for `data`.
@@ -157,6 +161,9 @@ pub struct Osc99ToastSpec {
 ///   `w=-1` (or unset) follows urgency: `Critical` stays until dismissed,
 ///   `Normal` uses the toast default, `Low` uses
 ///   [`OSC99_LOW_URGENCY_TOAST_LIFETIME`].
+/// - The icon is the first standard `n=` name's glyph (see
+///   [`standard_icon_glyph`]); toasts render no images, so transmitted icon
+///   data never changes the toast.
 #[must_use]
 pub fn osc99_toast_spec(data: &Notification99Data) -> Osc99ToastSpec {
     let kind = match data.urgency {
@@ -178,6 +185,10 @@ pub fn osc99_toast_spec(data: &Notification99Data) -> Osc99ToastSpec {
         detail: data.body.clone().filter(|body| !body.is_empty()),
         lifetime,
         buttons: data.buttons.clone(),
+        icon: data
+            .icon_names
+            .iter()
+            .find_map(|name| standard_icon_glyph(name)),
     }
 }
 
@@ -423,6 +434,7 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                     detail,
                     lifetime,
                     buttons,
+                    icon,
                 } = spec;
                 let key = instance.to_toast_key();
                 let content = ToastContent {
@@ -430,6 +442,7 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                     title,
                     detail,
                     buttons,
+                    icon,
                 };
                 if let Some(old) = replaces {
                     sink.toasts

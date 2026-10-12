@@ -642,6 +642,7 @@ mod tests {
     use freminal_windowing::WindowId;
 
     use super::*;
+    use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
         NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99FailedSystemLegs,
         Osc99SystemBackend, Osc99ToastSpec, Osc99UntrackedBackend, RecordedShow,
@@ -948,6 +949,29 @@ mod tests {
         assert_eq!(with_buttons.buttons, ["Yes", "No"]);
 
         assert_eq!(osc99_toast_spec(&data(None)).buttons.len(), 0);
+    }
+
+    #[test]
+    fn toast_spec_icon_is_the_first_standard_name_in_order() {
+        let names = |names: &[&str]| Notification99Data {
+            icon_names: names.iter().map(|n| (*n).to_owned()).collect(),
+            ..data(None)
+        };
+        assert_eq!(osc99_toast_spec(&data(None)).icon, None);
+        assert_eq!(
+            osc99_toast_spec(&names(&["custom-app-icon", "info", "error"])).icon,
+            Some(ChromeIcon::Info),
+            "a non-standard name before a standard one is skipped"
+        );
+        assert_eq!(
+            osc99_toast_spec(&names(&["error", "info"])).icon,
+            Some(ChromeIcon::Error)
+        );
+        assert_eq!(
+            osc99_toast_spec(&names(&["warn"])).icon,
+            Some(ChromeIcon::Warning)
+        );
+        assert_eq!(osc99_toast_spec(&names(&["Error", "folder"])).icon, None);
     }
 
     // ── registration and updates ────────────────────────────────────────
