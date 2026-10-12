@@ -21,9 +21,17 @@
 //! The dispatcher exits when the handle (and with it the command sender) is
 //! dropped; the pump exits on its next send after that.
 //!
-//! Signals are not filtered by sender: any session-bus peer can forge
-//! `ActionInvoked` / `NotificationClosed` for a known notification id. This is
-//! recorded follow-up 138.C2 and is deliberately not implemented here.
+//! Signals are filtered by sender (Task 138.C2). On a bus connection the
+//! dispatcher resolves the unique name that owns `org.freedesktop.Notifications`
+//! (`GetNameOwner`) and ignores `ActionInvoked` / `NotificationClosed` from any
+//! other sender, so a session-bus peer cannot forge them. A second pump
+//! (`freminal-osc99-owner`) follows `NameOwnerChanged` for that one name so a
+//! daemon restart re-targets the filter. zbus's client-side match cannot
+//! resolve a well-known sender, so the sender is compared in the dispatcher
+//! rather than put in the match rule. A peer-to-peer connection (tests) has no
+//! bus, no owner and no sender to check, so it is [`Osc99SignalSender::Unfiltered`].
+//! When the owner changes to a different name (or to nobody) the old daemon's
+//! notifications are gone with it, so every mapped instance is closed.
 //!
 //! Every state transition lives in the pure [`DispatcherState`], which has no
 //! bus and no threads and is unit-tested directly.
@@ -58,6 +66,12 @@ const NOTIFICATIONS_SERVICE: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 /// The notification interface.
 const NOTIFICATIONS_INTERFACE: &str = "org.freedesktop.Notifications";
+/// The bus driver's name, which is also the sender of its signals.
+const BUS_DRIVER_NAME: &str = "org.freedesktop.DBus";
+/// The object path of the bus driver.
+const BUS_DRIVER_PATH: &str = "/org/freedesktop/DBus";
+/// The bus driver's interface.
+const BUS_DRIVER_INTERFACE: &str = "org.freedesktop.DBus";
 /// The `app_name` sent when the notification names no application (`f=`).
 const DEFAULT_APP_NAME: &str = "freminal";
 /// How long a D-Bus method call waits for its reply before it fails. This is
@@ -293,19 +307,64 @@ enum CloseTarget {
     AlreadyGone,
 }
 
-/// A signal the pump forwards to the dispatcher.
+/// A signal a pump forwards to the dispatcher.
+///
+/// The notification signals carry the unique name of their sender (`None` when
+/// the message has no sender header, as over a peer-to-peer connection) so the
+/// dispatcher can drop forgeries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PumpSignal {
     /// `ActionInvoked(id, action_key)`.
-    ActionInvoked { dbus_id: u32, action_key: String },
+    ActionInvoked {
+        sender: Option<String>,
+        dbus_id: u32,
+        action_key: String,
+    },
     /// `NotificationClosed(id, reason)`. The reason does not matter to the
     /// protocol, so it is not carried.
-    NotificationClosed { dbus_id: u32 },
+    NotificationClosed {
+        sender: Option<String>,
+        dbus_id: u32,
+    },
+    /// `NameOwnerChanged` for `org.freedesktop.Notifications`: the unique name
+    /// that owns it now, or `None` when nobody does.
+    OwnerChanged { new_owner: Option<String> },
+}
+
+/// Whose notification signals the dispatcher believes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Osc99SignalSender {
+    /// There is no bus (a peer-to-peer connection), so there is no sender to
+    /// check: every signal is believed.
+    #[default]
+    Unfiltered,
+    /// Only signals from this unique name are believed.
+    Owner(String),
+    /// Nobody owns `org.freedesktop.Notifications`: no signal is believed.
+    NoOwner,
+}
+
+impl Osc99SignalSender {
+    /// Whether a signal from `sender` is believed.
+    fn accepts(&self, sender: Option<&str>) -> bool {
+        match self {
+            Self::Unfiltered => true,
+            Self::Owner(owner) => sender == Some(owner.as_str()),
+            Self::NoOwner => false,
+        }
+    }
+
+    /// The owner for a `NameOwnerChanged` / `GetNameOwner` answer.
+    fn from_owner(owner: Option<String>) -> Self {
+        owner.map_or(Self::NoOwner, Self::Owner)
+    }
 }
 
 /// The dispatcher's bookkeeping, free of any bus or thread.
 #[derive(Debug, Default)]
 struct DispatcherState {
+    /// Whose notification signals are believed.
+    daemon_owner: Osc99SignalSender,
     /// The daemon's id for each displayed instance.
     by_instance: HashMap<Osc99InstanceId, u32>,
     /// The instance behind each of the daemon's ids.
@@ -426,15 +485,77 @@ impl DispatcherState {
         Some(Osc99DbusEvent::Closed { instance })
     }
 
-    /// The event, if any, a pump signal stands for.
-    fn on_signal(&mut self, signal: &PumpSignal) -> Option<Osc99DbusEvent> {
+    /// The events, if any, a pump signal stands for.
+    ///
+    /// A notification signal from a sender that is not the daemon's owner is
+    /// ignored (logged at debug level, without its payload).
+    fn on_signal(&mut self, signal: &PumpSignal) -> Vec<Osc99DbusEvent> {
         match signal {
             PumpSignal::ActionInvoked {
+                sender,
                 dbus_id,
                 action_key,
-            } => self.on_action(*dbus_id, action_key),
-            PumpSignal::NotificationClosed { dbus_id } => self.on_closed(*dbus_id),
+            } => {
+                if self.believes(sender.as_deref(), "ActionInvoked") {
+                    self.on_action(*dbus_id, action_key).into_iter().collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            PumpSignal::NotificationClosed { sender, dbus_id } => {
+                if self.believes(sender.as_deref(), "NotificationClosed") {
+                    self.on_closed(*dbus_id).into_iter().collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            PumpSignal::OwnerChanged { new_owner } => self.on_owner_changed(new_owner.clone()),
         }
+    }
+
+    /// Whether a `member` signal from `sender` comes from the daemon's owner.
+    fn believes(&self, sender: Option<&str>, member: &str) -> bool {
+        let believed = self.daemon_owner.accepts(sender);
+        if !believed {
+            tracing::debug!(
+                "OSC 99: ignoring a {member} signal from a sender that is not the daemon"
+            );
+        }
+        believed
+    }
+
+    /// Record who owns `org.freedesktop.Notifications` now.
+    ///
+    /// The same owner changes nothing. When a *known* owner is replaced by a
+    /// different name, or by nobody, the old daemon (and every notification it
+    /// displayed) is gone and will never send the signals that would end
+    /// those legs, so every mapped instance is reported
+    /// [`Osc99DbusEvent::Closed`] and the maps are cleared. This is freminal's
+    /// choice, so the registry can finish those legs and send the owed close
+    /// reports instead of leaving them open forever. A change *from* no owner
+    /// closes nothing: a `Notify` that auto-started the daemon can be recorded
+    /// before the change is processed, and those notifications belong to the
+    /// new owner.
+    fn on_owner_changed(&mut self, new_owner: Option<String>) -> Vec<Osc99DbusEvent> {
+        let new = Osc99SignalSender::from_owner(new_owner);
+        if self.daemon_owner == new {
+            return Vec::new();
+        }
+        let previous = std::mem::replace(&mut self.daemon_owner, new);
+        if !matches!(previous, Osc99SignalSender::Owner(_)) {
+            return Vec::new();
+        }
+        self.by_dbus_id.clear();
+        let mut instances: Vec<Osc99InstanceId> = self
+            .by_instance
+            .drain()
+            .map(|(instance, _)| instance)
+            .collect();
+        instances.sort_by_key(|instance| instance.0);
+        instances
+            .into_iter()
+            .map(|instance| Osc99DbusEvent::Closed { instance })
+            .collect()
     }
 }
 
@@ -622,28 +743,67 @@ where
     }
 }
 
-/// Connect, subscribe to the notification signals, and start the pump.
+/// Connect, subscribe to the notification signals, and start the pump(s).
 ///
-/// The subscription is made here, before the pump thread starts and before the
-/// first `Notify`, so no signal can be missed.
+/// The subscriptions are made here, before any pump thread starts and before
+/// the first `Notify` or `GetNameOwner`, so no signal can be missed. On a bus
+/// connection there is a second subscription, to `NameOwnerChanged` for the
+/// daemon's name, with its own pump: a blocking iterator reads one stream, and
+/// match rules cannot be OR-ed, so two streams need two threads. Both pumps
+/// feed the one signal channel. A peer-to-peer connection has no bus driver to
+/// ask, so it gets only the first.
 fn connect_and_subscribe<C>(connect: C) -> Result<(Connection, Receiver<PumpSignal>), StartError>
 where
     C: FnOnce() -> zbus::Result<Connection>,
 {
     let connection = connect()?;
-    let rule = MatchRule::builder()
+    let notifications =
+        MessageIterator::for_match_rule(notification_signals_rule()?, &connection, None)?;
+    let owner_changes = if connection.is_bus() {
+        Some(MessageIterator::for_match_rule(
+            owner_changed_rule()?,
+            &connection,
+            None,
+        )?)
+    } else {
+        None
+    };
+
+    let (signal_tx, signal_rx) = crossbeam_channel::unbounded();
+    if let Some(owner_changes) = owner_changes {
+        let owner_tx = signal_tx.clone();
+        std::thread::Builder::new()
+            .name("freminal-osc99-owner".to_owned())
+            .spawn(move || run_pump(owner_changes, &owner_tx, parse_owner_changed))
+            .map_err(StartError::PumpThread)?;
+    }
+    std::thread::Builder::new()
+        .name("freminal-osc99-signals".to_owned())
+        .spawn(move || run_pump(notifications, &signal_tx, parse_signal))
+        .map_err(StartError::PumpThread)?;
+    Ok((connection, signal_rx))
+}
+
+/// The match rule for the daemon's `ActionInvoked` / `NotificationClosed`
+/// signals. It names no sender: see [`Osc99SignalSender`].
+fn notification_signals_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
         .msg_type(MessageType::Signal)
         .interface(NOTIFICATIONS_INTERFACE)?
         .path(NOTIFICATIONS_PATH)?
-        .build();
-    let messages = MessageIterator::for_match_rule(rule, &connection, None)?;
+        .build())
+}
 
-    let (signal_tx, signal_rx) = crossbeam_channel::unbounded();
-    std::thread::Builder::new()
-        .name("freminal-osc99-signals".to_owned())
-        .spawn(move || run_pump(messages, &signal_tx))
-        .map_err(StartError::PumpThread)?;
-    Ok((connection, signal_rx))
+/// The match rule for the bus driver's `NameOwnerChanged` signal about the
+/// notification daemon's name.
+fn owner_changed_rule() -> zbus::Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(MessageType::Signal)
+        .sender(BUS_DRIVER_NAME)?
+        .interface(BUS_DRIVER_INTERFACE)?
+        .member("NameOwnerChanged")?
+        .arg(0, NOTIFICATIONS_SERVICE)?
+        .build())
 }
 
 /// Answer every show with `ShowFailed` and every close with `Closed` until
@@ -668,7 +828,10 @@ fn serve(
     signals: Receiver<PumpSignal>,
     sink: &EventSink,
 ) {
-    let mut state = DispatcherState::default();
+    let mut state = DispatcherState {
+        daemon_owner: resolve_daemon_owner(connection),
+        ..DispatcherState::default()
+    };
     match fetch_capabilities(connection) {
         Ok(advertised) => {
             state.set_capabilities(&advertised);
@@ -692,7 +855,7 @@ fn serve(
                 Err(_) => return,
             },
             recv(signal_rx) -> signal => signal.map_or(true, |signal| {
-                if let Some(event) = state.on_signal(&signal) {
+                for event in state.on_signal(&signal) {
                     sink.emit(event);
                 }
                 false
@@ -774,6 +937,40 @@ fn close_instance(
     }
 }
 
+/// Who owns `org.freedesktop.Notifications` at start.
+///
+/// A peer-to-peer connection has no bus driver and no sender to check, so it
+/// is [`Osc99SignalSender::Unfiltered`]. On a bus, an error (most likely that
+/// no daemon is running yet) is [`Osc99SignalSender::NoOwner`]: signals are
+/// ignored until a `NameOwnerChanged` names an owner. The `NameOwnerChanged`
+/// subscription was made before this call, so an owner appearing meanwhile is
+/// queued for the dispatcher, and processing it after a matching answer here
+/// is a no-op.
+fn resolve_daemon_owner(connection: &Connection) -> Osc99SignalSender {
+    if !connection.is_bus() {
+        return Osc99SignalSender::Unfiltered;
+    }
+    match fetch_daemon_owner(connection) {
+        Ok(owner) => Osc99SignalSender::Owner(owner),
+        Err(e) => {
+            tracing::debug!("OSC 99: no notification daemon owns its name yet: {e}");
+            Osc99SignalSender::NoOwner
+        }
+    }
+}
+
+/// Call the bus driver's `GetNameOwner` for the notification daemon's name.
+fn fetch_daemon_owner(connection: &Connection) -> zbus::Result<String> {
+    let reply = connection.call_method(
+        Some(BUS_DRIVER_NAME),
+        BUS_DRIVER_PATH,
+        Some(BUS_DRIVER_INTERFACE),
+        "GetNameOwner",
+        &NOTIFICATIONS_SERVICE,
+    )?;
+    reply.body().deserialize::<String>()
+}
+
 /// Call `GetCapabilities`.
 fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<String>> {
     let reply = connection.call_method(
@@ -821,9 +1018,13 @@ fn notify(connection: &Connection, args: &NotifyArgs) -> zbus::Result<u32> {
 
 // ── Signal pump ────────────────────────────────────────────────────────────
 
-/// The pump thread: forward the notification signals to the dispatcher until
-/// the bus closes or the dispatcher is gone.
-fn run_pump(messages: MessageIterator, signals: &Sender<PumpSignal>) {
+/// A pump thread: forward the signals `parse` recognises to the dispatcher
+/// until the bus closes or the dispatcher is gone.
+fn run_pump(
+    messages: MessageIterator,
+    signals: &Sender<PumpSignal>,
+    parse: fn(&Message) -> Option<PumpSignal>,
+) {
     for message in messages {
         let message = match message {
             Ok(message) => message,
@@ -832,7 +1033,7 @@ fn run_pump(messages: MessageIterator, signals: &Sender<PumpSignal>) {
                 return;
             }
         };
-        if let Some(signal) = parse_signal(&message)
+        if let Some(signal) = parse(&message)
             && signals.send(signal).is_err()
         {
             // The dispatcher dropped its receiver: the GUI is gone.
@@ -846,21 +1047,48 @@ fn run_pump(messages: MessageIterator, signals: &Sender<PumpSignal>) {
 fn parse_signal(message: &Message) -> Option<PumpSignal> {
     let header = message.header();
     let member = header.member()?;
+    let sender = header.sender().map(ToString::to_string);
     let body = message.body();
     match member.as_str() {
         "ActionInvoked" => {
             let (dbus_id, action_key) = body.deserialize::<(u32, String)>().ok()?;
             Some(PumpSignal::ActionInvoked {
+                sender,
                 dbus_id,
                 action_key,
             })
         }
         "NotificationClosed" => {
             let (dbus_id, _reason) = body.deserialize::<(u32, u32)>().ok()?;
-            Some(PumpSignal::NotificationClosed { dbus_id })
+            Some(PumpSignal::NotificationClosed { sender, dbus_id })
         }
         _ => None,
     }
+}
+
+/// The [`PumpSignal::OwnerChanged`] `message` carries, or `None` for anything
+/// else: another member, another name, a malformed body, or a sender that is
+/// not the bus driver. The match rule names the bus driver as sender, but
+/// zbus's client-side match cannot check a well-known sender, so it is checked
+/// here: otherwise a peer could emit a forged `NameOwnerChanged` and name
+/// itself the daemon.
+fn parse_owner_changed(message: &Message) -> Option<PumpSignal> {
+    let header = message.header();
+    if header.member()?.as_str() != "NameOwnerChanged"
+        || header.sender()?.as_str() != BUS_DRIVER_NAME
+    {
+        return None;
+    }
+    let (name, _old_owner, new_owner) = message
+        .body()
+        .deserialize::<(String, String, String)>()
+        .ok()?;
+    if name != NOTIFICATIONS_SERVICE {
+        return None;
+    }
+    Some(PumpSignal::OwnerChanged {
+        new_owner: (!new_owner.is_empty()).then_some(new_owner),
+    })
 }
 
 #[cfg(test)]
@@ -1208,20 +1436,215 @@ mod tests {
         state.record_shown(instance(1), None, 7);
 
         assert_eq!(
-            state.on_signal(&PumpSignal::ActionInvoked {
-                dbus_id: 7,
-                action_key: "1".to_owned(),
-            }),
-            Some(Osc99DbusEvent::Activated {
+            state.on_signal(&action_from(None, 7, "1")),
+            [Osc99DbusEvent::Activated {
                 instance: instance(1),
                 action: Osc99SystemAction::Button(1),
-            })
+            }]
         );
         assert_eq!(
-            state.on_signal(&PumpSignal::NotificationClosed { dbus_id: 7 }),
-            Some(Osc99DbusEvent::Closed {
+            state.on_signal(&closed_from(None, 7)),
+            [Osc99DbusEvent::Closed {
                 instance: instance(1)
-            })
+            }]
+        );
+    }
+
+    // ── Sender filtering (138.C2) ───────────────────────────────────────
+
+    fn action_from(sender: Option<&str>, dbus_id: u32, key: &str) -> PumpSignal {
+        PumpSignal::ActionInvoked {
+            sender: sender.map(str::to_owned),
+            dbus_id,
+            action_key: key.to_owned(),
+        }
+    }
+
+    fn closed_from(sender: Option<&str>, dbus_id: u32) -> PumpSignal {
+        PumpSignal::NotificationClosed {
+            sender: sender.map(str::to_owned),
+            dbus_id,
+        }
+    }
+
+    fn owner_changed(new_owner: Option<&str>) -> PumpSignal {
+        PumpSignal::OwnerChanged {
+            new_owner: new_owner.map(str::to_owned),
+        }
+    }
+
+    /// A state that believes `owner`, with instances 1 and 2 shown as ids 7
+    /// and 8.
+    fn owned_by(owner: Osc99SignalSender) -> DispatcherState {
+        let mut state = DispatcherState {
+            daemon_owner: owner,
+            ..DispatcherState::default()
+        };
+        state.record_shown(instance(1), None, 7);
+        state.record_shown(instance(2), None, 8);
+        state
+    }
+
+    #[test]
+    fn a_state_believes_everyone_until_it_learns_an_owner() {
+        assert_eq!(
+            DispatcherState::default().daemon_owner,
+            Osc99SignalSender::Unfiltered
+        );
+    }
+
+    #[test]
+    fn an_owned_state_ignores_signals_from_other_senders() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        for sender in [Some(":1.9"), None, Some(""), Some(":1.55")] {
+            assert_eq!(
+                state.on_signal(&action_from(sender, 7, "default")),
+                [],
+                "action from {sender:?}"
+            );
+            assert_eq!(
+                state.on_signal(&closed_from(sender, 7)),
+                [],
+                "close from {sender:?}"
+            );
+        }
+        assert_eq!(
+            state.close_target(instance(1)),
+            CloseTarget::CallDaemon(7),
+            "a forged close did not drop the mapping"
+        );
+    }
+
+    #[test]
+    fn an_owned_state_believes_the_owner() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        assert_eq!(
+            state.on_signal(&action_from(Some(":1.5"), 7, "default")),
+            [Osc99DbusEvent::Activated {
+                instance: instance(1),
+                action: Osc99SystemAction::Default,
+            }]
+        );
+        assert_eq!(
+            state.on_signal(&closed_from(Some(":1.5"), 7)),
+            [Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_state_with_no_owner_ignores_every_signal() {
+        let mut state = owned_by(Osc99SignalSender::NoOwner);
+
+        for sender in [Some(":1.5"), None] {
+            assert_eq!(state.on_signal(&action_from(sender, 7, "default")), []);
+            assert_eq!(state.on_signal(&closed_from(sender, 7)), []);
+        }
+    }
+
+    #[test]
+    fn an_unfiltered_state_believes_every_sender() {
+        let mut state = owned_by(Osc99SignalSender::Unfiltered);
+
+        assert_eq!(state.on_signal(&action_from(Some(":1.9"), 7, "1")).len(), 1);
+        assert_eq!(state.on_signal(&action_from(None, 7, "1")).len(), 1);
+        assert_eq!(state.on_signal(&closed_from(Some(":1.9"), 7)).len(), 1);
+        assert_eq!(state.on_signal(&closed_from(None, 8)).len(), 1);
+    }
+
+    #[test]
+    fn a_new_owner_retargets_the_filter_and_closes_the_old_daemons_instances() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        assert_eq!(
+            state.on_signal(&owner_changed(Some(":1.6"))),
+            [
+                Osc99DbusEvent::Closed {
+                    instance: instance(1)
+                },
+                Osc99DbusEvent::Closed {
+                    instance: instance(2)
+                },
+            ]
+        );
+
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.6".to_owned())
+        );
+        assert!(state.by_instance.is_empty());
+        assert!(state.by_dbus_id.is_empty());
+        // The new owner is believed, the old one no longer is.
+        state.record_shown(instance(3), None, 1);
+        assert_eq!(state.on_signal(&closed_from(Some(":1.5"), 1)), []);
+        assert_eq!(
+            state.on_signal(&closed_from(Some(":1.6"), 1)),
+            [Osc99DbusEvent::Closed {
+                instance: instance(3)
+            }]
+        );
+    }
+
+    #[test]
+    fn losing_the_owner_closes_the_old_daemons_instances_and_ignores_signals() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        assert_eq!(state.on_signal(&owner_changed(None)).len(), 2);
+
+        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert!(state.by_instance.is_empty());
+        assert!(state.by_dbus_id.is_empty());
+        assert_eq!(state.on_signal(&closed_from(Some(":1.5"), 7)), []);
+    }
+
+    #[test]
+    fn the_same_owner_changes_nothing() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        assert_eq!(state.on_signal(&owner_changed(Some(":1.5"))), []);
+
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.5".to_owned())
+        );
+        assert_eq!(state.by_instance.len(), 2);
+        assert_eq!(state.by_dbus_id.len(), 2);
+    }
+
+    #[test]
+    fn gaining_an_owner_from_none_keeps_what_was_recorded() {
+        // A `Notify` that auto-started the daemon can be recorded before the
+        // `NameOwnerChanged` that names the daemon is processed.
+        let mut state = owned_by(Osc99SignalSender::NoOwner);
+
+        assert_eq!(state.on_signal(&owner_changed(Some(":1.5"))), []);
+
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.5".to_owned())
+        );
+        assert_eq!(state.by_instance.len(), 2);
+        assert_eq!(
+            state.on_signal(&closed_from(Some(":1.5"), 7)),
+            [Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn losing_the_owner_then_gaining_one_again_ends_up_following_the_new_one() {
+        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+
+        let _ = state.on_signal(&owner_changed(None));
+
+        assert_eq!(state.on_signal(&owner_changed(Some(":1.8"))), []);
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.8".to_owned())
         );
     }
 
@@ -1312,13 +1735,17 @@ mod tests {
     fn parse_signal_reads_action_invoked() -> TestResult {
         let message = signal("ActionInvoked")?.build(&(7u32, "2"))?;
 
-        assert_eq!(
-            parse_signal(&message),
-            Some(PumpSignal::ActionInvoked {
-                dbus_id: 7,
-                action_key: "2".to_owned(),
-            })
-        );
+        assert_eq!(parse_signal(&message), Some(action_from(None, 7, "2")));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_signal_carries_the_sender() -> TestResult {
+        let message = signal("NotificationClosed")?
+            .sender(":1.5")?
+            .build(&(7u32, 3u32))?;
+
+        assert_eq!(parse_signal(&message), Some(closed_from(Some(":1.5"), 7)));
         Ok(())
     }
 
@@ -1326,10 +1753,7 @@ mod tests {
     fn parse_signal_reads_notification_closed_whatever_the_reason() -> TestResult {
         let message = signal("NotificationClosed")?.build(&(7u32, 3u32))?;
 
-        assert_eq!(
-            parse_signal(&message),
-            Some(PumpSignal::NotificationClosed { dbus_id: 7 })
-        );
+        assert_eq!(parse_signal(&message), Some(closed_from(None, 7)));
         Ok(())
     }
 
@@ -1346,6 +1770,83 @@ mod tests {
         let message = signal("ActionInvoked")?.build(&"not a tuple")?;
 
         assert_eq!(parse_signal(&message), None);
+        Ok(())
+    }
+
+    /// A `NameOwnerChanged` signal as the bus driver would send it.
+    fn name_owner_changed(sender: &str, name: &str, new_owner: &str) -> zbus::Result<Message> {
+        Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
+            .sender(sender)?
+            .build(&(name, "", new_owner))
+    }
+
+    #[test]
+    fn parse_owner_changed_reads_the_new_owner() -> TestResult {
+        let message = name_owner_changed(BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE, ":1.6")?;
+
+        assert_eq!(
+            parse_owner_changed(&message),
+            Some(owner_changed(Some(":1.6")))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_owner_changed_reads_an_empty_new_owner_as_no_owner() -> TestResult {
+        let message = name_owner_changed(BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE, "")?;
+
+        assert_eq!(parse_owner_changed(&message), Some(owner_changed(None)));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_owner_changed_ignores_other_names() -> TestResult {
+        let message = name_owner_changed(BUS_DRIVER_NAME, "org.example.Other", ":1.6")?;
+
+        assert_eq!(parse_owner_changed(&message), None);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_owner_changed_ignores_a_sender_that_is_not_the_bus_driver() -> TestResult {
+        let forged = name_owner_changed(":1.9", NOTIFICATIONS_SERVICE, ":1.9")?;
+        let senderless =
+            Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
+                .build(&(NOTIFICATIONS_SERVICE, "", ":1.9"))?;
+
+        assert_eq!(parse_owner_changed(&forged), None);
+        assert_eq!(parse_owner_changed(&senderless), None);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_owner_changed_ignores_other_members_and_malformed_bodies() -> TestResult {
+        let other_member = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameLost")?
+            .sender(BUS_DRIVER_NAME)?
+            .build(&(NOTIFICATIONS_SERVICE, "", ":1.6"))?;
+        let malformed = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
+            .sender(BUS_DRIVER_NAME)?
+            .build(&"not a tuple")?;
+
+        assert_eq!(parse_owner_changed(&other_member), None);
+        assert_eq!(parse_owner_changed(&malformed), None);
+        Ok(())
+    }
+
+    #[test]
+    fn the_match_rules_build() -> TestResult {
+        let rule = owner_changed_rule()?.to_string();
+
+        assert_eq!(
+            rule,
+            "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',\
+             member='NameOwnerChanged',arg0='org.freedesktop.Notifications'"
+        );
+        assert!(
+            notification_signals_rule()?
+                .to_string()
+                .contains("path='/org/freedesktop/Notifications'")
+        );
         Ok(())
     }
 

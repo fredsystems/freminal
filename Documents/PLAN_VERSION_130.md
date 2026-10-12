@@ -5849,6 +5849,7 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Verification:** a `DispatcherState` test showing that a signal from a non-owner is
   ignored, and an owner change re-targets.
 - **Scheduling:** in Task 138, with 138.13 (same files).
+- **Status:** done (see the 138.C2 status note).
 
 ### 138 Status notes
 
@@ -6007,6 +6008,17 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     - After the fix: 28 consecutive full `freminal` runs and 20 service-only runs all passed.
   - One out-of-scope edit was accepted: a sink struct literal in the `notifications.rs` test
     helper.
+- **138.C2 (done).** Signals carry their sender, and the dispatcher believes only the current
+  owner of `org.freedesktop.Notifications`.
+  - The owner is resolved with `GetNameOwner` and followed by a second pump on
+    `NameOwnerChanged`; a forged `NameOwnerChanged` not sent by `org.freedesktop.DBus` is
+    rejected. A p2p connection is `Unfiltered`.
+  - A change from one owner to another (or to nobody) closes every mapped instance, so no leg
+    stays open after a daemon restart.
+  - The orchestrator verified the filter against the real session bus on the development
+    machine (daemon `:1.21`), using temporary ignored tests that were not committed. A real
+    show and `CloseNotification` produced `Shown` then `Closed`. 5,000 forged
+    `NotificationClosed` signals from a second connection produced no event.
 
 ---
 
