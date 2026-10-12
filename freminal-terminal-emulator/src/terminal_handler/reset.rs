@@ -215,9 +215,11 @@ impl TerminalHandler {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::ResetKind;
     use crate::terminal_handler::TerminalHandler;
+    use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
     use freminal_common::buffer_states::sixel::{MAX_PALETTE, default_sixel_palette};
 
     /// A shared palette that differs from the default, so "kept" and "reset"
@@ -252,5 +254,64 @@ mod tests {
             handler.sixel_shared_palette.is_some(),
             "DECSTR keeps the sixel state: the reset table has no row for it"
         );
+    }
+
+    /// A handler holding an accumulating identified transfer, an
+    /// accumulating id-less one, and a tombstone, none of them finished.
+    fn handler_with_pending_osc99() -> TerminalHandler {
+        let mut handler = TerminalHandler::new(80, 24);
+        for (metadata, payload) in [
+            ("i=held:d=0", &b"head"[..]),
+            ("i=dropped:d=0:e=1", b"@@@@"),
+            // Last: an identified chunk discards an accumulating id-less one.
+            ("d=0", b"head"),
+        ] {
+            let chunk = parse_osc_99(metadata.as_bytes(), payload).expect("a valid sequence");
+            assert!(handler.reassemble_osc99(&chunk).is_none());
+        }
+        assert_eq!(handler.pending_osc99.identified_len(), 2);
+        assert!(handler.pending_osc99.get(None).is_some());
+        handler
+    }
+
+    #[test]
+    fn decstr_keeps_the_pending_osc99_state() {
+        let mut handler = handler_with_pending_osc99();
+
+        handler.reset(ResetKind::Soft);
+
+        assert_eq!(
+            handler.pending_osc99.identified_len(),
+            2,
+            "DECSTR keeps in-flight OSC 99 transfers: the reset table has no row for them"
+        );
+        assert!(handler.pending_osc99.get(None).is_some());
+
+        // And they still complete: the tail of the kept transfer joins it.
+        let tail = parse_osc_99(b"i=held", b"-tail").expect("a valid sequence");
+        let finalized = handler
+            .reassemble_osc99(&tail)
+            .expect("the kept transfer finalizes");
+        assert_eq!(finalized.title, "head-tail");
+    }
+
+    #[test]
+    fn ris_clears_the_pending_osc99_state() {
+        let mut handler = handler_with_pending_osc99();
+
+        handler.reset(ResetKind::Hard);
+
+        assert!(
+            handler.pending_osc99.is_empty(),
+            "RIS must discard every in-flight OSC 99 transfer, tombstones included"
+        );
+        handler.pending_osc99.assert_costs_consistent();
+
+        // A tail arriving after RIS starts afresh instead of joining the old head.
+        let tail = parse_osc_99(b"i=held", b"tail").expect("a valid sequence");
+        let finalized = handler
+            .reassemble_osc99(&tail)
+            .expect("a fresh complete notification finalizes");
+        assert_eq!(finalized.title, "tail");
     }
 }

@@ -362,6 +362,10 @@ pub(super) struct WindowManipulationEvents {
     /// from every pane this frame (Task 99.5c), answered after the drain
     /// loop.
     pub(super) osc99_controls: Vec<Osc99ControlRequest>,
+    /// OSC 99 icon bytes transmitted under a `g=` key with no text to show,
+    /// collected from every pane this frame. They are stored in the icon
+    /// cache before this frame's notifications are routed.
+    pub(super) osc99_icon_primes: Vec<rendering::Osc99IconPrime>,
     /// OSC 52 clipboard events (remote write / blocked read) collected from
     /// every pane this frame, routed to a toast after the drain loop (issue
     /// #433).
@@ -458,6 +462,7 @@ pub(super) fn drain_window_manipulation_commands(
         osc_notifications: Vec::new(),
         osc99_notifications: Vec::new(),
         osc99_controls: Vec::new(),
+        osc99_icon_primes: Vec::new(),
         osc52_events: Vec::new(),
     };
 
@@ -517,6 +522,7 @@ pub(super) fn drain_window_manipulation_commands(
                     &mut events.osc_notifications,
                     &mut events.osc99_notifications,
                     &mut events.osc99_controls,
+                    &mut events.osc99_icon_primes,
                     &mut events.osc52_events,
                 );
                 if shell_set {
@@ -1027,6 +1033,17 @@ mod tests {
     fn drain_osc99_from_two_tabs(
         window_focus: WindowFocus,
     ) -> (super::WindowManipulationEvents, PaneId, PaneId) {
+        drain_command_from_two_tabs(window_focus, || {
+            WindowManipulation::Notification99(Box::new(sample_osc99_notification()))
+        })
+    }
+
+    /// Drain a frame where both the active and the background tab's pane
+    /// emitted the window command `make` builds, with the given window focus.
+    fn drain_command_from_two_tabs(
+        window_focus: WindowFocus,
+        make: impl Fn() -> WindowManipulation,
+    ) -> (super::WindowManipulationEvents, PaneId, PaneId) {
         let (mut tabs, active_tx, bg_tx) = two_tab_manager_with_window_cmd_senders();
         let tab_ids: Vec<PaneId> = tabs
             .iter()
@@ -1038,10 +1055,8 @@ mod tests {
         let (active_id, bg_id) = (tab_ids[0], tab_ids[1]);
 
         for tx in [&active_tx, &bg_tx] {
-            if let Err(e) = tx.send(WindowCommand::Viewport(WindowManipulation::Notification99(
-                Box::new(sample_osc99_notification()),
-            ))) {
-                panic!("send notification: {e}");
+            if let Err(e) = tx.send(WindowCommand::Report(make())) {
+                panic!("send window command: {e}");
             }
         }
 
@@ -1088,6 +1103,24 @@ mod tests {
         assert_eq!(background.origin.window_id, WindowId::for_test(5));
         assert_eq!(background.pane_state.focus, PaneKeyboardFocus::Unfocused);
         assert_eq!(background.pane_state.visibility, PaneVisibility::Hidden);
+    }
+
+    #[test]
+    fn drain_carries_osc99_icon_priming_from_every_pane_across_tabs() {
+        let (events, _, _) = drain_command_from_two_tabs(WindowFocus::Focused, || {
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![1, 2, 3],
+            }
+        });
+
+        assert_eq!(events.osc99_icon_primes.len(), 2);
+        for prime in &events.osc99_icon_primes {
+            assert_eq!(prime.key, "k");
+            assert_eq!(prime.data, [1, 2, 3]);
+        }
+        assert!(events.osc99_notifications.is_empty());
+        assert!(events.osc99_controls.is_empty());
     }
 
     #[test]

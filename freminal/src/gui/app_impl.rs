@@ -4489,8 +4489,9 @@ impl FreminalGui {
         // is bounded by the registry's cap, and a busy cell only defers the
         // prune to the next frame, so it is worth a warning only when there
         // is OSC 99 work this frame.
-        let has_osc99_work =
-            !events.osc99_notifications.is_empty() || !events.osc99_controls.is_empty();
+        let has_osc99_work = !events.osc99_notifications.is_empty()
+            || !events.osc99_controls.is_empty()
+            || !events.osc99_icon_primes.is_empty();
         match self.osc99_registry.try_borrow_mut() {
             Ok(mut registry) => registry.prune_dead_panes(),
             Err(_) if has_osc99_work => {
@@ -4498,6 +4499,10 @@ impl FreminalGui {
             }
             Err(_) => {}
         }
+
+        // Store icon bytes sent for the `g=` cache before this frame's
+        // notifications are routed, so one that names the key finds them.
+        self.store_osc99_icon_primes(&events.osc99_icon_primes);
 
         // Route OSC 99 stateful notifications collected above (Task 99.5a).
         self.route_osc99_display_requests(window_focus, &events.osc99_notifications);
@@ -4534,6 +4539,26 @@ impl FreminalGui {
             };
             drop(registry);
             self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+        }
+    }
+
+    /// Store the icon bytes a frame's drain collected for the OSC 99 `g=`
+    /// cache. The cache bounds its own size; a busy cell drops the priming
+    /// for this frame, and the program re-transmits when a later
+    /// `g=`-only notification misses.
+    fn store_osc99_icon_primes(&self, primes: &[rendering::Osc99IconPrime]) {
+        if primes.is_empty() {
+            return;
+        }
+        let Ok(mut icon_cache) = self.osc99_icon_cache.try_borrow_mut() else {
+            tracing::warn!(
+                dropped = primes.len(),
+                "OSC 99: icon cache busy; icon priming dropped this frame"
+            );
+            return;
+        };
+        for prime in primes {
+            prime.store_in(&mut icon_cache);
         }
     }
 

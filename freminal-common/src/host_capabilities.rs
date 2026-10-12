@@ -156,24 +156,4 @@ mod tests {
     fn default_is_unsupported() {
         assert_eq!(HostCapabilities::default().osc99, Osc99Support::Unsupported);
     }
-
-    #[test]
-    fn supported_carries_its_features() {
-        let features = Osc99Features {
-            activation_report: Osc99ActivationReport::Reported,
-            close_events: Osc99CloseEvents::NotReported,
-            activation_focus: Osc99FocusAction::Unsupported,
-            auto_expiry: Osc99AutoExpiry::Supported,
-            urgency: Osc99UrgencySupport::Supported,
-            sound_names: Osc99SoundNames::SystemAndSilent,
-            body: Osc99BodySupport::Supported,
-            buttons: Osc99ButtonSupport::Supported,
-            icons: Osc99IconSupport::Supported,
-        };
-        let caps = HostCapabilities {
-            osc99: Osc99Support::Supported(features),
-        };
-        assert_ne!(caps, HostCapabilities::default());
-        assert_eq!(caps.osc99, Osc99Support::Supported(features));
-    }
 }

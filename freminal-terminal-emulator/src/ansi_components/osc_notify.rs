@@ -14,7 +14,9 @@
 //! [`AnsiOscType::Notify99`] carrying a fully-parsed
 //! [`freminal_common::buffer_states::osc_notify_99::Osc99Command`].
 //! Chunk reassembly, transport to the GUI, and reverse-write are handled
-//! downstream (Tasks 99.3+).
+//! downstream (Tasks 99.3+).  A sequence the parser rejects still produces an
+//! [`AnsiOscType::Notify99`], a stand-in carrying only its `i=` and `d=`, so
+//! the handler can abandon the transfer it belonged to.
 //!
 //! OSC 9 also carries the conflicting `ConEmu` progress-report sub-protocol
 //! (`9;4;<state>[;<value>]`, issue #507). A valid progress report produces an
@@ -42,7 +44,7 @@
 
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
-use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+use freminal_common::buffer_states::osc_notify_99::{Osc99Command, parse_osc_99};
 use freminal_common::buffer_states::progress::ProgressUpdate;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -231,10 +233,13 @@ pub(super) fn handle_osc_notify_777(raw_params: &[u8], output: &mut Vec<Terminal
 ///
 /// The metadata and payload byte slices are then forwarded to
 /// [`parse_osc_99`] which returns a typed [`Osc99Command`].  On success an
-/// [`AnsiOscType::Notify99`] is appended to `output`; on error the failure
-/// is logged at `debug!` level and the function returns without output.  The
-/// parser only fails on its two size guards (an oversized sequence or too many
-/// metadata items); every other irregularity is ignored by the parser itself.
+/// [`AnsiOscType::Notify99`] is appended to `output`.  On error the failure
+/// is logged at `debug!` level and the stand-in command for the rejected chunk
+/// ([`Osc99Command::rejected`]) is appended instead, so the handler can
+/// abandon the transfer rather than let the rest of it assemble into a
+/// truncated notification.  The parser only fails on its two size guards (an
+/// oversized sequence or too many metadata items); every other irregularity
+/// is ignored by the parser itself.
 ///
 /// OSC 99 payloads can carry notification text, icon data, and other
 /// application metadata, so the raw sequence must never be copied into logs
@@ -267,7 +272,10 @@ pub(super) fn handle_osc_notify_99(raw_params: &[u8], output: &mut Vec<TerminalO
         Err(e) => {
             // `Osc99ParseError` is only ever a size-guard failure; its Display
             // carries numbers, never sequence content, so it is safe to log.
-            tracing::debug!("OSC 99: parse error (ignored): {e}");
+            tracing::debug!("OSC 99: chunk rejected: {e}");
+            output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99(
+                Osc99Command::rejected(e.rejected()),
+            )));
         }
     }
 }
@@ -315,8 +323,8 @@ mod tests {
     use crate::log_capture::capture;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        MAX_OSC99_METADATA_ITEMS, MAX_OSC99_SEQUENCE_BYTES, Osc99Command, Osc99PayloadEncoding,
-        Osc99PayloadType,
+        MAX_OSC99_METADATA_ITEMS, MAX_OSC99_SEQUENCE_BYTES, Osc99ChunkState, Osc99Command,
+        Osc99PayloadEncoding, Osc99PayloadType,
     };
     use freminal_common::buffer_states::progress::ProgressUpdate;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -839,27 +847,41 @@ mod tests {
     }
 
     #[test]
-    fn osc99_too_many_metadata_items_no_output() {
-        let mut sequence = b"99;".to_vec();
+    fn osc99_too_many_metadata_items_yields_the_rejected_stand_in() {
+        // 65 items, the id and the not-done marker among them: the sequence
+        // is rejected, but its identity survives as a `Rejected` command.
+        let mut sequence = b"99;i=mid:d=0:".to_vec();
         sequence.extend(
-            vec!["d=1"; MAX_OSC99_METADATA_ITEMS + 1]
+            vec!["u=1"; MAX_OSC99_METADATA_ITEMS - 1]
                 .join(":")
                 .into_bytes(),
         );
         sequence.extend_from_slice(b";x\x07");
         let output = feed_osc(&sequence);
-        assert!(output.is_empty(), "got: {output:?}");
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.payload_type, Osc99PayloadType::Rejected);
+        assert_eq!(cmd.id, Some("mid".to_owned()));
+        assert_eq!(cmd.chunk_state, Osc99ChunkState::More);
+        assert_eq!(
+            cmd.payload, b"",
+            "the payload of a rejected chunk is dropped"
+        );
+        assert_eq!(cmd.urgency, None, "no other metadata is applied");
     }
 
     #[test]
-    fn osc99_direct_call_oversized_sequence_no_output() {
+    fn osc99_direct_call_oversized_sequence_yields_the_rejected_stand_in() {
         // The OSC accumulator caps the body first, so reach the parser's own
         // guard by calling the handler directly.
-        let mut raw = b"99;i=1:p=title;".to_vec();
+        let mut raw = b"99;i=1:d=0:p=title;".to_vec();
         raw.extend(std::iter::repeat_n(b'x', MAX_OSC99_SEQUENCE_BYTES));
         let mut output = Vec::new();
         super::handle_osc_notify_99(&raw, &mut output);
-        assert_eq!(output, []);
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.payload_type, Osc99PayloadType::Rejected);
+        assert_eq!(cmd.id, Some("1".to_owned()));
+        assert_eq!(cmd.chunk_state, Osc99ChunkState::More);
+        assert_eq!(cmd.payload, b"");
     }
 
     /// A parse failure on an OSC 99 with a huge payload must not copy the
@@ -879,10 +901,10 @@ mod tests {
 
         let events = capture(|| {
             let output = feed_osc(&sequence);
-            assert!(
-                output
-                    .iter()
-                    .all(|o| !matches!(o, TerminalOutput::OscResponse(AnsiOscType::Notify99(_)))),
+            let cmd = expect_notify99(&output);
+            assert_eq!(
+                cmd.payload_type,
+                Osc99PayloadType::Rejected,
                 "a rejected sequence must not produce a notification"
             );
         });

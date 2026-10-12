@@ -5997,9 +5997,10 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     different id.
   - **P8, name fields.** App name, types, icon names and sound name also have LF removed.
     Bidi controls are reviewed-not-a-defect (kitty parity).
-  - **P9, kitty value parity.** An empty `c=` / `d=` counts as not `0` (report / done); `+`
-    is accepted as a prefix on `a=` words; `w=` beyond the `i64` range is clamped to the
-    maximum.
+  - **P9, kitty value parity.** An empty `c=` / `d=` counts as not `0` (report / done);
+    `w=` beyond the `i64` range is clamped to the maximum. (Correction at execution: kitty
+    strips `+` only after a leading `-`, so a bare `+report` stays an unknown word; the
+    review's `+` item was wrong, and freminal matches kitty.)
   - **P10, dead metadata.** Finalisation goes into a narrow `MergedOsc99Metadata`, so the
     dead per-chunk fields and their pinning test are removed.
   - **P11, docs and visibility.** Stale docs are fixed, and `FinalizedNotification` becomes
@@ -6015,6 +6016,16 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The trivial derive-only tests are removed.
   - The `tests/osc99_query.rs` replies use the production `host_capabilities` value through a
     shared helper rather than hard-coded strings.
+- **Status:** done, for every item.
+  - P2 pushes `Osc99CacheIcon` and the GUI stores it in the `g=` cache. It is collected in
+    its own per-frame vector and stored before that frame's displays; 138.C10's ordered
+    requests remove the remaining same-frame ordering gap.
+  - P4 carries the rejected chunk's id and `d=` inside `Osc99ParseError`, through a
+    temporary stand-in that 138.C8 replaces.
+  - P9 deviates from the review where the review was wrong (see above). An empty `e=` stays
+    unchanged.
+  - The integration test cannot reach `host_capabilities`, which lives in the `freminal`
+    crate, so it keeps explicit literals per feature set, documented in the file header.
 
 #### 138.C8 — OSC 99 type placement and naming
 
@@ -6025,6 +6036,9 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The `window_manipulation.rs` re-exports are removed and every import uses one path.
   - `PendingOsc99::is_tombstone` becomes `touch_if_tombstone`.
   - `Osc99FocusAction` is renamed `Osc99FocusSupport`.
+  - The 138.C7 stand-in `Osc99PayloadType::Rejected` (a non-wire value in the wire enum) is
+    replaced by a dedicated `AnsiOscType::Notify99Rejected(Osc99RejectedChunk)` variant,
+    handled by the `Notify99` handler path.
   - The 130-era `Reported` / `NotReported` capability enums stay (reviewed: their meaning is
     "reported", not "supported").
 - **Verification:** mechanical; the test count is unchanged.

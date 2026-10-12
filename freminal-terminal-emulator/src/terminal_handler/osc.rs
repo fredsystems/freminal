@@ -1141,17 +1141,14 @@ mod tests {
     }
 
     #[test]
-    fn a_long_body_is_limited_to_1024_chars_ending_in_an_ellipsis() {
+    fn a_long_body_is_cut_hard_at_1024_chars() {
         let (mut state, _rx) = osc99_state();
         osc99_send(&mut state, "i=b:d=0", "T");
         osc99_send(&mut state, "i=b:p=body", &"x".repeat(2000));
 
         let notes = osc99_notifications(&state);
         assert_eq!(notes.len(), 1);
-        let body = notes[0].body.as_deref().unwrap();
-        assert_eq!(body.chars().count(), 1024);
-        assert!(body.ends_with('\u{2026}'));
-        assert_eq!(body.chars().filter(|&c| c == 'x').count(), 1023);
+        assert_eq!(notes[0].body.as_deref(), Some("x".repeat(1024).as_str()));
     }
 
     #[test]
@@ -1210,6 +1207,174 @@ mod tests {
         let notes = osc99_notifications(&state);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].app_name, None);
+    }
+
+    // ── 138.C7: rejected chunks, i=0, plain multi-byte text, g= priming ───────
+
+    /// Metadata for a middle chunk of transfer `id` with 65 items, one more
+    /// than the parser accepts.
+    fn osc99_over_cap_metadata(id: &str) -> String {
+        let filler = vec!["u=1"; 63].join(":");
+        format!("i={id}:d=0:{filler}")
+    }
+
+    #[test]
+    fn a_middle_chunk_over_the_item_cap_tombstones_the_transfer() {
+        let (mut state, rx) = osc99_state();
+        osc99_send(&mut state, "i=r:d=0", "head ");
+        osc99_send(&mut state, &osc99_over_cap_metadata("r"), "middle ");
+        assert!(osc99_is_tombstone(&state, "r"));
+        state.handler.pending_osc99.assert_costs_consistent();
+        assert_eq!(state.handler.pending_osc99.total_cost(), 0);
+
+        // The final chunk would otherwise assemble "head tail" or just "tail".
+        osc99_send(&mut state, "i=r", "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+        assert!(osc99_written(&rx).is_empty(), "no reply for a dropped one");
+
+        // The id is reusable afterwards.
+        osc99_send(&mut state, "i=r", "fresh");
+        assert_eq!(osc99_titles(&state), ["fresh"]);
+    }
+
+    #[test]
+    fn a_rejected_first_chunk_still_tombstones_the_transfer() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, &osc99_over_cap_metadata("first"), "head ");
+        assert!(osc99_is_tombstone(&state, "first"));
+        osc99_send(&mut state, "i=first", "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_final_chunk_ends_the_transfer_without_a_tombstone() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=r:d=0", "head ");
+        // 65 items, none of them `d=0`: the rejected chunk is a final one.
+        let metadata = format!("i=r:{}", vec!["u=1"; 64].join(":"));
+        osc99_send(&mut state, &metadata, "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+        state.handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn a_rejected_id_less_chunk_abandons_an_accumulating_unidentified_slot_only() {
+        let (mut state, _rx) = osc99_state();
+        // Nothing pending: a rejected id-less chunk leaves no tombstone behind
+        // to swallow the next, unrelated, id-less notification.
+        osc99_send(&mut state, &osc99_over_cap_metadata(""), "x");
+        assert!(state.handler.pending_osc99.is_empty());
+        osc99_send(&mut state, "", "shown");
+        assert_eq!(osc99_titles(&state), ["shown"]);
+
+        // Something accumulating: it is abandoned, and its tail is dropped.
+        osc99_send(&mut state, "d=0", "head ");
+        osc99_send(&mut state, &osc99_over_cap_metadata(""), "x");
+        assert!(matches!(
+            state.handler.pending_osc99.get(None),
+            Some(super::super::notify_99::PendingEntry::Dropped)
+        ));
+        osc99_send(&mut state, "", "tail");
+        assert_eq!(osc99_titles(&state), ["shown"]);
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_oversized_stand_in_tombstones_the_transfer() {
+        let mut handler = osc99_supported_handler();
+        let first = Osc99Command {
+            id: Some("big".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+            payload: b"head ".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(first))]);
+        // What `handle_osc_notify_99` forwards for a sequence over 1 MiB.
+        let oversized = freminal_common::buffer_states::osc_notify_99::parse_osc_99(
+            b"i=big:d=0",
+            &vec![b'x'; 1_048_576],
+        )
+        .unwrap_err();
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(
+            Osc99Command::rejected(oversized.rejected()),
+        ))]);
+        assert!(matches!(
+            handler.pending_osc99.get(Some("big")),
+            Some(super::super::notify_99::PendingEntry::Dropped)
+        ));
+        assert_eq!(handler.window_commands, []);
+    }
+
+    #[test]
+    fn a_rejected_chunk_while_unsupported_is_dropped_with_the_rest() {
+        let mut state = TerminalState::default();
+        let metadata = osc99_over_cap_metadata("u");
+        osc99_send(&mut state, &metadata, "x");
+        assert!(state.handler.pending_osc99.is_empty());
+        assert_eq!(state.window_commands, []);
+    }
+
+    #[test]
+    fn id_zero_is_an_ordinary_id_end_to_end() {
+        let (mut state, rx) = osc99_state();
+
+        // The query reply names it, as it does for an id-less query.
+        osc99_send(&mut state, "i=0:p=?", "");
+        let written = osc99_written(&rx);
+        assert!(
+            written.starts_with(b"\x1b]99;i=0:p=?;"),
+            "unexpected reply: {written:?}"
+        );
+
+        // A notification with it is displayed carrying that id, not `None`.
+        osc99_send(&mut state, "i=0", "Hello");
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id.as_deref(), Some("0"));
+        assert_eq!(notes[0].title, "Hello");
+    }
+
+    #[test]
+    fn a_plain_multibyte_char_split_across_sequences_reassembles() {
+        let (mut state, _rx) = osc99_state();
+        // "é" is C3 A9; each half is an invalid UTF-8 fragment by itself.
+        state.handle_incoming_data(b"\x1b]99;i=m:d=0;ol\xC3\x1b\\");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        state.handle_incoming_data(b"\x1b]99;i=m;\xA9\x1b\\");
+        assert_eq!(osc99_titles(&state), ["ol\u{e9}"]);
+    }
+
+    #[test]
+    fn an_icon_only_notification_with_a_g_key_primes_the_gui_cache() {
+        let (mut state, rx) = osc99_state();
+        // base64 "AAAA" is three zero bytes.
+        osc99_send(&mut state, "i=p:p=icon:e=1:g=my-key", "AAAA");
+        assert_eq!(
+            state.window_commands,
+            [WindowManipulation::Osc99CacheIcon {
+                key: "my-key".to_owned(),
+                data: vec![0, 0, 0],
+            }]
+        );
+        assert!(osc99_written(&rx).is_empty(), "priming gets no reply");
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn a_g_only_notification_after_priming_is_still_a_normal_notification() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "p=icon:e=1:g=k", "AAAA");
+        osc99_send(&mut state, "g=k", "Hello");
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].icon_cache_key.as_deref(), Some("k"));
+        assert_eq!(
+            notes[0].icon_data, None,
+            "the GUI resolves it from its cache"
+        );
     }
 
     // ── Payload-free warn logging (129.14) ───────────────────────────────────

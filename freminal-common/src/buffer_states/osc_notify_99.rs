@@ -24,13 +24,15 @@
 //! not understand.  An invalid value for a known key ignores *that key only*;
 //! a malformed metadata token (no `=`, or a key that is not exactly one byte)
 //! is skipped; unknown keys are skipped.  The only errors are the two size
-//! guards ([`Osc99ParseError`]).  Every metadata field that has a protocol
+//! guards ([`Osc99ParseError`]), and even a rejected sequence reports the
+//! `i=` and `d=` it carried so the terminal can abandon the transfer it
+//! belonged to.  Every metadata field that has a protocol
 //! default is *unset-aware* (`Option`, or an empty list) so that chunk
 //! reassembly can tell "the sender said nothing" from "the sender said the
 //! default"; defaults are applied once, at finalisation.
 
 use std::fmt;
-use std::num::NonZeroU32;
+use std::num::{IntErrorKind, NonZeroU32};
 
 use crate::buffer_states::osc99_notification::{
     Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
@@ -57,6 +59,12 @@ pub enum Osc99PayloadType {
     /// Any other `p=` value (including an empty one).  Its payload is
     /// discarded by reassembly, but its metadata and `d=` still apply.
     Unknown,
+    /// Never produced by a `p=` key: marks a chunk the parser rejected (see
+    /// [`Osc99ParseError`]).  The [`Osc99Command`] built by
+    /// [`Osc99Command::rejected`] carries only the best-effort `i=` and `d=`,
+    /// so the terminal can abandon the transfer the chunk belonged to
+    /// instead of later assembling a truncated notification.
+    Rejected,
 }
 
 /// How the payload of one OSC 99 chunk is encoded (`e=` key).
@@ -79,8 +87,8 @@ pub enum Osc99PayloadEncoding {
 pub enum Osc99ChunkState {
     /// `d=0`: more chunks follow.
     More,
-    /// `d=1`, any other non-empty `d=` value, or no `d=` (default): this chunk
-    /// completes the notification.
+    /// `d=1`, any other `d=` value (an empty one included), or no `d=`
+    /// (default): this chunk completes the notification.
     Done,
 }
 
@@ -127,31 +135,64 @@ pub enum NotificationOccasion {
     Invisible,
 }
 
+/// What survives of a chunk the parser rejected: the identity of the transfer
+/// it belonged to, scanned best-effort from the raw metadata.
+///
+/// A later chunk of the same transfer must not be assembled into a truncated
+/// notification, so the terminal uses this to abandon the transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Osc99RejectedChunk {
+    /// The notification id (`i=`), sanitised like a parsed one; the last
+    /// valid `i=` in the metadata wins.
+    pub id: Option<String>,
+    /// Whether the rejected chunk was the last of its transfer (`d=`).
+    pub chunk_state: Osc99ChunkState,
+}
+
 /// Error produced while parsing an OSC 99 metadata + payload pair.
 ///
 /// Only the two size guards are errors: everything else the parser does not
-/// understand is ignored.
+/// understand is ignored.  Both variants carry the [`Osc99RejectedChunk`] so
+/// the rejection can be acted on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Osc99ParseError {
     /// The metadata + payload region exceeded [`MAX_OSC99_SEQUENCE_BYTES`].
     /// Rejected before any allocation/decode to bound memory use on
     /// untrusted terminal input.
-    SequenceTooLarge(usize),
+    SequenceTooLarge {
+        /// The size of the metadata + payload region, in bytes.
+        bytes: usize,
+        /// The transfer the rejected chunk belonged to.
+        rejected: Osc99RejectedChunk,
+    },
     /// The metadata held more than [`MAX_OSC99_METADATA_ITEMS`] `key=value`
     /// items. Rejected to bound work on untrusted terminal input.
     TooManyMetadataItems {
         /// The item cap that was exceeded.
         max: usize,
+        /// The transfer the rejected chunk belonged to.
+        rejected: Osc99RejectedChunk,
     },
+}
+
+impl Osc99ParseError {
+    /// The transfer the rejected chunk belonged to.
+    #[must_use]
+    pub const fn rejected(&self) -> &Osc99RejectedChunk {
+        match self {
+            Self::SequenceTooLarge { rejected, .. }
+            | Self::TooManyMetadataItems { rejected, .. } => rejected,
+        }
+    }
 }
 
 impl fmt::Display for Osc99ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SequenceTooLarge(n) => {
-                write!(f, "OSC 99 sequence too large: {n} bytes")
+            Self::SequenceTooLarge { bytes, .. } => {
+                write!(f, "OSC 99 sequence too large: {bytes} bytes")
             }
-            Self::TooManyMetadataItems { max } => {
+            Self::TooManyMetadataItems { max, .. } => {
                 write!(f, "OSC 99 metadata has more than {max} items")
             }
         }
@@ -161,12 +202,13 @@ impl fmt::Display for Osc99ParseError {
 /// Maximum accepted size (in bytes) of a single OSC 99 metadata + payload
 /// region before decode.
 ///
-/// Terminal escape-sequence input is untrusted, and `base64::decode`
-/// reserves `len * 3 / 4` up front, so an unbounded sequence could trigger a
-/// large allocation. A single chunk's payload is capped here; multi-chunk
-/// reassembly is additionally bounded by the terminal handler (see
-/// `notify_99.rs`). 1 MiB comfortably covers any realistic notification icon
-/// while refusing pathological input.
+/// Terminal escape-sequence input is untrusted, and the parser copies the
+/// payload of every sequence it accepts. A single sequence is therefore
+/// capped here, before that copy; the terminal handler bounds multi-chunk
+/// reassembly separately with its own per-payload, per-notification and
+/// handler-wide caps (see `notify_99.rs`). 1 MiB equals the handler's icon
+/// payload cap, so one sequence can carry an icon of any size the handler
+/// would accept, while pathological input is refused.
 pub const MAX_OSC99_SEQUENCE_BYTES: usize = 1_048_576;
 
 /// Maximum number of `key=value` items accepted in one OSC 99 metadata region.
@@ -213,7 +255,7 @@ pub struct Osc99Command {
     /// action word was given; see [`resolve_osc99_actions`].
     pub action_edits: Vec<Osc99ActionEdit>,
     /// Close reporting (`c=`): `Some(Silent)` for `c=0`, `Some(Report)` for any
-    /// other non-empty value, `None` when absent.
+    /// other value (an empty one included), `None` when absent.
     pub close_reporting: Option<Osc99CloseReporting>,
     /// App name (`f=`, base64-decoded), if present and decodable.
     pub app_name: Option<String>,
@@ -232,6 +274,43 @@ pub struct Osc99Command {
     pub urgency: Option<NotificationUrgency>,
     /// Auto-expiry (`w=`), if present and numeric.
     pub expiry: Option<Osc99Expiry>,
+}
+
+impl Osc99Command {
+    /// A command with every field at its protocol default: no id, a `Title`
+    /// payload, `Done`, an empty plain payload, and nothing else set.
+    const fn blank() -> Self {
+        Self {
+            id: None,
+            payload_type: Osc99PayloadType::Title,
+            chunk_state: Osc99ChunkState::Done,
+            payload: Vec::new(),
+            payload_encoding: Osc99PayloadEncoding::Plain,
+            action_edits: Vec::new(),
+            close_reporting: None,
+            app_name: None,
+            icon_cache_key: None,
+            icon_names: Vec::new(),
+            occasion: None,
+            sound: None,
+            notification_types: Vec::new(),
+            urgency: None,
+            expiry: None,
+        }
+    }
+
+    /// The command that stands for a chunk the parser rejected: payload type
+    /// [`Osc99PayloadType::Rejected`], the id and chunk state the rejected
+    /// chunk carried, and nothing else.
+    #[must_use]
+    pub fn rejected(chunk: &Osc99RejectedChunk) -> Self {
+        Self {
+            id: chunk.id.clone(),
+            payload_type: Osc99PayloadType::Rejected,
+            chunk_state: chunk.chunk_state,
+            ..Self::blank()
+        }
+    }
 }
 
 /// Map a `w=` value (milliseconds) to an [`Osc99Expiry`].
@@ -309,10 +388,20 @@ fn sanitise_id(value: &[u8]) -> Option<String> {
 }
 
 /// Parse one `a=` comma-list token into an edit; unknown words give `None`.
+///
+/// A word beginning with `-` removes the action, and any further leading `+`
+/// or `-` characters after that first `-` are skipped, as kitty does.  A
+/// word without the leading `-` must be exactly an action name: kitty does
+/// not treat a leading `+` as meaningful there, so `+report` is unknown and
+/// ignored.
 fn parse_action_edit(token: &[u8]) -> Option<Osc99ActionEdit> {
-    let (negated, name) = token
-        .strip_prefix(b"-")
-        .map_or((false, token), |name| (true, name));
+    let (negated, name) = token.strip_prefix(b"-").map_or((false, token), |rest| {
+        let start = rest
+            .iter()
+            .position(|&b| b != b'+' && b != b'-')
+            .unwrap_or(rest.len());
+        (true, &rest[start..])
+    });
     let action = match name {
         b"report" => Osc99Action::Report,
         b"focus" => Osc99Action::Focus,
@@ -341,9 +430,32 @@ const fn parse_payload_type(value: &[u8]) -> Osc99PayloadType {
 }
 
 /// Parse a `w=` value: an ASCII decimal integer.  `None` when it is not one.
+///
+/// An integer beyond the `i64` range is still an integer: kitty reads
+/// arbitrary-precision ones, so it clamps here rather than being ignored (a
+/// huge positive lifetime is the longest one, a huge negative one the OS
+/// default).
 fn parse_expiry(value: &[u8]) -> Option<Osc99Expiry> {
-    let ms = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
+    let text = std::str::from_utf8(value).ok()?;
+    let ms = match text.parse::<i64>() {
+        Ok(ms) => ms,
+        Err(err) => match err.kind() {
+            IntErrorKind::PosOverflow => i64::MAX,
+            IntErrorKind::NegOverflow => i64::MIN,
+            _ => return None,
+        },
+    };
     Some(osc99_expiry_from_ms(ms))
+}
+
+/// Map a `d=` value to a chunk state: `0` means more chunks follow, and any
+/// other value, an empty one included, means this chunk is the last.
+fn chunk_state_from_value(value: &[u8]) -> Osc99ChunkState {
+    if value == b"0" {
+        Osc99ChunkState::More
+    } else {
+        Osc99ChunkState::Done
+    }
 }
 
 /// Apply a single `key=value` metadata pair to `cmd`.
@@ -359,8 +471,9 @@ fn apply_metadata_pair(cmd: &mut Osc99Command, key: u8, value: &[u8]) {
             .action_edits
             .extend(value.split(|&b| b == b',').filter_map(parse_action_edit)),
 
-        // `c` — close reporting: `0` is silent, any other value reports.
-        b'c' if !value.is_empty() => {
+        // `c` — close reporting: `0` is silent, any other value (an empty one
+        // included, as in kitty) reports.
+        b'c' => {
             cmd.close_reporting = Some(if value == b"0" {
                 Osc99CloseReporting::Silent
             } else {
@@ -368,14 +481,9 @@ fn apply_metadata_pair(cmd: &mut Osc99Command, key: u8, value: &[u8]) {
             });
         }
 
-        // `d` — done flag: `0` means more chunks follow, any other value is done.
-        b'd' if !value.is_empty() => {
-            cmd.chunk_state = if value == b"0" {
-                Osc99ChunkState::More
-            } else {
-                Osc99ChunkState::Done
-            };
-        }
+        // `d` — done flag: `0` means more chunks follow, any other value (an
+        // empty one included, as in kitty) is done.
+        b'd' => cmd.chunk_state = chunk_state_from_value(value),
 
         // `e` — payload encoding: `1` is base64, any other value is plain.
         b'e' if !value.is_empty() => {
@@ -458,7 +566,7 @@ fn apply_metadata_pair(cmd: &mut Osc99Command, key: u8, value: &[u8]) {
             }
         }
 
-        // Unknown keys, and empty `c`/`d`/`e` values — ignored for forward
+        // Unknown keys, and an empty `e` value — ignored for forward
         // compatibility.
         _ => {}
     }
@@ -487,26 +595,13 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
     // on untrusted terminal input cannot force a large allocation.
     let total = metadata.len().saturating_add(payload.len());
     if total > MAX_OSC99_SEQUENCE_BYTES {
-        return Err(Osc99ParseError::SequenceTooLarge(total));
+        return Err(Osc99ParseError::SequenceTooLarge {
+            bytes: total,
+            rejected: scan_rejected_chunk(metadata),
+        });
     }
 
-    let mut cmd = Osc99Command {
-        id: None,
-        payload_type: Osc99PayloadType::Title,
-        chunk_state: Osc99ChunkState::Done,
-        payload: Vec::new(),
-        payload_encoding: Osc99PayloadEncoding::Plain,
-        action_edits: Vec::new(),
-        close_reporting: None,
-        app_name: None,
-        icon_cache_key: None,
-        icon_names: Vec::new(),
-        occasion: None,
-        sound: None,
-        notification_types: Vec::new(),
-        urgency: None,
-        expiry: None,
-    };
+    let mut cmd = Osc99Command::blank();
 
     // Parse the colon-separated key=value pairs in the metadata region. Empty
     // tokens (leading/trailing/doubled colons) are skipped by the tokenizer.
@@ -519,7 +614,10 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
             }
             Ok(KeyValueItem::Pair { .. } | KeyValueItem::Bare(_)) => {}
             Err(KeyValueError::TooManyItems { max }) => {
-                return Err(Osc99ParseError::TooManyMetadataItems { max });
+                return Err(Osc99ParseError::TooManyMetadataItems {
+                    max,
+                    rejected: scan_rejected_chunk(metadata),
+                });
             }
         }
     }
@@ -528,6 +626,36 @@ pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc
     // sequence rejected by the item cap never allocates its payload.
     cmd.payload = payload.to_vec();
     Ok(cmd)
+}
+
+/// Read the `i=` and `d=` of a rejected sequence's raw metadata.
+///
+/// Only those two keys are looked at, with the same rules as a parsed chunk
+/// (a key is one byte, the last valid `i=` and the last `d=` win), but over
+/// the whole metadata rather than up to the item cap, because a hostile
+/// sequence puts them wherever it likes.  The scan is linear in the metadata,
+/// allocates only the sanitised id, and decodes nothing.
+fn scan_rejected_chunk(metadata: &[u8]) -> Osc99RejectedChunk {
+    let mut rejected = Osc99RejectedChunk {
+        id: None,
+        chunk_state: Osc99ChunkState::Done,
+    };
+    for item in tokenize(metadata, KeyValueSeparator::Colon, usize::MAX) {
+        match item {
+            Ok(KeyValueItem::Pair { key: b"i", value }) => {
+                if let Some(id) = sanitise_id(value) {
+                    rejected.id = Some(id);
+                }
+            }
+            Ok(KeyValueItem::Pair { key: b"d", value }) => {
+                rejected.chunk_state = chunk_state_from_value(value);
+            }
+            Ok(KeyValueItem::Pair { .. } | KeyValueItem::Bare(_)) => {}
+            // An unbounded scan cannot hit the item cap.
+            Err(KeyValueError::TooManyItems { .. }) => break,
+        }
+    }
+    rejected
 }
 
 #[cfg(test)]
@@ -772,9 +900,12 @@ mod tests {
     }
 
     #[test]
-    fn d_equals_empty_is_ignored() {
-        assert_eq!(parse("d=0:d=").chunk_state, Osc99ChunkState::More);
+    fn d_equals_empty_is_not_zero_so_done() {
+        // kitty: `done = v != '0'`, so an empty value completes the chunk and
+        // overrides an earlier `d=0`.
         assert_eq!(parse("d=").chunk_state, Osc99ChunkState::Done);
+        assert_eq!(parse("d=0:d=").chunk_state, Osc99ChunkState::Done);
+        assert_eq!(parse("d=:d=0").chunk_state, Osc99ChunkState::More);
     }
 
     // ------------------------------------------------------------------
@@ -1070,6 +1201,21 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_plus_is_not_an_add_prefix_but_is_skipped_after_a_minus() {
+        // kitty lstrips `+` and `-` only after the first `-` has marked the
+        // word as a removal; a bare `+report` is just an unknown word.
+        assert_eq!(parse("a=+report,+focus").action_edits, []);
+        assert_eq!(
+            parse("a=-+report,--focus,-+-+focus").action_edits,
+            [
+                Osc99ActionEdit::Remove(Osc99Action::Report),
+                Osc99ActionEdit::Remove(Osc99Action::Focus),
+                Osc99ActionEdit::Remove(Osc99Action::Focus),
+            ]
+        );
+    }
+
+    #[test]
     fn a_repeated_keys_keep_appending_in_arrival_order() {
         assert_eq!(
             parse("a=report:a=-focus:a=focus").action_edits,
@@ -1183,11 +1329,19 @@ mod tests {
     }
 
     #[test]
-    fn c_equals_empty_is_ignored() {
-        assert_eq!(parse("c=").close_reporting, None);
+    fn c_equals_empty_is_not_zero_so_reports() {
+        // kitty: `close_response_requested = v != '0'`.
         assert_eq!(
-            parse("c=1:c=").close_reporting,
+            parse("c=").close_reporting,
             Some(Osc99CloseReporting::Report)
+        );
+        assert_eq!(
+            parse("c=0:c=").close_reporting,
+            Some(Osc99CloseReporting::Report)
+        );
+        assert_eq!(
+            parse("c=:c=0").close_reporting,
+            Some(Osc99CloseReporting::Silent)
         );
     }
 
@@ -1238,8 +1392,27 @@ mod tests {
     }
 
     #[test]
-    fn w_beyond_i64_range_is_ignored() {
-        assert_eq!(parse("w=99999999999999999999999").expiry, None);
+    fn w_beyond_i64_range_clamps_to_the_maximum() {
+        // kitty reads arbitrary-precision integers, so this is a (huge)
+        // lifetime, not garbage.
+        let max = Some(Osc99Expiry::After(NonZeroU32::new(u32::MAX).unwrap()));
+        assert_eq!(parse("w=99999999999999999999999").expiry, max);
+        assert_eq!(parse("w=+99999999999999999999999").expiry, max);
+    }
+
+    #[test]
+    fn w_below_the_i64_range_is_the_os_default() {
+        assert_eq!(
+            parse("w=-99999999999999999999999").expiry,
+            Some(Osc99Expiry::OsDefault)
+        );
+    }
+
+    #[test]
+    fn w_sign_alone_or_with_junk_is_ignored() {
+        assert_eq!(parse("w=-").expiry, None);
+        assert_eq!(parse("w=+").expiry, None);
+        assert_eq!(parse("w=12x").expiry, None);
     }
 
     // ------------------------------------------------------------------
@@ -1362,10 +1535,11 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn empty_value_for_flag_keys_is_ignored() {
-        // `c`, `d`, `e`, `u` and `w` ignore an empty value.
+    fn empty_value_for_flag_keys() {
+        // `c` and `d` read an empty value as "not 0" (kitty), so it reports
+        // and completes; `e`, `u` and `w` ignore it.
         let cmd = parse("c=:d=:e=:u=:w=");
-        assert_eq!(cmd.close_reporting, None);
+        assert_eq!(cmd.close_reporting, Some(Osc99CloseReporting::Report));
         assert_eq!(cmd.chunk_state, Osc99ChunkState::Done);
         assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
         assert_eq!(cmd.urgency, None);
@@ -1427,7 +1601,11 @@ mod tests {
         assert_eq!(
             err,
             Osc99ParseError::TooManyMetadataItems {
-                max: MAX_OSC99_METADATA_ITEMS
+                max: MAX_OSC99_METADATA_ITEMS,
+                rejected: Osc99RejectedChunk {
+                    id: None,
+                    chunk_state: Osc99ChunkState::Done
+                },
             }
         );
     }
@@ -1446,10 +1624,95 @@ mod tests {
         let mut metadata = b"foo:".to_vec();
         metadata.extend(repeated_metadata(MAX_OSC99_METADATA_ITEMS));
         let err = parse_osc_99(&metadata, &pay("")).unwrap_err();
-        assert_eq!(
+        assert!(matches!(
             err,
             Osc99ParseError::TooManyMetadataItems {
-                max: MAX_OSC99_METADATA_ITEMS
+                max: MAX_OSC99_METADATA_ITEMS,
+                ..
+            }
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // What a rejected chunk reports (138.C7 P4)
+    // ------------------------------------------------------------------
+
+    /// The rejected-chunk report of a sequence that must be refused.
+    fn rejected(metadata: &[u8], payload: &[u8]) -> Osc99RejectedChunk {
+        parse_osc_99(metadata, payload)
+            .unwrap_err()
+            .rejected()
+            .clone()
+    }
+
+    /// `i=` and `d=` placed after the item cap, so only a full scan finds them.
+    fn metadata_with_tail(tail: &str) -> Vec<u8> {
+        let mut metadata = repeated_metadata(MAX_OSC99_METADATA_ITEMS + 1);
+        metadata.push(b':');
+        metadata.extend_from_slice(tail.as_bytes());
+        metadata
+    }
+
+    #[test]
+    fn a_rejected_chunk_reports_the_id_and_chunk_state_it_carried() {
+        let metadata = metadata_with_tail("i=my-id:d=0");
+        assert_eq!(
+            rejected(&metadata, b""),
+            Osc99RejectedChunk {
+                id: Some("my-id".to_owned()),
+                chunk_state: Osc99ChunkState::More,
+            }
+        );
+    }
+
+    #[test]
+    fn a_rejected_chunk_applies_the_parser_rules_to_i_and_d() {
+        // Sanitised id, last valid `i=` wins, an empty or illegal `i=` is
+        // skipped, the last `d=` wins and an empty `d=` is "not 0".
+        let metadata = metadata_with_tail("i=a/b:i=///:i=:d=0:d=");
+        assert_eq!(
+            rejected(&metadata, b""),
+            Osc99RejectedChunk {
+                id: Some("ab".to_owned()),
+                chunk_state: Osc99ChunkState::Done,
+            }
+        );
+        // A key longer than one byte is not `i` or `d`.
+        let metadata = metadata_with_tail("id=nope:dd=0");
+        assert_eq!(
+            rejected(&metadata, b""),
+            Osc99RejectedChunk {
+                id: None,
+                chunk_state: Osc99ChunkState::Done,
+            }
+        );
+    }
+
+    #[test]
+    fn an_oversized_sequence_reports_its_id_and_chunk_state_too() {
+        let payload = vec![b'A'; MAX_OSC99_SEQUENCE_BYTES];
+        assert_eq!(
+            rejected(b"i=big:d=0:p=icon:e=1", &payload),
+            Osc99RejectedChunk {
+                id: Some("big".to_owned()),
+                chunk_state: Osc99ChunkState::More,
+            }
+        );
+    }
+
+    #[test]
+    fn the_rejected_command_carries_only_the_id_and_chunk_state() {
+        let chunk = Osc99RejectedChunk {
+            id: Some("x".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+        };
+        assert_eq!(
+            Osc99Command::rejected(&chunk),
+            Osc99Command {
+                id: Some("x".to_owned()),
+                payload_type: Osc99PayloadType::Rejected,
+                chunk_state: Osc99ChunkState::More,
+                ..Osc99Command::blank()
             }
         );
     }
@@ -1508,9 +1771,16 @@ mod tests {
 
     #[test]
     fn display_all_error_variants() {
+        let rejected = Osc99RejectedChunk {
+            id: None,
+            chunk_state: Osc99ChunkState::Done,
+        };
         let errors = [
-            Osc99ParseError::SequenceTooLarge(2_000_000),
-            Osc99ParseError::TooManyMetadataItems { max: 64 },
+            Osc99ParseError::SequenceTooLarge {
+                bytes: 2_000_000,
+                rejected: rejected.clone(),
+            },
+            Osc99ParseError::TooManyMetadataItems { max: 64, rejected },
         ];
         for e in &errors {
             let s = format!("{e}");
@@ -1525,8 +1795,8 @@ mod tests {
         let payload = vec![b'A'; MAX_OSC99_SEQUENCE_BYTES + 1];
         let err = parse_osc_99(b"p=title:e=1", &payload).unwrap_err();
         match err {
-            Osc99ParseError::SequenceTooLarge(n) => {
-                assert!(n > MAX_OSC99_SEQUENCE_BYTES);
+            Osc99ParseError::SequenceTooLarge { bytes, .. } => {
+                assert!(bytes > MAX_OSC99_SEQUENCE_BYTES);
             }
             other @ Osc99ParseError::TooManyMetadataItems { .. } => {
                 panic!("expected SequenceTooLarge, got {other:?}")

@@ -762,9 +762,13 @@ fn spawn_pty_consumer_thread(
                             // OSC 99 display and control requests drive reverse replies
                             // back to the originating pane's input_tx (Tasks
                             // 99.5c/99.6/99.7), so they are classified as Report like
-                            // the other PTY-response-producing variants above.
+                            // the other PTY-response-producing variants above. Icon
+                            // priming (`g=`) is not answered, but it is OSC 99 state
+                            // for the notifications it serves, not a viewport change,
+                            // so it travels with them.
                             | WindowManipulation::Notification99(_)
-                            | WindowManipulation::Osc99Control { .. } => {
+                            | WindowManipulation::Osc99Control { .. }
+                            | WindowManipulation::Osc99CacheIcon { .. } => {
                                 WindowCommand::Report(cmd)
                             }
                             _ => WindowCommand::Viewport(cmd),

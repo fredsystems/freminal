@@ -92,8 +92,10 @@ pub struct Notification99Data {
     /// Notification id (`i=`), if any. `None` = no id (report as `i=0`).
     pub id: Option<String>,
     /// Notification title. Never empty: the terminal handler promotes the
-    /// body into the title when no title arrived, and drops a notification
-    /// that has neither.
+    /// body into the title when no title arrived, and does not display a
+    /// notification that has neither (see
+    /// `WindowManipulation::Osc99CacheIcon` for the one such case that is
+    /// still acted on).
     pub title: String,
     /// Notification body (`p=body` payload), if any.
     pub body: Option<String>,
@@ -123,22 +125,4 @@ pub struct Notification99Data {
     pub notification_types: Vec<String>,
     /// Auto-expiry (`w=`).
     pub expiry: Osc99Expiry,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transport_types_are_cloneable_and_comparable() {
-        let a = Osc99Sound::Named("bell".to_owned());
-        assert_eq!(a.clone(), a);
-        assert_ne!(Osc99Sound::System, Osc99Sound::Silent);
-        assert_ne!(Osc99Expiry::OsDefault, Osc99Expiry::Never);
-        assert_eq!(
-            Osc99Expiry::After(NonZeroU32::MIN),
-            Osc99Expiry::After(NonZeroU32::MIN)
-        );
-        assert_ne!(Osc99ControlKind::Close, Osc99ControlKind::Alive);
-    }
 }

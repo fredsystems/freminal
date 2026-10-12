@@ -21,7 +21,9 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, Window
 
 use crate::gui::chrome_style;
 use crate::gui::notifications::{NotificationRequest, Osc99Control};
-use crate::gui::osc99::{Osc99ControlRequest, Osc99DisplayRequest, Osc99PaneContext};
+use crate::gui::osc99::{
+    Osc99ControlRequest, Osc99DisplayRequest, Osc99IconCache, Osc99PaneContext,
+};
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
 /// spacing for the initial / window-creation style setup.
@@ -162,6 +164,26 @@ pub(super) enum Osc52ToastEvent {
     ReadBlocked,
 }
 
+/// Icon bytes an OSC 99 notification transmitted under a `g=` cache key
+/// without any text to show (`WindowManipulation::Osc99CacheIcon`), collected
+/// during a frame's window-manipulation drain so the caller can store them in
+/// the session's icon cache, which the per-pane loop cannot reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Osc99IconPrime {
+    /// The cache key (`g=`), sanitised.
+    pub(super) key: String,
+    /// The icon image bytes.
+    pub(super) data: Vec<u8>,
+}
+
+impl Osc99IconPrime {
+    /// Store the icon in `cache` under its key, as the most recently used
+    /// entry. The cache applies its own bounds.
+    pub(super) fn store_in(&self, cache: &mut Osc99IconCache) {
+        cache.insert(self.key.clone(), self.data.clone());
+    }
+}
+
 /// Maps an [`Osc52ToastEvent`] to the `(title, detail)` pair used for the
 /// resulting toast. Pure and free of `egui`/config access so it can be
 /// unit-tested directly; the caller (`app_impl::update()`) supplies the
@@ -253,6 +275,7 @@ pub(super) fn handle_window_manipulation(
     notifications: &mut Vec<NotificationRequest>,
     osc99_notifications: &mut Vec<Osc99DisplayRequest>,
     osc99_controls: &mut Vec<Osc99ControlRequest>,
+    osc99_icon_primes: &mut Vec<Osc99IconPrime>,
     osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
@@ -642,6 +665,13 @@ pub(super) fn handle_window_manipulation(
                     origin: flags.osc99.origin,
                 });
             }
+            // OSC 99 icon priming (`g=` with icon bytes and no text). Nothing
+            // is displayed or answered; the caller stores the bytes in the
+            // session's icon cache before it routes this frame's
+            // notifications, so one that names the key finds them.
+            WindowManipulation::Osc99CacheIcon { key, data } => {
+                osc99_icon_primes.push(Osc99IconPrime { key, data });
+            }
         }
     }
     shell_set_title
@@ -677,12 +707,12 @@ mod osc52_toast_text_tests {
 
 #[cfg(test)]
 mod window_manipulation_reply_tests {
-    use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
+    use super::{Osc52ToastEvent, Osc99IconPrime, WindowManipFlags, handle_window_manipulation};
     use crate::gui::frame_drain::WindowFocus;
     use crate::gui::osc99::{
-        Osc99ControlRequest, Osc99DisplayRequest, Osc99Origin, Osc99PaneContext, Osc99PaneState,
-        PaneActivity, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
-        ZoomOcclusion,
+        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconCache, Osc99Origin, Osc99PaneContext,
+        Osc99PaneState, PaneActivity, PaneKeyboardFocus, PaneVisibility, TabActivity,
+        WindowMinimized, ZoomOcclusion,
     };
     use crate::gui::panes::PaneIdGenerator;
     use freminal_windowing::WindowId;
@@ -709,6 +739,7 @@ mod window_manipulation_reply_tests {
         osc52_events: Vec<Osc52ToastEvent>,
         osc99_notifications: Vec<Osc99DisplayRequest>,
         osc99_controls: Vec<Osc99ControlRequest>,
+        osc99_icon_primes: Vec<Osc99IconPrime>,
         /// The pane's only strong sender; dropping it models the pane closing.
         pane_handle: Arc<Sender<InputEvent>>,
     }
@@ -765,6 +796,7 @@ mod window_manipulation_reply_tests {
         let mut notifications = Vec::new();
         let mut osc99_notifications = Vec::new();
         let mut osc99_controls = Vec::new();
+        let mut osc99_icon_primes = Vec::new();
         let mut osc52_events = Vec::new();
 
         let ctx = egui::Context::default();
@@ -787,6 +819,7 @@ mod window_manipulation_reply_tests {
                 &mut notifications,
                 &mut osc99_notifications,
                 &mut osc99_controls,
+                &mut osc99_icon_primes,
                 &mut osc52_events,
             );
         });
@@ -804,6 +837,7 @@ mod window_manipulation_reply_tests {
             osc52_events,
             osc99_notifications,
             osc99_controls,
+            osc99_icon_primes,
             pane_handle: reply_tx,
         }
     }
@@ -864,6 +898,54 @@ mod window_manipulation_reply_tests {
         assert_eq!(drained.osc99_notifications[0].pane_state, osc99.pane_state);
         assert_eq!(drained.osc99_controls.len(), 1);
         assert_eq!(drained.osc99_controls[0].origin, osc99.origin);
+    }
+
+    #[test]
+    fn osc99_cache_icon_is_collected_and_reaches_the_icon_cache() {
+        let drained = drain_commands(vec![
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![1, 2, 3],
+            },
+            // A later priming under the same key replaces the earlier bytes.
+            WindowManipulation::Osc99CacheIcon {
+                key: "other".to_owned(),
+                data: vec![9],
+            },
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![4, 5],
+            },
+        ]);
+        assert_eq!(
+            drained.osc99_icon_primes,
+            [
+                Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![1, 2, 3]
+                },
+                Osc99IconPrime {
+                    key: "other".to_owned(),
+                    data: vec![9]
+                },
+                Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![4, 5]
+                },
+            ],
+            "priming is collected in arrival order"
+        );
+        assert!(drained.osc99_notifications.is_empty());
+        assert!(drained.osc99_controls.is_empty());
+        assert!(drained.replies.is_empty(), "priming is never answered");
+
+        let mut cache = Osc99IconCache::default();
+        for prime in &drained.osc99_icon_primes {
+            prime.store_in(&mut cache);
+        }
+        assert_eq!(cache.get("k"), Some([4u8, 5].as_slice()));
+        assert_eq!(cache.get("other"), Some([9u8].as_slice()));
+        assert_eq!(cache.get("missing"), None);
     }
 
     #[test]

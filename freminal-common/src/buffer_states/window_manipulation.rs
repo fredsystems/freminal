@@ -158,6 +158,19 @@ pub enum WindowManipulation {
         /// Which control payload type this is.
         kind: Osc99ControlKind,
     },
+    /// OSC 99 icon priming: icon bytes transmitted under a `g=` cache key by
+    /// a notification that has no title and no body, so nothing is displayed
+    /// (kitty caches the icon before it checks for text).
+    ///
+    /// The GUI stores the bytes in its `g=` icon cache, where a later
+    /// notification that names the same `g=` key without transmitting the
+    /// bytes finds them. The cache bounds its own size.
+    Osc99CacheIcon {
+        /// The cache key (`g=`), sanitised. Never empty.
+        key: String,
+        /// The icon image bytes (`p=icon`, base64-decoded). Never empty.
+        data: Vec<u8>,
+    },
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {
