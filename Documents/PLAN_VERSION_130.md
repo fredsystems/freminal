@@ -5221,7 +5221,8 @@ Each subtask is done in four steps:
 A sub-agent that ends without a report is treated as unverified. Its tree state is inspected,
 and the work is then finished by a fresh agent, re-decomposed, or discarded.
 
-Order: 138.1 → 138.18 in number order. The adversarial review of the whole branch follows
+Order: 138.1 → 138.18 in number order (138.7 runs as 138.7a then 138.7b). The adversarial
+review of the whole branch follows
 138.18, and its findings become `138.Cn` entries.
 
 No benchmark subtask: OSC 99 is not on a benchmarked path (`freminal-bench-table` lists none,
@@ -5446,37 +5447,84 @@ Deliverable:
 
 #### 138.7 — Toast keyed lifecycle; toast leg through the registry
 
-Scope: `freminal/src/gui/toast.rs`, `freminal/src/gui/osc99/registry.rs`,
-`freminal/src/gui/osc99/mod.rs`, `freminal/src/gui/notifications.rs`,
-`freminal/src/gui/app_impl.rs` (draining toast events and executing the toast effects).
+Split at execution time (2026-10-12) into 138.7a and 138.7b, so each sub-agent pass stays
+bounded.
+
+##### 138.7a — `ToastStack` keyed lifecycle and events
+
+Scope: `freminal/src/gui/toast.rs` only.
 
 What:
 
-- **`ToastStack` additions.** As in "138 Types":
+- **Types** (as in "138 Types"): `ToastKey(pub u64)`; `ToastLifetime { KindDefault,
+  Fixed(Duration), UntilDismissed }`; `ToastEventKind { Activated, Button(u8), Closed }`
+  (`Button` unused until 138.8, so not added yet); `ToastEvent { key, kind }`.
+- **API:**
   - `push_keyed(key, kind, title, detail, lifetime, placement)`;
-  - `replace_keyed(old, new, …)`, which updates in place and keeps the position and age;
+  - `replace_keyed(old, new_key, kind, title, detail, lifetime)`. This updates the toast in
+    place: it keeps its stack slot, placement and entry-animation state, and **its lifetime
+    restarts**. Keeping the age would make a toast updated every second expire mid-update.
+    Returns whether `old` existed; if not, it behaves as `push_keyed`;
   - `close_keyed(key)`;
   - `take_events() -> Vec<ToastEvent>`.
-- **Toast events.** Events are produced for keyed toasts on body click (`Activated` then
-  `Closed`), on the `×`, on expiry, on eviction and on `close_keyed` (`Closed`).
-  `Toast::is_expired` honours `ToastLifetime`. Unkeyed toasts behave exactly as today.
-- **Toast leg in the registry.** The registry's toast leg uses these:
-  - an update of a live `(pane, id)` replaces in place and suppresses the old close report;
-  - `p=close` closes the toast leg;
-  - `Activated` reports when `a=report` (`GuiReply::Osc99Activation { button: None }`);
-  - the instance is forgotten after activation unless `c=1`;
-  - the last tracked leg closing sends one `Osc99Closed { Tracked }` when `c=1`;
-  - urgency and `w=` map to `ToastKind` and `ToastLifetime` as in "Toast leg".
-- **Title/detail.** The toast title is `data.title` and the detail is `data.body`; the body is
-  no longer duplicated.
+- **Events** are produced for keyed toasts only:
+  - a body click gives `Activated` then `Closed`;
+  - a click on the dismiss glyph gives `Closed`;
+  - expiry, eviction past `MAX_TOASTS` and `close_keyed` give `Closed`;
+  - `replace_keyed` produces no event for the replaced toast.
+- **Dismiss rect:** `ToastLayoutOutput` gains a dismiss hit rect (logical points) around the
+  "x" glyph. It is tested before the body rect, for keyed toasts only.
+- `Toast::is_expired` honours `ToastLifetime` (`UntilDismissed` never expires).
+- **Unkeyed toasts** (every existing caller) behave and lay out exactly as today: any click
+  dismisses and no events are produced.
 
-Deliverable:
+Deliverable: unit tests for every event path and lifetime, eviction of a keyed toast, replace
+keeping the slot, and unkeyed behaviour unchanged.
 
-- `toast.rs` unit tests for keyed events and lifetimes.
-- Registry tests: update-in-place suppresses the old close; activation without `c=1` sends no
-  close; activation with `c=1` sends the activation and then exactly one close when the toast
-  closes; `p=close` sends a close report only when `c=1`; activation on one leg emits a close
-  for the instance's other legs.
+##### 138.7b — Toast leg through the registry
+
+Scope: `freminal/src/gui/osc99/registry.rs`, `freminal/src/gui/osc99/mod.rs`,
+`freminal/src/gui/notifications.rs`, `freminal/src/gui/app_impl.rs` (drain toast events after
+`ToastStack::show`; executor sink).
+
+What:
+
+- **Effects and executor.** `Osc99Effect` gains `ShowToast { instance, replaces, spec }` and
+  `CloseToast(instance)`. `Osc99ToastSpec { kind, title, detail, lifetime }` is built by a pure
+  function from `Notification99Data`, using the urgency and `w=` mapping in "Toast leg". The
+  executor takes an `Osc99EffectSink { toasts: &mut ToastStack }` (later subtasks add fields).
+  `ToastKey` is the instance's raw id.
+- **Routing.** `route_osc99` no longer pushes toasts directly: `register` returns the
+  effects.
+- **Instance state.** Each instance tracks its open legs.
+  - An update of a live `(pane, id)` replaces the toast in place (or closes the old toast when
+    the new routing has no toast leg) and forgets the old instance silently.
+  - `p=close` emits `CloseToast`. The instance stays until the toast's `Closed` event arrives,
+    and then a close report is sent when `c=1`.
+  - `Activated` sends `GuiReply::Osc99Activation { button: None }` when `a=report`. Without
+    `c=1` the instance is forgotten. With `c=1` it waits for the last tracked leg to close,
+    then sends exactly one `Osc99Closed { Tracked }`.
+  - An event for an unknown instance is ignored. This covers replaced and forgotten
+    instances.
+- **Interim rules until 138.12, 138.13 and 138.16.**
+  - The `LinuxSystem` leg is still driven by the old per-notification thread, which sends its
+    own activation and close reports. The registry treats it as externally managed: it never
+    reports for it, `p=close` drops it silently, and while it is open no registry close report
+    is sent (otherwise `Both` routing would report twice).
+  - An instance with an `UntrackedSystem` leg never gets a registry close report, because the
+    old code already sent `untracked` at display. This is the final 138.16 rule, applied now.
+
+Deliverable: the registry tests listed below.
+
+- update-in-place suppresses the old close;
+- activation without `c=1` sends no close;
+- activation with `c=1` sends the activation and then exactly one close when the toast
+  closes;
+- `p=close` sends a close report only when `c=1`;
+- the interim `LinuxSystem` and `UntrackedSystem` rules.
+
+The "activation on one leg closes the other legs" test moves to 138.13, the first point at
+which two closable legs exist.
 
 #### 138.8 — Toast buttons
 
@@ -5639,6 +5687,8 @@ Deliverable:
 - `DispatcherState` tests for each path.
 - The fake-server integration test extended: an update sends `replaces_id`, and the old id's
   close signal produces no event; `Close` calls `CloseNotification` once.
+- A registry test: an activation on one leg (toast or Linux) emits a close for the
+  instance's other leg (moved here from 138.7).
 
 #### 138.14 — Linux presentation: icons, sounds, category, markup
 
