@@ -4364,7 +4364,7 @@ mod tests {
     fn host_capabilities_default_then_set_and_get() {
         use freminal_common::host_capabilities::{
             Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
-            Osc99CloseEvents, Osc99Features, Osc99FocusAction, Osc99IconSupport, Osc99SoundNames,
+            Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
             Osc99Support, Osc99UrgencySupport,
         };
 
@@ -4376,7 +4376,7 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,

@@ -49,7 +49,7 @@ pub struct Osc99Features {
     /// application.
     pub close_events: Osc99CloseEvents,
     /// Whether activating a notification focuses the window that produced it.
-    pub activation_focus: Osc99FocusAction,
+    pub activation_focus: Osc99FocusSupport,
     /// Whether the host honours an application-requested auto-expiry (`w=`).
     pub auto_expiry: Osc99AutoExpiry,
     /// Whether the host honours the requested urgency level (`u=`).
@@ -86,7 +86,7 @@ pub enum Osc99CloseEvents {
 
 /// Whether activating a notification focuses the window that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99FocusAction {
+pub enum Osc99FocusSupport {
     /// Activation focuses the source window.
     Supported,
     /// Activation never focuses the source window.

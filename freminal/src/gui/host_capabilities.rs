@@ -13,7 +13,7 @@
 use freminal_common::config::{Config, NotificationRouting};
 use freminal_common::host_capabilities::{
     HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
-    Osc99CloseEvents, Osc99Features, Osc99FocusAction, Osc99IconSupport, Osc99SoundNames,
+    Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
     Osc99Support, Osc99UrgencySupport,
 };
 
@@ -166,7 +166,7 @@ pub(super) const fn toast_leg() -> Osc99Features {
     Osc99Features {
         activation_report: Osc99ActivationReport::Reported,
         close_events: Osc99CloseEvents::Reported,
-        activation_focus: Osc99FocusAction::Supported,
+        activation_focus: Osc99FocusSupport::Supported,
         auto_expiry: Osc99AutoExpiry::Supported,
         urgency: Osc99UrgencySupport::Supported,
         sound_names: Osc99SoundNames::SystemAndSilent,
@@ -182,7 +182,7 @@ const fn no_features() -> Osc99Features {
     Osc99Features {
         activation_report: Osc99ActivationReport::NotReported,
         close_events: Osc99CloseEvents::NotReported,
-        activation_focus: Osc99FocusAction::Unsupported,
+        activation_focus: Osc99FocusSupport::Unsupported,
         auto_expiry: Osc99AutoExpiry::Unsupported,
         urgency: Osc99UrgencySupport::Unsupported,
         sound_names: Osc99SoundNames::SystemAndSilent,
@@ -222,9 +222,9 @@ pub(super) const fn system_leg(
                     },
                     close_events: Osc99CloseEvents::Reported,
                     activation_focus: if has_actions {
-                        Osc99FocusAction::Supported
+                        Osc99FocusSupport::Supported
                     } else {
-                        Osc99FocusAction::Unsupported
+                        Osc99FocusSupport::Unsupported
                     },
                     auto_expiry: Osc99AutoExpiry::Supported,
                     urgency: Osc99UrgencySupport::Supported,
@@ -255,7 +255,7 @@ const fn untracked_system_leg(urgency: Osc99UrgencySupport) -> Osc99Features {
     Osc99Features {
         activation_report: Osc99ActivationReport::NotReported,
         close_events: Osc99CloseEvents::NotReported,
-        activation_focus: Osc99FocusAction::Unsupported,
+        activation_focus: Osc99FocusSupport::Unsupported,
         auto_expiry: Osc99AutoExpiry::Unsupported,
         urgency,
         sound_names: Osc99SoundNames::SystemAndSilent,
@@ -283,12 +283,12 @@ const fn union(a: Osc99Features, b: Osc99Features) -> Osc99Features {
         } else {
             Osc99CloseEvents::NotReported
         },
-        activation_focus: if matches!(a.activation_focus, Osc99FocusAction::Supported)
-            || matches!(b.activation_focus, Osc99FocusAction::Supported)
+        activation_focus: if matches!(a.activation_focus, Osc99FocusSupport::Supported)
+            || matches!(b.activation_focus, Osc99FocusSupport::Supported)
         {
-            Osc99FocusAction::Supported
+            Osc99FocusSupport::Supported
         } else {
-            Osc99FocusAction::Unsupported
+            Osc99FocusSupport::Unsupported
         },
         auto_expiry: if matches!(a.auto_expiry, Osc99AutoExpiry::Supported)
             || matches!(b.auto_expiry, Osc99AutoExpiry::Supported)
@@ -353,12 +353,12 @@ const fn intersection(a: Osc99Features, b: Osc99Features) -> Osc99Features {
         } else {
             Osc99CloseEvents::NotReported
         },
-        activation_focus: if matches!(a.activation_focus, Osc99FocusAction::Supported)
-            && matches!(b.activation_focus, Osc99FocusAction::Supported)
+        activation_focus: if matches!(a.activation_focus, Osc99FocusSupport::Supported)
+            && matches!(b.activation_focus, Osc99FocusSupport::Supported)
         {
-            Osc99FocusAction::Supported
+            Osc99FocusSupport::Supported
         } else {
-            Osc99FocusAction::Unsupported
+            Osc99FocusSupport::Unsupported
         },
         auto_expiry: if matches!(a.auto_expiry, Osc99AutoExpiry::Supported)
             && matches!(b.auto_expiry, Osc99AutoExpiry::Supported)
@@ -597,7 +597,7 @@ mod tests {
             Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Supported,
+                activation_focus: Osc99FocusSupport::Supported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -663,7 +663,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Supported,
+                activation_focus: Osc99FocusSupport::Supported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::Standard,
@@ -697,7 +697,7 @@ mod tests {
                 Osc99Support::Supported(Osc99Features {
                     activation_report: Osc99ActivationReport::Reported,
                     close_events: Osc99CloseEvents::NotReported,
-                    activation_focus: Osc99FocusAction::Supported,
+                    activation_focus: Osc99FocusSupport::Supported,
                     auto_expiry: Osc99AutoExpiry::Unsupported,
                     urgency: Osc99UrgencySupport::Supported,
                     sound_names: Osc99SoundNames::SystemAndSilent,
@@ -723,7 +723,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::NotReported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Unsupported,
                 urgency: Osc99UrgencySupport::Unsupported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -747,7 +747,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Supported,
+                activation_focus: Osc99FocusSupport::Supported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -770,7 +770,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::NotReported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Unsupported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -806,7 +806,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -881,7 +881,7 @@ mod tests {
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::NotReported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Unsupported,
                 urgency: Osc99UrgencySupport::Unsupported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -1031,7 +1031,7 @@ mod tests {
             features.activation_report,
             Osc99ActivationReport::NotReported
         );
-        assert_eq!(features.activation_focus, Osc99FocusAction::Unsupported);
+        assert_eq!(features.activation_focus, Osc99FocusSupport::Unsupported);
         assert_eq!(features.buttons, Osc99ButtonSupport::Unsupported);
         // Everything the daemon still offers stays.
         assert_eq!(features.close_events, Osc99CloseEvents::Reported);

@@ -719,16 +719,11 @@ mod window_manipulation_reply_tests {
     use std::sync::{Arc, Weak};
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
-    use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency,
-    };
     use freminal_common::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
-        Osc99Sound,
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
-    use freminal_common::buffer_states::window_manipulation::{
-        Notification99Data, Osc99ControlKind, WindowManipulation,
-    };
+    use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::BellMode;
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 

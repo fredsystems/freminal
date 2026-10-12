@@ -198,6 +198,9 @@ impl TerminalHandler {
             // supported, control payloads (`p=?`, `p=close`, `p=alive`) act at
             // once and content payloads are reassembled.
             AnsiOscType::Notify99(cmd) => self.handle_osc99(cmd),
+            // A chunk the parser refused: abandons the transfer it names,
+            // behind the same support gate as every other OSC 99 chunk.
+            AnsiOscType::Notify99Rejected(rejected) => self.handle_osc99_rejected(rejected),
 
             AnsiOscType::NoOp => {}
         }
@@ -260,12 +263,12 @@ mod tests {
     use crate::state::internal::TerminalState;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency, Osc99Action, Osc99ActionEdit, Osc99ChunkState,
-        Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
+        Osc99Action, Osc99ActionEdit, Osc99ChunkState, Osc99Command, Osc99PayloadEncoding,
+        Osc99PayloadType,
     };
     use freminal_common::buffer_states::osc99_notification::{
-        Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
-        Osc99ControlKind, Osc99Expiry,
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry,
     };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
@@ -273,7 +276,7 @@ mod tests {
     };
     use freminal_common::host_capabilities::{
         HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport,
-        Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusAction, Osc99IconSupport,
+        Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport,
         Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
     };
     use freminal_common::pty_write::PtyWrite;
@@ -573,7 +576,7 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -798,7 +801,7 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Unsupported,
+                activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Supported,
                 urgency: Osc99UrgencySupport::Supported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
@@ -891,7 +894,7 @@ mod tests {
     }
 
     /// Whether the in-flight entry for `id` is a tombstone.
-    fn osc99_is_tombstone(state: &TerminalState, id: &str) -> bool {
+    fn osc99_has_tombstone(state: &TerminalState, id: &str) -> bool {
         matches!(
             state.handler.pending_osc99.get(Some(id)),
             Some(super::super::notify_99::PendingEntry::Dropped)
@@ -1028,7 +1031,7 @@ mod tests {
     fn a_tombstone_is_unaffected_by_a_control_chunk() {
         let (mut state, _rx) = osc99_state();
         osc99_send(&mut state, "i=t:d=0:e=1", "@@@@");
-        assert!(osc99_is_tombstone(&state, "t"));
+        assert!(osc99_has_tombstone(&state, "t"));
 
         osc99_send(&mut state, "i=t:p=close", "");
         assert_eq!(
@@ -1039,7 +1042,7 @@ mod tests {
             }]
         );
         assert!(
-            osc99_is_tombstone(&state, "t"),
+            osc99_has_tombstone(&state, "t"),
             "a control chunk must not remove the tombstone"
         );
 
@@ -1116,7 +1119,7 @@ mod tests {
     fn tombstones_are_evicted_like_any_other_entry() {
         let (mut state, _rx) = osc99_state();
         osc99_send(&mut state, "i=bad:d=0:e=1", "@@@@");
-        assert!(osc99_is_tombstone(&state, "bad"));
+        assert!(osc99_has_tombstone(&state, "bad"));
         for i in 0..128 {
             osc99_send(&mut state, &format!("i=id-{i}:d=0"), "x");
         }
@@ -1223,7 +1226,7 @@ mod tests {
         let (mut state, rx) = osc99_state();
         osc99_send(&mut state, "i=r:d=0", "head ");
         osc99_send(&mut state, &osc99_over_cap_metadata("r"), "middle ");
-        assert!(osc99_is_tombstone(&state, "r"));
+        assert!(osc99_has_tombstone(&state, "r"));
         state.handler.pending_osc99.assert_costs_consistent();
         assert_eq!(state.handler.pending_osc99.total_cost(), 0);
 
@@ -1242,7 +1245,7 @@ mod tests {
     fn a_rejected_first_chunk_still_tombstones_the_transfer() {
         let (mut state, _rx) = osc99_state();
         osc99_send(&mut state, &osc99_over_cap_metadata("first"), "head ");
-        assert!(osc99_is_tombstone(&state, "first"));
+        assert!(osc99_has_tombstone(&state, "first"));
         osc99_send(&mut state, "i=first", "tail");
         assert_eq!(osc99_titles(&state), Vec::<String>::new());
         assert!(state.handler.pending_osc99.is_empty());
@@ -1283,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_oversized_stand_in_tombstones_the_transfer() {
+    fn a_rejected_oversized_chunk_tombstones_the_transfer() {
         let mut handler = osc99_supported_handler();
         let first = Osc99Command {
             id: Some("big".to_owned()),
@@ -1298,8 +1301,8 @@ mod tests {
             &vec![b'x'; 1_048_576],
         )
         .unwrap_err();
-        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(
-            Osc99Command::rejected(oversized.rejected()),
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99Rejected(
+            oversized.rejected().clone(),
         ))]);
         assert!(matches!(
             handler.pending_osc99.get(Some("big")),

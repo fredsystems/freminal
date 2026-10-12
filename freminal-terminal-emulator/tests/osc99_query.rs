@@ -24,10 +24,11 @@
 //! and could not catch a regression in it.
 
 use crossbeam_channel::Receiver;
-use freminal_common::buffer_states::window_manipulation::{Osc99ControlKind, WindowManipulation};
+use freminal_common::buffer_states::osc99_notification::Osc99ControlKind;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
     HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
-    Osc99CloseEvents, Osc99Features, Osc99FocusAction, Osc99IconSupport, Osc99SoundNames,
+    Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
     Osc99Support, Osc99UrgencySupport,
 };
 use freminal_common::pty_write::PtyWrite;
@@ -46,7 +47,7 @@ const fn toast_like() -> Osc99Features {
     Osc99Features {
         activation_report: Osc99ActivationReport::Reported,
         close_events: Osc99CloseEvents::Reported,
-        activation_focus: Osc99FocusAction::Supported,
+        activation_focus: Osc99FocusSupport::Supported,
         auto_expiry: Osc99AutoExpiry::Supported,
         urgency: Osc99UrgencySupport::Supported,
         sound_names: Osc99SoundNames::SystemAndSilent,
@@ -152,7 +153,7 @@ fn query_with_close_not_reported_omits_c_key() {
 fn query_with_no_supported_action_starts_with_occasion_key() {
     let features = Osc99Features {
         activation_report: Osc99ActivationReport::NotReported,
-        activation_focus: Osc99FocusAction::Unsupported,
+        activation_focus: Osc99FocusSupport::Unsupported,
         ..toast_like()
     };
     assert_eq!(
@@ -183,7 +184,7 @@ fn query_with_only_the_always_present_features_is_minimal() {
     let features = Osc99Features {
         activation_report: Osc99ActivationReport::NotReported,
         close_events: Osc99CloseEvents::NotReported,
-        activation_focus: Osc99FocusAction::Unsupported,
+        activation_focus: Osc99FocusSupport::Unsupported,
         auto_expiry: Osc99AutoExpiry::Unsupported,
         urgency: Osc99UrgencySupport::Unsupported,
         sound_names: Osc99SoundNames::SystemAndSilent,

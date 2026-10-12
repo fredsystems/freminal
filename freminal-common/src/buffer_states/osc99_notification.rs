@@ -7,15 +7,14 @@
 //!
 //! These are the typed values the terminal handler hands to the GUI inside
 //! `WindowManipulation::Notification99` / `WindowManipulation::Osc99Control`.
-//! The parser-side types (`Osc99Command`, `NotificationUrgency`,
-//! `NotificationOccasion`) live in [`super::osc_notify_99`]; this module holds
-//! only what crosses the PTY-thread -> GUI-thread boundary.
+//! The parser-side types (`Osc99Command` and the metadata enums only the
+//! parser and handler use) live in [`super::osc_notify_99`], which imports the
+//! shared value enums from here; this module holds what crosses the
+//! PTY-thread -> GUI-thread boundary.
 //!
 //! Reference: <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
 
 use std::num::NonZeroU32;
-
-use super::osc_notify_99::{NotificationOccasion, NotificationUrgency};
 
 /// Whether the application asked to be told when the notification is
 /// activated (`a=report`).
@@ -80,6 +79,28 @@ pub enum Osc99ControlKind {
     Close,
     /// `p=alive`: liveness poll; the terminal answers with the live-id list.
     Alive,
+}
+
+/// Urgency level of an OSC 99 notification (`u=` key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationUrgency {
+    /// `u=0`.
+    Low,
+    /// `u=1`.
+    Normal,
+    /// `u=2`.
+    Critical,
+}
+
+/// Display occasion of an OSC 99 notification (`o=` key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationOccasion {
+    /// `o=always` (default): honour unconditionally.
+    Always,
+    /// `o=unfocused`: only when the source window lacks focus.
+    Unfocused,
+    /// `o=invisible`: only when unfocused and not visible.
+    Invisible,
 }
 
 /// Data payload for a stateful OSC 99 desktop notification.

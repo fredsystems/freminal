@@ -35,7 +35,8 @@ use std::fmt;
 use std::num::{IntErrorKind, NonZeroU32};
 
 use crate::buffer_states::osc99_notification::{
-    Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
+    NotificationOccasion, NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting,
+    Osc99CloseReporting, Osc99Expiry,
 };
 use crate::key_value::{KeyValueError, KeyValueItem, KeyValueSeparator, tokenize};
 
@@ -59,12 +60,6 @@ pub enum Osc99PayloadType {
     /// Any other `p=` value (including an empty one).  Its payload is
     /// discarded by reassembly, but its metadata and `d=` still apply.
     Unknown,
-    /// Never produced by a `p=` key: marks a chunk the parser rejected (see
-    /// [`Osc99ParseError`]).  The [`Osc99Command`] built by
-    /// [`Osc99Command::rejected`] carries only the best-effort `i=` and `d=`,
-    /// so the terminal can abandon the transfer the chunk belonged to
-    /// instead of later assembling a truncated notification.
-    Rejected,
 }
 
 /// How the payload of one OSC 99 chunk is encoded (`e=` key).
@@ -111,28 +106,6 @@ pub enum Osc99ActionEdit {
     Add(Osc99Action),
     /// A `-`-prefixed action word (`-report` / `-focus`): remove the action.
     Remove(Osc99Action),
-}
-
-/// Urgency level of an OSC 99 notification (`u=` key).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationUrgency {
-    /// `u=0`.
-    Low,
-    /// `u=1`.
-    Normal,
-    /// `u=2`.
-    Critical,
-}
-
-/// Display occasion of an OSC 99 notification (`o=` key).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationOccasion {
-    /// `o=always` (default): honour unconditionally.
-    Always,
-    /// `o=unfocused`: only when the source window lacks focus.
-    Unfocused,
-    /// `o=invisible`: only when unfocused and not visible.
-    Invisible,
 }
 
 /// What survives of a chunk the parser rejected: the identity of the transfer
@@ -296,19 +269,6 @@ impl Osc99Command {
             notification_types: Vec::new(),
             urgency: None,
             expiry: None,
-        }
-    }
-
-    /// The command that stands for a chunk the parser rejected: payload type
-    /// [`Osc99PayloadType::Rejected`], the id and chunk state the rejected
-    /// chunk carried, and nothing else.
-    #[must_use]
-    pub fn rejected(chunk: &Osc99RejectedChunk) -> Self {
-        Self {
-            id: chunk.id.clone(),
-            payload_type: Osc99PayloadType::Rejected,
-            chunk_state: chunk.chunk_state,
-            ..Self::blank()
         }
     }
 }
@@ -1696,23 +1656,6 @@ mod tests {
             Osc99RejectedChunk {
                 id: Some("big".to_owned()),
                 chunk_state: Osc99ChunkState::More,
-            }
-        );
-    }
-
-    #[test]
-    fn the_rejected_command_carries_only_the_id_and_chunk_state() {
-        let chunk = Osc99RejectedChunk {
-            id: Some("x".to_owned()),
-            chunk_state: Osc99ChunkState::More,
-        };
-        assert_eq!(
-            Osc99Command::rejected(&chunk),
-            Osc99Command {
-                id: Some("x".to_owned()),
-                payload_type: Osc99PayloadType::Rejected,
-                chunk_state: Osc99ChunkState::More,
-                ..Osc99Command::blank()
             }
         );
     }

@@ -48,9 +48,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, select};
-use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
-use freminal_common::buffer_states::osc99_notification::Osc99Expiry;
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, NotificationUrgency, Osc99Expiry,
+};
 use freminal_common::send_or_log;
 use freminal_windowing::{RepaintProxy, WindowId};
 use zbus::MatchRule;
@@ -1205,9 +1205,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use freminal_common::buffer_states::osc_notify_99::NotificationOccasion;
     use freminal_common::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Sound,
+        NotificationOccasion, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+        Osc99Sound,
     };
     use std::collections::HashSet;
 

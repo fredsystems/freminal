@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
+use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use regex::{Regex, RegexBuilder};
 
 /// The compiled-regex size limit, in bytes. Bounds the memory a hostile or
@@ -210,12 +210,9 @@ fn compile_rule(rule: &str) -> Result<Osc99FilterRule, Osc99FilterError> {
 
 #[cfg(test)]
 mod tests {
-    use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency,
-    };
     use freminal_common::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
-        Osc99Sound,
+        NotificationOccasion, NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting,
+        Osc99CloseReporting, Osc99Expiry, Osc99Sound,
     };
 
     use super::*;

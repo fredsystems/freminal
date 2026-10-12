@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-pub use super::osc99_notification::{Notification99Data, Osc99ControlKind};
+use super::osc99_notification::{Notification99Data, Osc99ControlKind};
 
 /// Category of a desktop/in-app notification (Task 76).
 ///
@@ -220,10 +220,9 @@ impl TryFrom<(usize, usize, usize)> for WindowManipulation {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::buffer_states::osc_notify_99::{NotificationOccasion, NotificationUrgency};
     use crate::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
-        Osc99Sound,
+        NotificationOccasion, NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting,
+        Osc99CloseReporting, Osc99Expiry, Osc99Sound,
     };
     use std::num::NonZeroU32;
 

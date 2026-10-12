@@ -66,9 +66,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::{
-    Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
+    Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+    Osc99Expiry,
 };
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -635,10 +635,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency,
+    use freminal_common::buffer_states::osc99_notification::{
+        NotificationOccasion, NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
-    use freminal_common::buffer_states::osc99_notification::{Osc99Expiry, Osc99Sound};
     use freminal_windowing::WindowId;
 
     use super::*;

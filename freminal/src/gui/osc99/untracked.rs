@@ -17,9 +17,9 @@
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::borrow::Cow;
 
+use freminal_common::buffer_states::osc99_notification::Notification99Data;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::icon_raster::rasterize_chrome_icon_png;
@@ -180,7 +180,7 @@ fn build_untracked_notification(
 
     #[cfg(target_os = "windows")]
     {
-        use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
+        use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 
         notification.urgency(match data.urgency {
             NotificationUrgency::Low => notify_rust::Urgency::Low,
@@ -415,11 +415,9 @@ mod tests {
     }
 
     fn test_notification() -> Notification99Data {
-        use freminal_common::buffer_states::osc_notify_99::{
-            NotificationOccasion, NotificationUrgency,
-        };
         use freminal_common::buffer_states::osc99_notification::{
-            Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
+            NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+            Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
         };
 
         Notification99Data {

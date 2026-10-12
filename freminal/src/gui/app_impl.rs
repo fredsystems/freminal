@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
-use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
+use freminal_common::buffer_states::osc99_notification::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::send_or_log;

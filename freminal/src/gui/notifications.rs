@@ -28,8 +28,9 @@ use std::time::Instant;
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
-use freminal_common::buffer_states::osc_notify_99::NotificationOccasion;
-use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99ControlKind};
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, NotificationOccasion, Osc99ControlKind,
+};
 use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::send_or_log;
@@ -763,10 +764,9 @@ mod tests {
         NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99Filter, Osc99Origin,
         Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
     };
-    use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
     use freminal_common::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
-        Osc99Sound,
+        NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+        Osc99Expiry, Osc99Sound,
     };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;

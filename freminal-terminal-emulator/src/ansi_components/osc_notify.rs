@@ -14,9 +14,9 @@
 //! [`AnsiOscType::Notify99`] carrying a fully-parsed
 //! [`freminal_common::buffer_states::osc_notify_99::Osc99Command`].
 //! Chunk reassembly, transport to the GUI, and reverse-write are handled
-//! downstream (Tasks 99.3+).  A sequence the parser rejects still produces an
-//! [`AnsiOscType::Notify99`], a stand-in carrying only its `i=` and `d=`, so
-//! the handler can abandon the transfer it belonged to.
+//! downstream (Tasks 99.3+).  A sequence the parser rejects produces an
+//! [`AnsiOscType::Notify99Rejected`] carrying only its `i=` and `d=`, so the
+//! handler can abandon the transfer it belonged to.
 //!
 //! OSC 9 also carries the conflicting `ConEmu` progress-report sub-protocol
 //! (`9;4;<state>[;<value>]`, issue #507). A valid progress report produces an
@@ -44,7 +44,7 @@
 
 use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
-use freminal_common::buffer_states::osc_notify_99::{Osc99Command, parse_osc_99};
+use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 use freminal_common::buffer_states::progress::ProgressUpdate;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -234,10 +234,10 @@ pub(super) fn handle_osc_notify_777(raw_params: &[u8], output: &mut Vec<Terminal
 /// The metadata and payload byte slices are then forwarded to
 /// [`parse_osc_99`] which returns a typed [`Osc99Command`].  On success an
 /// [`AnsiOscType::Notify99`] is appended to `output`.  On error the failure
-/// is logged at `debug!` level and the stand-in command for the rejected chunk
-/// ([`Osc99Command::rejected`]) is appended instead, so the handler can
-/// abandon the transfer rather than let the rest of it assemble into a
-/// truncated notification.  The parser only fails on its two size guards (an
+/// is logged at `debug!` level and an [`AnsiOscType::Notify99Rejected`]
+/// naming the rejected chunk's transfer is appended instead, so the handler
+/// can abandon it rather than let the rest of it assemble into a truncated
+/// notification.  The parser only fails on its two size guards (an
 /// oversized sequence or too many metadata items); every other irregularity
 /// is ignored by the parser itself.
 ///
@@ -273,8 +273,8 @@ pub(super) fn handle_osc_notify_99(raw_params: &[u8], output: &mut Vec<TerminalO
             // `Osc99ParseError` is only ever a size-guard failure; its Display
             // carries numbers, never sequence content, so it is safe to log.
             tracing::debug!("OSC 99: chunk rejected: {e}");
-            output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99(
-                Osc99Command::rejected(e.rejected()),
+            output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99Rejected(
+                e.rejected().clone(),
             )));
         }
     }
@@ -324,7 +324,7 @@ mod tests {
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
         MAX_OSC99_METADATA_ITEMS, MAX_OSC99_SEQUENCE_BYTES, Osc99ChunkState, Osc99Command,
-        Osc99PayloadEncoding, Osc99PayloadType,
+        Osc99PayloadEncoding, Osc99PayloadType, Osc99RejectedChunk,
     };
     use freminal_common::buffer_states::progress::ProgressUpdate;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -749,6 +749,16 @@ mod tests {
         }
     }
 
+    /// Extract the rejected chunk from a single-element output, panicking on
+    /// mismatch.
+    fn expect_notify99_rejected(output: &[TerminalOutput]) -> &Osc99RejectedChunk {
+        assert_eq!(output.len(), 1, "expected one output, got: {output:?}");
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::Notify99Rejected(rejected)) => rejected,
+            other => panic!("expected Notify99Rejected, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn osc99_title_payload_bel() {
         // 99 ; p=title ; Hello  BEL
@@ -847,9 +857,9 @@ mod tests {
     }
 
     #[test]
-    fn osc99_too_many_metadata_items_yields_the_rejected_stand_in() {
+    fn osc99_too_many_metadata_items_yields_a_rejected_chunk() {
         // 65 items, the id and the not-done marker among them: the sequence
-        // is rejected, but its identity survives as a `Rejected` command.
+        // is rejected, but its identity survives as a `Notify99Rejected`.
         let mut sequence = b"99;i=mid:d=0:".to_vec();
         sequence.extend(
             vec!["u=1"; MAX_OSC99_METADATA_ITEMS - 1]
@@ -858,30 +868,28 @@ mod tests {
         );
         sequence.extend_from_slice(b";x\x07");
         let output = feed_osc(&sequence);
-        let cmd = expect_notify99(&output);
-        assert_eq!(cmd.payload_type, Osc99PayloadType::Rejected);
-        assert_eq!(cmd.id, Some("mid".to_owned()));
-        assert_eq!(cmd.chunk_state, Osc99ChunkState::More);
+        let rejected = expect_notify99_rejected(&output);
         assert_eq!(
-            cmd.payload, b"",
-            "the payload of a rejected chunk is dropped"
+            rejected,
+            &Osc99RejectedChunk {
+                id: Some("mid".to_owned()),
+                chunk_state: Osc99ChunkState::More,
+            },
+            "only the identity of the transfer survives"
         );
-        assert_eq!(cmd.urgency, None, "no other metadata is applied");
     }
 
     #[test]
-    fn osc99_direct_call_oversized_sequence_yields_the_rejected_stand_in() {
+    fn osc99_direct_call_oversized_sequence_yields_a_rejected_chunk() {
         // The OSC accumulator caps the body first, so reach the parser's own
         // guard by calling the handler directly.
         let mut raw = b"99;i=1:d=0:p=title;".to_vec();
         raw.extend(std::iter::repeat_n(b'x', MAX_OSC99_SEQUENCE_BYTES));
         let mut output = Vec::new();
         super::handle_osc_notify_99(&raw, &mut output);
-        let cmd = expect_notify99(&output);
-        assert_eq!(cmd.payload_type, Osc99PayloadType::Rejected);
-        assert_eq!(cmd.id, Some("1".to_owned()));
-        assert_eq!(cmd.chunk_state, Osc99ChunkState::More);
-        assert_eq!(cmd.payload, b"");
+        let rejected = expect_notify99_rejected(&output);
+        assert_eq!(rejected.id, Some("1".to_owned()));
+        assert_eq!(rejected.chunk_state, Osc99ChunkState::More);
     }
 
     /// A parse failure on an OSC 99 with a huge payload must not copy the
@@ -901,12 +909,7 @@ mod tests {
 
         let events = capture(|| {
             let output = feed_osc(&sequence);
-            let cmd = expect_notify99(&output);
-            assert_eq!(
-                cmd.payload_type,
-                Osc99PayloadType::Rejected,
-                "a rejected sequence must not produce a notification"
-            );
+            let _ = expect_notify99_rejected(&output);
         });
 
         assert!(

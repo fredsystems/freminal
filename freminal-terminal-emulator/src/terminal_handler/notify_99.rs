@@ -16,22 +16,23 @@
 //! Control payloads (`p=?`, `p=close`, `p=alive`) act immediately, whatever
 //! `d=` says, and never touch the pending store. Only content payloads
 //! (`title`, `body`, `icon`, `buttons`, and unknown types) are reassembled.
-//! A chunk the parser rejected ([`Osc99PayloadType::Rejected`]) abandons the
-//! transfer it belonged to.
+//! A chunk the parser rejected ([`AnsiOscType::Notify99Rejected`](freminal_common::buffer_states::osc::AnsiOscType::Notify99Rejected))
+//! abandons the transfer it belonged to.
 
 use std::collections::HashMap;
 
 use freminal_common::buffer_states::osc_notify_99::{
-    MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99ActionEdit,
-    Osc99ChunkState, Osc99Command, Osc99PayloadEncoding, Osc99PayloadType, resolve_osc99_actions,
+    MAX_OSC99_SEQUENCE_BYTES, Osc99ActionEdit, Osc99ChunkState, Osc99Command, Osc99PayloadEncoding,
+    Osc99PayloadType, Osc99RejectedChunk, resolve_osc99_actions,
 };
 use freminal_common::buffer_states::osc99_notification::{
-    Notification99Data, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
+    Notification99Data, NotificationOccasion, NotificationUrgency, Osc99CloseReporting,
+    Osc99ControlKind, Osc99Expiry, Osc99Sound,
 };
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
     Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents,
-    Osc99Features, Osc99FocusAction, Osc99IconSupport, Osc99SoundNames, Osc99Support,
+    Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames, Osc99Support,
     Osc99UrgencySupport,
 };
 
@@ -357,8 +358,7 @@ impl PendingNotification {
     /// decoding it according to `encoding`.
     ///
     /// For `Unknown` (whose payload is discarded), the control types `Close`,
-    /// `Alive` and `Query`, and `Rejected` (which never reaches here) nothing
-    /// is accumulated; only the metadata is merged (done by
+    /// `Alive` and `Query` nothing is accumulated; only the metadata is merged (done by
     /// [`accept`](Self::accept)).
     ///
     /// # Errors
@@ -382,7 +382,6 @@ impl PendingNotification {
             Osc99PayloadType::Close
             | Osc99PayloadType::Alive
             | Osc99PayloadType::Query
-            | Osc99PayloadType::Rejected
             | Osc99PayloadType::Unknown => {
                 return Ok(());
             }
@@ -558,8 +557,8 @@ pub(in crate::terminal_handler) fn osc99_query_reply_body(features: Osc99Feature
 
     let mut actions: Vec<&str> = Vec::with_capacity(2);
     match features.activation_focus {
-        Osc99FocusAction::Supported => actions.push("focus"),
-        Osc99FocusAction::Unsupported => {}
+        Osc99FocusSupport::Supported => actions.push("focus"),
+        Osc99FocusSupport::Unsupported => {}
     }
     match features.activation_report {
         Osc99ActivationReport::Reported => actions.push("report"),
@@ -913,9 +912,11 @@ impl PendingOsc99 {
         }
     }
 
-    /// Whether `id` currently holds a tombstone. A tombstone that is looked
-    /// up counts as touched: its transfer is still in progress.
-    fn is_tombstone(&mut self, id: Option<&str>) -> bool {
+    /// Whether `id` currently holds a tombstone, touching the slot when it
+    /// does: a tombstone that is looked up counts as touched, because its
+    /// transfer is still in progress. A lookup that finds no tombstone still
+    /// advances the clock but touches nothing.
+    fn touch_if_tombstone(&mut self, id: Option<&str>) -> bool {
         let now = self.tick();
         let slot = match id {
             Some(id) => self.by_id.get_mut(id),
@@ -1132,9 +1133,6 @@ impl TerminalHandler {
     /// - `p=close` and `p=alive` with an id are forwarded as `Osc99Control`;
     ///   without an id they are no-ops.
     ///
-    /// A [`Rejected`](Osc99PayloadType::Rejected) stand-in abandons the
-    /// transfer it names; see [`reject_osc99_chunk`](Self::reject_osc99_chunk).
-    ///
     /// Everything else is content and goes through
     /// [`reassemble_osc99`](Self::reassemble_osc99); a finalised notification
     /// is pushed as `Notification99` (an icon-only one as `Osc99CacheIcon`).
@@ -1152,9 +1150,6 @@ impl TerminalHandler {
             }
             Osc99PayloadType::Close => self.forward_osc99_control(cmd, Osc99ControlKind::Close),
             Osc99PayloadType::Alive => self.forward_osc99_control(cmd, Osc99ControlKind::Alive),
-            Osc99PayloadType::Rejected => {
-                self.reject_osc99_chunk(cmd.id.as_deref(), cmd.chunk_state);
-            }
             Osc99PayloadType::Title
             | Osc99PayloadType::Body
             | Osc99PayloadType::Icon
@@ -1168,6 +1163,23 @@ impl TerminalHandler {
                 }
             }
         }
+    }
+
+    /// Handle a chunk the parser rejected ([`AnsiOscType::Notify99Rejected`](freminal_common::buffer_states::osc::AnsiOscType::Notify99Rejected)).
+    ///
+    /// Gated like [`handle_osc99`](Self::handle_osc99): while OSC 99 is
+    /// unsupported the chunk is dropped and nothing is abandoned (nothing
+    /// could be pending). While supported the transfer it names is abandoned;
+    /// see [`reject_osc99_chunk`](Self::reject_osc99_chunk).
+    pub(in crate::terminal_handler) fn handle_osc99_rejected(
+        &mut self,
+        rejected: &Osc99RejectedChunk,
+    ) {
+        if matches!(self.host_capabilities().osc99, Osc99Support::Unsupported) {
+            tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
+            return;
+        }
+        self.reject_osc99_chunk(rejected.id.as_deref(), rejected.chunk_state);
     }
 
     /// Forward a `p=close` / `p=alive` request to the GUI.
@@ -1271,7 +1283,7 @@ impl TerminalHandler {
             self.pending_osc99.discard_unidentified_accumulation();
         }
 
-        if self.pending_osc99.is_tombstone(key) {
+        if self.pending_osc99.touch_if_tombstone(key) {
             // The rest of a dropped transfer: ignore the payload; the
             // terminating chunk ends the notification.
             if done {
@@ -1358,7 +1370,7 @@ mod tests {
         Osc99ActivationFocus, Osc99ActivationReporting,
     };
     use freminal_common::host_capabilities::{
-        Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99FocusAction, Osc99IconSupport,
+        Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99FocusSupport, Osc99IconSupport,
         Osc99SoundNames, Osc99UrgencySupport,
     };
     use std::num::NonZeroU32;
@@ -2776,14 +2788,14 @@ mod tests {
     #[test]
     fn store_tombstone_replaces_and_is_detected() {
         let mut store = PendingOsc99::default();
-        assert!(!store.is_tombstone(Some("a")));
-        assert!(!store.is_tombstone(None));
+        assert!(!store.touch_if_tombstone(Some("a")));
+        assert!(!store.touch_if_tombstone(None));
         store.slot_mut(Some("a"));
-        assert!(!store.is_tombstone(Some("a")));
+        assert!(!store.touch_if_tombstone(Some("a")));
         store.tombstone(Some("a"));
-        assert!(store.is_tombstone(Some("a")));
+        assert!(store.touch_if_tombstone(Some("a")));
         store.tombstone(None);
-        assert!(store.is_tombstone(None));
+        assert!(store.touch_if_tombstone(None));
     }
 
     #[test]
@@ -3202,7 +3214,7 @@ mod tests {
         Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::Reported,
-            activation_focus: Osc99FocusAction::Supported,
+            activation_focus: Osc99FocusSupport::Supported,
             auto_expiry: Osc99AutoExpiry::Supported,
             urgency: Osc99UrgencySupport::Supported,
             sound_names: Osc99SoundNames::Standard,
@@ -3217,7 +3229,7 @@ mod tests {
         Osc99Features {
             activation_report: Osc99ActivationReport::NotReported,
             close_events: Osc99CloseEvents::NotReported,
-            activation_focus: Osc99FocusAction::Unsupported,
+            activation_focus: Osc99FocusSupport::Unsupported,
             auto_expiry: Osc99AutoExpiry::Unsupported,
             urgency: Osc99UrgencySupport::Unsupported,
             sound_names: Osc99SoundNames::SystemAndSilent,
@@ -3239,7 +3251,7 @@ mod tests {
             (
                 "focus only",
                 Osc99Features {
-                    activation_focus: Osc99FocusAction::Supported,
+                    activation_focus: Osc99FocusSupport::Supported,
                     ..none_supported()
                 },
                 "a=focus:o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
@@ -3328,7 +3340,7 @@ mod tests {
     #[test]
     fn query_reply_body_focus_only_begins_with_a_focus() {
         let body = osc99_query_reply_body(Osc99Features {
-            activation_focus: Osc99FocusAction::Supported,
+            activation_focus: Osc99FocusSupport::Supported,
             ..none_supported()
         });
         assert!(body.starts_with("a=focus:"), "reply: {body}");

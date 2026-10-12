@@ -6042,6 +6042,12 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The 130-era `Reported` / `NotReported` capability enums stay (reviewed: their meaning is
     "reported", not "supported").
 - **Verification:** mechanical; the test count is unchanged.
+- **Status:** done.
+  - The import cycle is broken, and the `window_manipulation` re-exports are removed.
+  - `touch_if_tombstone` and `Osc99FocusSupport` are in place.
+  - `AnsiOscType::Notify99Rejected` replaces the stand-in, gated on OSC 99 support by
+    `handle_osc99_rejected`.
+  - The test count is 8526 before and after; one test was replaced by a `Display` test.
 
 #### 138.C9 — D-Bus service robustness
 

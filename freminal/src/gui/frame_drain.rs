@@ -550,12 +550,9 @@ mod tests {
     use crate::gui::pty::CommandFinishedEvent;
     use crate::gui::tabs::{Tab, TabId, TabManager};
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
-    use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency,
-    };
     use freminal_common::buffer_states::osc99_notification::{
-        Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
-        Osc99Expiry, Osc99Sound,
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
     };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;

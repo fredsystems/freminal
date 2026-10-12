@@ -29,9 +29,9 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
-use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
-use freminal_common::buffer_states::osc99_notification::Osc99Expiry;
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, NotificationUrgency, Osc99Expiry,
+};
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use freminal_windowing::WindowId;
 
