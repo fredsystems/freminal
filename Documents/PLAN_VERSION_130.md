@@ -5356,8 +5356,9 @@ Deliverable:
 - **Id-less chunks:** id-less `d=0` then id-less `d=1` assembles one notification.
 - **Controls:** `p=?` with `d=0` is answered at once; `p=close` with `d=0` and an id is
   forwarded at once, and an id's pending content survives a control chunk for the same id.
-- **Saturation:** 128 pending ids plus a new complete single-chunk notification displays, and
-  the oldest entry is evicted; a `p=?` on a saturated map is answered.
+- **Saturation:** 128 pending ids plus a new complete single-chunk notification displays
+  without evicting anything (it never enters the store); a new `d=0` id evicts the
+  least-recently-touched entry; a `p=?` on a saturated map is answered.
 - **Finalisation:** controls are stripped from the title (ESC, C1 U+0085 and TAB removed, LF
   kept); a 2000-character body becomes 1024 characters ending in `…`; nine buttons become
   eight; a body-only notification becomes title-only; a notification with no title and no
@@ -5785,6 +5786,17 @@ None yet.
   - the payload is copied only after the metadata is accepted.
 
   The pre-existing `abandon_notification(.., done: bool)` parameter is removed by 138.3.
+- **138.3 (done).** `handle_osc99` is the single entry point. Controls act at once and never
+  touch `PendingOsc99`, which holds the by-id map with LRU eviction plus the unidentified
+  slot. A looked-up tombstone counts as touched. Merged list metadata (`n`, `t`, `a` edits)
+  counts toward the 1 MiB per-notification cap, so endless `d=0` chunks cannot grow it.
+  `dispatch_finalized_osc99`, `control_kind` and `is_control_payload` are deleted. Content
+  chunks are still cloned once, because `handle_osc` takes `&AnsiOscType`; controls clone
+  nothing. Orchestrator change, and a plan correction: a complete chunk for a key with no
+  pending entry is finalised without entering the store. The plan text asked for an
+  eviction, which would have destroyed another key's in-progress transfer for no reason.
+  Verification from this subtask on uses `cargo nextest run --all` (main moved to nextest in
+  PR #541).
 
 ---
 

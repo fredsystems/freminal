@@ -796,7 +796,7 @@ mod window_manipulation_reply_tests {
         let drained = drain_commands(vec![
             WindowManipulation::Notification99(Box::new(sample_notification())),
             WindowManipulation::Osc99Control {
-                id: Some("n1".to_owned()),
+                id: "n1".to_owned(),
                 kind: Osc99ControlKind::Alive,
             },
         ]);

@@ -11,17 +11,15 @@
 
 use std::sync::Arc;
 
+use crate::ansi_components::tracer::{
+    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
+};
 use freminal_common::buffer_states::{
     ftcs::{FtcsMarker, FtcsState},
     kitty_graphics::{KittyParseError, parse_kitty_graphics},
     osc::{AnsiOscType, UrlResponse},
     url::Url,
     window_manipulation::{NotificationKind, WindowManipulation},
-};
-use freminal_common::host_capabilities::Osc99Support;
-
-use crate::ansi_components::tracer::{
-    escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
 
 use super::{TerminalHandler, shell_integration};
@@ -195,25 +193,11 @@ impl TerminalHandler {
                 });
             }
 
-            // OSC 99 stateful notification (Task 99).
-            // - while OSC 99 is unsupported EVERY chunk (display payloads,
-            //   `p=close`, `p=alive`, `p=?`) is dropped BEFORE reassembly, so the
-            //   terminal looks like one that does not speak the protocol and no
-            //   state accumulates for a transfer that could complete after the
-            //   host later enables the protocol;
-            // - while supported, each chunk is fed into the reassembly machine and
-            //   on finalize `dispatch_finalized_osc99` acts on it: `p=?` is answered
-            //   here from the host capabilities (Task 130.5) and never reaches the
-            //   GUI, `p=alive` / `p=close` are forwarded as `Osc99Control`, and
-            //   display payloads (title/body/icon/buttons) push Notification99
-            //   (Task 99.4).
-            AnsiOscType::Notify99(cmd) => {
-                if matches!(self.host_capabilities().osc99, Osc99Support::Unsupported) {
-                    tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
-                } else if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
-                    self.dispatch_finalized_osc99(finalized);
-                }
-            }
+            // OSC 99 stateful notification (Task 99). See `handle_osc99`: while
+            // unsupported every chunk is dropped before anything else; while
+            // supported, control payloads (`p=?`, `p=close`, `p=alive`) act at
+            // once and content payloads are reassembled.
+            AnsiOscType::Notify99(cmd) => self.handle_osc99(cmd),
 
             AnsiOscType::NoOp => {}
         }
@@ -280,8 +264,8 @@ mod tests {
         Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
     };
     use freminal_common::buffer_states::osc99_notification::{
-        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind,
-        Osc99Expiry,
+        Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+        Osc99ControlKind, Osc99Expiry,
     };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
@@ -389,7 +373,7 @@ mod tests {
         };
         let result = handler.reassemble_osc99(cmd);
         let finalized = result.expect("single done chunk must finalize");
-        assert_eq!(finalized.title, Some("Hi".to_owned()));
+        assert_eq!(finalized.title, "Hi");
         assert_eq!(finalized.body, None);
         assert_eq!(finalized.icon, None);
         assert!(finalized.meta.id.is_none());
@@ -434,7 +418,7 @@ mod tests {
         };
         let r3 = handler.reassemble_osc99(chunk3);
         let finalized = r3.expect("terminating chunk must finalize");
-        assert_eq!(finalized.title, Some("Hello".to_owned()));
+        assert_eq!(finalized.title, "Hello");
         assert_eq!(finalized.body, Some("World".to_owned()));
         assert_eq!(finalized.icon, None);
         assert_eq!(finalized.meta.id, Some("n1".to_owned()));
@@ -463,25 +447,41 @@ mod tests {
         let r2 = handler.reassemble_osc99(second);
         let finalized = r2.expect("second n1 must finalize (fresh start)");
         // Must not carry stale bytes from the first notification.
-        assert_eq!(finalized.title, Some("Second".to_owned()));
+        assert_eq!(finalized.title, "Second");
     }
 
-    /// Unidentified non-final chunk → dropped, map stays empty.
+    /// An id-less non-final chunk accumulates in the single unidentified slot
+    /// (never in the id map), and an id-less final chunk completes it.
     #[test]
-    fn unidentified_non_final_never_merged() {
+    fn unidentified_chunks_accumulate_in_the_shared_slot() {
         let mut handler = TerminalHandler::new(80, 24);
-        let cmd = Osc99Command {
+        let first = Osc99Command {
             id: None,
             chunk_state: Osc99ChunkState::More,
-            payload: b"ignored".to_vec(),
+            payload: b"Wor".to_vec(),
             ..default_osc99()
         };
-        let result = handler.reassemble_osc99(cmd);
-        assert!(result.is_none(), "non-final, no-id chunk must return None");
-        assert!(
-            handler.pending_notifications.is_empty(),
-            "no map entry must be created for a no-id non-final chunk"
+        assert!(handler.reassemble_osc99(first).is_none());
+        assert_eq!(
+            handler.pending_osc99.identified_len(),
+            0,
+            "an id-less chunk must not enter the id map"
         );
+        assert!(
+            !handler.pending_osc99.is_empty(),
+            "the unidentified slot must hold the chunk"
+        );
+
+        let last = Osc99Command {
+            id: None,
+            payload: b"ld".to_vec(),
+            ..default_osc99()
+        };
+        let finalized = handler
+            .reassemble_osc99(last)
+            .expect("the id-less final chunk must finalize");
+        assert_eq!(finalized.title, "World");
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// Two interleaved ids must not cross-contaminate each other's payloads.
@@ -518,7 +518,7 @@ mod tests {
             ..default_osc99()
         };
         let fa = handler.reassemble_osc99(a2).expect("a must finalize");
-        assert_eq!(fa.title, Some("AAAaaa".to_owned()), "a title contaminated");
+        assert_eq!(fa.title, "AAAaaa", "a title contaminated");
         assert_eq!(fa.body, None);
 
         // Finalize id=b.
@@ -530,13 +530,14 @@ mod tests {
             ..default_osc99()
         };
         let fb = handler.reassemble_osc99(b2).expect("b must finalize");
-        assert_eq!(fb.title, Some("BBBbbb".to_owned()), "b title contaminated");
+        assert_eq!(fb.title, "BBBbbb", "b title contaminated");
         assert_eq!(fb.body, None);
     }
 
-    /// `full_reset()` clears all in-flight pending notifications.
+    /// `full_reset()` clears all in-flight pending notifications, the
+    /// unidentified slot included.
     #[test]
-    fn full_reset_clears_pending_notifications() {
+    fn full_reset_clears_pending_osc99() {
         let mut handler = TerminalHandler::new(80, 24);
 
         // Accumulate a non-final chunk.
@@ -547,23 +548,28 @@ mod tests {
             ..default_osc99()
         };
         handler.reassemble_osc99(chunk);
-        assert!(
-            !handler.pending_notifications.is_empty(),
-            "pending map must be non-empty before reset"
-        );
+        let unidentified = Osc99Command {
+            id: None,
+            chunk_state: Osc99ChunkState::More,
+            payload: b"partial".to_vec(),
+            ..default_osc99()
+        };
+        handler.reassemble_osc99(unidentified);
+        assert_eq!(handler.pending_osc99.identified_len(), 1);
+        assert!(handler.pending_osc99.get(None).is_some());
 
         handler.full_reset();
         assert!(
-            handler.pending_notifications.is_empty(),
-            "full_reset must clear pending_notifications"
+            handler.pending_osc99.is_empty(),
+            "full_reset must clear identified and unidentified pending state"
         );
+        assert_eq!(handler.pending_osc99.identified_len(), 0);
+        assert!(handler.pending_osc99.get(None).is_none());
     }
 
-    /// A handler whose host supports OSC 99: while it does not, every OSC 99
-    /// request is dropped (130 adversarial review finding 14).
-    fn osc99_supported_handler() -> TerminalHandler {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.set_host_capabilities(HostCapabilities {
+    /// Host capabilities under which OSC 99 is honoured.
+    fn osc99_supported_caps() -> HostCapabilities {
+        HostCapabilities {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
@@ -575,7 +581,14 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
-        });
+        }
+    }
+
+    /// A handler whose host supports OSC 99: while it does not, every OSC 99
+    /// request is dropped (130 adversarial review finding 14).
+    fn osc99_supported_handler() -> TerminalHandler {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_host_capabilities(osc99_supported_caps());
         handler
     }
 
@@ -672,7 +685,9 @@ mod tests {
         match &handler.window_commands[0] {
             WindowManipulation::Notification99(data) => {
                 assert_eq!(data.id.as_deref(), Some("notif-1"));
-                assert_eq!(data.body.as_deref(), Some("Body text"));
+                // A body-only notification is promoted into the title.
+                assert_eq!(data.title, "Body text");
+                assert_eq!(data.body, None);
                 assert_eq!(data.urgency, NotificationUrgency::Critical);
                 assert_eq!(data.occasion, NotificationOccasion::Unfocused);
                 assert_eq!(
@@ -743,33 +758,20 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Osc99Control { id, kind } => {
-                assert_eq!(id.as_deref(), Some("close-1"));
+                assert_eq!(id, "close-1");
                 assert_eq!(*kind, Osc99ControlKind::Close);
             }
             other => panic!("expected Osc99Control, got: {other:?}"),
         }
     }
 
-    /// A `p=alive` payload finalizing must push `Osc99Control { kind: Alive }`.
+    /// A `p=alive` payload with an id must push `Osc99Control { kind: Alive }`.
     #[test]
     fn osc_notify99_alive_pushes_osc99_control_alive() {
-        let mut handler = TerminalHandler::new(80, 24);
-        handler.set_host_capabilities(HostCapabilities {
-            osc99: Osc99Support::Supported(Osc99Features {
-                activation_report: Osc99ActivationReport::Reported,
-                close_events: Osc99CloseEvents::Reported,
-                activation_focus: Osc99FocusAction::Unsupported,
-                auto_expiry: Osc99AutoExpiry::Supported,
-                urgency: Osc99UrgencySupport::Supported,
-                sound_names: Osc99SoundNames::SystemAndSilent,
-                body: Osc99BodySupport::Supported,
-                buttons: Osc99ButtonSupport::Supported,
-                icons: Osc99IconSupport::Supported,
-            }),
-        });
+        let mut handler = osc99_supported_handler();
 
         let cmd = Osc99Command {
-            id: None,
+            id: Some("alive-1".to_owned()),
             payload_type: Osc99PayloadType::Alive,
             ..default_osc99()
         };
@@ -778,7 +780,7 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Osc99Control { id, kind } => {
-                assert_eq!(*id, None);
+                assert_eq!(id, "alive-1");
                 assert_eq!(*kind, Osc99ControlKind::Alive);
             }
             other => panic!("expected Osc99Control, got: {other:?}"),
@@ -840,6 +842,374 @@ mod tests {
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
+    }
+
+    // ── 138.3: reassembly rework, fed as real escape sequences ────────────────
+
+    /// A full terminal state whose host supports OSC 99, and the receiver of
+    /// everything it writes to the PTY.
+    fn osc99_state() -> (TerminalState, crossbeam_channel::Receiver<PtyWrite>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut state = TerminalState::new(tx, None);
+        state.handler.set_host_capabilities(osc99_supported_caps());
+        (state, rx)
+    }
+
+    /// Feed one real OSC 99 escape sequence, `ESC ] 99 ; metadata ; payload ST`.
+    fn osc99_send(state: &mut TerminalState, metadata: &str, payload: &str) {
+        let bytes = format!("\x1b]99;{metadata};{payload}\x1b\\");
+        state.handle_incoming_data(bytes.as_bytes());
+    }
+
+    /// Every `Notification99` pushed so far.
+    fn osc99_notifications(state: &TerminalState) -> Vec<&Notification99Data> {
+        state
+            .window_commands
+            .iter()
+            .filter_map(|c| match c {
+                WindowManipulation::Notification99(data) => Some(&**data),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The title of every `Notification99` pushed so far.
+    fn osc99_titles(state: &TerminalState) -> Vec<String> {
+        osc99_notifications(state)
+            .iter()
+            .map(|n| n.title.clone())
+            .collect()
+    }
+
+    /// Everything written to the PTY so far, concatenated.
+    fn osc99_written(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(PtyWrite::Write(bytes)) = rx.try_recv() {
+            out.extend_from_slice(&bytes);
+        }
+        out
+    }
+
+    /// Whether the in-flight entry for `id` is a tombstone.
+    fn osc99_is_tombstone(state: &TerminalState, id: &str) -> bool {
+        matches!(
+            state.handler.pending_osc99.get(Some(id)),
+            Some(super::super::notify_99::PendingEntry::Dropped)
+        )
+    }
+
+    #[test]
+    fn merged_chunks_keep_report_and_default_focus() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=x:d=0:a=report", "T");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        osc99_send(&mut state, "i=x", "U");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "TU");
+        assert_eq!(
+            notes[0].activation_reporting,
+            Osc99ActivationReporting::Report
+        );
+        assert_eq!(notes[0].activation_focus, Osc99ActivationFocus::Focus);
+    }
+
+    #[test]
+    fn earlier_urgency_survives_a_final_chunk_without_u() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=u:d=0:u=2", "A");
+        osc99_send(&mut state, "i=u", "B");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].urgency, NotificationUrgency::Critical);
+    }
+
+    #[test]
+    fn names_and_types_from_two_chunks_keep_arrival_order() {
+        let (mut state, _rx) = osc99_state();
+        // n=a, n=b and t=ta, t=tb, base64 encoded.
+        osc99_send(&mut state, "i=m:d=0:n=YQ==:t=dGE=", "T");
+        osc99_send(&mut state, "i=m:n=Yg==:t=dGI=", "");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].icon_names, ["a", "b"]);
+        assert_eq!(notes[0].notification_types, ["ta", "tb"]);
+    }
+
+    #[test]
+    fn id_less_chunks_assemble_one_notification() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "d=0", "Wor");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        osc99_send(&mut state, "", "ld");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "World");
+        assert_eq!(notes[0].id, None);
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn id_less_transfer_dropped_mid_way_stays_dropped_until_the_final_chunk() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "d=0:e=1", "@@@@");
+        osc99_send(&mut state, "d=0", "ignored");
+        osc99_send(&mut state, "", "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+
+        osc99_send(&mut state, "", "fresh");
+        assert_eq!(osc99_notifications(&state).len(), 1);
+    }
+
+    // ── Controls act immediately ──────────────────────────────────────────────
+
+    #[test]
+    fn query_with_d0_is_answered_at_once() {
+        let (mut state, rx) = osc99_state();
+        osc99_send(&mut state, "i=q:p=?:d=0", "");
+        let written = osc99_written(&rx);
+        assert!(
+            written.starts_with(b"\x1b]99;i=q:p=?;"),
+            "unexpected reply: {written:?}"
+        );
+        assert_eq!(state.window_commands, []);
+    }
+
+    #[test]
+    fn close_with_d0_is_forwarded_at_once() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=c:p=close:d=0", "");
+        assert_eq!(
+            state.window_commands,
+            [WindowManipulation::Osc99Control {
+                id: "c".to_owned(),
+                kind: Osc99ControlKind::Close,
+            }]
+        );
+    }
+
+    #[test]
+    fn controls_without_an_id_push_nothing() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "p=close", "");
+        osc99_send(&mut state, "p=alive", "");
+        osc99_send(&mut state, "p=close:d=0", "");
+        osc99_send(&mut state, "p=alive:d=0", "");
+        assert_eq!(state.window_commands, []);
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn pending_content_survives_a_control_chunk_for_the_same_id() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=x:d=0", "A");
+        osc99_send(&mut state, "i=x:p=alive", "");
+        osc99_send(&mut state, "i=x", "B");
+
+        assert_eq!(state.window_commands.len(), 2);
+        assert_eq!(
+            state.window_commands[0],
+            WindowManipulation::Osc99Control {
+                id: "x".to_owned(),
+                kind: Osc99ControlKind::Alive,
+            }
+        );
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "AB");
+    }
+
+    #[test]
+    fn a_tombstone_is_unaffected_by_a_control_chunk() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=t:d=0:e=1", "@@@@");
+        assert!(osc99_is_tombstone(&state, "t"));
+
+        osc99_send(&mut state, "i=t:p=close", "");
+        assert_eq!(
+            state.window_commands,
+            [WindowManipulation::Osc99Control {
+                id: "t".to_owned(),
+                kind: Osc99ControlKind::Close,
+            }]
+        );
+        assert!(
+            osc99_is_tombstone(&state, "t"),
+            "a control chunk must not remove the tombstone"
+        );
+
+        // The rest of the dropped transfer is still discarded.
+        osc99_send(&mut state, "i=t", "tail");
+        assert_eq!(osc99_titles(&state), Vec::<String>::new());
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    // ── Saturation ────────────────────────────────────────────────────────────
+
+    /// Open 128 pending ids (`id-0` .. `id-127`), each holding `"x"`.
+    fn osc99_saturate(state: &mut TerminalState) {
+        for i in 0..128 {
+            osc99_send(state, &format!("i=id-{i}:d=0"), "x");
+        }
+        assert_eq!(state.handler.pending_osc99.identified_len(), 128);
+    }
+
+    #[test]
+    fn a_complete_notification_on_a_saturated_map_displays_without_evicting() {
+        let (mut state, _rx) = osc99_state();
+        osc99_saturate(&mut state);
+
+        osc99_send(&mut state, "i=new", "Hello");
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Hello");
+
+        // A complete single-chunk notification never enters the store, so no
+        // in-progress transfer is evicted to make room for it.
+        assert_eq!(state.handler.pending_osc99.identified_len(), 128);
+        for i in 0..128 {
+            assert!(
+                state
+                    .handler
+                    .pending_osc99
+                    .get(Some(&format!("id-{i}")))
+                    .is_some(),
+                "id-{i} must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn touching_an_id_protects_it_from_eviction() {
+        let (mut state, _rx) = osc99_state();
+        osc99_saturate(&mut state);
+        // Touch the oldest id again: `id-1` is now the least recently touched.
+        osc99_send(&mut state, "i=id-0:d=0", "y");
+
+        osc99_send(&mut state, "i=new:d=0", "n");
+        assert!(state.handler.pending_osc99.get(Some("id-1")).is_none());
+        assert!(state.handler.pending_osc99.get(Some("id-0")).is_some());
+
+        // The protected id kept its content; the evicted one starts afresh.
+        osc99_send(&mut state, "i=id-0", "z");
+        osc99_send(&mut state, "i=id-1", "z");
+        assert_eq!(osc99_titles(&state), ["xyz", "z"]);
+    }
+
+    #[test]
+    fn a_new_pending_id_on_a_saturated_map_evicts_without_growing_it() {
+        let (mut state, _rx) = osc99_state();
+        osc99_saturate(&mut state);
+
+        osc99_send(&mut state, "i=new:d=0", "n");
+        assert_eq!(state.handler.pending_osc99.identified_len(), 128);
+        assert!(state.handler.pending_osc99.get(Some("id-0")).is_none());
+        assert!(state.handler.pending_osc99.get(Some("new")).is_some());
+    }
+
+    #[test]
+    fn tombstones_are_evicted_like_any_other_entry() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=bad:d=0:e=1", "@@@@");
+        assert!(osc99_is_tombstone(&state, "bad"));
+        for i in 0..128 {
+            osc99_send(&mut state, &format!("i=id-{i}:d=0"), "x");
+        }
+        assert_eq!(state.handler.pending_osc99.identified_len(), 128);
+        assert!(
+            state.handler.pending_osc99.get(Some("bad")).is_none(),
+            "the oldest entry, a tombstone, must have been evicted"
+        );
+    }
+
+    // ── Finalisation ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn control_characters_are_stripped_from_the_title_but_lf_is_kept() {
+        let (mut state, _rx) = osc99_state();
+        let title = freminal_common::base64::encode("a\u{1b}b\u{85}c\td\ne\u{7f}f".as_bytes());
+        osc99_send(&mut state, "e=1", &title);
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "abcd\nef");
+    }
+
+    #[test]
+    fn a_long_body_is_limited_to_1024_chars_ending_in_an_ellipsis() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=b:d=0", "T");
+        osc99_send(&mut state, "i=b:p=body", &"x".repeat(2000));
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        let body = notes[0].body.as_deref().unwrap();
+        assert_eq!(body.chars().count(), 1024);
+        assert!(body.ends_with('\u{2026}'));
+        assert_eq!(body.chars().filter(|&c| c == 'x').count(), 1023);
+    }
+
+    #[test]
+    fn nine_buttons_become_eight() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "i=b:d=0", "T");
+        let labels = ["1", "2", "3", "4", "5", "6", "7", "8", "9"].join("\u{2028}");
+        osc99_send(
+            &mut state,
+            "i=b:p=buttons:e=1",
+            &freminal_common::base64::encode(labels.as_bytes()),
+        );
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].buttons, ["1", "2", "3", "4", "5", "6", "7", "8"]);
+    }
+
+    #[test]
+    fn a_body_only_notification_becomes_title_only() {
+        let (mut state, _rx) = osc99_state();
+        osc99_send(&mut state, "p=body", "Hello");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Hello");
+        assert_eq!(notes[0].body, None);
+    }
+
+    #[test]
+    fn a_notification_without_title_or_body_pushes_nothing() {
+        let (mut state, rx) = osc99_state();
+        osc99_send(&mut state, "", "");
+        osc99_send(&mut state, "i=a:p=icon:e=1", "AAAA");
+        osc99_send(&mut state, "i=b:p=buttons", "OK");
+        // A body that is all control characters strips to nothing.
+        osc99_send(
+            &mut state,
+            "i=c:p=body:e=1",
+            &freminal_common::base64::encode(b"\x01\x02"),
+        );
+        assert_eq!(state.window_commands, []);
+        assert!(
+            osc99_written(&rx).is_empty(),
+            "a dropped notification gets no reply"
+        );
+        assert!(state.handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn an_app_name_that_strips_to_nothing_is_absent() {
+        let (mut state, _rx) = osc99_state();
+        let name = freminal_common::base64::encode(b"\x1b");
+        osc99_send(&mut state, &format!("f={name}"), "T");
+
+        let notes = osc99_notifications(&state);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].app_name, None);
     }
 
     // ── Payload-free warn logging (129.14) ───────────────────────────────────

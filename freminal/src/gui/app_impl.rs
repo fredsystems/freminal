@@ -4476,7 +4476,11 @@ impl FreminalGui {
                 Osc99ControlKind::Alive => {
                     // Answer the poll with the current live notification ids.
                     if let Ok(live) = self.osc99_live.try_borrow() {
-                        crate::gui::notifications::send_osc99_alive(&live, control.id.clone(), tx);
+                        crate::gui::notifications::send_osc99_alive(
+                            &live,
+                            Some(control.id.clone()),
+                            tx,
+                        );
                     }
                 }
                 Osc99ControlKind::Close => {
@@ -4487,10 +4491,8 @@ impl FreminalGui {
                     // map — no report is sent here (the close report is
                     // emitted only when WE observe a close on the
                     // notification thread with `c=1`).
-                    if let (Some(id), Ok(mut live)) =
-                        (control.id.as_deref(), self.osc99_live.try_borrow_mut())
-                    {
-                        crate::gui::notifications::forget_osc99(&mut live, id);
+                    if let Ok(mut live) = self.osc99_live.try_borrow_mut() {
+                        crate::gui::notifications::forget_osc99(&mut live, &control.id);
                     }
                 }
             }

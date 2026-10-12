@@ -151,8 +151,10 @@ pub enum WindowManipulation {
     /// thread from the host capabilities (Task 130.5) and does not reach the
     /// GUI, so it never becomes an `Osc99Control`.
     Osc99Control {
-        /// Notification id (`i=`) the control refers to, if any.
-        id: Option<String>,
+        /// Notification id (`i=`) the control refers to. Mandatory: an
+        /// id-less `p=close` / `p=alive` is a no-op that never leaves the PTY
+        /// thread.
+        id: String,
         /// Which control payload type this is.
         kind: Osc99ControlKind,
     },

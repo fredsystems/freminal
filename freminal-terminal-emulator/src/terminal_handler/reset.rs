@@ -151,7 +151,7 @@ impl TerminalHandler {
             sixel_shared_palette,
             s8c1t_mode,
             kitty_keyboard_stack,
-            pending_notifications,
+            pending_osc99,
         } = self;
 
         // ── Reset by both kinds ──────────────────────────────────────────
@@ -198,7 +198,7 @@ impl TerminalHandler {
                 *sixel_shared_palette = None;
                 *vt52_mode = Decanm::Ansi;
                 *s8c1t_mode = S8c1t::SevenBit;
-                pending_notifications.clear();
+                pending_osc99.clear();
             }
             ResetKind::Soft => {
                 // DECAWM -> on: xterm's own resource default, and what kitty,

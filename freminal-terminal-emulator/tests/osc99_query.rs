@@ -177,7 +177,7 @@ fn alive_while_supported_pushes_one_alive_control() {
     assert_eq!(state.window_commands.len(), 1);
     match &state.window_commands[0] {
         WindowManipulation::Osc99Control { id, kind } => {
-            assert_eq!(id.as_deref(), Some("abc"));
+            assert_eq!(id, "abc");
             assert_eq!(*kind, Osc99ControlKind::Alive);
         }
         other => panic!("expected Osc99Control, got: {other:?}"),
@@ -221,7 +221,7 @@ fn close_while_supported_pushes_one_close_control() {
     assert_eq!(state.window_commands.len(), 1);
     match &state.window_commands[0] {
         WindowManipulation::Osc99Control { id, kind } => {
-            assert_eq!(id.as_deref(), Some("abc"));
+            assert_eq!(id, "abc");
             assert_eq!(*kind, Osc99ControlKind::Close);
         }
         other => panic!("expected Osc99Control, got: {other:?}"),
@@ -254,6 +254,64 @@ fn query_for_a_tombstoned_id_is_answered_while_supported() {
     let expected = format!("\x1b]99;i=1:p=?;a=report:c=1:{TAIL}\x1b\\");
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_for_a_tombstoned_id_leaves_the_tombstone_in_place() {
+    let (mut state, rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=1:d=0:p=title:e=1;@@@@\x1b\\");
+    state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
+    assert!(!drain(&rx).is_empty());
+
+    // The query did not revive the id: the tail of the dropped transfer is
+    // still discarded.
+    state.handle_incoming_data(b"\x1b]99;i=1;tail\x1b\\");
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_with_d0_is_answered_at_once() {
+    let (mut state, rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=abc:p=?:d=0;\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;a=report:c=1:{TAIL}\x1b\\");
+    assert_eq!(drain(&rx), expected.into_bytes());
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_on_a_saturated_pending_map_is_answered() {
+    let (mut state, rx) = make_state(full_caps());
+    for i in 0..128 {
+        let seq = format!("\x1b]99;i=id-{i}:d=0;x\x1b\\");
+        state.handle_incoming_data(seq.as_bytes());
+    }
+    assert!(drain(&rx).is_empty());
+
+    state.handle_incoming_data(b"\x1b]99;i=q:p=?;\x1b\\");
+    let expected = format!("\x1b]99;i=q:p=?;a=report:c=1:{TAIL}\x1b\\");
+    assert_eq!(drain(&rx), expected.into_bytes());
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn alive_and_close_without_an_id_push_no_window_command() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;p=alive;\x1b\\");
+    state.handle_incoming_data(b"\x1b]99;p=close;\x1b\\");
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn close_with_d0_is_forwarded_at_once() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=c:p=close:d=0;\x1b\\");
+    assert_eq!(
+        state.window_commands,
+        [WindowManipulation::Osc99Control {
+            id: "c".to_owned(),
+            kind: Osc99ControlKind::Close,
+        }]
+    );
 }
 
 // ── Gate before reassembly; pending cleared on disable (130 review N5) ──────
@@ -302,5 +360,24 @@ fn pending_transfer_is_discarded_when_support_is_disabled() {
         only_notification_title(&state).as_deref(),
         Some("bbb"),
         "disabling OSC 99 must discard the in-flight accumulator"
+    );
+}
+
+#[test]
+fn unidentified_transfer_is_discarded_when_support_is_disabled() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;d=0;aaa\x1b\\");
+    assert!(state.window_commands.is_empty());
+
+    state
+        .handler
+        .set_host_capabilities(HostCapabilities::default());
+    state.handler.set_host_capabilities(full_caps());
+    state.handle_incoming_data(b"\x1b]99;;bbb\x1b\\");
+
+    assert_eq!(
+        only_notification_title(&state).as_deref(),
+        Some("bbb"),
+        "disabling OSC 99 must discard the unidentified slot too"
     );
 }

@@ -91,8 +91,9 @@ pub enum Osc99ControlKind {
 pub struct Notification99Data {
     /// Notification id (`i=`), if any. `None` = no id (report as `i=0`).
     pub id: Option<String>,
-    /// Notification title (`p=title` payload). Empty when the application
-    /// sent no title.
+    /// Notification title. Never empty: the terminal handler promotes the
+    /// body into the title when no title arrived, and drops a notification
+    /// that has neither.
     pub title: String,
     /// Notification body (`p=body` payload), if any.
     pub body: Option<String>,

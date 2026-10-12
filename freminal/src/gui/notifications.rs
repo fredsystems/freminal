@@ -626,8 +626,9 @@ pub(super) fn osc99_action_report(
 /// answers it itself (Task 130.5).
 #[derive(Debug, Clone)]
 pub(super) struct Osc99Control {
-    /// Notification id (`i=`) the control refers to, if any.
-    pub id: Option<String>,
+    /// Notification id (`i=`) the control refers to. Always present: id-less
+    /// controls never leave the PTY thread.
+    pub id: String,
     /// Which control payload type this is.
     pub kind: Osc99ControlKind,
 }
