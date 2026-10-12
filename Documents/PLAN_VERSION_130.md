@@ -6234,6 +6234,16 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - `osc99/mod.rs` is split into `pane_state.rs`, `effects.rs` and `toast_spec.rs`.
   - The stale "four separate blocks" doc is fixed.
   - `Osc99FailedSystemLegs` is folded into the sink's vectors (moved here from 138.C10).
+- **Status:** done. `app_impl.rs` went from 6,030 to 5,515 lines.
+  - `osc99/glue.rs` has the OSC 99 `impl FreminalGui` block plus eight tested free functions
+    (frame routing, the deferral cap, expiry, toast and system event delivery, failed-leg
+    feedback, daemon-state recording, and the focus drain over an `Osc99FocusTargets`
+    trait), with 28 new tests. Disabling the feedback pass makes the failed-leg tests fail.
+  - `osc99/mod.rs` went from 837 to 214 lines, split into `pane_state.rs`, `effects.rs` and
+    `toast_spec.rs`.
+  - Two behaviour-neutral simplifications: the cells are borrowed once per frame rather than
+    once per request, and the registry stays borrowed through the feedback pass. That removes
+    an unreachable busy-warning path. No `FreminalGui` field visibility changed.
 
 #### 138.C14 — Toast interaction and layout fixes
 

@@ -794,9 +794,9 @@ mod tests {
     use super::*;
     use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
-        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99FailedSystemLegs,
-        Osc99SystemBackend, Osc99ToastSpec, Osc99UntrackedBackend, RecordedShow,
-        RecordingSystemBackend, RecordingUntrackedBackend, apply_osc99_effects,
+        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec,
+        Osc99UntrackedBackend, RecordedShow, RecordingSystemBackend, RecordingUntrackedBackend,
+        apply_osc99_effects,
     };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{
@@ -928,13 +928,17 @@ mod tests {
         )
     }
 
-    /// Execute `effects` against `toasts` and `system`, returning the focus
-    /// requests and the system requests the executor could not queue.
+    /// The focus requests and failed system requests one executor run left in
+    /// its sink: `(focus_requests, failed_system_shows, failed_system_closes)`.
+    type Executed = (Vec<Osc99Origin>, Vec<Osc99InstanceId>, Vec<Osc99InstanceId>);
+
+    /// Execute `effects` against `toasts` and `system`, returning what the
+    /// sink collected.
     fn execute_all(
         effects: Vec<Osc99Effect>,
         toasts: &mut ToastStack,
         system: &mut dyn Osc99SystemBackend,
-    ) -> (Vec<Osc99Origin>, Osc99FailedSystemLegs) {
+    ) -> Executed {
         execute_all_with_untracked(effects, toasts, system, &mut NoUntrackedBackend)
     }
 
@@ -944,22 +948,13 @@ mod tests {
         toasts: &mut ToastStack,
         system: &mut dyn Osc99SystemBackend,
         untracked: &mut dyn Osc99UntrackedBackend,
-    ) -> (Vec<Osc99Origin>, Osc99FailedSystemLegs) {
-        let mut sink = Osc99EffectSink {
-            toasts,
-            system,
-            untracked,
-            focus_requests: Vec::new(),
-            failed_system_shows: Vec::new(),
-            failed_system_closes: Vec::new(),
-        };
+    ) -> Executed {
+        let mut sink = Osc99EffectSink::new(toasts, system, untracked);
         apply_osc99_effects(effects, &mut sink);
         (
             sink.focus_requests,
-            Osc99FailedSystemLegs {
-                shows: sink.failed_system_shows,
-                closes: sink.failed_system_closes,
-            },
+            sink.failed_system_shows,
+            sink.failed_system_closes,
         )
     }
 
@@ -970,8 +965,8 @@ mod tests {
         toasts: &mut ToastStack,
         system: &mut dyn Osc99SystemBackend,
     ) -> (Vec<Osc99Origin>, Vec<Osc99InstanceId>) {
-        let (focus_requests, failed) = execute_all(effects, toasts, system);
-        (focus_requests, failed.shows)
+        let (focus_requests, failed_shows, _) = execute_all(effects, toasts, system);
+        (focus_requests, failed_shows)
     }
 
     /// The close effect of every kind, as `(leg, instance)` pairs, panicking
@@ -2453,7 +2448,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut untracked = RecordingUntrackedBackend::default();
 
-        let (focus, failed) = execute_all_with_untracked(
+        let (focus, failed_shows, failed_closes) = execute_all_with_untracked(
             effects,
             &mut toasts,
             &mut RecordingSystemBackend::default(),
@@ -2463,7 +2458,10 @@ mod tests {
         assert_eq!(untracked.shown, [wanted]);
         assert_eq!(toasts.len(), 1, "the toast leg still showed");
         assert_eq!(focus, Vec::new());
-        assert!(failed.is_empty(), "an untracked show cannot fail");
+        assert!(
+            failed_shows.is_empty() && failed_closes.is_empty(),
+            "an untracked show cannot fail"
+        );
     }
 
     // ── activation closes the other legs ────────────────────────────────
@@ -3061,10 +3059,13 @@ mod tests {
         let _ = execute(effects, &mut toasts, &mut system);
 
         let effects = registry.close(a.origin, "n");
-        let (_, failed) = execute_all(effects, &mut toasts, &mut system);
+        let (_, failed_shows, failed_closes) = execute_all(effects, &mut toasts, &mut system);
 
         assert_eq!(system.closed, [instance]);
-        assert!(failed.is_empty(), "a queued close is not a failure");
+        assert!(
+            failed_shows.is_empty() && failed_closes.is_empty(),
+            "a queued close is not a failure"
+        );
     }
 
     #[test]
@@ -3081,14 +3082,15 @@ mod tests {
         let _ = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
 
         let effects = registry.close(a.origin, "n");
-        let (_, failed) = execute_all(effects, &mut toasts, &mut NoSystemBackend);
+        let (_, failed_shows, failed_closes) =
+            execute_all(effects, &mut toasts, &mut NoSystemBackend);
 
         assert_eq!(
-            failed.closes,
+            failed_closes,
             [instance],
             "NoSystemBackend fails every close"
         );
-        assert_eq!(failed.shows, Vec::new());
+        assert_eq!(failed_shows, Vec::new());
     }
 
     /// The Linux/BSD feedback loop for a close the backend could not queue:
@@ -3108,12 +3110,11 @@ mod tests {
         let _ = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
 
         let effects = registry.close(a.origin, "n");
-        let (_, failed) = execute_all(effects, &mut toasts, &mut NoSystemBackend);
-        assert_eq!(failed.closes, [instance]);
+        let (_, _, failed_closes) = execute_all(effects, &mut toasts, &mut NoSystemBackend);
+        assert_eq!(failed_closes, [instance]);
         assert_eq!(registry.instances().len(), 1, "still waiting for a Closed");
 
-        let reports: Vec<GuiReply> = failed
-            .closes
+        let reports: Vec<GuiReply> = failed_closes
             .into_iter()
             .flat_map(|failed| registry.on_system_event(failed, Osc99SystemLegEvent::Closed))
             .map(|effect| match effect {

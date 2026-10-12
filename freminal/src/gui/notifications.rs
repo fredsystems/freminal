@@ -905,14 +905,7 @@ mod tests {
         let effects = NotificationRouter::route_osc99(request, config, ctx, icon_cache, registry);
         apply_osc99_effects(
             effects,
-            &mut Osc99EffectSink {
-                toasts,
-                system,
-                untracked: &mut NoUntrackedBackend,
-                focus_requests: Vec::new(),
-                failed_system_shows: Vec::new(),
-                failed_system_closes: Vec::new(),
-            },
+            &mut Osc99EffectSink::new(toasts, system, &mut NoUntrackedBackend),
         );
     }
 
