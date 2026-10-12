@@ -12,8 +12,11 @@
 mod registry;
 
 use std::sync::Weak;
+use std::time::Duration;
 
 use crossbeam_channel::Sender;
+use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
+use freminal_common::buffer_states::osc99_notification::Osc99Expiry;
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 use freminal_windowing::WindowId;
@@ -21,6 +24,7 @@ use freminal_windowing::WindowId;
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::notifications::{Osc99Control, send_reply_weak};
 use crate::gui::panes::PaneId;
+use crate::gui::toast::{ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack};
 
 pub use registry::Osc99Registry;
 
@@ -28,9 +32,25 @@ pub use registry::Osc99Registry;
 ///
 /// Unlike the application's `i=` id (which may be absent, reused, or shared
 /// by different panes), an instance id is unique for the process lifetime and
-/// is minted by [`Osc99Registry::register`].
+/// is minted by [`Osc99Registry::register`]. The toast leg uses the raw value
+/// as its [`ToastKey`] (see [`Self::to_toast_key`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Osc99InstanceId(u64);
+
+impl Osc99InstanceId {
+    /// The [`ToastKey`] the instance's toast is pushed with.
+    #[must_use]
+    pub const fn to_toast_key(self) -> ToastKey {
+        ToastKey(self.0)
+    }
+
+    /// The instance a toast event's key refers to (the inverse of
+    /// [`Self::to_toast_key`]).
+    #[must_use]
+    pub const fn from_toast_key(key: ToastKey) -> Self {
+        Self(key.0)
+    }
+}
 
 /// Where a notification was shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +63,55 @@ pub enum Osc99Leg {
     /// A desktop notification whose close and activation freminal cannot
     /// observe (macOS and Windows).
     UntrackedSystem,
+}
+
+/// How long a `Low`-urgency notification's toast stays when the application
+/// did not ask for a duration (`w=-1`, or no `w=`): half the `Info` toast
+/// default of 6 s. The toast module's per-kind default is private to it, so
+/// the value is restated here.
+pub const OSC99_LOW_URGENCY_TOAST_LIFETIME: Duration = Duration::from_secs(3);
+
+/// What an OSC 99 notification looks like as a toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Osc99ToastSpec {
+    /// The toast severity.
+    pub kind: ToastKind,
+    /// The notification title.
+    pub title: String,
+    /// The notification body, if any.
+    pub detail: Option<String>,
+    /// How long the toast stays.
+    pub lifetime: ToastLifetime,
+}
+
+/// Build the toast for `data`.
+///
+/// - `Critical` urgency is an `Error` toast; everything else is `Info`.
+/// - `w=` > 0 is an exact duration, `w=0` stays until dismissed, and
+///   `w=-1` (or unset) follows urgency: `Critical` stays until dismissed,
+///   `Normal` uses the toast default, `Low` uses
+///   [`OSC99_LOW_URGENCY_TOAST_LIFETIME`].
+#[must_use]
+pub fn osc99_toast_spec(data: &Notification99Data) -> Osc99ToastSpec {
+    let kind = match data.urgency {
+        NotificationUrgency::Critical => ToastKind::Error,
+        NotificationUrgency::Low | NotificationUrgency::Normal => ToastKind::Info,
+    };
+    let lifetime = match data.expiry {
+        Osc99Expiry::After(ms) => ToastLifetime::Fixed(Duration::from_millis(u64::from(ms.get()))),
+        Osc99Expiry::Never => ToastLifetime::UntilDismissed,
+        Osc99Expiry::OsDefault => match data.urgency {
+            NotificationUrgency::Critical => ToastLifetime::UntilDismissed,
+            NotificationUrgency::Normal => ToastLifetime::KindDefault,
+            NotificationUrgency::Low => ToastLifetime::Fixed(OSC99_LOW_URGENCY_TOAST_LIFETIME),
+        },
+    };
+    Osc99ToastSpec {
+        kind,
+        title: data.title.clone(),
+        detail: data.body.clone().filter(|body| !body.is_empty()),
+        lifetime,
+    }
 }
 
 /// Something the registry asks the GUI to do.
@@ -58,13 +127,64 @@ pub enum Osc99Effect {
         /// The reply to serialise.
         reply: GuiReply,
     },
+    /// Show `instance`'s toast, updating `replaces`' toast in place when
+    /// that is set.
+    ShowToast {
+        /// The instance the toast belongs to.
+        instance: Osc99InstanceId,
+        /// The instance whose toast this one takes over, if any.
+        replaces: Option<Osc99InstanceId>,
+        /// What to show.
+        spec: Osc99ToastSpec,
+    },
+    /// Remove `instance`'s toast (a no-op if it is already gone).
+    CloseToast(Osc99InstanceId),
 }
 
-/// Execute `effects` in order.
-pub fn apply_osc99_effects(effects: Vec<Osc99Effect>) {
+/// The GUI state the executor acts on. Later subtasks add the system legs.
+pub struct Osc99EffectSink<'a> {
+    /// The shared toast stack.
+    pub toasts: &'a mut ToastStack,
+}
+
+/// Execute `effects` in order against `sink`.
+pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink<'_>) {
     for effect in effects {
         match effect {
             Osc99Effect::Reply { reply_tx, reply } => send_reply_weak(&reply_tx, reply),
+            Osc99Effect::ShowToast {
+                instance,
+                replaces,
+                spec,
+            } => {
+                let Osc99ToastSpec {
+                    kind,
+                    title,
+                    detail,
+                    lifetime,
+                } = spec;
+                let key = instance.to_toast_key();
+                if let Some(old) = replaces {
+                    sink.toasts.replace_keyed(
+                        old.to_toast_key(),
+                        key,
+                        kind,
+                        title,
+                        detail,
+                        lifetime,
+                    );
+                } else {
+                    sink.toasts.push_keyed(
+                        key,
+                        kind,
+                        title,
+                        detail,
+                        lifetime,
+                        ToastPlacement::TOP_RIGHT,
+                    );
+                }
+            }
+            Osc99Effect::CloseToast(instance) => sink.toasts.close_keyed(instance.to_toast_key()),
         }
     }
 }

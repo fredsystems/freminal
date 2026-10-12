@@ -5884,6 +5884,18 @@ None yet.
     `ToastLifetime::UntilDismissed`, `push_keyed`, `replace_keyed`, `close_keyed` and
     `take_events`.
   - Unkeyed layout and behaviour are unchanged; no existing layout test was edited.
+- **138.7b (done).** `register` returns the toast effects, and the toast events are delivered
+  once per window frame through `route_osc99_toast_events`. Both cells are borrowed before the
+  events are taken, so a busy cell defers delivery to the next frame and loses nothing.
+  - Instances keep `open_legs` (legs still displayed and observable) and `shown_legs` (legs
+    ever shown). `UntrackedSystem` is never an open leg, because it cannot be observed
+    closing.
+  - Interim rule: the close report is suppressed whenever the instance was ever shown on a
+    `LinuxSystem` or `UntrackedSystem` leg, so the old notification thread and the registry
+    never both report. 138.12 and 138.16 replace this rule.
+  - All six temporary `expect(dead_code)` attributes from 138.7a are removed.
+  - The toast title/body test checks the `osc99_toast_spec` mapping, because `ToastStack` has
+    no title accessor.
 
 ---
 

@@ -3932,6 +3932,12 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
+        // Deliver the events keyed (OSC 99) toasts recorded this frame to the
+        // registry. Outside the block above on purpose: the last toast
+        // closing leaves the stack empty, and that `Closed` must still be
+        // delivered.
+        self.route_osc99_toast_events();
+
         // ── Retired GL objects need one more frame (125.C2 review) ──────────
         // A pane closed during this update retired its renderer after the
         // top-of-frame drain ran. Without a further frame the objects would
@@ -4503,11 +4509,17 @@ impl FreminalGui {
         for request in &events.osc99_controls {
             let control = &request.control;
             tracing::trace!(origin = ?request.origin, kind = ?control.kind, "routing OSC 99 control");
-            let Ok(mut registry) = self.osc99_registry.try_borrow_mut() else {
+            // Both cells before any mutation: a `Close` changes the registry
+            // and its effects change the toast stack, so a busy cell must
+            // leave both untouched.
+            let (Ok(mut toasts), Ok(mut registry)) = (
+                self.toasts.try_borrow_mut(),
+                self.osc99_registry.try_borrow_mut(),
+            ) else {
                 tracing::warn!(
                     id = control.id,
                     kind = ?control.kind,
-                    "OSC 99: notification registry busy; control not applied"
+                    "OSC 99: toast stack or notification registry busy; control not applied"
                 );
                 continue;
             };
@@ -4516,13 +4528,49 @@ impl FreminalGui {
                 Osc99ControlKind::Alive => {
                     registry.alive(request.origin, control.id.clone(), request.reply_tx.clone())
                 }
-                // App-driven close: forget the pane's instance. Closing the
-                // displayed legs and the close report are not yet produced.
+                // App-driven close: close the pane's toast, if shown; the
+                // close report follows when the toast's `Closed` event arrives.
                 Osc99ControlKind::Close => registry.close(request.origin, &control.id),
             };
             drop(registry);
-            crate::gui::osc99::apply_osc99_effects(effects);
+            crate::gui::osc99::apply_osc99_effects(
+                effects,
+                &mut crate::gui::osc99::Osc99EffectSink {
+                    toasts: &mut toasts,
+                },
+            );
         }
+    }
+
+    /// Hand the events recorded by keyed toasts (activation, close) to the
+    /// OSC 99 registry and execute the effects it returns.
+    ///
+    /// Runs once per window frame after `ToastStack::show`. Both cells are
+    /// borrowed before the events are taken, so a busy cell defers delivery
+    /// to the next frame instead of losing the events.
+    fn route_osc99_toast_events(&self) {
+        let (Ok(mut toasts), Ok(mut registry)) = (
+            self.toasts.try_borrow_mut(),
+            self.osc99_registry.try_borrow_mut(),
+        ) else {
+            tracing::warn!("OSC 99: toast stack or registry busy; toast events deferred");
+            return;
+        };
+
+        let events = toasts.take_events();
+        if events.is_empty() {
+            return;
+        }
+        let effects: Vec<crate::gui::osc99::Osc99Effect> = events
+            .into_iter()
+            .flat_map(|event| registry.on_toast_event(event))
+            .collect();
+        crate::gui::osc99::apply_osc99_effects(
+            effects,
+            &mut crate::gui::osc99::Osc99EffectSink {
+                toasts: &mut toasts,
+            },
+        );
     }
 
     /// First-window spawn path when no layout or session restore will apply.

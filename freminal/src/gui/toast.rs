@@ -183,11 +183,9 @@ pub(super) enum ToastLifetime {
     /// unkeyed toast uses this.
     KindDefault,
     /// An explicit duration.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     Fixed(Duration),
     /// Never expires; only a click, eviction or [`ToastStack::close_keyed`]
     /// removes it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     UntilDismissed,
 }
 
@@ -1569,7 +1567,6 @@ impl ToastStack {
     /// Its [`ToastEvent`]s are collected by [`Self::take_events`]. The key is
     /// not checked for uniqueness; callers that update a toast should use
     /// [`Self::replace_keyed`].
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     pub(super) fn push_keyed(
         &mut self,
         key: ToastKey,
@@ -1595,7 +1592,6 @@ impl ToastStack {
     /// [`ToastPlacement::TOP_RIGHT`] and returns [`ToastReplace::Pushed`].
     /// (No placement parameter: with one this method would exceed the
     /// `too_many_arguments` limit, and a replaced toast always keeps its own.)
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     pub(super) fn replace_keyed(
         &mut self,
         old: ToastKey,
@@ -1646,7 +1642,6 @@ impl ToastStack {
 
     /// Remove every toast keyed `key`, recording `Closed` for each. A no-op
     /// (no event) if none exists.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     pub(super) fn close_keyed(&mut self, key: ToastKey) {
         let mut closed = Vec::new();
         self.entries.retain(|t| {
@@ -1661,7 +1656,6 @@ impl ToastStack {
     }
 
     /// Drain the events recorded by keyed toasts since the last call.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
     pub(super) fn take_events(&mut self) -> Vec<ToastEvent> {
         std::mem::take(&mut self.events)
     }

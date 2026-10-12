@@ -39,7 +39,8 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99Leg, Osc99PaneState, Osc99Registry, PaneKeyboardFocus, PaneVisibility,
+    Osc99DisplayRequest, Osc99EffectSink, Osc99Leg, Osc99PaneState, Osc99Registry,
+    PaneKeyboardFocus, PaneVisibility, apply_osc99_effects,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -705,22 +706,8 @@ impl NotificationRouter {
 
         let mut legs: Vec<Osc99Leg> = Vec::with_capacity(2);
 
+        // The toast leg is shown by the effects `register` returns below.
         if wants_toast {
-            let summary = if data.title.is_empty() {
-                data.body.clone().unwrap_or_default()
-            } else {
-                data.title.clone()
-            };
-            let detail = data
-                .body
-                .as_deref()
-                .filter(|body| !body.is_empty())
-                .map(str::to_owned);
-            if data.urgency == NotificationUrgency::Critical {
-                toasts.error(summary, detail);
-            } else {
-                toasts.info(summary, detail);
-            }
             legs.push(Osc99Leg::Toast);
         }
 
@@ -742,13 +729,9 @@ impl NotificationRouter {
         // Every displayed notification is registered, whether or not it
         // carries an `i=` id and whichever leg showed it.
         if !legs.is_empty() {
-            let instance = registry.register(request.origin, request.reply_tx.clone(), data, &legs);
-            tracing::trace!(
-                instance = ?instance,
-                id = ?data.id,
-                legs = ?legs,
-                "registered OSC 99 notification"
-            );
+            tracing::trace!(id = ?data.id, legs = ?legs, "registering OSC 99 notification");
+            let effects = registry.register(request.origin, request.reply_tx.clone(), data, &legs);
+            apply_osc99_effects(effects, &mut Osc99EffectSink { toasts });
         }
     }
 
@@ -1088,7 +1071,7 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::gui::osc99::Osc99Origin;
+    use crate::gui::osc99::{Osc99Origin, osc99_toast_spec};
     use freminal_common::buffer_states::osc99_notification::Osc99ActivationFocus;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
@@ -1343,14 +1326,18 @@ mod tests {
     }
 
     #[test]
-    fn route_osc99_empty_title_falls_back_to_body_for_toast() {
+    fn route_osc99_toast_shows_the_title_and_the_body_without_duplication() {
+        // `ToastStack` exposes no title accessor, so the toast's content is
+        // pinned through the spec the registry's `ShowToast` effect carries
+        // (the same function `route_osc99` reaches via `register`), and the
+        // routing is pinned by the stack gaining exactly one keyed toast.
         let config = enabled_config(0.0);
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut registry = Osc99Registry::default();
         let data = Notification99Data {
-            title: String::new(),
-            body: Some("Only body".to_owned()),
+            title: "The title".to_owned(),
+            body: Some("The body".to_owned()),
             ..default_n99()
         };
 
@@ -1364,6 +1351,9 @@ mod tests {
         );
 
         assert_eq!(toasts.len(), 1);
+        let spec = osc99_toast_spec(&data);
+        assert_eq!(spec.title, "The title");
+        assert_eq!(spec.detail.as_deref(), Some("The body"));
     }
 
     /// Error-category notifications carry Critical urgency on the platforms
@@ -2288,7 +2278,7 @@ mod tests {
         assert_eq!(entry.id.as_deref(), Some("n1"));
         assert_eq!(entry.activation_reporting, Osc99ActivationReporting::Report);
         assert_eq!(entry.close_reporting, Osc99CloseReporting::Report);
-        assert_ne!(entry.legs, Vec::<Osc99Leg>::new());
+        assert_ne!(entry.open_legs, Vec::<Osc99Leg>::new());
     }
 
     #[test]
@@ -2447,7 +2437,7 @@ mod tests {
             panic!("a toast-only notification must be registered");
         };
         assert_eq!(entry.id.as_deref(), Some("toast-only"));
-        assert_eq!(entry.legs, [Osc99Leg::Toast]);
+        assert_eq!(entry.open_legs, [Osc99Leg::Toast]);
     }
 
     #[test]
@@ -2485,7 +2475,7 @@ mod tests {
             panic!("a system-leg notification must be registered");
         };
         assert_eq!(entry.id.as_deref(), Some("tracked"));
-        assert_eq!(entry.legs, [Osc99Leg::Toast, system_leg]);
+        assert_eq!(entry.shown_legs, [Osc99Leg::Toast, system_leg]);
     }
 
     #[test]
