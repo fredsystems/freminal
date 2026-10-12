@@ -232,13 +232,13 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 129 | Kitty Wire Infrastructure                   | `PLAN_VERSION_130.md` (Task 129)              | Complete      | None                          |
 | 130 | Reverse-Path & Capability-Query Consistency | `PLAN_VERSION_130.md` (Task 130)              | Complete      | Task 129                      |
 | 131 | Screen-Scoped State & Reset Lifecycle       | `PLAN_VERSION_130.md` (Task 131)              | Complete      | Task 130.1-130.3 (foundation) |
-| 132 | Colour Foundation                           | `PLAN_VERSION_130.md` (Task 132)              | Pending merge | Task 126                      |
+| 132 | Colour Foundation                           | `PLAN_VERSION_130.md` (Task 132)              | Complete      | Task 126                      |
 | 133 | Shared Consent Prompt                       | `PLAN_VERSION_130.md` (Task 133)              | Planned       | None                          |
 | 134 | Unicode Width & Segmentation Conformance    | `PLAN_VERSION_130.md` (Task 134)              | Planned       | None                          |
 | 135 | Graphics Protocol Conformance               | `PLAN_VERSION_130.md` (Task 135)              | Planned       | Tasks 126, 129–131            |
 | 136 | Graphics Placement Model & Z-Layers         | `PLAN_VERSION_130.md` (Task 136)              | Planned       | Task 135                      |
 | 137 | Keyboard Protocol Conformance               | `PLAN_VERSION_130.md` (Task 137)              | Planned       | Tasks 128, 131; arch sign-off |
-| 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Planned       | Tasks 129, 130                |
+| 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | In progress   | Tasks 129, 130                |
 | 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Planned       | Tasks 129–131                 |
 | 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | Planned       | None                          |
 | 141 | Misc Protocol Extensions                    | `PLAN_VERSION_130.md` (Task 141)              | Planned       | Tasks 128, 131                |
@@ -823,7 +823,8 @@ Update this section as tasks complete:
 | 129  | 2026-10-09 | 2026-10-10 | 129.1-129.15, two review passes, 129.C1-C6; merged via PR #536 (`2862acb9`)        |
 | 130  | 2026-10-10 | 2026-10-11 | 130.1-130.9, C1-C3, C5-C6, two review passes; merged via PR #537 (`61b86bf5`)      |
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
-| 132  | 2026-10-11 |            | 132.1-132.14, C1-C7, adversarial review; PR #539                                   |
+| 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
+| 138  | 2026-10-12 |            | Activated and decomposed on task-138/osc99-conformance                             |
 
 ---
 
