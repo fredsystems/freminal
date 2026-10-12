@@ -232,7 +232,8 @@ Two seams were considered and **not** made separate tasks:
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
-Every implementation subtask leaves `cargo test --all` and
+Every implementation subtask leaves `cargo xtask test` (nextest plus doctests; the repo
+moved to cargo-nextest in PR #541) and
 `cargo clippy --all-targets --all-features -- -D warnings` green. Every PR runs
 `cargo machete` and `cargo xtask check-windows`.
 
@@ -5229,7 +5230,7 @@ tokenizer, so the general OSC path is untouched.
 
 ### 138 Subtasks
 
-Every subtask's verification is `cargo test --all` and
+Every subtask's verification is `cargo xtask test` and
 `cargo clippy --all-targets --all-features -- -D warnings`, plus anything named below.
 
 Every subtask's prohibitions include: do NOT touch files outside scope, do NOT commit, do NOT
@@ -5866,7 +5867,7 @@ Source review: PR #537 (Copilot and CodeRabbit).
 
 ### 147 Subtasks
 
-Every subtask leaves `cargo test --all` and
+Every subtask leaves `cargo xtask test` and
 `cargo clippy --all-targets --all-features -- -D warnings` green. Parser and encoder subtasks
 name their benchmark (`freminal-bench-table`) and record before and after results in their
 status note (`performance-benchmarks`, 15% threshold). Escape-sequence behaviour changes are
@@ -6507,7 +6508,7 @@ Stale stub text was corrected at the same time:
 
 ### 147 Verification
 
-- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+- `cargo xtask test`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
   `cargo xtask check-windows`, `cargo xtask lint-markdown`.
 - Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15, 147.18 and 147.20 stay within the 15% threshold, or

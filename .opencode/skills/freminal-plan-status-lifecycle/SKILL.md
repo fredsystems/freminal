@@ -50,7 +50,7 @@ Status moves in one direction only:
   `Planned` for activated-but-unstarted tasks.
 - **`In progress`** — a task branch exists and work is underway. Set
   this when the branch is created.
-- **`Pending merge`** — all subtasks done, `cargo test --all` green on
+- **`Pending merge`** — all subtasks done, `cargo xtask test` green on
   the branch, PR open but not yet merged.
 - **`Complete`** — **the defining event is the merge**, not the last
   subtask commit. Advance to `Complete` the moment the PR merges into
