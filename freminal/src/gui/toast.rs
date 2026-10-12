@@ -18,9 +18,17 @@
 //! Toasts auto-expire after a kind-dependent duration unless the user hovers
 //! over them, in which case the timer is paused.  Error toasts expire after
 //! 15 seconds, warnings after 10, and info after 6.  The user can dismiss any
-//! toast immediately by clicking anywhere on it; the "x" glyph shown at the
-//! pill's right edge is a visual affordance for this, not a separate hit
-//! target.
+//! toast immediately by clicking anywhere on it; for an ordinary (unkeyed)
+//! toast the "x" glyph shown at the pill's right edge is a visual affordance
+//! for this, not a separate hit target.
+//!
+//! A toast may also carry an opaque [`ToastKey`] (see
+//! [`ToastStack::push_keyed`]). Keyed toasts have a caller-chosen
+//! [`ToastLifetime`] and report what happened to them as [`ToastEvent`]s
+//! (drained with [`ToastStack::take_events`]): a click on the pill body is
+//! `Activated` then `Closed`, a click on the "x" is `Closed`, and expiry,
+//! eviction and [`ToastStack::close_keyed`] are `Closed`. Unkeyed toasts
+//! never produce events.
 //!
 //! Toasts are drawn by a fully-owned OpenGL pass (issue #433), not egui
 //! widgets: [`ToastStack::show`] measures/shapes each toast's text on the
@@ -163,6 +171,63 @@ impl ToastKind {
     }
 }
 
+/// Opaque caller-chosen identity of a keyed toast. The toast module attaches
+/// no meaning to the value; it is only compared for equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct ToastKey(pub u64);
+
+/// How long a toast stays on screen (when not hovered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToastLifetime {
+    /// The toast kind's default ([`ToastKind::default_duration`]). Every
+    /// unkeyed toast uses this.
+    KindDefault,
+    /// An explicit duration.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    Fixed(Duration),
+    /// Never expires; only a click, eviction or [`ToastStack::close_keyed`]
+    /// removes it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    UntilDismissed,
+}
+
+/// What happened to a keyed toast. See [`ToastEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToastEventKind {
+    /// The user clicked the toast body (always followed by `Closed`).
+    Activated,
+    /// The toast left the stack, for any reason.
+    Closed,
+}
+
+/// An event produced by a keyed toast, drained with
+/// [`ToastStack::take_events`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToastEvent {
+    /// The key the toast was pushed with.
+    pub key: ToastKey,
+    /// What happened.
+    pub kind: ToastEventKind,
+}
+
+/// Outcome of [`ToastStack::replace_keyed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToastReplace {
+    /// A toast with the old key existed and was updated in place.
+    Replaced,
+    /// No toast had the old key; a new one was pushed instead.
+    Pushed,
+}
+
+/// Which part of a toast a click landed on. See [`click_target`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastClickPart {
+    /// The dismiss ("x") square.
+    Dismiss,
+    /// Anywhere else within the pill.
+    Body,
+}
+
 /// A single toast entry in the stack.
 #[derive(Debug, Clone)]
 pub(super) struct Toast {
@@ -174,9 +239,18 @@ pub(super) struct Toast {
     /// Monotonic id used as the egui widget id seed, so each toast has
     /// a stable id across frames even after list reordering.
     id: u64,
-    /// When the toast was created.  Used with `default_duration()` to
-    /// compute expiry (unless hovered).
+    /// When the toast was created.  Drives the entry animation only; a
+    /// keyed replace keeps it so the toast does not re-enter.
     created: Instant,
+    /// When the toast's lifetime started: `created` for a new toast, reset by
+    /// [`ToastStack::replace_keyed`]. Used with [`Self::lifetime`] to compute
+    /// expiry and the exit fade (unless hovered).
+    life_start: Instant,
+    /// How long the toast lives (see [`ToastLifetime`]).
+    lifetime: ToastLifetime,
+    /// Caller identity for a keyed toast; `None` for ordinary toasts, which
+    /// never produce [`ToastEvent`]s.
+    key: Option<ToastKey>,
     /// When the toast was last hovered.  `None` if never hovered.  Used
     /// to extend the lifetime of a toast the user is reading.
     last_hovered: Option<Instant>,
@@ -194,14 +268,35 @@ impl Toast {
         id: u64,
         placement: ToastPlacement,
     ) -> Self {
+        let now = Instant::now();
         Self {
             kind,
             title,
             detail,
             id,
-            created: Instant::now(),
+            created: now,
+            life_start: now,
+            lifetime: ToastLifetime::KindDefault,
+            key: None,
             last_hovered: None,
             placement,
+        }
+    }
+
+    /// Make this a keyed toast with the given lifetime.
+    const fn keyed(mut self, key: ToastKey, lifetime: ToastLifetime) -> Self {
+        self.key = Some(key);
+        self.lifetime = lifetime;
+        self
+    }
+
+    /// Total nominal lifetime, or `None` if the toast never expires on its
+    /// own ([`ToastLifetime::UntilDismissed`]).
+    const fn total_lifetime(&self) -> Option<Duration> {
+        match self.lifetime {
+            ToastLifetime::KindDefault => Some(self.kind.default_duration()),
+            ToastLifetime::Fixed(duration) => Some(duration),
+            ToastLifetime::UntilDismissed => None,
         }
     }
 
@@ -226,12 +321,15 @@ impl Toast {
     /// [`Self::anim`] guarantees a toast is never removed while `anim` still
     /// shows it fading (review finding #2).
     fn is_expired(&self, now: Instant) -> bool {
+        // An `UntilDismissed` toast never expires on its own.
+        let Some(total) = self.total_lifetime() else {
+            return false;
+        };
         // While actively hovered (within the hold grace), never expire.
         if self.hovered_recently(now) {
             return false;
         }
-        let age = now.saturating_duration_since(self.created);
-        let total = self.kind.default_duration();
+        let age = now.saturating_duration_since(self.life_start);
         // Not yet past nominal life -> alive.
         if age <= total {
             return false;
@@ -285,19 +383,24 @@ impl Toast {
             scale: 1.0,
         };
 
-        let age = now.saturating_duration_since(self.created);
-        let total = self.kind.default_duration();
+        // Entry progress runs from `created`; the exit timeline runs from
+        // `life_start` (they differ only after a keyed replace). `total` uses
+        // the same lifetime `is_expired` does.
+        let entry_age = now.saturating_duration_since(self.created);
+        let age = now.saturating_duration_since(self.life_start);
+        let total = self.total_lifetime();
 
         // Degenerate timelines (not expected in practice — every
         // `ToastKind::default_duration()` is nonzero — but guards against
         // div-by-zero if the animation durations are ever misconfigured).
-        if ANIM_IN.is_zero() || ANIM_OUT.is_zero() || total.is_zero() {
+        if ANIM_IN.is_zero() || ANIM_OUT.is_zero() || total.as_ref().is_some_and(Duration::is_zero)
+        {
             return SETTLED;
         }
 
         // Phase 1: entry.
-        if age < ANIM_IN {
-            let p = (age.as_secs_f32() / ANIM_IN.as_secs_f32()).clamp(0.0, 1.0);
+        if entry_age < ANIM_IN {
+            let p = (entry_age.as_secs_f32() / ANIM_IN.as_secs_f32()).clamp(0.0, 1.0);
             let eased = 1.0 - (1.0 - p).powi(3);
             return ToastAnim {
                 opacity: eased.clamp(0.0, 1.0),
@@ -310,6 +413,11 @@ impl Toast {
         if self.hovered_recently(now) {
             return SETTLED;
         }
+
+        // `UntilDismissed` has no exit timeline: it stays settled.
+        let Some(total) = total else {
+            return SETTLED;
+        };
 
         // Phase 3: post-hover exit. If a hover extended the toast past its
         // nominal life, fade over ANIM_OUT starting when the HOVER_HOLD grace
@@ -555,10 +663,17 @@ pub(super) struct ToastLayoutOutput {
     pub runs: Vec<ToastTextRun>,
     /// Interactable pill rect, logical points, window space:
     /// `[min_x, min_y, max_x, max_y]`. The whole pill is the click target —
-    /// a primary click anywhere within this rect dismisses the toast (see
-    /// [`ToastStack::hit_test`]); the drawn "x" glyph (in `runs`) is purely
-    /// a visual affordance, not a separate hit region.
+    /// a primary click anywhere within this rect closes the toast (see
+    /// [`ToastStack::hit_test`]). For an unkeyed toast the drawn "x" glyph
+    /// (in `runs`) is purely a visual affordance; for a keyed toast it is a
+    /// separate hit region ([`Self::dismiss_rect_logical`]) that is tested
+    /// first and reports `Closed` without `Activated`.
     pub hit_rect_logical: [f32; 4],
+    /// The dismiss ("x") hit square, logical points, window space, in the
+    /// same `[min_x, min_y, max_x, max_y]` form as
+    /// [`Self::hit_rect_logical`]: [`CLOSE_SIZE_PTS`] on a side, centred on
+    /// the drawn "x" glyph and clamped to lie within `hit_rect_logical`.
+    pub dismiss_rect_logical: [f32; 4],
 }
 
 /// The maximum corner radius (in logical points) among the theme's
@@ -892,6 +1007,28 @@ fn toast_colors(kind: ToastKind, visuals: &egui::Visuals, opacity: f32) -> Toast
     }
 }
 
+/// Origin `(origin_x, baseline_y)`, physical pixels, of the dismiss ("x")
+/// glyph run for a pill at `(x, y)` of `width`. Shared by [`build_text_runs`]
+/// (to place the run) and [`layout_one_toast`] (to centre the dismiss hit
+/// square on it), so the two can never disagree.
+fn close_glyph_origin(
+    input: &ToastLayoutInput,
+    x: f32,
+    y: f32,
+    width: f32,
+    metrics: &ToastLayoutMetrics,
+) -> (f32, f32) {
+    let close_right = x + width - metrics.pad_x;
+    let close_left = close_right - metrics.close_size;
+    let origin_x = (close_left + (metrics.close_size - input.close.width) / 2.0).max(close_left);
+    // Share the label row's baseline so the "x" aligns with the title text
+    // beside it (top-aligned header row), rather than centering in the full
+    // pill height — which visually drops it too low, more so on a
+    // two-line (detail) toast.
+    let baseline_y = y + metrics.pad_y + input.label.ascent;
+    (origin_x, baseline_y)
+}
+
 /// Build the icon/label/(optional detail)/dismiss [`ToastTextRun`]s for one
 /// toast, anchored to the pill's already-animated top-left corner `(x, y)`
 /// and sized `width` x `height` (physical pixels, post-animation scale —
@@ -938,19 +1075,9 @@ fn build_text_runs(
         });
     }
 
-    // Dismiss ("x") glyph — purely a visual affordance (the whole pill is
-    // the click target, see `ToastStack::hit_test`), drawn within the
-    // reserved close-button region at the pill's right edge (physical
-    // pixels, since text runs are physical).
-    let close_right = x + width - metrics.pad_x;
-    let close_left = close_right - metrics.close_size;
-    let close_origin_x =
-        (close_left + (metrics.close_size - input.close.width) / 2.0).max(close_left);
-    // Share the label row's baseline so the "x" aligns with the title text
-    // beside it (top-aligned header row), rather than centering in the full
-    // pill height — which visually drops it too low, more so on a
-    // two-line (detail) toast.
-    let close_baseline_y = y + metrics.pad_y + input.label.ascent;
+    // Dismiss ("x") glyph, drawn within the reserved close-button region at
+    // the pill's right edge (physical pixels, since text runs are physical).
+    let (close_origin_x, close_baseline_y) = close_glyph_origin(input, x, y, width, metrics);
     // Dimmed relative to the label/detail text so it reads as a secondary
     // affordance rather than competing with the message; still respects the
     // animation's opacity via `colors.text_color`'s alpha.
@@ -1032,11 +1159,28 @@ fn layout_one_toast(
         (y + scaled_height) / metrics.ppp,
     ];
 
+    // Dismiss hit square: centred on the drawn "x" glyph (same origin the
+    // run was placed at), CLOSE_SIZE_PTS on a side, clamped into the pill's
+    // hit rect so a mid-animation (scaled-down) pill never has a dismiss
+    // region poking outside it.
+    let (close_origin_x, close_baseline_y) = close_glyph_origin(input, x, y, scaled_width, metrics);
+    let glyph_center_x = (close_origin_x + input.close.width / 2.0) / metrics.ppp;
+    let glyph_center_y =
+        (close_baseline_y - input.close.ascent + input.close.height / 2.0) / metrics.ppp;
+    let half = CLOSE_SIZE_PTS / 2.0;
+    let dismiss_rect_logical = [
+        (glyph_center_x - half).max(hit_rect_logical[0]),
+        (glyph_center_y - half).max(hit_rect_logical[1]),
+        (glyph_center_x + half).min(hit_rect_logical[2]),
+        (glyph_center_y + half).min(hit_rect_logical[3]),
+    ];
+
     ToastLayoutOutput {
         id: input.id,
         pill,
         runs,
         hit_rect_logical,
+        dismiss_rect_logical,
     }
 }
 
@@ -1284,6 +1428,9 @@ pub(super) struct ToastStack {
     /// lets that method see the answer without re-running the per-frame
     /// measurement. `false` on a fresh/default stack (nothing to animate).
     cached_is_animating: bool,
+    /// Events produced by keyed toasts since the last
+    /// [`Self::take_events`]. Unkeyed toasts never add to this.
+    events: Vec<ToastEvent>,
 }
 
 /// Maximum simultaneous toasts.  Older ones are evicted.
@@ -1417,6 +1564,159 @@ impl ToastStack {
         self.cached_is_animating
     }
 
+    /// Push a keyed toast (see [`ToastKey`]) with an explicit `lifetime`.
+    ///
+    /// Its [`ToastEvent`]s are collected by [`Self::take_events`]. The key is
+    /// not checked for uniqueness; callers that update a toast should use
+    /// [`Self::replace_keyed`].
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    pub(super) fn push_keyed(
+        &mut self,
+        key: ToastKey,
+        kind: ToastKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+        lifetime: ToastLifetime,
+        placement: ToastPlacement,
+    ) {
+        let toast =
+            Toast::new(kind, title.into(), detail, self.alloc_id(), placement).keyed(key, lifetime);
+        self.push_entry(toast);
+    }
+
+    /// Update the toast keyed `old` in place, re-keying it to `new_key`.
+    ///
+    /// The toast keeps its stack slot, placement and `created` instant (so no
+    /// entry animation replays), takes the new content and `lifetime`, and
+    /// **its lifetime restarts**: keeping the age would make a toast updated
+    /// every second expire mid-update. No event is produced for `old`.
+    ///
+    /// If no toast is keyed `old`, behaves as [`Self::push_keyed`] with
+    /// [`ToastPlacement::TOP_RIGHT`] and returns [`ToastReplace::Pushed`].
+    /// (No placement parameter: with one this method would exceed the
+    /// `too_many_arguments` limit, and a replaced toast always keeps its own.)
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    pub(super) fn replace_keyed(
+        &mut self,
+        old: ToastKey,
+        new_key: ToastKey,
+        kind: ToastKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+        lifetime: ToastLifetime,
+    ) -> ToastReplace {
+        self.replace_keyed_at(
+            Instant::now(),
+            old,
+            new_key,
+            (kind, title.into(), detail),
+            lifetime,
+        )
+    }
+
+    /// [`Self::replace_keyed`] with an injected `now` (the new `life_start`),
+    /// so the lifetime reset is testable without sleeping.
+    fn replace_keyed_at(
+        &mut self,
+        now: Instant,
+        old: ToastKey,
+        new_key: ToastKey,
+        (kind, title, detail): (ToastKind, String, Option<String>),
+        lifetime: ToastLifetime,
+    ) -> ToastReplace {
+        let Some(toast) = self.entries.iter_mut().find(|t| t.key == Some(old)) else {
+            self.push_keyed(
+                new_key,
+                kind,
+                title,
+                detail,
+                lifetime,
+                ToastPlacement::TOP_RIGHT,
+            );
+            return ToastReplace::Pushed;
+        };
+        toast.key = Some(new_key);
+        toast.kind = kind;
+        toast.title = title;
+        toast.detail = detail;
+        toast.lifetime = lifetime;
+        toast.life_start = now;
+        ToastReplace::Replaced
+    }
+
+    /// Remove every toast keyed `key`, recording `Closed` for each. A no-op
+    /// (no event) if none exists.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    pub(super) fn close_keyed(&mut self, key: ToastKey) {
+        let mut closed = Vec::new();
+        self.entries.retain(|t| {
+            if t.key == Some(key) {
+                closed.push(key);
+                false
+            } else {
+                true
+            }
+        });
+        self.record_closed(closed);
+    }
+
+    /// Drain the events recorded by keyed toasts since the last call.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 138.7b"))]
+    pub(super) fn take_events(&mut self) -> Vec<ToastEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Record a `Closed` event for each of `keys`.
+    fn record_closed(&mut self, keys: impl IntoIterator<Item = ToastKey>) {
+        self.events.extend(keys.into_iter().map(|key| ToastEvent {
+            key,
+            kind: ToastEventKind::Closed,
+        }));
+    }
+
+    /// Remove every toast that has expired at `now`, recording `Closed` for
+    /// each keyed one.
+    fn sweep_expired(&mut self, now: Instant) {
+        let mut closed = Vec::new();
+        self.entries.retain(|t| {
+            if t.is_expired(now) {
+                closed.extend(t.key);
+                false
+            } else {
+                true
+            }
+        });
+        self.record_closed(closed);
+    }
+
+    /// Handle a primary click on toast `id` at `part`: the toast is removed,
+    /// and a keyed toast records `Activated` (body only) then `Closed`.
+    /// Unkeyed toasts are removed with no event, whichever part was hit. A
+    /// no-op if `id` is not on the stack.
+    fn apply_click(&mut self, id: u64, part: ToastClickPart) {
+        let Some(index) = self.entries.iter().position(|t| t.id == id) else {
+            return;
+        };
+        let toast = self.entries.remove(index);
+        let Some(key) = toast.key else {
+            return;
+        };
+        if part == ToastClickPart::Body {
+            self.events.push(ToastEvent {
+                key,
+                kind: ToastEventKind::Activated,
+            });
+        }
+        self.record_closed([key]);
+    }
+
+    /// Allocate the next monotonic toast id.
+    const fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        id
+    }
+
     fn push(
         &mut self,
         kind: ToastKind,
@@ -1424,13 +1724,18 @@ impl ToastStack {
         detail: Option<String>,
         placement: ToastPlacement,
     ) {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.entries
-            .push(Toast::new(kind, title, detail, id, placement));
+        let toast = Toast::new(kind, title, detail, self.alloc_id(), placement);
+        self.push_entry(toast);
+    }
+
+    /// Append `toast`, evicting the oldest entries beyond [`MAX_TOASTS`]
+    /// (recording `Closed` for each evicted keyed toast).
+    fn push_entry(&mut self, toast: Toast) {
+        self.entries.push(toast);
         // Evict oldest entries beyond the cap.
         while self.entries.len() > MAX_TOASTS {
-            self.entries.remove(0);
+            let evicted = self.entries.remove(0);
+            self.record_closed(evicted.key);
         }
         // Subtask 121.14: eagerly mark the stack as animating. A freshly
         // pushed toast is always at the start of its entry animation (age
@@ -1471,7 +1776,8 @@ impl ToastStack {
     ///
     /// Clears auto-expired toasts and any the user dismissed by clicking
     /// anywhere within a toast's pill (its `hit_rect_logical`, computed by
-    /// `layout_toasts`).
+    /// `layout_toasts`). Keyed toasts record their [`ToastEvent`]s as they
+    /// go (see [`Self::take_events`]).
     ///
     /// Returns a [`ToastShowOutcome`] bundling the repaint delay this call
     /// needs to keep expiry/animation going without further input (subtask
@@ -1558,7 +1864,7 @@ impl ToastStack {
         // are not a typing modal, so this deliberately does NOT touch the
         // `ui_overlay_open` / `suppress_input` global gate — only the exact
         // click that lands on a toast is consumed. (Review finding #3.)
-        let to_remove = self.hit_test(ctx, &outputs, now);
+        self.hit_test(ctx, &outputs, now);
 
         let text_instances = {
             let mut rs = render_state
@@ -1585,12 +1891,8 @@ impl ToastStack {
             .collect();
         Self::paint_toasts(ctx, render_state, pills, text_instances);
 
-        // Remove dismissed toasts.
-        if !to_remove.is_empty() {
-            self.entries.retain(|t| !to_remove.contains(&t.id));
-        }
-        // Remove expired toasts.
-        self.entries.retain(|t| !t.is_expired(now));
+        // Expire toasts (dismissed ones were already removed by `hit_test`).
+        self.sweep_expired(now);
 
         // Report the delay needed so expiry/animation happens even without
         // input: a fast (16ms, ~60fps) cadence while any toast is animating
@@ -1769,7 +2071,9 @@ impl ToastStack {
     /// region per toast, over its `hit_rect_logical` (logical points).
     /// Hovering a toast's pill pauses its expiry (`last_hovered`); clicking
     /// anywhere within a toast's pill dismisses it — the whole pill is the
-    /// click target, the drawn "x" glyph is purely a visual affordance.
+    /// click target. For a keyed toast the click is also classified by
+    /// [`click_target`] (dismiss square vs body) and reported as events via
+    /// [`Self::apply_click`], which removes the toast.
     ///
     /// The regions live in an interactive `egui::Area` above the terminal so
     /// egui consumes the click (see the call site's finding-#3 comment). At
@@ -1777,14 +2081,9 @@ impl ToastStack {
     /// newest-first (newest toasts are drawn on top) so that during the brief
     /// entry slide — when an arriving toast can transiently overlap its
     /// neighbour — a click in the overlap dismisses only the topmost one
-    /// (review finding #4). Returns the ids to remove. Split out of
+    /// (review finding #4). Removes the dismissed toast itself. Split out of
     /// [`Self::show`] to keep it under the line-count limit.
-    fn hit_test(
-        &mut self,
-        ctx: &egui::Context,
-        outputs: &[ToastLayoutOutput],
-        now: Instant,
-    ) -> Vec<u64> {
+    fn hit_test(&mut self, ctx: &egui::Context, outputs: &[ToastLayoutOutput], now: Instant) {
         // Allocate one interactive `Area` PER TOAST, each sized and positioned
         // exactly to its pill's hit rect, so egui consumes a click that lands
         // on a toast (keeping it off the terminal). Deliberately NOT a single
@@ -1817,18 +2116,15 @@ impl ToastStack {
 
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         let Some(pos) = pointer else {
-            return Vec::new();
+            return;
         };
-        let hovered = topmost_hit(outputs, pos);
-        if let Some(id) = hovered
+        if let Some(id) = topmost_hit(outputs, pos)
             && let Some(toast) = self.entries.iter_mut().find(|t| t.id == id)
         {
             toast.last_hovered = Some(now);
         }
-        if any_clicked {
-            hovered.into_iter().collect()
-        } else {
-            Vec::new()
+        if any_clicked && let Some((id, part)) = click_target(outputs, pos) {
+            self.apply_click(id, part);
         }
     }
 
@@ -1892,11 +2188,30 @@ fn rect_contains(rect: [f32; 4], pos: egui::Pos2) -> bool {
 /// egui path relies on the same newest-first ordering when it allocates its
 /// click regions.
 fn topmost_hit(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Option<u64> {
+    topmost_output(outputs, pos).map(|out| out.id)
+}
+
+/// The topmost (newest) output whose hit rect contains `pos`.
+fn topmost_output(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Option<&ToastLayoutOutput> {
     outputs
         .iter()
         .rev()
         .find(|out| rect_contains(out.hit_rect_logical, pos))
-        .map(|out| out.id)
+}
+
+/// What a click at `pos` hit: the topmost toast (same precedence as
+/// [`topmost_hit`]) and which part of it. The dismiss square wins over the
+/// body. The distinction only matters for keyed toasts —
+/// [`ToastStack::apply_click`] ignores it for unkeyed ones.
+fn click_target(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Option<(u64, ToastClickPart)> {
+    topmost_output(outputs, pos).map(|out| {
+        let part = if rect_contains(out.dismiss_rect_logical, pos) {
+            ToastClickPart::Dismiss
+        } else {
+            ToastClickPart::Body
+        };
+        (out.id, part)
+    })
 }
 
 #[cfg(test)]
@@ -2110,6 +2425,9 @@ mod tests {
             detail: None,
             id: 0,
             created,
+            life_start: created,
+            lifetime: ToastLifetime::KindDefault,
+            key: None,
             last_hovered: None,
             placement: ToastPlacement::TOP_RIGHT,
         };
@@ -2127,6 +2445,9 @@ mod tests {
             detail: None,
             id: 0,
             created,
+            life_start: created,
+            lifetime: ToastLifetime::KindDefault,
+            key: None,
             // Hover event coincides with `later` — within the 200 ms
             // keep-alive window.
             last_hovered: Some(later),
@@ -2146,6 +2467,9 @@ mod tests {
             detail: None,
             id: 0,
             created,
+            life_start: created,
+            lifetime: ToastLifetime::KindDefault,
+            key: None,
             // Hover was 5 s ago — well past HOVER_HOLD + ANIM_OUT.
             last_hovered: Some(stale_hover),
             placement: ToastPlacement::TOP_RIGHT,
@@ -2164,6 +2488,9 @@ mod tests {
             detail: None,
             id: 0,
             created,
+            life_start: created,
+            lifetime: ToastLifetime::KindDefault,
+            key: None,
             last_hovered,
             placement: ToastPlacement::TOP_RIGHT,
         }
@@ -3357,6 +3684,7 @@ mod tests {
             },
             runs: Vec::new(),
             hit_rect_logical: [0.0, 0.0, 100.0, 100.0],
+            dismiss_rect_logical: [0.0; 4],
         };
         let mut newer = older.clone();
         newer.id = 2;
@@ -3394,5 +3722,433 @@ mod tests {
 
         let darker = lighten(base, -10.0);
         assert!(darker[0].abs() < f32::EPSILON);
+    }
+
+    // -----------------------------------------------------------------
+    //  Keyed toasts: lifecycle, events, lifetimes
+    // -----------------------------------------------------------------
+
+    const NO_EVENTS: [ToastEvent; 0] = [];
+
+    fn push_keyed_info(s: &mut ToastStack, key: u64, lifetime: ToastLifetime) {
+        s.push_keyed(
+            ToastKey(key),
+            ToastKind::Info,
+            format!("toast {key}"),
+            None,
+            lifetime,
+            ToastPlacement::TOP_RIGHT,
+        );
+    }
+
+    fn closed(key: u64) -> ToastEvent {
+        ToastEvent {
+            key: ToastKey(key),
+            kind: ToastEventKind::Closed,
+        }
+    }
+
+    fn activated(key: u64) -> ToastEvent {
+        ToastEvent {
+            key: ToastKey(key),
+            kind: ToastEventKind::Activated,
+        }
+    }
+
+    #[test]
+    fn push_keyed_then_close_keyed_emits_exactly_one_closed() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take_events(), NO_EVENTS, "push itself emits nothing");
+
+        s.close_keyed(ToastKey(1));
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![closed(1)]);
+        assert_eq!(s.take_events(), NO_EVENTS, "take_events drains");
+    }
+
+    #[test]
+    fn close_keyed_of_an_absent_key_is_a_no_op() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        s.info("unkeyed", None);
+        s.close_keyed(ToastKey(99));
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn closing_an_unkeyed_toast_never_emits() {
+        let mut s = ToastStack::default();
+        s.info("unkeyed", None);
+        let id = s.entries[0].id;
+        s.apply_click(id, ToastClickPart::Body);
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn keyed_fixed_toast_expiry_records_closed_on_sweep() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 7, ToastLifetime::Fixed(Duration::from_secs(2)));
+        s.info("unkeyed", None);
+        let created = s.entries[0].created;
+
+        s.sweep_expired(created + Duration::from_secs(1));
+        assert_eq!(s.len(), 2, "not yet expired");
+        assert_eq!(s.take_events(), NO_EVENTS);
+
+        // Past the lifetime (and its trailing fade window is not extended,
+        // since it was never hovered).
+        s.sweep_expired(created + Duration::from_millis(2001));
+        assert_eq!(s.len(), 1, "only the keyed Fixed(2s) toast expired");
+        assert_eq!(s.take_events(), vec![closed(7)]);
+    }
+
+    #[test]
+    fn until_dismissed_never_expires() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::UntilDismissed);
+        let created = s.entries[0].created;
+        let far = created + Duration::from_hours(24 * 365);
+        assert!(!s.entries[0].is_expired(far));
+        s.sweep_expired(far);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take_events(), NO_EVENTS);
+        // And it never fades: it is fully settled forever after its entry.
+        assert_eq!(s.entries[0].anim(far), SETTLED_ANIM);
+    }
+
+    #[test]
+    fn until_dismissed_still_closes_by_click_and_close_keyed() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::UntilDismissed);
+        s.close_keyed(ToastKey(1));
+        assert_eq!(s.take_events(), vec![closed(1)]);
+    }
+
+    #[test]
+    fn kind_default_keyed_toast_expires_like_an_unkeyed_one() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        s.info("unkeyed", None);
+        let created = s.entries[0].created;
+        let total = ToastKind::Info.default_duration();
+
+        for toast in &s.entries {
+            assert!(!toast.is_expired(created + total.saturating_sub(Duration::from_millis(1))));
+            assert!(toast.is_expired(created + total + Duration::from_millis(1)));
+        }
+        s.sweep_expired(created + total + Duration::from_millis(1));
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![closed(1)], "unkeyed emits nothing");
+    }
+
+    #[test]
+    fn fixed_lifetime_anim_fades_in_lockstep_with_expiry() {
+        // The exit fade must use the same total as `is_expired`.
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::Fixed(Duration::from_secs(60)));
+        let toast = &s.entries[0];
+        let created = toast.created;
+        // Well inside a 60s life (an Info default would already be gone).
+        let mid = created + Duration::from_secs(30);
+        assert!(!toast.is_expired(mid));
+        assert_eq!(toast.anim(mid), SETTLED_ANIM);
+        // Last 100ms of the 60s life: fading, still alive.
+        let fading = created + Duration::from_millis(59_900);
+        assert!(!toast.is_expired(fading));
+        assert!(toast.anim(fading).opacity < 1.0);
+        assert!(toast.is_expired(created + Duration::from_millis(60_001)));
+    }
+
+    #[test]
+    fn evicting_past_max_toasts_closes_only_the_first_keyed() {
+        let mut s = ToastStack::default();
+        for key in 0..=u64::try_from(MAX_TOASTS).unwrap() {
+            push_keyed_info(&mut s, key, ToastLifetime::KindDefault);
+        }
+        assert_eq!(s.len(), MAX_TOASTS);
+        assert_eq!(s.take_events(), vec![closed(0)]);
+    }
+
+    #[test]
+    fn evicting_an_unkeyed_toast_emits_nothing() {
+        let mut s = ToastStack::default();
+        s.info("old unkeyed", None);
+        for key in 0..u64::try_from(MAX_TOASTS).unwrap() {
+            push_keyed_info(&mut s, key, ToastLifetime::KindDefault);
+        }
+        assert_eq!(s.len(), MAX_TOASTS);
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn replace_keyed_keeps_slot_placement_and_created_and_resets_life() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        s.push_keyed(
+            ToastKey(2),
+            ToastKind::Info,
+            "second",
+            None,
+            ToastLifetime::KindDefault,
+            ToastPlacement::WINDOW_CENTERED,
+        );
+        push_keyed_info(&mut s, 3, ToastLifetime::KindDefault);
+        s.take_events();
+        let before = s.entries[1].clone();
+
+        let later = before.created + Duration::from_secs(5);
+        let outcome = s.replace_keyed_at(
+            later,
+            ToastKey(2),
+            ToastKey(20),
+            (ToastKind::Error, "updated".to_owned(), Some("d".to_owned())),
+            ToastLifetime::Fixed(Duration::from_secs(9)),
+        );
+        assert_eq!(outcome, ToastReplace::Replaced);
+        assert_eq!(s.len(), 3);
+
+        let after = &s.entries[1];
+        assert_eq!(after.id, before.id, "same slot");
+        assert_eq!(after.placement, ToastPlacement::WINDOW_CENTERED);
+        assert_eq!(after.created, before.created, "no re-entry animation");
+        assert_eq!(after.life_start, later, "lifetime restarts");
+        assert_eq!(after.key, Some(ToastKey(20)));
+        assert_eq!(after.kind, ToastKind::Error);
+        assert_eq!(after.title, "updated");
+        assert_eq!(after.detail.as_deref(), Some("d"));
+        assert_eq!(after.lifetime, ToastLifetime::Fixed(Duration::from_secs(9)));
+        assert_eq!(
+            s.take_events(),
+            NO_EVENTS,
+            "replace emits no event for the old key"
+        );
+        // The old key is gone, the new one is closable.
+        s.close_keyed(ToastKey(2));
+        assert_eq!(s.take_events(), NO_EVENTS);
+        s.close_keyed(ToastKey(20));
+        assert_eq!(s.take_events(), vec![closed(20)]);
+    }
+
+    #[test]
+    fn replace_keyed_restarts_the_expiry_clock() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::Fixed(Duration::from_secs(10)));
+        let created = s.entries[0].created;
+        let replaced_at = created + Duration::from_secs(9);
+        s.replace_keyed_at(
+            replaced_at,
+            ToastKey(1),
+            ToastKey(1),
+            (ToastKind::Info, "u".to_owned(), None),
+            ToastLifetime::Fixed(Duration::from_secs(10)),
+        );
+        // 11s after creation would have expired the old clock.
+        assert!(!s.entries[0].is_expired(created + Duration::from_secs(11)));
+        assert!(s.entries[0].is_expired(replaced_at + Duration::from_millis(10_001)));
+    }
+
+    #[test]
+    fn replace_keyed_with_an_absent_old_key_pushes() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        let outcome = s.replace_keyed(
+            ToastKey(99),
+            ToastKey(5),
+            ToastKind::Info,
+            "new",
+            None,
+            ToastLifetime::UntilDismissed,
+        );
+        assert_eq!(outcome, ToastReplace::Pushed);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.entries[1].key, Some(ToastKey(5)));
+        assert_eq!(s.entries[1].lifetime, ToastLifetime::UntilDismissed);
+        assert_eq!(s.entries[1].placement, ToastPlacement::TOP_RIGHT);
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn replace_keyed_public_wrapper_updates_in_place() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
+        let id = s.entries[0].id;
+        let outcome = s.replace_keyed(
+            ToastKey(1),
+            ToastKey(2),
+            ToastKind::Warning,
+            "w",
+            None,
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(outcome, ToastReplace::Replaced);
+        assert_eq!(s.entries[0].id, id);
+        assert_eq!(s.entries[0].key, Some(ToastKey(2)));
+    }
+
+    // -----------------------------------------------------------------
+    //  Click handling: stack-level `apply_click` + pure `click_target`
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unkeyed_click_removes_with_no_events_for_either_part() {
+        for part in [ToastClickPart::Body, ToastClickPart::Dismiss] {
+            let mut s = ToastStack::default();
+            s.error("e", None);
+            let id = s.entries[0].id;
+            s.apply_click(id, part);
+            assert!(s.is_empty());
+            assert_eq!(s.take_events(), NO_EVENTS);
+        }
+    }
+
+    #[test]
+    fn keyed_body_click_is_activated_then_closed() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 4, ToastLifetime::KindDefault);
+        let id = s.entries[0].id;
+        s.apply_click(id, ToastClickPart::Body);
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![activated(4), closed(4)]);
+    }
+
+    #[test]
+    fn keyed_dismiss_click_is_closed_only() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 4, ToastLifetime::KindDefault);
+        let id = s.entries[0].id;
+        s.apply_click(id, ToastClickPart::Dismiss);
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), vec![closed(4)]);
+    }
+
+    #[test]
+    fn click_on_an_absent_id_is_a_no_op() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 4, ToastLifetime::KindDefault);
+        s.apply_click(12_345, ToastClickPart::Body);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    fn rect_center(rect: [f32; 4]) -> egui::Pos2 {
+        egui::pos2(rect[0].midpoint(rect[2]), rect[1].midpoint(rect[3]))
+    }
+
+    #[test]
+    fn click_target_dismiss_rect_wins_over_body() {
+        let outputs = single_toast_outputs(7);
+        let dismiss_center = rect_center(outputs[0].dismiss_rect_logical);
+        assert_eq!(
+            click_target(&outputs, dismiss_center),
+            Some((7, ToastClickPart::Dismiss))
+        );
+    }
+
+    #[test]
+    fn click_target_body_elsewhere_in_the_pill() {
+        let outputs = single_toast_outputs(7);
+        let pill_center = rect_center(outputs[0].hit_rect_logical);
+        assert!(!rect_contains(outputs[0].dismiss_rect_logical, pill_center));
+        assert_eq!(
+            click_target(&outputs, pill_center),
+            Some((7, ToastClickPart::Body))
+        );
+    }
+
+    #[test]
+    fn click_target_outside_every_pill_is_none() {
+        let outputs = single_toast_outputs(7);
+        let pill = &outputs[0].pill;
+        assert_eq!(
+            click_target(&outputs, egui::pos2(pill.x - 50.0, pill.y - 50.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn click_target_uses_topmost_toast_precedence() {
+        // Newer toast overlaps the older one's dismiss square: the newer
+        // toast's body wins, not the older toast's dismiss.
+        let base = single_toast_outputs(1).remove(0);
+        let mut older = base.clone();
+        older.hit_rect_logical = [0.0, 0.0, 100.0, 100.0];
+        older.dismiss_rect_logical = [70.0, 10.0, 90.0, 30.0];
+        let mut newer = base;
+        newer.id = 2;
+        newer.hit_rect_logical = [50.0, 0.0, 150.0, 100.0];
+        newer.dismiss_rect_logical = [130.0, 10.0, 150.0, 30.0];
+        let outputs = vec![older, newer];
+        assert_eq!(
+            click_target(&outputs, egui::pos2(80.0, 20.0)),
+            Some((2, ToastClickPart::Body))
+        );
+        assert_eq!(
+            click_target(&outputs, egui::pos2(10.0, 20.0)),
+            Some((1, ToastClickPart::Body))
+        );
+    }
+
+    #[test]
+    fn dismiss_rect_is_inside_the_pill_and_contains_the_close_glyph_centre() {
+        for ppp in [1.0_f32, 2.0] {
+            for has_detail in [false, true] {
+                let geom = ToastGeometry {
+                    content_rect: test_window_rect(),
+                    active_pane_rect: None,
+                };
+                let visuals = egui::Visuals::dark();
+                let input = test_input(0, 100.0, has_detail, SETTLED_ANIM);
+                let out = layout_toasts(
+                    std::slice::from_ref(&input),
+                    ToastPosition::TopRightStack,
+                    geom,
+                    &visuals,
+                    ppp,
+                );
+                let hit = out[0].hit_rect_logical;
+                let dismiss = out[0].dismiss_rect_logical;
+                assert!(dismiss[0] >= hit[0] && dismiss[1] >= hit[1]);
+                assert!(dismiss[2] <= hit[2] && dismiss[3] <= hit[3]);
+                assert!((dismiss[2] - dismiss[0] - CLOSE_SIZE_PTS).abs() < 0.01);
+                assert!((dismiss[3] - dismiss[1] - CLOSE_SIZE_PTS).abs() < 0.01);
+
+                // The close glyph run is the last one; its centre (physical
+                // px) converted to logical must be inside the dismiss rect.
+                let run = out[0].runs.last().unwrap();
+                assert_eq!(run.text, ChromeIcon::Close.glyph());
+                let centre = egui::pos2(
+                    (run.origin_x + input.close.width / 2.0) / ppp,
+                    (run.baseline_y - input.close.ascent + input.close.height / 2.0) / ppp,
+                );
+                assert!(
+                    rect_contains(dismiss, centre),
+                    "ppp={ppp} detail={has_detail}: {centre:?} not in {dismiss:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dismiss_rect_stays_inside_hit_rect_mid_animation() {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let visuals = egui::Visuals::dark();
+        let out = layout_toasts(
+            &[test_input(0, 100.0, false, ENTRY_ANIM)],
+            ToastPosition::TopRightStack,
+            geom,
+            &visuals,
+            1.0,
+        );
+        let hit = out[0].hit_rect_logical;
+        let dismiss = out[0].dismiss_rect_logical;
+        assert!(dismiss[0] >= hit[0] && dismiss[1] >= hit[1]);
+        assert!(dismiss[2] <= hit[2] && dismiss[3] <= hit[3]);
     }
 }

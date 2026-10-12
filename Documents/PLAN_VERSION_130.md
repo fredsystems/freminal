@@ -5872,6 +5872,18 @@ None yet.
   system notifications. Instance fields with no reader yet are read by a `trace!` when the
   instance is forgotten, so no `dead_code` allow is needed; 138.7 adds the real readers.
   Orchestrator change: a stale `osc99_live` mention in the `frame_drain.rs` module doc.
+- **138.7a (done).** The keyed API, events, the dismiss rect and `sweep_expired(now)` are in
+  place.
+  - `replace_keyed` has no placement parameter, as the plan states: a replaced toast keeps its
+    placement and the `Pushed` fallback uses `TOP_RIGHT`. Adding the parameter would exceed
+    `too_many_arguments`.
+  - Clicks are resolved by the pure `click_target` plus `apply_click`, so `hit_test` removes
+    clicked toasts itself.
+  - Six temporary `#[cfg_attr(not(test), expect(dead_code, reason = "wired by Task
+    138.7b"))]` attributes must all be gone after 138.7b: `ToastLifetime::Fixed`,
+    `ToastLifetime::UntilDismissed`, `push_keyed`, `replace_keyed`, `close_keyed` and
+    `take_events`.
+  - Unkeyed layout and behaviour are unchanged; no existing layout test was edited.
 
 ---
 
