@@ -38,10 +38,7 @@ use super::window::PerWindowState;
 /// (`notifications.osc_99`) are both on. Otherwise the features follow
 /// [`combine`]: each leg the `routing_osc99` setting uses has a capability
 /// table, and the routing decides how the legs' tables combine.
-pub(super) const fn host_capabilities(
-    config: &Config,
-    daemon: Osc99LinuxDaemon,
-) -> HostCapabilities {
+pub(super) fn host_capabilities(config: &Config, daemon: Osc99LinuxDaemon) -> HostCapabilities {
     let notifications = &config.notifications;
     if !(notifications.enabled && notifications.osc_99) {
         return HostCapabilities {
@@ -176,22 +173,6 @@ pub(super) const fn toast_leg() -> Osc99Features {
     }
 }
 
-/// No optional feature: what a leg that cannot be relied on contributes to an
-/// intersection.
-const fn no_features() -> Osc99Features {
-    Osc99Features {
-        activation_report: Osc99ActivationReport::NotReported,
-        close_events: Osc99CloseEvents::NotReported,
-        activation_focus: Osc99FocusSupport::Unsupported,
-        auto_expiry: Osc99AutoExpiry::Unsupported,
-        urgency: Osc99UrgencySupport::Unsupported,
-        sound_names: Osc99SoundNames::SystemAndSilent,
-        body: Osc99BodySupport::Unsupported,
-        buttons: Osc99ButtonSupport::Unsupported,
-        icons: Osc99IconSupport::Unsupported,
-    }
-}
-
 /// The system (desktop-notification) leg's capabilities on `platform`, or
 /// `None` when the leg cannot show anything.
 ///
@@ -265,143 +246,141 @@ const fn untracked_system_leg(urgency: Osc99UrgencySupport) -> Osc99Features {
     }
 }
 
+/// `yes` if `a` or `b` is `yes`, otherwise `no`. One field of [`union`].
+fn either<T: Copy + PartialEq>(a: T, b: T, yes: T, no: T) -> T {
+    if a == yes || b == yes { yes } else { no }
+}
+
+/// `yes` if both `a` and `b` are `yes`, otherwise `no`. One field of
+/// [`intersection`].
+fn both<T: Copy + PartialEq>(a: T, b: T, yes: T, no: T) -> T {
+    if a == yes && b == yes { yes } else { no }
+}
+
 /// The features present in **either** `a` or `b`. For sound names, `Standard`
 /// if either understands it.
-const fn union(a: Osc99Features, b: Osc99Features) -> Osc99Features {
+///
+/// The struct literal names every field, so a new [`Osc99Features`] field
+/// fails to compile here until it is classified.
+fn union(a: Osc99Features, b: Osc99Features) -> Osc99Features {
     Osc99Features {
-        activation_report: if matches!(a.activation_report, Osc99ActivationReport::Reported)
-            || matches!(b.activation_report, Osc99ActivationReport::Reported)
-        {
-            Osc99ActivationReport::Reported
-        } else {
-            Osc99ActivationReport::NotReported
-        },
-        close_events: if matches!(a.close_events, Osc99CloseEvents::Reported)
-            || matches!(b.close_events, Osc99CloseEvents::Reported)
-        {
-            Osc99CloseEvents::Reported
-        } else {
-            Osc99CloseEvents::NotReported
-        },
-        activation_focus: if matches!(a.activation_focus, Osc99FocusSupport::Supported)
-            || matches!(b.activation_focus, Osc99FocusSupport::Supported)
-        {
-            Osc99FocusSupport::Supported
-        } else {
-            Osc99FocusSupport::Unsupported
-        },
-        auto_expiry: if matches!(a.auto_expiry, Osc99AutoExpiry::Supported)
-            || matches!(b.auto_expiry, Osc99AutoExpiry::Supported)
-        {
-            Osc99AutoExpiry::Supported
-        } else {
-            Osc99AutoExpiry::Unsupported
-        },
-        urgency: if matches!(a.urgency, Osc99UrgencySupport::Supported)
-            || matches!(b.urgency, Osc99UrgencySupport::Supported)
-        {
-            Osc99UrgencySupport::Supported
-        } else {
-            Osc99UrgencySupport::Unsupported
-        },
-        sound_names: if matches!(a.sound_names, Osc99SoundNames::Standard)
-            || matches!(b.sound_names, Osc99SoundNames::Standard)
-        {
-            Osc99SoundNames::Standard
-        } else {
-            Osc99SoundNames::SystemAndSilent
-        },
-        body: if matches!(a.body, Osc99BodySupport::Supported)
-            || matches!(b.body, Osc99BodySupport::Supported)
-        {
-            Osc99BodySupport::Supported
-        } else {
-            Osc99BodySupport::Unsupported
-        },
-        buttons: if matches!(a.buttons, Osc99ButtonSupport::Supported)
-            || matches!(b.buttons, Osc99ButtonSupport::Supported)
-        {
-            Osc99ButtonSupport::Supported
-        } else {
-            Osc99ButtonSupport::Unsupported
-        },
-        icons: if matches!(a.icons, Osc99IconSupport::Supported)
-            || matches!(b.icons, Osc99IconSupport::Supported)
-        {
-            Osc99IconSupport::Supported
-        } else {
-            Osc99IconSupport::Unsupported
-        },
+        activation_report: either(
+            a.activation_report,
+            b.activation_report,
+            Osc99ActivationReport::Reported,
+            Osc99ActivationReport::NotReported,
+        ),
+        close_events: either(
+            a.close_events,
+            b.close_events,
+            Osc99CloseEvents::Reported,
+            Osc99CloseEvents::NotReported,
+        ),
+        activation_focus: either(
+            a.activation_focus,
+            b.activation_focus,
+            Osc99FocusSupport::Supported,
+            Osc99FocusSupport::Unsupported,
+        ),
+        auto_expiry: either(
+            a.auto_expiry,
+            b.auto_expiry,
+            Osc99AutoExpiry::Supported,
+            Osc99AutoExpiry::Unsupported,
+        ),
+        urgency: either(
+            a.urgency,
+            b.urgency,
+            Osc99UrgencySupport::Supported,
+            Osc99UrgencySupport::Unsupported,
+        ),
+        sound_names: either(
+            a.sound_names,
+            b.sound_names,
+            Osc99SoundNames::Standard,
+            Osc99SoundNames::SystemAndSilent,
+        ),
+        body: either(
+            a.body,
+            b.body,
+            Osc99BodySupport::Supported,
+            Osc99BodySupport::Unsupported,
+        ),
+        buttons: either(
+            a.buttons,
+            b.buttons,
+            Osc99ButtonSupport::Supported,
+            Osc99ButtonSupport::Unsupported,
+        ),
+        icons: either(
+            a.icons,
+            b.icons,
+            Osc99IconSupport::Supported,
+            Osc99IconSupport::Unsupported,
+        ),
     }
 }
 
 /// The features present in **both** `a` and `b`. For sound names, `Standard`
 /// only if both understand it.
-const fn intersection(a: Osc99Features, b: Osc99Features) -> Osc99Features {
+///
+/// Exhaustive in the same way as [`union`].
+fn intersection(a: Osc99Features, b: Osc99Features) -> Osc99Features {
     Osc99Features {
-        activation_report: if matches!(a.activation_report, Osc99ActivationReport::Reported)
-            && matches!(b.activation_report, Osc99ActivationReport::Reported)
-        {
-            Osc99ActivationReport::Reported
-        } else {
-            Osc99ActivationReport::NotReported
-        },
-        close_events: if matches!(a.close_events, Osc99CloseEvents::Reported)
-            && matches!(b.close_events, Osc99CloseEvents::Reported)
-        {
-            Osc99CloseEvents::Reported
-        } else {
-            Osc99CloseEvents::NotReported
-        },
-        activation_focus: if matches!(a.activation_focus, Osc99FocusSupport::Supported)
-            && matches!(b.activation_focus, Osc99FocusSupport::Supported)
-        {
-            Osc99FocusSupport::Supported
-        } else {
-            Osc99FocusSupport::Unsupported
-        },
-        auto_expiry: if matches!(a.auto_expiry, Osc99AutoExpiry::Supported)
-            && matches!(b.auto_expiry, Osc99AutoExpiry::Supported)
-        {
-            Osc99AutoExpiry::Supported
-        } else {
-            Osc99AutoExpiry::Unsupported
-        },
-        urgency: if matches!(a.urgency, Osc99UrgencySupport::Supported)
-            && matches!(b.urgency, Osc99UrgencySupport::Supported)
-        {
-            Osc99UrgencySupport::Supported
-        } else {
-            Osc99UrgencySupport::Unsupported
-        },
-        sound_names: if matches!(a.sound_names, Osc99SoundNames::Standard)
-            && matches!(b.sound_names, Osc99SoundNames::Standard)
-        {
-            Osc99SoundNames::Standard
-        } else {
-            Osc99SoundNames::SystemAndSilent
-        },
-        body: if matches!(a.body, Osc99BodySupport::Supported)
-            && matches!(b.body, Osc99BodySupport::Supported)
-        {
-            Osc99BodySupport::Supported
-        } else {
-            Osc99BodySupport::Unsupported
-        },
-        buttons: if matches!(a.buttons, Osc99ButtonSupport::Supported)
-            && matches!(b.buttons, Osc99ButtonSupport::Supported)
-        {
-            Osc99ButtonSupport::Supported
-        } else {
-            Osc99ButtonSupport::Unsupported
-        },
-        icons: if matches!(a.icons, Osc99IconSupport::Supported)
-            && matches!(b.icons, Osc99IconSupport::Supported)
-        {
-            Osc99IconSupport::Supported
-        } else {
-            Osc99IconSupport::Unsupported
-        },
+        activation_report: both(
+            a.activation_report,
+            b.activation_report,
+            Osc99ActivationReport::Reported,
+            Osc99ActivationReport::NotReported,
+        ),
+        close_events: both(
+            a.close_events,
+            b.close_events,
+            Osc99CloseEvents::Reported,
+            Osc99CloseEvents::NotReported,
+        ),
+        activation_focus: both(
+            a.activation_focus,
+            b.activation_focus,
+            Osc99FocusSupport::Supported,
+            Osc99FocusSupport::Unsupported,
+        ),
+        auto_expiry: both(
+            a.auto_expiry,
+            b.auto_expiry,
+            Osc99AutoExpiry::Supported,
+            Osc99AutoExpiry::Unsupported,
+        ),
+        urgency: both(
+            a.urgency,
+            b.urgency,
+            Osc99UrgencySupport::Supported,
+            Osc99UrgencySupport::Unsupported,
+        ),
+        sound_names: both(
+            a.sound_names,
+            b.sound_names,
+            Osc99SoundNames::Standard,
+            Osc99SoundNames::SystemAndSilent,
+        ),
+        body: both(
+            a.body,
+            b.body,
+            Osc99BodySupport::Supported,
+            Osc99BodySupport::Unsupported,
+        ),
+        buttons: both(
+            a.buttons,
+            b.buttons,
+            Osc99ButtonSupport::Supported,
+            Osc99ButtonSupport::Unsupported,
+        ),
+        icons: both(
+            a.icons,
+            b.icons,
+            Osc99IconSupport::Supported,
+            Osc99IconSupport::Unsupported,
+        ),
     }
 }
 
@@ -415,14 +394,14 @@ const fn intersection(a: Osc99Features, b: Osc99Features) -> Osc99Features {
 ///   is advertised only if both legs have it. With no system leg, only the toast
 ///   shows.
 /// - `SystemWhenUnfocused` shows one leg or the other depending on focus, so
-///   every feature needs both. With no system leg the toast still shows while
-///   focused but the failing system leg shows while unfocused, so no optional
-///   feature is guaranteed.
+///   every feature needs both. With no system leg the notification routes to
+///   the toast leg at every focus state (as `Both` does), so the toast leg's
+///   features are advertised.
 ///
 /// Exposed with `platform` as a parameter so every platform's row is testable
 /// on any host.
 #[must_use]
-pub(super) const fn combine(
+pub(super) fn combine(
     routing: NotificationRouting,
     platform: Osc99Platform,
     daemon: Osc99LinuxDaemon,
@@ -431,12 +410,13 @@ pub(super) const fn combine(
     match routing {
         NotificationRouting::Disabled => Osc99Support::Unsupported,
         NotificationRouting::Toast => Osc99Support::Supported(toast_leg()),
-        NotificationRouting::System => match system_leg(platform, daemon) {
-            Some(system) => Osc99Support::Supported(system),
-            None => Osc99Support::Unsupported,
-        },
-        NotificationRouting::Both => match system_leg(platform, daemon) {
-            Some(system) => {
+        NotificationRouting::System => {
+            system_leg(platform, daemon).map_or(Osc99Support::Unsupported, Osc99Support::Supported)
+        }
+        // With no system leg both routings show the toast alone.
+        NotificationRouting::Both => system_leg(platform, daemon).map_or_else(
+            || Osc99Support::Supported(toast_leg()),
+            |system| {
                 let toast = toast_leg();
                 let either = union(toast, system);
                 let both = intersection(toast, system);
@@ -445,13 +425,12 @@ pub(super) const fn combine(
                     auto_expiry: both.auto_expiry,
                     ..either
                 })
-            }
-            None => Osc99Support::Supported(toast_leg()),
-        },
-        NotificationRouting::SystemWhenUnfocused => match system_leg(platform, daemon) {
-            Some(system) => Osc99Support::Supported(intersection(toast_leg(), system)),
-            None => Osc99Support::Supported(no_features()),
-        },
+            },
+        ),
+        NotificationRouting::SystemWhenUnfocused => system_leg(platform, daemon).map_or_else(
+            || Osc99Support::Supported(toast_leg()),
+            |system| Osc99Support::Supported(intersection(toast_leg(), system)),
+        ),
     }
 }
 
@@ -459,6 +438,23 @@ pub(super) const fn combine(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// No optional feature: what a leg that cannot be relied on contributes to an
+    /// intersection.
+    fn no_features() -> Osc99Features {
+        Osc99Features {
+            activation_report: Osc99ActivationReport::NotReported,
+            close_events: Osc99CloseEvents::NotReported,
+            activation_focus: Osc99FocusSupport::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Unsupported,
+            urgency: Osc99UrgencySupport::Unsupported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Unsupported,
+            buttons: Osc99ButtonSupport::Unsupported,
+            icons: Osc99IconSupport::Unsupported,
+        }
+    }
+
     use crate::gui::osc99::Osc99DaemonCapabilities;
     use crate::gui::panes::{Pane, PaneId};
     use crate::gui::tabs::{Tab, TabId};
@@ -871,24 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn system_when_unfocused_on_linux_without_a_daemon_promises_nothing() {
+    fn system_when_unfocused_on_linux_without_a_daemon_is_the_toast_leg() {
+        // The routing falls back to the toast at every focus state, as `Both`
+        // does, so the toast leg's features are what is advertised.
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
                 Osc99Platform::LinuxBsd,
                 Osc99LinuxDaemon::Unavailable
             ),
-            Osc99Support::Supported(Osc99Features {
-                activation_report: Osc99ActivationReport::NotReported,
-                close_events: Osc99CloseEvents::NotReported,
-                activation_focus: Osc99FocusSupport::Unsupported,
-                auto_expiry: Osc99AutoExpiry::Unsupported,
-                urgency: Osc99UrgencySupport::Unsupported,
-                sound_names: Osc99SoundNames::SystemAndSilent,
-                body: Osc99BodySupport::Unsupported,
-                buttons: Osc99ButtonSupport::Unsupported,
-                icons: Osc99IconSupport::Unsupported,
-            })
+            Osc99Support::Supported(toast_leg())
         );
     }
 
@@ -1064,12 +1052,14 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn system_when_unfocused_with_the_bus_down_promises_nothing() {
+    fn system_when_unfocused_with_the_bus_down_is_the_toast_leg() {
         let config = config_with(NotificationRouting::SystemWhenUnfocused);
+        // A daemon without `actions` advertises less than the toast leg, so
+        // losing it (the toast then shows at every focus state) is a change.
         assert_eq!(
-            daemon_state_change(&config, assumed_daemon(), Osc99LinuxDaemon::Unavailable),
+            daemon_state_change(&config, body_only_daemon(), Osc99LinuxDaemon::Unavailable),
             Some(HostCapabilities {
-                osc99: Osc99Support::Supported(no_features())
+                osc99: Osc99Support::Supported(toast_leg())
             })
         );
     }

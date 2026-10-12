@@ -101,7 +101,7 @@ pub(super) enum ToastKind {
 
 impl ToastKind {
     /// Default lifetime before auto-dismissal, when not hovered.
-    const fn default_duration(self) -> Duration {
+    pub(super) const fn default_duration(self) -> Duration {
         match self {
             Self::Error => Duration::from_secs(15),
             Self::Warning => Duration::from_secs(10),

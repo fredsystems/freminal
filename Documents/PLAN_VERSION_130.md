@@ -6133,6 +6133,16 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - **D9, filter recompile.** A busy registry when recompiling the filter defers the config
     swap of `osc99_filters`, so the change is not lost.
 - **Tests:** one per item (G3's extraction in 138.C13 makes the glue testable).
+- **Status:**
+  - **138.C10a (done):** G2, G4, G5 (each leg is asked to close at most once, and expiry
+    still closes legs left open after an activation), G7, the `combine` half of G8, G9, G11,
+    G13 (`Arc` effect payloads, `Cow` icon bytes) and part of G14.
+    - Orchestrator change: `p=alive` lists an instance while it has an open leg that has not
+      been asked to close. An activated `c=1` instance whose notification is still displayed
+      stays listed, as in kitty. The sub-agent's `closing == Open` filter would have hidden
+      it.
+  - **Left for 138.C10b, because they need `app_impl.rs`:** the routing half of G8, the fold
+    of `Osc99FailedSystemLegs`, the busy-cell defer and the daemon-warning wording.
 
 #### 138.C11 — Linux presentation fixes
 

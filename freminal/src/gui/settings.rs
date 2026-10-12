@@ -2004,9 +2004,12 @@ impl SettingsModal {
     /// cannot be compiled listed beneath it.
     fn show_osc99_filters_editor(&mut self, ui: &mut Ui) {
         // The draft changed under the text box (Settings opened, config
-        // reloaded, defaults restored): show the draft's rules.
+        // reloaded, defaults restored): show the draft's rules. The comparison
+        // is on normalised rules: a stored list with blank or untrimmed
+        // entries equals its own text box, so it does not reset the text and
+        // recompile every frame.
         if Osc99Filter::rules_from_text(&self.osc99_filters_text)
-            != self.draft.notifications.osc99_filters
+            != Osc99Filter::normalise_rules(&self.draft.notifications.osc99_filters)
         {
             self.osc99_filters_text =
                 Osc99Filter::rules_to_text(&self.draft.notifications.osc99_filters);

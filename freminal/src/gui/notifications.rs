@@ -660,17 +660,17 @@ impl NotificationRouter {
         // omitted can resolve the icon.
         //
         // The notification handed to the legs carries the resolved bytes in
-        // `icon_data` (cloned only when the `g=` cache supplied them), so
+        // `icon_data` (copied only when the `g=` cache supplied them), so
         // the Linux/BSD notification service and the macOS/Windows system
         // leg both see the icon the program meant.
-        let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
-        let displayed: Cow<'_, Notification99Data> = match resolved_icon {
-            Some(bytes) if data.icon_data.is_none() => Cow::Owned(Notification99Data {
-                icon_data: Some(bytes),
-                ..data.clone()
-            }),
-            _ => Cow::Borrowed(data),
-        };
+        let displayed: Cow<'_, Notification99Data> =
+            match Self::resolve_icon_bytes(data, icon_cache) {
+                Some(bytes) if data.icon_data.is_none() => Cow::Owned(Notification99Data {
+                    icon_data: Some(bytes.into_owned()),
+                    ..data.clone()
+                }),
+                _ => Cow::Borrowed(data),
+            };
         let data = displayed.as_ref();
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
@@ -739,19 +739,23 @@ impl NotificationRouter {
     /// - Otherwise, a `g=`-only notification looks up the cache.
     /// - `None` when neither is available (the OS leg then falls back to
     ///   icon-by-name).
-    fn resolve_icon_bytes(
-        data: &Notification99Data,
-        icon_cache: &mut Osc99IconCache,
-    ) -> Option<Vec<u8>> {
+    ///
+    /// The bytes are borrowed from `data` or the cache, never copied here;
+    /// the cache itself keeps the one copy it needs to own.
+    fn resolve_icon_bytes<'a>(
+        data: &'a Notification99Data,
+        icon_cache: &'a mut Osc99IconCache,
+    ) -> Option<Cow<'a, [u8]>> {
         if let Some(bytes) = &data.icon_data {
             if let Some(key) = &data.icon_cache_key {
                 icon_cache.insert(key.clone(), bytes.clone());
             }
-            Some(bytes.clone())
+            Some(Cow::Borrowed(bytes.as_slice()))
         } else {
             data.icon_cache_key
                 .as_ref()
-                .and_then(|key| icon_cache.get(key).map(<[u8]>::to_vec))
+                .and_then(|key| icon_cache.get(key))
+                .map(Cow::Borrowed)
         }
     }
 }
@@ -1806,7 +1810,11 @@ mod tests {
 
         let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
 
-        assert_eq!(resolved, Some(vec![1, 2, 3, 4]));
+        assert!(
+            matches!(&resolved, Some(Cow::Borrowed(bytes)) if *bytes == [1u8, 2, 3, 4]),
+            "transmitted bytes are borrowed, not copied: {resolved:?}"
+        );
+        drop(resolved);
         assert_eq!(icon_cache.get("k"), Some([1u8, 2, 3, 4].as_slice()));
     }
 
@@ -1823,7 +1831,10 @@ mod tests {
 
         let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
 
-        assert_eq!(resolved, Some(vec![9, 9, 9]));
+        assert!(
+            matches!(&resolved, Some(Cow::Borrowed(bytes)) if *bytes == [9u8, 9, 9]),
+            "cached bytes are borrowed, not copied: {resolved:?}"
+        );
     }
 
     #[test]
@@ -1835,10 +1846,7 @@ mod tests {
             ..default_n99()
         };
 
-        assert_eq!(
-            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
-            None
-        );
+        assert!(NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache).is_none());
     }
 
     #[test]
@@ -1846,10 +1854,7 @@ mod tests {
         let mut icon_cache = Osc99IconCache::default();
         let data = default_n99();
 
-        assert_eq!(
-            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
-            None
-        );
+        assert!(NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache).is_none());
     }
 
     #[test]
@@ -1877,10 +1882,13 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("exactly one instance must be registered");
         };
-        assert_eq!(entry.id.as_deref(), Some("n1"));
-        assert_eq!(entry.activation_reporting, Osc99ActivationReporting::Report);
-        assert_eq!(entry.close_reporting, Osc99CloseReporting::Report);
-        assert_ne!(entry.open_legs, Vec::<Osc99Leg>::new());
+        assert_eq!(entry.id(), Some("n1"));
+        assert_eq!(
+            entry.activation_reporting(),
+            Osc99ActivationReporting::Report
+        );
+        assert_eq!(entry.close_reporting(), Osc99CloseReporting::Report);
+        assert_ne!(entry.open_legs(), []);
     }
 
     #[test]
@@ -1903,7 +1911,7 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("an id-less notification is still registered");
         };
-        assert_eq!(entry.id, None);
+        assert_eq!(entry.id(), None);
     }
 
     #[test]
@@ -2036,7 +2044,7 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("only the unfiltered notification is registered");
         };
-        assert_eq!(entry.id.as_deref(), Some("wanted"));
+        assert_eq!(entry.id(), Some("wanted"));
     }
 
     #[test]
@@ -2180,8 +2188,8 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("a toast-only notification must be registered");
         };
-        assert_eq!(entry.id.as_deref(), Some("toast-only"));
-        assert_eq!(entry.open_legs, [Osc99Leg::Toast]);
+        assert_eq!(entry.id(), Some("toast-only"));
+        assert_eq!(entry.open_legs(), [Osc99Leg::Toast]);
     }
 
     #[test]
@@ -2218,8 +2226,8 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("a system-leg notification must be registered");
         };
-        assert_eq!(entry.id.as_deref(), Some("tracked"));
-        assert_eq!(entry.shown_legs, [Osc99Leg::Toast, system_leg]);
+        assert_eq!(entry.id(), Some("tracked"));
+        assert_eq!(entry.shown_legs(), [Osc99Leg::Toast, system_leg]);
     }
 
     #[test]
@@ -2287,8 +2295,8 @@ mod tests {
         let [entry] = registry.instances() else {
             panic!("the notification must be registered");
         };
-        assert_eq!(entry.instance, shown.instance);
-        assert_eq!(entry.open_legs, [Osc99Leg::LinuxSystem]);
+        assert_eq!(entry.instance(), shown.instance);
+        assert_eq!(entry.open_legs(), [Osc99Leg::LinuxSystem]);
     }
 
     /// The notification handed to the desktop-notification backend carries the

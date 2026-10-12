@@ -36,7 +36,12 @@
 //! [`Osc99Effect::CloseLinuxSystem`]), and the instance finishes when the last
 //! of those legs reports `Closed`. An update that moves an instance off a leg
 //! closes the old notification's leg, and an activation on one leg closes the
-//! others. Events that later arrive for a forgotten instance are ignored.
+//! others. The registry remembers which legs it has already asked to close, so
+//! no leg is ever asked twice. Events that later arrive for a forgotten
+//! instance are ignored.
+//!
+//! An instance with no open leg is never kept: a display on the untracked leg
+//! alone is shown, answered and forgotten at once.
 //!
 //! # Expiry
 //!
@@ -46,7 +51,10 @@
 //! instance past its deadline through the same path as `p=close`, whatever
 //! the toast leg's own lifetime is, and [`Osc99Registry::next_deadline`]
 //! tells the GUI when to wake for the nearest one. Time is injected, so the
-//! registry never reads a clock.
+//! registry never reads a clock. The deadline also applies to legs left open
+//! after an activation (the activated leg closes itself, so only a leg that
+//! did not is closed by expiry); a leg already asked to close is not asked
+//! again.
 //!
 //! # Pane lifetime
 //!
@@ -57,11 +65,14 @@
 //!
 //! # Capacity
 //!
-//! At most [`MAX_OSC99_INSTANCES`] instances are kept. When a new one would
-//! exceed that, the oldest is forgotten without a reply (its toast, if open,
-//! is closed), like kitty.
+//! A pane keeps at most [`MAX_OSC99_INSTANCES_PER_PANE`] instances: when a new
+//! one would exceed that, *that pane's* oldest is forgotten without a reply,
+//! so a noisy pane cannot evict another pane's notifications. As a backstop,
+//! at most [`MAX_OSC99_INSTANCES`] instances are kept overall, and the oldest
+//! is forgotten the same way. A forgotten instance's open legs are closed
+//! (kitty also forgets the oldest).
 
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
@@ -80,53 +91,67 @@ use super::{
 use crate::gui::panes::PaneId;
 use crate::gui::toast::ToastEvent;
 
-/// The most instances the registry keeps. The oldest is forgotten, with no
-/// reply, when a new registration would exceed this.
+/// The most instances the registry keeps overall, as a backstop behind
+/// [`MAX_OSC99_INSTANCES_PER_PANE`]. The oldest is forgotten, with no reply,
+/// when a new registration would exceed this.
 pub const MAX_OSC99_INSTANCES: usize = 128;
+
+/// The most instances one pane keeps. That pane's oldest is forgotten, with no
+/// reply, when a new registration would exceed this.
+pub const MAX_OSC99_INSTANCES_PER_PANE: usize = 32;
 
 /// Whether the registry has already asked for an instance to be closed.
 ///
 /// An instance whose legs are closing stays registered until every open leg's
-/// `Closed` event arrives. Without this state a second close request (a
-/// `p=close` after expiry, or an expiry tick after `p=close`) would emit a
-/// second [`Osc99Effect::CloseToast`] or [`Osc99Effect::CloseLinuxSystem`].
+/// `Closed` event arrives. Without this state a second `p=close` or activation
+/// would repeat work already done. Which legs were actually asked to close is
+/// tracked per leg (`Osc99Instance::close_requested`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Osc99Closing {
-    /// No close has been requested.
+    /// No close has been requested and the instance has not been activated.
     Open,
-    /// Every open leg was asked to close (or is closing itself after an
-    /// activation); the instance waits for the last `Closed`.
+    /// The instance was closed (`p=close`, expiry) or activated; it waits for
+    /// its open legs' `Closed` events. It is no longer alive for `p=alive`, and
+    /// a further activation or `p=close` is ignored.
     Requested,
 }
 
 /// One displayed OSC 99 notification.
+///
+/// The fields are private: only the registry mutates an instance, so its
+/// invariants (such as `open_legs` never being empty) hold by construction.
 #[derive(Debug, Clone)]
 pub struct Osc99Instance {
     /// The registry-assigned identity, unique for the process lifetime.
-    pub instance: Osc99InstanceId,
+    instance: Osc99InstanceId,
     /// The application's `i=` id, if the notification carried one.
-    pub id: Option<String>,
+    id: Option<String>,
     /// The pane the notification came from.
-    pub origin: Osc99Origin,
+    origin: Osc99Origin,
     /// A `Weak` handle to the pane's reply sender; also the pane's liveness.
-    pub reply_tx: Weak<Sender<InputEvent>>,
+    reply_tx: Weak<Sender<InputEvent>>,
     /// Whether `a=report` was requested.
-    pub activation_reporting: Osc99ActivationReporting,
+    activation_reporting: Osc99ActivationReporting,
     /// Whether activation should focus the pane.
-    pub activation_focus: Osc99ActivationFocus,
+    activation_focus: Osc99ActivationFocus,
     /// Whether `c=1` was requested.
-    pub close_reporting: Osc99CloseReporting,
+    close_reporting: Osc99CloseReporting,
     /// Every leg the notification was shown on, without duplicates. Never
     /// shrinks.
-    pub shown_legs: Vec<Osc99Leg>,
+    shown_legs: Vec<Osc99Leg>,
     /// The legs still displayed and observable, without duplicates. Never
-    /// holds [`Osc99Leg::UntrackedSystem`].
-    pub open_legs: Vec<Osc99Leg>,
+    /// holds [`Osc99Leg::UntrackedSystem`], and never empty while the instance
+    /// is registered.
+    open_legs: Vec<Osc99Leg>,
+    /// The legs the registry has already emitted a close effect for. A leg is
+    /// asked to close at most once, whichever of `p=close`, expiry or an
+    /// activation on another leg asks first.
+    close_requested: Vec<Osc99Leg>,
     /// When the notification expires (`w=` > 0), measured from its display.
     /// `None` when it never expires on its own, or once expiry has acted.
-    pub deadline: Option<Instant>,
+    deadline: Option<Instant>,
     /// Whether the registry has already asked the instance to close.
-    pub closing: Osc99Closing,
+    closing: Osc99Closing,
 }
 
 impl Osc99Instance {
@@ -179,9 +204,10 @@ impl Osc99Instance {
         })
     }
 
-    /// The effect that closes `leg`, if it is open and closable.
+    /// The effect that closes `leg`, if it is open, closable and not already
+    /// asked to close.
     fn close_leg_effect(&self, leg: Osc99Leg) -> Option<Osc99Effect> {
-        if !self.is_open(leg) {
+        if !self.is_open(leg) || self.close_requested.contains(&leg) {
             return None;
         }
         match leg {
@@ -192,20 +218,48 @@ impl Osc99Instance {
         }
     }
 
-    /// The effects that close every open leg.
-    fn close_effects(&self) -> Vec<Osc99Effect> {
+    /// Whether some open leg has not been asked to close yet, so a close (or
+    /// expiry) would still do something.
+    fn has_unrequested_leg(&self) -> bool {
         self.open_legs
             .iter()
-            .filter_map(|leg| self.close_leg_effect(*leg))
-            .collect()
+            .any(|leg| !self.close_requested.contains(leg))
     }
 
-    /// The effects that close every open leg except `kept`, the leg that
-    /// closes itself (the one a user just activated).
-    fn close_effects_except(&self, kept: Osc99Leg) -> Vec<Osc99Effect> {
+    /// Ask every open leg that has not been asked yet to close, except `kept`
+    /// (the leg that closes itself: the one a user just activated), and return
+    /// the effects. The legs asked are remembered, so none is asked twice.
+    fn request_close_except(&mut self, kept: Option<Osc99Leg>) -> Vec<Osc99Effect> {
+        let asked: Vec<Osc99Leg> = self
+            .open_legs
+            .iter()
+            .copied()
+            .filter(|leg| Some(*leg) != kept)
+            .collect();
+        let effects = asked
+            .iter()
+            .filter_map(|leg| self.close_leg_effect(*leg))
+            .collect();
+        let newly_asked: Vec<Osc99Leg> = asked
+            .into_iter()
+            .filter(|leg| !self.close_requested.contains(leg))
+            .collect();
+        self.close_requested.extend(newly_asked);
+        effects
+    }
+
+    /// Ask every open leg that has not been asked yet to close (see
+    /// [`Self::request_close_except`]) and mark the instance closing.
+    fn request_close(&mut self) -> Vec<Osc99Effect> {
+        self.closing = Osc99Closing::Requested;
+        self.request_close_except(None)
+    }
+
+    /// The effects that close every open leg, for an instance that is being
+    /// forgotten (replaced or evicted) rather than closed.
+    fn forget_effects(&self) -> Vec<Osc99Effect> {
         self.open_legs
             .iter()
-            .filter(|leg| **leg != kept)
             .filter_map(|leg| self.close_leg_effect(*leg))
             .collect()
     }
@@ -256,21 +310,28 @@ impl Osc99Registry {
     /// Record a displayed notification and return the effects that show it.
     ///
     /// Callers register only when at least one leg displayed it; `legs`
-    /// lists the legs that did. An instance with no legs is legal but never
-    /// produced by the router. No leg is shown by the caller: a `Toast` in
+    /// lists the legs that did. No leg is shown by the caller: a `Toast` in
     /// `legs` yields a [`Osc99Effect::ShowToast`] here, a `LinuxSystem` a
     /// [`Osc99Effect::ShowLinuxSystem`], and an `UntrackedSystem` a
     /// [`Osc99Effect::ShowUntrackedSystem`] plus, when `c=1` was requested, the
-    /// `untracked` close report. An update of an instance whose new legs
-    /// include the untracked one shows a new notification (nothing can be
-    /// replaced in place there) and, with `c=1`, reports again.
+    /// `untracked` close report. The two system effects share one copy of
+    /// `data`. An update of an instance whose new legs include the untracked
+    /// one shows a new notification (nothing can be replaced in place there)
+    /// and, with `c=1`, reports again.
+    ///
+    /// An instance left with no open leg (a display on the untracked leg
+    /// alone) is not kept: it can never be closed or activated through the
+    /// registry, so it would only occupy a slot.
     ///
     /// If `data.id` is set and the same pane already has an instance with
     /// that id, the notification is an update: the old instance is forgotten
     /// without a close report, and each of its open legs is replaced in place
-    /// when `legs` still has it (a leg `legs` no longer has is closed). If the
-    /// registry would then exceed [`MAX_OSC99_INSTANCES`], the oldest instance
-    /// is forgotten, again without a reply, and its open legs are closed.
+    /// when `legs` still has it (a leg `legs` no longer has is closed), whether
+    /// or not the new instance is kept. If the pane would then exceed
+    /// [`MAX_OSC99_INSTANCES_PER_PANE`], that pane's oldest instance is
+    /// forgotten, again without a reply, and its open legs are closed; the
+    /// same applies to the oldest overall instance beyond
+    /// [`MAX_OSC99_INSTANCES`].
     ///
     /// `now` is the display time: an `w=` expiry is measured from it, so an
     /// update restarts the deadline.
@@ -287,35 +348,8 @@ impl Osc99Registry {
         let wants_linux = legs.contains(&Osc99Leg::LinuxSystem);
         let wants_untracked = legs.contains(&Osc99Leg::UntrackedSystem);
 
-        let mut replaces_toast = None;
-        let mut replaces_linux = None;
-        if let Some(id) = data.id.as_deref()
-            && let Some(pos) = self
-                .instances
-                .iter()
-                .position(|instance| instance.is_pane_id(origin.pane_id, id))
-        {
-            let old = self.instances.remove(pos);
-            old.log_forgotten("replaced by a notification with the same id");
-            if old.is_open(Osc99Leg::Toast) {
-                if wants_toast {
-                    replaces_toast = Some(old.instance);
-                } else {
-                    // The old toast's `Closed` event arrives for a forgotten
-                    // instance and is ignored, so no close is reported.
-                    effects.push(Osc99Effect::CloseToast(old.instance));
-                }
-            }
-            if old.is_open(Osc99Leg::LinuxSystem) {
-                if wants_linux {
-                    replaces_linux = Some(old.instance);
-                } else {
-                    // As for the toast: its `Closed` is for a forgotten
-                    // instance, so no close is reported.
-                    effects.push(Osc99Effect::CloseLinuxSystem(old.instance));
-                }
-            }
-        }
+        let (replaces_toast, replaces_linux) =
+            self.forget_replaced(origin, data.id.as_deref(), legs, &mut effects);
 
         let instance = Osc99InstanceId(self.next_instance);
         self.next_instance = self.next_instance.wrapping_add(1);
@@ -334,26 +368,41 @@ impl Osc99Registry {
                 spec: osc99_toast_spec(data),
             });
         }
-        if wants_linux {
-            effects.push(Osc99Effect::ShowLinuxSystem {
-                instance,
-                replaces: replaces_linux,
-                notification: Box::new(data.clone()),
-            });
-        }
-        if wants_untracked {
-            effects.push(Osc99Effect::ShowUntrackedSystem(Box::new(data.clone())));
-            // Nothing can observe this notification closing, so a requested
-            // close report is answered now, in the `untracked` form.
-            if data.close_reporting == Osc99CloseReporting::Report {
-                effects.push(Osc99Effect::Reply {
-                    reply_tx: Weak::clone(&reply_tx),
-                    reply: GuiReply::Osc99Closed {
-                        id: data.id.clone(),
-                        tracking: Osc99CloseTracking::Untracked,
-                    },
+        if wants_linux || wants_untracked {
+            let shared = Arc::new(data.clone());
+            if wants_linux {
+                effects.push(Osc99Effect::ShowLinuxSystem {
+                    instance,
+                    replaces: replaces_linux,
+                    notification: Arc::clone(&shared),
                 });
             }
+            if wants_untracked {
+                effects.push(Osc99Effect::ShowUntrackedSystem(shared));
+                // Nothing can observe this notification closing, so a
+                // requested close report is answered now, in the `untracked`
+                // form.
+                if data.close_reporting == Osc99CloseReporting::Report {
+                    effects.push(Osc99Effect::Reply {
+                        reply_tx: Weak::clone(&reply_tx),
+                        reply: GuiReply::Osc99Closed {
+                            id: data.id.clone(),
+                            tracking: Osc99CloseTracking::Untracked,
+                        },
+                    });
+                }
+            }
+        }
+
+        // An untracked system notification can never be observed closing, so
+        // it is never an open leg the instance could wait on.
+        let open_legs: Vec<Osc99Leg> = deduped
+            .iter()
+            .copied()
+            .filter(|leg| *leg != Osc99Leg::UntrackedSystem)
+            .collect();
+        if open_legs.is_empty() {
+            return effects;
         }
 
         self.instances.push(Osc99Instance {
@@ -364,14 +413,9 @@ impl Osc99Registry {
             activation_reporting: data.activation_reporting,
             activation_focus: data.activation_focus,
             close_reporting: data.close_reporting,
-            // An untracked system notification can never be observed closing,
-            // so it is never an open leg the instance could wait on.
-            open_legs: deduped
-                .iter()
-                .copied()
-                .filter(|leg| *leg != Osc99Leg::UntrackedSystem)
-                .collect(),
+            open_legs,
             shown_legs: deduped,
+            close_requested: Vec::new(),
             deadline: match data.expiry {
                 Osc99Expiry::After(ms) => {
                     now.checked_add(Duration::from_millis(u64::from(ms.get())))
@@ -381,12 +425,97 @@ impl Osc99Registry {
             closing: Osc99Closing::Open,
         });
 
+        effects.extend(self.evict_over_capacity(origin));
+
+        effects
+    }
+
+    /// Forget the pane's existing instance with `id`, if there is one, because
+    /// a new notification with the same id replaces it.
+    ///
+    /// Returns the instances whose toast and Linux notification the new one
+    /// (shown on `legs`) takes over in place: the old instance has that leg
+    /// open and `legs` still has it. A leg the new notification no longer uses
+    /// gets its close effect appended to `effects`, unless it was already asked
+    /// to close.
+    fn forget_replaced(
+        &mut self,
+        origin: Osc99Origin,
+        id: Option<&str>,
+        legs: &[Osc99Leg],
+        effects: &mut Vec<Osc99Effect>,
+    ) -> (Option<Osc99InstanceId>, Option<Osc99InstanceId>) {
+        let wants_toast = legs.contains(&Osc99Leg::Toast);
+        let wants_linux = legs.contains(&Osc99Leg::LinuxSystem);
+        let mut replaces_toast = None;
+        let mut replaces_linux = None;
+        if let Some(id) = id
+            && let Some(pos) = self
+                .instances
+                .iter()
+                .position(|instance| instance.is_pane_id(origin.pane_id, id))
+        {
+            let old = self.instances.remove(pos);
+            old.log_forgotten("replaced by a notification with the same id");
+            if old.is_open(Osc99Leg::Toast) {
+                if wants_toast {
+                    replaces_toast = Some(old.instance);
+                } else {
+                    // The old toast's `Closed` event arrives for a forgotten
+                    // instance and is ignored, so no close is reported.
+                    effects.extend(old.close_leg_effect(Osc99Leg::Toast));
+                }
+            }
+            if old.is_open(Osc99Leg::LinuxSystem) {
+                if wants_linux {
+                    replaces_linux = Some(old.instance);
+                } else {
+                    // As for the toast: its `Closed` is for a forgotten
+                    // instance, so no close is reported.
+                    effects.extend(old.close_leg_effect(Osc99Leg::LinuxSystem));
+                }
+            }
+        }
+        (replaces_toast, replaces_linux)
+    }
+
+    /// Forget the oldest instances beyond the pane quota of `origin`'s pane
+    /// and then beyond the global cap, returning the effects that close their
+    /// open legs.
+    fn evict_over_capacity(&mut self, origin: Osc99Origin) -> Vec<Osc99Effect> {
+        let mut effects = Vec::new();
+        // The pane's own quota first, so a noisy pane evicts itself and never
+        // another pane's notifications; the global cap is a backstop.
+        let mut to_evict = self
+            .instances
+            .iter()
+            .filter(|kept| kept.origin.pane_id == origin.pane_id)
+            .count()
+            .saturating_sub(MAX_OSC99_INSTANCES_PER_PANE);
+        if to_evict > 0 {
+            // Registration order is oldest first, so the first of the pane's
+            // instances are the oldest.
+            let (evicted, kept): (Vec<Osc99Instance>, Vec<Osc99Instance>) =
+                std::mem::take(&mut self.instances)
+                    .into_iter()
+                    .partition(|candidate| {
+                        let evict = to_evict > 0 && candidate.origin.pane_id == origin.pane_id;
+                        if evict {
+                            to_evict -= 1;
+                        }
+                        evict
+                    });
+            self.instances = kept;
+            for oldest in evicted {
+                oldest.log_forgotten("pane quota full; pane's oldest forgotten");
+                effects.extend(oldest.forget_effects());
+            }
+        }
         while self.instances.len() > MAX_OSC99_INSTANCES {
             let oldest = self.instances.remove(0);
             oldest.log_forgotten("registry full; oldest forgotten");
-            effects.extend(oldest.close_effects());
+            effects.extend(oldest.forget_effects());
         }
-
         effects
     }
 
@@ -394,7 +523,11 @@ impl Osc99Registry {
     ///
     /// The reply lists the ids of that pane's instances that carry an id,
     /// sorted and without duplicates. Other panes' instances are never
-    /// listed.
+    /// listed. An instance is listed while one of its legs is still open and
+    /// has not been asked to close: a `p=close` or an expiry removes it at
+    /// once, while an activated `c=1` instance whose desktop notification is
+    /// still displayed stays listed until the daemon closes it (as kitty
+    /// does).
     #[must_use]
     pub fn alive(
         &self,
@@ -405,7 +538,9 @@ impl Osc99Registry {
         let mut live_ids: Vec<String> = self
             .instances
             .iter()
-            .filter(|instance| instance.origin.pane_id == origin.pane_id)
+            .filter(|instance| {
+                instance.origin.pane_id == origin.pane_id && instance.has_unrequested_leg()
+            })
             .filter_map(|instance| instance.id.clone())
             .collect();
         live_ids.sort();
@@ -425,76 +560,54 @@ impl Osc99Registry {
     /// An id the pane does not have is a no-op. Every open leg (toast and
     /// Linux system) is asked to close; the instance stays until the last
     /// leg's `Closed` event arrives (see [`Self::on_toast_event`] and
-    /// [`Self::on_system_event`]), which is when a `c=1` report is sent. With
-    /// no leg to wait for, the instance is forgotten at once, without a
-    /// report. Closing an instance that is already closing does nothing.
+    /// [`Self::on_system_event`]), which is when a `c=1` report is sent.
+    /// Closing an instance that is already closing, or that was activated,
+    /// does nothing.
     pub fn close(&mut self, origin: Osc99Origin, id: &str) -> Vec<Osc99Effect> {
-        let Some(pos) = self
+        let Some(instance) = self
             .instances
-            .iter()
-            .position(|instance| instance.is_pane_id(origin.pane_id, id))
+            .iter_mut()
+            .find(|instance| instance.is_pane_id(origin.pane_id, id))
         else {
             return Vec::new();
         };
-        self.close_instance_at(pos, "closed by the application")
+        if instance.closing == Osc99Closing::Requested {
+            return Vec::new();
+        }
+        instance.request_close()
     }
 
-    /// Close every instance whose deadline is at or before `now`, through the
-    /// same path as `p=close` ([`Self::close`]), and return the effects.
+    /// Close the legs of every instance whose deadline is at or before `now`
+    /// and return the effects.
     ///
-    /// The deadline is spent once acted on, and an instance that is already
-    /// closing is skipped, so a later tick never closes it again.
+    /// An open instance closes through the same path as `p=close`
+    /// ([`Self::close`]). An instance that was activated, or is otherwise
+    /// already closing, still has its deadline: the legs that were never asked
+    /// to close (an activated leg that did not close itself) are closed now,
+    /// and a leg already asked is not asked again. The deadline is spent once
+    /// acted on.
     pub fn tick(&mut self, now: Instant) -> Vec<Osc99Effect> {
-        let due: Vec<Osc99InstanceId> = self
-            .instances
-            .iter()
-            .filter(|instance| {
-                instance.closing == Osc99Closing::Open
-                    && instance.deadline.is_some_and(|deadline| deadline <= now)
-            })
-            .map(|instance| instance.instance)
-            .collect();
-
         let mut effects = Vec::new();
-        for instance in due {
-            let Some(pos) = self.position_of(instance) else {
-                continue;
-            };
-            self.instances[pos].deadline = None;
-            effects.extend(self.close_instance_at(pos, "expired"));
+        for instance in &mut self.instances {
+            if instance.has_unrequested_leg()
+                && instance.deadline.is_some_and(|deadline| deadline <= now)
+            {
+                instance.deadline = None;
+                effects.extend(instance.request_close());
+            }
         }
         effects
     }
 
-    /// The earliest deadline among instances that are not already closing, or
-    /// `None` when nothing will expire. The GUI schedules a repaint for it.
+    /// The earliest deadline among instances that still have a leg to close,
+    /// or `None` when nothing will expire. The GUI schedules a repaint for it.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
         self.instances
             .iter()
-            .filter(|instance| instance.closing == Osc99Closing::Open)
+            .filter(|instance| instance.has_unrequested_leg())
             .filter_map(|instance| instance.deadline)
             .min()
-    }
-
-    /// Close the instance at `pos` on behalf of `why` (`p=close` or expiry).
-    ///
-    /// Every open leg is asked to close and the instance waits for their
-    /// `Closed` events; with nothing to wait for it is forgotten at once. An
-    /// instance already waiting yields no effects.
-    fn close_instance_at(&mut self, pos: usize, why: &'static str) -> Vec<Osc99Effect> {
-        let instance = &mut self.instances[pos];
-        if instance.closing == Osc99Closing::Requested {
-            return Vec::new();
-        }
-
-        let effects = instance.close_effects();
-        if effects.is_empty() {
-            self.instances.remove(pos).log_forgotten(why);
-        } else {
-            instance.closing = Osc99Closing::Requested;
-        }
-        effects
     }
 
     /// Apply an event from the toast stack.
@@ -545,7 +658,12 @@ impl Osc99Registry {
     /// The instance is forgotten unless `c=1` was requested, so the other
     /// legs' `Closed` events are then ignored. With `c=1` it stays, marked
     /// closing, until every open leg has closed, and then reports once. An
-    /// unknown instance yields nothing.
+    /// activation of an instance that is already closing (activated before, or
+    /// closed by `p=close` or expiry) is ignored: no second report, no second
+    /// focus request. An unknown instance yields nothing.
+    ///
+    /// The activated leg is not marked as asked to close: the user's action
+    /// normally closes it, but if it stays open, expiry still closes it.
     fn activate(
         &mut self,
         instance: Osc99InstanceId,
@@ -555,16 +673,14 @@ impl Osc99Registry {
         let Some(pos) = self.position_of(instance) else {
             return Vec::new();
         };
+        if self.instances[pos].closing == Osc99Closing::Requested {
+            return Vec::new();
+        }
         let button = match activation {
             Osc99LegActivation::Body => None,
             Osc99LegActivation::Button(n) => Some(n),
         };
-        let other_legs = if self.instances[pos].closing == Osc99Closing::Open {
-            self.instances[pos].close_effects_except(leg)
-        } else {
-            // A close was already requested for every open leg.
-            Vec::new()
-        };
+        let other_legs = self.instances[pos].request_close_except(Some(leg));
         let effects: Vec<Osc99Effect> = self.instances[pos]
             .activation_reply(button)
             .into_iter()
@@ -626,6 +742,41 @@ impl Osc99Registry {
     #[cfg(test)]
     pub fn instances(&self) -> &[Osc99Instance] {
         &self.instances
+    }
+}
+
+/// Read access for tests outside this module (the fields are private).
+#[cfg(test)]
+impl Osc99Instance {
+    /// The application's `i=` id.
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The registry-assigned identity. Only the Linux/BSD tests read it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub const fn instance(&self) -> Osc99InstanceId {
+        self.instance
+    }
+
+    /// Whether `a=report` was requested.
+    pub const fn activation_reporting(&self) -> Osc99ActivationReporting {
+        self.activation_reporting
+    }
+
+    /// Whether `c=1` was requested.
+    pub const fn close_reporting(&self) -> Osc99CloseReporting {
+        self.close_reporting
+    }
+
+    /// The legs the notification was shown on.
+    pub fn shown_legs(&self) -> &[Osc99Leg] {
+        &self.shown_legs
+    }
+
+    /// The legs still displayed.
+    pub fn open_legs(&self) -> &[Osc99Leg] {
+        &self.open_legs
     }
 }
 
@@ -732,9 +883,9 @@ mod tests {
         legs: &[Osc99Leg],
     ) -> (Vec<Osc99Effect>, Osc99InstanceId) {
         let effects = registry.register(pane.origin, pane.weak(), data, legs, Instant::now());
-        let Some(instance) = registry.instances().last().map(|i| i.instance) else {
-            panic!("registration adds an instance");
-        };
+        // The registry mints ids in order, whether or not it keeps the
+        // instance (a display on the untracked leg alone is not kept).
+        let instance = Osc99InstanceId(registry.next_instance.wrapping_sub(1));
         (effects, instance)
     }
 
@@ -2111,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn an_untracked_only_instance_gets_no_tracked_close_report_later() {
+    fn an_untracked_only_display_is_not_kept() {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let short_lived = Notification99Data {
@@ -2119,34 +2270,56 @@ mod tests {
             ..reporting_data("n", Osc99CloseReporting::Report)
         };
         let now = Instant::now();
-        let _ = registry.register(
+
+        let effects = registry.register(
             a.origin,
             a.weak(),
             &short_lived,
             &[Osc99Leg::UntrackedSystem],
             now,
         );
+
         assert!(
-            registry.instances()[0].open_legs.is_empty(),
-            "the untracked leg never holds the instance open"
+            matches!(
+                effects.as_slice(),
+                [
+                    Osc99Effect::ShowUntrackedSystem(_),
+                    Osc99Effect::Reply { .. }
+                ]
+            ),
+            "it is still shown and answered: {effects:?}"
         );
-
-        // Expiry and `p=close` both go through the shared close path, and
-        // neither has a leg to close or a tracked report to send.
+        assert!(registry.instances().is_empty(), "nothing is registered");
+        assert_eq!(alive_ids(&registry, &a), Vec::<String>::new());
+        assert_eq!(registry.next_deadline(), None);
         assert!(registry.tick(now + Duration::from_secs(1)).is_empty());
-        assert!(registry.instances().is_empty(), "expiry forgot it");
+        assert!(registry.close(a.origin, "n").is_empty());
+    }
 
-        let (_, again) = register_with(
+    #[test]
+    fn an_untracked_only_update_still_closes_the_old_instance() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, first) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
+
+        let (effects, _) = register_with(
             &mut registry,
             &a,
-            &reporting_data("n", Osc99CloseReporting::Report),
+            &data(Some("n")),
             &[Osc99Leg::UntrackedSystem],
         );
-        assert!(registry.close(a.origin, "n").is_empty());
-        assert!(registry.instances().is_empty(), "p=close forgot it");
+
         assert!(
-            registry.on_toast_event(closed(again)).is_empty(),
-            "a late event for the forgotten instance is ignored"
+            matches!(
+                effects.as_slice(),
+                [Osc99Effect::CloseToast(old), Osc99Effect::ShowUntrackedSystem(_)] if *old == first
+            ),
+            "the old toast closes and the new one shows: {effects:?}"
+        );
+        assert!(registry.instances().is_empty(), "the old one was forgotten");
+        assert!(
+            registry.on_toast_event(closed(first)).is_empty(),
+            "its late close is ignored"
         );
     }
 
@@ -2236,7 +2409,10 @@ mod tests {
         };
         assert!(is_untracked_close(reply, "n"), "got {reply:?}");
         assert_ne!(first, second);
-        assert_eq!(registry.instances().len(), 1, "the update replaced it");
+        assert!(
+            registry.instances().is_empty(),
+            "an untracked display is not kept"
+        );
     }
 
     #[test]
@@ -2410,6 +2586,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_repeated_activation_of_an_activated_instance_is_ignored() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let notification = Notification99Data {
+            activation_focus: Osc99ActivationFocus::Focus,
+            ..reporting_data("n", Osc99CloseReporting::Report)
+        };
+        let (_, instance) = register_with(&mut registry, &a, &notification, &[Osc99Leg::Toast]);
+
+        let first = registry.on_toast_event(activated(instance));
+        assert!(
+            matches!(
+                first.as_slice(),
+                [Osc99Effect::Reply { .. }, Osc99Effect::FocusPane(_)]
+            ),
+            "the first activation reports and focuses: {first:?}"
+        );
+
+        assert!(
+            registry.on_toast_event(activated(instance)).is_empty(),
+            "no second reply and no second focus request"
+        );
+        assert!(
+            registry
+                .on_toast_event(button_pressed(instance, 1))
+                .is_empty(),
+            "a button press on the activated instance is ignored too"
+        );
+
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1, "still exactly one close report");
+        assert!(is_tracked_close(&reports[0], "n"));
+    }
+
+    #[test]
+    fn an_activation_after_p_close_is_ignored() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast],
+        );
+        let _ = registry.close(a.origin, "n");
+
+        assert!(registry.on_toast_event(activated(instance)).is_empty());
+    }
+
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn activating_a_single_leg_instance_emits_no_close() {
@@ -2494,19 +2720,63 @@ mod tests {
 
     // ── capacity and pane lifetime ──────────────────────────────────────
 
+    /// `n` live panes, with distinct ids.
+    fn panes(n: usize) -> Vec<TestPane> {
+        let mut ids = PaneIdGenerator::new(0);
+        (0..n).map(|_| TestPane::new(ids.next_id())).collect()
+    }
+
     #[test]
-    fn the_cap_forgets_the_oldest_instance() {
-        let (a, _b) = two_panes();
+    fn the_global_cap_forgets_the_oldest_instance() {
+        // Four panes at their quota fill the global cap exactly; a fifth
+        // pane's registration pushes the overall oldest out.
+        let panes = panes(5);
         let mut registry = Osc99Registry::default();
-        for n in 0..=MAX_OSC99_INSTANCES {
-            register(&mut registry, &a, Some(&format!("id{n}")));
+        for pane in &panes[..4] {
+            for n in 0..MAX_OSC99_INSTANCES_PER_PANE {
+                register(&mut registry, pane, Some(&format!("id{n}")));
+            }
         }
+        assert_eq!(registry.instances().len(), MAX_OSC99_INSTANCES);
+
+        register(&mut registry, &panes[4], Some("fresh"));
 
         assert_eq!(registry.instances().len(), MAX_OSC99_INSTANCES);
+        let first = alive_ids(&registry, &panes[0]);
+        assert!(
+            !first.contains(&"id0".to_owned()),
+            "the oldest must be gone"
+        );
+        assert!(first.contains(&"id1".to_owned()));
+        assert_eq!(alive_ids(&registry, &panes[4]), ["fresh"]);
+    }
+
+    #[test]
+    fn the_pane_quota_evicts_that_panes_oldest_and_leaves_other_panes_alone() {
+        let (a, b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        register(&mut registry, &b, Some("b-first"));
+        for n in 0..MAX_OSC99_INSTANCES_PER_PANE {
+            register(&mut registry, &a, Some(&format!("id{n}")));
+        }
+        register(&mut registry, &b, Some("b-second"));
+        assert_eq!(
+            ids_in_registry(&registry, &a).len(),
+            MAX_OSC99_INSTANCES_PER_PANE
+        );
+
+        register(&mut registry, &a, Some("id-over"));
+
         let ids = alive_ids(&registry, &a);
-        assert!(!ids.contains(&"id0".to_owned()), "the oldest must be gone");
+        assert_eq!(ids.len(), MAX_OSC99_INSTANCES_PER_PANE);
+        assert!(!ids.contains(&"id0".to_owned()), "A's oldest must be gone");
         assert!(ids.contains(&"id1".to_owned()));
-        assert!(ids.contains(&format!("id{MAX_OSC99_INSTANCES}")));
+        assert!(ids.contains(&"id-over".to_owned()));
+        assert_eq!(
+            alive_ids(&registry, &b),
+            ["b-first", "b-second"],
+            "pane B is unaffected, including its older instance"
+        );
     }
 
     #[test]
@@ -2519,10 +2789,10 @@ mod tests {
             &reporting_data("id0", Osc99CloseReporting::Report),
             &[Osc99Leg::Toast],
         );
-        for n in 1..MAX_OSC99_INSTANCES {
+        for n in 1..MAX_OSC99_INSTANCES_PER_PANE {
             register(&mut registry, &a, Some(&format!("id{n}")));
         }
-        assert_eq!(registry.instances().len(), MAX_OSC99_INSTANCES);
+        assert_eq!(registry.instances().len(), MAX_OSC99_INSTANCES_PER_PANE);
 
         let (effects, _) =
             register_with(&mut registry, &a, &data(Some("last")), &[Osc99Leg::Toast]);
@@ -2550,7 +2820,7 @@ mod tests {
             &reporting_data("id0", Osc99CloseReporting::Report),
             &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
         );
-        for n in 1..MAX_OSC99_INSTANCES {
+        for n in 1..MAX_OSC99_INSTANCES_PER_PANE {
             register(&mut registry, &a, Some(&format!("id{n}")));
         }
 
@@ -2628,6 +2898,43 @@ mod tests {
         let registry = Osc99Registry::default();
 
         assert_eq!(alive_ids(&registry, &a), Vec::<String>::new());
+    }
+
+    #[test]
+    fn alive_leaves_out_instances_whose_close_was_requested() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        register(&mut registry, &a, Some("closing"));
+        register(&mut registry, &a, Some("open"));
+        let _ = registry.close(a.origin, "closing");
+
+        assert_eq!(
+            alive_ids(&registry, &a),
+            ["open"],
+            "the closing instance is still registered but not alive"
+        );
+        assert_eq!(ids_in_registry(&registry, &a).len(), 2);
+    }
+
+    #[test]
+    fn alive_lists_an_activated_instance_until_its_leg_closes() {
+        // kitty keeps an activated `c=1` notification listed until the
+        // display closes it: the activated leg is still open, and nothing
+        // asked it to close.
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, activated_one) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("done", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast],
+        );
+        register(&mut registry, &a, Some("open"));
+        let _ = registry.on_toast_event(activated(activated_one));
+        assert_eq!(alive_ids(&registry, &a), ["done", "open"]);
+
+        let _ = registry.on_toast_event(closed(activated_one));
+        assert_eq!(alive_ids(&registry, &a), ["open"]);
     }
 
     #[test]
@@ -3169,6 +3476,100 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert!(is_tracked_close(&reports[0], "n"));
         assert!(registry.instances().is_empty());
+    }
+
+    #[test]
+    fn expiry_after_a_toast_activation_closes_the_still_open_toast_exactly_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = Notification99Data {
+            activation_reporting: Osc99ActivationReporting::Report,
+            ..expiring("n", ms(1000), Osc99CloseReporting::Report)
+        };
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+        let _ = registry.on_toast_event(activated(instance));
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert_eq!(close_toast_targets(&effects), [instance]);
+        assert!(registry.tick(t0 + Duration::from_millis(2000)).is_empty());
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn expiry_after_a_linux_activation_closes_the_still_open_leg_exactly_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = Notification99Data {
+            activation_reporting: Osc99ActivationReporting::Report,
+            ..expiring("n", ms(1000), Osc99CloseReporting::Report)
+        };
+        let instance = register_at(
+            &mut registry,
+            &a,
+            &notification,
+            &[Osc99Leg::LinuxSystem],
+            t0,
+        );
+        // The daemon reports the activation but leaves the notification up
+        // (a resident notification): the leg is activated yet still open.
+        let activation = linux_activated(&mut registry, instance, Osc99LegActivation::Body);
+        assert_eq!(replies(activation).len(), 1, "the activation is reported");
+        assert_eq!(
+            registry.next_deadline(),
+            Some(t0 + Duration::from_millis(1000)),
+            "the open leg still expires"
+        );
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert_eq!(close_targets(&effects), [(Osc99Leg::LinuxSystem, instance)]);
+        assert!(
+            registry.tick(t0 + Duration::from_millis(2000)).is_empty(),
+            "never a second close effect"
+        );
+        assert!(registry.close(a.origin, "n").is_empty());
+        assert_eq!(registry.next_deadline(), None);
+
+        let reports = replies(registry.on_system_event(instance, Osc99SystemLegEvent::Closed));
+        assert_eq!(reports.len(), 1, "then exactly one close report");
+        assert!(is_tracked_close(&reports[0], "n"));
+        assert!(registry.instances().is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn expiry_after_an_activation_does_not_re_close_the_legs_activation_already_closed() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let instance = register_at(
+            &mut registry,
+            &a,
+            &expiring("n", ms(1000), Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+            t0,
+        );
+        // Activating the Linux leg closes the toast; only the activated Linux
+        // leg stays open.
+        let activation = registry.on_system_event(
+            instance,
+            Osc99SystemLegEvent::Activated(Osc99LegActivation::Body),
+        );
+        assert_eq!(close_targets(&activation), [(Osc99Leg::Toast, instance)]);
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert_eq!(
+            close_targets(&effects),
+            [(Osc99Leg::LinuxSystem, instance)],
+            "the toast was already asked to close, so only the Linux leg is"
+        );
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

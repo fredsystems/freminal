@@ -6,6 +6,10 @@
 //! kitty: use `(?i)` inside the pattern for case-insensitive matching. A
 //! notification that matches any rule is dropped silently, with no reply.
 //!
+//! An absent body or application name is matched as the empty string, as in
+//! kitty: `body:^$` and `app:^$` match a notification without that field, and
+//! so does an empty pattern (`body:`).
+//!
 //! [`Osc99Filter::compile`] never fails as a whole: an invalid rule is
 //! reported in the returned error list and skipped, and the remaining rules
 //! still apply. The config text is user-controlled, so each regex is built
@@ -27,9 +31,10 @@ pub enum Osc99FilterRule {
     All,
     /// Matches when the title contains a match.
     Title(Regex),
-    /// Matches when the body is present and contains a match.
+    /// Matches when the body (the empty string when absent) contains a match.
     Body(Regex),
-    /// Matches when the application name is present and contains a match.
+    /// Matches when the application name (the empty string when absent)
+    /// contains a match.
     App(Regex),
     /// Matches when any notification type contains a match.
     Type(Regex),
@@ -41,8 +46,8 @@ impl Osc99FilterRule {
         match self {
             Self::All => true,
             Self::Title(re) => re.is_match(&data.title),
-            Self::Body(re) => data.body.as_deref().is_some_and(|body| re.is_match(body)),
-            Self::App(re) => data.app_name.as_deref().is_some_and(|app| re.is_match(app)),
+            Self::Body(re) => re.is_match(data.body.as_deref().unwrap_or_default()),
+            Self::App(re) => re.is_match(data.app_name.as_deref().unwrap_or_default()),
             Self::Type(re) => data.notification_types.iter().any(|t| re.is_match(t)),
         }
     }
@@ -154,6 +159,19 @@ impl Osc99Filter {
         text.lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The rule entries as [`Self::compile`] sees them: each trimmed, blank
+    /// ones dropped. [`Self::rules_from_text`] always yields this form, so a
+    /// stored list compares equal to its text box only after this.
+    #[must_use]
+    pub fn normalise_rules(rules: &[String]) -> Vec<String> {
+        rules
+            .iter()
+            .map(|rule| rule.trim())
+            .filter(|rule| !rule.is_empty())
             .map(str::to_owned)
             .collect()
     }
@@ -309,9 +327,15 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_body_never_matches_even_an_empty_pattern() {
-        assert_eq!(verdict(&["body:"], &data()), Osc99FilterVerdict::Keep);
-        assert_eq!(verdict(&["body:.*"], &data()), Osc99FilterVerdict::Keep);
+    fn a_missing_body_is_matched_as_the_empty_string() {
+        assert_eq!(verdict(&["body:"], &data()), Osc99FilterVerdict::Drop);
+        assert_eq!(verdict(&["body:.*"], &data()), Osc99FilterVerdict::Drop);
+        assert_eq!(verdict(&["body:^$"], &data()), Osc99FilterVerdict::Drop);
+        assert_eq!(
+            verdict(&["body:.+"], &data()),
+            Osc99FilterVerdict::Keep,
+            "a pattern that needs a character cannot match an absent body"
+        );
     }
 
     #[test]
@@ -331,8 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_app_name_never_matches() {
-        assert_eq!(verdict(&["app:.*"], &data()), Osc99FilterVerdict::Keep);
+    fn a_missing_app_name_is_matched_as_the_empty_string() {
+        assert_eq!(verdict(&["app:.*"], &data()), Osc99FilterVerdict::Drop);
+        assert_eq!(verdict(&["app:^$"], &data()), Osc99FilterVerdict::Drop);
+        assert_eq!(verdict(&["app:.+"], &data()), Osc99FilterVerdict::Keep);
     }
 
     #[test]
@@ -484,6 +510,23 @@ mod tests {
         );
         assert_eq!(Osc99Filter::rules_from_text(""), Vec::<String>::new());
         assert_eq!(Osc99Filter::rules_from_text(" \n \n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn normalised_rules_are_trimmed_without_blank_entries() {
+        let stored = vec![
+            "  app:^a$ ".to_owned(),
+            String::new(),
+            "   ".to_owned(),
+            "all".to_owned(),
+        ];
+        let normalised = Osc99Filter::normalise_rules(&stored);
+        assert_eq!(normalised, vec!["app:^a$".to_owned(), "all".to_owned()]);
+        assert_eq!(
+            Osc99Filter::rules_from_text(&Osc99Filter::rules_to_text(&stored)),
+            normalised,
+            "the text box form of a stored list equals its normalised form"
+        );
     }
 
     #[test]

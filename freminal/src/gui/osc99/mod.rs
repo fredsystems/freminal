@@ -25,7 +25,7 @@ mod presentation;
 mod registry;
 mod untracked;
 
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
@@ -133,9 +133,13 @@ impl Osc99LegActivation {
 
 /// How long a `Low`-urgency notification's toast stays when the application
 /// did not ask for a duration (`w=-1`, or no `w=`): half the `Info` toast
-/// default of 6 s. The toast module's per-kind default is private to it, so
-/// the value is restated here.
-pub const OSC99_LOW_URGENCY_TOAST_LIFETIME: Duration = Duration::from_secs(3);
+/// default, so it follows that default if it changes.
+pub const OSC99_LOW_URGENCY_TOAST_LIFETIME: Duration =
+    match ToastKind::Info.default_duration().checked_div(2) {
+        Some(half) => half,
+        // Dividing by two cannot fail; the full default is the safe fallback.
+        None => ToastKind::Info.default_duration(),
+    };
 
 /// What an OSC 99 notification looks like as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,8 +239,9 @@ pub enum Osc99Effect {
         /// The instance whose desktop notification this one takes over, if
         /// any.
         replaces: Option<Osc99InstanceId>,
-        /// What to show. Boxed: it is far larger than every other effect.
-        notification: Box<Notification99Data>,
+        /// What to show. Shared: it is far larger than every other effect,
+        /// and the registry hands the same allocation to every system leg.
+        notification: Arc<Notification99Data>,
     },
     /// Show a notification on the untracked system leg (macOS and Windows).
     ///
@@ -245,8 +250,8 @@ pub enum Osc99Effect {
     /// Only macOS and Windows route to that leg, but the registry is
     /// platform-independent, so the variant exists everywhere.
     ShowUntrackedSystem(
-        /// What to show. Boxed: it is far larger than every other effect.
-        Box<Notification99Data>,
+        /// What to show. Shared: it is far larger than every other effect.
+        Arc<Notification99Data>,
     ),
     /// Bring `origin`'s pane into focus: switch to its tab, unzoom, make it
     /// the active pane and raise its OS window. Emitted when a notification
