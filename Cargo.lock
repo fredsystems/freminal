@@ -1580,6 +1580,7 @@ dependencies = [
  "serde",
  "swash",
  "sysinfo",
+ "tauri-winrt-notification",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",

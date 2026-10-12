@@ -40,14 +40,19 @@ const CORNER_DIVISOR: u32 = 6;
 /// side: `tile_side / GLYPH_PADDING_DIVISOR`.
 const GLYPH_PADDING_DIVISOR: u32 = 8;
 
+/// The largest image [`rasterize_chrome_icon_png`] will draw, in pixels per
+/// side. The only callers ask for 256; the cap keeps a future caller from
+/// allocating an unbounded canvas.
+pub const MAX_RASTER_SIZE_PX: u32 = 1024;
+
 /// Render `icon` into a `size_px` by `size_px` RGBA PNG.
 ///
 /// A rounded square tile fills the image inside a margin of `size_px / 16`
 /// (corner radius `size_px / 6`), so the outermost pixels are transparent. The
 /// white glyph is scaled to fit the tile's interior with its own padding and
-/// is centred on it. Returns `None` if the size is zero, the bundled face has
-/// no glyph for the icon, or rendering or encoding fails; the reason is logged
-/// at debug level.
+/// is centred on it. Returns `None` if the size is zero or over
+/// [`MAX_RASTER_SIZE_PX`], the bundled face has no glyph for the icon, or
+/// rendering or encoding fails; the reason is logged at debug level.
 #[must_use]
 pub fn rasterize_chrome_icon_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u8>> {
     let result = render_png(icon, size_px);
@@ -59,7 +64,7 @@ pub fn rasterize_chrome_icon_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u
 
 /// [`rasterize_chrome_icon_png`] without the logging.
 fn render_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u8>> {
-    if size_px == 0 {
+    if size_px == 0 || size_px > MAX_RASTER_SIZE_PX {
         return None;
     }
     let font = FontRef::from_index(bundled_regular_font_bytes(), 0)?;
@@ -112,7 +117,7 @@ fn render_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u8>> {
     let rows = glyph.data.chunks_exact(usize::try_from(width).ok()?);
     for (y, row) in (y_origin..).zip(rows) {
         for (x, &coverage) in (x_origin..).zip(row) {
-            let pixel = canvas.get_pixel_mut(x, y);
+            let pixel = canvas.get_pixel_mut_checked(x, y)?;
             for channel in 0..3 {
                 pixel.0[channel] = blend(TILE_RGB[channel], GLYPH_RGB[channel], coverage);
             }
@@ -289,5 +294,19 @@ mod tests {
     #[test]
     fn a_zero_size_has_no_image() {
         assert_eq!(rasterize_chrome_icon_png(ChromeIcon::Info, 0), None);
+    }
+
+    #[test]
+    fn a_size_over_the_cap_has_no_image_and_the_cap_itself_is_drawn() {
+        assert_eq!(
+            rasterize_chrome_icon_png(ChromeIcon::Info, MAX_RASTER_SIZE_PX + 1),
+            None
+        );
+        assert_eq!(rasterize_chrome_icon_png(ChromeIcon::Info, u32::MAX), None);
+        let at_cap = rasterize_chrome_icon_png(ChromeIcon::Info, MAX_RASTER_SIZE_PX).unwrap();
+        assert_eq!(
+            decode(&at_cap).dimensions(),
+            (MAX_RASTER_SIZE_PX, MAX_RASTER_SIZE_PX)
+        );
     }
 }

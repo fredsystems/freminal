@@ -94,6 +94,11 @@ swash = "0.2.10"
 sys-locale = "0.3.2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tar = "0.4.46"
+# Direct dependency for the Windows OSC 99 untracked leg (Task 138.C15): the
+# toast is built with its own image (`appLogoOverride`) instead of through
+# `notify-rust`, which only offers an inline image. Same version `notify-rust`
+# already resolves, so the lock file keeps a single copy.
+tauri-winrt-notification = "0.8.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
 thiserror = "2.0.21"

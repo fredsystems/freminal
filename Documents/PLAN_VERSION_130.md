@@ -6325,6 +6325,24 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     - a test with two stores holding the same content;
     - `size_px` is capped at 1024;
     - `get_pixel_mut_checked` replaces `get_pixel_mut`.
+- **Status:** done.
+  - **Recovery.** The first sub-agent was killed by an upstream error before it reported.
+    Its uncommitted work compiled cleanly. A fresh agent audited it item by item against this
+    entry, found every item present and correct, and fixed one over-long doc line. The
+    orchestrator then reviewed the worker, the directory-safety checks and the Windows URI
+    encoding directly.
+  - **Worker.** One bounded `freminal-osc99-deliver` worker (queue of 16, drop when full)
+    does the image preparation and `show()`, with the PNG cached per `ChromeIcon`.
+  - **Directory.** `freminal-osc99-icons-<pid>` is created `0700` with `0600` files.
+    Symlinked or permissive existing directories are refused.
+  - **Images.** Transmitted bytes are re-encoded through the shared bounded decoder
+    (`icon_decode.rs`).
+  - **Eviction.** Files older than 10 minutes are evicted, in addition to the 64-file cap.
+  - **Windows.** The toast is built directly with `tauri-winrt-notification` 0.8.1 (one copy
+    in the lock file), using `appLogoOverride` and a percent-encoded `file:///` path.
+  - **Ownership check.** It is done by mode rather than uid, which would need unsafe or
+    libc: a `0700` directory owned by someone else cannot be written by us anyway.
+  - **macOS** was checked by reading the source only.
 
 #### 138.C16 — Documentation and plan corrections from the adversarial review
 
