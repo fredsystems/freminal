@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
@@ -600,6 +601,8 @@ pub(super) struct Osc99DisplayContext {
     pub window_focus: WindowFocus,
     /// The originating pane's focus and visibility, for the `o=` gate.
     pub pane: Osc99PaneState,
+    /// The display time. An `w=` expiry is measured from it.
+    pub now: Instant,
 }
 
 /// Outcome of the OSC 99 `o=` occasion check.
@@ -735,7 +738,13 @@ impl NotificationRouter {
         // carries an `i=` id and whichever leg showed it.
         if !legs.is_empty() {
             tracing::trace!(id = ?data.id, legs = ?legs, "registering OSC 99 notification");
-            return registry.register(request.origin, request.reply_tx.clone(), data, &legs);
+            return registry.register(
+                request.origin,
+                request.reply_tx.clone(),
+                data,
+                &legs,
+                ctx.now,
+            );
         }
         Vec::new()
     }
@@ -1938,12 +1947,16 @@ mod tests {
         Osc99PaneState { focus, visibility }
     }
 
-    const fn osc99_ctx(window_focus: WindowFocus, pane: Osc99PaneState) -> Osc99DisplayContext {
-        Osc99DisplayContext { window_focus, pane }
+    fn osc99_ctx(window_focus: WindowFocus, pane: Osc99PaneState) -> Osc99DisplayContext {
+        Osc99DisplayContext {
+            window_focus,
+            pane,
+            now: Instant::now(),
+        }
     }
 
     /// A focused window whose originating pane is the focused, visible one.
-    const fn focused_ctx() -> Osc99DisplayContext {
+    fn focused_ctx() -> Osc99DisplayContext {
         osc99_ctx(
             WindowFocus::Focused,
             pane_state(PaneKeyboardFocus::Focused, PaneVisibility::Visible),

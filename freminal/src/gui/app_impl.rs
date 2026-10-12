@@ -3937,6 +3937,21 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
+        // Expire OSC 99 notifications past their `w=` deadline. Once per
+        // window frame, here, because every window runs this point every
+        // frame and it precedes the delivery below: the `Closed` events the
+        // expiry produces are delivered in this same frame. The registry is
+        // shared by all windows, so any window's frame may be the one that
+        // expires an instance; each window also schedules its own wake-up
+        // for the nearest remaining deadline, so an idle app still ticks.
+        if let Some(delay) = self.expire_osc99_notifications() {
+            win.pending_terminal_requested_delay = Some(
+                win.pending_terminal_requested_delay
+                    .map_or(delay, |prev| prev.min(delay)),
+            );
+            ctx.request_repaint_after(delay);
+        }
+
         // Deliver the events keyed (OSC 99) toasts recorded this frame to the
         // registry. Outside the block above on purpose: the last toast
         // closing leaves the stack empty, and that `Closed` must still be
@@ -4487,6 +4502,7 @@ impl FreminalGui {
                         let ctx = crate::gui::notifications::Osc99DisplayContext {
                             window_focus,
                             pane: request.pane_state,
+                            now: std::time::Instant::now(),
                         };
                         let effects = crate::gui::notifications::NotificationRouter::route_osc99(
                             request,
@@ -4543,6 +4559,36 @@ impl FreminalGui {
             drop(registry);
             self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
         }
+    }
+
+    /// Close the OSC 99 notifications whose `w=` deadline has passed, execute
+    /// the resulting effects, and return how long until the next deadline.
+    ///
+    /// The returned delay is what the caller folds into the window's repaint
+    /// scheduling, the same way the toast stack's own delay is. `None` means
+    /// no instance will expire, or a busy cell deferred the tick: the busy
+    /// case asks for a prompt retry rather than waiting for the next event.
+    /// Both cells are borrowed before the registry changes, so a busy cell
+    /// loses nothing.
+    fn expire_osc99_notifications(&self) -> Option<std::time::Duration> {
+        let (Ok(mut toasts), Ok(mut registry)) = (
+            self.toasts.try_borrow_mut(),
+            self.osc99_registry.try_borrow_mut(),
+        ) else {
+            tracing::warn!("OSC 99: toast stack or registry busy; expiry deferred");
+            return Some(std::time::Duration::from_millis(16));
+        };
+
+        let now = std::time::Instant::now();
+        let effects = registry.tick(now);
+        let next = registry
+            .next_deadline()
+            .map(|deadline| deadline.saturating_duration_since(now));
+        drop(registry);
+        if !effects.is_empty() {
+            self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+        }
+        next
     }
 
     /// Hand the events recorded by keyed toasts (activation, close) to the

@@ -26,6 +26,16 @@
 //! on an untracked system leg likewise never gets a registry close report:
 //! the `untracked` report was already sent at display.
 //!
+//! # Expiry
+//!
+//! A positive `w=` ([`Osc99Expiry::After`]) gives the instance a deadline,
+//! measured from the moment it was registered (so an update, which registers
+//! a new instance, restarts it). [`Osc99Registry::tick`] closes every
+//! instance past its deadline through the same path as `p=close`, whatever
+//! the toast leg's own lifetime is, and [`Osc99Registry::next_deadline`]
+//! tells the GUI when to wake for the nearest one. Time is injected, so the
+//! registry never reads a clock.
+//!
 //! # Pane lifetime
 //!
 //! An instance remembers the pane's `Weak` reply handle. Once the pane is
@@ -40,10 +50,11 @@
 //! is closed), like kitty.
 
 use std::sync::Weak;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::{
-    Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+    Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
 };
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
@@ -55,6 +66,20 @@ use crate::gui::toast::{ToastEvent, ToastEventKind};
 /// The most instances the registry keeps. The oldest is forgotten, with no
 /// reply, when a new registration would exceed this.
 pub const MAX_OSC99_INSTANCES: usize = 128;
+
+/// Whether the registry has already asked for an instance to be closed.
+///
+/// An instance whose toast is closing stays registered until the toast's
+/// `Closed` event arrives. Without this state a second close request (a
+/// `p=close` after expiry, or an expiry tick after `p=close`) would emit a
+/// second [`Osc99Effect::CloseToast`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99Closing {
+    /// No close has been requested.
+    Open,
+    /// The toast was asked to close; the instance waits for its `Closed`.
+    Requested,
+}
 
 /// One displayed OSC 99 notification.
 #[derive(Debug, Clone)]
@@ -79,6 +104,11 @@ pub struct Osc99Instance {
     /// The legs still displayed and observable, without duplicates. Never
     /// holds [`Osc99Leg::UntrackedSystem`].
     pub open_legs: Vec<Osc99Leg>,
+    /// When the notification expires (`w=` > 0), measured from its display.
+    /// `None` when it never expires on its own, or once expiry has acted.
+    pub deadline: Option<Instant>,
+    /// Whether the registry has already asked the instance to close.
+    pub closing: Osc99Closing,
 }
 
 impl Osc99Instance {
@@ -177,12 +207,16 @@ impl Osc99Registry {
     /// closed, when `legs` has no toast). If the registry would then exceed
     /// [`MAX_OSC99_INSTANCES`], the oldest instance is forgotten, again
     /// without a reply, and its open toast is closed.
+    ///
+    /// `now` is the display time: an `w=` expiry is measured from it, so an
+    /// update restarts the deadline.
     pub fn register(
         &mut self,
         origin: Osc99Origin,
         reply_tx: Weak<Sender<InputEvent>>,
         data: &Notification99Data,
         legs: &[Osc99Leg],
+        now: Instant,
     ) -> Vec<Osc99Effect> {
         let mut effects = Vec::new();
         let wants_toast = legs.contains(&Osc99Leg::Toast);
@@ -241,6 +275,13 @@ impl Osc99Registry {
                 .filter(|leg| *leg != Osc99Leg::UntrackedSystem)
                 .collect(),
             shown_legs: deduped,
+            deadline: match data.expiry {
+                Osc99Expiry::After(ms) => {
+                    now.checked_add(Duration::from_millis(u64::from(ms.get())))
+                }
+                Osc99Expiry::Never | Osc99Expiry::OsDefault => None,
+            },
+            closing: Osc99Closing::Open,
         });
 
         while self.instances.len() > MAX_OSC99_INSTANCES {
@@ -289,7 +330,8 @@ impl Osc99Registry {
     /// (see [`Self::on_toast_event`]), which is when a `c=1` report is sent.
     /// The Linux and untracked system legs are dropped silently (the Linux
     /// leg's own thread reports for it). With no toast to wait for, the
-    /// instance is forgotten at once, without a report.
+    /// instance is forgotten at once, without a report. Closing an instance
+    /// that is already closing does nothing.
     pub fn close(&mut self, origin: Osc99Origin, id: &str) -> Vec<Osc99Effect> {
         let Some(pos) = self
             .instances
@@ -298,18 +340,69 @@ impl Osc99Registry {
         else {
             return Vec::new();
         };
+        self.close_instance_at(pos, "closed by the application")
+    }
 
-        let effects: Vec<Osc99Effect> = self.instances[pos]
-            .close_toast_effect()
-            .into_iter()
+    /// Close every instance whose deadline is at or before `now`, through the
+    /// same path as `p=close` ([`Self::close`]), and return the effects.
+    ///
+    /// The deadline is spent once acted on, and an instance that is already
+    /// closing is skipped, so a later tick never closes it again.
+    pub fn tick(&mut self, now: Instant) -> Vec<Osc99Effect> {
+        let due: Vec<Osc99InstanceId> = self
+            .instances
+            .iter()
+            .filter(|instance| {
+                instance.closing == Osc99Closing::Open
+                    && instance.deadline.is_some_and(|deadline| deadline <= now)
+            })
+            .map(|instance| instance.instance)
             .collect();
-        self.instances[pos]
-            .open_legs
-            .retain(|leg| *leg == Osc99Leg::Toast);
+
+        let mut effects = Vec::new();
+        for instance in due {
+            let Some(pos) = self
+                .instances
+                .iter()
+                .position(|candidate| candidate.instance == instance)
+            else {
+                continue;
+            };
+            self.instances[pos].deadline = None;
+            effects.extend(self.close_instance_at(pos, "expired"));
+        }
+        effects
+    }
+
+    /// The earliest deadline among instances that are not already closing, or
+    /// `None` when nothing will expire. The GUI schedules a repaint for it.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.instances
+            .iter()
+            .filter(|instance| instance.closing == Osc99Closing::Open)
+            .filter_map(|instance| instance.deadline)
+            .min()
+    }
+
+    /// Close the instance at `pos` on behalf of `why` (`p=close` or expiry).
+    ///
+    /// An open toast is asked to close and the instance waits for the
+    /// toast's `Closed` event. System legs are dropped silently, and with
+    /// nothing to wait for the instance is forgotten at once. An instance
+    /// already waiting for its toast yields no effects.
+    fn close_instance_at(&mut self, pos: usize, why: &'static str) -> Vec<Osc99Effect> {
+        let instance = &mut self.instances[pos];
+        if instance.closing == Osc99Closing::Requested {
+            return Vec::new();
+        }
+
+        let effects: Vec<Osc99Effect> = instance.close_toast_effect().into_iter().collect();
+        instance.open_legs.retain(|leg| *leg == Osc99Leg::Toast);
         if effects.is_empty() {
-            self.instances
-                .remove(pos)
-                .log_forgotten("closed by the application");
+            self.instances.remove(pos).log_forgotten(why);
+        } else {
+            instance.closing = Osc99Closing::Requested;
         }
         effects
     }
@@ -477,7 +570,13 @@ mod tests {
     }
 
     fn register(registry: &mut Osc99Registry, pane: &TestPane, id: Option<&str>) {
-        let _ = registry.register(pane.origin, pane.weak(), &data(id), &[Osc99Leg::Toast]);
+        let _ = registry.register(
+            pane.origin,
+            pane.weak(),
+            &data(id),
+            &[Osc99Leg::Toast],
+            Instant::now(),
+        );
     }
 
     /// Register `data` on `legs`, returning the effects and the new
@@ -488,7 +587,7 @@ mod tests {
         data: &Notification99Data,
         legs: &[Osc99Leg],
     ) -> (Vec<Osc99Effect>, Osc99InstanceId) {
-        let effects = registry.register(pane.origin, pane.weak(), data, legs);
+        let effects = registry.register(pane.origin, pane.weak(), data, legs, Instant::now());
         let Some(instance) = registry.instances().last().map(|i| i.instance) else {
             panic!("registration adds an instance");
         };
@@ -770,6 +869,7 @@ mod tests {
             a.weak(),
             &data(None),
             &[Osc99Leg::Toast, Osc99Leg::LinuxSystem, Osc99Leg::Toast],
+            Instant::now(),
         );
 
         let instance = &registry.instances()[0];
@@ -781,6 +881,7 @@ mod tests {
             a.weak(),
             &data(None),
             &[Osc99Leg::Toast, Osc99Leg::UntrackedSystem],
+            Instant::now(),
         );
         let instance = &registry.instances()[1];
         assert_eq!(
@@ -1449,5 +1550,293 @@ mod tests {
             registry.on_toast_event(events[0]).is_empty(),
             "c=0: no close report"
         );
+    }
+
+    // ── expiry ──────────────────────────────────────────────────────────
+
+    fn ms(n: u32) -> Osc99Expiry {
+        let Some(n) = NonZeroU32::new(n) else {
+            panic!("test durations are non-zero");
+        };
+        Osc99Expiry::After(n)
+    }
+
+    /// Data with the given `w=` expiry and `c=` setting.
+    fn expiring(id: &str, expiry: Osc99Expiry, close: Osc99CloseReporting) -> Notification99Data {
+        Notification99Data {
+            expiry,
+            close_reporting: close,
+            ..data(Some(id))
+        }
+    }
+
+    /// Register at the injected time `at`, returning the new instance's id.
+    fn register_at(
+        registry: &mut Osc99Registry,
+        pane: &TestPane,
+        data: &Notification99Data,
+        legs: &[Osc99Leg],
+        at: Instant,
+    ) -> Osc99InstanceId {
+        let _ = registry.register(pane.origin, pane.weak(), data, legs, at);
+        let Some(instance) = registry.instances().last().map(|i| i.instance) else {
+            panic!("registration adds an instance");
+        };
+        instance
+    }
+
+    fn close_toast_targets(effects: &[Osc99Effect]) -> Vec<Osc99InstanceId> {
+        effects
+            .iter()
+            .map(|effect| match effect {
+                Osc99Effect::CloseToast(instance) => *instance,
+                other => panic!("expected only CloseToast, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_toast_closes_at_its_deadline_then_reports_exactly_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(5000), Osc99CloseReporting::Report);
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+
+        assert!(registry.tick(t0 + Duration::from_millis(4999)).is_empty());
+
+        let effects = registry.tick(t0 + Duration::from_millis(5000));
+        assert_eq!(close_toast_targets(&effects), [instance]);
+
+        assert!(
+            registry.tick(t0 + Duration::from_millis(6000)).is_empty(),
+            "a closing instance is not closed again"
+        );
+
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"));
+        assert!(registry.instances().is_empty());
+    }
+
+    #[test]
+    fn the_deadline_closes_a_toast_whose_own_lifetime_is_longer() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = Notification99Data {
+            urgency: NotificationUrgency::Critical,
+            ..expiring("n", ms(1000), Osc99CloseReporting::Silent)
+        };
+        // Documented premise: the toast alone would stay until dismissed...
+        let spec = osc99_toast_spec(&Notification99Data {
+            expiry: Osc99Expiry::OsDefault,
+            ..notification.clone()
+        });
+        assert_eq!(spec.lifetime, ToastLifetime::UntilDismissed);
+        // ...and the registry closes it anyway.
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert_eq!(close_toast_targets(&effects), [instance]);
+    }
+
+    #[test]
+    fn an_update_restarts_the_deadline() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(5000), Osc99CloseReporting::Silent);
+        let first = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+        let second = register_at(
+            &mut registry,
+            &a,
+            &notification,
+            &[Osc99Leg::Toast],
+            t0 + Duration::from_millis(3000),
+        );
+        assert_ne!(first, second);
+
+        assert!(
+            registry.tick(t0 + Duration::from_millis(5000)).is_empty(),
+            "the first deadline died with the replaced instance"
+        );
+        assert_eq!(
+            registry.next_deadline(),
+            Some(t0 + Duration::from_millis(8000))
+        );
+
+        let effects = registry.tick(t0 + Duration::from_millis(8000));
+        assert_eq!(close_toast_targets(&effects), [second]);
+    }
+
+    #[test]
+    fn never_and_the_os_default_do_not_expire() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        for (id, expiry) in [
+            ("never", Osc99Expiry::Never),
+            ("os", Osc99Expiry::OsDefault),
+        ] {
+            let _ = register_at(
+                &mut registry,
+                &a,
+                &expiring(id, expiry, Osc99CloseReporting::Silent),
+                &[Osc99Leg::Toast],
+                t0,
+            );
+        }
+
+        assert_eq!(registry.next_deadline(), None);
+        assert!(registry.tick(t0 + Duration::from_hours(24)).is_empty());
+        assert_eq!(registry.instances().len(), 2);
+    }
+
+    #[test]
+    fn next_deadline_is_the_minimum_and_skips_closing_instances() {
+        let (a, b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let silent = Osc99CloseReporting::Silent;
+        let _late = register_at(
+            &mut registry,
+            &a,
+            &expiring("late", ms(9000), silent),
+            &[Osc99Leg::Toast],
+            t0,
+        );
+        let _early = register_at(
+            &mut registry,
+            &b,
+            &expiring("early", ms(2000), silent),
+            &[Osc99Leg::Toast],
+            t0,
+        );
+        let _no_deadline = register_at(
+            &mut registry,
+            &a,
+            &expiring("none", Osc99Expiry::Never, silent),
+            &[Osc99Leg::Toast],
+            t0,
+        );
+
+        assert_eq!(
+            registry.next_deadline(),
+            Some(t0 + Duration::from_millis(2000))
+        );
+
+        // Once the earliest is closing it no longer counts.
+        let effects = registry.tick(t0 + Duration::from_millis(2000));
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            registry.next_deadline(),
+            Some(t0 + Duration::from_millis(9000))
+        );
+    }
+
+    #[test]
+    fn p_close_then_a_tick_past_the_deadline_does_not_close_twice() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(1000), Osc99CloseReporting::Report);
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+
+        let effects = registry.close(a.origin, "n");
+        assert_eq!(close_toast_targets(&effects), [instance]);
+        assert_eq!(
+            registry.next_deadline(),
+            None,
+            "closing: nothing to wake for"
+        );
+
+        assert!(registry.tick(t0 + Duration::from_millis(2000)).is_empty());
+        assert!(
+            registry.close(a.origin, "n").is_empty(),
+            "a second p=close is idempotent too"
+        );
+
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1, "exactly one close report");
+    }
+
+    #[test]
+    fn a_toast_closed_by_its_own_lifetime_finishes_an_expiring_instance_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(1000), Osc99CloseReporting::Report);
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+
+        // The toast leg's own `Fixed` lifetime fires first.
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1);
+
+        // The instance is gone, so the deadline has nothing left to do.
+        assert_eq!(registry.next_deadline(), None);
+        assert!(registry.tick(t0 + Duration::from_millis(1000)).is_empty());
+        assert!(registry.on_toast_event(closed(instance)).is_empty());
+    }
+
+    #[test]
+    fn a_toast_closed_event_in_the_requested_state_finishes_it_exactly_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(1000), Osc99CloseReporting::Report);
+        let instance = register_at(&mut registry, &a, &notification, &[Osc99Leg::Toast], t0);
+        let _ = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert_eq!(replies(registry.on_toast_event(closed(instance))).len(), 1);
+        assert!(
+            registry.on_toast_event(closed(instance)).is_empty(),
+            "a repeated Closed is for a forgotten instance"
+        );
+    }
+
+    #[test]
+    fn expiry_drops_the_interim_linux_leg_silently() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(1000), Osc99CloseReporting::Report);
+        let _ = register_at(
+            &mut registry,
+            &a,
+            &notification,
+            &[Osc99Leg::LinuxSystem],
+            t0,
+        );
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+
+        assert!(effects.is_empty(), "the Linux leg reports for itself");
+        assert!(registry.instances().is_empty(), "forgotten");
+        assert_eq!(registry.next_deadline(), None);
+    }
+
+    #[test]
+    fn expiry_of_a_toast_plus_linux_instance_closes_the_toast_and_keeps_waiting() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let t0 = Instant::now();
+        let notification = expiring("n", ms(1000), Osc99CloseReporting::Report);
+        let instance = register_at(
+            &mut registry,
+            &a,
+            &notification,
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+            t0,
+        );
+
+        let effects = registry.tick(t0 + Duration::from_millis(1000));
+        assert_eq!(close_toast_targets(&effects), [instance]);
+        assert_eq!(registry.instances()[0].open_legs, [Osc99Leg::Toast]);
+
+        // The system leg reported for itself, so the registry stays silent.
+        assert!(registry.on_toast_event(closed(instance)).is_empty());
+        assert!(registry.instances().is_empty());
     }
 }

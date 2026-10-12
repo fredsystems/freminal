@@ -5930,6 +5930,12 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     `FocusChange` pair. Tested on a two-tab manager. The `FocusChange(false)` to a real old
     split pane is not asserted, because a split needs a PTY per pane; the path copies the
     click-to-focus code.
+- **138.10 (done).** Instances gain a `deadline` and an `Osc99Closing { Open, Requested }`
+  state, so `p=close` and expiry are idempotent and share `close_instance_at`. `tick(now)` and
+  `next_deadline()` run once per window frame, through `expire_osc99_notifications`, just
+  before toast events are delivered; the next deadline is folded into the window's repaint
+  scheduling. `Osc99DisplayContext` carries `now`, so `register` measures the deadline from
+  display. A busy cell retries after 16 ms.
 
 ---
 
