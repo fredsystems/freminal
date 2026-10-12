@@ -48,6 +48,20 @@ pub struct Osc99Features {
     /// Whether notification close events can be reported back to the
     /// application.
     pub close_events: Osc99CloseEvents,
+    /// Whether activating a notification focuses the window that produced it.
+    pub activation_focus: Osc99FocusAction,
+    /// Whether the host honours an application-requested auto-expiry (`w=`).
+    pub auto_expiry: Osc99AutoExpiry,
+    /// Whether the host honours the requested urgency level (`u=`).
+    pub urgency: Osc99UrgencySupport,
+    /// Which sound names (`s=`) the host understands.
+    pub sound_names: Osc99SoundNames,
+    /// Whether the host displays a notification body.
+    pub body: Osc99BodySupport,
+    /// Whether the host displays notification buttons.
+    pub buttons: Osc99ButtonSupport,
+    /// Whether the host displays notification icons.
+    pub icons: Osc99IconSupport,
 }
 
 /// Whether the host can report notification activation (a click) back to the
@@ -70,6 +84,70 @@ pub enum Osc99CloseEvents {
     NotReported,
 }
 
+/// Whether activating a notification focuses the window that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99FocusAction {
+    /// Activation focuses the source window.
+    Supported,
+    /// Activation never focuses the source window.
+    Unsupported,
+}
+
+/// Whether the host honours an application-requested auto-expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99AutoExpiry {
+    /// The requested expiry is honoured.
+    Supported,
+    /// The requested expiry is ignored.
+    Unsupported,
+}
+
+/// Whether the host honours the requested notification urgency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99UrgencySupport {
+    /// The requested urgency is honoured.
+    Supported,
+    /// The requested urgency is ignored.
+    Unsupported,
+}
+
+/// Which notification sound names the host understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99SoundNames {
+    /// Only the OSC 99 well-known names `system` and `silent` are understood.
+    SystemAndSilent,
+    /// The OSC 99 standard sound names (`error`, `warn`, `warning`, `info`,
+    /// `question`) are also understood.
+    Standard,
+}
+
+/// Whether the host displays a notification body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99BodySupport {
+    /// Bodies are displayed.
+    Supported,
+    /// Bodies are never displayed.
+    Unsupported,
+}
+
+/// Whether the host displays notification buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99ButtonSupport {
+    /// Buttons are displayed.
+    Supported,
+    /// Buttons are never displayed.
+    Unsupported,
+}
+
+/// Whether the host displays notification icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99IconSupport {
+    /// Icons are displayed.
+    Supported,
+    /// Icons are never displayed.
+    Unsupported,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +162,13 @@ mod tests {
         let features = Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::NotReported,
+            activation_focus: Osc99FocusAction::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
         };
         let caps = HostCapabilities {
             osc99: Osc99Support::Supported(features),

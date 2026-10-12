@@ -669,6 +669,13 @@ mod window_manipulation_reply_tests {
     use std::sync::{Arc, Weak};
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
+    use freminal_common::buffer_states::osc_notify_99::{
+        NotificationOccasion, NotificationUrgency,
+    };
+    use freminal_common::buffer_states::osc99_notification::{
+        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
+        Osc99Sound,
+    };
     use freminal_common::buffer_states::window_manipulation::{
         Notification99Data, Osc99ControlKind, WindowManipulation,
     };
@@ -766,21 +773,21 @@ mod window_manipulation_reply_tests {
     fn sample_notification() -> Notification99Data {
         Notification99Data {
             id: Some("n1".to_owned()),
-            title: Some("Title".to_owned()),
+            title: "Title".to_owned(),
             body: None,
             icon_data: None,
             icon_names: Vec::new(),
             icon_cache_key: None,
-            button_labels: Vec::new(),
-            report_activation: false,
-            focus_on_activation: true,
-            close_report: false,
-            urgency: None,
-            occasion: None,
-            sound: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
             app_name: None,
-            notification_type: Vec::new(),
-            expire_ms: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
         }
     }
 

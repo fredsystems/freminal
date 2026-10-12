@@ -12,14 +12,17 @@
 //! [`TerminalHandler::reassemble_osc99`].
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use freminal_common::buffer_states::osc_notify_99::{
-    MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99Command,
-    Osc99PayloadEncoding, Osc99PayloadType,
+    MAX_OSC99_SEQUENCE_BYTES, NotificationUrgency, Osc99Command, Osc99PayloadEncoding,
+    Osc99PayloadType,
 };
-use freminal_common::buffer_states::window_manipulation::{
-    Notification99Data, Osc99ControlKind, WindowManipulation,
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
+    Osc99ControlKind, Osc99Expiry, Osc99Sound,
 };
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
     Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
 };
@@ -208,52 +211,80 @@ pub struct FinalizedNotification {
     pub meta: Osc99Command,
 }
 
+/// Map the parsed `w=` value (milliseconds, `-1` = OS default) to an
+/// [`Osc99Expiry`].
+///
+/// `-1` is the spec's "OS default" sentinel and maps to
+/// [`Osc99Expiry::OsDefault`]; `0` means "never expire"; a positive value is
+/// the lifetime in milliseconds, clamped to [`u32::MAX`]. The parser rejects
+/// anything below `-1`, so any other negative value is not reachable; it is
+/// mapped to the OS default rather than relied upon to be absent.
+pub(in crate::terminal_handler) fn expiry_from_ms(expire_ms: i64) -> Osc99Expiry {
+    if expire_ms < 0 {
+        return Osc99Expiry::OsDefault;
+    }
+    // `try_from` only fails for values above `u32::MAX`, which clamp.
+    let clamped = u32::try_from(expire_ms).unwrap_or(u32::MAX);
+    NonZeroU32::new(clamped).map_or(Osc99Expiry::Never, Osc99Expiry::After)
+}
+
+/// Map the raw `s=` sound name to an [`Osc99Sound`].
+///
+/// Unset and the well-known `system` both mean the daemon's default sound;
+/// `silent` means no sound; anything else is forwarded verbatim.
+pub(in crate::terminal_handler) fn sound_from_name(sound: Option<String>) -> Osc99Sound {
+    sound.map_or(Osc99Sound::System, |name| match name.as_str() {
+        "system" => Osc99Sound::System,
+        "silent" => Osc99Sound::Silent,
+        _ => Osc99Sound::Named(name),
+    })
+}
+
 impl FinalizedNotification {
-    /// Map this finalized OSC 99 notification into the transport shell
+    /// Map this finalized OSC 99 notification into the transport type
     /// [`Notification99Data`] carried by `WindowManipulation::Notification99`.
     ///
-    /// Field mapping (Task 99.4 execution decisions): `id`/`title`/`body`
-    /// direct; `icon_data` from `self.icon`; `icon_names`/`icon_cache_key`/
-    /// `sound`/`app_name`/`notification_type` from `meta`;
-    /// `report_activation`/`focus_on_activation` from `meta.actions`;
-    /// `close_report` from `meta.close_report`; `urgency` maps
-    /// `Low`/`Normal`/`Critical` to `Some(0)`/`Some(1)`/`Some(2)`; `occasion`
-    /// maps `Always` to `None` (behaviourally identical to unset),
-    /// `Unfocused`/`Invisible` to `Some("unfocused")`/`Some("invisible")`;
-    /// `expire_ms` maps the spec's `-1` "OS default" sentinel to `None`, any
-    /// other value to `Some(v)`. `button_labels` comes directly from
-    /// `self.buttons` (the split `p=buttons` payload).
+    /// Field mapping: `id`/`body` direct; `title` is `String::new()` when no
+    /// title arrived; `icon_data` from `self.icon`; `buttons` from
+    /// `self.buttons` (the split `p=buttons` payload);
+    /// `icon_names`/`icon_cache_key`/`app_name`/`notification_types` from
+    /// `meta`; `activation_reporting`/`activation_focus` from `meta.actions`;
+    /// `close_reporting` from `meta.close_report`; `urgency` defaults to
+    /// `Normal` when unset; `occasion` passes through; `sound` and `expiry`
+    /// via [`sound_from_name`] and [`expiry_from_ms`].
     pub(in crate::terminal_handler) fn into_notification99_data(self) -> Notification99Data {
-        let urgency = self.meta.urgency.map(|u| match u {
-            NotificationUrgency::Low => 0u8,
-            NotificationUrgency::Normal => 1u8,
-            NotificationUrgency::Critical => 2u8,
-        });
-        let occasion = match self.meta.occasion {
-            // Always is the default — behaviourally identical to unset → None.
-            NotificationOccasion::Always => None,
-            NotificationOccasion::Unfocused => Some("unfocused".to_owned()),
-            NotificationOccasion::Invisible => Some("invisible".to_owned()),
+        let activation_reporting = if self.meta.actions.report_activation {
+            Osc99ActivationReporting::Report
+        } else {
+            Osc99ActivationReporting::Silent
         };
-        // -1 is the spec's "OS default" sentinel → None; any other value → Some.
-        let expire_ms = (self.meta.expire_ms != -1).then_some(self.meta.expire_ms);
+        let activation_focus = if self.meta.actions.focus_on_activation {
+            Osc99ActivationFocus::Focus
+        } else {
+            Osc99ActivationFocus::NoFocus
+        };
+        let close_reporting = if self.meta.close_report {
+            Osc99CloseReporting::Report
+        } else {
+            Osc99CloseReporting::Silent
+        };
         Notification99Data {
             id: self.meta.id,
-            title: self.title,
+            title: self.title.unwrap_or_default(),
             body: self.body,
             icon_data: self.icon,
             icon_names: self.meta.icon_names,
             icon_cache_key: self.meta.icon_cache_key,
-            button_labels: self.buttons,
-            report_activation: self.meta.actions.report_activation,
-            focus_on_activation: self.meta.actions.focus_on_activation,
-            close_report: self.meta.close_report,
-            urgency,
-            occasion,
-            sound: self.meta.sound,
+            buttons: self.buttons,
+            activation_reporting,
+            activation_focus,
+            close_reporting,
+            urgency: self.meta.urgency.unwrap_or(NotificationUrgency::Normal),
+            occasion: self.meta.occasion,
+            sound: sound_from_name(self.meta.sound),
             app_name: self.meta.app_name,
-            notification_type: self.meta.notification_type,
-            expire_ms,
+            notification_types: self.meta.notification_type,
+            expiry: expiry_from_ms(self.meta.expire_ms),
         }
     }
 }
@@ -643,7 +674,13 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use freminal_common::buffer_states::osc_notify_99::{Osc99Actions, parse_osc_99};
+    use freminal_common::buffer_states::osc_notify_99::{
+        NotificationOccasion, Osc99Actions, parse_osc_99,
+    };
+    use freminal_common::host_capabilities::{
+        Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99FocusAction, Osc99IconSupport,
+        Osc99SoundNames, Osc99UrgencySupport,
+    };
 
     /// Build a default `Osc99Command` for use in mapping tests.
     fn default_cmd() -> Osc99Command {
@@ -678,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn urgency_maps_critical_to_some_two() {
+    fn urgency_critical_passes_through() {
         let finalized = FinalizedNotification {
             meta: Osc99Command {
                 urgency: Some(NotificationUrgency::Critical),
@@ -687,11 +724,11 @@ mod tests {
             ..default_finalized()
         };
         let data = finalized.into_notification99_data();
-        assert_eq!(data.urgency, Some(2));
+        assert_eq!(data.urgency, NotificationUrgency::Critical);
     }
 
     #[test]
-    fn urgency_low_and_normal_map_to_zero_and_one() {
+    fn urgency_low_and_normal_pass_through() {
         let low = FinalizedNotification {
             meta: Osc99Command {
                 urgency: Some(NotificationUrgency::Low),
@@ -699,7 +736,10 @@ mod tests {
             },
             ..default_finalized()
         };
-        assert_eq!(low.into_notification99_data().urgency, Some(0));
+        assert_eq!(
+            low.into_notification99_data().urgency,
+            NotificationUrgency::Low
+        );
 
         let normal = FinalizedNotification {
             meta: Osc99Command {
@@ -708,70 +748,76 @@ mod tests {
             },
             ..default_finalized()
         };
-        assert_eq!(normal.into_notification99_data().urgency, Some(1));
+        assert_eq!(
+            normal.into_notification99_data().urgency,
+            NotificationUrgency::Normal
+        );
     }
 
     #[test]
-    fn urgency_none_maps_to_none() {
+    fn urgency_unset_maps_to_normal() {
         let finalized = default_finalized();
         let data = finalized.into_notification99_data();
-        assert_eq!(data.urgency, None);
+        assert_eq!(data.urgency, NotificationUrgency::Normal);
     }
 
     #[test]
-    fn occasion_always_maps_to_none() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Always,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion, None);
+    fn occasion_passes_through_unchanged() {
+        for occasion in [
+            NotificationOccasion::Always,
+            NotificationOccasion::Unfocused,
+            NotificationOccasion::Invisible,
+        ] {
+            let finalized = FinalizedNotification {
+                meta: Osc99Command {
+                    occasion,
+                    ..default_cmd()
+                },
+                ..default_finalized()
+            };
+            assert_eq!(finalized.into_notification99_data().occasion, occasion);
+        }
     }
 
     #[test]
-    fn occasion_unfocused_maps_to_some_string() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Unfocused,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion.as_deref(), Some("unfocused"));
+    fn expiry_minus_one_is_os_default() {
+        assert_eq!(expiry_from_ms(-1), Osc99Expiry::OsDefault);
     }
 
     #[test]
-    fn occasion_invisible_maps_to_some_string() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Invisible,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion.as_deref(), Some("invisible"));
+    fn expiry_zero_is_never() {
+        assert_eq!(expiry_from_ms(0), Osc99Expiry::Never);
     }
 
     #[test]
-    fn expire_ms_minus_one_maps_to_none() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                expire_ms: -1,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.expire_ms, None);
+    fn expiry_positive_is_after_milliseconds() {
+        assert_eq!(
+            expiry_from_ms(5000),
+            Osc99Expiry::After(NonZeroU32::new(5000).unwrap())
+        );
     }
 
     #[test]
-    fn expire_ms_5000_maps_to_some_5000() {
+    fn expiry_above_u32_max_clamps() {
+        let too_big = i64::from(u32::MAX) + 1;
+        assert_eq!(
+            expiry_from_ms(too_big),
+            Osc99Expiry::After(NonZeroU32::new(u32::MAX).unwrap())
+        );
+        assert_eq!(
+            expiry_from_ms(i64::MAX),
+            Osc99Expiry::After(NonZeroU32::new(u32::MAX).unwrap())
+        );
+    }
+
+    #[test]
+    fn expiry_other_negative_is_os_default() {
+        assert_eq!(expiry_from_ms(-2), Osc99Expiry::OsDefault);
+        assert_eq!(expiry_from_ms(i64::MIN), Osc99Expiry::OsDefault);
+    }
+
+    #[test]
+    fn expiry_mapped_into_notification99_data() {
         let finalized = FinalizedNotification {
             meta: Osc99Command {
                 expire_ms: 5000,
@@ -779,8 +825,56 @@ mod tests {
             },
             ..default_finalized()
         };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.expire_ms, Some(5000));
+        assert_eq!(
+            finalized.into_notification99_data().expiry,
+            Osc99Expiry::After(NonZeroU32::new(5000).unwrap())
+        );
+    }
+
+    #[test]
+    fn sound_unset_and_system_map_to_system() {
+        assert_eq!(sound_from_name(None), Osc99Sound::System);
+        assert_eq!(
+            sound_from_name(Some("system".to_owned())),
+            Osc99Sound::System
+        );
+    }
+
+    #[test]
+    fn sound_silent_maps_to_silent() {
+        assert_eq!(
+            sound_from_name(Some("silent".to_owned())),
+            Osc99Sound::Silent
+        );
+    }
+
+    #[test]
+    fn sound_other_maps_to_named() {
+        assert_eq!(
+            sound_from_name(Some("bell".to_owned())),
+            Osc99Sound::Named("bell".to_owned())
+        );
+    }
+
+    #[test]
+    fn sound_mapped_into_notification99_data() {
+        let finalized = FinalizedNotification {
+            meta: Osc99Command {
+                sound: Some("silent".to_owned()),
+                ..default_cmd()
+            },
+            ..default_finalized()
+        };
+        assert_eq!(
+            finalized.into_notification99_data().sound,
+            Osc99Sound::Silent
+        );
+    }
+
+    #[test]
+    fn missing_title_maps_to_empty_string() {
+        let data = default_finalized().into_notification99_data();
+        assert_eq!(data.title, "");
     }
 
     #[test]
@@ -802,13 +896,21 @@ mod tests {
         };
         let data = finalized.into_notification99_data();
         assert_eq!(data.id.as_deref(), Some("id-1"));
-        assert_eq!(data.title.as_deref(), Some("Title"));
+        assert_eq!(data.title, "Title");
         assert_eq!(data.body.as_deref(), Some("Body"));
         assert_eq!(data.icon_data.as_deref(), Some(&[1u8, 2, 3][..]));
-        assert!(data.report_activation);
-        assert!(!data.focus_on_activation);
-        assert!(data.close_report);
-        assert_eq!(data.button_labels, [] as [String; 0]);
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Report);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::NoFocus);
+        assert_eq!(data.close_reporting, Osc99CloseReporting::Report);
+        assert_eq!(data.buttons, [] as [String; 0]);
+    }
+
+    #[test]
+    fn default_flags_map_to_silent_and_focus() {
+        let data = default_finalized().into_notification99_data();
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Silent);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::Focus);
+        assert_eq!(data.close_reporting, Osc99CloseReporting::Silent);
     }
 
     // ── 99.9: button-label extraction ────────────────────────────────────────
@@ -892,7 +994,7 @@ mod tests {
             ..default_finalized()
         };
         let data = finalized.into_notification99_data();
-        assert_eq!(data.button_labels, vec!["A".to_owned(), "B".to_owned()]);
+        assert_eq!(data.buttons, vec!["A".to_owned(), "B".to_owned()]);
     }
 
     // ── 99.5c: control_kind mapping ───────────────────────────────────────────
@@ -1435,6 +1537,13 @@ mod tests {
         let features = Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::Reported,
+            activation_focus: Osc99FocusAction::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
         };
         assert_eq!(
             osc99_query_reply_body(features),
@@ -1447,6 +1556,13 @@ mod tests {
         let features = Osc99Features {
             activation_report: Osc99ActivationReport::NotReported,
             close_events: Osc99CloseEvents::Reported,
+            activation_focus: Osc99FocusAction::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
         };
         assert_eq!(
             osc99_query_reply_body(features),
@@ -1459,6 +1575,13 @@ mod tests {
         let features = Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::NotReported,
+            activation_focus: Osc99FocusAction::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
         };
         assert_eq!(
             osc99_query_reply_body(features),
@@ -1471,6 +1594,13 @@ mod tests {
         let features = Osc99Features {
             activation_report: Osc99ActivationReport::NotReported,
             close_events: Osc99CloseEvents::NotReported,
+            activation_focus: Osc99FocusAction::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
         };
         assert_eq!(osc99_query_reply_body(features), REPLY_TAIL);
     }

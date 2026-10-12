@@ -279,12 +279,18 @@ mod tests {
         NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command,
         Osc99PayloadEncoding, Osc99PayloadType,
     };
+    use freminal_common::buffer_states::osc99_notification::{
+        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind,
+        Osc99Expiry,
+    };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
-        NotificationKind, Osc99ControlKind, WindowManipulation,
+        NotificationKind, WindowManipulation,
     };
     use freminal_common::host_capabilities::{
-        HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+        HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport,
+        Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusAction, Osc99IconSupport,
+        Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
     };
     use freminal_common::pty_write::PtyWrite;
 
@@ -561,6 +567,13 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
+                activation_focus: Osc99FocusAction::Unsupported,
+                auto_expiry: Osc99AutoExpiry::Supported,
+                urgency: Osc99UrgencySupport::Supported,
+                sound_names: Osc99SoundNames::SystemAndSilent,
+                body: Osc99BodySupport::Supported,
+                buttons: Osc99ButtonSupport::Supported,
+                icons: Osc99IconSupport::Supported,
             }),
         });
         handler
@@ -584,10 +597,10 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Notification99(data) => {
-                assert_eq!(data.title.as_deref(), Some("Hello"));
-                assert_eq!(data.occasion, None, "default Always maps to None");
-                assert_eq!(data.expire_ms, None, "default -1 maps to None");
-                assert_eq!(data.button_labels, [] as [String; 0]);
+                assert_eq!(data.title, "Hello");
+                assert_eq!(data.occasion, NotificationOccasion::Always);
+                assert_eq!(data.expiry, Osc99Expiry::OsDefault, "default -1");
+                assert_eq!(data.buttons, [] as [String; 0]);
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
@@ -611,7 +624,7 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Notification99(data) => {
-                assert_eq!(data.title.as_deref(), Some("Hello"));
+                assert_eq!(data.title, "Hello");
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
@@ -660,12 +673,15 @@ mod tests {
             WindowManipulation::Notification99(data) => {
                 assert_eq!(data.id.as_deref(), Some("notif-1"));
                 assert_eq!(data.body.as_deref(), Some("Body text"));
-                assert_eq!(data.urgency, Some(2));
-                assert_eq!(data.occasion.as_deref(), Some("unfocused"));
-                assert_eq!(data.expire_ms, Some(3000));
-                assert!(data.close_report);
-                assert!(data.report_activation);
-                assert!(!data.focus_on_activation);
+                assert_eq!(data.urgency, NotificationUrgency::Critical);
+                assert_eq!(data.occasion, NotificationOccasion::Unfocused);
+                assert_eq!(
+                    data.expiry,
+                    Osc99Expiry::After(std::num::NonZeroU32::new(3000).unwrap())
+                );
+                assert_eq!(data.close_reporting, Osc99CloseReporting::Report);
+                assert_eq!(data.activation_reporting, Osc99ActivationReporting::Report);
+                assert_eq!(data.activation_focus, Osc99ActivationFocus::NoFocus);
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
@@ -702,7 +718,7 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Notification99(data) => {
-                assert_eq!(data.title.as_deref(), Some("partial-rest"));
+                assert_eq!(data.title, "partial-rest");
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }
@@ -742,6 +758,13 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
+                activation_focus: Osc99FocusAction::Unsupported,
+                auto_expiry: Osc99AutoExpiry::Supported,
+                urgency: Osc99UrgencySupport::Supported,
+                sound_names: Osc99SoundNames::SystemAndSilent,
+                body: Osc99BodySupport::Supported,
+                buttons: Osc99ButtonSupport::Supported,
+                icons: Osc99IconSupport::Supported,
             }),
         });
 
@@ -773,6 +796,13 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::Reported,
                 close_events: Osc99CloseEvents::Reported,
+                activation_focus: Osc99FocusAction::Unsupported,
+                auto_expiry: Osc99AutoExpiry::Supported,
+                urgency: Osc99UrgencySupport::Supported,
+                sound_names: Osc99SoundNames::SystemAndSilent,
+                body: Osc99BodySupport::Supported,
+                buttons: Osc99ButtonSupport::Supported,
+                icons: Osc99IconSupport::Supported,
             }),
         });
 
@@ -806,7 +836,7 @@ mod tests {
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
             WindowManipulation::Notification99(data) => {
-                assert_eq!(data.title.as_deref(), Some("Hello"));
+                assert_eq!(data.title, "Hello");
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }

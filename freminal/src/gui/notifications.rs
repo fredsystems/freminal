@@ -23,13 +23,15 @@ use std::collections::HashMap;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use conv2::ValueInto;
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
-use freminal_common::buffer_states::window_manipulation::{
-    Notification99Data, NotificationKind, Osc99ControlKind,
+use freminal_common::buffer_states::osc_notify_99::{NotificationOccasion, NotificationUrgency};
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind,
+    Osc99Expiry, Osc99Sound,
 };
+use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
@@ -517,9 +519,9 @@ fn freminal_icon_image() -> Option<&'static notify_rust::Image> {
 #[derive(Debug, Clone)]
 pub(super) struct Osc99LiveEntry {
     /// Whether `a=report` was requested (activation reports wanted — 99.6).
-    pub report_activation: bool,
+    pub activation_reporting: Osc99ActivationReporting,
     /// Whether `c=1` was requested (close report wanted — 99.6).
-    pub close_report: bool,
+    pub close_reporting: Osc99CloseReporting,
 }
 
 /// Remove a notification id from the live map.
@@ -584,7 +586,7 @@ pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<Str
 /// (whole-notification activation), or the button's registered id string
 /// (the 0-based `enumerate` index used when registering `.action(...)`).
 /// Returns `None` when the source notification didn't request a report for
-/// this event (`report_activation` / `close_report` both gate their
+/// this event (`activation_reporting` / `close_reporting` both gate their
 /// respective branches). The PTY thread serialises the reply and frames it
 /// per the application's S8C1T mode.
 ///
@@ -597,17 +599,19 @@ pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<Str
 pub(super) fn osc99_action_report(
     action: &str,
     id: Option<&str>,
-    report_activation: bool,
-    close_report: bool,
+    activation_reporting: Osc99ActivationReporting,
+    close_reporting: Osc99CloseReporting,
 ) -> Option<GuiReply> {
     let id = id.map(str::to_owned);
+    let reports_activation = activation_reporting == Osc99ActivationReporting::Report;
+    let reports_close = close_reporting == Osc99CloseReporting::Report;
     match action {
-        "__closed" => close_report.then_some(GuiReply::Osc99Closed {
+        "__closed" => reports_close.then_some(GuiReply::Osc99Closed {
             id,
             tracking: Osc99CloseTracking::Tracked,
         }),
-        "default" => report_activation.then_some(GuiReply::Osc99Activation { id, button: None }),
-        other => report_activation.then(|| GuiReply::Osc99Activation {
+        "default" => reports_activation.then_some(GuiReply::Osc99Activation { id, button: None }),
+        other => reports_activation.then(|| GuiReply::Osc99Activation {
             id,
             button: Some(other.to_owned()),
         }),
@@ -689,7 +693,7 @@ impl NotificationRouter {
         // omitted can resolve the icon.
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
 
-        if !Self::occasion_allows_display(data.occasion.as_deref(), ctx) {
+        if !Self::occasion_allows_display(data.occasion, ctx) {
             return;
         }
 
@@ -702,17 +706,17 @@ impl NotificationRouter {
         let wants_system = routing.wants_system(ctx.window_focused);
 
         if wants_toast {
-            let summary = data
-                .title
-                .clone()
-                .or_else(|| data.body.clone())
-                .unwrap_or_default();
+            let summary = if data.title.is_empty() {
+                data.body.clone().unwrap_or_default()
+            } else {
+                data.title.clone()
+            };
             let detail = data
                 .body
                 .as_deref()
                 .filter(|body| !body.is_empty())
                 .map(str::to_owned);
-            if data.urgency == Some(2) {
+            if data.urgency == NotificationUrgency::Critical {
                 toasts.error(summary, detail);
             } else {
                 toasts.info(summary, detail);
@@ -737,13 +741,13 @@ impl NotificationRouter {
             && wants_system
         {
             let entry = Osc99LiveEntry {
-                report_activation: data.report_activation,
-                close_report: data.close_report,
+                activation_reporting: data.activation_reporting,
+                close_reporting: data.close_reporting,
             };
             tracing::trace!(
                 id,
-                report_activation = entry.report_activation,
-                close_report = entry.close_report,
+                activation_reporting = ?entry.activation_reporting,
+                close_reporting = ?entry.close_reporting,
                 "tracking live OSC 99 notification"
             );
             // NOTE: OS-observed closes on Linux write the close report directly
@@ -759,22 +763,20 @@ impl NotificationRouter {
     }
     /// Evaluate the OSC 99 `o=` occasion gate.
     ///
-    /// - `None` (Always) — always display.
-    /// - `Some("unfocused")` — display only when the source window lacks
-    ///   focus.
-    /// - `Some("invisible")` — display only when the source window is
-    ///   minimized. Background-tab occlusion is out of scope for 99.5a
-    ///   (documented, not silently dropped — see the 99.5 execution
-    ///   decisions in `PLAN_VERSION_110.md`).
-    /// - Any other value — treated as Always (forward-compat with occasion
-    ///   values not yet recognised by the parser).
-    fn occasion_allows_display(occasion: Option<&str>, ctx: Osc99DisplayContext) -> bool {
+    /// - `Always` — always display.
+    /// - `Unfocused` — display only when the source window lacks focus.
+    /// - `Invisible` — display only when the source window is minimized.
+    ///   Background-tab occlusion is out of scope for 99.5a (documented, not
+    ///   silently dropped — see the 99.5 execution decisions in
+    ///   `PLAN_VERSION_110.md`).
+    const fn occasion_allows_display(
+        occasion: NotificationOccasion,
+        ctx: Osc99DisplayContext,
+    ) -> bool {
         match occasion {
-            Some("unfocused") => !ctx.window_focused,
-            Some("invisible") => ctx.window_minimized,
-            // `None` (Always) and any other/unrecognised value both display
-            // unconditionally.
-            None | Some(_) => true,
+            NotificationOccasion::Always => true,
+            NotificationOccasion::Unfocused => !ctx.window_focused,
+            NotificationOccasion::Invisible => ctx.window_minimized,
         }
     }
 
@@ -922,20 +924,20 @@ impl NotificationRouter {
     #[allow(clippy::too_many_arguments)]
     fn build_osc99_notification(
         id: Option<&str>,
-        title: Option<&str>,
+        title: &str,
         body: &str,
         app_name: Option<&str>,
         button_labels: &[String],
-        urgency: Option<u8>,
-        sound: Option<&str>,
-        expire_ms: Option<i64>,
+        urgency: NotificationUrgency,
+        sound: &Osc99Sound,
+        expiry: Osc99Expiry,
         icon_names: &[String],
         resolved_icon_bytes: Option<Vec<u8>>,
     ) -> (notify_rust::Notification, Option<std::path::PathBuf>) {
         let mut notification = notify_rust::Notification::new();
         notification
             .appname(app_name.unwrap_or("freminal"))
-            .summary(title.unwrap_or(body))
+            .summary(if title.is_empty() { body } else { title })
             .body(body);
 
         // See `Self::show_system` for the platform rationale: `urgency()` is
@@ -943,9 +945,9 @@ impl NotificationRouter {
         #[cfg(not(target_os = "macos"))]
         {
             let urgency_level = match urgency {
-                Some(0) => notify_rust::Urgency::Low,
-                Some(2) => notify_rust::Urgency::Critical,
-                _ => notify_rust::Urgency::Normal,
+                NotificationUrgency::Low => notify_rust::Urgency::Low,
+                NotificationUrgency::Critical => notify_rust::Urgency::Critical,
+                NotificationUrgency::Normal => notify_rust::Urgency::Normal,
             };
             notification.urgency(urgency_level);
         }
@@ -956,21 +958,21 @@ impl NotificationRouter {
             notification.action(&idx.to_string(), label);
         }
 
-        if let Some(sound_name) = sound {
-            notification.sound_name(sound_name);
+        match sound {
+            // The daemon's default sound: no sound-name hint is sent.
+            Osc99Sound::System => {}
+            Osc99Sound::Silent => {
+                notification.sound_name("silent");
+            }
+            Osc99Sound::Named(name) => {
+                notification.sound_name(name);
+            }
         }
 
-        let timeout = match expire_ms {
-            Some(0) => notify_rust::Timeout::Never,
-            Some(ms) if ms > 0 => {
-                let ms: u32 = ms.value_into().unwrap_or(u32::MAX);
-                notify_rust::Timeout::Milliseconds(ms)
-            }
-            // `None` (OS default) and negative-and-nonzero (not a value the
-            // 99.4 mapping produces -- `-1` is normalised to `None` -- but
-            // matched exhaustively rather than relying on that invariant)
-            // both fall back to the server default.
-            None | Some(_) => notify_rust::Timeout::Default,
+        let timeout = match expiry {
+            Osc99Expiry::OsDefault => notify_rust::Timeout::Default,
+            Osc99Expiry::Never => notify_rust::Timeout::Never,
+            Osc99Expiry::After(ms) => notify_rust::Timeout::Milliseconds(ms.get()),
         };
         notification.timeout(timeout);
 
@@ -1030,25 +1032,25 @@ impl NotificationRouter {
         let title = data.title.clone();
         let body = data.body.clone().unwrap_or_default();
         let app_name = data.app_name.clone();
-        let button_labels = data.button_labels.clone();
+        let button_labels = data.buttons.clone();
         let urgency = data.urgency;
         let sound = data.sound.clone();
-        let expire_ms = data.expire_ms;
+        let expiry = data.expiry;
         let icon_names = data.icon_names.clone();
-        let report_activation = data.report_activation;
-        let close_report = data.close_report;
+        let activation_reporting = data.activation_reporting;
+        let close_reporting = data.close_reporting;
 
         let builder = std::thread::Builder::new().name("freminal-notify-99".to_owned());
         if let Err(e) = builder.spawn(move || {
             let (notification, mut icon_temp_path) = Self::build_osc99_notification(
                 id.as_deref(),
-                title.as_deref(),
+                &title,
                 &body,
                 app_name.as_deref(),
                 &button_labels,
                 urgency,
-                sound.as_deref(),
-                expire_ms,
+                &sound,
+                expiry,
                 &icon_names,
                 resolved_icon_bytes,
             );
@@ -1068,8 +1070,8 @@ impl NotificationRouter {
                         if let Some(reply) = osc99_action_report(
                             action,
                             id.as_deref(),
-                            report_activation,
-                            close_report,
+                            activation_reporting,
+                            close_reporting,
                         ) {
                             send_reply_weak(&reply_tx, reply);
                         }
@@ -1092,8 +1094,8 @@ impl NotificationRouter {
                 if let Err(e) = notification.show() {
                     tracing::warn!("failed to show OSC 99 desktop notification: {e}");
                 }
-                let _ = report_activation;
-                if close_report {
+                let _ = activation_reporting;
+                if close_reporting == Osc99CloseReporting::Report {
                     let reply = GuiReply::Osc99Closed {
                         id: id.clone(),
                         tracking: Osc99CloseTracking::Untracked,
@@ -1114,6 +1116,7 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::osc99_notification::Osc99ActivationFocus;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
 
@@ -1203,13 +1206,13 @@ mod tests {
         // Named-icon branch: the transmitted freedesktop icon name is used.
         let (named, temp) = NotificationRouter::build_osc99_notification(
             Some("id-1"),
-            Some("Title"),
+            "Title",
             "body",
             None,
             &[],
-            None,
-            None,
-            None,
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::OsDefault,
             &["weather-clear".to_owned()],
             None,
         );
@@ -1223,13 +1226,13 @@ mod tests {
         // `image_path` via a temp file), and definitely is not "freminal".
         let (with_bytes, temp) = NotificationRouter::build_osc99_notification(
             Some("id-2"),
-            Some("Title"),
+            "Title",
             "body",
             None,
             &[],
-            None,
-            None,
-            None,
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::OsDefault,
             &[],
             Some(vec![1, 2, 3, 4]),
         );
@@ -1241,6 +1244,157 @@ mod tests {
         if let Some(path) = temp {
             NotificationRouter::remove_icon_temp_file(&path);
         }
+    }
+
+    /// Build an OSC 99 notification varying only urgency, sound and expiry.
+    fn build_osc99_with(
+        urgency: NotificationUrgency,
+        sound: &Osc99Sound,
+        expiry: Osc99Expiry,
+    ) -> notify_rust::Notification {
+        NotificationRouter::build_osc99_notification(
+            None,
+            "Title",
+            "body",
+            None,
+            &[],
+            urgency,
+            sound,
+            expiry,
+            &[],
+            None,
+        )
+        .0
+    }
+
+    #[test]
+    fn build_osc99_notification_maps_expiry_to_timeout() {
+        use notify_rust::Timeout;
+
+        let default = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::OsDefault,
+        );
+        assert_eq!(default.timeout, Timeout::Default);
+
+        let never = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::Never,
+        );
+        assert_eq!(never.timeout, Timeout::Never);
+
+        let after = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::After(std::num::NonZeroU32::new(5000).unwrap()),
+        );
+        assert_eq!(after.timeout, Timeout::Milliseconds(5000));
+    }
+
+    /// The sound-name and urgency hints live in `notify_rust`'s
+    /// `Notification::hints`, which exists only on Linux/BSD.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn build_osc99_notification_maps_sound_to_hint() {
+        use notify_rust::Hint;
+
+        let system = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::System,
+            Osc99Expiry::OsDefault,
+        );
+        assert!(
+            !system.hints.iter().any(|h| matches!(h, Hint::SoundName(_))),
+            "System must send no sound-name hint"
+        );
+
+        let silent = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::Silent,
+            Osc99Expiry::OsDefault,
+        );
+        assert!(silent.hints.contains(&Hint::SoundName("silent".to_owned())));
+
+        let named = build_osc99_with(
+            NotificationUrgency::Normal,
+            &Osc99Sound::Named("bell".to_owned()),
+            Osc99Expiry::OsDefault,
+        );
+        assert!(named.hints.contains(&Hint::SoundName("bell".to_owned())));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn build_osc99_notification_maps_urgency_to_hint() {
+        use notify_rust::{Hint, Urgency};
+
+        for (urgency, expected) in [
+            (NotificationUrgency::Low, Urgency::Low),
+            (NotificationUrgency::Normal, Urgency::Normal),
+            (NotificationUrgency::Critical, Urgency::Critical),
+        ] {
+            let n = build_osc99_with(urgency, &Osc99Sound::System, Osc99Expiry::OsDefault);
+            assert!(n.hints.contains(&Hint::Urgency(expected)));
+        }
+    }
+
+    #[test]
+    fn route_osc99_toast_is_error_styled_only_for_critical_urgency() {
+        for (urgency, expected) in [
+            (NotificationUrgency::Low, ToastKind::Info),
+            (NotificationUrgency::Normal, ToastKind::Info),
+            (NotificationUrgency::Critical, ToastKind::Error),
+        ] {
+            let config = enabled_config(0.0);
+            let mut toasts = ToastStack::default();
+            let mut icon_cache = HashMap::new();
+            let mut live = HashMap::new();
+            let tx: Weak<Sender<InputEvent>> = Weak::new();
+            let data = Notification99Data {
+                urgency,
+                ..default_n99()
+            };
+
+            NotificationRouter::route_osc99(
+                &data,
+                &config,
+                osc99_ctx(true, false),
+                &mut toasts,
+                &mut icon_cache,
+                &mut live,
+                &tx,
+            );
+
+            assert_eq!(toasts.last_kind(), Some(expected), "urgency {urgency:?}");
+        }
+    }
+
+    #[test]
+    fn route_osc99_empty_title_falls_back_to_body_for_toast() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let tx: Weak<Sender<InputEvent>> = Weak::new();
+        let data = Notification99Data {
+            title: String::new(),
+            body: Some("Only body".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 1);
     }
 
     /// Error-category notifications carry Critical urgency on the platforms
@@ -1764,21 +1918,21 @@ mod tests {
     fn default_n99() -> Notification99Data {
         Notification99Data {
             id: None,
-            title: Some("Title".to_owned()),
+            title: "Title".to_owned(),
             body: Some("Body".to_owned()),
             icon_data: None,
             icon_names: Vec::new(),
             icon_cache_key: None,
-            button_labels: Vec::new(),
-            report_activation: false,
-            focus_on_activation: true,
-            close_report: false,
-            urgency: None,
-            occasion: None,
-            sound: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
             app_name: None,
-            notification_type: Vec::new(),
-            expire_ms: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
         }
     }
 
@@ -1848,7 +2002,7 @@ mod tests {
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();
         let tx: Weak<Sender<InputEvent>> = Weak::new();
-        let data = default_n99(); // occasion: None => Always
+        let data = default_n99(); // occasion: Always
 
         NotificationRouter::route_osc99(
             &data,
@@ -1871,7 +2025,7 @@ mod tests {
     fn route_osc99_occasion_unfocused_gates_on_focus() {
         let config = enabled_config(0.0);
         let data = Notification99Data {
-            occasion: Some("unfocused".to_owned()),
+            occasion: NotificationOccasion::Unfocused,
             ..default_n99()
         };
 
@@ -1921,7 +2075,7 @@ mod tests {
     fn route_osc99_occasion_invisible_gates_on_minimized() {
         let config = enabled_config(0.0);
         let data = Notification99Data {
-            occasion: Some("invisible".to_owned()),
+            occasion: NotificationOccasion::Invisible,
             ..default_n99()
         };
 
@@ -1964,31 +2118,6 @@ mod tests {
             1,
             "invisible occasion must fire while minimized"
         );
-    }
-
-    #[test]
-    fn route_osc99_unrecognised_occasion_treated_as_always() {
-        let config = enabled_config(0.0);
-        let data = Notification99Data {
-            occasion: Some("something_new".to_owned()),
-            ..default_n99()
-        };
-        let mut toasts = ToastStack::default();
-        let mut icon_cache = HashMap::new();
-        let mut live = HashMap::new();
-        let tx: Weak<Sender<InputEvent>> = Weak::new();
-
-        NotificationRouter::route_osc99(
-            &data,
-            &config,
-            osc99_ctx(true, false),
-            &mut toasts,
-            &mut icon_cache,
-            &mut live,
-            &tx,
-        );
-
-        assert_eq!(toasts.len(), 1);
     }
 
     #[test]
@@ -2057,8 +2186,8 @@ mod tests {
         let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n1".to_owned()),
-            report_activation: true,
-            close_report: true,
+            activation_reporting: Osc99ActivationReporting::Report,
+            close_reporting: Osc99CloseReporting::Report,
             ..default_n99()
         };
 
@@ -2073,8 +2202,8 @@ mod tests {
         );
 
         let entry = live.get("n1").expect("live entry recorded");
-        assert!(entry.report_activation);
-        assert!(entry.close_report);
+        assert_eq!(entry.activation_reporting, Osc99ActivationReporting::Report);
+        assert_eq!(entry.close_reporting, Osc99CloseReporting::Report);
     }
 
     #[test]
@@ -2133,7 +2262,7 @@ mod tests {
         let tx: Weak<Sender<InputEvent>> = Weak::new();
         let data = Notification99Data {
             id: Some("n2".to_owned()),
-            occasion: Some("unfocused".to_owned()),
+            occasion: NotificationOccasion::Unfocused,
             ..default_n99()
         };
 
@@ -2316,8 +2445,8 @@ mod tests {
         live.insert(
             "n1".to_owned(),
             Osc99LiveEntry {
-                report_activation: true,
-                close_report: true,
+                activation_reporting: Osc99ActivationReporting::Report,
+                close_reporting: Osc99CloseReporting::Report,
             },
         );
 
@@ -2341,7 +2470,12 @@ mod tests {
     #[test]
     fn osc99_action_report_default_activates_whole_notification() {
         assert_eq!(
-            osc99_action_report("default", Some("abc"), true, false),
+            osc99_action_report(
+                "default",
+                Some("abc"),
+                Osc99ActivationReporting::Report,
+                Osc99CloseReporting::Silent
+            ),
             Some(GuiReply::Osc99Activation {
                 id: Some("abc".to_owned()),
                 button: None,
@@ -2352,7 +2486,12 @@ mod tests {
     #[test]
     fn osc99_action_report_button_carries_action_id() {
         assert_eq!(
-            osc99_action_report("2", Some("abc"), true, true),
+            osc99_action_report(
+                "2",
+                Some("abc"),
+                Osc99ActivationReporting::Report,
+                Osc99CloseReporting::Report
+            ),
             Some(GuiReply::Osc99Activation {
                 id: Some("abc".to_owned()),
                 button: Some("2".to_owned()),
@@ -2363,7 +2502,12 @@ mod tests {
     #[test]
     fn osc99_action_report_activation_without_id() {
         assert_eq!(
-            osc99_action_report("default", None, true, false),
+            osc99_action_report(
+                "default",
+                None,
+                Osc99ActivationReporting::Report,
+                Osc99CloseReporting::Silent
+            ),
             Some(GuiReply::Osc99Activation {
                 id: None,
                 button: None,
@@ -2374,7 +2518,12 @@ mod tests {
     #[test]
     fn osc99_action_report_closed_is_tracked() {
         assert_eq!(
-            osc99_action_report("__closed", Some("abc"), false, true),
+            osc99_action_report(
+                "__closed",
+                Some("abc"),
+                Osc99ActivationReporting::Silent,
+                Osc99CloseReporting::Report
+            ),
             Some(GuiReply::Osc99Closed {
                 id: Some("abc".to_owned()),
                 tracking: Osc99CloseTracking::Tracked,
@@ -2385,11 +2534,32 @@ mod tests {
     #[test]
     fn osc99_action_report_gated_by_requested_reports() {
         assert_eq!(
-            osc99_action_report("__closed", Some("a"), true, false),
+            osc99_action_report(
+                "__closed",
+                Some("a"),
+                Osc99ActivationReporting::Report,
+                Osc99CloseReporting::Silent
+            ),
             None
         );
-        assert_eq!(osc99_action_report("default", Some("a"), false, true), None);
-        assert_eq!(osc99_action_report("1", Some("a"), false, true), None);
+        assert_eq!(
+            osc99_action_report(
+                "default",
+                Some("a"),
+                Osc99ActivationReporting::Silent,
+                Osc99CloseReporting::Report
+            ),
+            None
+        );
+        assert_eq!(
+            osc99_action_report(
+                "1",
+                Some("a"),
+                Osc99ActivationReporting::Silent,
+                Osc99CloseReporting::Report
+            ),
+            None
+        );
     }
 
     #[test]
@@ -2399,8 +2569,8 @@ mod tests {
             live.insert(
                 id.to_owned(),
                 Osc99LiveEntry {
-                    report_activation: false,
-                    close_report: false,
+                    activation_reporting: Osc99ActivationReporting::Silent,
+                    close_reporting: Osc99CloseReporting::Silent,
                 },
             );
         }
@@ -2552,8 +2722,8 @@ mod tests {
             live.insert(
                 id.to_owned(),
                 Osc99LiveEntry {
-                    report_activation: false,
-                    close_report: false,
+                    activation_reporting: Osc99ActivationReporting::Silent,
+                    close_reporting: Osc99CloseReporting::Silent,
                 },
             );
         }
