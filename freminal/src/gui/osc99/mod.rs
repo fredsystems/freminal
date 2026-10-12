@@ -16,9 +16,12 @@ mod filter;
 mod icon_cache;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod icon_lookup;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod icon_tempfiles;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod presentation;
 mod registry;
+mod untracked;
 
 use std::sync::Weak;
 use std::time::Duration;
@@ -45,6 +48,9 @@ pub use dbus_service::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99W
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub use icon_cache::Osc99IconCache;
 pub use registry::Osc99Registry;
+#[cfg(test)]
+pub use untracked::RecordingUntrackedBackend;
+pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
 
 /// The registry's identity for one displayed notification.
 ///
@@ -79,7 +85,8 @@ pub enum Osc99Leg {
     /// (Linux/BSD, via the D-Bus handle).
     LinuxSystem,
     /// A desktop notification whose close and activation freminal cannot
-    /// observe (macOS and Windows).
+    /// observe (macOS and Windows). It is shown and forgotten: see
+    /// [`Osc99UntrackedBackend`].
     UntrackedSystem,
 }
 
@@ -218,6 +225,16 @@ pub enum Osc99Effect {
         /// What to show. Boxed: it is far larger than every other effect.
         notification: Box<Notification99Data>,
     },
+    /// Show a notification on the untracked system leg (macOS and Windows).
+    ///
+    /// There is no instance to track, update or close: the notification is
+    /// shown and forgotten, and an update of the same `i=` shows another one.
+    /// Only macOS and Windows route to that leg, but the registry is
+    /// platform-independent, so the variant exists everywhere.
+    ShowUntrackedSystem(
+        /// What to show. Boxed: it is far larger than every other effect.
+        Box<Notification99Data>,
+    ),
     /// Bring `origin`'s pane into focus: switch to its tab, unzoom, make it
     /// the active pane and raise its OS window. Emitted when a notification
     /// with `a=focus` is activated.
@@ -349,6 +366,8 @@ pub struct Osc99EffectSink<'a> {
     pub toasts: &'a mut ToastStack,
     /// The Linux/BSD desktop-notification service.
     pub system: &'a mut dyn Osc99SystemBackend,
+    /// The macOS and Windows fire-and-forget desktop notification.
+    pub untracked: &'a mut dyn Osc99UntrackedBackend,
     /// Panes to focus, collected in effect order.
     ///
     /// The executor has no window access, so [`Osc99Effect::FocusPane`] is
@@ -437,6 +456,7 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                     sink.failed_system_closes.push(instance);
                 }
             }
+            Osc99Effect::ShowUntrackedSystem(notification) => sink.untracked.show(&notification),
             Osc99Effect::FocusPane(origin) => sink.focus_requests.push(origin),
         }
     }

@@ -6084,6 +6084,25 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     change, `p=?` loses `a=` and `buttons`; `System` with the bus down gives no reply.
   - The sub-agent found that Reload Config already missed the in-flight window for every
     config dimension; recorded as 138.C3.
+- **138.16 (done).** The registry now produces the untracked leg: `ShowUntrackedSystem`, plus
+  the `p=close;untracked` reply at display when `c=1`.
+  - The old per-notification thread, `build_osc99_notification`, the temp-file functions and
+    the `cfg!(test)` guard are gone.
+  - `NotifyRustUntrackedBackend` (macOS/Windows) builds the notification on the GUI thread,
+    with no buttons, per-platform urgency and sound mapping, and an icon from
+    `IconTempFiles`.
+  - Windows shows inline.
+  - macOS shows on a short-lived `freminal-osc99-deliver` thread. This is an orchestrator
+    decision: the sub-agent found by reading the source that mac-notification-sys blocks until
+    delivery confirmation, up to 2 s, even on the asynchronous drop path, so an inline call
+    could stall the render thread.
+  - Icon temp files are content-hash named, written with `create_new`, capped at 64 (LRU),
+    and removed when the backend is dropped at shutdown. The windowing layer has no app exit
+    hook, so files survive a crash.
+  - Fixed on the way: Windows `s=system` used to be silent; it now plays the default sound.
+  - macOS was not compiled locally. Its code paths were checked against the notify-rust and
+    mac-notification-sys source, and macOS CI is the first compile. Windows passes
+    `check-windows`.
 
 ---
 

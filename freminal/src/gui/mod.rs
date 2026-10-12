@@ -425,6 +425,14 @@ struct FreminalGui {
     #[cfg(all(unix, not(target_os = "macos")))]
     osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
 
+    /// The macOS and Windows fire-and-forget desktop notification, which owns
+    /// the OSC 99 icon temp files and deletes them when it is dropped (the
+    /// application dropping this struct is the shutdown hook: the windowing
+    /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
+    /// Linux/BSD hold the no-op backend, the registry never routing to the
+    /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
+    osc99_untracked: std::cell::RefCell<Box<dyn osc99::Osc99UntrackedBackend>>,
+
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -631,6 +639,7 @@ impl FreminalGui {
             osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
+            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend()),
             #[cfg(all(unix, not(target_os = "macos")))]
             osc99_dbus: std::cell::RefCell::new(None),
             #[cfg(all(unix, not(target_os = "macos")))]

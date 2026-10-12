@@ -22,9 +22,14 @@
 //! The toast leg and the Linux/BSD system leg are both registry-managed: the
 //! registry emits their show effects and consumes their activation and close
 //! events ([`Osc99Registry::on_toast_event`], [`Osc99Registry::on_system_event`]),
-//! so both legs share one activation path and one close report. An instance
-//! shown on an untracked system leg (macOS and Windows) never gets a registry
-//! close report: the `untracked` report was already sent at display.
+//! so both legs share one activation path and one close report.
+//!
+//! The untracked system leg (macOS and Windows) is shown and forgotten: it is
+//! never an open leg, so it never holds an instance alive. Displaying it emits
+//! [`Osc99Effect::ShowUntrackedSystem`] and, when `c=1` was requested, the
+//! `untracked` close report straight away (as kitty does on macOS). An
+//! instance that was ever shown on it never gets a later, tracked close
+//! report, whatever its other legs do.
 //!
 //! Closing is requested per leg. `p=close`, expiry and capacity eviction emit
 //! a close effect for every open leg ([`Osc99Effect::CloseToast`],
@@ -159,7 +164,8 @@ impl Osc99Instance {
 
     /// The `p=close` report for this instance, if the registry owes one:
     /// `c=1` was requested and the `untracked` form was not already sent at
-    /// display (see the module docs).
+    /// display (see the module docs). An instance ever shown on the untracked
+    /// leg has had it, so it is owed nothing here.
     fn close_reply(&self) -> Option<Osc99Effect> {
         let reported_untracked = self.shown_legs.contains(&Osc99Leg::UntrackedSystem);
         (self.close_reporting == Osc99CloseReporting::Report && !reported_untracked).then(|| {
@@ -251,9 +257,13 @@ impl Osc99Registry {
     ///
     /// Callers register only when at least one leg displayed it; `legs`
     /// lists the legs that did. An instance with no legs is legal but never
-    /// produced by the router. Neither registry-managed leg is shown by the
-    /// caller: a `Toast` in `legs` yields a [`Osc99Effect::ShowToast`] here,
-    /// and a `LinuxSystem` yields a [`Osc99Effect::ShowLinuxSystem`].
+    /// produced by the router. No leg is shown by the caller: a `Toast` in
+    /// `legs` yields a [`Osc99Effect::ShowToast`] here, a `LinuxSystem` a
+    /// [`Osc99Effect::ShowLinuxSystem`], and an `UntrackedSystem` a
+    /// [`Osc99Effect::ShowUntrackedSystem`] plus, when `c=1` was requested, the
+    /// `untracked` close report. An update of an instance whose new legs
+    /// include the untracked one shows a new notification (nothing can be
+    /// replaced in place there) and, with `c=1`, reports again.
     ///
     /// If `data.id` is set and the same pane already has an instance with
     /// that id, the notification is an update: the old instance is forgotten
@@ -275,6 +285,7 @@ impl Osc99Registry {
         let mut effects = Vec::new();
         let wants_toast = legs.contains(&Osc99Leg::Toast);
         let wants_linux = legs.contains(&Osc99Leg::LinuxSystem);
+        let wants_untracked = legs.contains(&Osc99Leg::UntrackedSystem);
 
         let mut replaces_toast = None;
         let mut replaces_linux = None;
@@ -329,6 +340,20 @@ impl Osc99Registry {
                 replaces: replaces_linux,
                 notification: Box::new(data.clone()),
             });
+        }
+        if wants_untracked {
+            effects.push(Osc99Effect::ShowUntrackedSystem(Box::new(data.clone())));
+            // Nothing can observe this notification closing, so a requested
+            // close report is answered now, in the `untracked` form.
+            if data.close_reporting == Osc99CloseReporting::Report {
+                effects.push(Osc99Effect::Reply {
+                    reply_tx: Weak::clone(&reply_tx),
+                    reply: GuiReply::Osc99Closed {
+                        id: data.id.clone(),
+                        tracking: Osc99CloseTracking::Untracked,
+                    },
+                });
+            }
         }
 
         self.instances.push(Osc99Instance {
@@ -618,8 +643,9 @@ mod tests {
 
     use super::*;
     use crate::gui::osc99::{
-        NoSystemBackend, Osc99EffectSink, Osc99FailedSystemLegs, Osc99SystemBackend,
-        Osc99ToastSpec, RecordedShow, RecordingSystemBackend, apply_osc99_effects,
+        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99FailedSystemLegs,
+        Osc99SystemBackend, Osc99ToastSpec, Osc99UntrackedBackend, RecordedShow,
+        RecordingSystemBackend, RecordingUntrackedBackend, apply_osc99_effects,
     };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{
@@ -758,9 +784,20 @@ mod tests {
         toasts: &mut ToastStack,
         system: &mut dyn Osc99SystemBackend,
     ) -> (Vec<Osc99Origin>, Osc99FailedSystemLegs) {
+        execute_all_with_untracked(effects, toasts, system, &mut NoUntrackedBackend)
+    }
+
+    /// [`execute_all`] with a caller-supplied untracked-leg backend.
+    fn execute_all_with_untracked(
+        effects: Vec<Osc99Effect>,
+        toasts: &mut ToastStack,
+        system: &mut dyn Osc99SystemBackend,
+        untracked: &mut dyn Osc99UntrackedBackend,
+    ) -> (Vec<Osc99Origin>, Osc99FailedSystemLegs) {
         let mut sink = Osc99EffectSink {
             toasts,
             system,
+            untracked,
             focus_requests: Vec::new(),
             failed_system_shows: Vec::new(),
             failed_system_closes: Vec::new(),
@@ -2020,6 +2057,214 @@ mod tests {
 
         assert!(registry.on_toast_event(closed(instance)).is_empty());
         assert!(registry.instances().is_empty(), "no tracked leg remains");
+    }
+
+    // ── the untracked system leg (macOS and Windows) ────────────────────
+
+    fn is_untracked_close(reply: &GuiReply, id: &str) -> bool {
+        matches!(
+            reply,
+            GuiReply::Osc99Closed { id: Some(i), tracking: Osc99CloseTracking::Untracked } if i == id
+        )
+    }
+
+    #[test]
+    fn an_untracked_only_display_with_close_reporting_replies_untracked_at_once() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let wanted = reporting_data("n", Osc99CloseReporting::Report);
+
+        let (effects, _) = register_with(&mut registry, &a, &wanted, &[Osc99Leg::UntrackedSystem]);
+
+        let [
+            Osc99Effect::ShowUntrackedSystem(shown),
+            Osc99Effect::Reply { reply, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("expected ShowUntrackedSystem then the untracked close, got {effects:?}");
+        };
+        assert_eq!(**shown, wanted);
+        assert!(is_untracked_close(reply, "n"), "got {reply:?}");
+    }
+
+    #[test]
+    fn an_untracked_only_instance_gets_no_tracked_close_report_later() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let short_lived = Notification99Data {
+            expiry: ms(500),
+            ..reporting_data("n", Osc99CloseReporting::Report)
+        };
+        let now = Instant::now();
+        let _ = registry.register(
+            a.origin,
+            a.weak(),
+            &short_lived,
+            &[Osc99Leg::UntrackedSystem],
+            now,
+        );
+        assert!(
+            registry.instances()[0].open_legs.is_empty(),
+            "the untracked leg never holds the instance open"
+        );
+
+        // Expiry and `p=close` both go through the shared close path, and
+        // neither has a leg to close or a tracked report to send.
+        assert!(registry.tick(now + Duration::from_secs(1)).is_empty());
+        assert!(registry.instances().is_empty(), "expiry forgot it");
+
+        let (_, again) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::UntrackedSystem],
+        );
+        assert!(registry.close(a.origin, "n").is_empty());
+        assert!(registry.instances().is_empty(), "p=close forgot it");
+        assert!(
+            registry.on_toast_event(closed(again)).is_empty(),
+            "a late event for the forgotten instance is ignored"
+        );
+    }
+
+    #[test]
+    fn toast_plus_untracked_with_close_reporting_replies_untracked_and_never_tracked() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+
+        let (effects, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::UntrackedSystem],
+        );
+
+        let [
+            Osc99Effect::ShowToast { .. },
+            Osc99Effect::ShowUntrackedSystem(_),
+            Osc99Effect::Reply { reply, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("expected toast, untracked show, untracked close, got {effects:?}");
+        };
+        assert!(is_untracked_close(reply, "n"), "got {reply:?}");
+
+        // The toast closing is the last open leg, yet owes no tracked report:
+        // the untracked one was sent at display.
+        assert!(registry.on_toast_event(closed(instance)).is_empty());
+        assert!(registry.instances().is_empty());
+    }
+
+    #[test]
+    fn toast_plus_untracked_activation_with_close_reporting_sends_no_tracked_close() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::UntrackedSystem],
+        );
+
+        let activation = registry.on_toast_event(activated(instance));
+        let later = registry.on_toast_event(closed(instance));
+
+        let replies = replies(activation.into_iter().chain(later).collect());
+        assert!(
+            replies.iter().all(|reply| !is_tracked_close(reply, "n")),
+            "got {replies:?}"
+        );
+    }
+
+    #[test]
+    fn an_untracked_only_display_without_close_reporting_sends_no_reply() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::UntrackedSystem],
+        );
+
+        assert!(
+            matches!(effects.as_slice(), [Osc99Effect::ShowUntrackedSystem(_)]),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn updating_an_untracked_instance_shows_a_new_notification_and_reports_again() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let wanted = reporting_data("n", Osc99CloseReporting::Report);
+        let (_, first) = register_with(&mut registry, &a, &wanted, &[Osc99Leg::UntrackedSystem]);
+
+        let (effects, second) =
+            register_with(&mut registry, &a, &wanted, &[Osc99Leg::UntrackedSystem]);
+
+        let [
+            Osc99Effect::ShowUntrackedSystem(_),
+            Osc99Effect::Reply { reply, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("expected a fresh show and its untracked close, got {effects:?}");
+        };
+        assert!(is_untracked_close(reply, "n"), "got {reply:?}");
+        assert_ne!(first, second);
+        assert_eq!(registry.instances().len(), 1, "the update replaced it");
+    }
+
+    #[test]
+    fn updating_an_untracked_instance_without_close_reporting_shows_without_a_reply() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let _ = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::UntrackedSystem],
+        );
+
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::UntrackedSystem],
+        );
+
+        assert!(
+            matches!(effects.as_slice(), [Osc99Effect::ShowUntrackedSystem(_)]),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_executor_hands_an_untracked_show_to_the_untracked_backend() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let wanted = reporting_data("n", Osc99CloseReporting::Report);
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &wanted,
+            &[Osc99Leg::Toast, Osc99Leg::UntrackedSystem],
+        );
+        let mut toasts = ToastStack::default();
+        let mut untracked = RecordingUntrackedBackend::default();
+
+        let (focus, failed) = execute_all_with_untracked(
+            effects,
+            &mut toasts,
+            &mut RecordingSystemBackend::default(),
+            &mut untracked,
+        );
+
+        assert_eq!(untracked.shown, [wanted]);
+        assert_eq!(toasts.len(), 1, "the toast leg still showed");
+        assert_eq!(focus, Vec::new());
+        assert!(failed.is_empty(), "an untracked show cannot fail");
     }
 
     // ── activation closes the other legs ────────────────────────────────

@@ -4828,6 +4828,16 @@ impl FreminalGui {
         toasts: &mut crate::gui::toast::ToastStack,
     ) {
         let mut no_system = crate::gui::osc99::NoSystemBackend;
+        let mut no_untracked = crate::gui::osc99::NoUntrackedBackend;
+        // A busy cell cannot happen (showing a notification calls nothing back
+        // into the GUI), but if it did the show would be lost, not deferred:
+        // the untracked leg has no failure to feed back.
+        let mut untracked_slot = self.osc99_untracked.try_borrow_mut().ok();
+        let untracked: &mut dyn crate::gui::osc99::Osc99UntrackedBackend =
+            match untracked_slot.as_deref_mut() {
+                Some(backend) => backend.as_mut(),
+                None => &mut no_untracked,
+            };
         let failed = {
             #[cfg(all(unix, not(target_os = "macos")))]
             let mut dbus = self.osc99_dbus.try_borrow_mut().ok();
@@ -4840,7 +4850,7 @@ impl FreminalGui {
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let system: &mut dyn crate::gui::osc99::Osc99SystemBackend = &mut no_system;
 
-            self.execute_osc99_effects(effects, toasts, system)
+            self.execute_osc99_effects(effects, toasts, system, untracked)
         };
 
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -4862,10 +4872,12 @@ impl FreminalGui {
         effects: Vec<crate::gui::osc99::Osc99Effect>,
         toasts: &mut crate::gui::toast::ToastStack,
         system: &mut dyn crate::gui::osc99::Osc99SystemBackend,
+        untracked: &mut dyn crate::gui::osc99::Osc99UntrackedBackend,
     ) -> crate::gui::osc99::Osc99FailedSystemLegs {
         let mut sink = crate::gui::osc99::Osc99EffectSink {
             toasts,
             system,
+            untracked,
             focus_requests: Vec::new(),
             failed_system_shows: Vec::new(),
             failed_system_closes: Vec::new(),
@@ -4928,8 +4940,12 @@ impl FreminalGui {
             .collect();
         drop(registry);
 
-        let refailed =
-            self.execute_osc99_effects(effects, toasts, &mut crate::gui::osc99::NoSystemBackend);
+        let refailed = self.execute_osc99_effects(
+            effects,
+            toasts,
+            &mut crate::gui::osc99::NoSystemBackend,
+            &mut crate::gui::osc99::NoUntrackedBackend,
+        );
         if !refailed.is_empty() {
             tracing::debug!(
                 ?refailed,

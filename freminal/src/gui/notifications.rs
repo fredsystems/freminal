@@ -23,8 +23,6 @@
 
 use std::borrow::Cow;
 use std::sync::Weak;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
@@ -32,15 +30,9 @@ use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus}
 use freminal_common::buffer_states::osc::OscNotifySource;
 use freminal_common::buffer_states::osc_notify_99::NotificationOccasion;
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99ControlKind};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use freminal_common::buffer_states::osc99_notification::{
-    Osc99CloseReporting, Osc99Expiry, Osc99Sound,
-};
 use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::send_or_log;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use freminal_terminal_emulator::io::Osc99CloseTracking;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
@@ -405,8 +397,8 @@ impl NotificationRouter {
 
     /// Build the `notify-rust` notification for a freminal-derived / OSC 9 /
     /// OSC 777 / command-finished desktop notification (the [`show_system`]
-    /// path — *not* the OSC 99 path, which builds its own notification with a
-    /// transmitted icon in [`build_osc99_notification`]).
+    /// path — *not* the OSC 99 path, which has its own backends and a
+    /// transmitted icon: see the `osc99` module).
     ///
     /// Attaches the bundled freminal application icon by icon-theme **name**
     /// (`.icon("freminal")`), matching `assets/freminal.desktop`'s
@@ -607,11 +599,6 @@ pub(super) const fn occasion_allows_display(
     }
 }
 
-/// Monotonic counter disambiguating concurrent OSC 99 icon temp files within
-/// a single process run (paired with the process id in the filename).
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-static OSC99_ICON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 impl NotificationRouter {
     /// Route an OSC 99 stateful notification to the toast leg and/or the OS
     /// notification daemon, honouring the occasion gate, urgency, sound,
@@ -636,8 +623,10 @@ impl NotificationRouter {
     ///
     /// On macOS and Windows a notification shown on the system leg is
     /// fire-and-forget and cannot be observed closing, so it is registered as
-    /// an untracked leg. On Linux/BSD the system leg is driven by the
-    /// registry: it is returned as an
+    /// an untracked leg: the registry returns an
+    /// [`Osc99Effect::ShowUntrackedSystem`] effect, and answers a `c=1`
+    /// request with the `untracked` close report at once. On Linux/BSD the
+    /// system leg is driven by the registry: it is returned as an
     /// [`Osc99Effect::ShowLinuxSystem`] effect for the notification service,
     /// and its activation and close come back through the registry.
     ///
@@ -714,14 +703,12 @@ impl NotificationRouter {
         }
 
         if wants_system {
-            // macOS/Windows: fire-and-forget, shown here. Linux/BSD: shown by
-            // the `ShowLinuxSystem` effect `register` returns below.
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            Self::show_system_osc99(data, data.icon_data.clone(), Weak::clone(&request.reply_tx));
-            // Only Linux/BSD observe a close or activation (through the
+            // Both system legs are shown by the effects `register` returns
+            // below. Only Linux/BSD observe a close or activation (through the
             // notification service); elsewhere the system notification is
-            // fire-and-forget. `cfg!` rather than `#[cfg]` so both variants
-            // are constructed on every platform.
+            // fire-and-forget and shown through the untracked backend. `cfg!`
+            // rather than `#[cfg]` so both variants are constructed on every
+            // platform.
             legs.push(if cfg!(all(unix, not(target_os = "macos"))) {
                 Osc99Leg::LinuxSystem
             } else {
@@ -771,203 +758,13 @@ impl NotificationRouter {
     }
 }
 
-/// The macOS and Windows OSC 99 system leg: fire-and-forget `notify-rust`.
-///
-/// Neither platform lets a background thread observe an activation or a close
-/// (the macOS callback needs the main run loop), so the notification is shown
-/// and forgotten, and a `c=1` request is answered at once in the `untracked`
-/// form. Task 138.16 reworks this leg.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-impl NotificationRouter {
-    /// Write transmitted icon bytes to a uniquely-named temp file.
-    ///
-    /// `tempfile` is only a dev-dependency of the `freminal` crate (not a
-    /// production dependency), so this writes directly into
-    /// [`std::env::temp_dir`] with a name disambiguated by the notification
-    /// id, a monotonic per-process counter, and the process id. The caller
-    /// is responsible for best-effort removal after use.
-    fn write_icon_temp_file(id: Option<&str>, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
-        use std::io::Write as _;
-
-        let pid = std::process::id();
-        let sanitized_id: String = id
-            .unwrap_or("noid")
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .collect();
-
-        // The temp dir (e.g. `/tmp`) is typically world-writable, and the
-        // filename is predictable (pid + a per-process counter), so a plain
-        // `fs::write` (which follows symlinks and truncates) would be
-        // vulnerable to a symlink pre-creation attack: a local attacker could
-        // point a guessable future filename at a file the freminal user owns
-        // and have us overwrite it. Use `create_new(true)` (O_CREAT|O_EXCL,
-        // which refuses to follow an existing path/symlink) and retry on a
-        // name collision so the write always lands in a fresh, exclusively
-        // created file.
-        loop {
-            let counter = OSC99_ICON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let filename = format!("freminal-osc99-icon-{sanitized_id}-{pid}-{counter}.png");
-            let path = std::env::temp_dir().join(filename);
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    file.write_all(bytes)?;
-                    return Ok(path);
-                }
-                // A collision on the guessable name (or a pre-created
-                // symlink) is retried with the next counter value.
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    /// Best-effort removal of an OSC 99 icon temp file; a leftover file is
-    /// not fatal, so failures are logged at `debug` and otherwise ignored.
-    fn remove_icon_temp_file(path: &std::path::Path) {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::debug!(
-                "failed to remove OSC 99 icon temp file {}: {e}",
-                path.display()
-            );
-        }
-    }
-
-    /// Build a `notify-rust` `Notification` from `data`, applying urgency,
-    /// buttons, sound, timeout, and icon (as a temp file when transmitted
-    /// bytes are given, else by name).
-    ///
-    /// Returns the built notification plus the icon temp file path (if one
-    /// was written), so the caller can clean it up after `.show()`.
-    fn build_osc99_notification(
-        data: &Notification99Data,
-        resolved_icon_bytes: Option<Vec<u8>>,
-    ) -> (notify_rust::Notification, Option<std::path::PathBuf>) {
-        let body = data.body.as_deref().unwrap_or_default();
-        let mut notification = notify_rust::Notification::new();
-        notification
-            .appname(data.app_name.as_deref().unwrap_or("freminal"))
-            .summary(if data.title.is_empty() {
-                body
-            } else {
-                &data.title
-            })
-            .body(body);
-
-        // See `Self::build_system_notification` for the platform rationale:
-        // `urgency()` is unavailable on macOS.
-        #[cfg(not(target_os = "macos"))]
-        {
-            use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
-
-            let urgency_level = match data.urgency {
-                NotificationUrgency::Low => notify_rust::Urgency::Low,
-                NotificationUrgency::Critical => notify_rust::Urgency::Critical,
-                NotificationUrgency::Normal => notify_rust::Urgency::Normal,
-            };
-            notification.urgency(urgency_level);
-        }
-
-        for (idx, label) in data.buttons.iter().enumerate() {
-            notification.action(&idx.to_string(), label);
-        }
-
-        match &data.sound {
-            // The daemon's default sound: no sound-name hint is sent.
-            Osc99Sound::System => {}
-            Osc99Sound::Silent => {
-                notification.sound_name("silent");
-            }
-            Osc99Sound::Named(name) => {
-                notification.sound_name(name);
-            }
-        }
-
-        let timeout = match data.expiry {
-            Osc99Expiry::OsDefault => notify_rust::Timeout::Default,
-            Osc99Expiry::Never => notify_rust::Timeout::Never,
-            Osc99Expiry::After(ms) => notify_rust::Timeout::Milliseconds(ms.get()),
-        };
-        notification.timeout(timeout);
-
-        let mut icon_temp_path: Option<std::path::PathBuf> = None;
-        if let Some(bytes) = resolved_icon_bytes {
-            match Self::write_icon_temp_file(data.id.as_deref(), &bytes) {
-                Ok(path) => {
-                    if let Some(path_str) = path.to_str() {
-                        notification.image_path(path_str);
-                    }
-                    icon_temp_path = Some(path);
-                }
-                Err(e) => {
-                    tracing::warn!("failed to write OSC 99 icon temp file: {e}");
-                }
-            }
-        } else if let Some(first) = data.icon_names.first() {
-            notification.icon(first);
-        }
-
-        (notification, icon_temp_path)
-    }
-
-    /// Show an OS notification for an OSC 99 notification on a short-lived
-    /// background thread, and emit a `c=1` close report immediately in the
-    /// `untracked` form (no activation reports are sent: `notify-rust` does
-    /// not expose an observable handle from a background thread here).
-    /// `reply_tx` is a `Weak` handle upgraded per send, so the thread never
-    /// keeps a closed pane's PTY consumer alive. The icon temp file (if any)
-    /// is removed on a best-effort basis after `show()`; cleanup failure
-    /// never fails the notification.
-    fn show_system_osc99(
-        data: &Notification99Data,
-        resolved_icon_bytes: Option<Vec<u8>>,
-        reply_tx: Weak<Sender<InputEvent>>,
-    ) {
-        // See `show_system`: the OS notification call aborts in test binaries
-        // on macOS (uncatchable foreign ObjC exception in a non-bundled
-        // process). The OSC 99 unit tests assert only on registry and toast
-        // state, both settled before this point, so skipping the spawn under
-        // test loses no coverage.
-        if cfg!(test) {
-            return;
-        }
-        let data = data.clone();
-
-        let builder = std::thread::Builder::new().name("freminal-notify-99".to_owned());
-        if let Err(e) = builder.spawn(move || {
-            let (notification, mut icon_temp_path) =
-                Self::build_osc99_notification(&data, resolved_icon_bytes);
-
-            if let Err(e) = notification.show() {
-                tracing::warn!("failed to show OSC 99 desktop notification: {e}");
-            }
-            if data.close_reporting == Osc99CloseReporting::Report {
-                let reply = GuiReply::Osc99Closed {
-                    id: data.id.clone(),
-                    tracking: Osc99CloseTracking::Untracked,
-                };
-                send_reply_weak(&reply_tx, reply);
-            }
-            if let Some(path) = icon_temp_path.take() {
-                Self::remove_icon_temp_file(&path);
-            }
-        }) {
-            tracing::warn!("failed to spawn OSC 99 notification thread: {e}");
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::gui::osc99::{
-        NoSystemBackend, Osc99EffectSink, Osc99Filter, Osc99Origin, Osc99SystemBackend,
-        apply_osc99_effects, osc99_toast_spec,
+        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99Filter, Osc99Origin,
+        Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
     };
     use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
     use freminal_common::buffer_states::osc99_notification::{
@@ -1017,6 +814,7 @@ mod tests {
             &mut Osc99EffectSink {
                 toasts,
                 system,
+                untracked: &mut NoUntrackedBackend,
                 focus_requests: Vec::new(),
                 failed_system_shows: Vec::new(),
                 failed_system_closes: Vec::new(),
@@ -1097,77 +895,6 @@ mod tests {
         // `OscText` with no title falls back to the kind-derived default.
         assert_eq!(notification.summary, "Notification");
         assert_eq!(notification.icon, "freminal");
-    }
-
-    /// Slice 3 invariant guard: the OSC 99 path must NOT be given the
-    /// `"freminal"` app icon — it carries its own transmitted icon (a named
-    /// freedesktop icon, or transmitted bytes via `image_path`). This locks
-    /// the "slice 3 only touches `show_system`, never the OSC 99 path"
-    /// boundary so a future "make it consistent" edit can't silently override
-    /// a program's transmitted OSC 99 icon with the freminal app icon.
-    ///
-    /// The builder only exists on macOS and Windows: the Linux/BSD system leg
-    /// is the zbus notification service.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn build_osc99_notification_uses_transmitted_icon_not_freminal() {
-        // Named-icon branch: the transmitted freedesktop icon name is used.
-        let (named, temp) = NotificationRouter::build_osc99_notification(
-            &Notification99Data {
-                id: Some("id-1".to_owned()),
-                icon_names: vec!["weather-clear".to_owned()],
-                ..default_n99()
-            },
-            None,
-        );
-        assert_eq!(
-            named.icon, "weather-clear",
-            "OSC 99 must use the transmitted icon name, never \"freminal\""
-        );
-        assert!(temp.is_none(), "no temp file when no bytes transmitted");
-
-        // Transmitted-bytes branch: `.icon` stays empty (bytes go to
-        // `image_path` via a temp file), and definitely is not "freminal".
-        let (with_bytes, temp) = NotificationRouter::build_osc99_notification(
-            &Notification99Data {
-                id: Some("id-2".to_owned()),
-                ..default_n99()
-            },
-            Some(vec![1, 2, 3, 4]),
-        );
-        assert_ne!(
-            with_bytes.icon, "freminal",
-            "OSC 99 transmitted-bytes path must not fall back to the freminal app icon"
-        );
-        // Clean up the temp file the bytes branch created.
-        if let Some(path) = temp {
-            NotificationRouter::remove_icon_temp_file(&path);
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn build_osc99_notification_maps_expiry_to_timeout() {
-        use notify_rust::Timeout;
-
-        let timeout_for = |expiry| {
-            NotificationRouter::build_osc99_notification(
-                &Notification99Data {
-                    expiry,
-                    ..default_n99()
-                },
-                None,
-            )
-            .0
-            .timeout
-        };
-
-        assert_eq!(timeout_for(Osc99Expiry::OsDefault), Timeout::Default);
-        assert_eq!(timeout_for(Osc99Expiry::Never), Timeout::Never);
-        assert_eq!(
-            timeout_for(Osc99Expiry::After(std::num::NonZeroU32::new(5000).unwrap())),
-            Timeout::Milliseconds(5000)
-        );
     }
 
     #[test]
@@ -2500,9 +2227,8 @@ mod tests {
 
     #[test]
     fn route_osc99_routing_system_pushes_no_toast() {
-        // The system leg is skipped under `cfg(test)` regardless (see
-        // `show_system`'s doc comment for the equivalent OSC 9/777 case), so
-        // this only asserts the toast leg was correctly gated off.
+        // The test executor's system and untracked backends display nothing,
+        // so this only asserts the toast leg was correctly gated off.
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
             ..enabled_config(0.0)
@@ -2644,33 +2370,6 @@ mod tests {
 
         assert_eq!(system.shown, Vec::new());
         assert_eq!(toasts.len(), 1);
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn write_icon_temp_file_uses_exclusive_create() {
-        // Two writes with the same id must not collide or overwrite; the
-        // monotonic counter + O_EXCL retry guarantees distinct fresh files.
-        let a = NotificationRouter::write_icon_temp_file(Some("id"), b"aaaa")
-            .expect("first temp write");
-        let b = NotificationRouter::write_icon_temp_file(Some("id"), b"bbbb")
-            .expect("second temp write");
-        assert_ne!(a, b, "temp files must be distinct");
-        assert_eq!(std::fs::read(&a).unwrap(), b"aaaa");
-        assert_eq!(std::fs::read(&b).unwrap(), b"bbbb");
-
-        // Writing to an existing path must not follow/truncate it: calling
-        // the raw create_new on an existing file fails.
-        let err = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&a)
-            .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-
-        // Clean up.
-        NotificationRouter::remove_icon_temp_file(&a);
-        NotificationRouter::remove_icon_temp_file(&b);
     }
 
     // ── Weak reply handle (Task 130.8) ───────────────────────────────
