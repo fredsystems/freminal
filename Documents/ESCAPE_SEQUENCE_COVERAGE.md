@@ -2,6 +2,20 @@
 
 ## Last updated
 
+Last updated: 2026-10-12 — Task 138 (OSC 99 conformance). The OSC 99 row stays
+🚧 in both the OSC table and the Specification Coverage Summary, with one
+remaining gap stated precisely: the eight standard icon names are not rendered
+on the toast leg or the macOS/Windows system leg (Tasks 138.C4 and 138.C5). Its
+notes are rewritten as one description of the shipped behaviour (see "OSC 99
+behaviour (Task 138)" below the OSC table): lenient parsing with id sanitising,
+chunk reassembly with merged metadata, immediate control payloads and a bounded
+pending map, finalisation limits, the toast, Linux/BSD zbus and macOS/Windows
+untracked legs, per-pane lifecycle (update, close, alive), pane-aware `o=`,
+`a=focus`, terminal-side expiry, `osc99_filters` and a truthful `p=?` per
+routing, platform and daemon. The earlier Task 99, 129 and 130 sub-notes in the
+row are superseded by it. The platform limits of the macOS and Windows legs and
+the icon-name gap are recorded there.
+
 Last updated: 2026-10-11 — Task 132 (colour foundation). OSC 10/11 move from 🚧
 to ✅: an override now reaches rendering (default foreground; default
 background through a pane base fill), and OSC 17 / OSC 19 (selection
@@ -71,8 +85,9 @@ definition. (130.5) OSC 99 `p=?` is answered on the PTY thread in stream order
 (before a following DA1), only when notifications are enabled, `osc_99` is on
 and `routing_osc99` is not `disabled`; `a=report` is advertised only on
 Linux/BSD with a system-capable routing and `c=1` only with a system-capable
-routing; every OSC 99 request is ignored while OSC 99 is unsupported. Remaining OSC 99
-conformance is Task 138. (130.C1) DECRQM for LNM (`CSI 20 $ p`) answers in the
+routing; every OSC 99 request is ignored while OSC 99 is unsupported. (Task 138,
+2026-10-12, replaced these advertisement rules and closed all OSC 99 deviations
+but the standard icon names: see the OSC 99 notes below the OSC table.) (130.C1) DECRQM for LNM (`CSI 20 $ p`) answers in the
 ANSI form `CSI 20 ; Ps $ y`. (130.C2) DECRQM for DECSCLM (`CSI ? 4 $ p`) now
 answers `CSI ? 4 ; 4 $ y` (permanently reset); it was previously unanswered.
 (130.C3) Title and icon reports strip control characters from the echoed text,
@@ -542,7 +557,7 @@ Rows below marked "recognised and ignored" are in that state.
 | OSC 52 ; c ; data BEL        | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query. The query reply is framed by the handler and honours S8C1T, and echoes only valid selection characters (`c p q s 0`–`7`); anything else in the requested selection parameter is dropped (Task 130.6, 130.C3). Tokenises its own UTF-8 payload (non-UTF-8 is rejected); size cap of 64 MiB per sequence, introduced by Task 129.9 (no cap before).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | OSC 66 ; meta ; text ST      | Kitty text sizing             | ⬜     | Vestigial no-op: the handler warn-logs and silently consumes the payload. OSC 66 is kitty's text-sizing protocol, not a Contour colour-scheme code (Contour's notification is `CSI ? 996 n` / `?2031`); text sizing is unimplemented (Task 104, v0.13.3). DECRPM ?2031 is the functional adaptive-theme query path (Task 52)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | OSC 72 ; …                   | Kitty drag and drop           | ❌     | Not implemented. Spec is stable upstream; blocked locally by winit 0.30's DnD API. Task 105 (v0.13.4)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| OSC 99 ; meta ; payload      | Kitty desktop notifications   | 🚧     | Stateful notifications: chunked title/body/icon/buttons, urgency/sound/occasion/expiry, activation/close/alive reverse reports, p=? handshake, g= icon cache (Task 99, v0.11.0) 2026-10-08 audit: buttons are reported 0-based, `a=report` disables focus, `p=close` does not close; see Task 138 (v0.13.0). Task 130: `p=?` is answered on the PTY thread in stream order (before a following DA1), only when notifications are enabled, `osc_99` is on and `routing_osc99` is not `disabled`; `a=report` is advertised only on Linux/BSD with a system-capable routing (`system`, `both`, `system_when_unfocused`) and `c=1` only with a system-capable routing; every OSC 99 request is ignored, before reassembly, while OSC 99 is unsupported (130.4, 130.5, 130 review). The activation, close and alive reports are framed by the handler and honour S8C1T (130.6–130.8), and their ids are sanitised to the identifier set; every OSC 99 request is ignored while OSC 99 is unsupported (130 review). Task 129: base64 payloads are decoded as one stream across chunks, so an encode-then-chunk split mid-quantum (and chunk-then-encode with per-chunk padding) now reassembles correctly (129.12); the sequence receives the raw body (129.5). The other deviations here are unchanged and still open. |
+| OSC 99 ; meta ; payload      | Kitty desktop notifications   | 🚧     | Partial: conformant with kitty 0.49.2 (Tasks 99 and 138; deliberate differences in `KITTY_PROTOCOL_REFERENCE.md`) except one gap: the standard icon names (`error`, `warn`, `warning`, `info`, `question`, `help`, `file-manager`, `system-monitor`, `text-editor`) are not rendered on the toast leg or the macOS/Windows system leg (Task 138.C4, 138.C5); only the Linux/BSD system leg shows them. Lenient parse (an invalid value ignores its key only; ids sanitised to `[A-Za-z0-9_+.-]`, 512 bytes); chunk reassembly with merged metadata, one unidentified slot, immediate `p=?`/`p=close`/`p=alive`, 128-entry LRU pending map; finalisation limits (1024-character title and body, 8 buttons of 256). Legs: toast with keyed lifecycle, buttons and expiry; Linux/BSD zbus service (update in place, `CloseNotification`, activation and close signals, icons, sounds, category, markup); macOS/Windows untracked leg (`p=close;untracked` at display). Pane-scoped update/close/alive, pane-aware `o=`, `a=focus`, `w=` expiry, `osc99_filters`, truthful `p=?` per routing, platform and daemon. Reports use sanitised ids, one-based button numbers and honour S8C1T. macOS/Windows have no activation, close tracking, update, expiry or buttons, and advertise accordingly. See the notes below. |
 | OSC 104 ; n ; …              | Reset palette entries         | ✅     | Resets each listed index to the default; no index (or only empty fields) resets the whole palette; an invalid index is skipped and the rest apply (Task 132)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | OSC 110                      | Reset foreground color        | ✅     | Clears the dynamic foreground override; the theme default shows again. Parameters are ignored                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | OSC 111                      | Reset background color        | ✅     | Clears the dynamic background override, including its pane base fill; the theme default shows again. Parameters are ignored                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -577,6 +592,125 @@ Rows below marked "recognised and ignored" are in that state.
   any such byte made the OSC `Invalid` and the rest of its payload was printed
   as text. (kitty keeps every byte up to the terminator; no kitty protocol
   carries raw C0 in an OSC, so compliant clients are unaffected.)
+
+**OSC 99 behaviour (Task 138).** Reference for the row above; the key table,
+reply formats and freminal's deliberate differences from kitty are in
+`KITTY_PROTOCOL_REFERENCE.md`. The one open conformance gap is the standard
+icon names (see "Remaining gap" at the end of these notes).
+
+- **Parse (`freminal-common`):** an invalid value for a known key ignores that
+  key and the rest of the sequence still applies: `c` and `d` are true for any
+  value but `0`, `e` is base64 only for `1`, an unparsable `u`, `w` or `o` is
+  ignored, `w` is clamped to `>= -1`, and an `f`, `n`, `s` or `t` value that is
+  not base64 UTF-8 is ignored. A token with no `=` or a key that is not one byte,
+  and an unknown key, are skipped. `i` and `g` are sanitised, not rejected: bytes
+  outside `[A-Za-z0-9_+.-]` are removed and the result is cut to 512 bytes; an id
+  that is empty afterwards is absent, and `i=0` is an ordinary id. `a=` words are
+  edits applied in arrival order from the default `focus` (`-report`, `-focus`
+  remove). An unknown `p=` keeps its metadata and `d=` and discards its payload.
+  A plain payload that is not UTF-8 decodes lossily. At most 64 metadata items
+  and 1 MiB per sequence.
+- **Reassembly (`TerminalHandler`):** base64 payloads decode as one stream across
+  chunks (chunk-then-encode and encode-then-chunk both work). Scalars (`c`, `o`,
+  `u`, `w`, `f`, `g`, `s`) take the latest explicit value, `n` and `t`
+  concatenate, `a=` edits accumulate, and defaults apply once at finalisation.
+  Chunks with no id share one unidentified slot. `p=?`, `p=close` and `p=alive`
+  act at once whatever `d=` says and never enter or touch the pending map; an
+  id-less close or alive is a no-op. The pending map holds 128 ids and evicts the
+  least recently touched entry (a dropped transfer's tombstone included), so it
+  never refuses a chunk. A notification is capped at 1 MiB in total. A full reset
+  (RIS) and turning OSC 99 off discard everything in flight.
+- **Finalisation:** C0 controls except LF, DEL and C1 controls are removed from
+  title, body, button labels, icon names, app name, types and sound name. A title
+  or body over 1024 characters is cut to 1023 plus `…`; at most 8 buttons are
+  kept, each cut the same way at 256. An empty title takes the body, and a
+  notification with neither is dropped with no reply.
+- **Display:** the `o=` gate is pane-aware. A pane is focused when its window is
+  focused, its tab is active and it is the tab's active pane; it is visible when
+  its window is focused and not minimised, its tab is active and no other pane is
+  zoomed. `unfocused` shows only when not focused; `invisible` only when not
+  focused and not visible. Then `[notifications] osc99_filters` runs (`all` or
+  `location:regex`, location `title`, `body`, `app` or `type`; regex search, any
+  match drops the notification silently with no reply). Then `routing_osc99`
+  chooses the legs from the OS-window focus (`toast`, `system`, `both`,
+  `system_when_unfocused`). Transmitted icon bytes are cached under `g=` before
+  the gates run, so a suppressed notification still fills the cache (global,
+  least-recently-used, 64 entries and 4 MiB).
+- **Toast leg:** a keyed toast with its own lifetime: `w>0` is exact, `w=0` stays
+  until dismissed, and `w=-1` follows urgency (`critical` stays until dismissed
+  as an error toast, `normal` the default, `low` 3 s). Buttons are rendered and
+  reported 1-based. A body click activates, the dismiss square closes, and expiry,
+  eviction past five toasts and `p=close` close it. An update replaces it in
+  place. It shows no icons and plays no sounds.
+- **Linux/BSD leg:** one zbus connection, started when the config can use the
+  system leg. `Notify` carries `app_name` (`f=`, else `freminal`), `replaces_id`
+  for an update, `expire_timeout` (-1, 0 or milliseconds), a `default` action plus
+  one action per button (only when the daemon has `actions`), and the hints
+  `urgency`, `category` (first `t=`), `suppress-sound` for `silent`, `sound-name`
+  for a named sound and `image-data` for a transmitted icon. The icon is the first
+  `n=` name that is standard (mapped to its freedesktop name) or found in the XDG
+  icon scan, else the transmitted data (decoded as PNG, JPEG, GIF or WebP, at most
+  4096x4096 and 64 MiB, downscaled to fit 256x256), else the first name verbatim;
+  with no names, the data, else the `.desktop` icon matching `f=`, else
+  freminal's. `error`, `warn`, `warning`, `info` and `question` become the
+  freedesktop `dialog-*` sound names. The body gets a U+200C after `<` and `&`
+  when the daemon has `body-markup`. Until `GetCapabilities` answers, `body`,
+  `actions` and `body-markup` are assumed and `sound` is not. `p=close`, expiry
+  and eviction call `CloseNotification`. `ActionInvoked` and
+  `NotificationClosed` are believed only from the current owner of
+  `org.freedesktop.Notifications` (followed across daemon restarts). If the
+  session bus cannot be reached the leg is unavailable: it displays nothing and
+  `system` routing becomes unsupported.
+- **macOS / Windows leg:** fire-and-forget through notify-rust. No buttons are
+  registered; activation and close cannot be observed. `s=silent` is silent, and
+  `system` or any named sound plays the platform default. Urgency is sent on
+  Windows only. `w=` is passed as the OS timeout (coarse on Windows, ignored on
+  macOS) and is not enforced by freminal. A transmitted icon is shown from a
+  temp file (named by content hash, at most 64, removed at shutdown); icon names
+  are not resolved. A `c=1` request is answered with `p=close;untracked` when the
+  notification is shown, and nothing follows.
+- **Lifecycle:** every displayed notification becomes an instance keyed by pane
+  and `i=`. Update in place, `p=close` and `p=alive` see only the requesting
+  pane's instances (kitty's `p=close` looks across windows). An update replaces
+  every leg in place and sends no close report for the replaced one; a leg the
+  update no longer uses is closed. `p=close` and expiry close every open leg. A
+  positive `w=` is enforced by freminal on every tracked leg, measured from
+  display (an update restarts it). Activation from any leg sends the activation
+  report when `a=report` is set (empty payload, or the 1-based button number),
+  focuses when `focus` is set (switch to the pane's tab, unzoom, make the pane
+  active, raise the OS window; a compositor may refuse the raise), and closes the
+  other legs. Without `c=1` the instance is then forgotten; with `c=1` exactly one
+  `p=close` report follows once every tracked leg has closed. The registry holds
+  128 instances and forgets the oldest, with no reply. An instance whose pane is
+  gone produces no replies.
+- **`p=?`:** answered on the PTY thread in stream order, so it precedes the
+  answer to a DA1 sent after it. The reply follows kitty's key order
+  (`a : o : u : p : c : w : s`) and lists only what the routing can honour. Each
+  leg has a capability set: the toast has everything except icons and standard
+  sound names; the Linux/BSD leg follows the daemon (`actions` gives report,
+  focus and buttons, `body` gives body, `sound` gives the standard sound names)
+  and always has close events, expiry, urgency and icons; macOS and Windows have
+  body and icons only (Windows adds urgency). `toast` and `system` use their one
+  leg. `both` advertises a feature either leg has (report, focus, urgency, sound
+  names, body, buttons, icons) and a per-notification guarantee (close events,
+  expiry) only when both have it. `system_when_unfocused` advertises only what
+  both legs have, because either may show. With notifications, `osc_99` or
+  `routing_osc99` off, or `system` routing with no reachable daemon, OSC 99 is
+  unsupported: every request is ignored and `p=?` is not answered. Replies carry
+  sanitised ids and honour S8C1T.
+- **Platform limits:** macOS and Windows have no activation reports, no close
+  tracking, no update in place, no programmatic close, no expiry and no buttons,
+  and `p=?` omits what they cannot do. The OS gives a background thread no way to
+  observe a notification there. The toast plays no sounds on any platform.
+- **Remaining gap (why the row is 🚧):** the spec says the eight standard icon
+  names (`error`, `warn`, `warning`, `info`, `question`, `help`, `file-manager`,
+  `system-monitor`, `text-editor`) must be supported by every implementation.
+  freminal honours them only on the Linux/BSD system leg. The toast leg (every
+  platform) shows no icon at all, and the macOS/Windows system leg ignores icon
+  names (a transmitted icon is shown). Tasks 138.C4 (toast: the standard names
+  shown as bundled-font glyphs in the toast's icon slot) and 138.C5
+  (macOS/Windows: the same glyphs rasterised to a PNG and sent as the
+  notification image) close it, and the row moves to ✅ when both land.
 
 ---
 
@@ -714,7 +848,7 @@ UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 | SO/SI (G1 charset switching)                                       | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Sixel Graphics                                                     | ✅              | ✅                 | Full DCS decoder + renderer; DECSDM (?80) display mode; private/shared palette registers (?1070)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Kitty Graphics Protocol                                            | 🚧              | 🚧                 | APC `_G` transmit/place/delete, RGB/RGBA/PNG, chunked/file/temp-file/shm transfers, `a=q` query; animation, relative placements, storage quotas, zlib, delete-target correctness, z-index ordering (Tasks 13, 100) 2026-10-08 audit: about 30 deviations (replies to id-less commands, text/erase destroy tiles, placement model, z-layers); see Tasks 135, 136 (v0.13.1). Task 129: 400 MiB chunked-transfer cap, S8C1T-aware replies. Placement maps are per screen (Task 131.7).                                                                                                                                                                                                                           |
-| OSC 99 (Kitty notifications)                                       | 🚧              | ⬜                 | Stateful notifications implemented (Task 99) but not conformant: 0-based button reports, `a=report` disables focus; see Task 138 (v0.13.0). Task 130: `p=?` is answered in stream order, gated on configuration and platform, and reports honour S8C1T. Task 129: chunked base64 payloads now decode correctly across chunk boundaries.                                                                                                                                                                                                                                                                                                                                                                       |
+| OSC 99 (Kitty notifications)                                       | 🚧              | ⬜                 | Conformant with kitty 0.49.2 (Task 138, v0.13.0) except one gap: the standard icon names (`error`, `warn`, `warning`, `info`, `question`, `help`, `file-manager`, `system-monitor`, `text-editor`) are not rendered on the toast leg or the macOS/Windows system leg (Task 138.C4, 138.C5). macOS and Windows are untracked (no activation, close tracking, update, expiry or buttons) and advertise accordingly; see the OSC 99 notes below the OSC table                                                                                                                                                                                                                                                    |
 | OSC 22 (Pointer shapes)                                            | 🚧              | ⬜                 | Set/reset only; push/pop/query broken, no stack; see Task 139 (v0.13.0)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Kitty OSC 21 / colour stack / OSC 5522 / OSC 5113 / OSC 72         | ❌              | ⬜                 | Not implemented; see Tasks 144, 146, 102, 105 (v0.13.2–v0.13.4)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Kitty CSI extensions (unscroll, DECCARA, XTSAVE, multiple cursors) | ❌              | ⬜                 | Not implemented; see Tasks 142, 143, 141, 103 (v0.13.2)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -741,7 +875,7 @@ The gaps that remain are either low-priority polish or require significant new i
 3. **Standard mode SRM (12)** — Rare in practice.
 4. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
 5. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).
-6. **Kitty protocol compliance (v0.13.x)** — graphics, keyboard and OSC 99 are partially conformant, and OSC 21 / 22 / 72 / 5113 / 5522, the colour stack, unscroll, DECCARA, XTSAVE and multiple cursors are missing or incomplete. See the 2026-10-08 audit in `PLAN_VERSION_130.md` (Tasks 102–105, 126–146).
+6. **Kitty protocol compliance (v0.13.x)** — graphics, keyboard and OSC 99 are partially conformant (OSC 99 only lacks the standard icon names on the toast and macOS/Windows legs, Tasks 138.C4 and 138.C5), and OSC 21 / 22 / 72 / 5113 / 5522, the colour stack, unscroll, DECCARA, XTSAVE and multiple cursors are missing or incomplete. See the 2026-10-08 audit in `PLAN_VERSION_130.md` (Tasks 102–105, 126–146).
 
 ---
 

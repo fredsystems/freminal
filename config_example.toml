@@ -425,6 +425,23 @@ limit = 10000
 # `routing_osc99 = "disabled"`, freminal does not speak the kitty OSC 99
 # protocol at all: requests are ignored and the `p=?` capability query goes
 # unanswered, so applications detect it as unsupported.
+# The routing also decides what the `p=?` query advertises, because each leg
+# honours different features:
+#   "toast"   - the full toast lifecycle: activation and focus, buttons, close
+#               events, expiry and urgency are advertised; icons and the
+#               standard sound names are not (the toast shows no icons and
+#               plays no sounds).
+#   "system"  - depends on the platform and the notification daemon. On
+#               Linux/BSD, buttons and activation need the daemon's `actions`
+#               capability and the standard sound names need `sound`; if the
+#               session bus cannot be reached, OSC 99 is treated as
+#               unsupported. macOS and Windows cannot report activation or
+#               close and have no buttons or expiry, so none of those are
+#               advertised.
+#   "both"    - a feature is advertised if either leg has it (buttons, icons,
+#               activation, urgency, sounds); close events and expiry only if
+#               both legs have them.
+#   "system_when_unfocused" - only what both legs have, since either may show.
 # routing_osc99 = "both"
 
 # routing_command_finished = "system_when_unfocused"

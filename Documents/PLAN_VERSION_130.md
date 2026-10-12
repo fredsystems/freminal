@@ -5872,6 +5872,44 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   in-flight window (through the extracted helper); the existing settings tests stay green.
 - **Scheduling:** in Task 138, after 138.18 and before the adversarial review (with 138.C1).
 
+#### 138.C4 — Standard icon names on the toast leg
+
+- **Surfaced:** orchestrator review of 138.18.
+- **Impact:** the spec says the eight standard names (`error`, `warn`/`warning`, `info`,
+  `question`, `help`, `file-manager`, `system-monitor`, `text-editor`) must be supported. The
+  toast leg (`toast`, and the toast half of `both` / `system_when_unfocused`) shows only its
+  kind icon.
+- **Fix:**
+  - `ChromeIcon` gains glyphs from the bundled CaskaydiaCove Nerd Font for the names it lacks
+    (`Warning` exists). The existing all-glyphs-resolve regression test covers the new ones.
+  - A pure `standard_icon_glyph(name) -> Option<ChromeIcon>` is added.
+  - The toast spec carries an optional icon override: the first `n=` name that is standard,
+    names in order. The toast draws that glyph in its icon slot instead of the kind icon. The
+    accent colour still follows the kind.
+  - A non-standard name or transmitted data leaves the kind icon. Toasts render no images,
+    and that stays a documented toast limit.
+- **Verification:** unit tests for the mapping, that the spec carries the override, and that
+  layout uses the override glyph. The glyph-resolves test covers every new `ChromeIcon`.
+- **Scheduling:** in Task 138, before the adversarial review.
+
+#### 138.C5 — Standard icon names on the macOS/Windows system leg
+
+- **Surfaced:** orchestrator review of 138.18.
+- **Impact:** the untracked backend passes names to `notify-rust`'s `icon()`, which is a no-op
+  on both platforms, so standard names are never shown.
+- **Fix:**
+  - When the first resolvable icon is a standard name (names first, as on Linux), rasterise
+    the 138.C4 `ChromeIcon` glyph from the embedded bundled font to a 256×256 RGBA PNG
+    (swash, encoded with the workspace `image` crate) and send it through the existing
+    `IconTempFiles` / `image_path` path.
+  - Otherwise use transmitted data, as today.
+  - The rasteriser is a pure function, compiled for macOS, Windows and tests.
+- **Verification:** unit tests that every standard name rasterises to a non-empty 256×256 PNG
+  with non-transparent pixels, and that a standard name beats transmitted data.
+  `check-windows` must pass.
+- **Scheduling:** in Task 138, after 138.C4. When both land, the OSC 99 docs rows move to ✅,
+  and that change is part of 138.C5.
+
 ### 138 Status notes
 
 - **138.1 (done, `ba222d95`).** Types as decided; `window_manipulation.rs` re-exports
@@ -6103,6 +6141,14 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - macOS was not compiled locally. Its code paths were checked against the notify-rust and
     mac-notification-sys source, and macOS CI is the first compile. Windows passes
     `check-windows`.
+- **138.18 (done).** COVERAGE, GAPS, `KITTY_PROTOCOL_REFERENCE.md` (0.49.2 baseline,
+  including freminal's deliberate differences from kitty) and the `config_example.toml`
+  routing comments are rewritten.
+  - The orchestrator found that the eight standard icon names, a spec MUST, are honoured only
+    on the Linux system leg; the docs agent had called this a platform limit. OSC 99 therefore
+    stays 🚧, with exactly that gap, and the fix is scheduled as 138.C4 and 138.C5.
+  - The orchestrator checked the example `p=?` replies (macOS `both` and
+    `system_when_unfocused`) against `combine`.
 
 ---
 
