@@ -5911,15 +5911,15 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Status:** done. The new glyphs, all FontAwesome codepoints proven present in the bundled
   font, are:
 
-  | Variant         | Codepoint | Nerd Font name        |
-  | --------------- | --------- | --------------------- |
-  | `Error`         | U+F057    | `nf-fa-times_circle`  |
-  | `Info`          | U+F05A    | `nf-fa-info_circle`   |
+  | Variant         | Codepoint | Nerd Font name          |
+  | --------------- | --------- | ----------------------- |
+  | `Error`         | U+F057    | `nf-fa-times_circle`    |
+  | `Info`          | U+F05A    | `nf-fa-info_circle`     |
   | `Question`      | U+F059    | `nf-fa-question_circle` |
-  | `Help`          | U+F1CD    | `nf-fa-life_ring`     |
-  | `FileManager`   | U+F07C    | `nf-fa-folder_open`   |
-  | `SystemMonitor` | U+F0E4    | `nf-fa-tachometer`    |
-  | `TextEditor`    | U+F15C    | `nf-fa-file_text`     |
+  | `Help`          | U+F1CD    | `nf-fa-life_ring`       |
+  | `FileManager`   | U+F07C    | `nf-fa-folder_open`     |
+  | `SystemMonitor` | U+F0E4    | `nf-fa-tachometer`      |
+  | `TextEditor`    | U+F15C    | `nf-fa-file_text`       |
 
   `standard_icon_glyph` lives in `icons.rs` (all platforms). `Toast::icon()` is the single
   source for measuring and drawing, and the accent colour stays per kind.
@@ -5950,6 +5950,364 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     then transmitted data.
   - The OSC 99 rows in COVERAGE and the kitty reference are now ✅, and the GAPS row is
     removed.
+
+#### 138.C6 — Bounded, linear-cost OSC 99 reassembly
+
+- **Surfaced:** adversarial review, PTY findings P1, P6 and P7.
+- **Fix:**
+  - **P1, list metadata.** `PendingNotification` keeps a running list-metadata cost, charged
+    only for newly merged items at `len + 32` bytes per entry. `n=` and `t=` are capped at 64
+    entries each and `a=` edits at 64; a breach drops the transfer through the tombstone path.
+  - **P6, aggregate budget.** A handler-wide budget of 8 MiB applies across every pending
+    entry, the unidentified slot included. A chunk that would exceed it evicts
+    least-recently-touched entries first, and if that is still not enough the transfer is
+    dropped. Title, body and button accumulators are capped at 64 KiB each, because
+    finalisation cuts them to 1024 / 8 × 256 characters anyway. Icon data keeps the 1 MiB cap.
+  - **P7, per-chunk copy.** The content path no longer clones the whole command. The handler
+    passes the payload by reference into the assembler and clones metadata only.
+- **Tests:** a hostile stream of 100k tiny `n=` chunks is dropped early (assert entry count,
+  not time); the aggregate budget evicts and then drops; a large icon chunk is not copied
+  (assert through the assembler API that no owned clone of the payload is made).
+
+#### 138.C7 — OSC 99 parse and finalisation fidelity
+
+- **Surfaced:** adversarial review, PTY findings P2–P5, P8–P11, P13 and P14.
+- **Fix:**
+  - **P2, icon priming.** A finalised notification with no title and no body but with icon
+    data and a `g=` key is not displayed. Instead it pushes a new
+    `WindowManipulation::Osc99CacheIcon { key, data }`, which the GUI stores in the `g=`
+    cache (kitty caches before its no-title check). Anything else with no title and no body
+    is still dropped silently.
+  - **P3, truncation.** Over-length text is a hard cut at 1024 / 256 characters with no `…`,
+    as kitty's `limit_size` does. The plan's citation is corrected.
+  - **P4, rejected chunks.** When the parser rejects a sequence (item cap or size cap), the
+    handler extracts `i=` and `d=` from the raw metadata, best effort, and tombstones a
+    non-final id, so the rest of the transfer cannot assemble a truncated notification.
+  - **P5, stale unidentified slot.** An identified content chunk discards an `Accumulating`
+    unidentified slot. kitty's single pending command is replaced by any chunk with a
+    different id.
+  - **P8, name fields.** App name, types, icon names and sound name also have LF removed.
+    Bidi controls are reviewed-not-a-defect (kitty parity).
+  - **P9, kitty value parity.** An empty `c=` / `d=` counts as not `0` (report / done); `+`
+    is accepted as a prefix on `a=` words; `w=` beyond the `i64` range is clamped to the
+    maximum.
+  - **P10, dead metadata.** Finalisation goes into a narrow `MergedOsc99Metadata`, so the
+    dead per-chunk fields and their pinning test are removed.
+  - **P11, docs and visibility.** Stale docs are fixed, and `FinalizedNotification` becomes
+    `pub(in crate::terminal_handler)`.
+  - **P13, button numbering.** A button label is dropped only if it was empty before
+    stripping. One that strips to nothing becomes `U+FFFD`, so later button numbers do not
+    shift.
+- **Tests (P14):**
+  - DECSTR keeps pending state.
+  - `i=0` end to end.
+  - A plain multi-byte character split across chunks.
+  - `g=` priming.
+  - The trivial derive-only tests are removed.
+  - The `tests/osc99_query.rs` replies use the production `host_capabilities` value through a
+    shared helper rather than hard-coded strings.
+
+#### 138.C8 — OSC 99 type placement and naming
+
+- **Surfaced:** adversarial review, PTY finding P12.
+- **Fix:**
+  - `NotificationUrgency` and `NotificationOccasion` move to `osc99_notification.rs`, which
+    breaks the import cycle; `osc_notify_99.rs` imports from there.
+  - The `window_manipulation.rs` re-exports are removed and every import uses one path.
+  - `PendingOsc99::is_tombstone` becomes `touch_if_tombstone`.
+  - `Osc99FocusAction` is renamed `Osc99FocusSupport`.
+  - The 130-era `Reported` / `NotReported` capability enums stay (reviewed: their meaning is
+    "reported", not "supported").
+- **Verification:** mechanical; the test count is unchanged.
+
+#### 138.C9 — D-Bus service robustness
+
+- **Surfaced:** adversarial review, zbus findings Z1, Z2, Z4–Z6, Z12–Z15, Z17 and Z18.
+- **Fix:**
+  - **Z1 and Z2, owner tracking.** Each mapping records the unique name that answered its
+    `Notify` (the reply header sender). An owner change closes only the instances recorded
+    under a different owner. Only `NameHasNoOwner` from `GetNameOwner` means `NoOwner`; any
+    other failure (or `NoOwner`) adopts the sender of the next successful `Notify` reply.
+  - **Z4, pump loss.** If either pump ends, every mapped instance gets `Closed` and the
+    service emits `Unavailable`.
+  - **Z5, capabilities.** They are fetched again on every owner change, and a new
+    `Capabilities` event is emitted.
+  - **Z6, circuit breaker.** After a method timeout the dispatcher fails queued `Show`s
+    immediately, without calling the daemon, for 30 s. Then it tries again.
+  - **Z12, reused ids.** `record_shown` evicts a different instance that held the same D-Bus
+    id.
+  - **Z13, failed replacement.** A failed replacing `Notify` sends a best-effort
+    `CloseNotification` for the old id.
+  - **Z14, docs.** The shutdown docs say what actually exits. A failed pump spawn stops the
+    already-started pump.
+  - **Z15, fail-closed default.** `Osc99SignalSender` loses its `Default`.
+  - **Z18, auto-start.** `GetNameOwner` and `GetCapabilities` are sent with `NO_AUTO_START`,
+    so starting freminal does not D-Bus-activate a daemon. A missing daemon is logged at
+    debug, and the first real `Notify` activates it; the resulting owner change refreshes the
+    capabilities. After `Unavailable`, the service tries to reconnect on the next show, at
+    most once per 30 s.
+- **Tests (Z17):**
+  - Owner mode is injectable, so the p2p rig covers the bus branch: owner filter, owner
+    change, pump loss, and a failed `GetNameOwner`.
+  - The handle drop ends the dispatcher.
+  - Vacuous `try_events().next().is_none()` checks become sentinel round trips.
+  - The two method-timeout tests are removed. They depended on a 2 s bound on calls the fake
+    does answer, and the timeout itself is zbus behaviour. The error paths are covered by the
+    error-reply tests.
+
+#### 138.C10 — Registry, routing and GUI-glue correctness
+
+- **Surfaced:** adversarial review, GUI findings G1, G2, G4–G9, G11, G13 and G14; zbus
+  finding Z3; docs finding D9.
+- **Fix:**
+  - **G1, ordering.** One ordered `Vec<Osc99Request>` (display or control) per frame,
+    routed in arrival order.
+  - **G2, untracked-only instances.** An instance with no open leg after registration is not
+    kept, but an update still forgets the old instance.
+  - **G4, alive.** `p=alive` leaves out instances whose close was requested.
+  - **G5, activation.** A repeated activation of an already activated instance is ignored.
+    The deadline still applies to legs left open after an activation: expiry closes them.
+  - **G6 and Z3, wake and focus.** The wake falls back to any live window: windows are
+    registered on creation and removed on close. The focus drain un-minimises a minimised
+    window before focusing it.
+  - **G7, quota.** Each pane may hold at most 32 instances and evicts its own oldest first.
+    The global 128 cap stays as a backstop.
+  - **G8, bus down.** `SystemWhenUnfocused` with the daemon unavailable routes to the toast
+    leg and advertises the toast leg (as `Both` does).
+  - **G9, filters.** An absent body or app name is matched as `""` (kitty), and the docs are
+    updated.
+  - **G11, capability helpers.** A generic per-field helper replaces the copied
+    union/intersection chains.
+  - **G13, icon copies.** No redundant icon clones; system effects share the data through an
+    `Arc`.
+  - **G14, smaller items:**
+    - the low-urgency lifetime is derived from `ToastKind::Info`;
+    - `Osc99Instance` fields become private;
+    - the registry eviction doc is corrected;
+    - a busy cell defers display requests instead of dropping them;
+    - `Osc99FailedSystemLegs` is folded into the sink;
+    - the Settings editor compares normalised rules;
+    - `set_osc99_daemon`'s warning names the effect per routing.
+  - **D9, filter recompile.** A busy registry when recompiling the filter defers the config
+    swap of `osc99_filters`, so the change is not lost.
+- **Tests:** one per item (G3's extraction in 138.C13 makes the glue testable).
+
+#### 138.C11 — Linux presentation fixes
+
+- **Surfaced:** adversarial review, zbus findings Z7–Z11 and Z19.
+- **Fix:**
+  - **Z7, desktop fallback.** Undecodable icon data falls back to the `.desktop` icon for
+    `f=`, then to `freminal`.
+  - **Z8, name case.** `icon_exists` returns the matched on-disk stem, and that stem is what
+    is sent.
+  - **Z9, decoding.**
+    - Decode into `into_rgba8`, without a copy.
+    - Premultiply around the resize so transparent edges do not get dark fringes.
+    - Apply the EXIF orientation.
+    - Keep decoded icons in an 8-entry cache keyed by content hash.
+    - WebP stays accepted (reviewed: same bounded decoder, receiver leniency).
+  - **Z10, wire format.** The hints are serialised through a typed
+    `#[derive(SerializeDict, Type)]` struct with `as_value` fields, so `image-data` is no
+    longer one `Value` per byte.
+  - **Z11, XDG scan.** The scan runs on a background thread started with the service, so
+    `Notify` never waits for it; until it finishes, unknown names fall through. It uses
+    `file_type()`, caps visited entries at 200k and logs truncation once.
+  - **Z19:**
+    - a `desktop-entry` hint of `freminal` is added;
+    - a BOM is stripped from `.desktop` files;
+    - file stems take precedence over `Name=`;
+    - desktop IDs in subdirectories are mapped (`sub/x.desktop` becomes `sub-x`).
+- **Reviewed, not defects:**
+  - Zero-width non-joiner markup escaping (kitty parity, a recorded decision).
+  - `n=` paths passed verbatim (kitty parity).
+  - `ActivationToken` not consumed (a recorded decision).
+  - The cfg covers non-Linux Unix targets freminal does not ship.
+  - No fallback timer after `CloseNotification`: the notification spec requires the daemon
+    to emit `NotificationClosed`.
+
+#### 138.C12 — Split `osc99/dbus_service.rs` into a directory (move only)
+
+- **Surfaced:** adversarial review, zbus finding Z16.
+- **Fix:** `osc99/dbus_service/{mod.rs, wake.rs, state.rs, wire.rs, pump.rs}` plus a
+  `test_rig.rs`, following 138.C1's rules. Run after 138.C9 and 138.C11.
+
+#### 138.C13 — Move the OSC 99 GUI glue out of `app_impl.rs`; split `osc99/mod.rs`
+
+- **Surfaced:** adversarial review, GUI findings G3 and G12.
+- **Fix:**
+  - The nine OSC 99 methods move into `gui/osc99/glue.rs` as an `impl FreminalGui` block.
+  - Their decisions are extracted into free functions over `&mut Osc99Registry`,
+    `&mut ToastStack` and the window map, with unit tests: route a frame, expire, deliver
+    toast and system events, feed back failed legs, drain focus requests.
+  - `osc99/mod.rs` is split into `pane_state.rs`, `effects.rs` and `toast_spec.rs`.
+  - The stale "four separate blocks" doc is fixed.
+
+#### 138.C14 — Toast interaction and layout fixes
+
+- **Surfaced:** adversarial review, toast findings T1 and T9–T17, plus the toast nits.
+- **Fix:**
+  - **T1, affordance.** Toast areas call `.clickable()` (pointer hand), and buttons get a
+    hover and pressed fill.
+  - **T9, press and release.** The press part comes from `press_origin` and must match the
+    release part.
+  - **T10, missing hover position.** Fall back to `interact_pos` when `hover_pos` is `None`.
+  - **T11, light themes.** Buttons darken on light pills.
+  - **T12, `w=` toasts.** `w=` toasts use `UntilDismissed` and the registry enforces the
+    deadline, which makes the hover behaviour consistent; the docs are updated.
+  - **T13, short lifetimes.** `Fixed` is clamped to at least `ANIM_IN + ANIM_OUT`.
+  - **T14, eviction order.** Eviction prefers the oldest toast that is not `UntilDismissed`.
+  - **T15, `replace_keyed`.** It closes any other toast holding `new_key`, sets
+    `cached_is_animating`, and loses its unused return value.
+  - **T16, overflow.** Toasts that would extend below the content rect are not laid out until
+    space frees up; they stay on the stack.
+  - **T17, docs and tests.** The stale `WindowId` docs are fixed. Tests for
+    `layout_positioned` (two `WindowId::for_test`) and a headless egui `hit_test` are added.
+  - **Nits:**
+    - shared input types move to `toast/input.rs`, which breaks the `buttons` ↔ `layout`
+      cycle;
+    - `layout.rs` docs are corrected;
+    - the test-support bool parameter becomes an enum;
+    - the `Toast::id` doc is corrected.
+  - **Test gaps:**
+    - duplicate keys;
+    - hover past the lifetime;
+    - replace while fading;
+    - short `Fixed`;
+    - buttons at ppp 2 mid-animation;
+    - dismiss rect versus button rects;
+    - `measure_buttons` truncation.
+
+#### 138.C15 — macOS/Windows untracked leg hardening
+
+- **Surfaced:** adversarial review, toast findings T2–T8, plus the icon nits.
+- **Fix:**
+  - **T3, worker thread.** One long-lived delivery thread with a bounded queue of 16 (excess
+    dropped with a debug log) does the temp-file writes and `show()`. The GUI thread only
+    builds a request. The rasterised PNG is cached per `ChromeIcon`.
+  - **T4 and T5, temp directory.** Each process gets its own directory,
+    `freminal-osc99-icons-<pid>`. On Unix it is created with `create_dir` and mode `0700`,
+    and refused if it is a symlink or owned by someone else.
+  - **T6, untrusted image bytes.** Transmitted bytes are decoded with the bounded `image`
+    decoder (moved into a shared module) and re-encoded as PNG before the OS sees them.
+  - **T7, file lifetime.** Files are deleted by age (older than 10 minutes) as well as by the
+    64-file cap, and the directory is removed at exit. The limit that Action Center may show a
+    blank image after exit is documented.
+  - **T8, macOS failure docs.** They now state that delivery failures cannot be observed.
+  - **T2, Windows icon.**
+    - Windows builds its toast directly with `tauri-winrt-notification` (a new direct Windows
+      dependency, same version as the lock file), so the icon is an `appLogoOverride`.
+    - The `Critical` → reminder claim is dropped.
+    - The `appname` docs are corrected.
+    - The file URI is checked for spaces and `%`.
+  - **Nits:**
+    - `write_exclusive` and symlink tests;
+    - a test with two stores holding the same content;
+    - `size_px` is capped at 1024;
+    - `get_pixel_mut_checked` replaces `get_pixel_mut`.
+
+#### 138.C16 — Documentation and plan corrections from the adversarial review
+
+- **Surfaced:** adversarial review, docs findings D1–D8 and D10–D15.
+- **Fix:**
+  - **D1:** markdownlint (`cargo xtask lint-markdown` / `markdownlint-cli2`) passes; the
+    MD060 tables are re-padded.
+  - **D2–D5:** stale icon and toast claims in COVERAGE, `config_example.toml`, the
+    `toast_leg` doc and plan line "Toasts do not render icons" (marked superseded by C4);
+    `toast.rs` paths in `KITTY_PROTOCOL_REFERENCE.md`, the plan and the
+    `freminal-toast-options` skill.
+  - **D6:** the stale 138.1 commit hash.
+  - **D7 and D8:** closed markers on the 147 routing bullet, 130.C4 and the audit row.
+  - **D10:** the `p=close` advertisement rationale on macOS and Windows.
+  - **D11:** the `cargo test --all` mentions in `README.md` and
+    `.github/copilot-instructions.md`.
+  - **D12:** the MASTER_PLAN note.
+  - **D13:** superseded plan text in 138.14, 138.15, 138.18 and the 138.C1 line counts.
+  - **D14 and D15:** formatting artefacts, the `c=`/`d=` empty-value wording (after 138.C7),
+    the `config_example.toml` key order, the `dbus_service.rs` doc tense, and a branch-base
+    note that the branch was rebased and contains a `cargo update` commit.
+- Runs last, after every code cleanup, and re-checks every OSC 99 doc claim.
+
+### 138 Adversarial review (2026-10-12)
+
+Five parallel CODE-REVIEW passes covered the whole `main...HEAD` diff: PTY side, GUI
+registry and glue, D-Bus leg, toast and macOS/Windows leg, and docs/config/plan. Three passes
+failed on an upstream error before reporting and were re-run in full. Every finding has a
+disposition; nothing is left as an informal note.
+
+| Finding                                    | Severity | Disposition                     |
+| ------------------------------------------ | -------- | ------------------------------- |
+| P1 quadratic list metadata cost            | major    | 138.C6                          |
+| P2 icon-only `g=` priming dropped          | minor    | 138.C7                          |
+| P3 `…` truncation not kitty's              | minor    | 138.C7                          |
+| P4 rejected middle chunk truncates         | minor    | 138.C7                          |
+| P5 stale unidentified slot                 | minor    | 138.C7                          |
+| P6 no aggregate memory budget              | minor    | 138.C6                          |
+| P7 per-chunk command clone                 | minor    | 138.C6                          |
+| P8 LF in names; bidi controls              | minor    | 138.C7; bidi: not a defect      |
+| P9 empty `c`/`d`, `+report`, huge `w`      | nit      | 138.C7                          |
+| P10 dead per-chunk metadata                | nit      | 138.C7                          |
+| P11 stale docs, `pub` visibility           | nit      | 138.C7                          |
+| P12 naming, cycle, double paths            | nit      | 138.C8                          |
+| P13 stripped button shifts numbering       | nit      | 138.C7                          |
+| P14 PTY test gaps                          | minor    | 138.C7                          |
+| Z1 owner change closes new daemon's        | major    | 138.C9                          |
+| Z2 `GetNameOwner` error → deaf forever     | major    | 138.C9                          |
+| Z3 wake targets a dead window              | major    | 138.C10                         |
+| Z4 pump loss unhandled                     | minor    | 138.C9                          |
+| Z5 capabilities never refreshed            | minor    | 138.C9                          |
+| Z6 hung daemon serialises failures         | minor    | 138.C9                          |
+| Z7 bad icon data skips `.desktop`          | minor    | 138.C11                         |
+| Z8 icon-name case mismatch                 | minor    | 138.C11                         |
+| Z9 decode copies, fringes, EXIF, WebP      | minor    | 138.C11; WebP: not a defect     |
+| Z10 `image-data` one `Value` per byte      | minor    | 138.C11                         |
+| Z11 XDG scan cost and blocking             | minor    | 138.C11                         |
+| Z12 reused D-Bus id orphan                 | minor    | 138.C9                          |
+| Z13 failed replace leaves old shown        | nit      | 138.C9                          |
+| Z14 shutdown docs, orphan pump             | nit      | 138.C9                          |
+| Z15 fail-open `Default`                    | nit      | 138.C9                          |
+| Z16 `dbus_service.rs` size                 | minor    | 138.C12                         |
+| Z17 D-Bus test gaps, vacuous checks        | minor    | 138.C9                          |
+| Z18 daemon auto-start, noisy warn          | nit      | 138.C9                          |
+| Z19 markup, hints, `.desktop` details      | nit      | 138.C11 (partly not defects)    |
+| G1 same-frame display/control order        | major    | 138.C10                         |
+| G2 untracked-only instances kept           | major    | 138.C10                         |
+| G3 GUI glue untested                       | major    | 138.C13                         |
+| G4 alive lists closing instances           | minor    | 138.C10                         |
+| G5 sticky state after activation           | minor    | 138.C10                         |
+| G6 wake loss; focus of minimised window    | minor    | 138.C10                         |
+| G7 one pane evicts another's instances     | minor    | 138.C10                         |
+| G8 `SystemWhenUnfocused` with bus down     | minor    | 138.C10                         |
+| G9 filter on absent fields                 | minor    | 138.C10                         |
+| G10 `o=` on Wayland, occlusion             | minor    | 138.C16 (doc note)              |
+| G11 repetitive capability helpers          | minor    | 138.C10                         |
+| G12 `app_impl.rs` growth, mixed module     | minor    | 138.C13                         |
+| G13 wasted icon copies                     | nit      | 138.C10                         |
+| G14 smaller GUI items                      | nit      | 138.C10; `from_bool`: precedent |
+| T1 no cursor or hover affordance           | major    | 138.C14                         |
+| T2 Windows inline image, reminder claim    | major    | 138.C15                         |
+| T3 untracked leg unbounded, GUI thread     | major    | 138.C15                         |
+| T4 cross-process temp-file collisions      | minor    | 138.C15                         |
+| T5 temp directory hardening                | minor    | 138.C15                         |
+| T6 unvalidated bytes to OS decoders        | minor    | 138.C15                         |
+| T7 temp-file lifetime vs OS read           | minor    | 138.C15                         |
+| T8 macOS failure docs                      | minor    | 138.C15                         |
+| T9 press and release on different parts    | minor    | 138.C14                         |
+| T10 click lost without hover position      | minor    | 138.C14                         |
+| T11 buttons invisible on light themes      | minor    | 138.C14                         |
+| T12 hover pause defeated for `w=`          | minor    | 138.C14                         |
+| T13 `Fixed` shorter than animation         | minor    | 138.C14                         |
+| T14 eviction ignores lifetime              | minor    | 138.C14                         |
+| T15 `replace_keyed` edge cases             | minor    | 138.C14                         |
+| T16 tall stacks overflow                   | minor    | 138.C14                         |
+| T17 stale `WindowId` docs; tests           | minor    | 138.C14                         |
+| Toast and icon nits, test gaps             | nit      | 138.C14, 138.C15                |
+| D1 markdownlint MD060 failures             | major    | 138.C16                         |
+| D2–D8, D10–D15 doc and plan drift          | minor    | 138.C16                         |
+| D9 filter change lost on busy borrow       | minor    | 138.C10                         |
+
+Execution order: 138.C6, C7, C8, C9, C11, C12, C10, C13, C14, C15, C16. Each goes through
+sub-agent implementation, orchestrator review and the verification suite. A confirmation
+review of the cleanup diff follows.
 
 ### 138 Status notes
 
