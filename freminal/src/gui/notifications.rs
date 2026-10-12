@@ -13,6 +13,8 @@
 //! - **Toast leg:** push an entry onto the in-app [`ToastStack`].
 //! - **System leg:** show a desktop notification via `notify-rust` on a
 //!   short-lived background thread (the D-Bus call blocks briefly on Linux).
+//!   (OSC 99 is the exception on Linux/BSD: its system leg is driven by the
+//!   registry through the zbus notification service, see `osc99`.)
 //!
 //! Routing is decided per [`NotificationKind`] using the focus-aware
 //! [`NotificationRouting::wants_toast`] / [`NotificationRouting::wants_system`]
@@ -21,21 +23,25 @@
 
 use std::collections::HashMap;
 use std::sync::Weak;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
-use freminal_common::buffer_states::osc_notify_99::{NotificationOccasion, NotificationUrgency};
+use freminal_common::buffer_states::osc_notify_99::NotificationOccasion;
+use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99ControlKind};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use freminal_common::buffer_states::osc99_notification::{
-    Notification99Data, Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind,
-    Osc99Expiry, Osc99Sound,
+    Osc99CloseReporting, Osc99Expiry, Osc99Sound,
 };
 use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::send_or_log;
-use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use freminal_terminal_emulator::io::Osc99CloseTracking;
+use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
@@ -520,10 +526,10 @@ fn freminal_icon_image() -> Option<&'static notify_rust::Image> {
 /// handle to its input sender.
 ///
 /// OSC 99 replies can be produced long after the frame that collected the
-/// request (the desktop-notification thread blocks for the notification's
-/// lifetime), so they must never hold a strong `Sender<InputEvent>`: that
-/// would keep the closed pane's PTY consumer thread -- and its shell --
-/// alive until the notification is dismissed. The handle is upgraded per
+/// request (the registry answers when a notification is activated or closed,
+/// possibly long after), so they must never hold a strong
+/// `Sender<InputEvent>`: that would keep the closed pane's PTY consumer thread
+/// -- and its shell -- alive until the notification is dismissed. The handle is upgraded per
 /// send; if the pane is gone the upgrade fails and the reply is dropped
 /// (nobody is left to read it).
 pub(super) fn send_reply_weak(reply_tx: &Weak<Sender<InputEvent>>, reply: GuiReply) {
@@ -532,45 +538,6 @@ pub(super) fn send_reply_weak(reply_tx: &Weak<Sender<InputEvent>>, reply: GuiRep
         return;
     };
     send_or_log!(tx, InputEvent::Reply(reply), "Failed to send OSC 99 reply");
-}
-
-/// Map a `notify-rust` xdg action id observed by `wait_for_action` to the
-/// OSC 99 reverse-path [`GuiReply`] to send, if any.
-///
-/// `action` is `"__closed"` (dismissed without action), `"default"`
-/// (whole-notification activation), or the button's registered id string
-/// (the 0-based `enumerate` index used when registering `.action(...)`).
-/// Returns `None` when the source notification didn't request a report for
-/// this event (`activation_reporting` / `close_reporting` both gate their
-/// respective branches). The PTY thread serialises the reply and frames it
-/// per the application's S8C1T mode.
-///
-/// Only called from non-test code on Linux/BSD (the `wait_for_action`
-/// callback in `show_system_osc99`); macOS/Windows emit an untracked close
-/// report inline and never call this. Scoped dead-code allow for the
-/// platforms without a caller — the fn stays compiled for cross-platform
-/// unit coverage.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
-pub(super) fn osc99_action_report(
-    action: &str,
-    id: Option<&str>,
-    activation_reporting: Osc99ActivationReporting,
-    close_reporting: Osc99CloseReporting,
-) -> Option<GuiReply> {
-    let id = id.map(str::to_owned);
-    let reports_activation = activation_reporting == Osc99ActivationReporting::Report;
-    let reports_close = close_reporting == Osc99CloseReporting::Report;
-    match action {
-        "__closed" => reports_close.then_some(GuiReply::Osc99Closed {
-            id,
-            tracking: Osc99CloseTracking::Tracked,
-        }),
-        "default" => reports_activation.then_some(GuiReply::Osc99Activation { id, button: None }),
-        other => reports_activation.then(|| GuiReply::Osc99Activation {
-            id,
-            button: Some(other.to_owned()),
-        }),
-    }
 }
 
 /// An OSC 99 app→terminal control sequence collected from
@@ -642,6 +609,7 @@ pub(super) const fn occasion_allows_display(
 
 /// Monotonic counter disambiguating concurrent OSC 99 icon temp files within
 /// a single process run (paired with the process id in the filename).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static OSC99_ICON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl NotificationRouter {
@@ -666,12 +634,15 @@ impl NotificationRouter {
     /// [`Self::route`]; a request routed [`NotificationRouting::Disabled`]
     /// is not recorded either, since neither leg displayed it.
     ///
-    /// A notification the user dismisses at the OS level is not yet
-    /// reconciled with `registry`, so a `p=alive` poll may transiently
-    /// over-report it until the pane closes or the application sends
-    /// `p=close`.
+    /// On macOS and Windows a notification shown on the system leg is
+    /// fire-and-forget and cannot be observed closing, so it is registered as
+    /// an untracked leg. On Linux/BSD the system leg is driven by the
+    /// registry: it is returned as an
+    /// [`Osc99Effect::ShowLinuxSystem`] effect for the notification service,
+    /// and its activation and close come back through the registry.
     ///
-    /// The registry's effects (the toast to show, ...) are returned rather
+    /// The registry's effects (the toast and desktop notification to show,
+    /// ...) are returned rather
     /// than applied, so the caller can execute them with the full
     /// [`apply_osc99_effects`](super::osc99::apply_osc99_effects) sink, which
     /// this function has no access to. The result is empty when nothing was
@@ -700,7 +671,13 @@ impl NotificationRouter {
         // `g=` cache key must still populate the cache, so a later
         // (displayed) notification referencing the same `g=` key with bytes
         // omitted can resolve the icon.
+        //
+        // Only the macOS/Windows system leg consumes the resolved bytes
+        // today; Task 138.14 hands them to the Linux/BSD service.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        Self::resolve_icon_bytes(data, icon_cache);
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
             return Vec::new();
@@ -730,11 +707,14 @@ impl NotificationRouter {
         }
 
         if wants_system {
+            // macOS/Windows: fire-and-forget, shown here. Linux/BSD: shown by
+            // the `ShowLinuxSystem` effect `register` returns below.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Self::show_system_osc99(data, resolved_icon, Weak::clone(&request.reply_tx));
             // Only Linux/BSD observe a close or activation (through the
-            // D-Bus handle in `show_system_osc99`); elsewhere the system
-            // notification is fire-and-forget. `cfg!` rather than `#[cfg]`
-            // so both variants are constructed on every platform.
+            // notification service); elsewhere the system notification is
+            // fire-and-forget. `cfg!` rather than `#[cfg]` so both variants
+            // are constructed on every platform.
             legs.push(if cfg!(all(unix, not(target_os = "macos"))) {
                 Osc99Leg::LinuxSystem
             } else {
@@ -835,7 +815,16 @@ impl NotificationRouter {
 
         icon_cache.insert(key, bytes);
     }
+}
 
+/// The macOS and Windows OSC 99 system leg: fire-and-forget `notify-rust`.
+///
+/// Neither platform lets a background thread observe an activation or a close
+/// (the macOS callback needs the main run loop), so the notification is shown
+/// and forgotten, and a `c=1` request is answered at once in the `untracked`
+/// form. Task 138.16 reworks this leg.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl NotificationRouter {
     /// Write transmitted icon bytes to a uniquely-named temp file.
     ///
     /// `tempfile` is only a dev-dependency of the `freminal` crate (not a
@@ -894,50 +883,46 @@ impl NotificationRouter {
         }
     }
 
-    /// Build a `notify-rust` `Notification` from the extracted OSC 99
-    /// fields, applying urgency, buttons, sound, timeout, and icon (as a
-    /// temp file when transmitted bytes are given, else by name).
+    /// Build a `notify-rust` `Notification` from `data`, applying urgency,
+    /// buttons, sound, timeout, and icon (as a temp file when transmitted
+    /// bytes are given, else by name).
     ///
     /// Returns the built notification plus the icon temp file path (if one
     /// was written), so the caller can clean it up after `.show()`.
-    #[allow(clippy::too_many_arguments)]
     fn build_osc99_notification(
-        id: Option<&str>,
-        title: &str,
-        body: &str,
-        app_name: Option<&str>,
-        button_labels: &[String],
-        urgency: NotificationUrgency,
-        sound: &Osc99Sound,
-        expiry: Osc99Expiry,
-        icon_names: &[String],
+        data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,
     ) -> (notify_rust::Notification, Option<std::path::PathBuf>) {
+        let body = data.body.as_deref().unwrap_or_default();
         let mut notification = notify_rust::Notification::new();
         notification
-            .appname(app_name.unwrap_or("freminal"))
-            .summary(if title.is_empty() { body } else { title })
+            .appname(data.app_name.as_deref().unwrap_or("freminal"))
+            .summary(if data.title.is_empty() {
+                body
+            } else {
+                &data.title
+            })
             .body(body);
 
-        // See `Self::show_system` for the platform rationale: `urgency()` is
-        // unavailable on macOS.
+        // See `Self::build_system_notification` for the platform rationale:
+        // `urgency()` is unavailable on macOS.
         #[cfg(not(target_os = "macos"))]
         {
-            let urgency_level = match urgency {
+            use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
+
+            let urgency_level = match data.urgency {
                 NotificationUrgency::Low => notify_rust::Urgency::Low,
                 NotificationUrgency::Critical => notify_rust::Urgency::Critical,
                 NotificationUrgency::Normal => notify_rust::Urgency::Normal,
             };
             notification.urgency(urgency_level);
         }
-        #[cfg(target_os = "macos")]
-        let _ = urgency;
 
-        for (idx, label) in button_labels.iter().enumerate() {
+        for (idx, label) in data.buttons.iter().enumerate() {
             notification.action(&idx.to_string(), label);
         }
 
-        match sound {
+        match &data.sound {
             // The daemon's default sound: no sound-name hint is sent.
             Osc99Sound::System => {}
             Osc99Sound::Silent => {
@@ -948,7 +933,7 @@ impl NotificationRouter {
             }
         }
 
-        let timeout = match expiry {
+        let timeout = match data.expiry {
             Osc99Expiry::OsDefault => notify_rust::Timeout::Default,
             Osc99Expiry::Never => notify_rust::Timeout::Never,
             Osc99Expiry::After(ms) => notify_rust::Timeout::Milliseconds(ms.get()),
@@ -957,7 +942,7 @@ impl NotificationRouter {
 
         let mut icon_temp_path: Option<std::path::PathBuf> = None;
         if let Some(bytes) = resolved_icon_bytes {
-            match Self::write_icon_temp_file(id, &bytes) {
+            match Self::write_icon_temp_file(data.id.as_deref(), &bytes) {
                 Ok(path) => {
                     if let Some(path_str) = path.to_str() {
                         notification.image_path(path_str);
@@ -968,31 +953,21 @@ impl NotificationRouter {
                     tracing::warn!("failed to write OSC 99 icon temp file: {e}");
                 }
             }
-        } else if let Some(first) = icon_names.first() {
+        } else if let Some(first) = data.icon_names.first() {
             notification.icon(first);
         }
 
         (notification, icon_temp_path)
     }
 
-    /// Show an OS notification for an OSC 99 notification, retaining the
-    /// handle where the platform allows it so activation/close can be
-    /// reported back to the originating pane's PTY thread (Task 99.5b + 99.6).
-    ///
-    /// On Linux/BSD (`notify-rust`'s D-Bus backend), the handle's
-    /// `wait_for_action` blocks the spawned thread for the notification's
-    /// lifetime, observing whole-notification activation, button
-    /// activation, and dismissal ("closed") — each writes the matching
-    /// [`GuiReply`] through `reply_tx` when the source notification requested it
-    /// (`a=report` / `c=1`). On macOS/Windows, `notify-rust` does not expose
-    /// an observable handle from a background thread (the macOS callback
-    /// needs the main run loop), so a `c=1` close report is emitted
-    /// immediately in the `untracked` form and no activation reports are
-    /// sent. `reply_tx` is a `Weak` handle upgraded per send, so this
-    /// long-lived thread never keeps a closed pane's PTY consumer alive; a
-    /// reply for a closed pane is dropped. The icon temp file (if any) is
-    /// removed on a best-effort basis once the daemon has read it; cleanup
-    /// failure never fails the notification.
+    /// Show an OS notification for an OSC 99 notification on a short-lived
+    /// background thread, and emit a `c=1` close report immediately in the
+    /// `untracked` form (no activation reports are sent: `notify-rust` does
+    /// not expose an observable handle from a background thread here).
+    /// `reply_tx` is a `Weak` handle upgraded per send, so the thread never
+    /// keeps a closed pane's PTY consumer alive. The icon temp file (if any)
+    /// is removed on a best-effort basis after `show()`; cleanup failure
+    /// never fails the notification.
     fn show_system_osc99(
         data: &Notification99Data,
         resolved_icon_bytes: Option<Vec<u8>>,
@@ -1000,90 +975,31 @@ impl NotificationRouter {
     ) {
         // See `show_system`: the OS notification call aborts in test binaries
         // on macOS (uncatchable foreign ObjC exception in a non-bundled
-        // process). The OSC 99 unit tests assert only on the `live` map and
-        // toast state — both settled before this point — and never read the
-        // `reply_tx` close/activation replies, so skipping the spawn under
+        // process). The OSC 99 unit tests assert only on registry and toast
+        // state, both settled before this point, so skipping the spawn under
         // test loses no coverage.
         if cfg!(test) {
             return;
         }
-        let id = data.id.clone();
-        let title = data.title.clone();
-        let body = data.body.clone().unwrap_or_default();
-        let app_name = data.app_name.clone();
-        let button_labels = data.buttons.clone();
-        let urgency = data.urgency;
-        let sound = data.sound.clone();
-        let expiry = data.expiry;
-        let icon_names = data.icon_names.clone();
-        let activation_reporting = data.activation_reporting;
-        let close_reporting = data.close_reporting;
+        let data = data.clone();
 
         let builder = std::thread::Builder::new().name("freminal-notify-99".to_owned());
         if let Err(e) = builder.spawn(move || {
-            let (notification, mut icon_temp_path) = Self::build_osc99_notification(
-                id.as_deref(),
-                &title,
-                &body,
-                app_name.as_deref(),
-                &button_labels,
-                urgency,
-                &sound,
-                expiry,
-                &icon_names,
-                resolved_icon_bytes,
-            );
+            let (notification, mut icon_temp_path) =
+                Self::build_osc99_notification(&data, resolved_icon_bytes);
 
-            // Linux/BSD: `notify-rust`'s D-Bus backend returns a handle that
-            // can observe activation/close, but `wait_for_action` blocks for
-            // the notification's lifetime — so the icon temp file is cleaned
-            // up as soon as the daemon has shown it, not after the blocking
-            // call returns.
-            #[cfg(all(unix, not(target_os = "macos")))]
-            match notification.show() {
-                Ok(handle) => {
-                    if let Some(path) = icon_temp_path.take() {
-                        Self::remove_icon_temp_file(&path);
-                    }
-                    handle.wait_for_action(move |action| {
-                        if let Some(reply) = osc99_action_report(
-                            action,
-                            id.as_deref(),
-                            activation_reporting,
-                            close_reporting,
-                        ) {
-                            send_reply_weak(&reply_tx, reply);
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("failed to show OSC 99 desktop notification: {e}");
-                    if let Some(path) = icon_temp_path.take() {
-                        Self::remove_icon_temp_file(&path);
-                    }
-                }
+            if let Err(e) = notification.show() {
+                tracing::warn!("failed to show OSC 99 desktop notification: {e}");
             }
-
-            // macOS/Windows: no observable handle from a background thread
-            // (the macOS activation callback requires the main run loop), so
-            // emit the `untracked` close form immediately when requested and
-            // send no activation reports this cycle.
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            {
-                if let Err(e) = notification.show() {
-                    tracing::warn!("failed to show OSC 99 desktop notification: {e}");
-                }
-                let _ = activation_reporting;
-                if close_reporting == Osc99CloseReporting::Report {
-                    let reply = GuiReply::Osc99Closed {
-                        id: id.clone(),
-                        tracking: Osc99CloseTracking::Untracked,
-                    };
-                    send_reply_weak(&reply_tx, reply);
-                }
-                if let Some(path) = icon_temp_path.take() {
-                    Self::remove_icon_temp_file(&path);
-                }
+            if data.close_reporting == Osc99CloseReporting::Report {
+                let reply = GuiReply::Osc99Closed {
+                    id: data.id.clone(),
+                    tracking: Osc99CloseTracking::Untracked,
+                };
+                send_reply_weak(&reply_tx, reply);
+            }
+            if let Some(path) = icon_temp_path.take() {
+                Self::remove_icon_temp_file(&path);
             }
         }) {
             tracing::warn!("failed to spawn OSC 99 notification thread: {e}");
@@ -1096,14 +1012,21 @@ impl NotificationRouter {
 mod tests {
     use super::*;
     use crate::gui::osc99::{
-        Osc99EffectSink, Osc99Filter, Osc99Origin, apply_osc99_effects, osc99_toast_spec,
+        NoSystemBackend, Osc99EffectSink, Osc99Filter, Osc99Origin, Osc99SystemBackend,
+        apply_osc99_effects, osc99_toast_spec,
     };
-    use freminal_common::buffer_states::osc99_notification::Osc99ActivationFocus;
+    use freminal_common::buffer_states::osc_notify_99::NotificationUrgency;
+    use freminal_common::buffer_states::osc99_notification::{
+        Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry,
+        Osc99Sound,
+    };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
+    use freminal_terminal_emulator::io::Osc99CloseTracking;
 
     /// Route `request` and execute the effects `route_osc99` returns against
-    /// `toasts`, as the app does (minus the focus queue).
+    /// `toasts` and a backend that shows no desktop notifications, as the app
+    /// does (minus the focus queue).
     fn route_osc99_into(
         request: &Osc99DisplayRequest,
         config: &NotificationsConfig,
@@ -1112,12 +1035,36 @@ mod tests {
         icon_cache: &mut HashMap<String, Vec<u8>>,
         registry: &mut Osc99Registry,
     ) {
+        route_osc99_with_system(
+            request,
+            config,
+            ctx,
+            toasts,
+            icon_cache,
+            registry,
+            &mut NoSystemBackend,
+        );
+    }
+
+    /// [`route_osc99_into`] with a caller-supplied desktop-notification
+    /// backend.
+    fn route_osc99_with_system(
+        request: &Osc99DisplayRequest,
+        config: &NotificationsConfig,
+        ctx: Osc99DisplayContext,
+        toasts: &mut ToastStack,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        registry: &mut Osc99Registry,
+        system: &mut dyn Osc99SystemBackend,
+    ) {
         let effects = NotificationRouter::route_osc99(request, config, ctx, icon_cache, registry);
         apply_osc99_effects(
             effects,
             &mut Osc99EffectSink {
                 toasts,
+                system,
                 focus_requests: Vec::new(),
+                failed_system_shows: Vec::new(),
             },
         );
     }
@@ -1203,19 +1150,19 @@ mod tests {
     /// the "slice 3 only touches `show_system`, never the OSC 99 path"
     /// boundary so a future "make it consistent" edit can't silently override
     /// a program's transmitted OSC 99 icon with the freminal app icon.
+    ///
+    /// The builder only exists on macOS and Windows: the Linux/BSD system leg
+    /// is the zbus notification service.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn build_osc99_notification_uses_transmitted_icon_not_freminal() {
         // Named-icon branch: the transmitted freedesktop icon name is used.
         let (named, temp) = NotificationRouter::build_osc99_notification(
-            Some("id-1"),
-            "Title",
-            "body",
-            None,
-            &[],
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::OsDefault,
-            &["weather-clear".to_owned()],
+            &Notification99Data {
+                id: Some("id-1".to_owned()),
+                icon_names: vec!["weather-clear".to_owned()],
+                ..default_n99()
+            },
             None,
         );
         assert_eq!(
@@ -1227,15 +1174,10 @@ mod tests {
         // Transmitted-bytes branch: `.icon` stays empty (bytes go to
         // `image_path` via a temp file), and definitely is not "freminal".
         let (with_bytes, temp) = NotificationRouter::build_osc99_notification(
-            Some("id-2"),
-            "Title",
-            "body",
-            None,
-            &[],
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::OsDefault,
-            &[],
+            &Notification99Data {
+                id: Some("id-2".to_owned()),
+                ..default_n99()
+            },
             Some(vec![1, 2, 3, 4]),
         );
         assert_ne!(
@@ -1248,98 +1190,29 @@ mod tests {
         }
     }
 
-    /// Build an OSC 99 notification varying only urgency, sound and expiry.
-    fn build_osc99_with(
-        urgency: NotificationUrgency,
-        sound: &Osc99Sound,
-        expiry: Osc99Expiry,
-    ) -> notify_rust::Notification {
-        NotificationRouter::build_osc99_notification(
-            None,
-            "Title",
-            "body",
-            None,
-            &[],
-            urgency,
-            sound,
-            expiry,
-            &[],
-            None,
-        )
-        .0
-    }
-
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn build_osc99_notification_maps_expiry_to_timeout() {
         use notify_rust::Timeout;
 
-        let default = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::OsDefault,
+        let timeout_for = |expiry| {
+            NotificationRouter::build_osc99_notification(
+                &Notification99Data {
+                    expiry,
+                    ..default_n99()
+                },
+                None,
+            )
+            .0
+            .timeout
+        };
+
+        assert_eq!(timeout_for(Osc99Expiry::OsDefault), Timeout::Default);
+        assert_eq!(timeout_for(Osc99Expiry::Never), Timeout::Never);
+        assert_eq!(
+            timeout_for(Osc99Expiry::After(std::num::NonZeroU32::new(5000).unwrap())),
+            Timeout::Milliseconds(5000)
         );
-        assert_eq!(default.timeout, Timeout::Default);
-
-        let never = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::Never,
-        );
-        assert_eq!(never.timeout, Timeout::Never);
-
-        let after = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::After(std::num::NonZeroU32::new(5000).unwrap()),
-        );
-        assert_eq!(after.timeout, Timeout::Milliseconds(5000));
-    }
-
-    /// The sound-name and urgency hints live in `notify_rust`'s
-    /// `Notification::hints`, which exists only on Linux/BSD.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn build_osc99_notification_maps_sound_to_hint() {
-        use notify_rust::Hint;
-
-        let system = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::System,
-            Osc99Expiry::OsDefault,
-        );
-        assert!(
-            !system.hints.iter().any(|h| matches!(h, Hint::SoundName(_))),
-            "System must send no sound-name hint"
-        );
-
-        let silent = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::Silent,
-            Osc99Expiry::OsDefault,
-        );
-        assert!(silent.hints.contains(&Hint::SoundName("silent".to_owned())));
-
-        let named = build_osc99_with(
-            NotificationUrgency::Normal,
-            &Osc99Sound::Named("bell".to_owned()),
-            Osc99Expiry::OsDefault,
-        );
-        assert!(named.hints.contains(&Hint::SoundName("bell".to_owned())));
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn build_osc99_notification_maps_urgency_to_hint() {
-        use notify_rust::{Hint, Urgency};
-
-        for (urgency, expected) in [
-            (NotificationUrgency::Low, Urgency::Low),
-            (NotificationUrgency::Normal, Urgency::Normal),
-            (NotificationUrgency::Critical, Urgency::Critical),
-        ] {
-            let n = build_osc99_with(urgency, &Osc99Sound::System, Osc99Expiry::OsDefault);
-            assert!(n.hints.contains(&Hint::Urgency(expected)));
-        }
     }
 
     #[test]
@@ -2696,101 +2569,76 @@ mod tests {
         assert_eq!(toasts.len(), 0);
     }
 
-    // ── 99.5b + 99.6: reverse-path reply selection ────────────────────────
-
+    /// On Linux/BSD the system leg is the registry's `ShowLinuxSystem`
+    /// effect: the router no longer shows anything itself, the executor hands
+    /// the notification to the backend.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn osc99_action_report_default_activates_whole_notification() {
-        assert_eq!(
-            osc99_action_report(
-                "default",
-                Some("abc"),
-                Osc99ActivationReporting::Report,
-                Osc99CloseReporting::Silent
-            ),
-            Some(GuiReply::Osc99Activation {
-                id: Some("abc".to_owned()),
-                button: None,
-            })
+    fn route_osc99_system_routing_shows_through_the_system_backend() {
+        use crate::gui::osc99::RecordingSystemBackend;
+
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::System,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut registry = Osc99Registry::default();
+        let mut system = RecordingSystemBackend::default();
+        let data = Notification99Data {
+            id: Some("sys".to_owned()),
+            ..default_n99()
+        };
+
+        route_osc99_with_system(
+            &osc99_request(&data),
+            &config,
+            focused_ctx(),
+            &mut toasts,
+            &mut icon_cache,
+            &mut registry,
+            &mut system,
         );
+
+        let [shown] = system.shown.as_slice() else {
+            panic!("expected one desktop notification, got {:?}", system.shown);
+        };
+        assert_eq!(shown.notification, data);
+        assert_eq!(shown.replaces, None);
+        assert_eq!(toasts.len(), 0, "routed System: no toast");
+        let [entry] = registry.instances() else {
+            panic!("the notification must be registered");
+        };
+        assert_eq!(entry.instance, shown.instance);
+        assert_eq!(entry.open_legs, [Osc99Leg::LinuxSystem]);
     }
 
+    /// A toast-only routing never reaches the desktop-notification backend.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn osc99_action_report_button_carries_action_id() {
-        assert_eq!(
-            osc99_action_report(
-                "2",
-                Some("abc"),
-                Osc99ActivationReporting::Report,
-                Osc99CloseReporting::Report
-            ),
-            Some(GuiReply::Osc99Activation {
-                id: Some("abc".to_owned()),
-                button: Some("2".to_owned()),
-            })
-        );
-    }
+    fn route_osc99_toast_routing_does_not_touch_the_system_backend() {
+        use crate::gui::osc99::RecordingSystemBackend;
 
-    #[test]
-    fn osc99_action_report_activation_without_id() {
-        assert_eq!(
-            osc99_action_report(
-                "default",
-                None,
-                Osc99ActivationReporting::Report,
-                Osc99CloseReporting::Silent
-            ),
-            Some(GuiReply::Osc99Activation {
-                id: None,
-                button: None,
-            })
-        );
-    }
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::Toast,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut registry = Osc99Registry::default();
+        let mut system = RecordingSystemBackend::default();
 
-    #[test]
-    fn osc99_action_report_closed_is_tracked() {
-        assert_eq!(
-            osc99_action_report(
-                "__closed",
-                Some("abc"),
-                Osc99ActivationReporting::Silent,
-                Osc99CloseReporting::Report
-            ),
-            Some(GuiReply::Osc99Closed {
-                id: Some("abc".to_owned()),
-                tracking: Osc99CloseTracking::Tracked,
-            })
+        route_osc99_with_system(
+            &osc99_request(&default_n99()),
+            &config,
+            focused_ctx(),
+            &mut toasts,
+            &mut HashMap::new(),
+            &mut registry,
+            &mut system,
         );
-    }
 
-    #[test]
-    fn osc99_action_report_gated_by_requested_reports() {
-        assert_eq!(
-            osc99_action_report(
-                "__closed",
-                Some("a"),
-                Osc99ActivationReporting::Report,
-                Osc99CloseReporting::Silent
-            ),
-            None
-        );
-        assert_eq!(
-            osc99_action_report(
-                "default",
-                Some("a"),
-                Osc99ActivationReporting::Silent,
-                Osc99CloseReporting::Report
-            ),
-            None
-        );
-        assert_eq!(
-            osc99_action_report(
-                "1",
-                Some("a"),
-                Osc99ActivationReporting::Silent,
-                Osc99CloseReporting::Report
-            ),
-            None
-        );
+        assert_eq!(system.shown, Vec::new());
+        assert_eq!(toasts.len(), 1);
     }
 
     #[test]
@@ -2833,6 +2681,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn write_icon_temp_file_uses_exclusive_create() {
         // Two writes with the same id must not collide or overwrite; the

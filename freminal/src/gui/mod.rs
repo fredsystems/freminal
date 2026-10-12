@@ -408,6 +408,18 @@ struct FreminalGui {
     /// Single-threaded GUI, so `RefCell` suffices.
     osc99_focus_requests: std::cell::RefCell<Vec<osc99::Osc99Origin>>,
 
+    /// The Linux/BSD desktop-notification service's handle, started lazily the
+    /// first time an OSC 99 notification is shown on the system leg and kept
+    /// for the rest of the process (dropping it stops the service). `None`
+    /// until then. Single-threaded GUI, so `RefCell` suffices.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
+
+    /// Where the notification service's repaint wake-ups go: re-pointed at the
+    /// window being rendered each frame, so the service can wake an idle GUI.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    osc99_wake: osc99::Osc99Wake,
+
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
     /// window in this set it skips the running-command guard and lets the
@@ -608,6 +620,10 @@ impl FreminalGui {
             osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
             osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            osc99_dbus: std::cell::RefCell::new(None),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            osc99_wake: osc99::Osc99Wake::default(),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

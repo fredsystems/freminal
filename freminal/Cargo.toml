@@ -193,6 +193,15 @@ tempfile.workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 sysinfo.workspace = true
 
+# Linux/BSD OSC 99 notification service (Task 138.12). The `p2p` feature is
+# only needed by the in-process fake notification server in the service's
+# integration test, so it is enabled for tests alone.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus.workspace = true
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }
+
 [features]
 default = []
 validation = []

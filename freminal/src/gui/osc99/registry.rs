@@ -19,12 +19,17 @@
 //! An instance tracks the legs still displayed (`open_legs`) and the legs it
 //! was ever shown on (`shown_legs`). It is forgotten when its last open leg
 //! closes, and a single `p=close` report is then sent if `c=1` was requested.
-//! Only the toast leg is registry-managed so far. The Linux system leg is
-//! still driven by its own per-notification thread, which sends its own
-//! activation and close reports, so the registry never reports for it and
-//! never sends a close report for an instance that had one. An instance shown
-//! on an untracked system leg likewise never gets a registry close report:
-//! the `untracked` report was already sent at display.
+//! The toast leg and the Linux/BSD system leg are both registry-managed: the
+//! registry emits their show effects and consumes their activation and close
+//! events ([`Osc99Registry::on_toast_event`], [`Osc99Registry::on_system_event`]),
+//! so both legs share one activation path and one close report. An instance
+//! shown on an untracked system leg (macOS and Windows) never gets a registry
+//! close report: the `untracked` report was already sent at display.
+//!
+//! Until Task 138.13 the Linux leg is not yet closed by the registry: `p=close`,
+//! expiry and capacity eviction forget it silently (its later daemon events
+//! are ignored as unknown), and an update that moves an instance off the
+//! Linux leg leaves the old desktop notification on screen.
 //!
 //! # Expiry
 //!
@@ -59,12 +64,14 @@ use freminal_common::buffer_states::osc99_notification::{
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
+#[cfg(all(unix, not(target_os = "macos")))]
+use super::Osc99SystemLegEvent;
 use super::{
-    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99InstanceId, Osc99Leg, Osc99Origin,
-    osc99_toast_spec,
+    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99InstanceId, Osc99Leg, Osc99LegActivation,
+    Osc99Origin, osc99_toast_spec,
 };
 use crate::gui::panes::PaneId;
-use crate::gui::toast::{ToastEvent, ToastEventKind};
+use crate::gui::toast::ToastEvent;
 
 /// The most instances the registry keeps. The oldest is forgotten, with no
 /// reply, when a new registration would exceed this.
@@ -148,14 +155,11 @@ impl Osc99Instance {
     }
 
     /// The `p=close` report for this instance, if the registry owes one:
-    /// `c=1` was requested and no system leg reports for itself (see the
-    /// module docs).
+    /// `c=1` was requested and the `untracked` form was not already sent at
+    /// display (see the module docs).
     fn close_reply(&self) -> Option<Osc99Effect> {
-        let externally_reported = self
-            .shown_legs
-            .iter()
-            .any(|leg| matches!(leg, Osc99Leg::LinuxSystem | Osc99Leg::UntrackedSystem));
-        (self.close_reporting == Osc99CloseReporting::Report && !externally_reported).then(|| {
+        let reported_untracked = self.shown_legs.contains(&Osc99Leg::UntrackedSystem);
+        (self.close_reporting == Osc99CloseReporting::Report && !reported_untracked).then(|| {
             Osc99Effect::Reply {
                 reply_tx: Weak::clone(&self.reply_tx),
                 reply: GuiReply::Osc99Closed {
@@ -219,13 +223,16 @@ impl Osc99Registry {
     ///
     /// Callers register only when at least one leg displayed it; `legs`
     /// lists the legs that did. An instance with no legs is legal but never
-    /// produced by the router. The toast leg is not shown by the caller: a
-    /// `Toast` in `legs` yields a [`Osc99Effect::ShowToast`] here.
+    /// produced by the router. Neither registry-managed leg is shown by the
+    /// caller: a `Toast` in `legs` yields a [`Osc99Effect::ShowToast`] here,
+    /// and a `LinuxSystem` yields a [`Osc99Effect::ShowLinuxSystem`].
     ///
     /// If `data.id` is set and the same pane already has an instance with
     /// that id, the notification is an update: the old instance is forgotten
-    /// without a close report, and its open toast is replaced in place (or
-    /// closed, when `legs` has no toast). If the registry would then exceed
+    /// without a close report, and each of its open legs is replaced in place
+    /// when `legs` still has it (the toast is closed when `legs` has no
+    /// toast; a Linux desktop notification is not yet closed, see the module
+    /// docs). If the registry would then exceed
     /// [`MAX_OSC99_INSTANCES`], the oldest instance is forgotten, again
     /// without a reply, and its open toast is closed.
     ///
@@ -241,8 +248,10 @@ impl Osc99Registry {
     ) -> Vec<Osc99Effect> {
         let mut effects = Vec::new();
         let wants_toast = legs.contains(&Osc99Leg::Toast);
+        let wants_linux = legs.contains(&Osc99Leg::LinuxSystem);
 
-        let mut replaces = None;
+        let mut replaces_toast = None;
+        let mut replaces_linux = None;
         if let Some(id) = data.id.as_deref()
             && let Some(pos) = self
                 .instances
@@ -253,12 +262,15 @@ impl Osc99Registry {
             old.log_forgotten("replaced by a notification with the same id");
             if old.is_open(Osc99Leg::Toast) {
                 if wants_toast {
-                    replaces = Some(old.instance);
+                    replaces_toast = Some(old.instance);
                 } else {
                     // The old toast's `Closed` event arrives for a forgotten
                     // instance and is ignored, so no close is reported.
                     effects.push(Osc99Effect::CloseToast(old.instance));
                 }
+            }
+            if old.is_open(Osc99Leg::LinuxSystem) && wants_linux {
+                replaces_linux = Some(old.instance);
             }
         }
 
@@ -275,8 +287,15 @@ impl Osc99Registry {
         if wants_toast {
             effects.push(Osc99Effect::ShowToast {
                 instance,
-                replaces,
+                replaces: replaces_toast,
                 spec: osc99_toast_spec(data),
+            });
+        }
+        if wants_linux {
+            effects.push(Osc99Effect::ShowLinuxSystem {
+                instance,
+                replaces: replaces_linux,
+                notification: Box::new(data.clone()),
             });
         }
 
@@ -349,10 +368,10 @@ impl Osc99Registry {
     /// An id the pane does not have is a no-op. An open toast is asked to
     /// close; the instance stays until the toast's `Closed` event arrives
     /// (see [`Self::on_toast_event`]), which is when a `c=1` report is sent.
-    /// The Linux and untracked system legs are dropped silently (the Linux
-    /// leg's own thread reports for it). With no toast to wait for, the
-    /// instance is forgotten at once, without a report. Closing an instance
-    /// that is already closing does nothing.
+    /// The Linux and untracked system legs are dropped silently until Task
+    /// 138.13 closes the Linux leg. With no toast to wait for, the instance is
+    /// forgotten at once, without a report. Closing an instance that is
+    /// already closing does nothing.
     pub fn close(&mut self, origin: Osc99Origin, id: &str) -> Vec<Osc99Effect> {
         let Some(pos) = self
             .instances
@@ -382,11 +401,7 @@ impl Osc99Registry {
 
         let mut effects = Vec::new();
         for instance in due {
-            let Some(pos) = self
-                .instances
-                .iter()
-                .position(|candidate| candidate.instance == instance)
-            else {
+            let Some(pos) = self.position_of(instance) else {
                 continue;
             };
             self.instances[pos].deadline = None;
@@ -433,40 +448,55 @@ impl Osc99Registry {
     /// An event for an unknown instance (replaced, evicted, forgotten, or
     /// its pane pruned) is ignored.
     ///
-    /// - `Activated` and `Button(n)` send the activation report when
-    ///   `a=report` was requested (the report names button `n` for `Button`),
-    ///   then focus the pane when `a=focus` is in effect (independent of
-    ///   `a=report`), and forget the instance unless `c=1` was requested (the
-    ///   toast's `Closed` event follows either way).
+    /// - `Activated` and `Button(n)` are an activation (see
+    ///   [`Self::activate`]).
     /// - `Closed` closes the toast leg; once no leg is open the instance is
     ///   forgotten and a close report is sent when owed.
     pub fn on_toast_event(&mut self, event: ToastEvent) -> Vec<Osc99Effect> {
         let instance = Osc99InstanceId::from_toast_key(event.key);
-        let Some(pos) = self
-            .instances
-            .iter()
-            .position(|candidate| candidate.instance == instance)
-        else {
-            return Vec::new();
-        };
+        match Osc99LegActivation::from_toast_event(event.kind) {
+            Some(activation) => self.activate(instance, activation),
+            None => self.close_leg(instance, Osc99Leg::Toast),
+        }
+    }
 
-        match event.kind {
-            ToastEventKind::Activated => self.activate(pos, None),
-            ToastEventKind::Button(n) => self.activate(pos, Some(n)),
-            ToastEventKind::Closed => {
-                self.instances[pos]
-                    .open_legs
-                    .retain(|leg| *leg != Osc99Leg::Toast);
-                self.finish_if_closed(pos)
+    /// Apply an event from the Linux/BSD system leg (which exists only on
+    /// Linux/BSD).
+    ///
+    /// An event for an unknown instance (replaced, forgotten, or its pane
+    /// pruned) is ignored. `Activated` is an activation exactly like a
+    /// toast's; `Closed` and `ShowFailed` close the Linux leg (a failed show
+    /// leaves nothing displayed, so it ends the leg the same way).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn on_system_event(
+        &mut self,
+        instance: Osc99InstanceId,
+        event: Osc99SystemLegEvent,
+    ) -> Vec<Osc99Effect> {
+        match event {
+            Osc99SystemLegEvent::Activated(activation) => self.activate(instance, activation),
+            Osc99SystemLegEvent::Closed | Osc99SystemLegEvent::ShowFailed => {
+                self.close_leg(instance, Osc99Leg::LinuxSystem)
             }
         }
     }
 
-    /// Activate the instance at `pos` through `button` (`None` is the body):
-    /// returns the activation report when one was requested, then the focus
-    /// request when `a=focus` is in effect, and forgets the instance unless
-    /// `c=1` was requested.
-    fn activate(&mut self, pos: usize, button: Option<u8>) -> Vec<Osc99Effect> {
+    /// Activate `instance` through `activation`, from any leg: returns the
+    /// activation report when one was requested, then the focus request when
+    /// `a=focus` is in effect, and forgets the instance unless `c=1` was
+    /// requested. An unknown instance yields nothing.
+    fn activate(
+        &mut self,
+        instance: Osc99InstanceId,
+        activation: Osc99LegActivation,
+    ) -> Vec<Osc99Effect> {
+        let Some(pos) = self.position_of(instance) else {
+            return Vec::new();
+        };
+        let button = match activation {
+            Osc99LegActivation::Body => None,
+            Osc99LegActivation::Button(n) => Some(n),
+        };
         let effects: Vec<Osc99Effect> = self.instances[pos]
             .activation_reply(button)
             .into_iter()
@@ -478,6 +508,24 @@ impl Osc99Registry {
                 .log_forgotten("activated without close reporting");
         }
         effects
+    }
+
+    /// Close `leg` of `instance`; once no leg is open the instance is
+    /// forgotten and its close report is returned when owed. An unknown
+    /// instance yields nothing.
+    fn close_leg(&mut self, instance: Osc99InstanceId, leg: Osc99Leg) -> Vec<Osc99Effect> {
+        let Some(pos) = self.position_of(instance) else {
+            return Vec::new();
+        };
+        self.instances[pos].open_legs.retain(|open| *open != leg);
+        self.finish_if_closed(pos)
+    }
+
+    /// The index of `instance`, if it is registered.
+    fn position_of(&self, instance: Osc99InstanceId) -> Option<usize> {
+        self.instances
+            .iter()
+            .position(|candidate| candidate.instance == instance)
     }
 
     /// Forget the instance at `pos` if no leg is open, returning its close
@@ -523,7 +571,10 @@ mod tests {
     use freminal_windowing::WindowId;
 
     use super::*;
-    use crate::gui::osc99::{Osc99EffectSink, Osc99ToastSpec, apply_osc99_effects};
+    use crate::gui::osc99::{
+        NoSystemBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec, RecordedShow,
+        RecordingSystemBackend, apply_osc99_effects,
+    };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{
         ToastEvent, ToastEventKind, ToastKey, ToastKind, ToastLifetime, ToastStack,
@@ -652,6 +703,23 @@ mod tests {
             reply,
             GuiReply::Osc99Activation { id: Some(i), button: None } if i == id
         )
+    }
+
+    /// Execute `effects` against `toasts` and `system`, returning the focus
+    /// requests and the failed system shows the executor collected.
+    fn execute(
+        effects: Vec<Osc99Effect>,
+        toasts: &mut ToastStack,
+        system: &mut dyn Osc99SystemBackend,
+    ) -> (Vec<Osc99Origin>, Vec<Osc99InstanceId>) {
+        let mut sink = Osc99EffectSink {
+            toasts,
+            system,
+            focus_requests: Vec::new(),
+            failed_system_shows: Vec::new(),
+        };
+        apply_osc99_effects(effects, &mut sink);
+        (sink.focus_requests, sink.failed_system_shows)
     }
 
     /// The ids in the single `p=alive` reply the registry produces.
@@ -841,13 +909,121 @@ mod tests {
     }
 
     #[test]
-    fn a_system_only_instance_shows_no_toast() {
+    fn a_linux_only_instance_shows_on_the_linux_leg_and_shows_no_toast() {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
 
-        let (effects, _) = register_with(&mut registry, &a, &data(None), &[Osc99Leg::LinuxSystem]);
+        let (effects, instance) =
+            register_with(&mut registry, &a, &data(None), &[Osc99Leg::LinuxSystem]);
 
-        assert!(effects.is_empty());
+        let [
+            Osc99Effect::ShowLinuxSystem {
+                instance: shown,
+                replaces: None,
+                notification,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected one ShowLinuxSystem replacing nothing, got {effects:?}");
+        };
+        assert_eq!(*shown, instance);
+        assert_eq!(**notification, data(None));
+    }
+
+    #[test]
+    fn a_toast_plus_linux_instance_shows_on_both_legs() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &data(None),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Osc99Effect::ShowToast { .. },
+                Osc99Effect::ShowLinuxSystem { .. }
+            ]
+        ));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn updating_a_linux_instance_replaces_the_old_desktop_notification() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, first) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let (effects, second) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let [
+            Osc99Effect::ShowLinuxSystem {
+                instance,
+                replaces: Some(replaced),
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("expected one ShowLinuxSystem replacing the first, got {effects:?}");
+        };
+        assert_eq!(*instance, second);
+        assert_eq!(*replaced, first);
+        assert!(
+            registry
+                .on_system_event(first, Osc99SystemLegEvent::Closed)
+                .is_empty(),
+            "the replaced notification's close is for a forgotten instance"
+        );
+        assert_eq!(registry.instances().len(), 1, "the update is live");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn updating_after_the_linux_leg_closed_replaces_nothing_on_it() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, first) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+        let _ = registry.on_system_event(first, Osc99SystemLegEvent::Closed);
+
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [
+                    Osc99Effect::ShowToast {
+                        replaces: Some(_),
+                        ..
+                    },
+                    Osc99Effect::ShowLinuxSystem { replaces: None, .. }
+                ]
+            ),
+            "got {effects:?}"
+        );
     }
 
     #[test]
@@ -889,8 +1065,12 @@ mod tests {
 
         let (effects, _) = register_with(&mut registry, &a, &closing, &[Osc99Leg::LinuxSystem]);
 
-        let [Osc99Effect::CloseToast(old)] = effects.as_slice() else {
-            panic!("expected one CloseToast, got {effects:?}");
+        let [
+            Osc99Effect::CloseToast(old),
+            Osc99Effect::ShowLinuxSystem { replaces: None, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("expected CloseToast then a fresh ShowLinuxSystem, got {effects:?}");
         };
         assert_eq!(*old, first);
         assert!(
@@ -1367,10 +1547,313 @@ mod tests {
         assert_eq!(registry.instances().len(), 1);
     }
 
-    // ── interim system-leg rules ────────────────────────────────────────
+    // ── Linux system leg ────────────────────────────────────────────────
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn linux_activated(
+        registry: &mut Osc99Registry,
+        instance: Osc99InstanceId,
+        activation: Osc99LegActivation,
+    ) -> Vec<Osc99Effect> {
+        registry.on_system_event(instance, Osc99SystemLegEvent::Activated(activation))
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_button_activation_reports_the_one_based_button_then_focuses() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::Focus,
+                Osc99ActivationReporting::Report,
+            ),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let effects = linux_activated(&mut registry, instance, Osc99LegActivation::Button(2));
+
+        let [
+            Osc99Effect::Reply {
+                reply:
+                    GuiReply::Osc99Activation {
+                        id: Some(id),
+                        button: Some(button),
+                    },
+                ..
+            },
+            Osc99Effect::FocusPane(origin),
+        ] = effects.as_slice()
+        else {
+            panic!("expected the button report then FocusPane, got {effects:?}");
+        };
+        assert_eq!(id, "n");
+        assert_eq!(button, "2");
+        assert_eq!(*origin, a.origin);
+        assert!(registry.instances().is_empty(), "forgotten without c=1");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_body_activation_reports_without_a_button() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Silent),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let reports = replies(linux_activated(
+            &mut registry,
+            instance,
+            Osc99LegActivation::Body,
+        ));
+
+        assert_eq!(reports.len(), 1);
+        assert!(is_activation(&reports[0], "n"), "got {:?}", reports[0]);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_activation_without_a_report_request_or_focus_does_nothing() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        assert!(linux_activated(&mut registry, instance, Osc99LegActivation::Body).is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_activation_with_close_reporting_is_followed_by_exactly_one_close() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let reports = replies(linux_activated(
+            &mut registry,
+            instance,
+            Osc99LegActivation::Button(1),
+        ));
+        assert_eq!(reports.len(), 1);
+        assert_eq!(registry.instances().len(), 1, "kept until the leg closes");
+
+        let reports = replies(registry.on_system_event(instance, Osc99SystemLegEvent::Closed));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"), "got {:?}", reports[0]);
+        assert!(registry.instances().is_empty());
+        assert!(
+            registry
+                .on_system_event(instance, Osc99SystemLegEvent::Closed)
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_close_with_close_reporting_sends_exactly_one_report() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let reports = replies(registry.on_system_event(instance, Osc99SystemLegEvent::Closed));
+
+        assert_eq!(reports.len(), 1, "no longer suppressed");
+        assert!(is_tracked_close(&reports[0], "n"));
+        assert!(registry.instances().is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_linux_close_without_close_reporting_is_silent() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        assert!(
+            registry
+                .on_system_event(instance, Osc99SystemLegEvent::Closed)
+                .is_empty()
+        );
+        assert!(registry.instances().is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_failed_linux_show_closes_the_leg() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, reporting) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("r", Osc99CloseReporting::Report),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let (_, silent) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("s")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let reports = replies(registry.on_system_event(reporting, Osc99SystemLegEvent::ShowFailed));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "r"));
+
+        assert!(
+            registry
+                .on_system_event(silent, Osc99SystemLegEvent::ShowFailed)
+                .is_empty()
+        );
+        assert!(registry.instances().is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_failed_linux_show_leaves_the_toast_leg_open() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+
+        assert!(
+            registry
+                .on_system_event(instance, Osc99SystemLegEvent::ShowFailed)
+                .is_empty(),
+            "the toast is still displayed, so no report yet"
+        );
+        assert_eq!(registry.instances()[0].open_legs, [Osc99Leg::Toast]);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_toast_plus_linux_instance_reports_one_close_after_both_legs_close() {
+        for linux_first in [false, true] {
+            let (a, _b) = two_panes();
+            let mut registry = Osc99Registry::default();
+            let (_, instance) = register_with(
+                &mut registry,
+                &a,
+                &reporting_data("n", Osc99CloseReporting::Report),
+                &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+            );
+
+            let (first, second) = if linux_first {
+                (
+                    registry.on_system_event(instance, Osc99SystemLegEvent::Closed),
+                    registry.on_toast_event(closed(instance)),
+                )
+            } else {
+                (
+                    registry.on_toast_event(closed(instance)),
+                    registry.on_system_event(instance, Osc99SystemLegEvent::Closed),
+                )
+            };
+
+            assert!(first.is_empty(), "linux_first={linux_first}: one leg open");
+            let reports = replies(second);
+            assert_eq!(reports.len(), 1, "linux_first={linux_first}");
+            assert!(is_tracked_close(&reports[0], "n"));
+            assert!(registry.instances().is_empty());
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_system_event_for_an_unknown_instance_is_ignored() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let unknown = Osc99InstanceId(instance.0 + 1000);
+
+        for event in [
+            Osc99SystemLegEvent::Closed,
+            Osc99SystemLegEvent::ShowFailed,
+            Osc99SystemLegEvent::Activated(Osc99LegActivation::Body),
+        ] {
+            assert!(registry.on_system_event(unknown, event).is_empty());
+        }
+        assert_eq!(registry.instances().len(), 1);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn close_drops_the_linux_leg_silently_until_the_service_closes_it() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        // Interim (Task 138.13): with no toast to wait for, `p=close` forgets
+        // the instance at once and the Linux leg's later events are unknown.
+        assert!(registry.close(a.origin, "n").is_empty());
+        assert!(registry.instances().is_empty());
+        assert!(
+            registry
+                .on_system_event(instance, Osc99SystemLegEvent::Closed)
+                .is_empty()
+        );
+    }
 
     #[test]
-    fn an_open_linux_leg_keeps_the_instance_and_the_registry_never_reports_for_it() {
+    fn close_of_a_toast_plus_linux_instance_reports_once_when_the_toast_closes() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+
+        let effects = registry.close(a.origin, "n");
+
+        assert!(matches!(effects.as_slice(), [Osc99Effect::CloseToast(_)]));
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1, "the Linux leg was dropped, not awaited");
+        assert!(is_tracked_close(&reports[0], "n"));
+        assert!(registry.instances().is_empty());
+    }
+
+    #[test]
+    fn an_open_linux_leg_keeps_the_instance_after_the_toast_closes() {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let (_, instance) = register_with(
@@ -1386,32 +1869,6 @@ mod tests {
         );
         assert_eq!(alive_ids(&registry, &a), ["n"], "still live");
         assert_eq!(registry.instances()[0].open_legs, [Osc99Leg::LinuxSystem]);
-
-        // `p=close` has no toast left to close: the Linux leg is dropped and
-        // the instance forgotten, silently.
-        assert!(registry.close(a.origin, "n").is_empty());
-        assert!(registry.instances().is_empty());
-    }
-
-    #[test]
-    fn close_drops_the_linux_leg_silently_and_never_reports_after_the_toast_closes() {
-        let (a, _b) = two_panes();
-        let mut registry = Osc99Registry::default();
-        let (_, instance) = register_with(
-            &mut registry,
-            &a,
-            &reporting_data("n", Osc99CloseReporting::Report),
-            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
-        );
-
-        let effects = registry.close(a.origin, "n");
-
-        assert!(matches!(effects.as_slice(), [Osc99Effect::CloseToast(_)]));
-        assert!(
-            registry.on_toast_event(closed(instance)).is_empty(),
-            "the Linux leg reports for itself, so the registry does not"
-        );
-        assert!(registry.instances().is_empty());
     }
 
     #[test]
@@ -1536,13 +1993,7 @@ mod tests {
         drop(a);
         let mut toasts = ToastStack::default();
 
-        apply_osc99_effects(
-            effects,
-            &mut Osc99EffectSink {
-                toasts: &mut toasts,
-                focus_requests: Vec::new(),
-            },
-        );
+        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
     }
 
     // ── executor ────────────────────────────────────────────────────────
@@ -1551,21 +2002,133 @@ mod tests {
     fn the_executor_records_focus_requests_in_order_without_touching_toasts() {
         let (a, b) = two_panes();
         let mut toasts = ToastStack::default();
-        let mut sink = Osc99EffectSink {
-            toasts: &mut toasts,
-            focus_requests: Vec::new(),
-        };
+        let mut system = RecordingSystemBackend::default();
 
-        apply_osc99_effects(
+        let (focus_requests, failed_shows) = execute(
             vec![
                 Osc99Effect::FocusPane(a.origin),
                 Osc99Effect::FocusPane(b.origin),
             ],
-            &mut sink,
+            &mut toasts,
+            &mut system,
         );
 
-        assert_eq!(sink.focus_requests, [a.origin, b.origin]);
+        assert_eq!(focus_requests, [a.origin, b.origin]);
+        assert_eq!(failed_shows, Vec::new());
         assert_eq!(toasts.len(), 0);
+        assert_eq!(system.shown, Vec::new());
+    }
+
+    #[test]
+    fn the_executor_collects_the_instances_whose_show_could_not_be_queued() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let mut toasts = ToastStack::default();
+        let (effects, instance) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let (_, failed) = execute(effects, &mut toasts, &mut NoSystemBackend);
+        assert_eq!(failed, [instance], "NoSystemBackend fails every show");
+
+        let (effects, second) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("m")),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let mut failing = RecordingSystemBackend {
+            fail_shows: true,
+            ..RecordingSystemBackend::default()
+        };
+        let (_, failed) = execute(effects, &mut toasts, &mut failing);
+        assert_eq!(failed, [second]);
+        assert_eq!(failing.shown.len(), 1, "the show was still attempted");
+
+        let (effects, _) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("k")),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let (_, failed) = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
+        assert_eq!(failed, Vec::new(), "a queued show is not a failure");
+    }
+
+    /// The Linux/BSD feedback loop the GUI runs: a show the backend could not
+    /// queue is fed back as `ShowFailed`, which ends the only leg and sends
+    /// exactly one close report.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_failed_show_fed_back_closes_the_only_leg_with_one_close_report() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let mut toasts = ToastStack::default();
+        let (effects, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::LinuxSystem],
+        );
+
+        let (_, failed) = execute(effects, &mut toasts, &mut NoSystemBackend);
+        assert_eq!(failed, [instance]);
+        let reports: Vec<GuiReply> = failed
+            .into_iter()
+            .flat_map(|failed| registry.on_system_event(failed, Osc99SystemLegEvent::ShowFailed))
+            .map(|effect| match effect {
+                Osc99Effect::Reply { reply, .. } => reply,
+                other => panic!("expected only replies, got {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"), "got {:?}", reports[0]);
+        assert!(registry.instances().is_empty());
+        assert_eq!(alive_ids(&registry, &a), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_executor_hands_linux_shows_to_the_system_backend() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let mut toasts = ToastStack::default();
+        let mut system = RecordingSystemBackend::default();
+
+        let (effects, first) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let _ = execute(effects, &mut toasts, &mut system);
+        let (effects, second) = register_with(
+            &mut registry,
+            &a,
+            &data(Some("n")),
+            &[Osc99Leg::LinuxSystem],
+        );
+        let _ = execute(effects, &mut toasts, &mut system);
+
+        assert_eq!(
+            system.shown,
+            [
+                RecordedShow {
+                    instance: first,
+                    replaces: None,
+                    notification: data(Some("n")),
+                },
+                RecordedShow {
+                    instance: second,
+                    replaces: Some(first),
+                    notification: data(Some("n")),
+                },
+            ]
+        );
+        assert_eq!(toasts.len(), 0, "no toast for a Linux-only instance");
     }
 
     #[test]
@@ -1576,23 +2139,11 @@ mod tests {
 
         let (effects, first) =
             register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        apply_osc99_effects(
-            effects,
-            &mut Osc99EffectSink {
-                toasts: &mut toasts,
-                focus_requests: Vec::new(),
-            },
-        );
+        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
         assert_eq!(toasts.len(), 1);
 
         let (effects, _) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        apply_osc99_effects(
-            effects,
-            &mut Osc99EffectSink {
-                toasts: &mut toasts,
-                focus_requests: Vec::new(),
-            },
-        );
+        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
         assert_eq!(toasts.len(), 1, "updated in place, not stacked");
         assert!(
             toasts.take_events().is_empty(),
@@ -1600,13 +2151,7 @@ mod tests {
         );
 
         let effects = registry.close(a.origin, "n");
-        apply_osc99_effects(
-            effects,
-            &mut Osc99EffectSink {
-                toasts: &mut toasts,
-                focus_requests: Vec::new(),
-            },
-        );
+        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
         assert_eq!(toasts.len(), 0);
         let events = toasts.take_events();
         assert_eq!(events.len(), 1);
@@ -1882,13 +2427,13 @@ mod tests {
 
         let effects = registry.tick(t0 + Duration::from_millis(1000));
 
-        assert!(effects.is_empty(), "the Linux leg reports for itself");
+        assert!(effects.is_empty(), "no toast to close, nothing to report");
         assert!(registry.instances().is_empty(), "forgotten");
         assert_eq!(registry.next_deadline(), None);
     }
 
     #[test]
-    fn expiry_of_a_toast_plus_linux_instance_closes_the_toast_and_keeps_waiting() {
+    fn expiry_of_a_toast_plus_linux_instance_closes_the_toast_and_drops_the_interim_linux_leg() {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let t0 = Instant::now();
@@ -1905,8 +2450,11 @@ mod tests {
         assert_eq!(close_toast_targets(&effects), [instance]);
         assert_eq!(registry.instances()[0].open_legs, [Osc99Leg::Toast]);
 
-        // The system leg reported for itself, so the registry stays silent.
-        assert!(registry.on_toast_event(closed(instance)).is_empty());
+        // Interim (Task 138.13): expiry dropped the Linux leg, so the toast
+        // closing is the last leg and the registry reports once.
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"));
         assert!(registry.instances().is_empty());
     }
 }

@@ -5831,6 +5831,25 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Verification:** `git diff -M` shows moves; the test count is unchanged; clippy is clean.
 - **Scheduling:** in Task 138, after 138.18 and before the adversarial review.
 
+#### 138.C2 — The OSC 99 signal pump does not filter signals by sender
+
+- **Surfaced:** 138.12 (sub-agent report, confirmed by the orchestrator).
+- **Impact:** the match rule selects `org.freedesktop.Notifications` signals on
+  `/org/freedesktop/Notifications` from any sender. A session-bus peer that guesses a live
+  D-Bus id can forge `ActionInvoked` or `NotificationClosed`. That makes freminal send an
+  activation or close report (and possibly a focus) for one of its notifications. The old
+  notify-rust path had the same exposure, and a session-bus peer can already do more harmful
+  things.
+- **Fix:** at start, resolve the unique name that owns `org.freedesktop.Notifications`
+  (`GetNameOwner`) and drop signals whose sender differs. Re-resolve on `NameOwnerChanged` for
+  that name, so a daemon restart keeps working. zbus's client-side match does not resolve
+  well-known sender names, so this is done in `parse_signal` / the dispatcher, not by putting
+  a well-known name in the match rule. Over p2p (tests) there is no sender, and filtering is
+  skipped.
+- **Verification:** a `DispatcherState` test showing that a signal from a non-owner is
+  ignored, and an owner change re-targets.
+- **Scheduling:** in Task 138, with 138.13 (same files).
+
 ### 138 Status notes
 
 - **138.1 (done, `ba222d95`).** Types as decided; `window_manipulation.rs` re-exports
@@ -5946,6 +5965,27 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - The Settings window is a separate OS window, so modal input suppression does not apply.
   - A pre-existing gap the sub-agent found, the Nix module missing
     `command_finished_template`, is routed to 147.28.
+- **138.12 (done).** zbus 5.19.0 is a direct dependency on Linux/BSD only (`async-io` and
+  `blocking-api`; `p2p` only for the dev-dependency), and there is still a single copy in the
+  lock file. The service follows the decided design: one dispatcher, one pump that forwards
+  into the dispatcher, the pure `DispatcherState`, and connection and subscription on the
+  dispatcher thread.
+  - The integration tests run a hand-written fake daemon over a p2p socket pair. The
+    `#[zbus::interface]` macro expansion trips pedantic lints that would need allows. The
+    orchestrator re-ran the 30 service tests 5 more times; all passed.
+  - Wake: `Osc99Wake` keeps the `RepaintProxy` and the most recently rendered window, and is
+    re-pointed every frame. Any window's frame drains the shared event channel.
+  - The registry now owns the Linux leg's activation and close reports. Only
+    `UntrackedSystem` still suppresses the close report. Toast and system activation share one
+    path (`Osc99LegActivation`).
+  - Review fix by the orchestrator: a show that cannot be queued (handle busy, service gone)
+    used to leave the Linux leg open forever. `Osc99SystemBackend::show` now returns
+    `Osc99ShowDispatch`, and a failure is fed back to the registry as `ShowFailed`.
+  - Until 138.13, `p=close`, expiry and cap eviction drop the Linux leg silently and the
+    desktop notification stays on screen. Until 138.14, Linux icons are not sent.
+  - `Capabilities` and `Unavailable` are logged only; 138.15 consumes them.
+  - Signals are not filtered by sender; see 138.C2.
+  - The stale `host_capabilities.rs` doc is fixed by 138.15.
 
 ---
 

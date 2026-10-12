@@ -1547,6 +1547,12 @@ impl freminal_windowing::App for FreminalGui {
             return;
         };
 
+        // Keep the OSC 99 notification service's wake-up pointed at a window
+        // that exists: this one is rendering right now.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake
+            .retarget(window_id, || handle.event_loop_proxy());
+
         // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
         //
         // Sampled as early as possible in `update()` — before ANY dialog's
@@ -3952,6 +3958,12 @@ impl freminal_windowing::App for FreminalGui {
             ctx.request_repaint_after(delay);
         }
 
+        // Deliver the events the Linux/BSD desktop-notification service queued
+        // (activation, close, failed show) to the registry. Like the toast
+        // events below, every window drains the one shared channel.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.route_osc99_system_events();
+
         // Deliver the events keyed (OSC 99) toasts recorded this frame to the
         // registry. Outside the block above on purpose: the last toast
         // closing leaves the stack empty, and that `Closed` must still be
@@ -4476,55 +4488,7 @@ impl FreminalGui {
         }
 
         // Route OSC 99 stateful notifications collected above (Task 99.5a).
-        // `self.config`, the toast stack, and the OSC 99 session maps are
-        // borrowable here without conflicting with the drain's tab-list
-        // borrow.
-        if !events.osc99_notifications.is_empty() {
-            match (
-                self.toasts.try_borrow_mut(),
-                self.osc99_icon_cache.try_borrow_mut(),
-                self.osc99_registry.try_borrow_mut(),
-            ) {
-                (Ok(mut toasts), Ok(mut icon_cache), Ok(mut registry)) => {
-                    // Each request's `reply_tx` (a `Weak` handle to the
-                    // originating pane's reply sender) is threaded into the
-                    // reverse-reply path: the notification thread upgrades it
-                    // per send to deliver activation/close replies to the pane
-                    // that produced this OSC 99 sequence, without keeping that
-                    // pane alive. The pane state gates `o=`; OS-window focus
-                    // alone drives the toast/system routing choice.
-                    for request in &events.osc99_notifications {
-                        tracing::trace!(
-                            origin = ?request.origin,
-                            pane_state = ?request.pane_state,
-                            "routing OSC 99 notification"
-                        );
-                        let ctx = crate::gui::notifications::Osc99DisplayContext {
-                            window_focus,
-                            pane: request.pane_state,
-                            now: std::time::Instant::now(),
-                        };
-                        let effects = crate::gui::notifications::NotificationRouter::route_osc99(
-                            request,
-                            &self.config.notifications,
-                            ctx,
-                            &mut icon_cache,
-                            &mut registry,
-                        );
-                        self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
-                    }
-                }
-                (toasts, icon_cache, registry) => {
-                    tracing::warn!(
-                        toast_stack_busy = toasts.is_err(),
-                        icon_cache_busy = icon_cache.is_err(),
-                        registry_busy = registry.is_err(),
-                        dropped = events.osc99_notifications.len(),
-                        "OSC 99: notification state busy; notifications dropped this frame"
-                    );
-                }
-            }
-        }
+        self.route_osc99_display_requests(window_focus, &events.osc99_notifications);
 
         // Answer OSC 99 control sequences collected above (Task 99.6 for
         // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
@@ -4558,6 +4522,78 @@ impl FreminalGui {
             };
             drop(registry);
             self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+        }
+    }
+
+    /// Route the OSC 99 stateful notifications a frame's drain collected
+    /// (Task 99.5a): for each, the router decides the legs and the registry
+    /// returns the effects that show them.
+    ///
+    /// `self.config`, the toast stack, and the OSC 99 session maps are
+    /// borrowable here without conflicting with the drain's tab-list borrow.
+    /// The registry is checked free up front, but borrowed per request and
+    /// released before the effects are applied, because applying them can feed
+    /// failed desktop-notification shows back to it.
+    fn route_osc99_display_requests(
+        &self,
+        window_focus: WindowFocus,
+        requests: &[crate::gui::osc99::Osc99DisplayRequest],
+    ) {
+        if requests.is_empty() {
+            return;
+        }
+        match (
+            self.toasts.try_borrow_mut(),
+            self.osc99_icon_cache.try_borrow_mut(),
+            self.osc99_registry.try_borrow_mut(),
+        ) {
+            (Ok(mut toasts), Ok(mut icon_cache), Ok(registry)) => {
+                drop(registry);
+                // Each request's `reply_tx` (a `Weak` handle to the
+                // originating pane's reply sender) is threaded into the
+                // reverse-reply path: the registry upgrades it per send to
+                // deliver activation/close replies to the pane that
+                // produced this OSC 99 sequence, without keeping that pane
+                // alive. The pane state gates `o=`; OS-window focus
+                // alone drives the toast/system routing choice.
+                for request in requests {
+                    tracing::trace!(
+                        origin = ?request.origin,
+                        pane_state = ?request.pane_state,
+                        "routing OSC 99 notification"
+                    );
+                    let ctx = crate::gui::notifications::Osc99DisplayContext {
+                        window_focus,
+                        pane: request.pane_state,
+                        now: std::time::Instant::now(),
+                    };
+                    let Ok(mut registry) = self.osc99_registry.try_borrow_mut() else {
+                        tracing::warn!(
+                            id = ?request.data.id,
+                            "OSC 99: notification registry busy; notification dropped"
+                        );
+                        continue;
+                    };
+                    let effects = crate::gui::notifications::NotificationRouter::route_osc99(
+                        request,
+                        &self.config.notifications,
+                        ctx,
+                        &mut icon_cache,
+                        &mut registry,
+                    );
+                    drop(registry);
+                    self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+                }
+            }
+            (toasts, icon_cache, registry) => {
+                tracing::warn!(
+                    toast_stack_busy = toasts.is_err(),
+                    icon_cache_busy = icon_cache.is_err(),
+                    registry_busy = registry.is_err(),
+                    dropped = requests.len(),
+                    "OSC 99: notification state busy; notifications dropped this frame"
+                );
+            }
         }
     }
 
@@ -4614,11 +4650,123 @@ impl FreminalGui {
             .into_iter()
             .flat_map(|event| registry.on_toast_event(event))
             .collect();
+        drop(registry);
         self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
     }
 
-    /// Execute OSC 99 `effects` against `toasts` and queue the panes they ask
-    /// to focus on `self.osc99_focus_requests`.
+    /// Hand the events the Linux/BSD desktop-notification service queued to
+    /// the OSC 99 registry and execute the effects it returns.
+    ///
+    /// Runs once per window frame. Does nothing until the service has been
+    /// started. Both cells are borrowed before the events are drained, so a
+    /// busy cell defers delivery to the next frame instead of losing them.
+    /// The service handle is only borrowed to drain, and released before the
+    /// effects are applied (which borrow it again to show).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn route_osc99_system_events(&self) {
+        use crate::gui::osc99::{Osc99DbusEvent, Osc99SystemLegEvent};
+
+        if !self
+            .osc99_dbus
+            .try_borrow()
+            .is_ok_and(|slot| slot.is_some())
+        {
+            return;
+        }
+        let (Ok(mut toasts), Ok(mut registry)) = (
+            self.toasts.try_borrow_mut(),
+            self.osc99_registry.try_borrow_mut(),
+        ) else {
+            tracing::warn!("OSC 99: toast stack or registry busy; system events deferred");
+            return;
+        };
+        let events: Vec<Osc99DbusEvent> = match self.osc99_dbus.try_borrow() {
+            Ok(slot) => slot
+                .as_ref()
+                .map_or_else(Vec::new, |handle| handle.try_events().collect()),
+            Err(_) => return,
+        };
+
+        let mut effects = Vec::new();
+        for event in events {
+            let (instance, leg_event) = match event {
+                Osc99DbusEvent::Shown { instance } => {
+                    tracing::trace!(instance = ?instance, "OSC 99: desktop notification shown");
+                    continue;
+                }
+                Osc99DbusEvent::ShowFailed { instance } => {
+                    (instance, Osc99SystemLegEvent::ShowFailed)
+                }
+                Osc99DbusEvent::Activated { instance, action } => (
+                    instance,
+                    Osc99SystemLegEvent::Activated(action.to_leg_activation()),
+                ),
+                Osc99DbusEvent::Closed { instance } => (instance, Osc99SystemLegEvent::Closed),
+                Osc99DbusEvent::Capabilities(capabilities) => {
+                    // Task 138.15 feeds these into `HostCapabilities`.
+                    tracing::debug!(
+                        body = ?capabilities.body,
+                        actions = ?capabilities.actions,
+                        body_markup = ?capabilities.body_markup,
+                        sound = ?capabilities.sound,
+                        "OSC 99: notification daemon capabilities"
+                    );
+                    continue;
+                }
+                Osc99DbusEvent::Unavailable => {
+                    // The service already logged its one warning. Task 138.15
+                    // reacts to this.
+                    tracing::debug!("OSC 99: the notification service is unavailable");
+                    continue;
+                }
+            };
+            effects.extend(registry.on_system_event(instance, leg_event));
+        }
+        drop(registry);
+        if !effects.is_empty() {
+            self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+        }
+    }
+
+    /// Start the Linux/BSD desktop-notification service the first time an
+    /// effect needs it. It then lives for the rest of the process.
+    ///
+    /// A busy handle cell leaves the service unstarted; the effects are
+    /// applied against [`NoSystemBackend`](crate::gui::osc99::NoSystemBackend).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn start_osc99_dbus_for(&self, effects: &[crate::gui::osc99::Osc99Effect]) {
+        if !effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::gui::osc99::Osc99Effect::ShowLinuxSystem { .. }
+            )
+        }) {
+            return;
+        }
+        let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
+            return;
+        };
+        slot.get_or_insert_with(|| {
+            tracing::debug!("OSC 99: starting the desktop-notification service");
+            crate::gui::osc99::Osc99DbusService::spawn(self.osc99_wake.waker())
+        });
+    }
+
+    /// Execute OSC 99 `effects` against `toasts` and the desktop-notification
+    /// service, queue the panes they ask to focus on
+    /// `self.osc99_focus_requests`, and end the system leg of every show the
+    /// service could not queue.
+    ///
+    /// The service is started here, the first time a
+    /// [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem)
+    /// is applied (Task 138.15 moves the start to capability resolution).
+    /// Platforms without the service apply that effect to a backend that
+    /// fails every show; it is never produced there.
+    ///
+    /// A show that could not even be queued will never produce a service
+    /// event, so it is fed back to the registry as a failed show (Linux/BSD
+    /// only) once the sink and service borrows are released. **The caller must
+    /// not hold the registry borrow** when calling this.
     ///
     /// The effect executor has no window access, so focus is performed later,
     /// by [`Self::drain_osc99_focus_requests`] at the top of the next
@@ -4628,20 +4776,102 @@ impl FreminalGui {
         effects: Vec<crate::gui::osc99::Osc99Effect>,
         toasts: &mut crate::gui::toast::ToastStack,
     ) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.start_osc99_dbus_for(&effects);
+
+        let mut no_system = crate::gui::osc99::NoSystemBackend;
+        let failed_shows = {
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let mut dbus = self.osc99_dbus.try_borrow_mut().ok();
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let system: &mut dyn crate::gui::osc99::Osc99SystemBackend =
+                match dbus.as_mut().and_then(|slot| slot.as_mut()) {
+                    Some(handle) => handle,
+                    None => &mut no_system,
+                };
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            let system: &mut dyn crate::gui::osc99::Osc99SystemBackend = &mut no_system;
+
+            self.execute_osc99_effects(effects, toasts, system)
+        };
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if !failed_shows.is_empty() {
+            self.end_failed_osc99_system_shows(&failed_shows, toasts);
+        }
+        // Only the Linux/BSD service is ever asked to show; elsewhere the
+        // executor never produces that effect, so nothing can have failed.
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        debug_assert_eq!(failed_shows, Vec::new());
+    }
+
+    /// Run `effects` through the executor against `system`, queue the focus
+    /// requests, and return the instances whose show `system` could not queue.
+    fn execute_osc99_effects(
+        &self,
+        effects: Vec<crate::gui::osc99::Osc99Effect>,
+        toasts: &mut crate::gui::toast::ToastStack,
+        system: &mut dyn crate::gui::osc99::Osc99SystemBackend,
+    ) -> Vec<crate::gui::osc99::Osc99InstanceId> {
         let mut sink = crate::gui::osc99::Osc99EffectSink {
             toasts,
+            system,
             focus_requests: Vec::new(),
+            failed_system_shows: Vec::new(),
         };
         crate::gui::osc99::apply_osc99_effects(effects, &mut sink);
-        if sink.focus_requests.is_empty() {
-            return;
+        if !sink.focus_requests.is_empty() {
+            if let Ok(mut queue) = self.osc99_focus_requests.try_borrow_mut() {
+                queue.append(&mut sink.focus_requests);
+            } else {
+                tracing::warn!(
+                    dropped = sink.focus_requests.len(),
+                    "OSC 99: focus request queue busy; focus requests dropped"
+                );
+            }
         }
-        if let Ok(mut queue) = self.osc99_focus_requests.try_borrow_mut() {
-            queue.append(&mut sink.focus_requests);
-        } else {
+        sink.failed_system_shows
+    }
+
+    /// Feed shows the desktop-notification service could not queue back to the
+    /// registry as failed shows, and execute what it returns.
+    ///
+    /// Terminates after one pass by construction: a failed show only closes
+    /// the Linux leg, so the registry returns at most a close report, never
+    /// another [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem).
+    /// The follow-up effects are therefore executed against a backend that
+    /// fails every show, and a failure there (which cannot happen) is only
+    /// logged. A busy registry drops the feedback with a warning.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn end_failed_osc99_system_shows(
+        &self,
+        failed: &[crate::gui::osc99::Osc99InstanceId],
+        toasts: &mut crate::gui::toast::ToastStack,
+    ) {
+        let Ok(mut registry) = self.osc99_registry.try_borrow_mut() else {
             tracing::warn!(
-                dropped = sink.focus_requests.len(),
-                "OSC 99: focus request queue busy; focus requests dropped"
+                dropped = failed.len(),
+                "OSC 99: registry busy; failed desktop-notification shows not ended"
+            );
+            return;
+        };
+        let effects: Vec<crate::gui::osc99::Osc99Effect> = failed
+            .iter()
+            .flat_map(|instance| {
+                registry.on_system_event(
+                    *instance,
+                    crate::gui::osc99::Osc99SystemLegEvent::ShowFailed,
+                )
+            })
+            .collect();
+        drop(registry);
+
+        let refailed =
+            self.execute_osc99_effects(effects, toasts, &mut crate::gui::osc99::NoSystemBackend);
+        if !refailed.is_empty() {
+            tracing::debug!(
+                ?refailed,
+                "OSC 99: a failed show produced another show; ignored (cannot happen)"
             );
         }
     }

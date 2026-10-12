@@ -9,6 +9,8 @@
 //! pane was in ([`Osc99PaneState`]), and the request structs that carry both
 //! from the per-frame drain to the router.
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod dbus_service;
 mod filter;
 mod registry;
 
@@ -26,9 +28,11 @@ use crate::gui::frame_drain::WindowFocus;
 use crate::gui::notifications::{Osc99Control, send_reply_weak};
 use crate::gui::panes::PaneId;
 use crate::gui::toast::{
-    ToastContent, ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack,
+    ToastContent, ToastEventKind, ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack,
 };
 
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use dbus_service::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub use registry::Osc99Registry;
 
@@ -67,6 +71,44 @@ pub enum Osc99Leg {
     /// A desktop notification whose close and activation freminal cannot
     /// observe (macOS and Windows).
     UntrackedSystem,
+}
+
+/// How a user activated a displayed notification, whichever leg showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99LegActivation {
+    /// The notification body was activated.
+    Body,
+    /// The 1-based button was pressed.
+    Button(u8),
+}
+
+/// An event from the Linux/BSD system leg, as the registry consumes it.
+///
+/// Only the Linux/BSD notification service produces these, so the type exists
+/// only there.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99SystemLegEvent {
+    /// The user activated the notification.
+    Activated(Osc99LegActivation),
+    /// The daemon closed the notification (dismissed, expired, or closed by
+    /// call; the reason does not matter to the protocol).
+    Closed,
+    /// The daemon never displayed the notification.
+    ShowFailed,
+}
+
+impl Osc99LegActivation {
+    /// The activation a toast event stands for, or `None` for a `Closed`
+    /// event (which is not an activation).
+    #[must_use]
+    pub const fn from_toast_event(kind: ToastEventKind) -> Option<Self> {
+        match kind {
+            ToastEventKind::Activated => Some(Self::Body),
+            ToastEventKind::Button(n) => Some(Self::Button(n)),
+            ToastEventKind::Closed => None,
+        }
+    }
 }
 
 /// How long a `Low`-urgency notification's toast stays when the application
@@ -147,22 +189,140 @@ pub enum Osc99Effect {
     },
     /// Remove `instance`'s toast (a no-op if it is already gone).
     CloseToast(Osc99InstanceId),
+    /// Show `instance` on the Linux/BSD system leg, updating `replaces`'
+    /// notification in place when that is set.
+    ShowLinuxSystem {
+        /// The instance the desktop notification belongs to.
+        instance: Osc99InstanceId,
+        /// The instance whose desktop notification this one takes over, if
+        /// any.
+        replaces: Option<Osc99InstanceId>,
+        /// What to show. Boxed: it is far larger than every other effect.
+        notification: Box<Notification99Data>,
+    },
     /// Bring `origin`'s pane into focus: switch to its tab, unzoom, make it
     /// the active pane and raise its OS window. Emitted when a notification
     /// with `a=focus` is activated.
     FocusPane(Osc99Origin),
 }
 
-/// The GUI state the executor acts on. Later subtasks add the system legs.
+/// Whether a backend accepted a show request.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99ShowDispatch {
+    /// The request was queued; its outcome arrives later as an
+    /// [`Osc99SystemLegEvent`]. Only the Linux/BSD service (and the test
+    /// backend) ever queues a show, so the variant exists only there.
+    #[cfg(any(all(unix, not(target_os = "macos")), test))]
+    Queued,
+    /// The request could not even be queued, so no event will ever follow.
+    /// The caller must end the instance's system leg itself.
+    Failed,
+}
+
+/// The Linux/BSD desktop-notification service as the effect executor sees it.
+///
+/// A trait so the executor and its tests need not reach a session bus, and so
+/// every platform compiles the same executor.
+pub trait Osc99SystemBackend {
+    /// Display `notification` for `instance`, updating `replaces`'
+    /// notification in place when that is set.
+    fn show(
+        &mut self,
+        instance: Osc99InstanceId,
+        replaces: Option<Osc99InstanceId>,
+        notification: &Notification99Data,
+    ) -> Osc99ShowDispatch;
+}
+
+/// The backend on a build or moment with no system-notification service: it
+/// displays nothing and reports every show as [`Osc99ShowDispatch::Failed`],
+/// so the registry ends the leg instead of waiting for an event that cannot
+/// come.
+///
+/// macOS and Windows never route to [`Osc99Leg::LinuxSystem`], so for them it
+/// is never called. On Linux/BSD it stands in while the service's handle is
+/// borrowed elsewhere.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSystemBackend;
+
+impl Osc99SystemBackend for NoSystemBackend {
+    fn show(
+        &mut self,
+        instance: Osc99InstanceId,
+        _replaces: Option<Osc99InstanceId>,
+        _notification: &Notification99Data,
+    ) -> Osc99ShowDispatch {
+        tracing::trace!(
+            instance = instance.0,
+            "OSC 99: no system notification service; show failed"
+        );
+        Osc99ShowDispatch::Failed
+    }
+}
+
+/// One [`Osc99SystemBackend::show`] call, as [`RecordingSystemBackend`] saw it.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedShow {
+    /// The instance shown.
+    pub instance: Osc99InstanceId,
+    /// The instance it replaced, if any.
+    pub replaces: Option<Osc99InstanceId>,
+    /// The notification handed to the backend.
+    pub notification: Notification99Data,
+}
+
+/// A backend that records every show, for tests. It reports
+/// [`Osc99ShowDispatch::Queued`] unless `fail_shows` is set.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct RecordingSystemBackend {
+    /// Every show, in call order.
+    pub shown: Vec<RecordedShow>,
+    /// Report every show as [`Osc99ShowDispatch::Failed`] (after recording it).
+    pub fail_shows: bool,
+}
+
+#[cfg(test)]
+impl Osc99SystemBackend for RecordingSystemBackend {
+    fn show(
+        &mut self,
+        instance: Osc99InstanceId,
+        replaces: Option<Osc99InstanceId>,
+        notification: &Notification99Data,
+    ) -> Osc99ShowDispatch {
+        self.shown.push(RecordedShow {
+            instance,
+            replaces,
+            notification: notification.clone(),
+        });
+        if self.fail_shows {
+            Osc99ShowDispatch::Failed
+        } else {
+            Osc99ShowDispatch::Queued
+        }
+    }
+}
+
+/// The GUI state the executor acts on.
 pub struct Osc99EffectSink<'a> {
     /// The shared toast stack.
     pub toasts: &'a mut ToastStack,
+    /// The Linux/BSD desktop-notification service.
+    pub system: &'a mut dyn Osc99SystemBackend,
     /// Panes to focus, collected in effect order.
     ///
     /// The executor has no window access, so [`Osc99Effect::FocusPane`] is
     /// recorded here and performed by the caller once it can reach the
     /// windows (the next `update()`).
     pub focus_requests: Vec<Osc99Origin>,
+    /// Instances whose [`Osc99Effect::ShowLinuxSystem`] the backend could not
+    /// queue, in effect order. The caller feeds each back to the registry as a
+    /// failed show. Always empty on macOS and Windows, which never produce
+    /// that effect (the field exists there only because the executor is
+    /// shared).
+    pub failed_system_shows: Vec<Osc99InstanceId>,
 }
 
 /// Execute `effects` in order against `sink`.
@@ -198,6 +358,16 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                 }
             }
             Osc99Effect::CloseToast(instance) => sink.toasts.close_keyed(instance.to_toast_key()),
+            Osc99Effect::ShowLinuxSystem {
+                instance,
+                replaces,
+                notification,
+            } => {
+                if sink.system.show(instance, replaces, &notification) == Osc99ShowDispatch::Failed
+                {
+                    sink.failed_system_shows.push(instance);
+                }
+            }
             Osc99Effect::FocusPane(origin) => sink.focus_requests.push(origin),
         }
     }
