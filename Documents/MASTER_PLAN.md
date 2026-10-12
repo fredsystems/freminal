@@ -503,7 +503,7 @@ was reverted and is tracked separately. All target stable kitty specs; v0.11.0 k
 
 **Tasks 102–105 and 126–147 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–132 and 147 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–132, 138 and 147 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -847,7 +847,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–147; audit + 126–132, 147 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–147; audit + 126–132, 138, 147 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)
