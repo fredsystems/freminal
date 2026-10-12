@@ -12,15 +12,13 @@
 //! [`TerminalHandler::reassemble_osc99`].
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 
 use freminal_common::buffer_states::osc_notify_99::{
-    MAX_OSC99_SEQUENCE_BYTES, NotificationUrgency, Osc99Command, Osc99PayloadEncoding,
-    Osc99PayloadType,
+    MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99ChunkState,
+    Osc99Command, Osc99PayloadEncoding, Osc99PayloadType, resolve_osc99_actions,
 };
 use freminal_common::buffer_states::osc99_notification::{
-    Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
-    Osc99ControlKind, Osc99Expiry, Osc99Sound,
+    Notification99Data, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
 };
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
@@ -130,7 +128,7 @@ impl PendingNotification {
     /// Append `payload` to the accumulator selected by `payload_type`,
     /// decoding it according to `encoding`.
     ///
-    /// For `Close`, `Alive`, and `Query` payload types nothing is accumulated
+    /// For `Close`, `Alive`, `Query`, and `Unknown` payload types nothing is accumulated
     /// (they are not chunked content payloads); only the metadata is updated
     /// (done by the caller).
     ///
@@ -149,8 +147,12 @@ impl PendingNotification {
             Osc99PayloadType::Body => &mut self.body,
             Osc99PayloadType::Icon => &mut self.icon,
             Osc99PayloadType::Buttons => &mut self.buttons,
-            // Non-accumulating types: Close, Alive, Query.
-            Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {
+            // Non-accumulating types: Close, Alive, Query, and Unknown (whose
+            // payload is discarded; its metadata still applies).
+            Osc99PayloadType::Close
+            | Osc99PayloadType::Alive
+            | Osc99PayloadType::Query
+            | Osc99PayloadType::Unknown => {
                 return Ok(());
             }
         };
@@ -211,23 +213,6 @@ pub struct FinalizedNotification {
     pub meta: Osc99Command,
 }
 
-/// Map the parsed `w=` value (milliseconds, `-1` = OS default) to an
-/// [`Osc99Expiry`].
-///
-/// `-1` is the spec's "OS default" sentinel and maps to
-/// [`Osc99Expiry::OsDefault`]; `0` means "never expire"; a positive value is
-/// the lifetime in milliseconds, clamped to [`u32::MAX`]. The parser rejects
-/// anything below `-1`, so any other negative value is not reachable; it is
-/// mapped to the OS default rather than relied upon to be absent.
-pub(in crate::terminal_handler) fn expiry_from_ms(expire_ms: i64) -> Osc99Expiry {
-    if expire_ms < 0 {
-        return Osc99Expiry::OsDefault;
-    }
-    // `try_from` only fails for values above `u32::MAX`, which clamp.
-    let clamped = u32::try_from(expire_ms).unwrap_or(u32::MAX);
-    NonZeroU32::new(clamped).map_or(Osc99Expiry::Never, Osc99Expiry::After)
-}
-
 /// Map the raw `s=` sound name to an [`Osc99Sound`].
 ///
 /// Unset and the well-known `system` both mean the daemon's default sound;
@@ -248,26 +233,14 @@ impl FinalizedNotification {
     /// title arrived; `icon_data` from `self.icon`; `buttons` from
     /// `self.buttons` (the split `p=buttons` payload);
     /// `icon_names`/`icon_cache_key`/`app_name`/`notification_types` from
-    /// `meta`; `activation_reporting`/`activation_focus` from `meta.actions`;
-    /// `close_reporting` from `meta.close_report`; `urgency` defaults to
-    /// `Normal` when unset; `occasion` passes through; `sound` and `expiry`
-    /// via [`sound_from_name`] and [`expiry_from_ms`].
+    /// `meta`; `activation_reporting`/`activation_focus` from
+    /// [`resolve_osc99_actions`] over `meta.action_edits` (default: focus
+    /// only); `close_reporting` defaults to `Silent`; `urgency` defaults to
+    /// `Normal`; `occasion` defaults to `Always`; `expiry` defaults to
+    /// `OsDefault`; `sound` via [`sound_from_name`].
     pub(in crate::terminal_handler) fn into_notification99_data(self) -> Notification99Data {
-        let activation_reporting = if self.meta.actions.report_activation {
-            Osc99ActivationReporting::Report
-        } else {
-            Osc99ActivationReporting::Silent
-        };
-        let activation_focus = if self.meta.actions.focus_on_activation {
-            Osc99ActivationFocus::Focus
-        } else {
-            Osc99ActivationFocus::NoFocus
-        };
-        let close_reporting = if self.meta.close_report {
-            Osc99CloseReporting::Report
-        } else {
-            Osc99CloseReporting::Silent
-        };
+        let (activation_reporting, activation_focus) =
+            resolve_osc99_actions(&self.meta.action_edits);
         Notification99Data {
             id: self.meta.id,
             title: self.title.unwrap_or_default(),
@@ -278,13 +251,16 @@ impl FinalizedNotification {
             buttons: self.buttons,
             activation_reporting,
             activation_focus,
-            close_reporting,
+            close_reporting: self
+                .meta
+                .close_reporting
+                .unwrap_or(Osc99CloseReporting::Silent),
             urgency: self.meta.urgency.unwrap_or(NotificationUrgency::Normal),
-            occasion: self.meta.occasion,
+            occasion: self.meta.occasion.unwrap_or(NotificationOccasion::Always),
             sound: sound_from_name(self.meta.sound),
             app_name: self.meta.app_name,
-            notification_types: self.meta.notification_type,
-            expiry: expiry_from_ms(self.meta.expire_ms),
+            notification_types: self.meta.notification_types,
+            expiry: self.meta.expiry.unwrap_or(Osc99Expiry::OsDefault),
         }
     }
 }
@@ -314,7 +290,8 @@ pub(in crate::terminal_handler) const fn control_kind(
         | Osc99PayloadType::Title
         | Osc99PayloadType::Body
         | Osc99PayloadType::Icon
-        | Osc99PayloadType::Buttons => None,
+        | Osc99PayloadType::Buttons
+        | Osc99PayloadType::Unknown => None,
     }
 }
 
@@ -331,7 +308,8 @@ pub(in crate::terminal_handler) const fn is_control_payload(
         Osc99PayloadType::Title
         | Osc99PayloadType::Body
         | Osc99PayloadType::Icon
-        | Osc99PayloadType::Buttons => false,
+        | Osc99PayloadType::Buttons
+        | Osc99PayloadType::Unknown => false,
     }
 }
 
@@ -346,7 +324,7 @@ pub(in crate::terminal_handler) const fn is_control_payload(
 /// only what is genuinely implemented (the truthful-advertisement rule from
 /// Task 76):
 ///
-/// - `a=report` (NOT `focus` — `focus_on_activation` is parsed but freminal
+/// - `a=report` (NOT `focus` — `a=focus` is parsed but freminal
 ///   does not act on it), present only when activation can be reported. With
 ///   no supported actions the `a` key is omitted entirely, per the spec's
 ///   query table ("If no actions are supported, the `a` key must be
@@ -491,7 +469,7 @@ impl TerminalHandler {
         match &chunk.id {
             // ── No id: standalone or drop ────────────────────────────────────
             None => {
-                if chunk.done {
+                if chunk.chunk_state == Osc99ChunkState::Done {
                     // Standalone, single-chunk notification — decode it
                     // through a temporary accumulator and finalize immediately.
                     let mut pending = PendingNotification::default();
@@ -518,7 +496,7 @@ impl TerminalHandler {
             Some(id) => {
                 let id = id.clone();
 
-                let done = chunk.done;
+                let done = chunk.chunk_state == Osc99ChunkState::Done;
 
                 if matches!(
                     self.pending_notifications.get(&id),
@@ -675,31 +653,35 @@ impl TerminalHandler {
 mod tests {
     use super::*;
     use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, Osc99Actions, parse_osc_99,
+        Osc99Action, Osc99ActionEdit, parse_osc_99,
+    };
+    use freminal_common::buffer_states::osc99_notification::{
+        Osc99ActivationFocus, Osc99ActivationReporting,
     };
     use freminal_common::host_capabilities::{
         Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99FocusAction, Osc99IconSupport,
         Osc99SoundNames, Osc99UrgencySupport,
     };
+    use std::num::NonZeroU32;
 
     /// Build a default `Osc99Command` for use in mapping tests.
     fn default_cmd() -> Osc99Command {
         Osc99Command {
             id: None,
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: Vec::new(),
             payload_encoding: Osc99PayloadEncoding::Plain,
-            actions: Osc99Actions::default(),
-            close_report: false,
+            action_edits: Vec::new(),
+            close_reporting: None,
             app_name: None,
             icon_cache_key: None,
             icon_names: Vec::new(),
-            occasion: NotificationOccasion::Always,
+            occasion: None,
             sound: None,
-            notification_type: Vec::new(),
+            notification_types: Vec::new(),
             urgency: None,
-            expire_ms: -1,
+            expiry: None,
         }
     }
 
@@ -770,7 +752,7 @@ mod tests {
         ] {
             let finalized = FinalizedNotification {
                 meta: Osc99Command {
-                    occasion,
+                    occasion: Some(occasion),
                     ..default_cmd()
                 },
                 ..default_finalized()
@@ -780,47 +762,10 @@ mod tests {
     }
 
     #[test]
-    fn expiry_minus_one_is_os_default() {
-        assert_eq!(expiry_from_ms(-1), Osc99Expiry::OsDefault);
-    }
-
-    #[test]
-    fn expiry_zero_is_never() {
-        assert_eq!(expiry_from_ms(0), Osc99Expiry::Never);
-    }
-
-    #[test]
-    fn expiry_positive_is_after_milliseconds() {
-        assert_eq!(
-            expiry_from_ms(5000),
-            Osc99Expiry::After(NonZeroU32::new(5000).unwrap())
-        );
-    }
-
-    #[test]
-    fn expiry_above_u32_max_clamps() {
-        let too_big = i64::from(u32::MAX) + 1;
-        assert_eq!(
-            expiry_from_ms(too_big),
-            Osc99Expiry::After(NonZeroU32::new(u32::MAX).unwrap())
-        );
-        assert_eq!(
-            expiry_from_ms(i64::MAX),
-            Osc99Expiry::After(NonZeroU32::new(u32::MAX).unwrap())
-        );
-    }
-
-    #[test]
-    fn expiry_other_negative_is_os_default() {
-        assert_eq!(expiry_from_ms(-2), Osc99Expiry::OsDefault);
-        assert_eq!(expiry_from_ms(i64::MIN), Osc99Expiry::OsDefault);
-    }
-
-    #[test]
     fn expiry_mapped_into_notification99_data() {
         let finalized = FinalizedNotification {
             meta: Osc99Command {
-                expire_ms: 5000,
+                expiry: Some(Osc99Expiry::After(NonZeroU32::new(5000).unwrap())),
                 ..default_cmd()
             },
             ..default_finalized()
@@ -886,11 +831,11 @@ mod tests {
             buttons: Vec::new(),
             meta: Osc99Command {
                 id: Some("id-1".to_owned()),
-                close_report: true,
-                actions: Osc99Actions {
-                    report_activation: true,
-                    focus_on_activation: false,
-                },
+                close_reporting: Some(Osc99CloseReporting::Report),
+                action_edits: vec![
+                    Osc99ActionEdit::Add(Osc99Action::Report),
+                    Osc99ActionEdit::Remove(Osc99Action::Focus),
+                ],
                 ..default_cmd()
             },
         };
@@ -911,6 +856,101 @@ mod tests {
         assert_eq!(data.activation_reporting, Osc99ActivationReporting::Silent);
         assert_eq!(data.activation_focus, Osc99ActivationFocus::Focus);
         assert_eq!(data.close_reporting, Osc99CloseReporting::Silent);
+    }
+
+    #[test]
+    fn action_edits_resolve_from_the_focus_only_default() {
+        let finalized = FinalizedNotification {
+            meta: Osc99Command {
+                action_edits: vec![Osc99ActionEdit::Add(Osc99Action::Report)],
+                ..default_cmd()
+            },
+            ..default_finalized()
+        };
+        let data = finalized.into_notification99_data();
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Report);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::Focus);
+    }
+
+    #[test]
+    fn close_reporting_unset_is_silent_and_explicit_values_pass_through() {
+        assert_eq!(
+            default_finalized()
+                .into_notification99_data()
+                .close_reporting,
+            Osc99CloseReporting::Silent
+        );
+        let reported = FinalizedNotification {
+            meta: Osc99Command {
+                close_reporting: Some(Osc99CloseReporting::Report),
+                ..default_cmd()
+            },
+            ..default_finalized()
+        };
+        assert_eq!(
+            reported.into_notification99_data().close_reporting,
+            Osc99CloseReporting::Report
+        );
+    }
+
+    #[test]
+    fn unset_occasion_and_expiry_take_their_defaults() {
+        let data = default_finalized().into_notification99_data();
+        assert_eq!(data.occasion, NotificationOccasion::Always);
+        assert_eq!(data.expiry, Osc99Expiry::OsDefault);
+    }
+
+    #[test]
+    fn notification_types_are_carried_through() {
+        let finalized = FinalizedNotification {
+            meta: Osc99Command {
+                notification_types: vec!["alert".to_owned(), "info".to_owned()],
+                ..default_cmd()
+            },
+            ..default_finalized()
+        };
+        assert_eq!(
+            finalized.into_notification99_data().notification_types,
+            vec!["alert".to_owned(), "info".to_owned()]
+        );
+    }
+
+    /// An unknown `p=` type discards its payload, but still finalizes on `d=1`
+    /// and its metadata still applies.
+    #[test]
+    fn unknown_payload_type_discards_payload_but_keeps_metadata() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            id: Some("u".to_owned()),
+            payload_type: Osc99PayloadType::Unknown,
+            payload: b"ignored".to_vec(),
+            urgency: Some(NotificationUrgency::Critical),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(cmd)
+            .expect("a done unknown chunk finalizes");
+        assert_eq!(finalized.title, None);
+        assert_eq!(finalized.body, None);
+        assert_eq!(finalized.icon, None);
+        assert_eq!(finalized.meta.urgency, Some(NotificationUrgency::Critical));
+    }
+
+    #[test]
+    fn unknown_payload_type_chunk_with_d0_stays_pending_without_content() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            id: Some("u".to_owned()),
+            payload_type: Osc99PayloadType::Unknown,
+            chunk_state: Osc99ChunkState::More,
+            payload: b"ignored".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(cmd).is_none());
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_notifications.get("u") else {
+            panic!("entry should be accumulating");
+        };
+        assert_eq!(entry.accumulated_len(), 0);
     }
 
     // ── 99.9: button-label extraction ────────────────────────────────────────
@@ -967,7 +1007,7 @@ mod tests {
         let chunk1 = Osc99Command {
             id: Some("btn-1".to_owned()),
             payload_type: Osc99PayloadType::Buttons,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: "Yes\u{2028}N".as_bytes().to_vec(),
             ..default_cmd()
         };
@@ -977,7 +1017,7 @@ mod tests {
         let chunk2 = Osc99Command {
             id: Some("btn-1".to_owned()),
             payload_type: Osc99PayloadType::Buttons,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"o".to_vec(),
             ..default_cmd()
         };
@@ -1009,6 +1049,12 @@ mod tests {
             control_kind(Osc99PayloadType::Alive),
             Some(Osc99ControlKind::Alive)
         );
+    }
+
+    #[test]
+    fn control_kind_maps_unknown_to_none() {
+        assert_eq!(control_kind(Osc99PayloadType::Unknown), None);
+        assert!(!is_control_payload(Osc99PayloadType::Unknown));
     }
 
     #[test]
@@ -1047,7 +1093,7 @@ mod tests {
             let chunk = Osc99Command {
                 id: Some(format!("id-{i}")),
                 payload_type: Osc99PayloadType::Title,
-                done: false,
+                chunk_state: Osc99ChunkState::More,
                 payload: b"x".to_vec(),
                 ..default_cmd()
             };
@@ -1062,7 +1108,7 @@ mod tests {
         let overflow = Osc99Command {
             id: Some("overflow".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"x".to_vec(),
             ..default_cmd()
         };
@@ -1076,7 +1122,7 @@ mod tests {
         let finish = Osc99Command {
             id: Some("id-0".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"y".to_vec(),
             ..default_cmd()
         };
@@ -1092,7 +1138,7 @@ mod tests {
         let chunk1 = Osc99Command {
             id: Some(id.clone()),
             payload_type: Osc99PayloadType::Body,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: vec![b'a'; 1024],
             ..default_cmd()
         };
@@ -1104,7 +1150,7 @@ mod tests {
         let chunk2 = Osc99Command {
             id: Some(id.clone()),
             payload_type: Osc99PayloadType::Body,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: vec![b'b'; MAX_OSC99_NOTIFICATION_BYTES],
             ..default_cmd()
         };
@@ -1121,7 +1167,7 @@ mod tests {
         let chunk = Osc99Command {
             id: Some(id.clone()),
             payload_type: Osc99PayloadType::Body,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"hello".to_vec(),
             ..default_cmd()
         };
@@ -1142,7 +1188,7 @@ mod tests {
         let done = Osc99Command {
             id: Some(id),
             payload_type: Osc99PayloadType::Body,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: Vec::new(),
             ..default_cmd()
         };

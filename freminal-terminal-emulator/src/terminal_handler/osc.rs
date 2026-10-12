@@ -276,8 +276,8 @@ mod tests {
     use crate::state::internal::TerminalState;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command,
-        Osc99PayloadEncoding, Osc99PayloadType,
+        NotificationOccasion, NotificationUrgency, Osc99Action, Osc99ActionEdit, Osc99ChunkState,
+        Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
     };
     use freminal_common::buffer_states::osc99_notification::{
         Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind,
@@ -363,19 +363,19 @@ mod tests {
         Osc99Command {
             id: None,
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: Vec::new(),
             payload_encoding: Osc99PayloadEncoding::Plain,
-            actions: Osc99Actions::default(),
-            close_report: false,
+            action_edits: Vec::new(),
+            close_reporting: None,
             app_name: None,
             icon_cache_key: None,
             icon_names: Vec::new(),
-            occasion: NotificationOccasion::Always,
+            occasion: None,
             sound: None,
-            notification_type: Vec::new(),
+            notification_types: Vec::new(),
             urgency: None,
-            expire_ms: -1,
+            expiry: None,
         }
     }
 
@@ -406,7 +406,7 @@ mod tests {
         let chunk1 = Osc99Command {
             id: Some("n1".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"He".to_vec(),
             ..default_osc99()
         };
@@ -417,7 +417,7 @@ mod tests {
         let chunk2 = Osc99Command {
             id: Some("n1".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"llo".to_vec(),
             ..default_osc99()
         };
@@ -428,7 +428,7 @@ mod tests {
         let chunk3 = Osc99Command {
             id: Some("n1".to_owned()),
             payload_type: Osc99PayloadType::Body,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"World".to_vec(),
             ..default_osc99()
         };
@@ -472,7 +472,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         let cmd = Osc99Command {
             id: None,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"ignored".to_vec(),
             ..default_osc99()
         };
@@ -493,7 +493,7 @@ mod tests {
         let a1 = Osc99Command {
             id: Some("a".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"AAA".to_vec(),
             ..default_osc99()
         };
@@ -503,7 +503,7 @@ mod tests {
         let b1 = Osc99Command {
             id: Some("b".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"BBB".to_vec(),
             ..default_osc99()
         };
@@ -513,7 +513,7 @@ mod tests {
         let a2 = Osc99Command {
             id: Some("a".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"aaa".to_vec(),
             ..default_osc99()
         };
@@ -525,7 +525,7 @@ mod tests {
         let b2 = Osc99Command {
             id: Some("b".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"bbb".to_vec(),
             ..default_osc99()
         };
@@ -542,7 +542,7 @@ mod tests {
         // Accumulate a non-final chunk.
         let chunk = Osc99Command {
             id: Some("pending".to_owned()),
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"partial".to_vec(),
             ..default_osc99()
         };
@@ -655,13 +655,13 @@ mod tests {
         let cmd = Osc99Command {
             id: Some("notif-1".to_owned()),
             urgency: Some(NotificationUrgency::Critical),
-            occasion: NotificationOccasion::Unfocused,
-            expire_ms: 3000,
-            close_report: true,
-            actions: Osc99Actions {
-                report_activation: true,
-                focus_on_activation: false,
-            },
+            occasion: Some(NotificationOccasion::Unfocused),
+            expiry: Some(Osc99Expiry::After(std::num::NonZeroU32::new(3000).unwrap())),
+            close_reporting: Some(Osc99CloseReporting::Report),
+            action_edits: vec![
+                Osc99ActionEdit::Add(Osc99Action::Report),
+                Osc99ActionEdit::Remove(Osc99Action::Focus),
+            ],
             payload: b"Body text".to_vec(),
             payload_type: Osc99PayloadType::Body,
             ..default_osc99()
@@ -687,7 +687,7 @@ mod tests {
         }
     }
 
-    /// A non-final chunk (`done: false`, with an id) must not push a window
+    /// A non-final chunk (`chunk_state: More`, with an id) must not push a window
     /// command — it is still awaiting more chunks.
     #[test]
     fn osc_notify99_non_final_chunk_does_not_push_window_command() {
@@ -695,7 +695,7 @@ mod tests {
 
         let cmd = Osc99Command {
             id: Some("pending-1".to_owned()),
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: b"partial".to_vec(),
             ..default_osc99()
         };
@@ -710,7 +710,7 @@ mod tests {
         // empty assertion above is not vacuous.
         let last = Osc99Command {
             id: Some("pending-1".to_owned()),
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"-rest".to_vec(),
             ..default_osc99()
         };

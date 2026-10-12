@@ -5766,7 +5766,25 @@ None yet.
 
 ### 138 Status notes
 
-None yet.
+- **138.1 (done, `ba222d95`).** Types as decided; `window_manipulation.rs` re-exports
+  `Notification99Data` / `Osc99ControlKind` from the new module. Out-of-scope edits accepted
+  as mechanical: `Osc99Features` struct literals in test fixtures in
+  `terminal_handler/mod.rs`, `gui/pty.rs` and `tests/osc99_query.rs`. Intended observable
+  changes: `s=system` no longer forwards a `"system"` sound name, and an empty title falls back
+  to the body. `route_osc99_unrecognised_occasion_treated_as_always` was deleted because it can
+  no longer be written (`NotificationOccasion` is exhaustive). The toast-title fallback test
+  can only check the toast count; 138.7 adds title/detail assertions. Orchestrator change: the
+  `Osc99SoundNames::Standard` doc names the OSC 99 standard sounds, not freedesktop sounds.
+- **138.2 (done).** `ParseState` is removed; the parser fills `Osc99Command` directly, so there
+  is no mirror struct and no `bool`. `osc99_expiry_from_ms` and `resolve_osc99_actions` are
+  public in `osc_notify_99.rs` (one implementation each). Malformed tokens still count toward
+  the 64-item cap. An empty `c`/`d`/`e`/`o`/`u`/`w`/`i`/`g` is ignored, and an empty `p=` is
+  `Unknown`. Two orchestrator changes:
+  - an `f`/`n`/`s`/`t` value that decodes to the empty string is ignored (kitty treats an empty
+    name as unset);
+  - the payload is copied only after the metadata is accepted.
+
+  The pre-existing `abandon_notification(.., done: bool)` parameter is removed by 138.3.
 
 ---
 

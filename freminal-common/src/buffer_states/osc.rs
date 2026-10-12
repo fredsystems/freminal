@@ -1035,25 +1035,24 @@ mod tests {
     #[test]
     fn display_ansi_osc_notify99() {
         use crate::buffer_states::osc_notify_99::{
-            NotificationOccasion, Osc99Actions, Osc99Command, Osc99PayloadEncoding,
-            Osc99PayloadType,
+            Osc99ChunkState, Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
         };
         let cmd = Osc99Command {
             id: Some("abc".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"Hello".to_vec(),
             payload_encoding: Osc99PayloadEncoding::Plain,
-            actions: Osc99Actions::default(),
-            close_report: false,
+            action_edits: Vec::new(),
+            close_reporting: None,
             app_name: None,
             icon_cache_key: None,
             icon_names: Vec::new(),
-            occasion: NotificationOccasion::Always,
+            occasion: None,
             sound: None,
-            notification_type: Vec::new(),
+            notification_types: Vec::new(),
             urgency: None,
-            expire_ms: -1,
+            expiry: None,
         };
         let s = AnsiOscType::Notify99(cmd).to_string();
         assert!(s.contains("Notify99"), "got: {s}");
