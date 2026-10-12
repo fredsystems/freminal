@@ -6483,6 +6483,96 @@ Execution order: 138.C6, C7, C8, C9, C11, C12, C10, C13, C14, C15, C16. Each goe
 sub-agent implementation, orchestrator review and the verification suite. A confirmation
 review of the cleanup diff follows.
 
+#### 138.C18 — PTY follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, PTY findings N2, N3, N4, N5 and N8.
+- **Fix:**
+  - **N3, name lengths.** The parser caps a decoded `f=`, `s=`, `n=` or `t=` value at 256
+    characters and ignores a longer one. This bounds the scalar metadata outside the
+    pending budget.
+  - **N4, rejected id-less chunk.** A rejected `d=0` chunk with no id tombstones the
+    unidentified slot even when nothing is pending, so the rest of that transfer cannot
+    assemble a truncated notification. A rejected final chunk with no id stays a no-op.
+  - **N5, doc.** The `Osc99Closing::Requested` doc is corrected to match how `alive` behaves.
+  - **N8, strip order.** The strip-then-limit order is documented as a deliberate difference
+    from kitty, which limits first. freminal keeps more printable characters, and it
+    promotes the body when the title strips to nothing.
+  - **N2, size cap.** A chunk over 1 MiB is dropped silently by the OSC accumulator, before
+    OSC 99 sees it. The spec limits chunks to 4096 bytes, so only a non-conforming sender is
+    affected. Reviewed and documented, not a defect. The P4 status wording and the
+    rejected-oversized test's doc say that the path is reachable only from a direct call.
+- **Tests:** a long `f=` is ignored; a rejected id-less `d=0` chunk tombstones the slot.
+
+#### 138.C19 — GUI follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, GUI findings N1, N6 and N7.
+- **Fix:**
+  - **N1, pruned panes.** `prune_dead_panes` returns close effects for the open legs of the
+    instances it prunes, so a `w=` toast does not outlive its pane. The glue applies them.
+  - **N6, focus and deferral tests.** The window calls of the focus drain go through a small
+    trait whose test double records call order (un-minimise before focus). The busy-cell
+    deferral decision is a plain function and is tested.
+  - **N7, copies.** `register` takes the notification by value, so the `Arc` is built
+    without copying it. Icon primes are consumed.
+- **Tests:** one per item.
+
+#### 138.C20 — D-Bus follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, D-Bus findings 1, 2 and 7.
+- **Fix:**
+  - **Reconnect (1).** While unavailable, after a failed connect or lost signals, the
+    dispatcher retries connecting every 30 s on its own timer (`recv_timeout`), with no
+    `Show` needed. A successful reconnect emits `Capabilities`, so the GUI's daemon state
+    becomes available again and the capabilities are re-broadcast. The surviving pump and
+    the connection from the lost session are closed.
+  - **Breaker wiring (2).** Dispatcher-level tests cover the `Skip` branches (show, close,
+    replaced close, capability refresh), with the breaker forced open.
+  - **Icon scan (7).** The XDG scan starts on the first notification that carries `n=` or
+    `f=`, not with the service. The decoded-icon cache key is length-prefixed.
+- **Tests:** reconnect after a failed connect through an injectable connect closure and
+  clock; the breaker branches.
+
+#### 138.C21 — macOS/Windows and toast follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, toast/platform findings 4, 5 and 6.
+- **Fix:**
+  - **Ownership (4).** On Unix, an existing icon directory must also be owned by the current
+    user. The uid is taken from a probe file created in the parent temp directory and
+    compared with the directory's uid (`MetadataExt::uid`, no unsafe code).
+  - **Stale directories (5).** On first use, sibling `freminal-osc99-icons-*` directories
+    that pass the same checks and are more than a day old are removed.
+  - **Fade-out (6).** `close_keyed` starts the exit fade instead of removing the toast. The
+    toast is removed, and `Closed` is emitted, when the fade completes.
+- **Tests:** a foreign-owned directory is refused (if a foreign uid cannot be made in a
+  test, the comparison is unit-tested); the sweep removes old directories and keeps fresh
+  ones; `close_keyed` fades, then emits `Closed` once.
+
+#### 138.C22 — Documentation follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, docs findings 3, D12 and D11 (`opencode.json`).
+- **Fix:**
+  - COVERAGE's "urgency is advertised on Windows only" is removed.
+  - The COVERAGE header range becomes 138.C6–138.C22.
+  - The MASTER_PLAN note is updated.
+  - The 138.C12 `wake.rs` line count is marked "at commit time".
+  - `opencode.json`'s `cargo test --all` becomes `cargo xtask test`.
+  - The reconnect and scan docs follow 138.C20.
+  - Runs after 138.C18–C21.
+
+### 138 Confirmation review (2026-10-12)
+
+Two CODE-REVIEW passes over `1986117d..HEAD` checked every finding in the table above.
+
+- **Verified:** every finding, with the partials below.
+- **P4:** partial; see C18 N2.
+- **P14:** partial. The integration test cannot reach `host_capabilities`, which lives in
+  another crate; that is documented and accepted.
+- **G6:** partial; see C19 N6.
+- **G13:** partial; see C19 N7.
+- **D12:** partial; see C22.
+
+The new findings are disposed of in 138.C18–C22.
+
 ### 138 Status notes
 
 - **138.1 (done, `061cdc39`).** Types as decided; `window_manipulation.rs` re-exports
