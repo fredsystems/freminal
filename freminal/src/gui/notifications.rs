@@ -40,8 +40,8 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99Effect, Osc99Leg, Osc99PaneState, Osc99Registry, PaneKeyboardFocus,
-    PaneVisibility,
+    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99Leg, Osc99PaneState, Osc99Registry,
+    PaneKeyboardFocus, PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -658,7 +658,9 @@ impl NotificationRouter {
     /// Task 99.8), or when the occasion gate says the notification should
     /// not be displayed right now (in which case it is also not recorded in
     /// `registry` — an occasion-suppressed notification never happened as
-    /// far as later update/close tracking is concerned). The toast and
+    /// far as later update/close tracking is concerned), or when the user's
+    /// `osc99_filters` (held by `registry`) drop it (likewise not recorded,
+    /// and no reply is sent). The toast and
     /// system legs are additionally gated per-leg by
     /// [`NotificationsConfig::routing_osc99`] (3.3/3.4), mirroring
     /// [`Self::route`]; a request routed [`NotificationRouting::Disabled`]
@@ -701,6 +703,14 @@ impl NotificationRouter {
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
+            return Vec::new();
+        }
+
+        // User filter (`osc99_filters`), after the occasion check as in
+        // kitty. A dropped notification is displayed nowhere, registered
+        // nowhere and answered with nothing.
+        if registry.filter_verdict(data) == Osc99FilterVerdict::Drop {
+            tracing::debug!(id = ?data.id, "OSC 99 notification dropped by osc99_filters");
             return Vec::new();
         }
 
@@ -1085,7 +1095,9 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::gui::osc99::{Osc99EffectSink, Osc99Origin, apply_osc99_effects, osc99_toast_spec};
+    use crate::gui::osc99::{
+        Osc99EffectSink, Osc99Filter, Osc99Origin, apply_osc99_effects, osc99_toast_spec,
+    };
     use freminal_common::buffer_states::osc99_notification::Osc99ActivationFocus;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
@@ -2388,6 +2400,148 @@ mod tests {
 
         assert_eq!(toasts.len(), 0);
         assert!(registry.instances().is_empty());
+    }
+
+    /// Install the compiled `rules` as `registry`'s user filter.
+    fn set_filter(registry: &mut Osc99Registry, rules: &[&str]) {
+        let owned: Vec<String> = rules.iter().map(|r| (*r).to_owned()).collect();
+        let (filter, errors) = Osc99Filter::compile(&owned);
+        assert_eq!(errors, Vec::new(), "unexpected filter errors");
+        registry.set_filter(filter);
+    }
+
+    #[test]
+    fn route_osc99_filtered_notification_produces_no_effects_and_registers_nothing() {
+        let config = enabled_config(0.0);
+        let mut icon_cache = HashMap::new();
+        let mut registry = Osc99Registry::default();
+        set_filter(&mut registry, &["title:^Spam"]);
+        let data = Notification99Data {
+            id: Some("filtered".to_owned()),
+            title: "Spam offer".to_owned(),
+            // Even a notification that asks to be reported on gets nothing.
+            activation_reporting: Osc99ActivationReporting::Report,
+            close_reporting: Osc99CloseReporting::Report,
+            ..default_n99()
+        };
+
+        let effects = NotificationRouter::route_osc99(
+            &osc99_request(&data),
+            &config,
+            focused_ctx(),
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        assert!(
+            effects.is_empty(),
+            "a filtered notification yields no toast and no reply: {effects:?}"
+        );
+        assert!(registry.instances().is_empty());
+        let alive = registry.alive(osc99_request(&data).origin, "poll".to_owned(), Weak::new());
+        let [
+            Osc99Effect::Reply {
+                reply: GuiReply::Osc99Alive { live_ids, .. },
+                ..
+            },
+        ] = alive.as_slice()
+        else {
+            panic!("p=alive answers with exactly one alive reply: {alive:?}");
+        };
+        assert!(live_ids.is_empty(), "a filtered notification is not alive");
+    }
+
+    #[test]
+    fn route_osc99_unfiltered_notification_still_displays_beside_a_filtered_one() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut registry = Osc99Registry::default();
+        set_filter(&mut registry, &["title:^Spam"]);
+        let spam = Notification99Data {
+            id: Some("spam".to_owned()),
+            title: "Spam offer".to_owned(),
+            ..default_n99()
+        };
+        let wanted = Notification99Data {
+            id: Some("wanted".to_owned()),
+            title: "Build finished".to_owned(),
+            ..default_n99()
+        };
+
+        for data in [&spam, &wanted] {
+            route_osc99_into(
+                &osc99_request(data),
+                &config,
+                focused_ctx(),
+                &mut toasts,
+                &mut icon_cache,
+                &mut registry,
+            );
+        }
+
+        assert_eq!(toasts.len(), 1, "only the unfiltered notification shows");
+        let [entry] = registry.instances() else {
+            panic!("only the unfiltered notification is registered");
+        };
+        assert_eq!(entry.id.as_deref(), Some("wanted"));
+    }
+
+    #[test]
+    fn route_osc99_filter_runs_after_the_occasion_check_and_the_kill_switches() {
+        // A `Drop` verdict must not change what a non-displayed notification
+        // does today: the master switch and kill-switch still short-circuit.
+        let config = NotificationsConfig {
+            osc_99: false,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut registry = Osc99Registry::default();
+        set_filter(&mut registry, &["all"]);
+
+        route_osc99_into(
+            &osc99_request(&default_n99()),
+            &config,
+            focused_ctx(),
+            &mut toasts,
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(registry.instances().is_empty());
+    }
+
+    #[test]
+    fn route_osc99_replacing_the_filter_takes_effect_for_the_next_notification() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut registry = Osc99Registry::default();
+        let data = default_n99();
+
+        set_filter(&mut registry, &["all"]);
+        route_osc99_into(
+            &osc99_request(&data),
+            &config,
+            focused_ctx(),
+            &mut toasts,
+            &mut icon_cache,
+            &mut registry,
+        );
+        assert_eq!(toasts.len(), 0);
+
+        registry.set_filter(Osc99Filter::default());
+        route_osc99_into(
+            &osc99_request(&data),
+            &config,
+            focused_ctx(),
+            &mut toasts,
+            &mut icon_cache,
+            &mut registry,
+        );
+        assert_eq!(toasts.len(), 1);
     }
 
     #[test]

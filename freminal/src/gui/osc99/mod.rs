@@ -9,6 +9,7 @@
 //! pane was in ([`Osc99PaneState`]), and the request structs that carry both
 //! from the per-frame drain to the router.
 
+mod filter;
 mod registry;
 
 use std::sync::Weak;
@@ -28,6 +29,7 @@ use crate::gui::toast::{
     ToastContent, ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack,
 };
 
+pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub use registry::Osc99Registry;
 
 /// The registry's identity for one displayed notification.

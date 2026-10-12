@@ -5936,6 +5936,16 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   before toast events are delivered; the next deadline is folded into the window's repaint
   scheduling. `Osc99DisplayContext` carries `now`, so `register` measures the deadline from
   display. A busy cell retries after 16 ms.
+- **138.11 (done).** `osc99_filters` is wired through every step of the config checklist:
+  the field, the guard-test mutation, a load-path test, the Settings editor (which keeps a
+  text buffer apart from the draft `Vec`, so blank lines can be typed), `config_example.toml`
+  and the Nix option (nixfmt, statix and deadnix clean).
+  - The compiled filter lives in `Osc99Registry`. It is checked after the occasion gate, is
+    compiled at startup, and is recompiled on config apply only when the rules change.
+  - Regexes are built with a 1 MiB size limit.
+  - The Settings window is a separate OS window, so modal input suppression does not apply.
+  - A pre-existing gap the sub-agent found, the Nix module missing
+    `command_finished_template`, is routed to 147.28.
 
 ---
 
@@ -6562,6 +6572,19 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   (double reversal shows the default background), via the `.#gl-pixel` harness.
 - **Depends on:** nothing.
 
+#### 147.28 — Nix module lacks `[notifications] command_finished_template`
+
+- **Source:** Task 138.11 (sub-agent report, confirmed by the orchestrator). Predates 138.
+- **Defect today:** `NotificationsConfig::command_finished_template`
+  (`freminal-common/src/config.rs`) and `config_example.toml` both have the key, but
+  `nix/home-manager-module.nix` has no option for it. Managed installs cannot set it, against
+  `freminal-config-options` step 5.
+- **Scope:** `nix/home-manager-module.nix` only: the option, plus its entry in the
+  notifications section binding.
+- **Tests:** `nixfmt --check`, `statix check`, `deadnix --fail`; evaluate a module config that
+  sets the key and check it reaches the generated TOML.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -6638,7 +6661,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26 and 147.27 are independent.
+- 147.19, 147.26, 147.27 and 147.28 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a

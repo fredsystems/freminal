@@ -16,6 +16,24 @@ use super::visual_preview::{
 };
 
 impl FreminalGui {
+    /// Recompile the OSC 99 user filter when `new_cfg` changes
+    /// `[notifications] osc99_filters`, logging each invalid rule.
+    ///
+    /// Compares against `self.config`, so it must run before `self.config`
+    /// is replaced.
+    fn apply_osc99_filters(&self, new_cfg: &Config) {
+        if new_cfg.notifications.osc99_filters == self.config.notifications.osc99_filters {
+            return;
+        }
+        let filter =
+            super::osc99::Osc99Filter::compile_logged(&new_cfg.notifications.osc99_filters);
+        if let Ok(mut registry) = self.osc99_registry.try_borrow_mut() {
+            registry.set_filter(filter);
+        } else {
+            warn!("OSC 99 registry busy; osc99_filters change not applied");
+        }
+    }
+
     /// Replace `self.config` with `new_cfg` and broadcast every derived
     /// state change — theme, font, keybindings, URL detection, background
     /// image, shader source, opacity, and theme-mode updates — to every
@@ -186,6 +204,8 @@ impl FreminalGui {
                 }
             }
         }
+
+        self.apply_osc99_filters(&new_cfg);
 
         self.config = new_cfg;
 

@@ -174,6 +174,7 @@ let
           routing_recording
           routing_paste_blocked
           routing_config_reload
+          osc99_filters
           ;
       };
 
@@ -1073,6 +1074,23 @@ in
             Routing for the "config reloaded" toast: "toast" (in-app only)
             or "disabled" (suppress).
             Null uses the default ("toast").
+          '';
+        };
+
+        osc99_filters = mkOption {
+          type = types.nullOr (types.listOf types.str);
+          default = null;
+          description = ''
+            Filters for OSC 99 (kitty stateful) notifications, one rule per
+            entry. A rule is either "all" (matches every notification) or
+            "location:regex", where location is "title", "body", "app" (the
+            application name) or "type" (matches if any of the notification's
+            types matches). The regex is a Rust regular expression searched
+            within the field; matching is case-sensitive, so prefix the
+            pattern with (?i) to ignore case. A notification matching any
+            rule is dropped silently, with no reply. Invalid rules are logged
+            and ignored.
+            Null uses the default (no filters).
           '';
         };
       };

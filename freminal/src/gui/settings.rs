@@ -6,6 +6,7 @@
 use super::font_manager;
 use super::hover_cursor::HoverAffordance;
 use super::icons::ChromeIcon;
+use super::osc99::Osc99Filter;
 use super::visual_preview::{PreviewTrigger, VisualPreview};
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
@@ -310,6 +311,17 @@ pub struct SettingsModal {
     /// notification through the draft `[notifications]` config.
     pending_test_notification: bool,
 
+    /// The text box behind `[notifications] osc99_filters`: one rule per
+    /// line, exactly as typed. Kept apart from the draft's `Vec<String>`
+    /// because that form drops blank lines, which would make it impossible
+    /// to start a new line. [`Self::show_osc99_filters_editor`] re-derives it
+    /// whenever the draft rules stop matching it (open, reload, reset).
+    osc99_filters_text: String,
+
+    /// Why each rule in `osc99_filters_text` that cannot be compiled is
+    /// invalid, ready to display. Refreshed alongside the text.
+    osc99_filters_errors: Vec<String>,
+
     /// Set by `show_security_tab` when the user clicks "Test Paste".  Consumed
     /// by `show` / `show_standalone` which return it as
     /// `SettingsAction::TestPaste` so the app can open the confirm dialog with
@@ -340,6 +352,8 @@ impl SettingsModal {
             baseline_toml: String::new(),
             pending_close: PendingClose::None,
             pending_test_notification: false,
+            osc99_filters_text: String::new(),
+            osc99_filters_errors: Vec::new(),
             pending_test_paste: false,
         }
     }
@@ -1937,6 +1951,7 @@ impl SettingsModal {
             &mut self.draft.notifications.routing_osc_text,
         );
         Self::notification_routing_row(ui, "OSC 99", &mut self.draft.notifications.routing_osc99);
+        self.show_osc99_filters_editor(ui);
         Self::notification_routing_row(
             ui,
             "Command finished",
@@ -1982,6 +1997,57 @@ impl SettingsModal {
             "Mirrors the toggle in the Bell tab. The bell mode is configured \
              there.",
         );
+    }
+
+    /// Render the "OSC 99 filters" editor: a multi-line box with one
+    /// `[notifications] osc99_filters` rule per line, and the rules that
+    /// cannot be compiled listed beneath it.
+    fn show_osc99_filters_editor(&mut self, ui: &mut Ui) {
+        // The draft changed under the text box (Settings opened, config
+        // reloaded, defaults restored): show the draft's rules.
+        if Osc99Filter::rules_from_text(&self.osc99_filters_text)
+            != self.draft.notifications.osc99_filters
+        {
+            self.osc99_filters_text =
+                Osc99Filter::rules_to_text(&self.draft.notifications.osc99_filters);
+            self.refresh_osc99_filters_errors();
+        }
+
+        ui.add_space(12.0);
+        ui.heading("OSC 99 filters");
+        ui.label("Drop matching kitty notifications (one rule per line):");
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.osc99_filters_text)
+                .desired_width(f32::INFINITY)
+                .desired_rows(4)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("app:^slack$\ntype:^im\\.\ntitle:(?i)spam"),
+        );
+        if response.changed() {
+            self.draft.notifications.osc99_filters =
+                Osc99Filter::rules_from_text(&self.osc99_filters_text);
+            self.refresh_osc99_filters_errors();
+        }
+
+        let error_color = ui.visuals().error_fg_color;
+        for error in &self.osc99_filters_errors {
+            ui.colored_label(error_color, format!("Ignored rule {error}"));
+        }
+
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Each rule is `all` or `location:regex` with location title, \
+             body, app or type. A notification matching any rule is dropped \
+             silently, with no reply. Matching is a case-sensitive regex \
+             search; use (?i) for case-insensitive. Invalid rules are ignored.",
+        );
+    }
+
+    /// Recompute the invalid-rule messages from the draft's rules.
+    fn refresh_osc99_filters_errors(&mut self) {
+        let (_, errors) = Osc99Filter::compile(&self.draft.notifications.osc99_filters);
+        self.osc99_filters_errors = errors.iter().map(ToString::to_string).collect();
     }
 
     /// Render the "Freminal toasts" subsection: routing rows for the

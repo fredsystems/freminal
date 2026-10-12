@@ -59,7 +59,10 @@ use freminal_common::buffer_states::osc99_notification::{
 use freminal_common::buffer_states::window_manipulation::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
-use super::{Osc99Effect, Osc99InstanceId, Osc99Leg, Osc99Origin, osc99_toast_spec};
+use super::{
+    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99InstanceId, Osc99Leg, Osc99Origin,
+    osc99_toast_spec,
+};
 use crate::gui::panes::PaneId;
 use crate::gui::toast::{ToastEvent, ToastEventKind};
 
@@ -191,9 +194,27 @@ pub struct Osc99Registry {
     instances: Vec<Osc99Instance>,
     /// The raw value the next [`Osc99InstanceId`] is built from.
     next_instance: u64,
+    /// The compiled `osc99_filters`. The router consults it through
+    /// [`Self::filter_verdict`] before it displays or registers anything.
+    filter: Osc99Filter,
 }
 
 impl Osc99Registry {
+    /// Replace the compiled user filter (`[notifications] osc99_filters`).
+    ///
+    /// Already-registered instances are unaffected: the filter only decides
+    /// whether a *new* notification is displayed.
+    pub fn set_filter(&mut self, filter: Osc99Filter) {
+        self.filter = filter;
+    }
+
+    /// Whether the user filter drops `data`. A dropped notification is
+    /// neither displayed, registered, nor answered.
+    #[must_use]
+    pub fn filter_verdict(&self, data: &Notification99Data) -> Osc99FilterVerdict {
+        self.filter.matches(data)
+    }
+
     /// Record a displayed notification and return the effects that show it.
     ///
     /// Callers register only when at least one leg displayed it; `legs`
@@ -747,6 +768,55 @@ mod tests {
     }
 
     // ── registration and updates ────────────────────────────────────────
+
+    fn filter_of(rules: &[&str]) -> Osc99Filter {
+        let owned: Vec<String> = rules.iter().map(|r| (*r).to_owned()).collect();
+        let (filter, errors) = Osc99Filter::compile(&owned);
+        assert_eq!(errors, Vec::new(), "unexpected filter errors");
+        filter
+    }
+
+    #[test]
+    fn a_fresh_registry_keeps_everything() {
+        let registry = Osc99Registry::default();
+        assert_eq!(
+            registry.filter_verdict(&data(Some("a"))),
+            Osc99FilterVerdict::Keep
+        );
+    }
+
+    #[test]
+    fn the_filter_verdict_follows_the_installed_filter() {
+        let mut registry = Osc99Registry::default();
+        registry.set_filter(filter_of(&["title:^Title$"]));
+        assert_eq!(
+            registry.filter_verdict(&data(Some("a"))),
+            Osc99FilterVerdict::Drop
+        );
+
+        let other = Notification99Data {
+            title: "Other".to_owned(),
+            ..data(Some("b"))
+        };
+        assert_eq!(registry.filter_verdict(&other), Osc99FilterVerdict::Keep);
+
+        registry.set_filter(Osc99Filter::default());
+        assert_eq!(
+            registry.filter_verdict(&data(Some("a"))),
+            Osc99FilterVerdict::Keep
+        );
+    }
+
+    #[test]
+    fn replacing_the_filter_leaves_registered_instances_alone() {
+        let (pane, _) = two_panes();
+        let mut registry = Osc99Registry::default();
+        register(&mut registry, &pane, Some("kept"));
+
+        registry.set_filter(filter_of(&["all"]));
+
+        assert_eq!(ids_in_registry(&registry, &pane), vec![Some("kept".into())]);
+    }
 
     #[test]
     fn a_new_toast_instance_shows_a_toast_replacing_nothing() {

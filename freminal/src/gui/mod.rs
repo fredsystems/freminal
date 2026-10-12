@@ -551,6 +551,13 @@ impl FreminalGui {
         let shader_preview_debounce =
             visual_preview::DebouncedPreview::new(applied_preview.shader_path.clone());
 
+        // The user's OSC 99 filter rules, compiled once from the loaded
+        // config (and again on every config apply). Invalid rules are logged.
+        let mut osc99_registry = osc99::Osc99Registry::default();
+        osc99_registry.set_filter(osc99::Osc99Filter::compile_logged(
+            &config.notifications.osc99_filters,
+        ));
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
@@ -599,7 +606,7 @@ impl FreminalGui {
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
             osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
-            osc99_registry: std::cell::RefCell::new(osc99::Osc99Registry::default()),
+            osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
