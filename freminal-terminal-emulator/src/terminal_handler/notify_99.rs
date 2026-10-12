@@ -69,6 +69,12 @@ pub(in crate::terminal_handler) struct PendingNotification {
     /// stored command is always empty: the accumulators above are
     /// authoritative.
     meta: Option<Osc99Command>,
+    /// Running cost of the list-valued metadata in `meta` (`n=` names, `t=`
+    /// types and `a=` edits), charged once per newly merged entry at
+    /// [`OSC99_LIST_ENTRY_OVERHEAD`] plus the entry's byte length. Kept as a
+    /// counter so a chunk costs time proportional to its own entries, not to
+    /// everything merged so far.
+    list_cost: usize,
 }
 
 /// Maximum number of distinct in-flight (`i=`) OSC 99 notifications retained
@@ -78,9 +84,40 @@ pub(in crate::terminal_handler) struct PendingNotification {
 const MAX_PENDING_OSC99_NOTIFICATIONS: usize = 128;
 
 /// Maximum accumulated payload bytes for a single in-flight notification
-/// (across title/body/icon/buttons). A stream of `d=0` chunks under one id
-/// could otherwise grow a single accumulator without bound.
+/// (across title/body/icon/buttons), plus its list-valued metadata cost. A
+/// stream of `d=0` chunks under one id could otherwise grow a single
+/// accumulator without bound.
 const MAX_OSC99_NOTIFICATION_BYTES: usize = 1_048_576;
+
+/// Maximum accumulated bytes for the title, body or buttons payload of one
+/// notification. Finalisation cuts a title or body to
+/// [`MAX_OSC99_TEXT_CHARS`] characters and the buttons to
+/// [`MAX_OSC99_BUTTONS`] labels of [`MAX_OSC99_BUTTON_CHARS`] characters, so
+/// bytes beyond this cap could never be shown.
+const MAX_OSC99_TEXT_PAYLOAD_BYTES: usize = 65_536;
+
+/// Maximum accumulated bytes for the icon payload of one notification.
+const MAX_OSC99_ICON_PAYLOAD_BYTES: usize = 1_048_576;
+
+/// Maximum number of `n=` icon names merged into one notification.
+const MAX_OSC99_ICON_NAMES: usize = 64;
+
+/// Maximum number of `t=` notification types merged into one notification.
+const MAX_OSC99_NOTIFICATION_TYPES: usize = 64;
+
+/// Maximum number of `a=` action edits merged into one notification.
+const MAX_OSC99_ACTION_EDITS: usize = 64;
+
+/// Bytes charged for each list-valued metadata entry on top of its own
+/// length, standing in for the entry's allocation and bookkeeping.
+const OSC99_LIST_ENTRY_OVERHEAD: usize = 32;
+
+/// Budget for the bytes held by every in-flight notification of one handler
+/// together, the unidentified slot included: accumulated payload bytes plus
+/// list-valued metadata cost. Per-notification caps alone leave the total
+/// bounded only by [`MAX_PENDING_OSC99_NOTIFICATIONS`] times the per-
+/// notification cap.
+const MAX_OSC99_PENDING_TOTAL_BYTES: usize = 8 * 1_048_576;
 
 /// Maximum length, in characters, of a notification's title or body.
 const MAX_OSC99_TEXT_CHARS: usize = 1024;
@@ -91,11 +128,53 @@ const MAX_OSC99_BUTTON_CHARS: usize = 256;
 /// Maximum number of button labels kept.
 const MAX_OSC99_BUTTONS: usize = 8;
 
-/// Caps for each of a notification's four payload accumulators.
-const OSC99_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+/// Caps for the title, body and buttons accumulators.
+const OSC99_TEXT_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
     max_chunk_bytes: MAX_OSC99_SEQUENCE_BYTES,
-    max_total_bytes: MAX_OSC99_NOTIFICATION_BYTES,
+    max_total_bytes: MAX_OSC99_TEXT_PAYLOAD_BYTES,
 };
+
+/// Caps for the icon accumulator.
+const OSC99_ICON_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+    max_chunk_bytes: MAX_OSC99_SEQUENCE_BYTES,
+    max_total_bytes: MAX_OSC99_ICON_PAYLOAD_BYTES,
+};
+
+/// Why a chunk made the handler abandon its notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(in crate::terminal_handler) enum Osc99Reject {
+    /// A payload accumulator or the per-notification total rejected it.
+    #[error(transparent)]
+    Chunk(#[from] ChunkError),
+    /// The notification would hold more than [`MAX_OSC99_ICON_NAMES`] `n=`
+    /// names.
+    #[error("more than {max} icon names")]
+    TooManyIconNames {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification would hold more than [`MAX_OSC99_NOTIFICATION_TYPES`]
+    /// `t=` types.
+    #[error("more than {max} notification types")]
+    TooManyNotificationTypes {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification would hold more than [`MAX_OSC99_ACTION_EDITS`] `a=`
+    /// edits.
+    #[error("more than {max} action edits")]
+    TooManyActionEdits {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification alone exceeds the handler-wide pending budget
+    /// ([`MAX_OSC99_PENDING_TOTAL_BYTES`]).
+    #[error("notification exceeds the pending budget of {max} bytes")]
+    PendingBudget {
+        /// The budget.
+        max: usize,
+    },
+}
 
 /// The four payload byte strings of a notification once every chunk has been
 /// concatenated and decoded.
@@ -113,11 +192,12 @@ struct FinishedPayloads {
 impl Default for PendingNotification {
     fn default() -> Self {
         Self {
-            title: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            body: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            icon: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            buttons: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            title: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
+            body: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
+            icon: BoundedChunkAssembler::new(OSC99_ICON_CHUNK_LIMITS),
+            buttons: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
             meta: None,
+            list_cost: 0,
         }
     }
 }
@@ -127,6 +207,31 @@ const fn chunk_encoding(encoding: Osc99PayloadEncoding) -> ChunkEncoding {
     match encoding {
         Osc99PayloadEncoding::Plain => ChunkEncoding::Raw,
         Osc99PayloadEncoding::Base64 => ChunkEncoding::Base64,
+    }
+}
+
+/// An empty metadata accumulator: every scalar unset and every list empty.
+///
+/// Merging the first chunk into this is how the accumulator is seeded, so the
+/// first chunk is merged exactly like every later one (list caps and costs
+/// included) and nothing is cloned wholesale.
+const fn blank_osc99_metadata() -> Osc99Command {
+    Osc99Command {
+        id: None,
+        payload_type: Osc99PayloadType::Title,
+        chunk_state: Osc99ChunkState::Done,
+        payload: Vec::new(),
+        payload_encoding: Osc99PayloadEncoding::Plain,
+        action_edits: Vec::new(),
+        close_reporting: None,
+        app_name: None,
+        icon_cache_key: None,
+        icon_names: Vec::new(),
+        occasion: None,
+        sound: None,
+        notification_types: Vec::new(),
+        urgency: None,
+        expiry: None,
     }
 }
 
@@ -142,10 +247,11 @@ const fn chunk_encoding(encoding: Osc99PayloadEncoding) -> ChunkEncoding {
 /// - `p`, `d` and `e` are per chunk: the latest chunk's values are stored.
 ///   Nothing reads them after finalisation.
 ///
-/// `acc.payload` is left alone (it is always empty) and `chunk.payload` is
-/// discarded: payload bytes live in the accumulators, not in the metadata.
-fn merge_osc99_metadata(acc: &mut Osc99Command, chunk: Osc99Command) {
-    acc.id = chunk.id;
+/// The chunk is borrowed and only what is kept is cloned. `acc.payload` is
+/// left alone (it is always empty) and `chunk.payload` is never copied:
+/// payload bytes live in the accumulators, not in the metadata.
+fn merge_osc99_metadata(acc: &mut Osc99Command, chunk: &Osc99Command) {
+    acc.id.clone_from(&chunk.id);
     acc.payload_type = chunk.payload_type;
     acc.chunk_state = chunk.chunk_state;
     acc.payload_encoding = chunk.payload_encoding;
@@ -162,17 +268,18 @@ fn merge_osc99_metadata(acc: &mut Osc99Command, chunk: Osc99Command) {
         acc.expiry = chunk.expiry;
     }
     if chunk.app_name.is_some() {
-        acc.app_name = chunk.app_name;
+        acc.app_name.clone_from(&chunk.app_name);
     }
     if chunk.icon_cache_key.is_some() {
-        acc.icon_cache_key = chunk.icon_cache_key;
+        acc.icon_cache_key.clone_from(&chunk.icon_cache_key);
     }
     if chunk.sound.is_some() {
-        acc.sound = chunk.sound;
+        acc.sound.clone_from(&chunk.sound);
     }
-    acc.icon_names.extend(chunk.icon_names);
-    acc.notification_types.extend(chunk.notification_types);
-    acc.action_edits.extend(chunk.action_edits);
+    acc.icon_names.extend_from_slice(&chunk.icon_names);
+    acc.notification_types
+        .extend_from_slice(&chunk.notification_types);
+    acc.action_edits.extend_from_slice(&chunk.action_edits);
 }
 
 impl PendingNotification {
@@ -186,21 +293,59 @@ impl PendingNotification {
             .saturating_add(self.buttons.len())
     }
 
-    /// Size of the merged list-valued metadata (`n=` names and `t=` types in
-    /// bytes, plus one per `a=` edit).
+    /// Bytes this notification holds: accumulated payloads plus the running
+    /// cost of the list-valued metadata.
+    const fn cost(&self) -> usize {
+        self.accumulated_len().saturating_add(self.list_cost)
+    }
+
+    /// Check that merging `chunk`'s lists stays within the entry caps and
+    /// return the cost they add.
     ///
-    /// Lists extend across chunks, so without a bound a stream of tiny `d=0`
-    /// chunks could grow them forever. This counts toward
-    /// [`MAX_OSC99_NOTIFICATION_BYTES`] alongside the payloads.
-    fn metadata_list_len(&self) -> usize {
-        self.meta.as_ref().map_or(0, |meta| {
-            let strings = meta
-                .icon_names
-                .iter()
-                .chain(&meta.notification_types)
-                .fold(0usize, |total, s| total.saturating_add(s.len()));
-            strings.saturating_add(meta.action_edits.len())
-        })
+    /// Only the chunk's own entries are visited; the entries already merged
+    /// are accounted for by their lengths and by [`list_cost`](Self::list_cost).
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Osc99Reject`] for the first list that would pass its cap.
+    fn admit_list_entries(&self, chunk: &Osc99Command) -> Result<usize, Osc99Reject> {
+        let (held_names, held_types, held_edits) = self.meta.as_ref().map_or((0, 0, 0), |meta| {
+            (
+                meta.icon_names.len(),
+                meta.notification_types.len(),
+                meta.action_edits.len(),
+            )
+        });
+        if held_names.saturating_add(chunk.icon_names.len()) > MAX_OSC99_ICON_NAMES {
+            return Err(Osc99Reject::TooManyIconNames {
+                max: MAX_OSC99_ICON_NAMES,
+            });
+        }
+        if held_types.saturating_add(chunk.notification_types.len()) > MAX_OSC99_NOTIFICATION_TYPES
+        {
+            return Err(Osc99Reject::TooManyNotificationTypes {
+                max: MAX_OSC99_NOTIFICATION_TYPES,
+            });
+        }
+        if held_edits.saturating_add(chunk.action_edits.len()) > MAX_OSC99_ACTION_EDITS {
+            return Err(Osc99Reject::TooManyActionEdits {
+                max: MAX_OSC99_ACTION_EDITS,
+            });
+        }
+        let strings = chunk
+            .icon_names
+            .iter()
+            .chain(&chunk.notification_types)
+            .fold(0usize, |total, s| {
+                total
+                    .saturating_add(s.len())
+                    .saturating_add(OSC99_LIST_ENTRY_OVERHEAD)
+            });
+        let edits = chunk
+            .action_edits
+            .len()
+            .saturating_mul(OSC99_LIST_ENTRY_OVERHEAD);
+        Ok(strings.saturating_add(edits))
     }
 
     /// Append `payload` to the accumulator selected by `payload_type`,
@@ -241,34 +386,30 @@ impl PendingNotification {
     /// Take one chunk into this accumulation: append its payload, merge its
     /// metadata, and check the combined size.
     ///
-    /// The payload is moved out of the chunk before the rest is stored as
-    /// metadata, so a large final icon/body chunk is not retained twice.
+    /// The chunk is borrowed: its payload goes straight into the accumulator
+    /// and only the metadata that is kept is cloned, so a large final
+    /// icon/body chunk is never copied.
     ///
     /// # Errors
     ///
-    /// Returns the accumulator's [`ChunkError`] (cap exceeded or invalid
-    /// base64), or [`ChunkError::TotalTooLarge`] when the payloads plus the
-    /// list-valued metadata exceed [`MAX_OSC99_NOTIFICATION_BYTES`]; the
-    /// caller drops the whole notification.
-    fn accept(&mut self, mut chunk: Osc99Command) -> Result<(), ChunkError> {
-        let payload = std::mem::take(&mut chunk.payload);
-        self.push_payload(chunk.payload_type, &payload, chunk.payload_encoding)?;
-        drop(payload);
+    /// Returns [`Osc99Reject::Chunk`] for an accumulator's [`ChunkError`]
+    /// (cap exceeded or invalid base64) or when the payloads plus the list
+    /// metadata exceed [`MAX_OSC99_NOTIFICATION_BYTES`], and the
+    /// `TooMany...` variants when a list passes its entry cap. The caller
+    /// drops the whole notification.
+    fn accept(&mut self, chunk: &Osc99Command) -> Result<(), Osc99Reject> {
+        self.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)?;
+        let added = self.admit_list_entries(chunk)?;
 
-        if let Some(acc) = self.meta.as_mut() {
-            merge_osc99_metadata(acc, chunk);
-        } else {
-            self.meta = Some(chunk);
-        }
+        let acc = self.meta.get_or_insert_with(blank_osc99_metadata);
+        merge_osc99_metadata(acc, chunk);
+        self.list_cost = self.list_cost.saturating_add(added);
 
-        if self
-            .accumulated_len()
-            .saturating_add(self.metadata_list_len())
-            > MAX_OSC99_NOTIFICATION_BYTES
-        {
+        if self.cost() > MAX_OSC99_NOTIFICATION_BYTES {
             return Err(ChunkError::TotalTooLarge {
                 max: MAX_OSC99_NOTIFICATION_BYTES,
-            });
+            }
+            .into());
         }
         Ok(())
     }
@@ -600,7 +741,8 @@ pub(in crate::terminal_handler) enum PendingEntry {
     Dropped,
 }
 
-/// A [`PendingEntry`] plus the logical time it was last touched.
+/// A [`PendingEntry`] plus the logical time it was last touched and the bytes
+/// it is charged for.
 #[derive(Debug)]
 struct PendingSlot {
     /// The in-flight state.
@@ -608,6 +750,30 @@ struct PendingSlot {
     /// The store's clock at the last touch; the smallest value is evicted
     /// first.
     last_touched: u64,
+    /// Bytes charged against the store's budget: the entry's
+    /// [`PendingNotification::cost`] as of the last accepted chunk, and zero
+    /// for a tombstone.
+    cost: usize,
+}
+
+impl PendingSlot {
+    /// An empty accumulation touched at `now`.
+    fn new(now: u64) -> Self {
+        Self {
+            entry: PendingEntry::Accumulating(Box::default()),
+            last_touched: now,
+            cost: 0,
+        }
+    }
+}
+
+/// Which slot of a [`PendingOsc99`] store.
+#[derive(Debug)]
+enum SlotKey {
+    /// The entry for an `i=` id.
+    Identified(String),
+    /// The single entry for chunks without an id.
+    Unidentified,
 }
 
 /// The in-flight OSC 99 notifications of one terminal handler.
@@ -617,21 +783,65 @@ struct PendingSlot {
 /// (tombstones included), so the map never refuses a chunk. Content chunks
 /// without an id share the single `unidentified` slot, like kitty's one
 /// pending command keyed by "no id".
-#[derive(Debug, Default)]
+///
+/// The bytes held by every entry together are bounded by
+/// [`MAX_OSC99_PENDING_TOTAL_BYTES`]. `total_cost` is the sum of every slot's
+/// `cost`, maintained on each insert, accepted chunk, removal, eviction and
+/// clear rather than recomputed.
+#[derive(Debug)]
 pub(in crate::terminal_handler) struct PendingOsc99 {
     /// Identified entries.
     by_id: HashMap<String, PendingSlot>,
-    /// Monotonic touch counter; incremented on every touch of an id.
+    /// Monotonic touch counter; incremented on every touch of an entry.
     clock: u64,
     /// The single entry for chunks that carry no id.
-    unidentified: Option<PendingEntry>,
+    unidentified: Option<PendingSlot>,
+    /// The sum of every slot's `cost`.
+    total_cost: usize,
+    /// The most `total_cost` may reach.
+    budget: usize,
+}
+
+impl Default for PendingOsc99 {
+    fn default() -> Self {
+        Self {
+            by_id: HashMap::new(),
+            clock: 0,
+            unidentified: None,
+            total_cost: 0,
+            budget: MAX_OSC99_PENDING_TOTAL_BYTES,
+        }
+    }
 }
 
 impl PendingOsc99 {
+    /// A store with a custom byte budget.
+    #[cfg(test)]
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
     /// Advance and return the clock.
     const fn tick(&mut self) -> u64 {
         self.clock = self.clock.saturating_add(1);
         self.clock
+    }
+
+    /// Remove the identified entry `id`, releasing its cost.
+    fn remove_identified(&mut self, id: &str) -> Option<PendingSlot> {
+        let slot = self.by_id.remove(id)?;
+        self.total_cost = self.total_cost.saturating_sub(slot.cost);
+        Some(slot)
+    }
+
+    /// Remove the unidentified entry, releasing its cost.
+    fn take_unidentified(&mut self) -> Option<PendingSlot> {
+        let slot = self.unidentified.take()?;
+        self.total_cost = self.total_cost.saturating_sub(slot.cost);
+        Some(slot)
     }
 
     /// Remove the identified entry with the smallest `last_touched`.
@@ -642,18 +852,19 @@ impl PendingOsc99 {
             .min_by_key(|(_, slot)| slot.last_touched)
             .map(|(id, _)| id.clone());
         if let Some(oldest) = oldest {
-            self.by_id.remove(&oldest);
+            self.remove_identified(&oldest);
         }
     }
 
     /// Whether `id` currently holds a tombstone. A tombstone that is looked
     /// up counts as touched: its transfer is still in progress.
     fn is_tombstone(&mut self, id: Option<&str>) -> bool {
-        let Some(id) = id else {
-            return matches!(self.unidentified, Some(PendingEntry::Dropped));
-        };
         let now = self.tick();
-        self.by_id.get_mut(id).is_some_and(|slot| {
+        let slot = match id {
+            Some(id) => self.by_id.get_mut(id),
+            None => self.unidentified.as_mut(),
+        };
+        slot.is_some_and(|slot| {
             let dropped = matches!(slot.entry, PendingEntry::Dropped);
             if dropped {
                 slot.last_touched = now;
@@ -662,30 +873,102 @@ impl PendingOsc99 {
         })
     }
 
-    /// The entry for `id` (`None` is the unidentified slot), created as an
+    /// The slot for `id` (`None` is the unidentified slot), created as an
     /// empty accumulation when absent, and marked as touched.
     ///
     /// Inserting a new id into a full map first evicts the
     /// least-recently-touched entry, tombstones included.
-    fn entry_mut(&mut self, id: Option<&str>) -> &mut PendingEntry {
-        let Some(id) = id else {
-            return self
-                .unidentified
-                .get_or_insert_with(|| PendingEntry::Accumulating(Box::default()));
-        };
+    fn slot_mut(&mut self, id: Option<&str>) -> &mut PendingSlot {
         let now = self.tick();
+        let Some(id) = id else {
+            let slot = self
+                .unidentified
+                .get_or_insert_with(|| PendingSlot::new(now));
+            slot.last_touched = now;
+            return slot;
+        };
         if !self.by_id.contains_key(id) && self.by_id.len() >= MAX_PENDING_OSC99_NOTIFICATIONS {
             self.evict_least_recently_touched();
         }
         let slot = self
             .by_id
             .entry(id.to_owned())
-            .or_insert_with(|| PendingSlot {
-                entry: PendingEntry::Accumulating(Box::default()),
-                last_touched: now,
-            });
+            .or_insert_with(|| PendingSlot::new(now));
         slot.last_touched = now;
-        &mut slot.entry
+        slot
+    }
+
+    /// Feed one content chunk into the accumulation for `id` and keep the
+    /// store within its byte budget.
+    ///
+    /// The accumulation is created when absent. A tombstone ignores the chunk.
+    /// When accepting the chunk pushes the store past its budget, the
+    /// least-recently-touched entries *other than* `id` that hold bytes are
+    /// evicted until it fits; the budget is checked after the chunk lands, so
+    /// it can be overshot transiently by at most one chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Osc99Reject`] of the notification's own caps, or
+    /// [`Osc99Reject::PendingBudget`] when `id`'s accumulation alone exceeds
+    /// the budget (nothing else is evicted in that case). The caller then
+    /// abandons the transfer.
+    fn accept(&mut self, id: Option<&str>, chunk: &Osc99Command) -> Result<(), Osc99Reject> {
+        let slot = self.slot_mut(id);
+        let PendingEntry::Accumulating(entry) = &mut slot.entry else {
+            return Ok(());
+        };
+        entry.accept(chunk)?;
+        let new_cost = entry.cost();
+        let old_cost = std::mem::replace(&mut slot.cost, new_cost);
+        self.total_cost = self
+            .total_cost
+            .saturating_sub(old_cost)
+            .saturating_add(new_cost);
+        self.enforce_budget(id, new_cost)
+    }
+
+    /// Evict until `total_cost` fits the budget, never touching `keep`.
+    fn enforce_budget(&mut self, keep: Option<&str>, keep_cost: usize) -> Result<(), Osc99Reject> {
+        let over = Osc99Reject::PendingBudget { max: self.budget };
+        if keep_cost > self.budget {
+            return Err(over);
+        }
+        while self.total_cost > self.budget {
+            let Some(victim) = self.least_recently_touched_other(keep) else {
+                return Err(over);
+            };
+            match victim {
+                SlotKey::Identified(id) => {
+                    self.remove_identified(&id);
+                }
+                SlotKey::Unidentified => {
+                    self.take_unidentified();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The least-recently-touched slot other than `keep` that holds bytes
+    /// (evicting a zero-cost tombstone would free nothing).
+    fn least_recently_touched_other(&self, keep: Option<&str>) -> Option<SlotKey> {
+        let identified = self
+            .by_id
+            .iter()
+            .filter(|(id, slot)| slot.cost > 0 && keep != Some(id.as_str()))
+            .min_by_key(|(_, slot)| slot.last_touched)
+            .map(|(id, slot)| (slot.last_touched, SlotKey::Identified(id.clone())));
+        let unidentified = self
+            .unidentified
+            .as_ref()
+            .filter(|slot| slot.cost > 0 && keep.is_some())
+            .map(|slot| (slot.last_touched, SlotKey::Unidentified));
+        [identified, unidentified]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(touched, _)| *touched)
+            .map(|(_, key)| key)
     }
 
     /// Whether an entry (accumulating or tombstone) exists for `id`.
@@ -696,23 +979,28 @@ impl PendingOsc99 {
         )
     }
 
-    /// Replace the entry for `id` with a tombstone.
+    /// Replace the entry for `id` with a tombstone, releasing its cost.
     fn tombstone(&mut self, id: Option<&str>) {
-        *self.entry_mut(id) = PendingEntry::Dropped;
+        let slot = self.slot_mut(id);
+        slot.entry = PendingEntry::Dropped;
+        let released = std::mem::take(&mut slot.cost);
+        self.total_cost = self.total_cost.saturating_sub(released);
     }
 
-    /// Remove and return the entry for `id`.
+    /// Remove and return the entry for `id`, releasing its cost.
     fn remove(&mut self, id: Option<&str>) -> Option<PendingEntry> {
-        match id {
-            Some(id) => self.by_id.remove(id).map(|slot| slot.entry),
-            None => self.unidentified.take(),
-        }
+        let slot = match id {
+            Some(id) => self.remove_identified(id),
+            None => self.take_unidentified(),
+        };
+        slot.map(|slot| slot.entry)
     }
 
     /// Discard every in-flight notification, identified or not.
     pub(in crate::terminal_handler) fn clear(&mut self) {
         self.by_id.clear();
         self.unidentified = None;
+        self.total_cost = 0;
     }
 
     /// Whether nothing is in flight.
@@ -730,9 +1018,32 @@ impl PendingOsc99 {
     /// The entry for `id` (`None` is the unidentified slot), without touching it.
     #[cfg(test)]
     pub(in crate::terminal_handler) fn get(&self, id: Option<&str>) -> Option<&PendingEntry> {
-        id.map_or(self.unidentified.as_ref(), |id| {
-            self.by_id.get(id).map(|slot| &slot.entry)
-        })
+        id.map_or(self.unidentified.as_ref(), |id| self.by_id.get(id))
+            .map(|slot| &slot.entry)
+    }
+
+    /// The bytes currently charged against the budget.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) const fn total_cost(&self) -> usize {
+        self.total_cost
+    }
+
+    /// Recompute every cost from the entries and assert the running counters
+    /// agree: each slot's `cost` against its entry, and `total_cost` against
+    /// the sum.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) fn assert_costs_consistent(&self) {
+        let mut sum = 0usize;
+        for slot in self.by_id.values().chain(self.unidentified.as_ref()) {
+            let recomputed = match &slot.entry {
+                PendingEntry::Accumulating(entry) => entry.cost(),
+                PendingEntry::Dropped => 0,
+            };
+            assert_eq!(slot.cost, recomputed, "slot cost must match its entry");
+            sum += recomputed;
+        }
+        assert_eq!(self.total_cost, sum, "total cost must match the sum");
+        assert!(self.total_cost <= self.budget, "budget must hold");
     }
 }
 
@@ -786,7 +1097,7 @@ impl TerminalHandler {
             | Osc99PayloadType::Icon
             | Osc99PayloadType::Buttons
             | Osc99PayloadType::Unknown => {
-                if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
+                if let Some(finalized) = self.reassemble_osc99(cmd) {
                     self.window_commands
                         .push(WindowManipulation::Notification99(Box::new(
                             finalized.into_notification99_data(),
@@ -844,14 +1155,22 @@ impl TerminalHandler {
     /// leaves a tombstone for its key: further chunks are ignored and the
     /// terminating chunk removes the tombstone without emitting anything.
     ///
+    /// A notification that passes a list cap, its byte cap, or (alone) the
+    /// handler-wide pending budget is dropped the same way. A chunk that
+    /// pushes the pending store past its budget evicts other entries, least
+    /// recently touched first.
+    ///
+    /// The chunk is borrowed (the parser's event stream owns it): its payload
+    /// goes straight into the accumulator and only the metadata that is kept
+    /// is cloned.
+    ///
     /// Control payloads are handled by [`handle_osc99`](Self::handle_osc99)
     /// and never get here.
     pub(in crate::terminal_handler) fn reassemble_osc99(
         &mut self,
-        chunk: Osc99Command,
+        chunk: &Osc99Command,
     ) -> Option<FinalizedNotification> {
-        let id = chunk.id.clone();
-        let key = id.as_deref();
+        let key = chunk.id.as_deref();
         let chunk_state = chunk.chunk_state;
         let done = chunk_state == Osc99ChunkState::Done;
 
@@ -886,12 +1205,7 @@ impl TerminalHandler {
 
         // An invalid base64 stream or an exceeded cap drops the whole
         // in-flight notification rather than keeping a partial one.
-        let accepted = match self.pending_osc99.entry_mut(key) {
-            PendingEntry::Accumulating(entry) => entry.accept(chunk),
-            // Unreachable: a tombstone was handled above.
-            PendingEntry::Dropped => return None,
-        };
-        if let Err(err) = accepted {
+        if let Err(err) = self.pending_osc99.accept(key, chunk) {
             self.abandon_notification(key, chunk_state);
             tracing::debug!("OSC 99: dropping notification {}: {err}", log_key(key));
             return None;
@@ -1188,7 +1502,7 @@ mod tests {
             payload: b"Title".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(first).is_none());
+        assert!(handler.reassemble_osc99(&first).is_none());
         let cmd = Osc99Command {
             id: Some("u".to_owned()),
             payload_type: Osc99PayloadType::Unknown,
@@ -1197,7 +1511,7 @@ mod tests {
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(cmd)
+            .reassemble_osc99(&cmd)
             .expect("a done unknown chunk finalizes the accumulated content");
         assert_eq!(finalized.title, "Title");
         assert_eq!(finalized.body, None);
@@ -1216,7 +1530,7 @@ mod tests {
             payload: b"ignored".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(cmd).is_none());
+        assert!(handler.reassemble_osc99(&cmd).is_none());
         assert!(handler.pending_osc99.is_empty());
     }
 
@@ -1230,7 +1544,7 @@ mod tests {
             payload: b"ignored".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(cmd).is_none());
+        assert!(handler.reassemble_osc99(&cmd).is_none());
         let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some("u")) else {
             panic!("entry should be accumulating");
         };
@@ -1273,14 +1587,14 @@ mod tests {
             payload: b"T".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(title).is_none());
+        assert!(handler.reassemble_osc99(&title).is_none());
         let cmd = Osc99Command {
             payload_type: Osc99PayloadType::Buttons,
             payload: "OK\u{2028}Cancel".as_bytes().to_vec(),
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(cmd)
+            .reassemble_osc99(&cmd)
             .expect("single done Buttons chunk must finalize");
         assert_eq!(
             finalized.buttons,
@@ -1300,7 +1614,7 @@ mod tests {
             payload: b"T".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(title).is_none());
+        assert!(handler.reassemble_osc99(&title).is_none());
 
         let chunk1 = Osc99Command {
             id: Some("btn-1".to_owned()),
@@ -1309,7 +1623,7 @@ mod tests {
             payload: "Yes\u{2028}N".as_bytes().to_vec(),
             ..default_cmd()
         };
-        let r1 = handler.reassemble_osc99(chunk1);
+        let r1 = handler.reassemble_osc99(&chunk1);
         assert!(r1.is_none(), "first chunk must not finalize");
 
         let chunk2 = Osc99Command {
@@ -1320,7 +1634,7 @@ mod tests {
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(chunk2)
+            .reassemble_osc99(&chunk2)
             .expect("terminating chunk must finalize");
         assert_eq!(finalized.buttons, vec!["Yes".to_owned(), "No".to_owned()]);
     }
@@ -1353,7 +1667,7 @@ mod tests {
         for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
             assert!(
                 handler
-                    .reassemble_osc99(chunk_for(format!("id-{i}"), b"x"))
+                    .reassemble_osc99(&chunk_for(format!("id-{i}"), b"x"))
                     .is_none()
             );
         }
@@ -1365,14 +1679,14 @@ mod tests {
         // Touching `id-0` makes `id-1` the oldest.
         assert!(
             handler
-                .reassemble_osc99(chunk_for("id-0".to_owned(), b"y"))
+                .reassemble_osc99(&chunk_for("id-0".to_owned(), b"y"))
                 .is_none()
         );
 
         // One more distinct id is accepted; the map does not grow.
         assert!(
             handler
-                .reassemble_osc99(chunk_for("overflow".to_owned(), b"x"))
+                .reassemble_osc99(&chunk_for("overflow".to_owned(), b"x"))
                 .is_none()
         );
         assert_eq!(
@@ -1391,7 +1705,7 @@ mod tests {
             payload: b"z".to_vec(),
             ..default_cmd()
         };
-        let finalized = handler.reassemble_osc99(finish).expect("finalizes");
+        let finalized = handler.reassemble_osc99(&finish).expect("finalizes");
         assert_eq!(finalized.title, "xyz");
     }
 
@@ -1408,7 +1722,7 @@ mod tests {
             payload: vec![b'a'; 1024],
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(chunk1).is_none());
+        assert!(handler.reassemble_osc99(&chunk1).is_none());
         assert!(handler.pending_osc99.get(Some(&id)).is_some());
 
         // Second chunk that would push the accumulation past the cap: the
@@ -1420,7 +1734,7 @@ mod tests {
             payload: vec![b'b'; MAX_OSC99_NOTIFICATION_BYTES],
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(chunk2).is_none());
+        assert!(handler.reassemble_osc99(&chunk2).is_none());
         // The id stays as a tombstone until the terminating chunk.
         assert!(is_dropped(&handler, &id));
     }
@@ -1437,7 +1751,7 @@ mod tests {
             payload: b"hello".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(chunk).is_none());
+        assert!(handler.reassemble_osc99(&chunk).is_none());
 
         // The stored metadata must not keep a copy of the payload bytes: they
         // live only in the body accumulator now.
@@ -1459,7 +1773,7 @@ mod tests {
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(done)
+            .reassemble_osc99(&done)
             .expect("terminating chunk finalizes");
         // A body-only notification is promoted into the title.
         assert_eq!(finalized.title, "hello");
@@ -1476,7 +1790,7 @@ mod tests {
         payload: &[u8],
     ) -> Option<FinalizedNotification> {
         let cmd = parse_osc_99(metadata.as_bytes(), payload).expect("sequence must parse");
-        handler.reassemble_osc99(cmd)
+        handler.reassemble_osc99(&cmd)
     }
 
     /// Reassemble a two-chunk `p=title` notification whose payload slices are
@@ -1661,24 +1975,30 @@ mod tests {
     /// base64 tail adds when the accumulators are finished.
     #[test]
     fn base64_tail_flushed_at_finish_cannot_exceed_the_combined_cap() {
-        let half = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let half = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let almost_half = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
         let mut handler = TerminalHandler::new(80, 24);
-        // Exactly 1 MiB of plain title: at the cap, still accepted.
-        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
-        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        // Exactly 1 MiB across icon and title: at the cap, still accepted.
+        assert!(feed(&mut handler, "i=cap:d=0:p=icon", &half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=icon", &almost_half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", b"T").is_none());
         // `YQ` decodes to one byte, but only when the stream is finished.
         assert!(feed(&mut handler, "i=cap:d=1:p=body:e=1", b"YQ").is_none());
         assert!(handler.pending_osc99.get(Some("cap")).is_none());
 
-        // The same shape one byte smaller finalises with both parts intact.
+        // The same shape one byte smaller finalises with every part intact.
         let mut handler = TerminalHandler::new(80, 24);
-        let short = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
-        assert!(feed(&mut handler, "i=ok:d=0:p=title", &half).is_none());
-        assert!(feed(&mut handler, "i=ok:d=0:p=title", &short).is_none());
+        let shorter = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2 - 2];
+        assert!(feed(&mut handler, "i=ok:d=0:p=icon", &half).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=icon", &shorter).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", b"T").is_none());
         let done = feed(&mut handler, "i=ok:d=1:p=body:e=1", b"YQ").expect("within the cap");
         assert_eq!(done.body.as_deref(), Some("a"));
-        // The title is limited to 1024 characters at finalisation.
-        assert_eq!(done.title.chars().count(), MAX_OSC99_TEXT_CHARS);
+        assert_eq!(done.title, "T");
+        assert_eq!(
+            done.icon.as_ref().map(Vec::len),
+            Some(MAX_OSC99_NOTIFICATION_BYTES - 2)
+        );
     }
 
     // ── Tombstones for notifications dropped mid-transfer ────────────────────
@@ -1802,10 +2122,9 @@ mod tests {
     // ── 138.3: metadata merge ─────────────────────────────────────────────────
 
     /// Merge `chunks` in order and return the accumulated metadata.
-    fn merged(chunks: Vec<Osc99Command>) -> Osc99Command {
-        let mut iter = chunks.into_iter();
-        let mut acc = iter.next().expect("at least one chunk");
-        for chunk in iter {
+    fn merged(chunks: &[Osc99Command]) -> Osc99Command {
+        let mut acc = blank_osc99_metadata();
+        for chunk in chunks {
             merge_osc99_metadata(&mut acc, chunk);
         }
         acc
@@ -1820,7 +2139,7 @@ mod tests {
 
     #[test]
     fn merge_report_then_chunk_without_a_resolves_to_report_and_focus() {
-        let acc = merged(vec![
+        let acc = merged(&[
             edits(&[Osc99ActionEdit::Add(Osc99Action::Report)]),
             default_cmd(),
         ]);
@@ -1835,7 +2154,7 @@ mod tests {
 
     #[test]
     fn merge_minus_focus_then_focus_resolves_to_focus() {
-        let acc = merged(vec![
+        let acc = merged(&[
             edits(&[Osc99ActionEdit::Remove(Osc99Action::Focus)]),
             edits(&[Osc99ActionEdit::Add(Osc99Action::Focus)]),
         ]);
@@ -1851,7 +2170,7 @@ mod tests {
     #[test]
     fn merge_minus_focus_then_chunk_without_a_stays_unfocused() {
         // A later chunk's silence must not resurrect a removed action.
-        let acc = merged(vec![
+        let acc = merged(&[
             edits(&[Osc99ActionEdit::Remove(Osc99Action::Focus)]),
             default_cmd(),
         ]);
@@ -1867,10 +2186,10 @@ mod tests {
             urgency,
             ..default_cmd()
         };
-        let kept = merged(vec![with(Some(NotificationUrgency::Critical)), with(None)]);
+        let kept = merged(&[with(Some(NotificationUrgency::Critical)), with(None)]);
         assert_eq!(kept.urgency, Some(NotificationUrgency::Critical));
 
-        let overridden = merged(vec![
+        let overridden = merged(&[
             with(Some(NotificationUrgency::Low)),
             with(Some(NotificationUrgency::Critical)),
         ]);
@@ -1884,7 +2203,7 @@ mod tests {
             notification_types: vec![kind.to_owned()],
             ..default_cmd()
         };
-        let acc = merged(vec![with("a", "ta"), with("b", "tb")]);
+        let acc = merged(&[with("a", "ta"), with("b", "tb")]);
         assert_eq!(acc.icon_names, ["a", "b"]);
         assert_eq!(acc.notification_types, ["ta", "tb"]);
     }
@@ -1900,7 +2219,7 @@ mod tests {
             sound: Some("silent".to_owned()),
             ..default_cmd()
         };
-        let acc = merged(vec![first, default_cmd()]);
+        let acc = merged(&[first, default_cmd()]);
         assert_eq!(acc.close_reporting, Some(Osc99CloseReporting::Report));
         assert_eq!(acc.occasion, Some(NotificationOccasion::Unfocused));
         assert_eq!(acc.expiry, Some(Osc99Expiry::Never));
@@ -1918,7 +2237,7 @@ mod tests {
             app_name: Some("app".to_owned()),
             ..default_cmd()
         };
-        let acc = merged(vec![first, later]);
+        let acc = merged(&[first, later]);
         assert_eq!(acc.close_reporting, Some(Osc99CloseReporting::Silent));
         assert_eq!(acc.app_name.as_deref(), Some("other"));
     }
@@ -1936,7 +2255,7 @@ mod tests {
             id: Some("i".to_owned()),
             ..default_cmd()
         };
-        let acc = merged(vec![first, last]);
+        let acc = merged(&[first, last]);
         assert_eq!(acc.id.as_deref(), Some("i"));
         assert_eq!(acc.payload_type, Osc99PayloadType::Title);
         assert_eq!(acc.chunk_state, Osc99ChunkState::Done);
@@ -1953,12 +2272,12 @@ mod tests {
             ..default_cmd()
         };
         let big = "n".repeat(MAX_OSC99_NOTIFICATION_BYTES / 2 + 1);
-        assert!(pending.accept(chunk(big.clone())).is_ok());
+        assert!(pending.accept(&chunk(big.clone())).is_ok());
         assert_eq!(
-            pending.accept(chunk(big)),
-            Err(ChunkError::TotalTooLarge {
+            pending.accept(&chunk(big)),
+            Err(Osc99Reject::Chunk(ChunkError::TotalTooLarge {
                 max: MAX_OSC99_NOTIFICATION_BYTES
-            })
+            }))
         );
     }
 
@@ -2125,11 +2444,11 @@ mod tests {
         let mut store = PendingOsc99::default();
         assert!(store.is_empty());
         assert!(matches!(
-            store.entry_mut(Some("a")),
+            store.slot_mut(Some("a")).entry,
             PendingEntry::Accumulating(_)
         ));
         assert!(matches!(
-            store.entry_mut(None),
+            store.slot_mut(None).entry,
             PendingEntry::Accumulating(_)
         ));
         assert_eq!(store.identified_len(), 1);
@@ -2144,13 +2463,13 @@ mod tests {
     fn store_evicts_the_smallest_last_touched_at_the_cap() {
         let mut store = PendingOsc99::default();
         for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
-            store.entry_mut(Some(&format!("id-{i}")));
+            store.slot_mut(Some(&format!("id-{i}")));
         }
         // Touch the two oldest again, leaving `id-2` as the least recent.
-        store.entry_mut(Some("id-0"));
-        store.entry_mut(Some("id-1"));
+        store.slot_mut(Some("id-0"));
+        store.slot_mut(Some("id-1"));
 
-        store.entry_mut(Some("new"));
+        store.slot_mut(Some("new"));
         assert_eq!(store.identified_len(), MAX_PENDING_OSC99_NOTIFICATIONS);
         assert!(store.get(Some("id-2")).is_none());
         for kept in ["id-0", "id-1", "id-3", "new"] {
@@ -2158,7 +2477,7 @@ mod tests {
         }
 
         // Re-touching an existing id at the cap evicts nothing.
-        store.entry_mut(Some("id-3"));
+        store.slot_mut(Some("id-3"));
         assert_eq!(store.identified_len(), MAX_PENDING_OSC99_NOTIFICATIONS);
         assert!(store.get(Some("id-4")).is_some());
     }
@@ -2166,9 +2485,9 @@ mod tests {
     #[test]
     fn store_never_evicts_the_unidentified_slot() {
         let mut store = PendingOsc99::default();
-        store.entry_mut(None);
+        store.slot_mut(None);
         for i in 0..=MAX_PENDING_OSC99_NOTIFICATIONS {
-            store.entry_mut(Some(&format!("id-{i}")));
+            store.slot_mut(Some(&format!("id-{i}")));
         }
         assert!(store.get(None).is_some());
     }
@@ -2178,7 +2497,7 @@ mod tests {
         let mut store = PendingOsc99::default();
         assert!(!store.is_tombstone(Some("a")));
         assert!(!store.is_tombstone(None));
-        store.entry_mut(Some("a"));
+        store.slot_mut(Some("a"));
         assert!(!store.is_tombstone(Some("a")));
         store.tombstone(Some("a"));
         assert!(store.is_tombstone(Some("a")));
@@ -2189,12 +2508,410 @@ mod tests {
     #[test]
     fn store_clear_empties_both_halves() {
         let mut store = PendingOsc99::default();
-        store.entry_mut(Some("a"));
-        store.entry_mut(None);
+        store.slot_mut(Some("a"));
+        store.slot_mut(None);
         store.clear();
         assert!(store.is_empty());
         assert!(store.get(None).is_none());
         assert_eq!(store.identified_len(), 0);
+    }
+
+    // ── 138.C6: bounded, linear-cost reassembly ───────────────────────────────
+
+    /// How many entries the pending notification for `id` holds in the list
+    /// selected by `len`, or `None` when it holds no live accumulation.
+    fn live_list_len(
+        handler: &TerminalHandler,
+        id: &str,
+        len: fn(&Osc99Command) -> usize,
+    ) -> Option<usize> {
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some(id)) else {
+            return None;
+        };
+        entry.meta.as_ref().map(len)
+    }
+
+    /// Stream 100k tiny `d=0` chunks that each add one entry to one list and
+    /// assert the list never passes `cap` and the transfer ends as a tombstone.
+    fn assert_hostile_list_stream_is_capped(
+        metadata: &str,
+        cap: usize,
+        len: fn(&Osc99Command) -> usize,
+    ) {
+        let mut handler = TerminalHandler::new(80, 24);
+        for _ in 0..100_000 {
+            assert!(feed(&mut handler, metadata, b"").is_none());
+            if let Some(held) = live_list_len(&handler, "hostile", len) {
+                assert!(held <= cap, "list grew to {held}, past the cap of {cap}");
+            }
+        }
+        assert!(is_dropped(&handler, "hostile"));
+        assert_eq!(handler.pending_osc99.identified_len(), 1);
+        handler.pending_osc99.assert_costs_consistent();
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+    }
+
+    #[test]
+    fn hostile_icon_name_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:n=YQ",
+            MAX_OSC99_ICON_NAMES,
+            |m| m.icon_names.len(),
+        );
+    }
+
+    #[test]
+    fn hostile_notification_type_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:t=YQ",
+            MAX_OSC99_NOTIFICATION_TYPES,
+            |m| m.notification_types.len(),
+        );
+    }
+
+    #[test]
+    fn hostile_action_edit_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:a=report",
+            MAX_OSC99_ACTION_EDITS,
+            |m| m.action_edits.len(),
+        );
+    }
+
+    #[test]
+    fn list_caps_admit_exactly_the_cap_and_reject_one_more() {
+        let chunk = |names: usize| Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["a".to_owned(); names],
+            ..default_cmd()
+        };
+        let mut pending = PendingNotification::default();
+        assert!(pending.accept(&chunk(MAX_OSC99_ICON_NAMES)).is_ok());
+        assert_eq!(
+            pending.accept(&chunk(1)),
+            Err(Osc99Reject::TooManyIconNames {
+                max: MAX_OSC99_ICON_NAMES
+            })
+        );
+        // A rejected chunk merges nothing.
+        assert_eq!(
+            pending.meta.as_ref().map(|m| m.icon_names.len()),
+            Some(MAX_OSC99_ICON_NAMES)
+        );
+    }
+
+    #[test]
+    fn list_cost_charges_len_plus_overhead_per_string_and_overhead_per_edit() {
+        let mut pending = PendingNotification::default();
+        let chunk = Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["ab".to_owned()],
+            notification_types: vec!["c".to_owned(), "defg".to_owned()],
+            action_edits: vec![Osc99ActionEdit::Add(Osc99Action::Report)],
+            ..default_cmd()
+        };
+        pending.accept(&chunk).unwrap();
+        let expected = (2 + OSC99_LIST_ENTRY_OVERHEAD)
+            + (1 + OSC99_LIST_ENTRY_OVERHEAD)
+            + (4 + OSC99_LIST_ENTRY_OVERHEAD)
+            + OSC99_LIST_ENTRY_OVERHEAD;
+        assert_eq!(pending.list_cost, expected);
+
+        // A chunk without lists adds nothing, however much is already held.
+        pending.accept(&default_cmd()).unwrap();
+        assert_eq!(pending.list_cost, expected);
+        assert_eq!(pending.cost(), expected);
+    }
+
+    #[test]
+    fn list_cost_counts_toward_the_byte_budget_before_the_entry_cap() {
+        let mut pending = PendingNotification::default();
+        let name_len = 20_000;
+        let chunk = Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["n".repeat(name_len)],
+            ..default_cmd()
+        };
+        let mut accepted = 0usize;
+        let rejection = loop {
+            match pending.accept(&chunk) {
+                Ok(()) => accepted += 1,
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(
+            rejection,
+            Osc99Reject::Chunk(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES
+            })
+        );
+        // The byte budget bites before the 64-entry cap does.
+        assert!(accepted < MAX_OSC99_ICON_NAMES);
+        assert_eq!(
+            accepted,
+            MAX_OSC99_NOTIFICATION_BYTES / (name_len + OSC99_LIST_ENTRY_OVERHEAD)
+        );
+    }
+
+    #[test]
+    fn title_body_and_buttons_are_capped_at_64_kib() {
+        for (payload_type, name) in [
+            (Osc99PayloadType::Title, "title"),
+            (Osc99PayloadType::Body, "body"),
+            (Osc99PayloadType::Buttons, "buttons"),
+        ] {
+            let chunk = |len: usize| Osc99Command {
+                payload_type,
+                chunk_state: Osc99ChunkState::More,
+                payload: vec![b'x'; len],
+                ..default_cmd()
+            };
+            let mut at_cap = PendingNotification::default();
+            assert!(
+                at_cap.accept(&chunk(MAX_OSC99_TEXT_PAYLOAD_BYTES)).is_ok(),
+                "{name} at the cap must be accepted"
+            );
+            assert!(
+                matches!(
+                    at_cap.accept(&chunk(1)),
+                    Err(Osc99Reject::Chunk(ChunkError::TotalTooLarge {
+                        max: MAX_OSC99_TEXT_PAYLOAD_BYTES
+                    }))
+                ),
+                "{name} one byte over the cap must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_title_drops_the_transfer() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let chunk = vec![b't'; MAX_OSC99_TEXT_PAYLOAD_BYTES + 1];
+        assert!(feed(&mut handler, "i=big:d=0:p=title", &chunk).is_none());
+        assert!(is_dropped(&handler, "big"));
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+    }
+
+    #[test]
+    fn icon_keeps_the_one_mebibyte_cap() {
+        let half = Osc99Command {
+            payload_type: Osc99PayloadType::Icon,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![0x89; MAX_OSC99_ICON_PAYLOAD_BYTES / 2],
+            ..default_cmd()
+        };
+        let mut pending = PendingNotification::default();
+        assert!(pending.accept(&half).is_ok());
+        assert!(pending.accept(&half).is_ok());
+        assert_eq!(pending.cost(), MAX_OSC99_ICON_PAYLOAD_BYTES);
+        let one_more = Osc99Command {
+            payload: vec![0x89],
+            ..half
+        };
+        assert!(pending.accept(&one_more).is_err());
+    }
+
+    /// A content chunk of `len` payload bytes for the transfer `id`.
+    fn icon_chunk(id: Option<&str>, len: usize) -> Osc99Command {
+        Osc99Command {
+            id: id.map(str::to_owned),
+            payload_type: Osc99PayloadType::Icon,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![0x89; len],
+            ..default_cmd()
+        }
+    }
+
+    #[test]
+    fn aggregate_budget_evicts_the_least_recently_touched_other_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let each = 1_000_000;
+        for i in 0..8 {
+            assert!(
+                handler
+                    .reassemble_osc99(&icon_chunk(Some(&format!("a{i}")), each))
+                    .is_none()
+            );
+        }
+        assert_eq!(handler.pending_osc99.total_cost(), 8 * each);
+        handler.pending_osc99.assert_costs_consistent();
+
+        // Touching `a0` makes `a1` the least recently touched.
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("a0"), 1))
+                .is_none()
+        );
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("b"), each))
+                .is_none()
+        );
+
+        assert!(handler.pending_osc99.get(Some("a1")).is_none());
+        for kept in ["a0", "a2", "a3", "a4", "a5", "a6", "a7", "b"] {
+            assert!(
+                handler.pending_osc99.get(Some(kept)).is_some(),
+                "{kept} must survive"
+            );
+        }
+        assert_eq!(handler.pending_osc99.total_cost(), 8 * each + 1);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_never_evicts_the_chunks_own_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("old"), 600))
+                .is_none()
+        );
+        // The same id keeps growing: the other entry is evicted, not this one.
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("new"), 600))
+                .is_none()
+        );
+        assert!(handler.pending_osc99.get(Some("old")).is_none());
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("new"), 300))
+                .is_none()
+        );
+        assert!(matches!(
+            handler.pending_osc99.get(Some("new")),
+            Some(PendingEntry::Accumulating(_))
+        ));
+        assert_eq!(handler.pending_osc99.total_cost(), 900);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_can_evict_the_unidentified_slot() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(handler.reassemble_osc99(&icon_chunk(None, 600)).is_none());
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("id"), 600))
+                .is_none()
+        );
+        assert!(handler.pending_osc99.get(None).is_none());
+        assert!(handler.pending_osc99.get(Some("id")).is_some());
+        assert_eq!(handler.pending_osc99.total_cost(), 600);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_drops_an_entry_that_alone_exceeds_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("other"), 400))
+                .is_none()
+        );
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("huge"), 1_001))
+                .is_none()
+        );
+        // The oversized transfer is a tombstone; the bystander was not evicted.
+        assert!(is_dropped(&handler, "huge"));
+        assert!(matches!(
+            handler.pending_osc99.get(Some("other")),
+            Some(PendingEntry::Accumulating(_))
+        ));
+        assert_eq!(handler.pending_osc99.total_cost(), 400);
+        handler.pending_osc99.assert_costs_consistent();
+
+        // Its terminating chunk removes the tombstone and emits nothing.
+        let done = Osc99Command {
+            chunk_state: Osc99ChunkState::Done,
+            ..icon_chunk(Some("huge"), 0)
+        };
+        assert!(handler.reassemble_osc99(&done).is_none());
+        assert!(handler.pending_osc99.get(Some("huge")).is_none());
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn running_total_matches_a_recomputed_total_through_a_mixed_sequence() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(5_000);
+        let check = |handler: &TerminalHandler| handler.pending_osc99.assert_costs_consistent();
+
+        for i in 0..6 {
+            handler.reassemble_osc99(&icon_chunk(Some(&format!("x{i}")), 1_200));
+            check(&handler);
+        }
+        handler.reassemble_osc99(&icon_chunk(None, 700));
+        check(&handler);
+
+        // List metadata is charged too.
+        let named = Osc99Command {
+            id: Some("named".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["n".repeat(100)],
+            ..default_cmd()
+        };
+        handler.reassemble_osc99(&named);
+        check(&handler);
+
+        // Tombstone, then its terminating chunk.
+        handler.reassemble_osc99(&icon_chunk(Some("bad"), 9_999));
+        check(&handler);
+        let done_bad = Osc99Command {
+            chunk_state: Osc99ChunkState::Done,
+            ..icon_chunk(Some("bad"), 0)
+        };
+        handler.reassemble_osc99(&done_bad);
+        check(&handler);
+
+        // Finalise one, standalone-finalise another, then clear.
+        let finish = Osc99Command {
+            payload_type: Osc99PayloadType::Title,
+            chunk_state: Osc99ChunkState::Done,
+            payload: b"t".to_vec(),
+            ..icon_chunk(Some("named"), 0)
+        };
+        assert!(handler.reassemble_osc99(&finish).is_some());
+        check(&handler);
+        let standalone = Osc99Command {
+            payload: b"solo".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&standalone).is_some());
+        check(&handler);
+
+        handler.pending_osc99.clear();
+        check(&handler);
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+    }
+
+    #[test]
+    fn reassembly_borrows_the_chunk_and_never_stores_its_payload_in_meta() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let chunk = Osc99Command {
+            id: Some("borrow".to_owned()),
+            payload_type: Osc99PayloadType::Body,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![b'p'; 4096],
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&chunk).is_none());
+        // The caller still owns the payload: nothing was moved out of it, and
+        // the entry's metadata holds no copy.
+        assert_eq!(chunk.payload.len(), 4096);
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some("borrow"))
+        else {
+            panic!("entry should be accumulating");
+        };
+        assert_eq!(entry.body.len(), 4096);
+        assert!(entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()));
+        assert_eq!(handler.pending_osc99.total_cost(), 4096);
     }
 
     // ── 138.4: osc99_query_reply_body ─────────────────────────────────────────

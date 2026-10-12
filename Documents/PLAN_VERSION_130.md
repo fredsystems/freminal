@@ -5968,6 +5968,15 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Tests:** a hostile stream of 100k tiny `n=` chunks is dropped early (assert entry count,
   not time); the aggregate budget evicts and then drops; a large icon chunk is not copied
   (assert through the assembler API that no owned clone of the payload is made).
+- **Status:** done.
+  - A typed `Osc99Reject` covers the list caps and the budget. `ChunkError` is shared with
+    graphics, so it is left alone.
+  - The running costs are kept per slot and per store, with a test-only consistency check.
+  - The command cannot be moved (`handle_osc` takes `&AnsiOscType`), so reassembly takes
+    `&Osc99Command` and the payload slice goes straight into the assembler.
+  - The budget is checked after a chunk lands, so it can be exceeded by at most one chunk
+    (1 MiB) before eviction; this is documented.
+  - Evicted entries are removed, not tombstoned, as with the count cap.
 
 #### 138.C7 — OSC 99 parse and finalisation fidelity
 

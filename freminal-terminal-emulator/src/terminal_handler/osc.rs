@@ -371,7 +371,7 @@ mod tests {
             payload: b"Hi".to_vec(),
             ..default_osc99()
         };
-        let result = handler.reassemble_osc99(cmd);
+        let result = handler.reassemble_osc99(&cmd);
         let finalized = result.expect("single done chunk must finalize");
         assert_eq!(finalized.title, "Hi");
         assert_eq!(finalized.body, None);
@@ -394,7 +394,7 @@ mod tests {
             payload: b"He".to_vec(),
             ..default_osc99()
         };
-        let r1 = handler.reassemble_osc99(chunk1);
+        let r1 = handler.reassemble_osc99(&chunk1);
         assert!(r1.is_none(), "first chunk must not finalize");
 
         // Chunk 2: id=n1, Title, d=false, payload "llo"
@@ -405,7 +405,7 @@ mod tests {
             payload: b"llo".to_vec(),
             ..default_osc99()
         };
-        let r2 = handler.reassemble_osc99(chunk2);
+        let r2 = handler.reassemble_osc99(&chunk2);
         assert!(r2.is_none(), "second chunk must not finalize");
 
         // Chunk 3: id=n1, Body, d=true, payload "World"
@@ -416,7 +416,7 @@ mod tests {
             payload: b"World".to_vec(),
             ..default_osc99()
         };
-        let r3 = handler.reassemble_osc99(chunk3);
+        let r3 = handler.reassemble_osc99(&chunk3);
         let finalized = r3.expect("terminating chunk must finalize");
         assert_eq!(finalized.title, "Hello");
         assert_eq!(finalized.body, Some("World".to_owned()));
@@ -435,7 +435,7 @@ mod tests {
             payload: b"First".to_vec(),
             ..default_osc99()
         };
-        let r1 = handler.reassemble_osc99(first);
+        let r1 = handler.reassemble_osc99(&first);
         assert!(r1.is_some(), "first n1 must finalize");
 
         // Second notification: same id, new content.
@@ -444,7 +444,7 @@ mod tests {
             payload: b"Second".to_vec(),
             ..default_osc99()
         };
-        let r2 = handler.reassemble_osc99(second);
+        let r2 = handler.reassemble_osc99(&second);
         let finalized = r2.expect("second n1 must finalize (fresh start)");
         // Must not carry stale bytes from the first notification.
         assert_eq!(finalized.title, "Second");
@@ -461,7 +461,7 @@ mod tests {
             payload: b"Wor".to_vec(),
             ..default_osc99()
         };
-        assert!(handler.reassemble_osc99(first).is_none());
+        assert!(handler.reassemble_osc99(&first).is_none());
         assert_eq!(
             handler.pending_osc99.identified_len(),
             0,
@@ -478,7 +478,7 @@ mod tests {
             ..default_osc99()
         };
         let finalized = handler
-            .reassemble_osc99(last)
+            .reassemble_osc99(&last)
             .expect("the id-less final chunk must finalize");
         assert_eq!(finalized.title, "World");
         assert!(handler.pending_osc99.is_empty());
@@ -497,7 +497,7 @@ mod tests {
             payload: b"AAA".to_vec(),
             ..default_osc99()
         };
-        assert!(handler.reassemble_osc99(a1).is_none());
+        assert!(handler.reassemble_osc99(&a1).is_none());
 
         // id=b: non-final title chunk.
         let b1 = Osc99Command {
@@ -507,7 +507,7 @@ mod tests {
             payload: b"BBB".to_vec(),
             ..default_osc99()
         };
-        assert!(handler.reassemble_osc99(b1).is_none());
+        assert!(handler.reassemble_osc99(&b1).is_none());
 
         // Finalize id=a.
         let a2 = Osc99Command {
@@ -517,7 +517,7 @@ mod tests {
             payload: b"aaa".to_vec(),
             ..default_osc99()
         };
-        let fa = handler.reassemble_osc99(a2).expect("a must finalize");
+        let fa = handler.reassemble_osc99(&a2).expect("a must finalize");
         assert_eq!(fa.title, "AAAaaa", "a title contaminated");
         assert_eq!(fa.body, None);
 
@@ -529,7 +529,7 @@ mod tests {
             payload: b"bbb".to_vec(),
             ..default_osc99()
         };
-        let fb = handler.reassemble_osc99(b2).expect("b must finalize");
+        let fb = handler.reassemble_osc99(&b2).expect("b must finalize");
         assert_eq!(fb.title, "BBBbbb", "b title contaminated");
         assert_eq!(fb.body, None);
     }
@@ -547,14 +547,14 @@ mod tests {
             payload: b"partial".to_vec(),
             ..default_osc99()
         };
-        handler.reassemble_osc99(chunk);
+        handler.reassemble_osc99(&chunk);
         let unidentified = Osc99Command {
             id: None,
             chunk_state: Osc99ChunkState::More,
             payload: b"partial".to_vec(),
             ..default_osc99()
         };
-        handler.reassemble_osc99(unidentified);
+        handler.reassemble_osc99(&unidentified);
         assert_eq!(handler.pending_osc99.identified_len(), 1);
         assert!(handler.pending_osc99.get(None).is_some());
 
