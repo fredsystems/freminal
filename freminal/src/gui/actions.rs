@@ -798,7 +798,15 @@ impl super::FreminalGui {
                 // state change to every pane in every window.  Toast-reports
                 // success or failure; leaves the live config unchanged on
                 // parse error.  See `reload_config_from_disk` for details.
-                self.reload_config_from_disk(handle);
+                //
+                // `win` is out of `self.windows` for this frame, so it is
+                // passed through; the map alone would miss the window the
+                // user triggered the reload from.
+                self.reload_config_from_disk(handle, Some(&mut *win));
+                // The theme reaches this window's chrome via the PTY
+                // round-trip; `apply_new_config`'s follow-up repaint covers
+                // only the windows in the map.
+                handle.request_repaint_after(window_id, std::time::Duration::from_millis(50));
             }
         }
     }

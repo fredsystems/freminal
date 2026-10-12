@@ -5880,6 +5880,14 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Verification:** a test that `apply_new_config`'s per-pane fan-out reaches a passed
   in-flight window (through the extracted helper); the existing settings tests stay green.
 - **Scheduling:** in Task 138, after 138.18 and before the adversarial review (with 138.C1).
+- **Status:** done. The sub-agent verified the callers:
+  - Reload Config (shortcut and menu) runs with the window out of the map, and now passes
+    `Some(win)`.
+  - The Settings window's Apply runs with every terminal window in the map, and passes `None`.
+  - There are no other callers.
+
+  Every per-window loop in `apply_new_config` goes through `with_current`. The 50 ms
+  follow-up repaint is also requested for the in-flight window.
 
 #### 138.C4 — Standard icon names on the toast leg
 

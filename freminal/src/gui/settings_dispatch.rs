@@ -14,6 +14,21 @@ use super::visual_preview::{
     self, FONT_PREVIEW_DEBOUNCE, FontPreview, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, VisualPreview,
     VisualPreviewDiff,
 };
+use super::window::PerWindowState;
+
+/// Every window in `windows`, followed by `current` when there is one.
+///
+/// `update()` removes the window it is rendering from `FreminalGui::windows`
+/// for the duration of the frame, so a fan-out run from inside that frame
+/// (Reload Config) walks the map and must add that window itself or its panes
+/// miss the change. Works for `&W` and `&mut W` items alike. `current` must
+/// not also be in `windows`, or it would be visited twice.
+fn with_current<W>(
+    windows: impl IntoIterator<Item = W>,
+    current: Option<W>,
+) -> impl Iterator<Item = W> {
+    windows.into_iter().chain(current)
+}
 
 impl FreminalGui {
     /// Recompile the OSC 99 user filter when `new_cfg` changes
@@ -46,11 +61,18 @@ impl FreminalGui {
     ///
     /// The caller is responsible for having already produced `new_cfg`
     /// (either from the settings draft or by re-reading `config.toml`).
+    ///
+    /// `current` is the window being rendered, when the caller runs inside a
+    /// terminal window's `update()` (Reload Config): that window is out of
+    /// `self.windows` for the frame, so every per-window change below visits it
+    /// in addition to the map. Pass `None` when no window is out of the map
+    /// (the Settings window's Apply).
     #[allow(clippy::too_many_lines)] // Broadcasts 7 distinct config dimensions.
     pub(super) fn apply_new_config(
         &mut self,
         new_cfg: Config,
         handle: &freminal_windowing::WindowHandle<'_>,
+        mut current: Option<&mut PerWindowState>,
     ) {
         // The theme is being committed: drop the live preview override so
         // chrome styling returns to the snapshot's theme (which now carries the
@@ -60,7 +82,7 @@ impl FreminalGui {
         self.preview_theme = None;
 
         // Apply theme change to all windows.
-        for win in self.windows.values_mut() {
+        for win in with_current(self.windows.values_mut(), current.as_deref_mut()) {
             if new_cfg.theme.active_slug(win.os_dark_mode)
                 != self.config.theme.active_slug(win.os_dark_mode)
                 && let Some(theme) =
@@ -104,7 +126,7 @@ impl FreminalGui {
         }
 
         // Apply font changes to all windows.
-        for win in self.windows.values_mut() {
+        for win in with_current(self.windows.values_mut(), current.as_deref_mut()) {
             let font_changed = win
                 .terminal_widget
                 .apply_config_changes_no_ctx(&self.config, &new_cfg);
@@ -121,7 +143,7 @@ impl FreminalGui {
         // Broadcast auto URL detection toggle to all panes when changed.
         if new_cfg.ui.auto_detect_urls != self.config.ui.auto_detect_urls {
             let enabled = new_cfg.ui.auto_detect_urls;
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
@@ -155,7 +177,7 @@ impl FreminalGui {
                 &new_cfg.cursor.shape,
                 new_cfg.cursor.blink,
             );
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
@@ -180,17 +202,12 @@ impl FreminalGui {
 
         // Broadcast host-dependent capability changes to all panes (Task
         // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
-        // `None`: this function has no handle on an in-flight window. The
-        // Settings window's frame has none out of the map, but Reload Config
-        // (a key action dispatched inside a terminal window's `update()`)
-        // does, and its panes miss this broadcast until the caller passes its
-        // window through `apply_new_config`.
         let daemon = self.osc99_daemon.get();
         let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg, daemon);
         if new_host_capabilities
             != super::host_capabilities::host_capabilities(&self.config, daemon)
         {
-            self.broadcast_host_capabilities(new_host_capabilities, None);
+            self.broadcast_host_capabilities(new_host_capabilities, current.as_deref());
         }
 
         self.apply_osc99_filters(&new_cfg);
@@ -253,7 +270,7 @@ impl FreminalGui {
 
         // Apply background image to all panes in all windows.
         let new_bg_path = self.config.ui.background_image.clone();
-        for win in self.windows.values() {
+        for win in with_current(self.windows.values(), current.as_deref()) {
             for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
@@ -276,7 +293,7 @@ impl FreminalGui {
         // Apply shader changes to all windows.
         let has_shader_path = self.config.shader.path.is_some();
         if !has_shader_path {
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 if let Ok(mut wpr) = win.window_post.lock() {
                     wpr.pending_shader = Some(None);
                 }
@@ -284,7 +301,7 @@ impl FreminalGui {
         } else if let Some(ref p) = self.config.shader.path {
             match std::fs::read_to_string(p) {
                 Ok(src) => {
-                    for win in self.windows.values() {
+                    for win in with_current(self.windows.values(), current.as_deref()) {
                         if let Ok(mut wpr) = win.window_post.lock() {
                             wpr.pending_shader = Some(Some(src.clone()));
                         }
@@ -300,7 +317,7 @@ impl FreminalGui {
         }
 
         // Notify all panes of theme mode update.
-        for win in self.windows.values() {
+        for win in with_current(self.windows.values(), current.as_deref()) {
             for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
@@ -343,9 +360,13 @@ impl FreminalGui {
     /// before any config existed and no `--config` was supplied) this is a
     /// no-op with a user-visible toast.  Parse errors are logged and a
     /// toast is shown; `self.config` is left unchanged.
+    ///
+    /// `current` is the window the reload was triggered from; see
+    /// [`Self::apply_new_config`].
     pub(super) fn reload_config_from_disk(
         &mut self,
         handle: &freminal_windowing::WindowHandle<'_>,
+        current: Option<&mut PerWindowState>,
     ) {
         let Some(path) = self.config_path.clone() else {
             self.push_error_toast(
@@ -363,7 +384,7 @@ impl FreminalGui {
                     return;
                 }
             };
-        self.apply_new_config(new_cfg, handle);
+        self.apply_new_config(new_cfg, handle, current);
         // Re-sync the Settings modal's draft so opening Settings after a
         // reload shows the now-live values, not a stale draft.
         self.settings_modal.sync_from_config(&self.config);
@@ -1157,7 +1178,10 @@ impl FreminalGui {
         match action {
             SettingsAction::Applied => {
                 let new_cfg = self.settings_modal.applied_config().clone();
-                self.apply_new_config(new_cfg, handle);
+                // The Settings window's frame has no terminal window out of the
+                // map (it returns before `update()` removes one), so every
+                // window is in `self.windows`.
+                self.apply_new_config(new_cfg, handle, None);
             }
             SettingsAction::Preview(next, trigger) => {
                 self.apply_visual_preview(next, *trigger, handle);
@@ -1227,5 +1251,46 @@ impl FreminalGui {
                 self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_current;
+
+    #[test]
+    fn with_current_visits_the_in_flight_window_once_after_the_map() {
+        let mut in_map = [1_u32, 2];
+        let mut in_flight = 3_u32;
+
+        let mut visited = Vec::new();
+        for win in with_current(in_map.iter_mut(), Some(&mut in_flight)) {
+            visited.push(*win);
+            *win += 10;
+        }
+
+        assert_eq!(visited, [1, 2, 3], "every window, in-flight one last, once");
+        assert_eq!(in_map, [11, 12], "mapped windows were mutable");
+        assert_eq!(in_flight, 13, "the in-flight window was mutable");
+    }
+
+    #[test]
+    fn with_current_without_an_in_flight_window_visits_only_the_map() {
+        let in_map = [1_u32, 2];
+
+        let visited: Vec<u32> = with_current(in_map.iter(), None).copied().collect();
+
+        assert_eq!(visited, [1, 2]);
+    }
+
+    #[test]
+    fn with_current_visits_the_in_flight_window_when_the_map_is_empty() {
+        let in_flight = 7_u32;
+
+        let visited: Vec<u32> = with_current(std::iter::empty(), Some(&in_flight))
+            .copied()
+            .collect();
+
+        assert_eq!(visited, [7], "the only window is the in-flight one");
     }
 }
