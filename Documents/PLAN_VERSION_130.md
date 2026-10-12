@@ -5918,6 +5918,18 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   178×60 with a detail). Button quads reuse the pill shader, so they carry its small drop
   shadow; accepted. `toast.rs` reached about 4,700 lines (about 2,500 of production code);
   the move-only directory split is 138.C1.
+- **138.9 (done).** `FocusPane` follows the activation reply, on body and button activations,
+  whatever `a=report` says.
+  - `route_osc99` now returns its effects, and every effect is applied through
+    `apply_osc99_effects_queueing_focus` in `app_impl`.
+  - The executor has no window access, so focus requests are queued, and
+    `drain_osc99_focus_requests` runs at the very top of `update()`. That has to happen before
+    the current window is taken out of `self.windows`. A repaint wake makes an idle window run
+    the drain.
+  - `focus_pane_in_tabs` switches the tab, clears another pane's zoom, and sends the
+    `FocusChange` pair. Tested on a two-tab manager. The `FocusChange(false)` to a real old
+    split pane is not asserted, because a split needs a PTY per pane; the path copies the
+    click-to-focus code.
 
 ---
 

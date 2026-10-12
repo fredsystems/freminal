@@ -1410,6 +1410,10 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(feature = "frame-profiling")]
         let update_start = std::time::Instant::now();
 
+        // Focus the panes activated OSC 99 notifications asked for, before any
+        // window state is read this frame.
+        self.drain_osc99_focus_requests(handle);
+
         // ── Settings window rendering ────────────────────────────────────────
         // If this update is for the settings window, render settings directly
         // and return — no terminal state to process.
@@ -2063,6 +2067,7 @@ impl freminal_windowing::App for FreminalGui {
                 WindowFocus::from_bool(window_focused),
                 &window_manipulation_events,
             );
+            self.wake_for_osc99_focus_requests(ui.ctx());
 
             // ── Multi-pane rendering loop ────────────────────────────
             //
@@ -3937,6 +3942,9 @@ impl freminal_windowing::App for FreminalGui {
         // closing leaves the stack empty, and that `Closed` must still be
         // delivered.
         self.route_osc99_toast_events();
+        // An activation that asked for focus queued it; the drain at the top
+        // of `update()` needs a frame to run in.
+        self.wake_for_osc99_focus_requests(ctx);
 
         // ── Retired GL objects need one more frame (125.C2 review) ──────────
         // A pane closed during this update retired its renderer after the
@@ -4480,14 +4488,14 @@ impl FreminalGui {
                             window_focus,
                             pane: request.pane_state,
                         };
-                        crate::gui::notifications::NotificationRouter::route_osc99(
+                        let effects = crate::gui::notifications::NotificationRouter::route_osc99(
                             request,
                             &self.config.notifications,
                             ctx,
-                            &mut toasts,
                             &mut icon_cache,
                             &mut registry,
                         );
+                        self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
                     }
                 }
                 (toasts, icon_cache, registry) => {
@@ -4533,12 +4541,7 @@ impl FreminalGui {
                 Osc99ControlKind::Close => registry.close(request.origin, &control.id),
             };
             drop(registry);
-            crate::gui::osc99::apply_osc99_effects(
-                effects,
-                &mut crate::gui::osc99::Osc99EffectSink {
-                    toasts: &mut toasts,
-                },
-            );
+            self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
         }
     }
 
@@ -4565,12 +4568,79 @@ impl FreminalGui {
             .into_iter()
             .flat_map(|event| registry.on_toast_event(event))
             .collect();
-        crate::gui::osc99::apply_osc99_effects(
-            effects,
-            &mut crate::gui::osc99::Osc99EffectSink {
-                toasts: &mut toasts,
-            },
-        );
+        self.apply_osc99_effects_queueing_focus(effects, &mut toasts);
+    }
+
+    /// Execute OSC 99 `effects` against `toasts` and queue the panes they ask
+    /// to focus on `self.osc99_focus_requests`.
+    ///
+    /// The effect executor has no window access, so focus is performed later,
+    /// by [`Self::drain_osc99_focus_requests`] at the top of the next
+    /// `update()`. A busy queue drops the requests with a warning.
+    fn apply_osc99_effects_queueing_focus(
+        &self,
+        effects: Vec<crate::gui::osc99::Osc99Effect>,
+        toasts: &mut crate::gui::toast::ToastStack,
+    ) {
+        let mut sink = crate::gui::osc99::Osc99EffectSink {
+            toasts,
+            focus_requests: Vec::new(),
+        };
+        crate::gui::osc99::apply_osc99_effects(effects, &mut sink);
+        if sink.focus_requests.is_empty() {
+            return;
+        }
+        if let Ok(mut queue) = self.osc99_focus_requests.try_borrow_mut() {
+            queue.append(&mut sink.focus_requests);
+        } else {
+            tracing::warn!(
+                dropped = sink.focus_requests.len(),
+                "OSC 99: focus request queue busy; focus requests dropped"
+            );
+        }
+    }
+
+    /// Ask for one more frame when OSC 99 focus requests are waiting, so the
+    /// next `update()` drains them even on an otherwise idle window.
+    fn wake_for_osc99_focus_requests(&self, ctx: &egui::Context) {
+        if self
+            .osc99_focus_requests
+            .try_borrow()
+            .is_ok_and(|queue| !queue.is_empty())
+        {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Perform the focus requests queued by activated OSC 99 notifications.
+    ///
+    /// For each requested pane: find its window, switch to the pane's tab,
+    /// unzoom, make it the active pane ([`focus_pane_in_tabs`]), then raise
+    /// the OS window and repaint it. A missing window or pane is skipped.
+    ///
+    /// [`focus_pane_in_tabs`]: crate::gui::actions::focus_pane_in_tabs
+    fn drain_osc99_focus_requests(&mut self, handle: &freminal_windowing::WindowHandle<'_>) {
+        let Ok(mut queue) = self.osc99_focus_requests.try_borrow_mut() else {
+            tracing::warn!("OSC 99: focus request queue busy; draining deferred");
+            return;
+        };
+        let requests = std::mem::take(&mut *queue);
+        drop(queue);
+        for origin in requests {
+            let Some(win) = self.windows.get_mut(&origin.window_id) else {
+                trace!(?origin, "OSC 99 focus request: window is gone; skipped");
+                continue;
+            };
+            match crate::gui::actions::focus_pane_in_tabs(&mut win.tabs, origin.pane_id) {
+                crate::gui::actions::PaneFocusOutcome::Focused => {
+                    handle.focus_window(origin.window_id);
+                    handle.request_repaint(origin.window_id);
+                }
+                crate::gui::actions::PaneFocusOutcome::PaneNotFound => {
+                    trace!(?origin, "OSC 99 focus request: pane is gone; skipped");
+                }
+            }
+        }
     }
 
     /// First-window spawn path when no layout or session restore will apply.

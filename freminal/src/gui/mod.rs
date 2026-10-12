@@ -402,6 +402,12 @@ struct FreminalGui {
     /// `p=close` handling. A pure state machine; see [`osc99::Osc99Registry`].
     osc99_registry: std::cell::RefCell<osc99::Osc99Registry>,
 
+    /// Panes an activated OSC 99 notification asked to focus
+    /// ([`osc99::Osc99Effect::FocusPane`]). The effect executor has no window
+    /// access, so requests queue here and the next `update()` drains them.
+    /// Single-threaded GUI, so `RefCell` suffices.
+    osc99_focus_requests: std::cell::RefCell<Vec<osc99::Osc99Origin>>,
+
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
     /// window in this set it skips the running-command guard and lets the
@@ -594,6 +600,7 @@ impl FreminalGui {
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
             osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
             osc99_registry: std::cell::RefCell::new(osc99::Osc99Registry::default()),
+            osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

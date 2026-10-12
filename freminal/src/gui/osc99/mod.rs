@@ -145,12 +145,22 @@ pub enum Osc99Effect {
     },
     /// Remove `instance`'s toast (a no-op if it is already gone).
     CloseToast(Osc99InstanceId),
+    /// Bring `origin`'s pane into focus: switch to its tab, unzoom, make it
+    /// the active pane and raise its OS window. Emitted when a notification
+    /// with `a=focus` is activated.
+    FocusPane(Osc99Origin),
 }
 
 /// The GUI state the executor acts on. Later subtasks add the system legs.
 pub struct Osc99EffectSink<'a> {
     /// The shared toast stack.
     pub toasts: &'a mut ToastStack,
+    /// Panes to focus, collected in effect order.
+    ///
+    /// The executor has no window access, so [`Osc99Effect::FocusPane`] is
+    /// recorded here and performed by the caller once it can reach the
+    /// windows (the next `update()`).
+    pub focus_requests: Vec<Osc99Origin>,
 }
 
 /// Execute `effects` in order against `sink`.
@@ -186,6 +196,7 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                 }
             }
             Osc99Effect::CloseToast(instance) => sink.toasts.close_keyed(instance.to_toast_key()),
+            Osc99Effect::FocusPane(origin) => sink.focus_requests.push(origin),
         }
     }
 }

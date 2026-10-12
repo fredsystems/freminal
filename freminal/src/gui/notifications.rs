@@ -39,8 +39,8 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 use super::command_blocks::format_command_duration;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99EffectSink, Osc99Leg, Osc99PaneState, Osc99Registry,
-    PaneKeyboardFocus, PaneVisibility, apply_osc99_effects,
+    Osc99DisplayRequest, Osc99Effect, Osc99Leg, Osc99PaneState, Osc99Registry, PaneKeyboardFocus,
+    PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -665,23 +665,28 @@ impl NotificationRouter {
     /// reconciled with `registry`, so a `p=alive` poll may transiently
     /// over-report it until the pane closes or the application sends
     /// `p=close`.
+    ///
+    /// The registry's effects (the toast to show, ...) are returned rather
+    /// than applied, so the caller can execute them with the full
+    /// [`apply_osc99_effects`](super::osc99::apply_osc99_effects) sink, which
+    /// this function has no access to. The result is empty when nothing was
+    /// displayed.
     pub(super) fn route_osc99(
         request: &Osc99DisplayRequest,
         config: &NotificationsConfig,
         ctx: Osc99DisplayContext,
-        toasts: &mut ToastStack,
         icon_cache: &mut HashMap<String, Vec<u8>>,
         registry: &mut Osc99Registry,
-    ) {
+    ) -> Vec<Osc99Effect> {
         let data = &request.data;
         if !config.enabled {
-            return;
+            return Vec::new();
         }
 
         // OSC 99 kill-switch (Task 99.8): even with the master switch on, users can
         // disable the kitty stateful protocol specifically.
         if !config.osc_99 {
-            return;
+            return Vec::new();
         }
 
         // Resolve/cache icon bytes *before* the occasion gate: caching must
@@ -693,7 +698,7 @@ impl NotificationRouter {
         let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
-            return;
+            return Vec::new();
         }
 
         // Toast/system legs honour `routing_osc99` (3.3/3.4), mirroring
@@ -730,9 +735,9 @@ impl NotificationRouter {
         // carries an `i=` id and whichever leg showed it.
         if !legs.is_empty() {
             tracing::trace!(id = ?data.id, legs = ?legs, "registering OSC 99 notification");
-            let effects = registry.register(request.origin, request.reply_tx.clone(), data, &legs);
-            apply_osc99_effects(effects, &mut Osc99EffectSink { toasts });
+            return registry.register(request.origin, request.reply_tx.clone(), data, &legs);
         }
+        Vec::new()
     }
 
     /// Resolve the icon bytes to display, applying the `g=` cache.
@@ -1071,10 +1076,30 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::gui::osc99::{Osc99Origin, osc99_toast_spec};
+    use crate::gui::osc99::{Osc99EffectSink, Osc99Origin, apply_osc99_effects, osc99_toast_spec};
     use freminal_common::buffer_states::osc99_notification::Osc99ActivationFocus;
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
+
+    /// Route `request` and execute the effects `route_osc99` returns against
+    /// `toasts`, as the app does (minus the focus queue).
+    fn route_osc99_into(
+        request: &Osc99DisplayRequest,
+        config: &NotificationsConfig,
+        ctx: Osc99DisplayContext,
+        toasts: &mut ToastStack,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        registry: &mut Osc99Registry,
+    ) {
+        let effects = NotificationRouter::route_osc99(request, config, ctx, icon_cache, registry);
+        apply_osc99_effects(
+            effects,
+            &mut Osc99EffectSink {
+                toasts,
+                focus_requests: Vec::new(),
+            },
+        );
+    }
 
     fn osc_req(body: &str) -> NotificationRequest {
         NotificationRequest {
@@ -1312,7 +1337,7 @@ mod tests {
                 ..default_n99()
             };
 
-            NotificationRouter::route_osc99(
+            route_osc99_into(
                 &osc99_request(&data),
                 &config,
                 focused_ctx(),
@@ -1341,7 +1366,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -1933,7 +1958,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -1960,7 +1985,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -1981,7 +2006,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99(); // occasion: Always
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2004,7 +2029,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut registry = Osc99Registry::default();
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(data),
             &config,
             ctx,
@@ -2263,7 +2288,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2289,7 +2314,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99(); // id: None
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2312,7 +2337,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2339,7 +2364,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2369,7 +2394,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2393,7 +2418,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2423,7 +2448,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2457,7 +2482,7 @@ mod tests {
             ..default_n99()
         };
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),
@@ -2492,7 +2517,7 @@ mod tests {
         let mut registry = Osc99Registry::default();
         let data = default_n99();
 
-        NotificationRouter::route_osc99(
+        route_osc99_into(
             &osc99_request(&data),
             &config,
             focused_ctx(),

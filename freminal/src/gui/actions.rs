@@ -7,7 +7,69 @@ use egui;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::{debug, error, trace, warn};
 
+use super::panes::PaneId;
+use super::tabs::TabManager;
 use super::window::PerWindowState;
+
+/// What [`focus_pane_in_tabs`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneFocusOutcome {
+    /// The pane's tab is now active and the pane is that tab's active, unzoomed
+    /// pane.
+    Focused,
+    /// No tab holds the pane (it was closed). Nothing was changed.
+    PaneNotFound,
+}
+
+/// Make `pane` the focused pane of its window.
+///
+/// Switches to the tab holding `pane` (clearing the pane's `bell_active`, as
+/// [`PerWindowState::switch_to_tab_n`] does), clears the tab's zoom when
+/// another pane is zoomed, and makes `pane` the tab's active pane with the
+/// usual `FocusChange(false)` / `FocusChange(true)` pair. A pane that no tab
+/// holds is a no-op.
+///
+/// This does not raise the OS window; the caller does that.
+pub(super) fn focus_pane_in_tabs(tabs: &mut TabManager, pane: PaneId) -> PaneFocusOutcome {
+    let Some(index) = tabs
+        .iter()
+        .position(|tab| tab.pane_tree.find(pane).is_some())
+    else {
+        return PaneFocusOutcome::PaneNotFound;
+    };
+
+    let switched = index != tabs.active_index();
+    if switched && let Err(e) = tabs.switch_to(index) {
+        error!("Failed to switch to tab {index} to focus pane {pane}: {e}");
+        return PaneFocusOutcome::PaneNotFound;
+    }
+
+    let tab = tabs.active_tab_mut();
+    if tab.zoomed_pane.is_some_and(|zoomed| zoomed != pane) {
+        tab.zoomed_pane = None;
+    }
+
+    let old_active = tab.active_pane;
+    if old_active != pane {
+        if let Some(old_pane) = tab.pane_tree.find(old_active)
+            && let Err(e) = old_pane.input_tx.send(InputEvent::FocusChange(false))
+        {
+            error!("Failed to send FocusChange(false) to pane {old_active}: {e}");
+        }
+        tab.active_pane = pane;
+        if let Some(new_pane) = tab.pane_tree.find(pane)
+            && let Err(e) = new_pane.input_tx.send(InputEvent::FocusChange(true))
+        {
+            error!("Failed to send FocusChange(true) to pane {pane}: {e}");
+        }
+    }
+
+    if switched && let Some(new_pane) = tab.pane_tree.find_mut(pane) {
+        new_pane.bell_active = false;
+    }
+
+    PaneFocusOutcome::Focused
+}
 
 impl PerWindowState {
     pub(super) fn close_tab(&mut self, index: usize) {
@@ -937,6 +999,123 @@ mod tests {
         };
 
         (Tab::new(id, pane), input_rx)
+    }
+
+    /// A two-tab manager (tab 0 active) with each tab's single pane's input
+    /// receiver returned: `(tabs, pane0, rx0, pane1, rx1)`.
+    fn two_tabs_with_input_rx() -> (
+        TabManager,
+        PaneId,
+        Receiver<InputEvent>,
+        PaneId,
+        Receiver<InputEvent>,
+    ) {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (id0, id1) = (ids.next_id(), ids.next_id());
+        let (first_tab, rx0) = tab_with_input_rx(TabId::first(), id0);
+        let (second_tab, rx1) = tab_with_input_rx(TabId::offset(1), id1);
+        let mut manager = TabManager::new(first_tab);
+        manager.add_tab(second_tab);
+        if let Err(e) = manager.switch_to(0) {
+            panic!("switch back to tab 0: {e}");
+        }
+        (manager, id0, rx0, id1, rx1)
+    }
+
+    #[test]
+    fn focus_pane_in_tabs_switches_to_the_background_tab_and_clears_its_bell() {
+        let (mut tabs, _id0, rx0, id1, rx1) = two_tabs_with_input_rx();
+        if let Some(pane) = tabs.iter_mut().nth(1).and_then(Tab::active_pane_mut) {
+            pane.bell_active = true;
+        }
+
+        let outcome = focus_pane_in_tabs(&mut tabs, id1);
+
+        assert_eq!(outcome, PaneFocusOutcome::Focused);
+        assert_eq!(tabs.active_index(), 1);
+        assert_eq!(tabs.active_tab().active_pane, id1);
+        assert!(
+            tabs.active_tab()
+                .active_pane()
+                .is_some_and(|pane| !pane.bell_active),
+            "the bell is cleared on the focused pane"
+        );
+        // The pane was already its tab's active pane: no focus events.
+        assert!(rx0.try_recv().is_err());
+        assert!(rx1.try_recv().is_err());
+    }
+
+    #[test]
+    fn focus_pane_in_tabs_on_the_already_focused_pane_changes_nothing() {
+        let (mut tabs, id0, rx0, _id1, rx1) = two_tabs_with_input_rx();
+
+        let outcome = focus_pane_in_tabs(&mut tabs, id0);
+
+        assert_eq!(outcome, PaneFocusOutcome::Focused);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.active_tab().active_pane, id0);
+        assert!(rx0.try_recv().is_err());
+        assert!(rx1.try_recv().is_err());
+    }
+
+    #[test]
+    fn focus_pane_in_tabs_unzooms_and_sends_the_focus_pair() {
+        // A split cannot be built headlessly, so the tab's bookkeeping is
+        // pointed at a different pane than the one being focused: `active_pane`
+        // names a missing pane (so no `FocusChange(false)` is deliverable) and
+        // the zoom names another pane.
+        let (mut tabs, id0, rx0, _id1, _rx1) = two_tabs_with_input_rx();
+        let other = crate::gui::panes::PaneIdGenerator::new(200).next_id();
+        {
+            let tab = tabs.active_tab_mut();
+            tab.zoomed_pane = Some(other);
+            tab.active_pane = other;
+        }
+
+        let outcome = focus_pane_in_tabs(&mut tabs, id0);
+
+        assert_eq!(outcome, PaneFocusOutcome::Focused);
+        let tab = tabs.active_tab();
+        assert_eq!(tab.zoomed_pane, None, "another pane's zoom is cleared");
+        assert_eq!(tab.active_pane, id0);
+        match rx0.try_recv() {
+            Ok(InputEvent::FocusChange(true)) => {}
+            other => panic!("expected FocusChange(true), got {other:?}"),
+        }
+        assert!(rx0.try_recv().is_err(), "exactly one focus event");
+    }
+
+    #[test]
+    fn focus_pane_in_tabs_keeps_the_zoom_when_the_pane_itself_is_zoomed() {
+        let (mut tabs, id0, _rx0, _id1, _rx1) = two_tabs_with_input_rx();
+        tabs.active_tab_mut().zoomed_pane = Some(id0);
+
+        let outcome = focus_pane_in_tabs(&mut tabs, id0);
+
+        assert_eq!(outcome, PaneFocusOutcome::Focused);
+        assert_eq!(tabs.active_tab().zoomed_pane, Some(id0));
+    }
+
+    #[test]
+    fn focus_pane_in_tabs_unknown_pane_changes_nothing() {
+        let (mut tabs, id0, rx0, id1, rx1) = two_tabs_with_input_rx();
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(100);
+        let missing = ids.next_id();
+        tabs.active_tab_mut().zoomed_pane = Some(id0);
+
+        let outcome = focus_pane_in_tabs(&mut tabs, missing);
+
+        assert_eq!(outcome, PaneFocusOutcome::PaneNotFound);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.active_tab().active_pane, id0);
+        assert_eq!(tabs.active_tab().zoomed_pane, Some(id0));
+        assert_eq!(
+            tabs.iter().nth(1).map(|tab| tab.active_pane),
+            Some(id1),
+            "the other tab is untouched"
+        );
+        assert!(rx0.try_recv().is_err());
+        assert!(rx1.try_recv().is_err());
     }
 
     #[test]

@@ -107,6 +107,13 @@ impl Osc99Instance {
         })
     }
 
+    /// The effect that focuses this instance's pane, if activation should
+    /// focus it (`a=focus`).
+    fn focus_effect(&self) -> Option<Osc99Effect> {
+        (self.activation_focus == Osc99ActivationFocus::Focus)
+            .then_some(Osc99Effect::FocusPane(self.origin))
+    }
+
     /// The `p=close` report for this instance, if the registry owes one:
     /// `c=1` was requested and no system leg reports for itself (see the
     /// module docs).
@@ -314,8 +321,9 @@ impl Osc99Registry {
     ///
     /// - `Activated` and `Button(n)` send the activation report when
     ///   `a=report` was requested (the report names button `n` for `Button`),
-    ///   and forget the instance unless `c=1` was requested (the toast's
-    ///   `Closed` event follows either way).
+    ///   then focus the pane when `a=focus` is in effect (independent of
+    ///   `a=report`), and forget the instance unless `c=1` was requested (the
+    ///   toast's `Closed` event follows either way).
     /// - `Closed` closes the toast leg; once no leg is open the instance is
     ///   forgotten and a close report is sent when owed.
     pub fn on_toast_event(&mut self, event: ToastEvent) -> Vec<Osc99Effect> {
@@ -341,12 +349,14 @@ impl Osc99Registry {
     }
 
     /// Activate the instance at `pos` through `button` (`None` is the body):
-    /// returns the activation report when one was requested, and forgets the
-    /// instance unless `c=1` was requested.
+    /// returns the activation report when one was requested, then the focus
+    /// request when `a=focus` is in effect, and forgets the instance unless
+    /// `c=1` was requested.
     fn activate(&mut self, pos: usize, button: Option<u8>) -> Vec<Osc99Effect> {
         let effects: Vec<Osc99Effect> = self.instances[pos]
             .activation_reply(button)
             .into_iter()
+            .chain(self.instances[pos].focus_effect())
             .collect();
         if self.instances[pos].close_reporting == Osc99CloseReporting::Silent {
             self.instances
@@ -446,7 +456,7 @@ mod tests {
             icon_cache_key: None,
             buttons: Vec::new(),
             activation_reporting: Osc99ActivationReporting::Silent,
-            activation_focus: Osc99ActivationFocus::Focus,
+            activation_focus: Osc99ActivationFocus::NoFocus,
             close_reporting: Osc99CloseReporting::Silent,
             urgency: NotificationUrgency::Normal,
             occasion: NotificationOccasion::Always,
@@ -954,6 +964,141 @@ mod tests {
         assert!(registry.instances().is_empty());
     }
 
+    // ── focus on activation ─────────────────────────────────────────────
+
+    /// Data with `a=focus` / `a=-focus` and the given reporting.
+    fn focus_data(
+        focus: Osc99ActivationFocus,
+        reporting: Osc99ActivationReporting,
+    ) -> Notification99Data {
+        Notification99Data {
+            activation_focus: focus,
+            activation_reporting: reporting,
+            ..data(Some("n"))
+        }
+    }
+
+    #[test]
+    fn activation_with_focus_and_report_replies_then_focuses_the_pane() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::Focus,
+                Osc99ActivationReporting::Report,
+            ),
+            &[Osc99Leg::Toast],
+        );
+
+        let effects = registry.on_toast_event(activated(instance));
+
+        let [
+            Osc99Effect::Reply { reply, .. },
+            Osc99Effect::FocusPane(origin),
+        ] = effects.as_slice()
+        else {
+            panic!("expected the report then FocusPane, got {effects:?}");
+        };
+        assert!(is_activation(reply, "n"), "got {reply:?}");
+        assert_eq!(*origin, a.origin);
+    }
+
+    #[test]
+    fn activation_with_focus_but_no_report_only_focuses_the_pane() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::Focus,
+                Osc99ActivationReporting::Silent,
+            ),
+            &[Osc99Leg::Toast],
+        );
+
+        let effects = registry.on_toast_event(activated(instance));
+
+        assert!(
+            matches!(effects.as_slice(), [Osc99Effect::FocusPane(o)] if *o == a.origin),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn activation_without_focus_never_focuses_the_pane() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::NoFocus,
+                Osc99ActivationReporting::Report,
+            ),
+            &[Osc99Leg::Toast],
+        );
+
+        let effects = registry.on_toast_event(activated(instance));
+
+        assert!(
+            matches!(effects.as_slice(), [Osc99Effect::Reply { .. }]),
+            "only the report, got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn button_press_with_focus_replies_with_the_button_then_focuses_the_pane() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::Focus,
+                Osc99ActivationReporting::Report,
+            ),
+            &[Osc99Leg::Toast],
+        );
+
+        let effects = registry.on_toast_event(button_pressed(instance, 2));
+
+        let [
+            Osc99Effect::Reply {
+                reply:
+                    GuiReply::Osc99Activation {
+                        button: Some(b), ..
+                    },
+                ..
+            },
+            Osc99Effect::FocusPane(origin),
+        ] = effects.as_slice()
+        else {
+            panic!("expected the button report then FocusPane, got {effects:?}");
+        };
+        assert_eq!(b, "2");
+        assert_eq!(*origin, a.origin);
+    }
+
+    #[test]
+    fn dismissing_a_focus_instance_does_not_focus_the_pane() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &focus_data(
+                Osc99ActivationFocus::Focus,
+                Osc99ActivationReporting::Report,
+            ),
+            &[Osc99Leg::Toast],
+        );
+
+        assert!(registry.on_toast_event(closed(instance)).is_empty());
+    }
+
     #[test]
     fn an_event_for_an_unknown_instance_is_ignored() {
         let (a, _b) = two_panes();
@@ -1224,11 +1369,33 @@ mod tests {
             effects,
             &mut Osc99EffectSink {
                 toasts: &mut toasts,
+                focus_requests: Vec::new(),
             },
         );
     }
 
     // ── executor ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_executor_records_focus_requests_in_order_without_touching_toasts() {
+        let (a, b) = two_panes();
+        let mut toasts = ToastStack::default();
+        let mut sink = Osc99EffectSink {
+            toasts: &mut toasts,
+            focus_requests: Vec::new(),
+        };
+
+        apply_osc99_effects(
+            vec![
+                Osc99Effect::FocusPane(a.origin),
+                Osc99Effect::FocusPane(b.origin),
+            ],
+            &mut sink,
+        );
+
+        assert_eq!(sink.focus_requests, [a.origin, b.origin]);
+        assert_eq!(toasts.len(), 0);
+    }
 
     #[test]
     fn the_executor_shows_replaces_and_closes_keyed_toasts() {
@@ -1242,6 +1409,7 @@ mod tests {
             effects,
             &mut Osc99EffectSink {
                 toasts: &mut toasts,
+                focus_requests: Vec::new(),
             },
         );
         assert_eq!(toasts.len(), 1);
@@ -1251,6 +1419,7 @@ mod tests {
             effects,
             &mut Osc99EffectSink {
                 toasts: &mut toasts,
+                focus_requests: Vec::new(),
             },
         );
         assert_eq!(toasts.len(), 1, "updated in place, not stacked");
@@ -1264,6 +1433,7 @@ mod tests {
             effects,
             &mut Osc99EffectSink {
                 toasts: &mut toasts,
+                focus_requests: Vec::new(),
             },
         );
         assert_eq!(toasts.len(), 0);
