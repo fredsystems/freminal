@@ -6188,6 +6188,14 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Surfaced:** adversarial review, zbus finding Z16.
 - **Fix:** `osc99/dbus_service/{mod.rs, wake.rs, state.rs, wire.rs, pump.rs}` plus a
   `test_rig.rs`, following 138.C1's rules. Run after 138.C9 and 138.C11.
+- **Status:** done. The files are `mod.rs` (1,740 lines), `state.rs` (1,793), `wire.rs` (500),
+  `pump.rs` (301), `wake.rs` (62) and `test_rig.rs` (669); about half of `mod.rs` and
+  `state.rs` is tests.
+  - The 114 service test names are identical before and after; `freminal` has 2,165 tests
+    both times.
+  - The orchestrator confirmed the move with a sorted-line diff: only re-wraps, imports and
+    one helper path differ.
+  - Nothing is visible outside `osc99::dbus_service`, and no rustdoc links are broken.
 
 #### 138.C13 — Move the OSC 99 GUI glue out of `app_impl.rs`; split `osc99/mod.rs`
 
