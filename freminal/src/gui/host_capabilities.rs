@@ -5,9 +5,10 @@
 
 //! Host-dependent capability facts for the PTY thread.
 //!
-//! Resolves, from the config and the platform, the capability facts the PTY
-//! thread cannot know by itself (Task 130.4). Later facets (Tasks 138, 146)
-//! are added here.
+//! Resolves, from the config, the platform and what is known about the
+//! Linux/BSD notification daemon, the capability facts the PTY thread cannot
+//! know by itself (Tasks 130.4, 138.15), and re-sends them to every pane when
+//! they change. Later facets (Task 146) are added here.
 
 use freminal_common::config::{Config, NotificationRouting};
 use freminal_common::host_capabilities::{
@@ -16,16 +17,14 @@ use freminal_common::host_capabilities::{
     Osc99Support, Osc99UrgencySupport,
 };
 
-use super::osc99::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+use freminal_common::send_or_log;
+use freminal_terminal_emulator::io::InputEvent;
+use tracing::error;
 
-/// Resolve the host-dependent capability facts from the config and platform,
-/// assuming the Linux/BSD notification daemon is as capable as kitty assumes
-/// until it answers ([`Osc99LinuxDaemon::assumed`]).
-///
-/// See [`host_capabilities_with_daemon`].
-pub(super) const fn host_capabilities(config: &Config) -> HostCapabilities {
-    host_capabilities_with_daemon(config, Osc99LinuxDaemon::assumed())
-}
+use super::FreminalGui;
+use super::osc99::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+use super::tabs::TabManager;
+use super::window::PerWindowState;
 
 /// Resolve the host-dependent capability facts from the config, the platform
 /// and what is known about the Linux/BSD notification daemon.
@@ -39,7 +38,7 @@ pub(super) const fn host_capabilities(config: &Config) -> HostCapabilities {
 /// (`notifications.osc_99`) are both on. Otherwise the features follow
 /// [`combine`]: each leg the `routing_osc99` setting uses has a capability
 /// table, and the routing decides how the legs' tables combine.
-pub(super) const fn host_capabilities_with_daemon(
+pub(super) const fn host_capabilities(
     config: &Config,
     daemon: Osc99LinuxDaemon,
 ) -> HostCapabilities {
@@ -55,6 +54,104 @@ pub(super) const fn host_capabilities_with_daemon(
             Osc99Platform::current(),
             daemon,
         ),
+    }
+}
+
+/// Whether `config` can route an OSC 99 notification to the system
+/// (desktop-notification) leg: OSC 99 is on (`notifications.enabled` and
+/// `notifications.osc_99`) and `routing_osc99` uses the system leg.
+///
+/// The Linux/BSD notification service is started while this holds, so the
+/// daemon's `GetCapabilities` answer is normally in before an application's
+/// first `p=?`.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
+    let notifications = &config.notifications;
+    if !(notifications.enabled && notifications.osc_99) {
+        return false;
+    }
+    // No wildcard: a new routing variant must be classified here.
+    match notifications.routing_osc99 {
+        NotificationRouting::System
+        | NotificationRouting::Both
+        | NotificationRouting::SystemWhenUnfocused => true,
+        NotificationRouting::Toast | NotificationRouting::Disabled => false,
+    }
+}
+
+/// The capabilities to re-broadcast when the Linux/BSD daemon's state goes
+/// from `old` to `new` under `config`: `Some` exactly when the resulting
+/// [`HostCapabilities`] differ.
+///
+/// A daemon change the routing does not read (toast-only routing, OSC 99 off)
+/// resolves to the same value and returns `None`.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub(super) fn daemon_state_change(
+    config: &Config,
+    old: Osc99LinuxDaemon,
+    new: Osc99LinuxDaemon,
+) -> Option<HostCapabilities> {
+    let before = host_capabilities(config, old);
+    let after = host_capabilities(config, new);
+    (before != after).then_some(after)
+}
+
+/// Send `capabilities` to every pane of every tab in `windows` and in
+/// `in_flight` (`InputEvent::HostCapabilitiesChange`).
+///
+/// `in_flight` is the window `update()` has taken out of the map for the
+/// frame; see [`FreminalGui::broadcast_host_capabilities`]. A tab whose pane
+/// tree cannot be walked is logged and skipped.
+fn send_host_capabilities<'a>(
+    windows: impl IntoIterator<Item = &'a TabManager>,
+    in_flight: Option<&'a TabManager>,
+    capabilities: HostCapabilities,
+) {
+    for tabs in windows.into_iter().chain(in_flight) {
+        for tab in tabs {
+            match tab.pane_tree.iter_panes() {
+                Ok(panes) => {
+                    for pane in panes {
+                        send_or_log!(
+                            pane.input_tx,
+                            InputEvent::HostCapabilitiesChange(capabilities),
+                            "Failed to send HostCapabilitiesChange to PTY thread"
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "iter_panes() failed on tab during host capabilities \
+                         broadcast: {e}; skipping this tab"
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl FreminalGui {
+    /// Send `capabilities` to every pane of every window, via
+    /// `InputEvent::HostCapabilitiesChange`.
+    ///
+    /// `current` is the window being rendered. `update()` removes that window
+    /// from `self.windows` for the duration of the frame, so code running
+    /// inside it must pass the window here or its panes would miss the
+    /// broadcast. Pass `None` when no window is out of the map (e.g. from the
+    /// settings window's frame); passing a window that is also in the map
+    /// would send to its panes twice.
+    pub(super) fn broadcast_host_capabilities(
+        &self,
+        capabilities: HostCapabilities,
+        current: Option<&PerWindowState>,
+    ) {
+        send_host_capabilities(
+            self.windows.values().map(|win| &win.tabs),
+            current.map(|win| &win.tabs),
+            capabilities,
+        );
     }
 }
 
@@ -363,6 +460,16 @@ pub(super) const fn combine(
 mod tests {
     use super::*;
     use crate::gui::osc99::Osc99DaemonCapabilities;
+    use crate::gui::panes::{Pane, PaneId};
+    use crate::gui::tabs::{Tab, TabId};
+    use crate::gui::view_state::ViewState;
+    use arc_swap::ArcSwap;
+    use crossbeam_channel::Receiver;
+    use freminal_common::pty_write::PtyWrite;
+    use freminal_terminal_emulator::io::SearchCorpus;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+    use freminal_terminal_emulator::state::internal::TerminalState;
+    use std::sync::{Arc, atomic::AtomicBool};
 
     const ALL_ROUTINGS: [NotificationRouting; 5] = [
         NotificationRouting::Toast,
@@ -423,14 +530,17 @@ mod tests {
                 let mut config = config_with(routing);
                 config.notifications.enabled = false;
                 assert_eq!(
-                    host_capabilities_with_daemon(&config, daemon).osc99,
+                    host_capabilities(&config, daemon).osc99,
                     Osc99Support::Unsupported,
                     "enabled = false with routing {routing:?}, daemon {daemon:?}"
                 );
             }
             let mut config = config_with(routing);
             config.notifications.enabled = false;
-            assert_eq!(host_capabilities(&config).osc99, Osc99Support::Unsupported);
+            assert_eq!(
+                host_capabilities(&config, Osc99LinuxDaemon::assumed()).osc99,
+                Osc99Support::Unsupported
+            );
         }
     }
 
@@ -441,7 +551,7 @@ mod tests {
                 let mut config = config_with(routing);
                 config.notifications.osc_99 = false;
                 assert_eq!(
-                    host_capabilities_with_daemon(&config, daemon).osc99,
+                    host_capabilities(&config, daemon).osc99,
                     Osc99Support::Unsupported,
                     "osc_99 = false with routing {routing:?}, daemon {daemon:?}"
                 );
@@ -453,7 +563,7 @@ mod tests {
     fn host_capabilities_default_config_is_unsupported() {
         // `notifications.enabled` defaults to false (opt-in).
         assert_eq!(
-            host_capabilities(&Config::default()),
+            host_capabilities(&Config::default(), Osc99LinuxDaemon::assumed()),
             HostCapabilities::default()
         );
     }
@@ -463,13 +573,13 @@ mod tests {
         for routing in ALL_ROUTINGS {
             for daemon in all_daemons() {
                 assert_eq!(
-                    host_capabilities_with_daemon(&config_with(routing), daemon).osc99,
+                    host_capabilities(&config_with(routing), daemon).osc99,
                     combine(routing, Osc99Platform::current(), daemon),
                     "routing {routing:?}, daemon {daemon:?}"
                 );
             }
             assert_eq!(
-                host_capabilities(&config_with(routing)).osc99,
+                host_capabilities(&config_with(routing), Osc99LinuxDaemon::assumed()).osc99,
                 combine(
                     routing,
                     Osc99Platform::current(),
@@ -823,5 +933,415 @@ mod tests {
             intersection(standard, standard).sound_names,
             Osc99SoundNames::Standard
         );
+    }
+    // ── Daemon state changes (Task 138.15) ──────────────────────────────
+
+    /// A daemon reply that differs from [`Osc99DaemonCapabilities::ASSUMED`]
+    /// only in lacking `actions`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn no_actions_caps() -> Osc99DaemonCapabilities {
+        Osc99DaemonCapabilities {
+            actions: Osc99DaemonSupport::Unsupported,
+            ..Osc99DaemonCapabilities::ASSUMED
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn daemon_change_is_invisible_when_osc_99_is_off_or_toast_only() {
+        let mut switched_off = config_with(NotificationRouting::System);
+        switched_off.notifications.enabled = false;
+        let mut osc_99_off = config_with(NotificationRouting::System);
+        osc_99_off.notifications.osc_99 = false;
+        for config in [
+            config_with(NotificationRouting::Toast),
+            config_with(NotificationRouting::Disabled),
+            switched_off,
+            osc_99_off,
+        ] {
+            for old in all_daemons() {
+                for new in all_daemons() {
+                    assert_eq!(
+                        daemon_state_change(&config, old, new),
+                        None,
+                        "{:?}: {old:?} -> {new:?}",
+                        config.notifications.routing_osc99
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn an_unchanged_daemon_changes_nothing() {
+        for routing in ALL_ROUTINGS {
+            for daemon in all_daemons() {
+                assert_eq!(
+                    daemon_state_change(&config_with(routing), daemon, daemon),
+                    None,
+                    "{routing:?}, {daemon:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_capability_reply_matching_the_assumption_changes_nothing() {
+        for routing in ALL_ROUTINGS {
+            assert_eq!(
+                daemon_state_change(&config_with(routing), assumed_daemon(), assumed_daemon()),
+                None,
+                "{routing:?}"
+            );
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_reply_differing_only_in_unadvertised_capabilities_changes_nothing() {
+        // `body-markup` only decides whether the service escapes the body; it
+        // is not a feature the `p=?` reply carries.
+        let markup_less = Osc99LinuxDaemon::Available(Osc99DaemonCapabilities {
+            body_markup: Osc99DaemonSupport::Unsupported,
+            ..Osc99DaemonCapabilities::ASSUMED
+        });
+        for routing in ALL_ROUTINGS {
+            assert_eq!(
+                daemon_state_change(&config_with(routing), assumed_daemon(), markup_less),
+                None,
+                "{routing:?}"
+            );
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn system_routing_without_actions_drops_report_focus_and_buttons() {
+        let config = config_with(NotificationRouting::System);
+        let reply = Osc99LinuxDaemon::Available(no_actions_caps());
+        let Some(HostCapabilities {
+            osc99: Osc99Support::Supported(features),
+        }) = daemon_state_change(&config, assumed_daemon(), reply)
+        else {
+            panic!("a reply without actions must change a System-routed pane's capabilities");
+        };
+        assert_eq!(
+            features.activation_report,
+            Osc99ActivationReport::NotReported
+        );
+        assert_eq!(features.activation_focus, Osc99FocusAction::Unsupported);
+        assert_eq!(features.buttons, Osc99ButtonSupport::Unsupported);
+        // Everything the daemon still offers stays.
+        assert_eq!(features.close_events, Osc99CloseEvents::Reported);
+        assert_eq!(features.body, Osc99BodySupport::Supported);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn system_routing_with_the_bus_down_is_unsupported() {
+        let config = config_with(NotificationRouting::System);
+        assert_eq!(
+            daemon_state_change(&config, assumed_daemon(), Osc99LinuxDaemon::Unavailable),
+            Some(HostCapabilities {
+                osc99: Osc99Support::Unsupported
+            })
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn both_routing_with_the_bus_down_is_the_toast_leg_only() {
+        let config = config_with(NotificationRouting::Both);
+        assert_eq!(
+            daemon_state_change(&config, full_daemon(), Osc99LinuxDaemon::Unavailable),
+            Some(HostCapabilities {
+                osc99: Osc99Support::Supported(toast_leg())
+            })
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn system_when_unfocused_with_the_bus_down_promises_nothing() {
+        let config = config_with(NotificationRouting::SystemWhenUnfocused);
+        assert_eq!(
+            daemon_state_change(&config, assumed_daemon(), Osc99LinuxDaemon::Unavailable),
+            Some(HostCapabilities {
+                osc99: Osc99Support::Supported(no_features())
+            })
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_bus_coming_back_restores_the_capabilities() {
+        let config = config_with(NotificationRouting::System);
+        assert_eq!(
+            daemon_state_change(&config, Osc99LinuxDaemon::Unavailable, assumed_daemon()),
+            Some(host_capabilities(&config, assumed_daemon()))
+        );
+    }
+
+    #[test]
+    fn a_daemon_change_never_alters_the_macos_and_windows_rows() {
+        // `daemon_state_change` is `host_capabilities` before and after, and
+        // `host_capabilities` follows `combine`, which ignores the daemon off
+        // Linux/BSD, so no change can ever be reported there.
+        for platform in [Osc99Platform::MacOs, Osc99Platform::Windows] {
+            for routing in ALL_ROUTINGS {
+                for old in all_daemons() {
+                    for new in all_daemons() {
+                        assert_eq!(
+                            combine(routing, platform, old),
+                            combine(routing, platform, new),
+                            "{routing:?} on {platform:?}: {old:?} -> {new:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_system_leg_is_wanted_only_when_osc_99_is_on_and_routing_uses_it() {
+        for routing in ALL_ROUTINGS {
+            let expected = matches!(
+                routing,
+                NotificationRouting::System
+                    | NotificationRouting::Both
+                    | NotificationRouting::SystemWhenUnfocused
+            );
+            assert_eq!(
+                osc99_may_use_system_leg(&config_with(routing)),
+                expected,
+                "{routing:?}"
+            );
+            let mut switched_off = config_with(routing);
+            switched_off.notifications.enabled = false;
+            assert!(!osc99_may_use_system_leg(&switched_off), "{routing:?}");
+            let mut osc_99_off = config_with(routing);
+            osc_99_off.notifications.osc_99 = false;
+            assert!(!osc99_may_use_system_leg(&osc_99_off), "{routing:?}");
+        }
+        assert!(!osc99_may_use_system_leg(&Config::default()));
+    }
+
+    // ── End to end through a pane's handler (Task 138.15) ───────────────
+
+    /// A pane's terminal state seeded with `capabilities`, and its PTY write
+    /// receiver.
+    fn pane_state(
+        capabilities: HostCapabilities,
+    ) -> (TerminalState, crossbeam_channel::Receiver<PtyWrite>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut state = TerminalState::new(tx, None);
+        state.handler.set_host_capabilities(capabilities);
+        (state, rx)
+    }
+
+    /// What the pane writes to the PTY after a `p=?` query.
+    fn query(state: &mut TerminalState, rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        state.handle_incoming_data(b"\x1b]99;i=q:p=?;\x1b\\");
+        let mut bytes = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let PtyWrite::Write(written) = message {
+                bytes.extend_from_slice(&written);
+            }
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// The Linux/BSD capabilities of `routing` with `daemon`, on any host.
+    fn linux_capabilities(
+        routing: NotificationRouting,
+        daemon: Osc99LinuxDaemon,
+    ) -> HostCapabilities {
+        HostCapabilities {
+            osc99: combine(routing, Osc99Platform::LinuxBsd, daemon),
+        }
+    }
+
+    #[test]
+    fn a_reply_without_actions_removes_a_and_buttons_from_the_next_query() {
+        let routing = NotificationRouting::System;
+        let (mut state, rx) = pane_state(linux_capabilities(routing, assumed_daemon()));
+
+        assert_eq!(
+            query(&mut state, &rx),
+            "\x1b]99;i=q:p=?;a=focus,report:o=always,unfocused,invisible:u=0,1,2:\
+             p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent\x1b\\",
+            "before the daemon answers, the assumed capabilities are advertised"
+        );
+
+        // The daemon answers without `actions`; the pane gets the recomputed
+        // capabilities exactly as `InputEvent::HostCapabilitiesChange` delivers
+        // them (the PTY thread calls `set_host_capabilities`).
+        state
+            .handler
+            .set_host_capabilities(linux_capabilities(routing, body_only_daemon()));
+
+        assert_eq!(
+            query(&mut state, &rx),
+            "\x1b]99;i=q:p=?;o=always,unfocused,invisible:u=0,1,2:\
+             p=title,body,?,close,icon,alive:c=1:w=1:s=system,silent\x1b\\"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_bus_makes_a_system_routed_pane_answer_no_query() {
+        let routing = NotificationRouting::System;
+        let (mut state, rx) = pane_state(linux_capabilities(routing, assumed_daemon()));
+        assert!(!query(&mut state, &rx).is_empty(), "sanity: it answered");
+
+        state
+            .handler
+            .set_host_capabilities(linux_capabilities(routing, Osc99LinuxDaemon::Unavailable));
+
+        assert_eq!(query(&mut state, &rx), "");
+    }
+
+    #[test]
+    fn an_unavailable_bus_makes_a_both_routed_pane_advertise_the_toast_leg_only() {
+        let routing = NotificationRouting::Both;
+        let (mut state, rx) = pane_state(linux_capabilities(routing, full_daemon()));
+        assert!(
+            query(&mut state, &rx).contains("icon"),
+            "sanity: the system leg's icons were advertised"
+        );
+
+        state
+            .handler
+            .set_host_capabilities(linux_capabilities(routing, Osc99LinuxDaemon::Unavailable));
+
+        // The toast leg: focus and report, buttons, no icons, `system`/`silent`
+        // sounds only.
+        assert_eq!(
+            query(&mut state, &rx),
+            "\x1b]99;i=q:p=?;a=focus,report:o=always,unfocused,invisible:u=0,1,2:\
+             p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent\x1b\\"
+        );
+    }
+
+    // ── Broadcast to every pane, in-flight window included ──────────────
+
+    /// A tab with one pane whose input receiver is returned.
+    fn tab_with_input_rx(id: TabId, pane_id: PaneId) -> (Tab, Receiver<InputEvent>) {
+        let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
+        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
+        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
+
+        let pane = Pane {
+            id: pane_id,
+            arc_swap,
+            reply_tx: Arc::new(input_tx.clone()),
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
+            command_texts: std::collections::HashMap::new(),
+            title: format!("pane-{pane_id}"),
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: ViewState::new(),
+            echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
+                crate::gui::renderer::WindowPostRenderer::new(),
+            ))),
+            render_cache: crate::gui::terminal::PaneRenderCache::new(),
+        };
+
+        (Tab::new(id, pane), input_rx)
+    }
+
+    /// A window of `count` tabs (one pane each) and the panes' receivers.
+    fn window_of(
+        ids: &mut crate::gui::panes::PaneIdGenerator,
+        count: u64,
+    ) -> (TabManager, Vec<Receiver<InputEvent>>) {
+        let (first, rx) = tab_with_input_rx(TabId::first(), ids.next_id());
+        let mut receivers = vec![rx];
+        let mut tabs = TabManager::new(first);
+        for n in 1..count {
+            let (tab, rx) = tab_with_input_rx(TabId::offset(n), ids.next_id());
+            tabs.add_tab(tab);
+            receivers.push(rx);
+        }
+        (tabs, receivers)
+    }
+
+    /// The `HostCapabilitiesChange` payloads waiting on `rx`.
+    fn received(rx: &Receiver<InputEvent>) -> Vec<HostCapabilities> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                InputEvent::HostCapabilitiesChange(caps) => out.push(caps),
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn broadcast_reaches_every_pane_of_every_window_and_the_in_flight_window() {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (in_map_a, rxs_a) = window_of(&mut ids, 2);
+        let (in_map_b, rxs_b) = window_of(&mut ids, 1);
+        let (in_flight, rxs_flight) = window_of(&mut ids, 3);
+        let capabilities = HostCapabilities {
+            osc99: Osc99Support::Supported(toast_leg()),
+        };
+
+        send_host_capabilities([&in_map_a, &in_map_b], Some(&in_flight), capabilities);
+
+        for rx in rxs_a.iter().chain(&rxs_b).chain(&rxs_flight) {
+            assert_eq!(received(rx), vec![capabilities], "exactly one event");
+        }
+    }
+
+    #[test]
+    fn broadcast_without_an_in_flight_window_reaches_only_the_windows_given() {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (in_map, rxs) = window_of(&mut ids, 2);
+        let (_untouched, untouched_rxs) = window_of(&mut ids, 1);
+        let capabilities = HostCapabilities::default();
+
+        send_host_capabilities([&in_map], None, capabilities);
+
+        for rx in &rxs {
+            assert_eq!(received(rx), vec![capabilities]);
+        }
+        for rx in &untouched_rxs {
+            assert_eq!(received(rx), Vec::<HostCapabilities>::new());
+        }
+    }
+
+    #[test]
+    fn broadcast_survives_a_pane_whose_pty_thread_is_gone() {
+        let mut ids = crate::gui::panes::PaneIdGenerator::new(0);
+        let (dead, dead_rxs) = window_of(&mut ids, 1);
+        let (alive, alive_rxs) = window_of(&mut ids, 1);
+        drop(dead_rxs);
+        let capabilities = HostCapabilities::default();
+
+        send_host_capabilities([&dead, &alive], None, capabilities);
+
+        assert_eq!(received(&alive_rxs[0]), vec![capabilities]);
     }
 }

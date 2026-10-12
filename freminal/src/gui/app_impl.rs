@@ -834,9 +834,9 @@ impl freminal_windowing::App for FreminalGui {
                         &self.config.cursor.shape,
                         self.config.cursor.blink,
                     ),
-                    host_capabilities: super::host_capabilities::host_capabilities_with_daemon(
+                    host_capabilities: super::host_capabilities::host_capabilities(
                         &self.config,
-                        super::osc99::Osc99LinuxDaemon::assumed(),
+                        self.osc99_daemon.get(),
                     ),
                 },
                 &repaint_handle,
@@ -1555,6 +1555,15 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(all(unix, not(target_os = "macos")))]
         self.osc99_wake
             .retarget(window_id, || handle.event_loop_proxy());
+
+        // Start the notification service as soon as the config can route OSC 99
+        // to the system leg, before any OSC 99 is routed this frame. Starting
+        // here (rather than at the first desktop notification) means the
+        // daemon's `GetCapabilities` answer normally arrives before an
+        // application's first `p=?`; an answer that arrives later is
+        // broadcast to the panes as a capability change.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.ensure_osc99_dbus_started();
 
         // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
         //
@@ -3965,7 +3974,7 @@ impl freminal_windowing::App for FreminalGui {
         // (activation, close, failed show) to the registry. Like the toast
         // events below, every window drains the one shared channel.
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.route_osc99_system_events();
+        self.route_osc99_system_events(&win);
 
         // Deliver the events keyed (OSC 99) toasts recorded this frame to the
         // registry. Outside the block above on purpose: the last toast
@@ -4660,14 +4669,23 @@ impl FreminalGui {
     /// Hand the events the Linux/BSD desktop-notification service queued to
     /// the OSC 99 registry and execute the effects it returns.
     ///
-    /// Runs once per window frame. Does nothing until the service has been
-    /// started. Both cells are borrowed before the events are drained, so a
-    /// busy cell defers delivery to the next frame instead of losing them.
-    /// The service handle is only borrowed to drain, and released before the
-    /// effects are applied (which borrow it again to show).
+    /// Runs once per window frame, with `current` the window being rendered
+    /// (out of `self.windows` for the frame, see
+    /// [`Self::broadcast_host_capabilities`]). Does nothing until the service
+    /// has been started. Both cells are borrowed before the events are
+    /// drained, so a busy cell defers delivery to the next frame instead of
+    /// losing them. The service handle is only borrowed to drain, and
+    /// released before the effects are applied (which borrow it again to
+    /// show).
+    ///
+    /// The daemon's capability reply and a bus failure update
+    /// `self.osc99_daemon`; when that changes the resolved
+    /// `HostCapabilities` they are re-sent to every pane (including
+    /// `current`'s). That touches no `RefCell`, so it is safe with the toast
+    /// and registry borrows held.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn route_osc99_system_events(&self) {
-        use crate::gui::osc99::{Osc99DbusEvent, Osc99SystemLegEvent};
+    fn route_osc99_system_events(&self, current: &PerWindowState) {
+        use crate::gui::osc99::{Osc99DbusEvent, Osc99LinuxDaemon, Osc99SystemLegEvent};
 
         if !self
             .osc99_dbus
@@ -4706,7 +4724,6 @@ impl FreminalGui {
                 ),
                 Osc99DbusEvent::Closed { instance } => (instance, Osc99SystemLegEvent::Closed),
                 Osc99DbusEvent::Capabilities(capabilities) => {
-                    // Task 138.15 feeds these into `HostCapabilities`.
                     tracing::debug!(
                         body = ?capabilities.body,
                         actions = ?capabilities.actions,
@@ -4714,12 +4731,13 @@ impl FreminalGui {
                         sound = ?capabilities.sound,
                         "OSC 99: notification daemon capabilities"
                     );
+                    self.set_osc99_daemon(Osc99LinuxDaemon::Available(capabilities), current);
                     continue;
                 }
                 Osc99DbusEvent::Unavailable => {
-                    // The service already logged its one warning. Task 138.15
-                    // reacts to this.
-                    tracing::debug!("OSC 99: the notification service is unavailable");
+                    // The service already logged why; `set_osc99_daemon` logs
+                    // the consequence.
+                    self.set_osc99_daemon(Osc99LinuxDaemon::Unavailable, current);
                     continue;
                 }
             };
@@ -4731,19 +4749,47 @@ impl FreminalGui {
         }
     }
 
-    /// Start the Linux/BSD desktop-notification service the first time an
-    /// effect needs it. It then lives for the rest of the process.
+    /// Record what is now known about the notification daemon and, when that
+    /// changes the resolved `HostCapabilities`, re-send them to every pane
+    /// (`current` included, see [`Self::broadcast_host_capabilities`]).
     ///
-    /// A busy handle cell leaves the service unstarted; the effects are
-    /// applied against [`NoSystemBackend`](crate::gui::osc99::NoSystemBackend).
+    /// A daemon that did not change is ignored, so the one `warn!` for an
+    /// unreachable bus is logged once even if the event repeats. With the
+    /// daemon unavailable, `System` routing becomes `Unsupported`, `Both`
+    /// the toast leg only, and `SystemWhenUnfocused` promises no optional
+    /// feature; failed shows end the system leg on their own
+    /// (`ShowFailed`).
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn start_osc99_dbus_for(&self, effects: &[crate::gui::osc99::Osc99Effect]) {
-        if !effects.iter().any(|effect| {
-            matches!(
-                effect,
-                crate::gui::osc99::Osc99Effect::ShowLinuxSystem { .. }
-            )
-        }) {
+    fn set_osc99_daemon(&self, new: crate::gui::osc99::Osc99LinuxDaemon, current: &PerWindowState) {
+        let old = self.osc99_daemon.replace(new);
+        if old == new {
+            return;
+        }
+        if matches!(new, crate::gui::osc99::Osc99LinuxDaemon::Unavailable) {
+            warn!(
+                "OSC 99: the desktop-notification service is unavailable; the system leg is \
+                 disabled and System routing no longer advertises OSC 99"
+            );
+        }
+        if let Some(capabilities) =
+            super::host_capabilities::daemon_state_change(&self.config, old, new)
+        {
+            self.broadcast_host_capabilities(capabilities, Some(current));
+        }
+    }
+
+    /// Start the Linux/BSD desktop-notification service if the config can
+    /// route OSC 99 to the system leg
+    /// ([`osc99_may_use_system_leg`](super::host_capabilities::osc99_may_use_system_leg)).
+    /// It then lives for the rest of the process; calling this again is a
+    /// no-op.
+    ///
+    /// A busy handle cell leaves the service unstarted; the next call retries,
+    /// and until then effects are applied against
+    /// [`NoSystemBackend`](crate::gui::osc99::NoSystemBackend).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn ensure_osc99_dbus_started(&self) {
+        if !super::host_capabilities::osc99_may_use_system_leg(&self.config) {
             return;
         }
         let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
@@ -4760,11 +4806,12 @@ impl FreminalGui {
     /// `self.osc99_focus_requests`, and end the system leg of every show or
     /// close the service could not queue.
     ///
-    /// The service is started here, the first time a
+    /// The service is started by [`Self::ensure_osc99_dbus_started`], not here.
+    /// If it is not running (the slot is empty or busy), a
     /// [`Osc99Effect::ShowLinuxSystem`](crate::gui::osc99::Osc99Effect::ShowLinuxSystem)
-    /// is applied (Task 138.15 moves the start to capability resolution).
-    /// Platforms without the service apply that effect to a backend that
-    /// fails every show; it is never produced there.
+    /// is applied to a backend that fails every show, which ends the system
+    /// leg. Platforms without the service apply that effect to the same
+    /// backend; it is never produced there.
     ///
     /// A show or close that could not even be queued will never produce a
     /// service event, so a failed show is fed back to the registry as
@@ -4780,9 +4827,6 @@ impl FreminalGui {
         effects: Vec<crate::gui::osc99::Osc99Effect>,
         toasts: &mut crate::gui::toast::ToastStack,
     ) {
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.start_osc99_dbus_for(&effects);
-
         let mut no_system = crate::gui::osc99::NoSystemBackend;
         let failed = {
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -4989,9 +5033,9 @@ impl FreminalGui {
                     &self.config.cursor.shape,
                     self.config.cursor.blink,
                 ),
-                host_capabilities: super::host_capabilities::host_capabilities_with_daemon(
+                host_capabilities: super::host_capabilities::host_capabilities(
                     &self.config,
-                    super::osc99::Osc99LinuxDaemon::assumed(),
+                    self.osc99_daemon.get(),
                 ),
             },
             &repaint_handle,

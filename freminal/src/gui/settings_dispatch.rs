@@ -180,42 +180,27 @@ impl FreminalGui {
 
         // Broadcast host-dependent capability changes to all panes (Task
         // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
-        let new_host_capabilities = super::host_capabilities::host_capabilities_with_daemon(
-            &new_cfg,
-            super::osc99::Osc99LinuxDaemon::assumed(),
-        );
+        // `None`: this function has no handle on an in-flight window. The
+        // Settings window's frame has none out of the map, but Reload Config
+        // (a key action dispatched inside a terminal window's `update()`)
+        // does, and its panes miss this broadcast until the caller passes its
+        // window through `apply_new_config`.
+        let daemon = self.osc99_daemon.get();
+        let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg, daemon);
         if new_host_capabilities
-            != super::host_capabilities::host_capabilities_with_daemon(
-                &self.config,
-                super::osc99::Osc99LinuxDaemon::assumed(),
-            )
+            != super::host_capabilities::host_capabilities(&self.config, daemon)
         {
-            for win in self.windows.values() {
-                for tab in &win.tabs {
-                    match tab.pane_tree.iter_panes() {
-                        Ok(panes) => {
-                            for pane in panes {
-                                send_or_log!(
-                                    pane.input_tx,
-                                    InputEvent::HostCapabilitiesChange(new_host_capabilities),
-                                    "Failed to send HostCapabilitiesChange to PTY thread"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "iter_panes() failed on tab during host capabilities \
-                                 apply: {e}; skipping this tab"
-                            );
-                        }
-                    }
-                }
-            }
+            self.broadcast_host_capabilities(new_host_capabilities, None);
         }
 
         self.apply_osc99_filters(&new_cfg);
 
         self.config = new_cfg;
+
+        // Routing may now use the system leg: have the notification service
+        // up before the next OSC 99 is routed, not at the next frame.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.ensure_osc99_dbus_started();
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed
         // profile may have set `gui_theme` ephemerally; on Apply we re-derive it

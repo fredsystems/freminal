@@ -408,10 +408,20 @@ struct FreminalGui {
     /// Single-threaded GUI, so `RefCell` suffices.
     osc99_focus_requests: std::cell::RefCell<Vec<osc99::Osc99Origin>>,
 
-    /// The Linux/BSD desktop-notification service's handle, started lazily the
-    /// first time an OSC 99 notification is shown on the system leg and kept
-    /// for the rest of the process (dropping it stops the service). `None`
-    /// until then. Single-threaded GUI, so `RefCell` suffices.
+    /// What is known about the Linux/BSD notification daemon: assumed until
+    /// the service reports its `GetCapabilities` answer or that the bus is
+    /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
+    /// by the service-event router, which re-broadcasts the capabilities when
+    /// the change alters them. Read on every platform (it is
+    /// [`osc99::Osc99LinuxDaemon::assumed`] throughout where no service
+    /// exists). Single-threaded GUI, so `Cell` suffices.
+    osc99_daemon: std::cell::Cell<osc99::Osc99LinuxDaemon>,
+
+    /// The Linux/BSD desktop-notification service's handle, started the first
+    /// frame the config can route OSC 99 to the system leg
+    /// (`FreminalGui::ensure_osc99_dbus_started`) and kept for the rest of the
+    /// process (dropping it stops the service). `None` until then.
+    /// Single-threaded GUI, so `RefCell` suffices.
     #[cfg(all(unix, not(target_os = "macos")))]
     osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
 
@@ -620,6 +630,7 @@ impl FreminalGui {
             osc99_icon_cache: std::cell::RefCell::new(osc99::Osc99IconCache::default()),
             osc99_registry: std::cell::RefCell::new(osc99_registry),
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
+            osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
             #[cfg(all(unix, not(target_os = "macos")))]
             osc99_dbus: std::cell::RefCell::new(None),
             #[cfg(all(unix, not(target_os = "macos")))]

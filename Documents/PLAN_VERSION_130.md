@@ -5854,6 +5854,24 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Scheduling:** in Task 138, with 138.13 (same files).
 - **Status:** done (see the 138.C2 status note).
 
+#### 138.C3 — Reload Config does not reach the window it was triggered from
+
+- **Surfaced:** 138.15 (sub-agent report, confirmed by the orchestrator: `KeyAction::ReloadConfig`
+  is dispatched from `actions.rs` inside `update()`, while the window being rendered is out of
+  `self.windows`). Predates 138.
+- **Impact:** `reload_config_from_disk` → `apply_new_config` broadcasts theme, cursor,
+  host-capability and every other per-pane change only to the windows in the map. The window
+  where the user pressed the key or clicked the menu entry, usually the only window, misses
+  them until something else re-sends them. For OSC 99 this means a reloaded routing change is
+  not advertised in that window's panes. The Settings-window Apply path is unaffected.
+- **Fix:** thread `current: Option<&PerWindowState>` through `reload_config_from_disk` and
+  `apply_new_config`. Every per-pane loop in `apply_new_config` goes through the existing
+  window iteration plus `current` (as the 138.15 broadcast helper does). Pass `Some(win)` from
+  the `ReloadConfig` dispatch and `None` from the Settings Apply path.
+- **Verification:** a test that `apply_new_config`'s per-pane fan-out reaches a passed
+  in-flight window (through the extracted helper); the existing settings tests stay green.
+- **Scheduling:** in Task 138, after 138.18 and before the adversarial review (with 138.C1).
+
 ### 138 Status notes
 
 - **138.1 (done, `ba222d95`).** Types as decided; `window_manipulation.rs` re-exports
@@ -6053,6 +6071,19 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     builder is private to the emulator crate.
   - Interim: a one-argument `host_capabilities(config)` wrapper (passing `assumed()`) remains
     because `tab_spawning.rs` was out of scope; 138.15 removes it.
+- **138.15 (done).** `FreminalGui::osc99_daemon` (a `Cell<Osc99LinuxDaemon>`) feeds every
+  `host_capabilities` call, and the one-argument wrapper is gone.
+  - The daemon's `Capabilities` and `Unavailable` events update the cell through
+    `set_osc99_daemon`, which re-broadcasts only when the resolved capabilities change (pure
+    `daemon_state_change`).
+  - One broadcast helper, shared with config apply, takes the in-flight window explicitly,
+    because the window being rendered is out of `self.windows`.
+  - The service starts from `ensure_osc99_dbus_started` early in every `update()`, and after
+    a config apply, whenever the config can use the system leg.
+  - The end-to-end test drives a real `TerminalState`: after a no-`actions` capability
+    change, `p=?` loses `a=` and `buttons`; `System` with the bus down gives no reply.
+  - The sub-agent found that Reload Config already missed the in-flight window for every
+    config dimension; recorded as 138.C3.
 
 ---
 
