@@ -15,19 +15,20 @@ them, and the exact wiring each requires. It pairs with
 All file references are to the freminal repo. The routing enums live
 in `freminal-common/src/config.rs`; the router lives in
 `freminal/src/gui/notifications.rs`; placement lives in
-`freminal/src/gui/toast.rs`.
+`freminal/src/gui/toast/` (the stack and placement types in `mod.rs`,
+anchors in `layout.rs`).
 
 ## The two models
 
-| Aspect        | Terminal-app notifications                   | Freminal-derived toasts                    |
-| ------------- | -------------------------------------------- | ------------------------------------------ |
-| Source        | OSC 9 / 777 / 99 / 133D, command-finished    | freminal's own UI events                   |
-| Routing enum  | `NotificationRouting` (5 variants)           | `FreminalToastRouting` (2 variants)        |
-| System leg    | Yes — can raise a desktop notification        | No — toast or nothing, ever                |
-| Master switch | Gated by `notifications.enabled`             | Bypasses `enabled` entirely                |
-| Focus-aware   | Yes (`wants_toast(focused)`)                 | No (`wants_toast()`, no argument)          |
-| Router entry  | `NotificationRouter::route` / `route_osc99`  | `NotificationRouter::route_freminal_toast` |
-| Default anchor| `ToastPlacement::TOP_RIGHT`                  | window- or pane-centered                   |
+| Aspect         | Terminal-app notifications                  | Freminal-derived toasts                    |
+| -------------- | ------------------------------------------- | ------------------------------------------ |
+| Source         | OSC 9 / 777 / 99 / 133D, command-finished   | freminal's own UI events                   |
+| Routing enum   | `NotificationRouting` (5 variants)          | `FreminalToastRouting` (2 variants)        |
+| System leg     | Yes — can raise a desktop notification      | No — toast or nothing, ever                |
+| Master switch  | Gated by `notifications.enabled`            | Bypasses `enabled` entirely                |
+| Focus-aware    | Yes (`wants_toast(focused)`)                | No (`wants_toast()`, no argument)          |
+| Router entry   | `NotificationRouter::route` / `route_osc99` | `NotificationRouter::route_freminal_toast` |
+| Default anchor | `ToastPlacement::TOP_RIGHT`                 | window- or pane-centered                   |
 
 ### Model 1 — terminal-application notifications (full options)
 
@@ -105,8 +106,8 @@ adding a new one, wire all four:
    checklist still applies.
 
 3. **Router** — the push site calls
-   `NotificationRouter::route_freminal_toast(category, kind, title,
-   detail, placement, config, toasts)` (usually via the
+   `NotificationRouter::route_freminal_toast` with the category, kind,
+   title, detail, placement, config and toast stack (usually via the
    `FreminalGui::route_freminal_toast` `&self` wrapper in `mod.rs`,
    which handles the `RefCell` borrow). The router checks
    `config.routing_for_category(category).wants_toast()` and, if true,
@@ -130,7 +131,7 @@ PaneId)> }`. Three consts / constructors:
   specific pane (today: "Copied to clipboard"). Falls back to
   window-centered when that pane/window is not the one being rendered.
 
-Rule of thumb: a pane-specific event (something you did *in* a pane)
+Rule of thumb: a pane-specific event (something you did _in_ a pane)
 is `pane_centered`; a window/app-level event is `WINDOW_CENTERED`;
 program-driven notifications are `TOP_RIGHT`.
 
@@ -185,4 +186,4 @@ do not route it as a toast.
 - A new toast needs a placement none of the three consts cover. A new
   `ToastPosition` variant is a layout change with its own tests and
   grouping/occlusion implications (see the coincident-group handling
-  in `toast.rs`); confirm the need first.
+  in `toast/layout.rs`); confirm the need first.

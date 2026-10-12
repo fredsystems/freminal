@@ -47,9 +47,9 @@ pub(super) fn lighten(rgba: [f32; 4], amount: f32) -> [f32; 4] {
 
 /// Which way a button's fill moves away from the pill it sits on.
 ///
-/// Making lighter a button on a light pill makes it vanish into the pill, so a
-/// light pill darkens its buttons instead (the same luma test that picks dark
-/// text, [`ToastKind::prefers_dark_text`]).
+/// A lighter button on a light pill vanishes into it, so a light pill darkens
+/// its buttons instead (the same luma test that picks dark text,
+/// [`ToastKind::prefers_dark_text`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ButtonTint {
     /// The fill is lighter than the pill (dark pills).

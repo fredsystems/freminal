@@ -88,7 +88,9 @@
 //! signal produce the [`Osc99DbusEvent::Closed`]; an instance with no D-Bus id
 //! (its show failed, or it was replaced) is reported closed at once.
 //!
-//! Presentation (icons, sounds, category, markup) is Task 138.14.
+//! How a notification is presented (icons, sounds, category, markup) is decided
+//! by the pure functions in `presentation`, and the wire form of the hints is
+//! built in `wire`; this module only carries it.
 
 mod pump;
 mod state;

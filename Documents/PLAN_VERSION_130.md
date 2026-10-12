@@ -42,34 +42,34 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | In progress   | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete    | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete    | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete    | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete    | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete    | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete    | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete    | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | In progress | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned     | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned     | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned     | 130, 131                           |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -143,7 +143,7 @@ claims to verify, not as evidence.
 | Underlines            | Complete                                            | Mostly compliant. SGR 21 means bold-off where kitty means double underline; `4:N>5` clears instead of clamping; underline geometry untested and unclamped; default colour wrong under SGR 7 + DECSCNM                                                | 140           |
 | Graphics              | "Fully implemented", "graphics surface is complete" | ~30 deviations, 5 high. Replies to id-less commands; `t=t` deletes arbitrary files; text and erase destroy image tiles; placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                          | 126, 135, 136 |
 | Keyboard              | "Substantially compliant, remainder tracked"        | Encoder machinery sound, but the GUI layer feeding it is not. Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable | 137           |
-| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; ~~`p=?` answered after DA1~~ (fixed by 130)                              | 138           |
+| Desktop notifications | Done, incl. reports and `p=?` handshake             | ~~Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close~~ (all closed by Task 138); ~~`p=?` answered after DA1~~ (fixed by 130) | 138           |
 | Pointer shapes        | Undocumented                                        | Plain set works. Push, pop and query (and `=`) all reset the shape to default instead; a query gets no reply; no stack                                                                                                                               | 139           |
 | Clipboard (OSC 5522)  | Not mentioned                                       | Entirely missing; payloads would be warn-logged by the unknown-OSC path                                                                                                                                                                              | 146           |
 | Color control         | Not mentioned                                       | OSC 21 and colour stack missing. OSC 10/11 "set" never reaches rendering. `CSI # P` deletes characters. `parse_color_spec` panics on non-ASCII input                                                                                                 | 126, 132, 144 |
@@ -3075,6 +3075,7 @@ Prohibitions: do NOT touch code.
   `freminal/src/gui/notifications.rs`.
 - **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
   avoids changing it twice. Not scheduled in Task 130.
+- **Status:** resolved by 138.1 (the typed transport enums).
 
 #### 130.C5 — XTGETTCAP echoes the raw request on an invalid name
 
@@ -4188,9 +4189,9 @@ the call sites of the removed function in `freminal-common` and `freminal` (`gui
 
 What:
 
-- One function computes the default 256-colour entry: `default_palette_rgb(index: u8, theme)
-  -> (u8, u8, u8)`. 0–15 come from `theme.ansi`; 16–231 are the cube; 232–255 the greyscale
-  ramp. Index 16 is `(0,0,0)`.
+- One function computes the default 256-colour entry:
+  `default_palette_rgb(index: u8, theme) -> (u8, u8, u8)`. 0–15 come from `theme.ansi`; 16–231
+  are the cube; 232–255 the greyscale ramp. Index 16 is `(0,0,0)`.
 - `lookup_default_256_color`, `default_index_to_rgb` and `resolve_palette_default` are replaced
   by it (or become thin wrappers over it, if a caller needs `TerminalColor`). The `256..` arm
   disappears with the `usize` signature.
@@ -4297,8 +4298,8 @@ Scope: new `freminal-terminal-emulator/src/ansi_components/csi_commands/sgr_colo
 What:
 
 - `pub enum SgrColorForm { Semicolon, Colon }`.
-- `pub fn parse_sgr_color(params: &[Option<usize>], form: SgrColorForm) -> Result<SgrColor,
-  SgrColorError>` where `params` starts at the colour-type value (the element after 38/48/58),
+- `pub fn parse_sgr_color(params: &[Option<usize>], form: SgrColorForm) -> Result<SgrColor, SgrColorError>`
+  where `params` starts at the colour-type value (the element after 38/48/58),
   `SgrColor { color: TerminalColor, consumed: usize }` (`color` is `PaletteIndex` or `Custom`;
   `consumed` counts the elements used, including the type), and `SgrColorError` distinguishes
   `Incomplete` from `UnknownType(usize)`.
@@ -4543,8 +4544,9 @@ Deliverable: the doc changes, markdownlint clean.
   `Region(pane rect)` rather than `Full`. The links on either side are tested
   (`frame_dirty.rs` decides `content_changed`; `frame_damage.rs` aggregates `Region`).
 - **Scope of fix:** `freminal/src/gui/terminal/widget.rs`.
-- **Suggested approach:** the mapping from `(FullRebuildDamage, Option<PaneDamageRect>,
-  EmptyBoundedDamage inputs)` to `PaneFrameDamage` is a decision with real branches (the
+- **Suggested approach:** the mapping from
+  `(FullRebuildDamage, Option<PaneDamageRect>, EmptyBoundedDamage inputs)` to `PaneFrameDamage`
+  is a decision with real branches (the
   `Bounded` arm's search-only fallback); per `freminal-extend-or-extract`, give it a named
   function because it is a decision, not only to test it, then unit-test every arm.
 - **Verification:** a test per arm, including `Full` with and without a degenerate pane rect.
@@ -4773,8 +4775,9 @@ R1 partial. No blockers or majors. New findings and dispositions:
 - **132.C4 (done).** `UploadByteCounts::background_quad_vbo_bytes` counts the base-fill quad
   (144 bytes) and the background-image quad (96 bytes) on full and cursor-only frames; added
   to the flush line. Compiled away without `frame-profiling`.
-- **132.C2 (done).** `decide_full_rebuild(VertexRebuild, FrameDirtyObservations,
-  PriorVertexState)` and `pane_damage_for_full_rebuild(Option<PaneDamageRect>)` named and
+- **132.C2 (done).**
+  `decide_full_rebuild(VertexRebuild, FrameDirtyObservations, PriorVertexState)` and
+  `pane_damage_for_full_rebuild(Option<PaneDamageRect>)` named and
   unit-tested; `osc4_change_in_one_of_two_panes_damages_only_that_pane` runs the real chain to
   `decide_frame_damage` and gets `Partial` with exactly that pane's rect. The never-built read
   of `cursor_vert_range` is now taken on every non-skipped frame (one uncontended lock).
@@ -4813,8 +4816,9 @@ sounds, urgency, category, markup), user filtering, and a `p=?` reply that is tr
 every routing and platform.
 
 Activated and decomposed on 2026-10-12 on `task-138/osc99-conformance`, branched from `main`
-at `8c040150` (after PR #541). Closes 130.C4 and the 147 routing note on the saturated
-128-id map.
+at `8c040150` (after PR #541) and since rebased onto `724b291c` (after PR #551). The branch
+contains a `chore(deps): cargo update` commit (`794a7980`) that is not Task 138 work. Closes
+130.C4 and the 147 routing note on the saturated 128-id map.
 
 ### 138 Activation recon (2026-10-12)
 
@@ -4935,6 +4939,8 @@ deliberately differs from kitty is marked **(differs from kitty)**.
     shown in freminal's toast and sent over D-Bus).
   - A title or body longer than 1024 characters is cut to 1023 characters plus `…` (kitty's
     `limit_size`). At most 8 buttons are kept, each limited to 256 characters the same way.
+    **Superseded by 138.C7:** the cut is a hard one at 1024 / 256 characters with no `…`,
+    which is what `limit_size` does.
   - An empty title takes the body, and the body becomes empty. A notification with neither is
     dropped with no reply (spec line 1132).
 
@@ -4998,7 +5004,9 @@ deliberately differs from kitty is marked **(differs from kitty)**.
 - Urgency: `Critical` uses `ToastKind::Error` and stays until dismissed unless `w>0`;
   `Normal` uses `ToastKind::Info` with its default lifetime; `Low` uses `ToastKind::Info` at
   half the Info lifetime.
-- Toasts do not render icons and play no sounds (see the capability rules).
+- Toasts do not render icons and play no sounds (see the capability rules). **Superseded by
+  138.C4 for icons:** the first standard `n=` name shows as a bundled-font glyph in the toast's
+  icon slot. Toasts still render no transmitted images and play no sounds.
 
 **Linux/BSD system leg (zbus).**
 
@@ -5058,27 +5066,31 @@ deliberately differs from kitty is marked **(differs from kitty)**.
 **macOS / Windows system leg.**
 
 - Fire-and-forget notify-rust, with no waiting thread. Buttons are not registered, because
-  their activation cannot be observed.
+  their activation cannot be observed. (**Superseded by 138.C15:** one delivery thread with a
+  queue of 16 does the work, and Windows builds its toast directly with
+  `tauri-winrt-notification`.)
 - Sound: `system` uses the platform default (`NSUserNotificationDefaultSoundName` on macOS,
   `"Default"` on Windows). `silent` sets no sound name, which both backends treat as silent.
   Other names fall back to the platform default.
 - Icon temp files are written once per content hash into
   `std::env::temp_dir()/freminal-osc99-icons/`, capped at 64 files (oldest deleted), and the
   directory is removed at shutdown. This replaces deleting the file right after `show()`.
+  (**Superseded by 138.C15:** the directory is per process, `freminal-osc99-icons-<pid>`, mode
+  `0700`, and files are also deleted by age.)
 
 **Leg capabilities and `p=?` truthfulness.** Each leg has a capability set:
 
-| Capability            | Toast | Linux/BSD system                 | macOS system | Windows system |
-| --------------------- | ----- | -------------------------------- | ------------ | -------------- |
-| Activation report     | yes   | daemon has `actions`             | no           | no             |
-| Focus on activation   | yes   | daemon has `actions`             | no           | no             |
-| Close events (track)  | yes   | yes                              | no           | no             |
-| Auto-expiry           | yes   | yes                              | no           | no             |
-| Urgency               | yes   | yes                              | no           | yes            |
-| Standard sound names  | no    | daemon has `sound`               | no           | no             |
-| Body                  | yes   | daemon has `body`                | yes          | yes            |
-| Buttons               | yes   | daemon has `actions`             | no           | no             |
-| Icons                 | no    | yes                              | yes          | yes            |
+| Capability           | Toast | Linux/BSD system     | macOS system | Windows system |
+| -------------------- | ----- | -------------------- | ------------ | -------------- |
+| Activation report    | yes   | daemon has `actions` | no           | no             |
+| Focus on activation  | yes   | daemon has `actions` | no           | no             |
+| Close events (track) | yes   | yes                  | no           | no             |
+| Auto-expiry          | yes   | yes                  | no           | no             |
+| Urgency              | yes   | yes                  | no           | yes            |
+| Standard sound names | no    | daemon has `sound`   | no           | no             |
+| Body                 | yes   | daemon has `body`    | yes          | yes            |
+| Buttons              | yes   | daemon has `actions` | no           | no             |
+| Icons                | no    | yes                  | yes          | yes            |
 
 The routing combines its legs:
 
@@ -5198,7 +5210,7 @@ pub(crate) enum Osc99Effect {
 }
 ```
 
-In `freminal/src/gui/toast.rs` (138.7):
+In `freminal/src/gui/toast/mod.rs` (138.7; `gui/toast.rs` until 138.C1 split it):
 
 ```rust
 pub(super) struct ToastKey(pub u64);
@@ -5210,7 +5222,8 @@ pub(super) struct ToastEvent { pub key: ToastKey, pub kind: ToastEventKind }
 ### 138 Execution model
 
 Serial, on one checkout (`task-138/osc99-conformance`). The subtasks share
-`notify_99.rs`, `notifications.rs`, the new `gui/osc99/` modules and `toast.rs`, so worktrees
+`notify_99.rs`, `notifications.rs`, the new `gui/osc99/` modules and `toast.rs` (later
+`toast/`), so worktrees
 would buy nothing.
 
 Each subtask is done in four steps:
@@ -5365,7 +5378,8 @@ Deliverable:
   without evicting anything (it never enters the store); a new `d=0` id evicts the
   least-recently-touched entry; a `p=?` on a saturated map is answered.
 - **Finalisation:** controls are stripped from the title (ESC, C1 U+0085 and TAB removed, LF
-  kept); a 2000-character body becomes 1024 characters ending in `…`; nine buttons become
+  kept); a 2000-character body becomes 1024 characters ending in `…` (superseded by 138.C7:
+  no `…`); nine buttons become
   eight; a body-only notification becomes title-only; a notification with no title and no
   body pushes nothing.
 - **Existing tests:** the existing pinning tests are updated.
@@ -5455,12 +5469,13 @@ bounded.
 
 ##### 138.7a — `ToastStack` keyed lifecycle and events
 
-Scope: `freminal/src/gui/toast.rs` only.
+Scope: `freminal/src/gui/toast.rs` only (now the `gui/toast/` directory, split by 138.C1).
 
 What:
 
-- **Types** (as in "138 Types"): `ToastKey(pub u64)`; `ToastLifetime { KindDefault,
-  Fixed(Duration), UntilDismissed }`; `ToastEventKind { Activated, Button(u8), Closed }`
+- **Types** (as in "138 Types"): `ToastKey(pub u64)`;
+  `ToastLifetime { KindDefault, Fixed(Duration), UntilDismissed }`;
+  `ToastEventKind { Activated, Button(u8), Closed }`
   (`Button` unused until 138.8, so not added yet); `ToastEvent { key, kind }`.
 - **API:**
   - `push_keyed(key, kind, title, detail, lifetime, placement)`;
@@ -5531,7 +5546,8 @@ which two closable legs exist.
 
 #### 138.8 — Toast buttons
 
-Scope: `freminal/src/gui/toast.rs` (layout, rendering, hit-test), `freminal/src/gui/osc99/registry.rs`.
+Scope: `freminal/src/gui/toast.rs` (layout, rendering, hit-test; now the `gui/toast/`
+directory, split by 138.C1), `freminal/src/gui/osc99/registry.rs`.
 
 What:
 
@@ -5708,7 +5724,8 @@ What, as in "Linux/BSD system leg":
   - Applications dirs: `$XDG_DATA_HOME/applications`, each `$XDG_DATA_DIRS/applications`.
   - A desktop file matches when its stem or its `Name=` equals `f=` case-insensitively.
 - Icon data is decoded to RGBA for the `image-data` hint, and downscaled to 256×256 when over
-  1024×1024. A decode failure falls back to the next source.
+  1024×1024 (**superseded at 138.14 execution:** it is downscaled whenever a side exceeds 256;
+  see the 138.14 status note). A decode failure falls back to the next source.
 - Sound hints, the `category` hint, and body-markup escaping when the daemon reports
   `body-markup`.
 - The `g=` cache is least-recently-used, keeping the 64-entry / 4 MiB bound.
@@ -5734,7 +5751,9 @@ type), `freminal/src/gui/osc99/dbus_service.rs`, `freminal/src/gui/app_impl.rs`,
 
 What:
 
-- **Capability type.** `Osc99LegCapabilities` is a typed struct holding the table's rows.
+- **Capability type.** `Osc99LegCapabilities` is a typed struct holding the table's rows
+  (**superseded by 138.17:** the rows are `Osc99Features` values, and the daemon types live
+  in `osc99/capabilities.rs`).
 - **Daemon reply.** The `Capabilities(..)` event updates the Linux leg's capabilities, from
   the defaults until it arrives.
 - **Recompute and broadcast.** `host_capabilities` now takes the config plus the Linux
@@ -5834,7 +5853,8 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Verification:** `git diff -M` shows moves; the test count is unchanged; clippy is clean.
 - **Scheduling:** in Task 138, after 138.18 and before the adversarial review.
 - **Status:** done. The files are `mod.rs` (1,903 lines), `layout.rs` (2,189), `buttons.rs`
-  (282), `hit.rs` (310) and `test_support.rs` (135). The 2,084-test count is identical
+  (282), `hit.rs` (310) and `test_support.rs` (135), at commit time (138.C14 added
+  `input.rs` and grew the others). The 2,084-test count is identical
   before and after. The orchestrator confirmed the move is move-only with a sorted-line
   multiset diff: only visibility prefixes, imports and rustfmt re-wraps differ. Nothing is
   visible outside `gui::toast`.
@@ -6365,6 +6385,20 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
     the `config_example.toml` key order, the `dbus_service.rs` doc tense, and a branch-base
     note that the branch was rebased and contains a `cargo update` commit.
 - Runs last, after every code cleanup, and re-checks every OSC 99 doc claim.
+- **Status:** done. Every item was applied. Every OSC 99 claim in COVERAGE, GAPS and the
+  kitty reference was re-checked against the code as it stands after the cleanup work, and
+  about 20 claims made stale by 138.C6–C15 were corrected. The re-check found one code
+  defect, recorded as 138.C17.
+
+#### 138.C17 — Windows advertised urgency it no longer honours
+
+- **Surfaced:** 138.C16's docs re-check.
+- **Defect:** 138.C15 dropped the `Critical` → reminder mapping (a reminder needs buttons),
+  so the Windows toast has no urgency levels. `system_leg(Windows)` still advertised
+  `u=0,1,2`, which is untruthful.
+- **Fix:** both untracked platforms now advertise `Osc99UrgencySupport::Unsupported`; the
+  `system_on_windows` test and the docs are updated.
+- **Status:** done (orchestrator).
 
 ### 138 Adversarial review (2026-10-12)
 
@@ -6373,76 +6407,77 @@ registry and glue, D-Bus leg, toast and macOS/Windows leg, and docs/config/plan.
 failed on an upstream error before reporting and were re-run in full. Every finding has a
 disposition; nothing is left as an informal note.
 
-| Finding                                    | Severity | Disposition                     |
-| ------------------------------------------ | -------- | ------------------------------- |
-| P1 quadratic list metadata cost            | major    | 138.C6                          |
-| P2 icon-only `g=` priming dropped          | minor    | 138.C7                          |
-| P3 `…` truncation not kitty's              | minor    | 138.C7                          |
-| P4 rejected middle chunk truncates         | minor    | 138.C7                          |
-| P5 stale unidentified slot                 | minor    | 138.C7                          |
-| P6 no aggregate memory budget              | minor    | 138.C6                          |
-| P7 per-chunk command clone                 | minor    | 138.C6                          |
-| P8 LF in names; bidi controls              | minor    | 138.C7; bidi: not a defect      |
-| P9 empty `c`/`d`, `+report`, huge `w`      | nit      | 138.C7                          |
-| P10 dead per-chunk metadata                | nit      | 138.C7                          |
-| P11 stale docs, `pub` visibility           | nit      | 138.C7                          |
-| P12 naming, cycle, double paths            | nit      | 138.C8                          |
-| P13 stripped button shifts numbering       | nit      | 138.C7                          |
-| P14 PTY test gaps                          | minor    | 138.C7                          |
-| Z1 owner change closes new daemon's        | major    | 138.C9                          |
-| Z2 `GetNameOwner` error → deaf forever     | major    | 138.C9                          |
-| Z3 wake targets a dead window              | major    | 138.C10                         |
-| Z4 pump loss unhandled                     | minor    | 138.C9                          |
-| Z5 capabilities never refreshed            | minor    | 138.C9                          |
-| Z6 hung daemon serialises failures         | minor    | 138.C9                          |
-| Z7 bad icon data skips `.desktop`          | minor    | 138.C11                         |
-| Z8 icon-name case mismatch                 | minor    | 138.C11                         |
-| Z9 decode copies, fringes, EXIF, WebP      | minor    | 138.C11; WebP: not a defect     |
-| Z10 `image-data` one `Value` per byte      | minor    | 138.C11                         |
-| Z11 XDG scan cost and blocking             | minor    | 138.C11                         |
-| Z12 reused D-Bus id orphan                 | minor    | 138.C9                          |
-| Z13 failed replace leaves old shown        | nit      | 138.C9                          |
-| Z14 shutdown docs, orphan pump             | nit      | 138.C9                          |
-| Z15 fail-open `Default`                    | nit      | 138.C9                          |
-| Z16 `dbus_service.rs` size                 | minor    | 138.C12                         |
-| Z17 D-Bus test gaps, vacuous checks        | minor    | 138.C9                          |
-| Z18 daemon auto-start, noisy warn          | nit      | 138.C9                          |
-| Z19 markup, hints, `.desktop` details      | nit      | 138.C11 (partly not defects)    |
-| G1 same-frame display/control order        | major    | 138.C10                         |
-| G2 untracked-only instances kept           | major    | 138.C10                         |
-| G3 GUI glue untested                       | major    | 138.C13                         |
-| G4 alive lists closing instances           | minor    | 138.C10                         |
-| G5 sticky state after activation           | minor    | 138.C10                         |
-| G6 wake loss; focus of minimised window    | minor    | 138.C10                         |
-| G7 one pane evicts another's instances     | minor    | 138.C10                         |
-| G8 `SystemWhenUnfocused` with bus down     | minor    | 138.C10                         |
-| G9 filter on absent fields                 | minor    | 138.C10                         |
-| G10 `o=` on Wayland, occlusion             | minor    | 138.C16 (doc note)              |
-| G11 repetitive capability helpers          | minor    | 138.C10                         |
-| G12 `app_impl.rs` growth, mixed module     | minor    | 138.C13                         |
-| G13 wasted icon copies                     | nit      | 138.C10                         |
-| G14 smaller GUI items                      | nit      | 138.C10; `from_bool`: precedent |
-| T1 no cursor or hover affordance           | major    | 138.C14                         |
-| T2 Windows inline image, reminder claim    | major    | 138.C15                         |
-| T3 untracked leg unbounded, GUI thread     | major    | 138.C15                         |
-| T4 cross-process temp-file collisions      | minor    | 138.C15                         |
-| T5 temp directory hardening                | minor    | 138.C15                         |
-| T6 unvalidated bytes to OS decoders        | minor    | 138.C15                         |
-| T7 temp-file lifetime vs OS read           | minor    | 138.C15                         |
-| T8 macOS failure docs                      | minor    | 138.C15                         |
-| T9 press and release on different parts    | minor    | 138.C14                         |
-| T10 click lost without hover position      | minor    | 138.C14                         |
-| T11 buttons invisible on light themes      | minor    | 138.C14                         |
-| T12 hover pause defeated for `w=`          | minor    | 138.C14                         |
-| T13 `Fixed` shorter than animation         | minor    | 138.C14                         |
-| T14 eviction ignores lifetime              | minor    | 138.C14                         |
-| T15 `replace_keyed` edge cases             | minor    | 138.C14                         |
-| T16 tall stacks overflow                   | minor    | 138.C14                         |
-| T17 stale `WindowId` docs; tests           | minor    | 138.C14                         |
-| Toast and icon nits, test gaps             | nit      | 138.C14, 138.C15                |
-| D1 markdownlint MD060 failures             | major    | 138.C16                         |
-| D2–D8, D10–D15 doc and plan drift          | minor    | 138.C16                         |
-| D9 filter change lost on busy borrow       | minor    | 138.C10                         |
+| Finding                                 | Severity | Disposition                     |
+| --------------------------------------- | -------- | ------------------------------- |
+| P1 quadratic list metadata cost         | major    | 138.C6                          |
+| P2 icon-only `g=` priming dropped       | minor    | 138.C7                          |
+| P3 `…` truncation not kitty's           | minor    | 138.C7                          |
+| P4 rejected middle chunk truncates      | minor    | 138.C7                          |
+| P5 stale unidentified slot              | minor    | 138.C7                          |
+| P6 no aggregate memory budget           | minor    | 138.C6                          |
+| P7 per-chunk command clone              | minor    | 138.C6                          |
+| P8 LF in names; bidi controls           | minor    | 138.C7; bidi: not a defect      |
+| P9 empty `c`/`d`, `+report`, huge `w`   | nit      | 138.C7                          |
+| P10 dead per-chunk metadata             | nit      | 138.C7                          |
+| P11 stale docs, `pub` visibility        | nit      | 138.C7                          |
+| P12 naming, cycle, double paths         | nit      | 138.C8                          |
+| P13 stripped button shifts numbering    | nit      | 138.C7                          |
+| P14 PTY test gaps                       | minor    | 138.C7                          |
+| Z1 owner change closes new daemon's     | major    | 138.C9                          |
+| Z2 `GetNameOwner` error → deaf forever  | major    | 138.C9                          |
+| Z3 wake targets a dead window           | major    | 138.C10                         |
+| Z4 pump loss unhandled                  | minor    | 138.C9                          |
+| Z5 capabilities never refreshed         | minor    | 138.C9                          |
+| Z6 hung daemon serialises failures      | minor    | 138.C9                          |
+| Z7 bad icon data skips `.desktop`       | minor    | 138.C11                         |
+| Z8 icon-name case mismatch              | minor    | 138.C11                         |
+| Z9 decode copies, fringes, EXIF, WebP   | minor    | 138.C11; WebP: not a defect     |
+| Z10 `image-data` one `Value` per byte   | minor    | 138.C11                         |
+| Z11 XDG scan cost and blocking          | minor    | 138.C11                         |
+| Z12 reused D-Bus id orphan              | minor    | 138.C9                          |
+| Z13 failed replace leaves old shown     | nit      | 138.C9                          |
+| Z14 shutdown docs, orphan pump          | nit      | 138.C9                          |
+| Z15 fail-open `Default`                 | nit      | 138.C9                          |
+| Z16 `dbus_service.rs` size              | minor    | 138.C12                         |
+| Z17 D-Bus test gaps, vacuous checks     | minor    | 138.C9                          |
+| Z18 daemon auto-start, noisy warn       | nit      | 138.C9                          |
+| Z19 markup, hints, `.desktop` details   | nit      | 138.C11 (partly not defects)    |
+| G1 same-frame display/control order     | major    | 138.C10                         |
+| G2 untracked-only instances kept        | major    | 138.C10                         |
+| G3 GUI glue untested                    | major    | 138.C13                         |
+| G4 alive lists closing instances        | minor    | 138.C10                         |
+| G5 sticky state after activation        | minor    | 138.C10                         |
+| G6 wake loss; focus of minimised window | minor    | 138.C10                         |
+| G7 one pane evicts another's instances  | minor    | 138.C10                         |
+| G8 `SystemWhenUnfocused` with bus down  | minor    | 138.C10                         |
+| G9 filter on absent fields              | minor    | 138.C10                         |
+| G10 `o=` on Wayland, occlusion          | minor    | 138.C16 (doc note)              |
+| G11 repetitive capability helpers       | minor    | 138.C10                         |
+| G12 `app_impl.rs` growth, mixed module  | minor    | 138.C13                         |
+| G13 wasted icon copies                  | nit      | 138.C10                         |
+| G14 smaller GUI items                   | nit      | 138.C10; `from_bool`: precedent |
+| T1 no cursor or hover affordance        | major    | 138.C14                         |
+| T2 Windows inline image, reminder claim | major    | 138.C15                         |
+| T3 untracked leg unbounded, GUI thread  | major    | 138.C15                         |
+| T4 cross-process temp-file collisions   | minor    | 138.C15                         |
+| T5 temp directory hardening             | minor    | 138.C15                         |
+| T6 unvalidated bytes to OS decoders     | minor    | 138.C15                         |
+| T7 temp-file lifetime vs OS read        | minor    | 138.C15                         |
+| T8 macOS failure docs                   | minor    | 138.C15                         |
+| T9 press and release on different parts | minor    | 138.C14                         |
+| T10 click lost without hover position   | minor    | 138.C14                         |
+| T11 buttons invisible on light themes   | minor    | 138.C14                         |
+| T12 hover pause defeated for `w=`       | minor    | 138.C14                         |
+| T13 `Fixed` shorter than animation      | minor    | 138.C14                         |
+| T14 eviction ignores lifetime           | minor    | 138.C14                         |
+| T15 `replace_keyed` edge cases          | minor    | 138.C14                         |
+| T16 tall stacks overflow                | minor    | 138.C14                         |
+| T17 stale `WindowId` docs; tests        | minor    | 138.C14                         |
+| Toast and icon nits, test gaps          | nit      | 138.C14, 138.C15                |
+| D1 markdownlint MD060 failures          | major    | 138.C16                         |
+| D2–D8, D10–D15 doc and plan drift       | minor    | 138.C16                         |
+| D9 filter change lost on busy borrow    | minor    | 138.C10                         |
+| C16 re-check: Windows advertises `u`    | minor    | 138.C17                         |
 
 Execution order: 138.C6, C7, C8, C9, C11, C12, C10, C13, C14, C15, C16. Each goes through
 sub-agent implementation, orchestrator review and the verification suite. A confirmation
@@ -6450,7 +6485,7 @@ review of the cleanup diff follows.
 
 ### 138 Status notes
 
-- **138.1 (done, `ba222d95`).** Types as decided; `window_manipulation.rs` re-exports
+- **138.1 (done, `061cdc39`).** Types as decided; `window_manipulation.rs` re-exports
   `Notification99Data` / `Osc99ControlKind` from the new module. Out-of-scope edits accepted
   as mechanical: `Osc99Features` struct literals in test fixtures in
   `terminal_handler/mod.rs`, `gui/pty.rs` and `tests/osc99_query.rs`. Intended observable
@@ -6469,6 +6504,7 @@ review of the cleanup diff follows.
   - the payload is copied only after the metadata is accepted.
 
   The pre-existing `abandon_notification(.., done: bool)` parameter is removed by 138.3.
+
 - **138.3 (done).** `handle_osc99` is the single entry point. Controls act at once and never
   touch `PendingOsc99`, which holds the by-id map with LRU eviction plus the unidentified
   slot. A looked-up tombstone counts as touched. Merged list metadata (`n`, `t`, `a` edits)
@@ -6511,8 +6547,8 @@ review of the cleanup diff follows.
     `too_many_arguments`.
   - Clicks are resolved by the pure `click_target` plus `apply_click`, so `hit_test` removes
     clicked toasts itself.
-  - Six temporary `#[cfg_attr(not(test), expect(dead_code, reason = "wired by Task
-    138.7b"))]` attributes must all be gone after 138.7b: `ToastLifetime::Fixed`,
+  - Six temporary `expect(dead_code)` attributes (reason: wired by Task 138.7b) must all be
+    gone after 138.7b: `ToastLifetime::Fixed`,
     `ToastLifetime::UntilDismissed`, `push_keyed`, `replace_keyed`, `close_keyed` and
     `take_events`.
   - Unkeyed layout and behaviour are unchanged; no existing layout test was edited.
@@ -6684,7 +6720,9 @@ review of the cleanup diff follows.
   routing comments are rewritten.
   - The orchestrator found that the eight standard icon names, a spec MUST, are honoured only
     on the Linux system leg; the docs agent had called this a platform limit. OSC 99 therefore
-    stays 🚧, with exactly that gap, and the fix is scheduled as 138.C4 and 138.C5.
+    stayed 🚧, with exactly that gap, and the fix was scheduled as 138.C4 and 138.C5.
+    🚧 superseded by 138.C5: OSC 99 is ✅ in every document, and the docs were rewritten by
+    138.C16 against the post-cleanup code.
   - The orchestrator checked the example `p=?` replies (macOS `both` and
     `system_when_unfocused`) against `combine`.
 
@@ -7329,8 +7367,9 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 #### 147.29 — `resolve_anchor` takes a bool parameter
 
 - **Source:** Task 138.C14 (found while editing the toast layout). Predates 138.
-- **Defect today:** `freminal/src/gui/toast/layout.rs` `resolve_anchor(.., is_origin_window:
-  bool)` violates `freminal-state-representation` (no bool parameters).
+- **Defect today:** `freminal/src/gui/toast/layout.rs`
+  `resolve_anchor(.., is_origin_window: bool)` violates `freminal-state-representation` (no
+  bool parameters).
 - **Scope:** `toast/layout.rs` and its tests: a two-variant named enum
   (`ToastOriginWindow { This, Other }`).
 - **Tests:** the existing anchor tests, ported.
@@ -7368,7 +7407,8 @@ task's stub:
 
 - **Task 138:** a saturated 128-id OSC 99 map refuses even complete single-chunk
   notifications. Tombstoned ids are unbounded strings. (129 review; previously routed, but
-  missing from the stub.)
+  missing from the stub.) Closed by 138.3 (LRU, never refuses) and 138.2 (ids capped at 512
+  bytes).
 - **Task 138:** the transported OSC 99 `bool`s (130.C4). Already present.
 - **Task 135:** cap `o=z` inflation at the size implied by `s`/`v`/`f`, not only at
   `MAX_KITTY_DATA_BYTES`. (129 review; previously routed, but missing from the stub.)

@@ -156,8 +156,11 @@ impl FreminalGui {
 /// or the daemon.
 ///
 /// The toast reports activation and close, focuses the window on activation,
-/// honours expiry and urgency, and shows a body and buttons. It shows no
-/// icons, and understands only the `system` and `silent` sound names.
+/// honours expiry and urgency, and shows a body and buttons. It draws a glyph
+/// for the eight standard icon names (`n=`), but never a transmitted image, so
+/// `icons` (which is about a transmitted `p=icon` payload) is `Unsupported`.
+/// It plays no sounds and understands only the `system` and `silent` sound
+/// names.
 #[must_use]
 pub(super) const fn toast_leg() -> Osc99Features {
     Osc99Features {
@@ -182,7 +185,9 @@ pub(super) const fn toast_leg() -> Osc99Features {
 ///   icons are always available. With no daemon the leg cannot show anything.
 /// - **macOS** reports neither activation nor close, and honours neither expiry
 ///   nor urgency; it shows a body and icons but no buttons.
-/// - **Windows** is the same as macOS, except that it honours urgency.
+/// - **Windows** is the same as macOS. Its toast has no urgency levels (the
+///   "reminder" scenario needs buttons, which this leg cannot report), so
+///   urgency is not advertised (138.C17).
 ///
 /// `daemon` is read only for [`Osc99Platform::LinuxBsd`].
 #[must_use]
@@ -226,19 +231,19 @@ pub(super) const fn system_leg(
                 })
             }
         },
-        Osc99Platform::MacOs => Some(untracked_system_leg(Osc99UrgencySupport::Unsupported)),
-        Osc99Platform::Windows => Some(untracked_system_leg(Osc99UrgencySupport::Supported)),
+        Osc99Platform::MacOs | Osc99Platform::Windows => Some(untracked_system_leg()),
     }
 }
 
-/// The macOS / Windows system leg, which differ only in urgency.
-const fn untracked_system_leg(urgency: Osc99UrgencySupport) -> Osc99Features {
+/// The macOS / Windows system leg: fire-and-forget, with no reports, expiry,
+/// urgency or buttons.
+const fn untracked_system_leg() -> Osc99Features {
     Osc99Features {
         activation_report: Osc99ActivationReport::NotReported,
         close_events: Osc99CloseEvents::NotReported,
         activation_focus: Osc99FocusSupport::Unsupported,
         auto_expiry: Osc99AutoExpiry::Unsupported,
-        urgency,
+        urgency: Osc99UrgencySupport::Unsupported,
         sound_names: Osc99SoundNames::SystemAndSilent,
         body: Osc99BodySupport::Supported,
         buttons: Osc99ButtonSupport::Unsupported,
@@ -709,7 +714,8 @@ mod tests {
     #[test]
     fn system_when_unfocused_on_macos_is_the_intersection() {
         // No `a`, `u`, `c` or `w`; a body but no buttons; no icons (the toast
-        // shows none); only the `system` and `silent` sound names.
+        // shows no transmitted image); only the `system` and `silent` sound
+        // names.
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
@@ -732,8 +738,8 @@ mod tests {
 
     #[test]
     fn system_when_unfocused_on_linux_with_a_full_daemon() {
-        // The toast has no icons and no standard sound names, so neither can
-        // be promised even though the daemon has both.
+        // The toast shows no transmitted icon image and has no standard sound
+        // names, so neither can be promised even though the daemon has both.
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
@@ -756,7 +762,8 @@ mod tests {
 
     #[test]
     fn system_on_windows() {
-        // No `a`, `c` or `w`; urgency, a body and icons; no buttons.
+        // No `a`, `c`, `w` or `u` (the Windows toast has no urgency levels,
+        // 138.C17); a body and icons; no buttons.
         assert_eq!(
             combine(
                 NotificationRouting::System,
@@ -768,7 +775,7 @@ mod tests {
                 close_events: Osc99CloseEvents::NotReported,
                 activation_focus: Osc99FocusSupport::Unsupported,
                 auto_expiry: Osc99AutoExpiry::Unsupported,
-                urgency: Osc99UrgencySupport::Supported,
+                urgency: Osc99UrgencySupport::Unsupported,
                 sound_names: Osc99SoundNames::SystemAndSilent,
                 body: Osc99BodySupport::Supported,
                 buttons: Osc99ButtonSupport::Unsupported,

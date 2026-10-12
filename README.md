@@ -204,7 +204,7 @@ direnv allow   # or: nix develop
 Every PR must pass the full verification suite:
 
 ```bash
-cargo test --all
+cargo xtask test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo-machete
 ```

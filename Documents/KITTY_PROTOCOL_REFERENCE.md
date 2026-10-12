@@ -7,7 +7,11 @@ formats, the `p=?` answer per routing, platform and daemon, the leg capability
 table and the documented differences from kitty. The standard icon names are
 honoured on every leg (Tasks 138.C4 and 138.C5), so the "Remaining conformance
 gap" subsection is removed. The Task 99 current-state notes and the alive-map
-deferral are removed (superseded). No other section changed.
+deferral are removed (superseded). The section was re-checked against the code
+after the adversarial-review cleanups (138.C6 to 138.C15): hard text limits,
+reassembly bounds, rejected-chunk handling, per-pane quotas, `p=alive`
+semantics, bus-down routing, the D-Bus service and the macOS/Windows delivery
+worker. No other section changed.
 
 Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
 (131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
@@ -160,22 +164,22 @@ update, close and query actions 0.36.0.
 
 ### How freminal handles each key
 
-| Key | freminal                                                                                                                                                                                                                                   |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `a` | Words are edits applied in arrival order, starting from `{focus}`; unknown words are ignored; an empty `a=` changes nothing; edits keep accumulating across chunks (differs from kitty). `focus` raises the pane, `report` sends a report. |
-| `c` | `0` is off; any other non-empty value is on. On macOS and Windows a `c=1` request is answered with `p=close;untracked` when the notification is shown.                                                                                     |
-| `d` | `0` means more chunks follow; any other non-empty value is done.                                                                                                                                                                           |
-| `e` | `1` is base64; any other non-empty value is plain text. Base64 chunks decode as one stream, so chunk-then-encode and encode-then-chunk both work.                                                                                          |
-| `f` | Base64 UTF-8; invalid or empty is ignored. Sent as the D-Bus `app_name`, matched by `osc99_filters` (`app`), and the fallback for the `.desktop` icon lookup on Linux/BSD.                                                                 |
-| `g` | Sanitised like `i`. The icon cache is global (not per pane), least-recently-used, 64 entries and 4 MiB. A transmitted icon is cached before the `o=` gate, so a suppressed notification still fills it.                                    |
-| `i` | Sanitised: bytes outside `[A-Za-z0-9_+.-]` are removed and the result is cut to 512 bytes; an id that is empty afterwards is absent. `i=0` is an ordinary id.                                                                              |
-| `n` | Base64 UTF-8; invalid or empty is ignored. The eight standard names are honoured on every leg; any other name is resolved on Linux/BSD only (see icons below).                                                                   |
-| `o` | Pane-aware (see occasions below). An unrecognised value is ignored.                                                                                                                                                                        |
-| `p` | An unknown value is its own payload type: its payload is discarded and its metadata and `d=` still apply.                                                                                                                                  |
-| `s` | Base64 UTF-8; invalid or empty is ignored. See sounds below.                                                                                                                                                                               |
-| `t` | Base64 UTF-8; invalid or empty is ignored. The first non-empty type is the D-Bus `category` hint; all are matched by `osc99_filters` (`type`).                                                                                             |
-| `u` | An unparsable value is ignored. Linux/BSD and Windows honour it; macOS has no urgency. The toast shows `2` as an error toast.                                                                                                              |
-| `w` | An unparsable value is ignored; a value below `-1` is `-1`. A positive value is enforced by freminal on every tracked leg; see expiry below.                                                                                               |
+| Key | freminal                                                                                                                                                                                                                                                                                                                                                       |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a` | Words are edits applied in arrival order, starting from `{focus}`; unknown words are ignored; an empty `a=` changes nothing; edits keep accumulating across chunks (differs from kitty). `focus` raises the pane, `report` sends a report.                                                                                                                     |
+| `c` | `0` is off; any other value, an empty one included, is on (kitty's `v != 0`). On macOS and Windows a `c=1` request is answered with `p=close;untracked` when the notification is shown.                                                                                                                                                                        |
+| `d` | `0` means more chunks follow; any other value, an empty one included, is done (kitty's `v != 0`).                                                                                                                                                                                                                                                              |
+| `e` | `1` is base64; any other non-empty value is plain text. Base64 chunks decode as one stream, so chunk-then-encode and encode-then-chunk both work.                                                                                                                                                                                                              |
+| `f` | Base64 UTF-8; invalid or empty is ignored. Sent as the D-Bus `app_name`, matched by `osc99_filters` (`app`), and the fallback for the `.desktop` icon lookup on Linux/BSD.                                                                                                                                                                                     |
+| `g` | Sanitised like `i`. The icon cache is global (not per pane), least-recently-used, 64 entries and 4 MiB. A transmitted icon is cached before the `o=` gate, so a suppressed notification still fills it. A notification with no title and no body but icon data and a `g=` key is not shown; it only primes the cache (kitty caches before its no-title check). |
+| `i` | Sanitised: bytes outside `[A-Za-z0-9_+.-]` are removed and the result is cut to 512 bytes; an id that is empty afterwards is absent. `i=0` is an ordinary id.                                                                                                                                                                                                  |
+| `n` | Base64 UTF-8; invalid or empty is ignored. The eight standard names are honoured on every leg; any other name is resolved on Linux/BSD only (see icons below).                                                                                                                                                                                                 |
+| `o` | Pane-aware (see occasions below). An unrecognised value is ignored.                                                                                                                                                                                                                                                                                            |
+| `p` | An unknown value is its own payload type: its payload is discarded and its metadata and `d=` still apply.                                                                                                                                                                                                                                                      |
+| `s` | Base64 UTF-8; invalid or empty is ignored. See sounds below.                                                                                                                                                                                                                                                                                                   |
+| `t` | Base64 UTF-8; invalid or empty is ignored. The first non-empty type is the D-Bus `category` hint; all are matched by `osc99_filters` (`type`).                                                                                                                                                                                                                 |
+| `u` | An unparsable value is ignored. Linux/BSD honours it (the `urgency` hint); the macOS and Windows system legs have no urgency and do not advertise it. The toast shows `2` as an error toast.                                                                                                                                                                    |
+| `w` | An unparsable value is ignored; a value below `-1` is `-1`; an integer beyond the 64-bit range is clamped, and a positive value above `u32::MAX` ms is clamped to it. A positive value is enforced by freminal on every tracked leg; see expiry below.                                                                                                         |
 
 ### Payload types (`p=`)
 
@@ -212,24 +216,46 @@ Unknown `p=` values must be ignored (forward compat).
 
 freminal's limits and reassembly:
 
-- Receiver leniency: a chunk may be up to 1 MiB (more than the senders' 2048 and
-  4096 byte limits) and a notification up to 1 MiB in total. A chunk or a
-  notification over its cap, or a sequence with more than 64 metadata items, is
-  dropped (debug-logged, no payload bytes).
+- Receiver leniency: a sequence (metadata plus payload) may be up to 1 MiB, more
+  than the senders' 2048 and 4096 byte limits, and a notification up to 1 MiB in
+  total (payloads plus the cost of its list metadata). A sequence over 1 MiB, or
+  with more than 64 metadata items, is rejected by the parser (debug-logged, no
+  payload bytes).
+- A rejected non-final chunk does not leave a truncated notification behind: the
+  handler recovers the chunk's `i=` and `d=` from the raw metadata, best effort,
+  and tombstones the transfer, so the rest of it, final chunk included, emits
+  nothing. A rejected id-less chunk abandons the unidentified slot only when
+  something is in it.
+- Per-notification caps, each of which drops the transfer the same way (a
+  tombstone for a non-final chunk): the title, body and buttons payloads are held
+  to 64 KiB each (finalisation cuts them far shorter anyway), the icon payload to
+  1 MiB, and `n=`, `t=` and `a=` entries to 64 each.
+- A handler-wide budget of 8 MiB covers every in-flight notification together,
+  the unidentified slot included (payload bytes plus list-metadata cost). A chunk
+  that would pass it first evicts the least recently touched other entries, which
+  are removed, not tombstoned; if the chunk's own notification still does not fit,
+  the transfer is dropped. The budget is checked after a chunk lands, so it can be
+  exceeded by at most one chunk before eviction.
 - Chunks with no `i=` share one unidentified slot, like kitty's single pending
-  command keyed by "no id".
+  command keyed by "no id". An identified content chunk discards an accumulating
+  unidentified slot (a different id replaces kitty's one pending command); a
+  dropped transfer's tombstone in that slot is kept.
 - Identified chunks are held in a map of at most 128 ids. A new id at the cap
   evicts the least recently touched entry (a dropped transfer's tombstone
-  included), so the map never refuses a chunk.
+  included), so the map never refuses a chunk. A complete single-chunk
+  notification with no pending entry is finalised without entering the map.
 - Metadata merges across chunks: scalars (`c o u w f g s`) take the latest
   explicit value, `n` and `t` concatenate, `a=` edits accumulate, and `e`, `p`
   and `d` are per chunk. Defaults apply once, at finalisation.
 - `p=?`, `p=close` and `p=alive` act at once whatever `d=` says and never touch
   the pending map.
-- At finalisation: C0 controls except LF, DEL and the C1 controls are removed;
-  a title or body longer than 1024 characters is cut to 1023 plus `…`; at most
-  8 buttons are kept, each cut the same way at 256 characters; an empty title
-  takes the body.
+- At finalisation: C0 controls except LF, DEL and the C1 controls are removed; a
+  title or body longer than 1024 characters is cut to its first 1024 characters
+  with no marker (kitty's `limit_size`); at most 8 buttons are kept, each cut the
+  same way at 256 characters; an empty title takes the body. A button label that
+  is empty before stripping is not a button; one that strips to nothing becomes
+  U+FFFD, so later button numbers do not shift. App name, types, icon names and
+  the sound name also lose LF.
 - A plain (`e=0`) payload that is not UTF-8 decodes lossily (U+FFFD).
 
 ### Reports written back to the application (reverse PTY path)
@@ -276,7 +302,12 @@ term→app:  ESC ] 99 ; i=<any-id> : p=alive ; id1,id2,id3 ST
 - The `i=` in the response echoes the request's `i=` (multiplexer routing).
 - Payload is the comma-separated list of currently-live notification ids.
 - freminal lists the requesting pane's identified instances, sorted and without
-  duplicates. Other panes' instances are never listed.
+  duplicates. Other panes' instances are never listed. An instance is listed
+  while one of its legs is open and has not been asked to close: `p=close` and
+  expiry remove it at once, while an activated `c=1` instance whose desktop
+  notification is still displayed stays listed until the daemon closes it, as in
+  kitty. A display on the macOS/Windows system leg alone is shown, answered and
+  forgotten at once, so it is never listed.
 
 ### Capability handshake (`p=?`)
 
@@ -310,9 +341,12 @@ freminal's answer:
 - The keys come in kitty's order: `a`, `o`, `u`, `p`, `c`, `w`, `s`. The `p` list
   is in the order `title,body,?,close,icon,alive,buttons`; `title`, `?`, `close`
   and `alive` are always present and `body`, `icon` and `buttons` only when
-  displayed. `o=always,unfocused,invisible` is always sent. `a` lists `focus`
+  displayed. `p=close` stays advertised on macOS and Windows although the
+  desktop notification there cannot be closed: kitty advertises it
+  unconditionally, and the request still closes the toast leg and forgets the
+  instance. `o=always,unfocused,invisible` is always sent. `a` lists `focus`
   and `report` as supported and is omitted when neither is. `u=0,1,2` is sent
-  only when urgency is honoured. `s` is `system,silent`, plus
+  only when urgency is advertised. `s` is `system,silent`, plus
   `error,info,question,warn,warning` when the standard names are honoured.
 - **OSC 99 is unsupported** (every request is ignored before reassembly and
   `p=?` is not answered, so the application sees a terminal that does not speak
@@ -329,7 +363,7 @@ freminal's answer:
 | Focus on activation  | yes   | daemon has `actions` | no           | no             |
 | Close events (track) | yes   | yes                  | no           | no             |
 | Auto-expiry          | yes   | yes                  | no           | no             |
-| Urgency              | yes   | yes                  | no           | yes            |
+| Urgency              | yes   | yes                  | no           | no             |
 | Standard sound names | no    | daemon has `sound`   | no           | no             |
 | Body                 | yes   | daemon has `body`    | yes          | yes            |
 | Buttons              | yes   | daemon has `actions` | no           | no             |
@@ -348,13 +382,16 @@ freminal's answer:
     is advertised only if both legs have it. With no system leg, only the toast
     shows.
   - `system_when_unfocused` shows one leg or the other depending on window
-    focus, so every feature needs both legs. With no system leg it advertises
-    no optional feature.
+    focus, so every feature needs both legs. With no system leg (the Linux/BSD
+    session bus cannot be reached) every notification routes to the toast at
+    every focus state, as `both` does, so it advertises the toast leg's
+    features.
 - The Linux/BSD daemon's capabilities (`body`, `actions`, `body-markup`,
   `sound`) come from `GetCapabilities`. Until the daemon answers, `body`,
   `actions` and `body-markup` are assumed and `sound` is not. A later answer, or
   an unreachable bus, is re-broadcast to every pane so the next query is
-  truthful.
+  truthful. Capabilities are fetched again after every change of the daemon's
+  owner.
 
 Example replies (written without the spaces the spec shows around the colons):
 
@@ -369,13 +406,17 @@ system, macOS:
 o=always,unfocused,invisible:p=title,body,?,close,icon,alive:s=system,silent
 
 system, Windows:
-o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive:s=system,silent
+o=always,unfocused,invisible:p=title,body,?,close,icon,alive:s=system,silent
 
 both, macOS:
 a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:s=system,silent
 
 system_when_unfocused, macOS:
 o=always,unfocused,invisible:p=title,body,?,close,alive:s=system,silent
+
+system_when_unfocused, Linux/BSD with the session bus unreachable (the toast
+leg, the same reply as toast routing):
+a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent
 ```
 
 ### Icons, sounds, occasions, urgency, expiry
@@ -406,11 +447,17 @@ freminal:
   `question` to `dialog-question`, `help` to `system-help`, `file-manager` to
   `system-file-manager`, `system-monitor` to `utilities-system-monitor`,
   `text-editor` to `utilities-text-editor`); any other name is used when the XDG
-  icon scan finds it. If no name matched, the transmitted data is used, else the
+  icon scan finds it (the scan runs once on a background thread, so until it
+  finishes unknown names fall through, and the on-disk spelling of the match is
+  what is sent). If no name matched, the transmitted data is used, else the
   first name verbatim. With no names: the data, else the icon of the `.desktop`
-  file matching `f=`, else freminal's own. Transmitted data is decoded with the
-  `image` crate (PNG, JPEG, GIF, WebP; at most 4096x4096 and 64 MiB) and sent as
-  the `image-data` hint, downscaled to fit 256x256.
+  file whose stem or `Name=` equals `f=`, else freminal's own. Transmitted data
+  that does not decode counts as no data. Decoding uses the `image` crate (PNG,
+  JPEG, GIF, WebP; at most 4096x4096 and 64 MiB), applies the EXIF orientation,
+  and downscales anything over 256 pixels to fit 256x256 (premultiplied, so
+  transparent edges do not darken); the decoded pixels are sent as the
+  `image-data` hint, as one byte array, and the last 8 decoded icons are kept.
+  Every notification also carries the `desktop-entry` hint `freminal`.
 - **Linux/BSD sounds:** `system` sends no sound hint, `silent` sends
   `suppress-sound`, `error`, `warn`, `warning`, `info` and `question` send
   `sound-name` `dialog-error`, `dialog-warning`, `dialog-information` and
@@ -422,29 +469,47 @@ freminal:
   name that is one of the eight standard names is drawn from the bundled
   `CaskaydiaCove` glyph for it to a 256x256 PNG (a white glyph, its coverage as
   alpha, centred on an opaque `#5A5A5A` rounded square tile inside a margin, so
-  it reads on light and dark backgrounds) and shown as the notification image. With no standard name, or if drawing fails, a transmitted icon is shown.
-  A name that is not standard cannot be resolved on these platforms (`notify-rust`'s
-  `icon()` is a no-op on both) and is ignored.
-  Only the eight standard names are mandatory, so this is allowed.
+  it reads on light and dark backgrounds) and shown as the notification image;
+  each standard icon is drawn once per process. With no standard name, a
+  transmitted icon is shown: it is decoded within the limits above and
+  re-encoded as a PNG, so the OS never decodes the bytes the program sent. If
+  the drawing or the decode fails there is no image. A name that is not standard
+  cannot be resolved on these platforms (neither OS API takes a freedesktop icon
+  name) and is ignored. Only the eight standard names are mandatory, so this is
+  allowed.
 - **Toast:** the first `n=` name that is standard shows as its bundled-font
-  glyph in the toast's icon slot; any other name is ignored, and a transmitted
-  icon image is never shown. No sounds. Urgency `2` is an error toast that stays until
-  dismissed, `1` is an info toast with its default lifetime, `0` is an info toast
-  for 3 seconds (all three when `w=` is `-1` or unset; `w=` overrides).
+  glyph in the toast's icon slot (the accent colour still follows the urgency);
+  any other name is ignored, and a transmitted icon image is never shown. No
+  sounds. Urgency `2` is an error toast that stays until dismissed, `1` is an
+  info toast with its default lifetime (6 seconds), `0` is an info toast for 3
+  seconds (all three when `w=` is `-1` or unset; `w=` overrides). A body click
+  activates, each button reports its 1-based number, the dismiss square closes,
+  and the toast shows a hand cursor with hover and pressed fills on buttons.
+  More than five toasts evict the oldest that is not waiting to be dismissed
+  first.
 - **Occasions** are pane-aware. A pane is _focused_ when its OS window is focused,
   its tab is active and it is the tab's active pane. It is _visible_ when its OS
   window is focused and not minimised, its tab is active and no other pane in the
   tab is zoomed. `unfocused` shows only when the pane is not focused;
   `invisible` only when it is neither focused nor visible. (The choice of leg
   under `routing_osc99` still follows OS-window focus; that is freminal's own
-  routing, not the protocol's.)
-- **Expiry:** a positive `w=` is enforced by freminal, measured from display, on
-  every tracked leg (toast and Linux/BSD): at the deadline every leg is closed
-  whatever the OS or hover state, and a close report follows with `c=1`. It is
-  also sent to the Linux daemon as `expire_timeout`. `w=0` never expires (toast:
-  until dismissed). On macOS and Windows `w=` is passed as the OS timeout
-  (coarse on Windows, ignored on macOS) and freminal does not enforce it, so
-  `w=1` is not advertised there.
+  routing, not the protocol's.) Visibility requires OS-window focus because
+  freminal cannot tell an occluded window from a merely unfocused one, so a pane
+  in an unfocused OS window counts as not visible even when it is fully on
+  screen, and `o=invisible` shows there. Minimisation comes from the window
+  system's viewport information, which a Wayland compositor does not provide:
+  there a minimised window reads as restored.
+- **Expiry:** a positive `w=` is enforced by freminal, measured from display (an
+  update restarts it), on every tracked leg (toast and Linux/BSD): at the
+  deadline every leg is closed whatever the OS or hover state, and a close
+  report follows with `c=1`. The toast of a `w=` notification has no timer of its
+  own (it stays until dismissed), so hovering it cannot hold it past the
+  deadline; only the default and low-urgency toast lifetimes pause while the
+  pointer is over them. The value is also sent to the Linux daemon as
+  `expire_timeout`. `w=0` never expires (toast: until dismissed). On macOS and
+  Windows `w=` is passed as the OS timeout (a short or long toast on Windows,
+  ignored on macOS) and freminal does not enforce it, so `w=1` is not advertised
+  there.
 
 ### Allowing users to filter notifications
 
@@ -455,10 +520,13 @@ repeat), both base64 UTF-8. They exist so users can filter notifications.
 freminal: `[notifications] osc99_filters` is a list of `location:regex` rules
 (and the bare rule `all`); locations are `title`, `body`, `app` (the `f=` value)
 and `type` (any `t=` value). The regex is a search, case-sensitive (use `(?i)`),
-built with a 1 MiB size limit. Any matching rule drops the notification
-silently: it is not shown, not registered and gets no reply. The filter runs
-after the `o=` gate, as in kitty. An invalid rule is logged and ignored. There
-is no `and` / `or` / `not`.
+built with a 1 MiB size limit. An absent body or app name is matched as the empty
+string, as in kitty, so `body:^$` matches a notification with no body. Any
+matching rule drops the notification silently: it is not shown, not registered
+and gets no reply. The filter runs after the `o=` gate, as in kitty. An invalid
+rule is logged and ignored. There is no `and` / `or` / `not`. A change applies
+on config reload; if the registry is busy when it is applied, it is retried
+every frame until it lands.
 
 ### Encoding rules
 
@@ -479,7 +547,9 @@ The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
 - **Parser** (`freminal-common/src/buffer_states/osc_notify_99.rs`):
   `parse_osc_99` turns one sequence into an `Osc99Command` in which every field
   with a default is unset-aware, so reassembly can merge chunks. An invalid value
-  ignores its key; only the size guards are errors.
+  ignores its key; only the size guards are errors, and a rejected sequence is
+  reported to the handler as `AnsiOscType::Notify99Rejected` so it can abandon
+  the transfer it belonged to.
 - **Reassembly and finalisation**
   (`freminal-terminal-emulator/src/terminal_handler/notify_99.rs`):
   `TerminalHandler::handle_osc99` is the single entry point. It answers `p=?`
@@ -491,15 +561,19 @@ The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
 - **Registry** (`freminal/src/gui/osc99/registry.rs`): a pure state machine. Each
   displayed notification is an instance keyed by pane and `i=`, with the legs it
   is shown on. It returns effects (reply, show, close, focus) that a thin
-  executor applies. It holds at most 128 instances.
-- **Legs:** the keyed toast (`freminal/src/gui/toast.rs`), the Linux/BSD zbus
-  service (`osc99/dbus_service.rs`, `presentation.rs`, `icon_lookup.rs`), and the
-  untracked macOS/Windows backend (`osc99/untracked.rs`, `icon_raster.rs`,
-  `icon_tempfiles.rs`).
+  executor applies. A pane holds at most 32 instances (its own oldest is
+  forgotten first, so a noisy pane cannot evict another pane's), and 128 overall
+  as a backstop.
+- **Legs:** the keyed toast (`freminal/src/gui/toast/`), the Linux/BSD zbus
+  service (`osc99/dbus_service/`, `presentation.rs`, `icon_lookup.rs`,
+  `icon_decode.rs`), and the untracked macOS/Windows backend
+  (`osc99/untracked.rs`, `icon_raster.rs`, `icon_tempfiles.rs`,
+  `icon_decode.rs`).
 - **Routing and capabilities:** `route_osc99` in `freminal/src/gui/notifications.rs`
-  applies the `o=` gate, the filters and `routing_osc99`;
-  `freminal/src/gui/host_capabilities.rs` holds the leg tables and the pure
-  combination function behind `p=?`.
+  applies the `o=` gate, the filters and `routing_osc99`; a frame's requests
+  (displays, controls and icon primings) are routed strictly in arrival order by
+  `osc99/glue.rs`. `freminal/src/gui/host_capabilities.rs` holds the leg tables
+  and the pure combination function behind `p=?`.
 - **Config:** `[notifications] enabled`, `osc_99`, `routing_osc99` (`toast`,
   `system`, `both`, `system_when_unfocused`, `disabled`) and `osc99_filters`.
   See `config_example.toml`.
@@ -521,11 +595,24 @@ Lifecycle summary:
 - On Linux/BSD the signals `ActionInvoked` and `NotificationClosed` are believed
   only from the current owner of `org.freedesktop.Notifications`, so another
   session-bus client cannot forge an activation or a close. `GetNameOwner` and
-  `NameOwnerChanged` follow a daemon restart, which closes every mapped instance.
+  `NameOwnerChanged` follow a daemon restart. Each mapping records the unique
+  name that answered its `Notify`, and an owner change closes only the instances
+  recorded under a different owner. If `GetNameOwner` fails or finds nobody, the
+  sender of the next successful `Notify` reply is adopted as the owner.
+- `GetNameOwner` and `GetCapabilities` carry `NO_AUTO_START`, so starting freminal
+  never activates a daemon; the first real `Notify` does, and the resulting owner
+  change refreshes the capabilities. Every call is bounded at 25 seconds. After
+  a timed-out call, shows fail and closes complete without calling the daemon for
+  30 seconds. If either signal pump ends, every mapped instance is reported
+  closed and the service becomes unavailable; after a failed connect the next
+  show reconnects, at most once per 30 seconds.
 - An instance whose pane is gone is pruned every frame; its notifications stay on
   screen and produce no replies.
-- An unreachable session bus makes `system` routing unsupported and `both` the
-  toast alone; a show that cannot be queued ends that notification's system leg.
+- An unreachable session bus makes `system` routing unsupported, and `both` and
+  `system_when_unfocused` the toast alone (advertised and routed alike); a show
+  that cannot be queued ends that notification's system leg.
+- Requests that find a GUI cell busy are deferred to the next frame, not dropped
+  (at most 256 are held); the repaint wake falls back to any live window.
 
 ### Documented differences from kitty
 
@@ -539,9 +626,9 @@ does, not copied. These are the places freminal deliberately differs:
    `p=alive` act at once as in kitty, but kitty also discards the window's
    pending command; freminal leaves the pending map untouched.
 3. **Control stripping is wider.** Besides title and body, freminal strips
-   control characters from button labels, icon names, the app name, types and
-   the sound name, because they are shown in the toast and sent over D-Bus.
-   kitty leaves those alone.
+   control characters (and LF, for the names) from button labels, icon names,
+   the app name, types and the sound name, because they are shown in the toast
+   and sent over D-Bus. kitty leaves those alone.
 4. **Pane-scoped `p=close`.** kitty's `p=close` looks across all windows; freminal
    looks only at the requesting pane's instances (and update and `p=alive` are
    scoped the same way), so one pane cannot close or see another's
@@ -557,14 +644,30 @@ freminal adds no lifecycle code there. Their system leg is untracked: no
 activation reports, no close tracking, no update in place, no programmatic close
 and no expiry enforced by freminal, no buttons, and only the eight standard icon
 names are resolved (as drawn glyph images; otherwise a transmitted icon is
-shown). `p=?` omits what they cannot
-do: no `a`, no `c`, no `w`, no `buttons`, `s=system,silent`, and `u` on Windows
-only. A `c=1` request is answered with `p=close;untracked` at display, and
-`p=alive` lists the pane's ids until `p=close`, a positive `w=` deadline, the
-instance cap or the pane going away removes them. On Linux/BSD, `actions`
-(report, focus, buttons), `body` and `sound` follow the daemon. The toast, on
-every platform, plays no sounds and shows no transmitted icon images (standard
-icon names show as glyphs).
+shown). `p=?` omits what they cannot do: no `a`, no `c`, no `w`, no `buttons`,
+no `u`, and `s=system,silent`. A `c=1` request is answered with
+`p=close;untracked` at display. A display on that leg alone is not kept, so
+`p=alive` does not list it; with `both` routing the toast leg keeps the
+instance, and `p=alive` lists it until `p=close`, a positive `w=` deadline, the
+toast closing, the instance cap or the pane going away removes it.
+
+Delivery on those platforms runs on one long-lived thread
+(`freminal-osc99-deliver`) fed by a queue of 16 requests; a request that finds
+the queue full is dropped with a debug log, so a flood cannot stall the GUI or
+grow memory. Icon files live in a per-process directory,
+`freminal-osc99-icons-<pid>` under the temp directory (mode `0700`, files
+`0600`, a symlinked or permissive existing directory is refused), are deleted
+after 10 minutes unused or past 64 files, and are removed at exit; the OS may
+therefore show no image when it redraws an old notification. macOS cannot report
+a delivery failure to freminal at all. Windows builds the toast directly with
+`tauri-winrt-notification` (the icon is an `appLogoOverride`, attributed to the
+PowerShell app id) and has no reminder scenario (it needs buttons, which this leg
+cannot report), so the Windows toast has no urgency levels and `u` is not
+advertised there.
+
+On Linux/BSD, `actions` (report, focus, buttons), `body` and `sound` follow the
+daemon. The toast, on every platform, plays no sounds and shows no transmitted
+icon images (standard icon names show as glyphs).
 
 ---
 
