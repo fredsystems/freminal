@@ -24,7 +24,9 @@ use freminal_windowing::WindowId;
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::notifications::{Osc99Control, send_reply_weak};
 use crate::gui::panes::PaneId;
-use crate::gui::toast::{ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack};
+use crate::gui::toast::{
+    ToastContent, ToastKey, ToastKind, ToastLifetime, ToastPlacement, ToastStack,
+};
 
 pub use registry::Osc99Registry;
 
@@ -82,6 +84,9 @@ pub struct Osc99ToastSpec {
     pub detail: Option<String>,
     /// How long the toast stays.
     pub lifetime: ToastLifetime,
+    /// The button labels (`p=buttons`), in order. The toast keeps at most
+    /// eight.
+    pub buttons: Vec<String>,
 }
 
 /// Build the toast for `data`.
@@ -111,6 +116,7 @@ pub fn osc99_toast_spec(data: &Notification99Data) -> Osc99ToastSpec {
         title: data.title.clone(),
         detail: data.body.clone().filter(|body| !body.is_empty()),
         lifetime,
+        buttons: data.buttons.clone(),
     }
 }
 
@@ -162,26 +168,21 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                     title,
                     detail,
                     lifetime,
+                    buttons,
                 } = spec;
                 let key = instance.to_toast_key();
+                let content = ToastContent {
+                    kind,
+                    title,
+                    detail,
+                    buttons,
+                };
                 if let Some(old) = replaces {
-                    sink.toasts.replace_keyed(
-                        old.to_toast_key(),
-                        key,
-                        kind,
-                        title,
-                        detail,
-                        lifetime,
-                    );
+                    sink.toasts
+                        .replace_keyed(old.to_toast_key(), key, content, lifetime);
                 } else {
-                    sink.toasts.push_keyed(
-                        key,
-                        kind,
-                        title,
-                        detail,
-                        lifetime,
-                        ToastPlacement::TOP_RIGHT,
-                    );
+                    sink.toasts
+                        .push_keyed(key, content, lifetime, ToastPlacement::TOP_RIGHT);
                 }
             }
             Osc99Effect::CloseToast(instance) => sink.toasts.close_keyed(instance.to_toast_key()),

@@ -93,13 +93,15 @@ impl Osc99Instance {
     }
 
     /// The reply for this instance's activation, if `a=report` was requested.
-    fn activation_reply(&self) -> Option<Osc99Effect> {
+    /// `button` is the 1-based button that was pressed, or `None` for an
+    /// activation of the notification body.
+    fn activation_reply(&self, button: Option<u8>) -> Option<Osc99Effect> {
         (self.activation_reporting == Osc99ActivationReporting::Report).then(|| {
             Osc99Effect::Reply {
                 reply_tx: Weak::clone(&self.reply_tx),
                 reply: GuiReply::Osc99Activation {
                     id: self.id.clone(),
-                    button: None,
+                    button: button.map(|n| n.to_string()),
                 },
             }
         })
@@ -310,9 +312,10 @@ impl Osc99Registry {
     /// An event for an unknown instance (replaced, evicted, forgotten, or
     /// its pane pruned) is ignored.
     ///
-    /// - `Activated` sends the activation report when `a=report` was
-    ///   requested, and forgets the instance unless `c=1` was requested (the
-    ///   toast's `Closed` event follows either way).
+    /// - `Activated` and `Button(n)` send the activation report when
+    ///   `a=report` was requested (the report names button `n` for `Button`),
+    ///   and forget the instance unless `c=1` was requested (the toast's
+    ///   `Closed` event follows either way).
     /// - `Closed` closes the toast leg; once no leg is open the instance is
     ///   forgotten and a close report is sent when owed.
     pub fn on_toast_event(&mut self, event: ToastEvent) -> Vec<Osc99Effect> {
@@ -326,16 +329,8 @@ impl Osc99Registry {
         };
 
         match event.kind {
-            ToastEventKind::Activated => {
-                let effects: Vec<Osc99Effect> =
-                    self.instances[pos].activation_reply().into_iter().collect();
-                if self.instances[pos].close_reporting == Osc99CloseReporting::Silent {
-                    self.instances
-                        .remove(pos)
-                        .log_forgotten("activated without close reporting");
-                }
-                effects
-            }
+            ToastEventKind::Activated => self.activate(pos, None),
+            ToastEventKind::Button(n) => self.activate(pos, Some(n)),
             ToastEventKind::Closed => {
                 self.instances[pos]
                     .open_legs
@@ -343,6 +338,22 @@ impl Osc99Registry {
                 self.finish_if_closed(pos)
             }
         }
+    }
+
+    /// Activate the instance at `pos` through `button` (`None` is the body):
+    /// returns the activation report when one was requested, and forgets the
+    /// instance unless `c=1` was requested.
+    fn activate(&mut self, pos: usize, button: Option<u8>) -> Vec<Osc99Effect> {
+        let effects: Vec<Osc99Effect> = self.instances[pos]
+            .activation_reply(button)
+            .into_iter()
+            .collect();
+        if self.instances[pos].close_reporting == Osc99CloseReporting::Silent {
+            self.instances
+                .remove(pos)
+                .log_forgotten("activated without close reporting");
+        }
+        effects
     }
 
     /// Forget the instance at `pos` if no leg is open, returning its close
@@ -615,6 +626,17 @@ mod tests {
         assert_eq!(empty_body.detail, None, "an empty body is not a detail");
     }
 
+    #[test]
+    fn toast_spec_carries_the_buttons_in_order() {
+        let with_buttons = osc99_toast_spec(&Notification99Data {
+            buttons: vec!["Yes".to_owned(), "No".to_owned()],
+            ..data(None)
+        });
+        assert_eq!(with_buttons.buttons, ["Yes", "No"]);
+
+        assert_eq!(osc99_toast_spec(&data(None)).buttons.len(), 0);
+    }
+
     // ── registration and updates ────────────────────────────────────────
 
     #[test]
@@ -833,6 +855,76 @@ mod tests {
         let (_, instance) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
 
         assert!(registry.on_toast_event(activated(instance)).is_empty());
+    }
+
+    fn button_pressed(instance: Osc99InstanceId, n: u8) -> ToastEvent {
+        ToastEvent {
+            key: instance.to_toast_key(),
+            kind: ToastEventKind::Button(n),
+        }
+    }
+
+    #[test]
+    fn button_press_with_a_report_request_reports_the_one_based_button() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Silent),
+            &[Osc99Leg::Toast],
+        );
+
+        let reports = replies(registry.on_toast_event(button_pressed(instance, 2)));
+
+        assert_eq!(reports.len(), 1);
+        assert!(
+            matches!(
+                &reports[0],
+                GuiReply::Osc99Activation { id: Some(i), button: Some(b) } if i == "n" && b == "2"
+            ),
+            "got {:?}",
+            reports[0]
+        );
+        assert!(registry.instances().is_empty(), "forgotten without c=1");
+    }
+
+    #[test]
+    fn button_press_without_a_report_request_sends_no_reply() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
+
+        assert!(
+            registry
+                .on_toast_event(button_pressed(instance, 2))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn button_press_with_close_reporting_is_followed_by_exactly_one_close() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("n", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast],
+        );
+
+        let reports = replies(registry.on_toast_event(button_pressed(instance, 1)));
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            &reports[0],
+            GuiReply::Osc99Activation { button: Some(b), .. } if b == "1"
+        ));
+        assert_eq!(registry.instances().len(), 1, "kept until the toast closes");
+
+        let reports = replies(registry.on_toast_event(closed(instance)));
+        assert_eq!(reports.len(), 1);
+        assert!(is_tracked_close(&reports[0], "n"), "got {:?}", reports[0]);
+        assert!(registry.on_toast_event(closed(instance)).is_empty());
     }
 
     #[test]

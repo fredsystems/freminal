@@ -5814,7 +5814,22 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 
 ### 138 Cleanup entries
 
-None yet.
+#### 138.C1 — Split `gui/toast.rs` into a `gui/toast/` module directory
+
+- **Surfaced:** 138.8 (sub-agent report, confirmed by the orchestrator). After 138.7a and
+  138.8, `freminal/src/gui/toast.rs` is about 4,700 lines: about 2,500 of production code
+  (stack and lifecycle, measurement, layout, the button flow, hit-testing) plus about 2,200 of
+  tests.
+- **Impact:** module cohesion (`freminal-module-cohesion`). One file holds several concepts. A
+  sibling `toast_buttons.rs` would have to widen the visibility of private layout helpers,
+  which that skill forbids, so the fix is a directory module.
+- **Fix:** a move-only split into `gui/toast/mod.rs` (types, `ToastStack`, lifecycle and
+  events), `gui/toast/layout.rs` (measurement inputs, `layout_toasts`, `layout_one_toast`,
+  anchors), `gui/toast/buttons.rs` (button flow and quads) and `gui/toast/hit.rs` (hit-testing
+  and click targeting). Tests move with their code. Visibility is `pub(super)` within the
+  directory only, and nothing outside `gui::toast` changes.
+- **Verification:** `git diff -M` shows moves; the test count is unchanged; clippy is clean.
+- **Scheduling:** in Task 138, after 138.18 and before the adversarial review.
 
 ### 138 Status notes
 
@@ -5896,6 +5911,13 @@ None yet.
   - All six temporary `expect(dead_code)` attributes from 138.7a are removed.
   - The toast title/body test checks the `osc99_toast_spec` mapping, because `ToastStack` has
     no title accessor.
+- **138.8 (done).** Toast buttons are laid out under the text, wrap at `MAX_PILL_WIDTH_PTS`,
+  and are drawn as lightened `ToastQuad`s straight after their own pill. `ToastLayoutOutput`
+  gains `button_quads` and `button_rects_logical`, and `ToastContent` keeps `push_keyed` and
+  `replace_keyed` under the argument limit. Geometry without buttons is unchanged (178×40, and
+  178×60 with a detail). Button quads reuse the pill shader, so they carry its small drop
+  shadow; accepted. `toast.rs` reached about 4,700 lines (about 2,500 of production code);
+  the move-only directory split is 138.C1.
 
 ---
 

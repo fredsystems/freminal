@@ -194,6 +194,9 @@ pub(super) enum ToastLifetime {
 pub(super) enum ToastEventKind {
     /// The user clicked the toast body (always followed by `Closed`).
     Activated,
+    /// The user clicked button _n_ (1-based, in label order; always followed
+    /// by `Closed`).
+    Button(u8),
     /// The toast left the stack, for any reason.
     Closed,
 }
@@ -222,8 +225,30 @@ pub(super) enum ToastReplace {
 enum ToastClickPart {
     /// The dismiss ("x") square.
     Dismiss,
+    /// Button _n_ (1-based, in label order).
+    Button(u8),
     /// Anywhere else within the pill.
     Body,
+}
+
+/// The most buttons a toast keeps. Further labels are dropped (the PTY side
+/// already caps at the same number; this is a defensive second cap).
+const MAX_TOAST_BUTTONS: usize = 8;
+
+/// What a keyed toast shows: its severity, text and button labels.
+///
+/// Bundled so [`ToastStack::push_keyed`] and [`ToastStack::replace_keyed`]
+/// stay under the `too_many_arguments` limit. Unkeyed toasts have no buttons.
+#[derive(Debug, Clone)]
+pub(super) struct ToastContent {
+    /// The severity (colour and icon).
+    pub kind: ToastKind,
+    /// One-line headline.
+    pub title: String,
+    /// Optional detail line.
+    pub detail: Option<String>,
+    /// Button labels, in order. Only the first [`MAX_TOAST_BUTTONS`] are kept.
+    pub buttons: Vec<String>,
 }
 
 /// A single toast entry in the stack.
@@ -234,6 +259,8 @@ pub(super) struct Toast {
     title: String,
     /// Optional multi-line detail (wrapped).
     detail: Option<String>,
+    /// Button labels (keyed toasts only; at most [`MAX_TOAST_BUTTONS`]).
+    buttons: Vec<String>,
     /// Monotonic id used as the egui widget id seed, so each toast has
     /// a stable id across frames even after list reordering.
     id: u64,
@@ -271,6 +298,7 @@ impl Toast {
             kind,
             title,
             detail,
+            buttons: Vec::new(),
             id,
             created: now,
             life_start: now,
@@ -285,6 +313,13 @@ impl Toast {
     const fn keyed(mut self, key: ToastKey, lifetime: ToastLifetime) -> Self {
         self.key = Some(key);
         self.lifetime = lifetime;
+        self
+    }
+
+    /// Give this toast button labels, keeping at most [`MAX_TOAST_BUTTONS`].
+    fn with_buttons(mut self, mut buttons: Vec<String>) -> Self {
+        buttons.truncate(MAX_TOAST_BUTTONS);
+        self.buttons = buttons;
         self
     }
 
@@ -494,6 +529,21 @@ const TOAST_STACK_GAP_PTS: f32 = 8.0;
 const DETAIL_GAP_PTS: f32 = 4.0;
 /// Maximum pill width, logical points. Content wider than this clamps.
 const MAX_PILL_WIDTH_PTS: f32 = 360.0;
+/// Horizontal padding inside a button, on each side of its label.
+const BUTTON_PAD_X_PTS: f32 = 10.0;
+/// Vertical padding inside a button, above and below its label.
+const BUTTON_PAD_Y_PTS: f32 = 4.0;
+/// Gap between buttons on one row.
+const BUTTON_GAP_PTS: f32 = 6.0;
+/// Gap between button rows.
+const BUTTON_ROW_GAP_PTS: f32 = 6.0;
+/// Gap between the title/detail block and the first button row.
+const BUTTON_TOP_GAP_PTS: f32 = 8.0;
+/// The widest a single button may be; longer labels are fitted with an
+/// ellipsis.
+const MAX_BUTTON_WIDTH_PTS: f32 = 160.0;
+/// How much lighter than the pill a button's fill is.
+const BUTTON_LIGHTEN: f32 = 0.08;
 /// Minimum pill height, logical points, regardless of content.
 const MIN_PILL_HEIGHT_PTS: f32 = 40.0;
 /// Floor applied to the theme's `menu_corner_radius`, logical points.
@@ -588,6 +638,18 @@ pub(super) struct ToastGeometry {
     pub active_pane_rect: Option<egui::Rect>,
 }
 
+/// One measured toast button label, input to [`layout_toasts`].
+#[derive(Debug, Clone)]
+pub(super) struct ToastButtonInput {
+    /// The exact label that was measured, already whitespace-normalized and
+    /// fitted to [`MAX_BUTTON_WIDTH_PTS`] (see [`fit_text`]).
+    pub label_text: String,
+    /// The physical pixel size `label_text` was measured/rasterized at.
+    pub size_px: f32,
+    /// Measured `label_text`, in physical pixels.
+    pub label: ToastTextMetrics,
+}
+
 /// Per-toast input to [`layout_toasts`]: its measured content plus its
 /// current animation phase.
 ///
@@ -640,6 +702,9 @@ pub(super) struct ToastLayoutInput {
     pub close: ToastTextMetrics,
     /// This toast's current animation phase (see [`Toast::anim`]).
     pub anim: ToastAnim,
+    /// Measured button labels, in order. Empty for every unkeyed toast, and
+    /// then the toast's geometry is exactly that of a toast with no buttons.
+    pub buttons: Vec<ToastButtonInput>,
 }
 
 /// One laid-out toast, ready to hand to the toast/toast-text GPU passes.
@@ -672,6 +737,12 @@ pub(super) struct ToastLayoutOutput {
     /// [`Self::hit_rect_logical`]: [`CLOSE_SIZE_PTS`] on a side, centred on
     /// the drawn "x" glyph and clamped to lie within `hit_rect_logical`.
     pub dismiss_rect_logical: [f32; 4],
+    /// One quad per button, in label order, to draw immediately after
+    /// [`Self::pill`] (physical pixels, same space as the pill).
+    pub button_quads: Vec<ToastQuad>,
+    /// One hit rect per button, in label order (index _i_ is button _i_ + 1),
+    /// logical points, window space, clamped into [`Self::hit_rect_logical`].
+    pub button_rects_logical: Vec<[f32; 4]>,
 }
 
 /// The maximum corner radius (in logical points) among the theme's
@@ -826,13 +897,85 @@ fn settled_pill_size(input: &ToastLayoutInput, ppp: f32) -> (f32, f32) {
         input.icon.width + icon_label_gap + text_width + label_close_gap + close_size;
     let width = pad_x.mul_add(2.0, content_width).min(max_width);
 
+    let text_height = text_block_height(input, detail_gap);
+    if input.buttons.is_empty() {
+        let height = pad_y.mul_add(2.0, text_height).max(min_height);
+        return (width, height);
+    }
+
+    // Widen to fit the buttons on one row where they fit, up to the maximum
+    // pill width; past that the rows wrap (see `button_flow`).
+    let inner_max = 2.0_f32.mul_add(-pad_x, max_width);
+    let row_width = button_row_width(&input.buttons, ppp).min(inner_max);
+    let width = width.max(pad_x.mul_add(2.0, row_width));
+    let flow = button_flow(&input.buttons, 2.0_f32.mul_add(-pad_x, width), ppp);
+    let content_height = BUTTON_TOP_GAP_PTS.mul_add(ppp, text_height) + flow.height;
+    let height = pad_y.mul_add(2.0, content_height).max(min_height);
+
+    (width, height)
+}
+
+/// Height, physical pixels, of the label (and optional detail) block.
+fn text_block_height(input: &ToastLayoutInput, detail_gap: f32) -> f32 {
     let mut text_height = input.label.height;
     if input.has_detail {
         text_height += detail_gap + input.detail.height;
     }
-    let height = pad_y.mul_add(2.0, text_height).max(min_height);
+    text_height
+}
 
-    (width, height)
+/// The width of one button: its label plus padding, physical pixels.
+fn button_width(button: &ToastButtonInput, ppp: f32) -> f32 {
+    BUTTON_PAD_X_PTS.mul_add(2.0 * ppp, button.label.width)
+}
+
+/// The width of all `buttons` on a single row, physical pixels.
+fn button_row_width(buttons: &[ToastButtonInput], ppp: f32) -> f32 {
+    let gap = BUTTON_GAP_PTS * ppp;
+    buttons
+        .iter()
+        .enumerate()
+        .map(|(i, b)| button_width(b, ppp) + if i == 0 { 0.0 } else { gap })
+        .sum()
+}
+
+/// Where each button sits within the button block, before animation.
+struct ButtonFlow {
+    /// `[x, y, width, height]` per button, physical pixels, relative to the
+    /// block's top-left corner.
+    rects: Vec<[f32; 4]>,
+    /// Total height of all rows, physical pixels (0 with no buttons).
+    height: f32,
+}
+
+/// Flow `buttons` left to right, wrapping to a new row when the next button
+/// would pass `inner_width` (physical pixels). A button wider than the row
+/// sits alone on its own row. All buttons share the tallest label's height.
+fn button_flow(buttons: &[ToastButtonInput], inner_width: f32, ppp: f32) -> ButtonFlow {
+    let gap = BUTTON_GAP_PTS * ppp;
+    let row_gap = BUTTON_ROW_GAP_PTS * ppp;
+    let label_height = buttons
+        .iter()
+        .map(|b| b.label.height)
+        .fold(0.0_f32, f32::max);
+    let height = BUTTON_PAD_Y_PTS.mul_add(2.0 * ppp, label_height);
+
+    let mut rects = Vec::with_capacity(buttons.len());
+    let (mut x, mut y) = (0.0_f32, 0.0_f32);
+    for button in buttons {
+        let width = button_width(button, ppp);
+        if x > 0.0 && x + width > inner_width {
+            x = 0.0;
+            y += height + row_gap;
+        }
+        rects.push([x, y, width, height]);
+        x += width + gap;
+    }
+    let total = if rects.is_empty() { 0.0 } else { y + height };
+    ButtonFlow {
+        rects,
+        height: total,
+    }
 }
 
 /// Compute the settled (pre-animation) top-left origin, in physical pixels,
@@ -1096,6 +1239,90 @@ fn build_text_runs(
     runs
 }
 
+/// The animated draw data and hit rects of one toast's buttons.
+struct ToastButtonLayout {
+    /// One quad per button, in label order.
+    quads: Vec<ToastQuad>,
+    /// One hit rect per button, logical points, clamped into the pill's.
+    rects_logical: Vec<[f32; 4]>,
+    /// One label run per button.
+    runs: Vec<ToastTextRun>,
+}
+
+/// Lay out `input`'s buttons under its title/detail block.
+///
+/// `settled` is the pill's settled `[x, y, width, height]` (physical pixels);
+/// the buttons are flowed against that rect and then mapped through the same
+/// scale-and-slide transform the pill goes through (see [`layout_one_toast`]),
+/// so they never drift from the pill during the entry animation. `pill` is the
+/// already-animated pill quad (its border and opacity are reused),
+/// `hit_rect` its logical hit rect (the button rects are clamped into it), and
+/// `text_color` the label colour.
+fn layout_buttons(
+    input: &ToastLayoutInput,
+    settled: [f32; 4],
+    pill: &ToastQuad,
+    hit_rect: [f32; 4],
+    metrics: &ToastLayoutMetrics,
+    text_color: [f32; 4],
+) -> ToastButtonLayout {
+    let [settled_x, settled_y, width, height] = settled;
+    let anim = input.anim;
+    let ppp = metrics.ppp;
+    let flow = button_flow(&input.buttons, 2.0_f32.mul_add(-metrics.pad_x, width), ppp);
+    let block_x = settled_x + metrics.pad_x;
+    let block_y = BUTTON_TOP_GAP_PTS.mul_add(
+        ppp,
+        settled_y + metrics.pad_y + text_block_height(input, metrics.detail_gap),
+    );
+    let center_x = settled_x + width / 2.0;
+    let center_y = settled_y + height / 2.0;
+
+    let mut layout = ToastButtonLayout {
+        quads: Vec::with_capacity(input.buttons.len()),
+        rects_logical: Vec::with_capacity(input.buttons.len()),
+        runs: Vec::with_capacity(input.buttons.len()),
+    };
+    for (button, rel) in input.buttons.iter().zip(&flow.rects) {
+        // The same transform as the pill: scale about the pill's centre, then
+        // slide horizontally.
+        let x = anim.slide_x.mul_add(
+            ppp,
+            (block_x + rel[0] - center_x).mul_add(anim.scale, center_x),
+        );
+        let y = (block_y + rel[1] - center_y).mul_add(anim.scale, center_y);
+        let (w, h) = (rel[2] * anim.scale, rel[3] * anim.scale);
+        let half_extent = w.min(h) / 2.0;
+        layout.quads.push(ToastQuad {
+            x,
+            y,
+            width: w,
+            height: h,
+            corner_radius: metrics.corner_radius.min(half_extent).max(0.0),
+            color_top: lighten(pill.color_top, BUTTON_LIGHTEN),
+            color_bottom: lighten(pill.color_bottom, BUTTON_LIGHTEN),
+            border_color: pill.border_color,
+            border_width: pill.border_width.min(half_extent).max(0.0),
+            accent: [0.0; 4],
+            opacity: pill.opacity,
+        });
+        layout.rects_logical.push([
+            (x / ppp).max(hit_rect[0]),
+            (y / ppp).max(hit_rect[1]),
+            ((x + w) / ppp).min(hit_rect[2]),
+            ((y + h) / ppp).min(hit_rect[3]),
+        ]);
+        layout.runs.push(ToastTextRun {
+            text: button.label_text.clone(),
+            origin_x: x + (w - button.label.width) / 2.0,
+            baseline_y: y + (h - button.label.height) / 2.0 + button.label.ascent,
+            size_px: button.size_px,
+            color: text_color,
+        });
+    }
+    layout
+}
+
 /// Lay out one toast: apply its animation to the settled pill rect, derive
 /// its colors, and build its text runs and hit rects.
 fn layout_one_toast(
@@ -1148,7 +1375,7 @@ fn layout_one_toast(
         opacity: anim.opacity.clamp(0.0, 1.0),
     };
 
-    let runs = build_text_runs(input, x, y, scaled_width, metrics, &colors);
+    let mut runs = build_text_runs(input, x, y, scaled_width, metrics, &colors);
 
     let hit_rect_logical = [
         x / metrics.ppp,
@@ -1156,6 +1383,16 @@ fn layout_one_toast(
         (x + scaled_width) / metrics.ppp,
         (y + scaled_height) / metrics.ppp,
     ];
+
+    let buttons = layout_buttons(
+        input,
+        [settled_x, settled_y, width, height],
+        &pill,
+        hit_rect_logical,
+        metrics,
+        colors.text_color,
+    );
+    runs.extend(buttons.runs);
 
     // Dismiss hit square: centred on the drawn "x" glyph (same origin the
     // run was placed at), CLOSE_SIZE_PTS on a side, clamped into the pill's
@@ -1179,6 +1416,8 @@ fn layout_one_toast(
         runs,
         hit_rect_logical,
         dismiss_rect_logical,
+        button_quads: buttons.quads,
+        button_rects_logical: buttons.rects_logical,
     }
 }
 
@@ -1570,14 +1809,19 @@ impl ToastStack {
     pub(super) fn push_keyed(
         &mut self,
         key: ToastKey,
-        kind: ToastKind,
-        title: impl Into<String>,
-        detail: Option<String>,
+        content: ToastContent,
         lifetime: ToastLifetime,
         placement: ToastPlacement,
     ) {
-        let toast =
-            Toast::new(kind, title.into(), detail, self.alloc_id(), placement).keyed(key, lifetime);
+        let ToastContent {
+            kind,
+            title,
+            detail,
+            buttons,
+        } = content;
+        let toast = Toast::new(kind, title, detail, self.alloc_id(), placement)
+            .keyed(key, lifetime)
+            .with_buttons(buttons);
         self.push_entry(toast);
     }
 
@@ -1596,18 +1840,10 @@ impl ToastStack {
         &mut self,
         old: ToastKey,
         new_key: ToastKey,
-        kind: ToastKind,
-        title: impl Into<String>,
-        detail: Option<String>,
+        content: ToastContent,
         lifetime: ToastLifetime,
     ) -> ToastReplace {
-        self.replace_keyed_at(
-            Instant::now(),
-            old,
-            new_key,
-            (kind, title.into(), detail),
-            lifetime,
-        )
+        self.replace_keyed_at(Instant::now(), old, new_key, content, lifetime)
     }
 
     /// [`Self::replace_keyed`] with an injected `now` (the new `life_start`),
@@ -1617,24 +1853,25 @@ impl ToastStack {
         now: Instant,
         old: ToastKey,
         new_key: ToastKey,
-        (kind, title, detail): (ToastKind, String, Option<String>),
+        content: ToastContent,
         lifetime: ToastLifetime,
     ) -> ToastReplace {
         let Some(toast) = self.entries.iter_mut().find(|t| t.key == Some(old)) else {
-            self.push_keyed(
-                new_key,
-                kind,
-                title,
-                detail,
-                lifetime,
-                ToastPlacement::TOP_RIGHT,
-            );
+            self.push_keyed(new_key, content, lifetime, ToastPlacement::TOP_RIGHT);
             return ToastReplace::Pushed;
         };
+        let ToastContent {
+            kind,
+            title,
+            detail,
+            mut buttons,
+        } = content;
+        buttons.truncate(MAX_TOAST_BUTTONS);
         toast.key = Some(new_key);
         toast.kind = kind;
         toast.title = title;
         toast.detail = detail;
+        toast.buttons = buttons;
         toast.lifetime = lifetime;
         toast.life_start = now;
         ToastReplace::Replaced
@@ -1684,7 +1921,8 @@ impl ToastStack {
     }
 
     /// Handle a primary click on toast `id` at `part`: the toast is removed,
-    /// and a keyed toast records `Activated` (body only) then `Closed`.
+    /// and a keyed toast records `Activated` (body) or `Button(n)` (button
+    /// _n_) and then `Closed`; the dismiss square records `Closed` only.
     /// Unkeyed toasts are removed with no event, whichever part was hit. A
     /// no-op if `id` is not on the stack.
     fn apply_click(&mut self, id: u64, part: ToastClickPart) {
@@ -1695,12 +1933,13 @@ impl ToastStack {
         let Some(key) = toast.key else {
             return;
         };
-        if part == ToastClickPart::Body {
-            self.events.push(ToastEvent {
-                key,
-                kind: ToastEventKind::Activated,
-            });
-        }
+        let activation = match part {
+            ToastClickPart::Body => Some(ToastEventKind::Activated),
+            ToastClickPart::Button(n) => Some(ToastEventKind::Button(n)),
+            ToastClickPart::Dismiss => None,
+        };
+        self.events
+            .extend(activation.map(|kind| ToastEvent { key, kind }));
         self.record_closed([key]);
     }
 
@@ -1867,7 +2106,11 @@ impl ToastStack {
             let runs: Vec<ToastTextRun> = outputs.iter().flat_map(|o| o.runs.clone()).collect();
             rs.text.build_instances(&runs, font_manager)
         };
-        let pills: Vec<ToastQuad> = outputs.iter().map(|o| o.pill).collect();
+        // Draw order: each pill, then its buttons, then the next pill.
+        let pills: Vec<ToastQuad> = outputs
+            .iter()
+            .flat_map(|o| std::iter::once(o.pill).chain(o.button_quads.iter().copied()))
+            .collect();
         // Subtask 121.14: the same hit rects `hit_test` above just tested the
         // pointer against, in the same logical-point/window-space coordinates
         // `PublishedFrameState`'s `chrome_head_rects`/`chrome_border_rects`
@@ -2036,6 +2279,9 @@ impl ToastStack {
                 )
             };
 
+            let buttons =
+                measure_buttons(&toast.buttons, &rs.text, detail_size_px, ppp, font_manager);
+
             let anim = toast.anim(now);
             if anim.opacity < 1.0 || anim.slide_x.abs() > f32::EPSILON || anim.scale < 1.0 {
                 any_animating = true;
@@ -2056,6 +2302,7 @@ impl ToastStack {
                 close_size_px,
                 close,
                 anim,
+                buttons,
             });
         }
         (inputs, any_animating)
@@ -2168,6 +2415,29 @@ impl ToastStack {
     }
 }
 
+/// Measure and fit each of `labels` as a button label at `size_px`, so a
+/// single button always fits [`MAX_BUTTON_WIDTH_PTS`].
+fn measure_buttons(
+    labels: &[String],
+    renderer: &ToastTextRenderer,
+    size_px: f32,
+    ppp: f32,
+    font_manager: &mut FontManager,
+) -> Vec<ToastButtonInput> {
+    let budget = (2.0_f32.mul_add(-BUTTON_PAD_X_PTS, MAX_BUTTON_WIDTH_PTS) * ppp).max(1.0);
+    labels
+        .iter()
+        .map(|raw| {
+            let (label_text, label) = fit_text(renderer, raw, size_px, budget, font_manager);
+            ToastButtonInput {
+                label_text,
+                size_px,
+                label,
+            }
+        })
+        .collect()
+}
+
 /// Whether logical-point `pos` falls within `rect` (`[min_x, min_y, max_x,
 /// max_y]`, logical points — see [`ToastLayoutOutput::hit_rect_logical`]).
 fn rect_contains(rect: [f32; 4], pos: egui::Pos2) -> bool {
@@ -2194,13 +2464,20 @@ fn topmost_output(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Option<&Toa
 }
 
 /// What a click at `pos` hit: the topmost toast (same precedence as
-/// [`topmost_hit`]) and which part of it. The dismiss square wins over the
-/// body. The distinction only matters for keyed toasts —
-/// [`ToastStack::apply_click`] ignores it for unkeyed ones.
+/// [`topmost_hit`]) and which part of it. The dismiss square wins over a
+/// button, and a button over the body. The distinction only matters for keyed
+/// toasts — [`ToastStack::apply_click`] ignores it for unkeyed ones.
 fn click_target(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Option<(u64, ToastClickPart)> {
     topmost_output(outputs, pos).map(|out| {
         let part = if rect_contains(out.dismiss_rect_logical, pos) {
             ToastClickPart::Dismiss
+        } else if let Some((_, n)) = out
+            .button_rects_logical
+            .iter()
+            .zip(1_u8..)
+            .find(|(rect, _)| rect_contains(**rect, pos))
+        {
+            ToastClickPart::Button(n)
         } else {
             ToastClickPart::Body
         };
@@ -2417,6 +2694,7 @@ mod tests {
             kind: ToastKind::Info,
             title: "t".to_owned(),
             detail: None,
+            buttons: Vec::new(),
             id: 0,
             created,
             life_start: created,
@@ -2437,6 +2715,7 @@ mod tests {
             kind: ToastKind::Info,
             title: "t".to_owned(),
             detail: None,
+            buttons: Vec::new(),
             id: 0,
             created,
             life_start: created,
@@ -2459,6 +2738,7 @@ mod tests {
             kind: ToastKind::Info,
             title: "t".to_owned(),
             detail: None,
+            buttons: Vec::new(),
             id: 0,
             created,
             life_start: created,
@@ -2480,6 +2760,7 @@ mod tests {
             kind: ToastKind::Info,
             title: "t".to_owned(),
             detail: None,
+            buttons: Vec::new(),
             id: 0,
             created,
             life_start: created,
@@ -2886,6 +3167,7 @@ mod tests {
                 ascent: 12.0,
             },
             anim,
+            buttons: Vec::new(),
         }
     }
 
@@ -3679,6 +3961,8 @@ mod tests {
             runs: Vec::new(),
             hit_rect_logical: [0.0, 0.0, 100.0, 100.0],
             dismiss_rect_logical: [0.0; 4],
+            button_quads: Vec::new(),
+            button_rects_logical: Vec::new(),
         };
         let mut newer = older.clone();
         newer.id = 2;
@@ -3727,12 +4011,19 @@ mod tests {
     fn push_keyed_info(s: &mut ToastStack, key: u64, lifetime: ToastLifetime) {
         s.push_keyed(
             ToastKey(key),
-            ToastKind::Info,
-            format!("toast {key}"),
-            None,
+            info_content(&format!("toast {key}")),
             lifetime,
             ToastPlacement::TOP_RIGHT,
         );
+    }
+
+    fn info_content(title: &str) -> ToastContent {
+        ToastContent {
+            kind: ToastKind::Info,
+            title: title.to_owned(),
+            detail: None,
+            buttons: Vec::new(),
+        }
     }
 
     fn closed(key: u64) -> ToastEvent {
@@ -3884,9 +4175,7 @@ mod tests {
         push_keyed_info(&mut s, 1, ToastLifetime::KindDefault);
         s.push_keyed(
             ToastKey(2),
-            ToastKind::Info,
-            "second",
-            None,
+            info_content("second"),
             ToastLifetime::KindDefault,
             ToastPlacement::WINDOW_CENTERED,
         );
@@ -3899,7 +4188,12 @@ mod tests {
             later,
             ToastKey(2),
             ToastKey(20),
-            (ToastKind::Error, "updated".to_owned(), Some("d".to_owned())),
+            ToastContent {
+                kind: ToastKind::Error,
+                title: "updated".to_owned(),
+                detail: Some("d".to_owned()),
+                buttons: Vec::new(),
+            },
             ToastLifetime::Fixed(Duration::from_secs(9)),
         );
         assert_eq!(outcome, ToastReplace::Replaced);
@@ -3937,7 +4231,7 @@ mod tests {
             replaced_at,
             ToastKey(1),
             ToastKey(1),
-            (ToastKind::Info, "u".to_owned(), None),
+            info_content("u"),
             ToastLifetime::Fixed(Duration::from_secs(10)),
         );
         // 11s after creation would have expired the old clock.
@@ -3952,9 +4246,7 @@ mod tests {
         let outcome = s.replace_keyed(
             ToastKey(99),
             ToastKey(5),
-            ToastKind::Info,
-            "new",
-            None,
+            info_content("new"),
             ToastLifetime::UntilDismissed,
         );
         assert_eq!(outcome, ToastReplace::Pushed);
@@ -3973,9 +4265,10 @@ mod tests {
         let outcome = s.replace_keyed(
             ToastKey(1),
             ToastKey(2),
-            ToastKind::Warning,
-            "w",
-            None,
+            ToastContent {
+                kind: ToastKind::Warning,
+                ..info_content("w")
+            },
             ToastLifetime::KindDefault,
         );
         assert_eq!(outcome, ToastReplace::Replaced);
@@ -4144,5 +4437,281 @@ mod tests {
         let dismiss = out[0].dismiss_rect_logical;
         assert!(dismiss[0] >= hit[0] && dismiss[1] >= hit[1]);
         assert!(dismiss[2] <= hit[2] && dismiss[3] <= hit[3]);
+    }
+    // -----------------------------------------------------------------
+    //  Buttons: layout, hit-testing, events, cap
+    // -----------------------------------------------------------------
+
+    /// A measured button label `label_width` wide (12 px text, 14 tall).
+    fn button_input(label: &str, label_width: f32) -> ToastButtonInput {
+        ToastButtonInput {
+            label_text: label.to_owned(),
+            size_px: 12.0,
+            label: ToastTextMetrics {
+                width: label_width,
+                height: 14.0,
+                ascent: 11.0,
+            },
+        }
+    }
+
+    fn buttons_output(
+        buttons: Vec<ToastButtonInput>,
+        has_detail: bool,
+        anim: ToastAnim,
+        ppp: f32,
+    ) -> ToastLayoutOutput {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let mut input = test_input(3, 100.0, has_detail, anim);
+        input.buttons = buttons;
+        layout_toasts(
+            &[input],
+            ToastPosition::TopRightStack,
+            geom,
+            &egui::Visuals::dark(),
+            ppp,
+        )
+        .remove(0)
+    }
+
+    fn rect_inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
+        inner[0] >= outer[0] - 0.01
+            && inner[1] >= outer[1] - 0.01
+            && inner[2] <= outer[2] + 0.01
+            && inner[3] <= outer[3] + 0.01
+    }
+
+    fn rects_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+        a[0] < b[2] - 0.01 && b[0] < a[2] - 0.01 && a[1] < b[3] - 0.01 && b[1] < a[3] - 0.01
+    }
+
+    #[test]
+    fn three_short_buttons_share_one_row_in_order_below_the_title() {
+        let labels = ["One", "Two", "Three"];
+        let buttons = labels.iter().map(|l| button_input(l, 40.0)).collect();
+        let out = buttons_output(buttons, false, SETTLED_ANIM, 1.0);
+
+        assert_eq!(out.button_rects_logical.len(), 3);
+        assert_eq!(out.button_quads.len(), 3);
+        let rects = &out.button_rects_logical;
+        for rect in rects {
+            assert!(rect_inside(*rect, out.hit_rect_logical), "{rect:?}");
+        }
+        for pair in rects.windows(2) {
+            assert!(pair[0][2] <= pair[1][0], "left to right, no overlap");
+            assert!((pair[0][1] - pair[1][1]).abs() < 0.01, "one row");
+        }
+        // The title is the second run; every button starts below its baseline.
+        let title_baseline = out.runs[1].baseline_y;
+        assert!(rects.iter().all(|r| r[1] > title_baseline));
+
+        // Labels are appended after the dismiss glyph, in order, centred.
+        let label_runs = &out.runs[3..];
+        assert_eq!(label_runs.len(), 3);
+        for ((run, label), rect) in label_runs.iter().zip(labels).zip(rects) {
+            assert_eq!(run.text, label);
+            assert!(run.origin_x > rect[0] && run.origin_x < rect[2]);
+            assert!(run.baseline_y > rect[1] && run.baseline_y < rect[3]);
+        }
+        // The quads match the rects and carry no accent bar.
+        for (quad, rect) in out.button_quads.iter().zip(rects) {
+            assert!((quad.x - rect[0]).abs() < 0.01 && (quad.y - rect[1]).abs() < 0.01);
+            assert!((quad.x + quad.width - rect[2]).abs() < 0.01);
+            assert!(quad.accent[3].abs() < f32::EPSILON);
+            assert!((quad.opacity - out.pill.opacity).abs() < f32::EPSILON);
+            assert!(
+                quad.color_top[0] > out.pill.color_top[0],
+                "lighter than the pill"
+            );
+        }
+    }
+
+    #[test]
+    fn a_button_row_grows_the_pill_to_hold_it() {
+        let plain = buttons_output(Vec::new(), false, SETTLED_ANIM, 1.0);
+        let with = buttons_output(vec![button_input("OK", 40.0)], false, SETTLED_ANIM, 1.0);
+        assert!(with.pill.height > plain.pill.height);
+        let last = with.button_rects_logical[0];
+        assert!(
+            last[3] <= with.hit_rect_logical[3] - PILL_PAD_Y_PTS + 0.01,
+            "the bottom padding is kept"
+        );
+    }
+
+    #[test]
+    fn many_long_buttons_wrap_onto_rows_without_overlap_or_overflow() {
+        for ppp in [1.0_f32, 2.0] {
+            let buttons = (0..8).map(|i| button_input(&format!("long {i}"), 120.0 * ppp));
+            let out = buttons_output(buttons.collect(), true, SETTLED_ANIM, ppp);
+
+            let rects = &out.button_rects_logical;
+            assert_eq!(rects.len(), 8);
+            let mut rows: Vec<f32> = rects.iter().map(|r| r[1]).collect();
+            rows.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            assert!(
+                rows.len() >= 2,
+                "ppp={ppp}: expected wrapping, got {rows:?}"
+            );
+            assert!(
+                out.pill.width <= MAX_PILL_WIDTH_PTS.mul_add(ppp, 0.01),
+                "ppp={ppp}: pill width {}",
+                out.pill.width
+            );
+            for (i, rect) in rects.iter().enumerate() {
+                assert!(
+                    rect_inside(*rect, out.hit_rect_logical),
+                    "ppp={ppp}: {rect:?}"
+                );
+                for other in &rects[i + 1..] {
+                    assert!(
+                        !rects_overlap(*rect, *other),
+                        "ppp={ppp}: {rect:?} {other:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn button_rects_stay_inside_the_hit_rect_mid_animation() {
+        let buttons = (0..4)
+            .map(|i| button_input(&format!("b{i}"), 60.0))
+            .collect();
+        let out = buttons_output(buttons, false, ENTRY_ANIM, 1.0);
+        for rect in &out.button_rects_logical {
+            assert!(rect_inside(*rect, out.hit_rect_logical), "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn a_toast_without_buttons_keeps_its_original_geometry() {
+        // Numbers from the pre-button formula at ppp 1: width is
+        // 2*14 + icon 16 + 8 + label 100 + 8 + close 18 = 178; height is
+        // max(40, 2*10 + 20) = 40, or 2*10 + 20 + 4 + 16 = 60 with a detail.
+        for (has_detail, height) in [(false, 40.0_f32), (true, 60.0)] {
+            let out = buttons_output(Vec::new(), has_detail, SETTLED_ANIM, 1.0);
+            assert!((out.pill.width - 178.0).abs() < 0.01);
+            assert!((out.pill.height - height).abs() < 0.01);
+            assert!(out.button_quads.is_empty());
+            assert_eq!(out.button_rects_logical.len(), 0);
+            assert_eq!(out.runs.len(), if has_detail { 4 } else { 3 });
+            assert_eq!(
+                out.runs.last().map(|r| r.text.clone()),
+                Some(ChromeIcon::Close.glyph())
+            );
+        }
+    }
+
+    #[test]
+    fn click_target_prefers_dismiss_over_a_button_and_a_button_over_the_body() {
+        let buttons = ["A", "B", "C"]
+            .iter()
+            .map(|l| button_input(l, 40.0))
+            .collect();
+        let mut outputs = vec![buttons_output(buttons, false, SETTLED_ANIM, 1.0)];
+
+        let [first, second, third] =
+            [0, 1, 2].map(|i| rect_center(outputs[0].button_rects_logical[i]));
+        assert_eq!(
+            click_target(&outputs, first),
+            Some((3, ToastClickPart::Button(1)))
+        );
+        assert_eq!(
+            click_target(&outputs, second),
+            Some((3, ToastClickPart::Button(2)))
+        );
+        assert_eq!(
+            click_target(&outputs, third),
+            Some((3, ToastClickPart::Button(3)))
+        );
+
+        // The pill's top-left padding is body, not a button.
+        let hit = outputs[0].hit_rect_logical;
+        let body = egui::pos2(hit[0] + 2.0, hit[1] + 2.0);
+        assert_eq!(
+            click_target(&outputs, body),
+            Some((3, ToastClickPart::Body))
+        );
+        // The gap between two buttons is body too.
+        let gap = egui::pos2(
+            outputs[0].button_rects_logical[0][2].midpoint(outputs[0].button_rects_logical[1][0]),
+            second.y,
+        );
+        assert_eq!(click_target(&outputs, gap), Some((3, ToastClickPart::Body)));
+
+        // Force a button onto the dismiss square: dismiss wins.
+        outputs[0].button_rects_logical[0] = outputs[0].dismiss_rect_logical;
+        let dismiss = rect_center(outputs[0].dismiss_rect_logical);
+        assert_eq!(
+            click_target(&outputs, dismiss),
+            Some((3, ToastClickPart::Dismiss))
+        );
+    }
+
+    #[test]
+    fn keyed_button_click_is_button_n_then_closed() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 4, ToastLifetime::KindDefault);
+        let id = s.entries[0].id;
+        s.apply_click(id, ToastClickPart::Button(2));
+        assert!(s.is_empty());
+        let button = ToastEvent {
+            key: ToastKey(4),
+            kind: ToastEventKind::Button(2),
+        };
+        assert_eq!(s.take_events(), vec![button, closed(4)]);
+    }
+
+    #[test]
+    fn unkeyed_toast_ignores_a_button_part() {
+        let mut s = ToastStack::default();
+        s.info("i", None);
+        let id = s.entries[0].id;
+        s.apply_click(id, ToastClickPart::Button(1));
+        assert!(s.is_empty());
+        assert_eq!(s.take_events(), NO_EVENTS);
+    }
+
+    #[test]
+    fn more_than_eight_buttons_are_capped_to_eight() {
+        let many: Vec<String> = (0..12).map(|i| format!("b{i}")).collect();
+        let content = ToastContent {
+            buttons: many.clone(),
+            ..info_content("t")
+        };
+        let mut s = ToastStack::default();
+        s.push_keyed(
+            ToastKey(1),
+            content.clone(),
+            ToastLifetime::KindDefault,
+            ToastPlacement::TOP_RIGHT,
+        );
+        assert_eq!(s.entries[0].buttons, many[..8]);
+
+        // The in-place replace caps too, and replaces the old buttons.
+        s.replace_keyed(
+            ToastKey(1),
+            ToastKey(2),
+            content,
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.entries[0].buttons.len(), 8);
+        s.replace_keyed(
+            ToastKey(2),
+            ToastKey(3),
+            info_content("no buttons"),
+            ToastLifetime::KindDefault,
+        );
+        assert_eq!(s.entries[0].buttons.len(), 0);
+    }
+
+    #[test]
+    fn unkeyed_toasts_have_no_buttons() {
+        let mut s = ToastStack::default();
+        s.error("e", None);
+        assert_eq!(s.entries[0].buttons.len(), 0);
     }
 }
