@@ -19,6 +19,12 @@ confidence-threshold = 0.8
 
 [advisories]
 version = 2
+# Every ignore must reference a tracking issue and be removed once the
+# underlying advisory is resolved. Any advisory not listed here fails CI.
+ignore = [
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is unmaintained, no safe upgrade available; tracked in #530" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained, no safe upgrade available; tracked in #530" },
+]
 
 [bans]
 # Duplicate crate versions are tracked here; clippy's lint is allowed in Cargo.toml.

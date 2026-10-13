@@ -66,8 +66,10 @@ In scope:
 
 Out of scope:
 
-- Vulnerabilities in third-party dependencies (report those upstream; we
-  track dependency advisories through Dependabot and will update on a fix).
+- Vulnerabilities in third-party dependencies (report those upstream).
+  Freminal checks its dependencies against the RustSec advisory database
+  with cargo-deny on every pull request and daily on `main`, and Renovate
+  proposes dependency updates.
 - Issues that require an attacker to already have arbitrary code execution
   or local shell access equivalent to the user running Freminal.
 - Denial of service caused by deliberately pathological input that a normal
