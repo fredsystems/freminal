@@ -190,18 +190,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-deny
       - run: cargo deny --locked check
 
-  # Deterministic fuzz gate (issue 553). Lints and unit-tests the standalone
-  # `fuzz/` crate (it is excluded from the root workspace, so none of the jobs
-  # above see it), then replays every committed seed and regression input
-  # through every fuzz target with `-runs=0`. No fuzzing happens here: a replay
-  # is deterministic, so a failure is a real regression and this job is
-  # required. The time-boxed fuzzing lives in `fuzz-smoke` (advisory) and
-  # `fuzz-nightly.yml`.
+  # Deterministic fuzz gate (issue 553). `cargo xtask fuzz-replay` first runs
+  # `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  # `cargo test --lib` in the standalone `fuzz/` crate (it is excluded from the
+  # root workspace, so none of the jobs above see it), then replays every
+  # committed seed and regression input through every fuzz target with
+  # `-runs=0`. No fuzzing happens here: a replay is deterministic, so a failure
+  # is a real regression and this job is required. The time-boxed fuzzing lives
+  # in `fuzz-smoke` (advisory) and `fuzz-nightly.yml`.
   #
   # Everything runs inside `nix develop .#fuzz` (pinned nightly + cargo-fuzz).
   # `xtask` builds in the root `target/`, the fuzz crate in `fuzz/target/`, so
@@ -240,19 +242,15 @@ jobs:
         run: |
           nix develop .#fuzz --command bash -e -c '
             set -euxo pipefail
-            cd fuzz
-            cargo fmt --check
-            cargo clippy --all-targets -- -D warnings
-            cargo test --lib
-            cd ..
             cargo xtask fuzz-replay --sandbox none
           '
 
   # Time-boxed fuzzing of every target. ADVISORY: deliberately not listed in
   # `ci-success.needs`, and `continue-on-error` keeps a red result from showing
   # as a failed check. Short fuzzing runs are nondeterministic (the same
-  # commit can pass or fail), and known open crashes currently exist in some
-  # targets, so a blocking gate would be both flaky and permanently red.
+  # commit can pass or fail), and known open crashes exist in some targets
+  # (tracked in issues #556, #557, #558 and #559, and in a private security
+  # advisory), so a blocking gate would be both flaky and permanently red.
   # Findings surface through the step summary and the uploaded artifacts,
   # never by blocking a PR. The deterministic gate is `fuzz-replay`.
   fuzz-smoke:
