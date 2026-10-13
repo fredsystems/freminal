@@ -6235,8 +6235,8 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Fix:** `osc99/dbus_service/{mod.rs, wake.rs, state.rs, wire.rs, pump.rs}` plus a
   `test_rig.rs`, following 138.C1's rules. Run after 138.C9 and 138.C11.
 - **Status:** done. The files are `mod.rs` (1,740 lines), `state.rs` (1,793), `wire.rs` (500),
-  `pump.rs` (301), `wake.rs` (62) and `test_rig.rs` (669); about half of `mod.rs` and
-  `state.rs` is tests.
+  `pump.rs` (301), `wake.rs` (62) and `test_rig.rs` (669), at commit time (later cleanups
+  changed them); about half of `mod.rs` and `state.rs` is tests.
   - The 114 service test names are identical before and after; `freminal` has 2,165 tests
     both times.
   - The orchestrator confirmed the move with a sorted-line diff: only re-wraps, imports and
@@ -6584,6 +6584,9 @@ review of the cleanup diff follows.
   - `opencode.json`'s `cargo test --all` becomes `cargo xtask test`.
   - The reconnect and scan docs follow 138.C20.
   - Runs after 138.C18–C21.
+- **Status:** done. The C18–C21 behaviour is reflected in COVERAGE and the kitty reference,
+  including two stale claims there (the parser rejecting >1 MiB, and notifications staying on
+  screen after their pane closes). Strip-then-limit is listed as deliberate difference 6.
 
 ### 138 Confirmation review (2026-10-12)
 

@@ -442,7 +442,8 @@ limit = 10000
 #               Linux/BSD, buttons and activation need the daemon's `actions`
 #               capability and the standard sound names need `sound`; if the
 #               session bus cannot be reached, OSC 99 is treated as
-#               unsupported. macOS and Windows cannot report activation or
+#               unsupported until freminal reconnects (it retries every 30
+#               seconds while the bus is unavailable). macOS and Windows cannot report activation or
 #               close and have no buttons or expiry, so none of those are
 #               advertised.
 #   "both"    - a feature is advertised if either leg has it (buttons, icons,

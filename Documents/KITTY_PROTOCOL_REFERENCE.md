@@ -8,10 +8,12 @@ table and the documented differences from kitty. The standard icon names are
 honoured on every leg (Tasks 138.C4 and 138.C5), so the "Remaining conformance
 gap" subsection is removed. The Task 99 current-state notes and the alive-map
 deferral are removed (superseded). The section was re-checked against the code
-after the adversarial-review cleanups (138.C6 to 138.C15): hard text limits,
-reassembly bounds, rejected-chunk handling, per-pane quotas, `p=alive`
-semantics, bus-down routing, the D-Bus service and the macOS/Windows delivery
-worker. No other section changed.
+after the adversarial-review cleanups (138.C6 to 138.C15) and the
+confirmation-review cleanups (138.C18 to 138.C22): hard text limits, name-length
+limits, reassembly bounds, rejected-chunk handling, per-pane quotas, `p=alive`
+semantics, pruning of a gone pane's notifications, bus-down routing, the D-Bus
+service and its reconnect timer, the lazy icon scan, the toast's exit fade, and
+the macOS/Windows delivery worker and icon directory. No other section changed.
 
 Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
 (131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
@@ -218,14 +220,26 @@ freminal's limits and reassembly:
 
 - Receiver leniency: a sequence (metadata plus payload) may be up to 1 MiB, more
   than the senders' 2048 and 4096 byte limits, and a notification up to 1 MiB in
-  total (payloads plus the cost of its list metadata). A sequence over 1 MiB, or
-  with more than 64 metadata items, is rejected by the parser (debug-logged, no
-  payload bytes).
+  total (payloads plus the cost of its list metadata). A sequence with more than
+  64 metadata items is rejected by the parser (debug-logged, no payload bytes).
+  A sequence whose OSC body (`99;` and everything after it) is over 1 MiB never
+  reaches OSC 99: the OSC accumulator drops it silently, with no reply and no
+  tombstone, so a later chunk of the same transfer can still start a truncated
+  notification. Spec senders keep every chunk to 4096 bytes or less, so only a
+  non-conforming sender is affected. The parser's own 1 MiB guard is a backstop
+  that is reachable only by calling it directly.
+- A decoded `f=`, `s=`, `n=` or `t=` value longer than 256 characters (counted as
+  characters, not bytes) is ignored like an undecodable one: that key only, and
+  the rest of the sequence still applies. These scalar values are not charged to
+  the pending budget, so this bounds them.
 - A rejected non-final chunk does not leave a truncated notification behind: the
   handler recovers the chunk's `i=` and `d=` from the raw metadata, best effort,
   and tombstones the transfer, so the rest of it, final chunk included, emits
-  nothing. A rejected id-less chunk abandons the unidentified slot only when
-  something is in it.
+  nothing. A rejected id-less non-final chunk (`d=0`) tombstones the unidentified
+  slot even when nothing was pending, because it starts or continues a transfer
+  whose remaining chunks must be discarded; the transfer's final chunk removes the
+  tombstone. A rejected id-less final chunk changes nothing when the slot is
+  empty, and ends the transfer in the slot when it is not.
 - Per-notification caps, each of which drops the transfer the same way (a
   tombstone for a non-final chunk): the title, body and buttons payloads are held
   to 64 KiB each (finalisation cuts them far shorter anyway), the icon payload to
@@ -251,7 +265,8 @@ freminal's limits and reassembly:
   the pending map.
 - At finalisation: C0 controls except LF, DEL and the C1 controls are removed; a
   title or body longer than 1024 characters is cut to its first 1024 characters
-  with no marker (kitty's `limit_size`); at most 8 buttons are kept, each cut the
+  with no marker (kitty's `limit_size`; the control characters are removed first,
+  see "Documented differences from kitty"); at most 8 buttons are kept, each cut the
   same way at 256 characters; an empty title takes the body. A button label that
   is empty before stripping is not a button; one that strips to nothing becomes
   U+FFFD, so later button numbers do not shift. App name, types, icon names and
@@ -447,9 +462,11 @@ freminal:
   `question` to `dialog-question`, `help` to `system-help`, `file-manager` to
   `system-file-manager`, `system-monitor` to `utilities-system-monitor`,
   `text-editor` to `utilities-text-editor`); any other name is used when the XDG
-  icon scan finds it (the scan runs once on a background thread, so until it
-  finishes unknown names fall through, and the on-disk spelling of the match is
-  what is sent). If no name matched, the transmitted data is used, else the
+  icon scan finds it (the scan runs once on a background thread, started by the
+  first lookup rather than at startup, so a machine whose notifications never
+  carry a non-standard `n=` name or an `f=` that needs a `.desktop` lookup never
+  walks the icon directories; until it finishes unknown names fall through, and
+  the on-disk spelling of the match is what is sent). If no name matched, the transmitted data is used, else the
   first name verbatim. With no names: the data, else the icon of the `.desktop`
   file whose stem or `Name=` equals `f=`, else freminal's own. Transmitted data
   that does not decode counts as no data. Decoding uses the `image` crate (PNG,
@@ -486,7 +503,10 @@ freminal:
   activates, each button reports its 1-based number, the dismiss square closes,
   and the toast shows a hand cursor with hover and pressed fills on buttons.
   More than five toasts evict the oldest that is not waiting to be dismissed
-  first.
+  first. A keyed toast closed by `p=close`, an enforced `w=` deadline or a gone
+  pane fades out over the exit animation (400 ms, ignoring clicks and hover
+  meanwhile) before it is removed; the `Closed` that follows is reported when
+  the fade completes, not when the close was requested.
 - **Occasions** are pane-aware. A pane is _focused_ when its OS window is focused,
   its tab is active and it is the tab's active pane. It is _visible_ when its OS
   window is focused and not minimised, its tab is active and no other pane in the
@@ -604,10 +624,16 @@ Lifecycle summary:
   change refreshes the capabilities. Every call is bounded at 25 seconds. After
   a timed-out call, shows fail and closes complete without calling the daemon for
   30 seconds. If either signal pump ends, every mapped instance is reported
-  closed and the service becomes unavailable; after a failed connect the next
-  show reconnects, at most once per 30 seconds.
-- An instance whose pane is gone is pruned every frame; its notifications stay on
-  screen and produce no replies.
+  closed and the service becomes unavailable. While it is unavailable (after a
+  failed connect or lost signals) the dispatcher tries to connect again every 30
+  seconds on its own timer, with no notification needed to trigger it; a
+  successful reconnect reports the daemon's capabilities (the assumed ones when
+  nobody can be asked yet), so the GUI's daemon state recovers and the capabilities
+  are re-broadcast to every pane.
+- An instance whose pane is gone is pruned every frame, and its open legs are
+  closed (the toast fades out, a desktop notification is closed through
+  `CloseNotification`), so nothing outlives its pane. No reply is sent to the
+  gone pane.
 - An unreachable session bus makes `system` routing unsupported, and `both` and
   `system_when_unfocused` the toast alone (advertised and routed alike); a show
   that cannot be queued ends that notification's system leg.
@@ -636,6 +662,12 @@ does, not copied. These are the places freminal deliberately differs:
 5. **Named sounds use the freedesktop hint.** kitty plays named sounds itself
    through libcanberra; freminal has no sound library and sends `sound-name` (and
    `suppress-sound`) to the daemon.
+6. **Strip, then limit.** kitty limits a title or body to 1024 characters when
+   the text is committed and strips control characters later; freminal strips
+   first and then limits. The limit therefore counts only characters that are
+   kept, so a text with control characters keeps more printable characters than
+   kitty would, and a title that strips to nothing is empty and takes the body.
+   The same order applies to button labels (256 characters).
 
 ### Platform limits
 
@@ -656,9 +688,13 @@ Delivery on those platforms runs on one long-lived thread
 the queue full is dropped with a debug log, so a flood cannot stall the GUI or
 grow memory. Icon files live in a per-process directory,
 `freminal-osc99-icons-<pid>` under the temp directory (mode `0700`, files
-`0600`, a symlinked or permissive existing directory is refused), are deleted
-after 10 minutes unused or past 64 files, and are removed at exit; the OS may
-therefore show no image when it redraws an old notification. macOS cannot report
+`0600`; an existing directory that is a symlink, has group or other permissions
+or is not owned by the current user is refused), are deleted after 10 minutes
+unused or past 64 files, and are removed at exit; the OS may therefore show no
+image when it redraws an old notification. A process that is killed cannot
+remove its directory, so on first use the store also removes sibling
+`freminal-osc99-icons-*` directories that pass the same checks and have not been
+modified for 24 hours. macOS cannot report
 a delivery failure to freminal at all. Windows builds the toast directly with
 `tauri-winrt-notification` (the icon is an `appLogoOverride`, attributed to the
 PowerShell app id) and has no reminder scenario (it needs buttons, which this leg

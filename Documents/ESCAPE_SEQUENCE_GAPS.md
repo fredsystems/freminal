@@ -15,7 +15,11 @@ rest of Task 138 (per-pane lifecycle, pane-aware `o=`, `a=focus`,
 reassembly); they are recorded in `ESCAPE_SEQUENCE_COVERAGE.md`. Not a gap:
 macOS and Windows cannot observe activation or close and have no update in
 place, expiry or buttons, so their `p=?` omits those features (the OS limit,
-recorded in the coverage notes). Nothing in OSC 99 remains open.
+recorded in the coverage notes). Nothing in OSC 99 remains open. The
+confirmation-review cleanups (138.C18–138.C22) opened no gap: the stripped-then-
+limited text order and the silent drop of an OSC body over 1 MiB (before OSC 99
+sees it; spec senders use chunks of 4096 bytes or less) are deliberate
+differences, recorded in `KITTY_PROTOCOL_REFERENCE.md`.
 
 Last updated: 2026-10-11 — Task 132 (colour foundation). Closed and removed from
 "OSC Gaps": "OSC 10/11 set" — an override now reaches rendering (default

@@ -16,7 +16,7 @@
       "description": "Run full CI and fix errors"
     },
     "test": {
-      "template": "Run `cargo test --all`. If any tests fail, diagnose and fix them. Report results.",
+      "template": "Run `cargo xtask test`. If any tests fail, diagnose and fix them. Report results.",
       "description": "Run all tests and fix failures"
     },
     "bench": {
@@ -24,7 +24,7 @@
       "description": "Run all benchmarks"
     },
     "verify": {
-      "template": "Run the full verification suite:\n1. `cargo test --all`\n2. `cargo clippy --all-targets --all-features -- -D warnings`\n3. `cargo-machete`\nReport pass/fail for each step. Fix any issues found.",
+      "template": "Run the full verification suite:\n1. `cargo xtask test`\n2. `cargo clippy --all-targets --all-features -- -D warnings`\n3. `cargo-machete`\nReport pass/fail for each step. Fix any issues found.",
       "description": "Run full verification suite"
     },
     "check-file": {

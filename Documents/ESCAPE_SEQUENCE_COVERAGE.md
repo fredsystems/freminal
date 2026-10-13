@@ -14,9 +14,13 @@ pending state, finalisation limits, the toast, Linux/BSD zbus and macOS/Windows
 untracked legs, per-pane lifecycle (update, close, alive), pane-aware `o=`,
 `a=focus`, terminal-side expiry, `osc99_filters` and a truthful `p=?` per
 routing, platform and daemon. The notes were re-checked against the code after
-the adversarial-review cleanups (138.C6 to 138.C15). The earlier Task 99, 129
-and 130 sub-notes in the row are superseded by it. The platform limits of the
-macOS and Windows legs are recorded there.
+the adversarial-review and confirmation-review cleanups (138.C6–138.C22),
+including the 256-character limit on decoded `f=`, `s=`, `n=` and `t=` values,
+rejected id-less chunks, closing a gone pane's notifications, the D-Bus
+reconnect timer, the lazy icon scan, the toast exit fade and the icon
+directory's ownership check and stale sweep. The earlier Task 99, 129 and 130
+sub-notes in the row are superseded by it. The platform limits of the macOS and
+Windows legs are recorded there.
 
 Last updated: 2026-10-11 — Task 132 (colour foundation). OSC 10/11 move from 🚧
 to ✅: an override now reaches rendering (default foreground; default
@@ -612,9 +616,13 @@ icon names are covered by the leg notes below.
   is an ordinary id. `a=` words are edits applied in arrival order from the
   default `focus` (`-report`, `-focus` remove). An unknown `p=` keeps its
   metadata and `d=` and discards its payload. A plain payload that is not UTF-8
-  decodes lossily. At most 64 metadata items and 1 MiB per sequence; a rejected
-  sequence is reported to the handler (`Notify99Rejected`) so it can abandon its
-  transfer.
+  decodes lossily. A decoded `f`, `s`, `n` or `t` value of more than 256
+  characters is ignored like an undecodable one (that key only). At most 64
+  metadata items per sequence; a rejected sequence is reported to the handler
+  (`Notify99Rejected`) so it can abandon its transfer. A sequence whose OSC body
+  is over 1 MiB never reaches OSC 99: the OSC accumulator drops it silently (spec
+  senders use chunks of 4096 bytes or less); the parser's own 1 MiB guard is only
+  reachable by a direct call.
 - **Reassembly (`TerminalHandler`):** base64 payloads decode as one stream across
   chunks (chunk-then-encode and encode-then-chunk both work). Scalars (`c`, `o`,
   `u`, `w`, `f`, `g`, `s`) take the latest explicit value, `n` and `t`
@@ -624,7 +632,10 @@ icon names are covered by the leg notes below.
   once whatever `d=` says and never enter or touch the pending map; an id-less
   close or alive is a no-op. A transfer that overruns a cap, carries invalid
   base64 or whose chunk the parser rejected is tombstoned (its `i=` and `d=` are
-  recovered from the rejected chunk), so the rest of it emits nothing. The caps:
+  recovered from the rejected chunk), so the rest of it emits nothing; a rejected
+  id-less `d=0` chunk tombstones the unidentified slot even when it was empty,
+  and a rejected id-less final chunk changes nothing when the slot is empty. The
+  caps:
   a notification is 1 MiB in total; title, body and buttons 64 KiB each; icon
   1 MiB; `n=`, `t=` and `a=` entries 64 each; all in-flight notifications
   together 8 MiB (the least recently touched other entries are evicted first).
@@ -634,7 +645,10 @@ icon names are covered by the leg notes below.
 - **Finalisation:** C0 controls except LF, DEL and C1 controls are removed from
   title, body and button labels; app name, types, icon names and sound name lose
   LF as well. A title or body over 1024 characters is cut to its first 1024 with
-  no marker; at most 8 buttons are kept, each cut the same way at 256, and a
+  no marker, after the controls are removed (kitty cuts first and strips later,
+  so freminal keeps more printable characters; see
+  `KITTY_PROTOCOL_REFERENCE.md`); at most 8 buttons are kept, each cut the same
+  way at 256, and a
   label that strips to nothing becomes U+FFFD so the button numbers do not shift.
   An empty title takes the body. A notification with neither is dropped with no
   reply, except that one carrying icon data under a `g=` key only primes the icon
@@ -662,7 +676,10 @@ icon names are covered by the leg notes below.
   the deadline). Buttons are rendered and reported 1-based. A body click
   activates, the dismiss square closes, and expiry, eviction past five toasts
   (the oldest that is not waiting to be dismissed goes first) and `p=close` close
-  it. An update replaces it in place. It shows a hand cursor, with hover and
+  it. An update replaces it in place. A keyed toast closed by `p=close`, an
+  enforced `w=` deadline or a gone pane fades out over the 400 ms exit animation
+  (ignoring clicks and hover) before it is removed, and its close is reported when
+  the fade completes. It shows a hand cursor, with hover and
   pressed fills on its buttons (darker on a light pill). It shows no transmitted
   icon images and plays no sounds. The first `n=` name that is one of the eight
   standard names shows as its bundled-font glyph in the toast's icon slot (Task
@@ -675,7 +692,8 @@ icon names are covered by the leg notes below.
   for a named sound, `image-data` for a transmitted icon and `desktop-entry`
   (`freminal`). The icon is the first `n=` name that is standard (mapped to its
   freedesktop name) or found in the XDG icon scan (run once on a background
-  thread), else the transmitted data (decoded as PNG, JPEG, GIF or WebP, at most
+  thread, started by the first lookup: a notification with a non-standard `n=`
+  name, or an `f=` and no names or icon data, not at service start), else the transmitted data (decoded as PNG, JPEG, GIF or WebP, at most
   4096x4096 and 64 MiB, EXIF orientation applied, downscaled to fit 256x256), else
   the first name verbatim; with no names, the data, else the `.desktop` icon
   matching `f=`, else freminal's (data that does not decode counts as none).
@@ -693,7 +711,12 @@ icon names are covered by the leg notes below.
   mapped instance is reported closed and the leg becomes unavailable. If the
   session bus cannot be reached the leg is unavailable: it displays nothing,
   `system` routing becomes unsupported, and `both` and `system_when_unfocused`
-  fall back to the toast.
+  fall back to the toast. While the service is unavailable (the connect failed at
+  start, or the signals were lost) it reconnects every 30 s on its own timer; no
+  notification is needed to trigger an attempt, only the first failure is
+  reported, and a reconnect reports the daemon's capabilities (the assumed ones if
+  nobody can be asked yet), so the daemon state recovers and the capabilities are
+  re-broadcast to every pane.
 - **macOS / Windows leg:** fire-and-forget through one delivery thread
   (`freminal-osc99-deliver`, a queue of 16; a request that finds it full is
   dropped). macOS uses `notify-rust`; Windows builds the toast directly with
@@ -702,9 +725,13 @@ icon names are covered by the leg notes below.
   `s=silent` is silent, and `system` or any named sound plays the platform
   default. `w=` is passed as the OS timeout (a short or long toast on Windows,
   ignored on macOS) and is not enforced by freminal. Urgency is not acted on
-  there (it is advertised on Windows only). The icon is an image file in a
+  there. The icon is an image file in a
   per-process directory (`freminal-osc99-icons-<pid>`, mode `0700`, files named
-  by content hash, at most 64, deleted after 10 minutes unused and at exit).
+  by content hash, at most 64, deleted after 10 minutes unused and at exit). On
+  Unix an existing directory is used only if it is a real directory with no group
+  or other permissions and owned by the current user; on first use, sibling
+  `freminal-osc99-icons-*` directories that pass the same checks and are more
+  than 24 hours old (left by a killed process) are removed.
   Names come first, as on Linux: the first `n=` name that is one of the eight
   standard names is drawn from the bundled `CaskaydiaCove` glyph to a 256x256 PNG
   (a white glyph on an opaque `#5A5A5A` rounded square tile), so it reads on
@@ -730,7 +757,9 @@ icon names are covered by the leg notes below.
   instance is then forgotten; with `c=1` exactly one `p=close` report follows
   once every tracked leg has closed. A pane holds at most 32 instances (its own
   oldest is forgotten first) and the registry 128 overall; a forgotten instance
-  gets no reply. An instance whose pane is gone produces no replies.
+  gets no reply. An instance whose pane is gone is dropped, its open legs are
+  closed (the toast fades out, the desktop notification is closed) and no reply
+  is sent.
 - **`p=?`:** answered on the PTY thread in stream order, so it precedes the
   answer to a DA1 sent after it. The reply follows kitty's key order
   (`a : o : u : p : c : w : s`) and lists only what the routing can honour. Each
