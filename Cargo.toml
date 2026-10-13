@@ -125,6 +125,45 @@ zbus = { version = "5.19.0", default-features = false, features = ["async-io", "
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]
 
+[workspace.lints.clippy]
+# Lint groups. Priority -1 so the individual lints below can override them.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+all = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+
+# Panic-free production code. Test code is exempted via `clippy.toml`
+# (`allow-unwrap-in-tests` / `allow-expect-in-tests`).
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Task 70.H tripwires: explicit deny for the three cast lints that guard
+# against silent truncation/sign-loss/wrap in numeric conversions. These
+# are already part of `clippy::pedantic` above, but naming them directly
+# documents the contract and survives any future reorganization of the
+# pedantic group. All remaining `as` casts must be covered by a local
+# `#[allow(...)]` with a justification comment per agents.md.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+
+# The duplicate versions are all transitive and not fixable by pinning our
+# direct dependencies: they are dominated by the exact-pinned egui 0.36 /
+# winit 0.30 windowing stack (objc2 0.5/0.6, smithay-client-toolkit 0.19/0.20,
+# calloop, rustix 0.38/1, windows-sys 0.52-0.61), plus thiserror 1 via conv2
+# and getrandom 0.3 via ahash. Duplicate tracking lives in `deny.toml`
+# (`[bans] multiple-versions = "warn"`); `cargo deny check` lists them.
+# Revisit when the windowing stack moves.
+multiple_crate_versions = "allow"
+
+# Metadata is inherited from the workspace.
+cargo_common_metadata = "allow"
+
 # Profiling profile: optimized like release but with full debuginfo and
 # without stripping, so `perf` / `cargo flamegraph` produce symbol-rich,
 # inline-aware stacks. Build with `cargo build --profile profiling` (or

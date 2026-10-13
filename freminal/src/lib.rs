@@ -17,22 +17,6 @@
 //! - [`gui::view_state`] — `ViewState` (scroll offset, mouse, focus) owned
 //!   entirely by the GUI and never shared with the PTY thread
 
-#![deny(
-    clippy::pedantic,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all,
-    clippy::suspicious,
-    clippy::complexity,
-    clippy::perf,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
-#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
-#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
-
 #[macro_use]
 extern crate tracing;
 

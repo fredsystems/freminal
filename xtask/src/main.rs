@@ -12,14 +12,6 @@
 //! This crate is **not** production code. `anyhow`/`color-eyre` are
 //! acceptable here.
 
-#![deny(
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all
-)]
-
 use std::{fmt::Debug, fs, io, process::Output, vec};
 
 use cargo_metadata::MetadataCommand;

@@ -21,7 +21,8 @@ confidence-threshold = 0.8
 version = 2
 
 [bans]
-multiple-versions = "allow"
+# Duplicate crate versions are tracked here; clippy's lint is allowed in Cargo.toml.
+multiple-versions = "warn"
 
 [sources]
 unknown-registry = "deny"

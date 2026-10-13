@@ -9,25 +9,6 @@
 //! GL context management, and egui rendering. The `freminal` binary crate
 //! implements the [`App`] trait to receive per-window update callbacks.
 
-#![deny(
-    clippy::pedantic,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all,
-    clippy::suspicious,
-    clippy::complexity,
-    clippy::perf,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
-#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
-#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace]
-
 pub mod error;
 
 mod egui_integration;
