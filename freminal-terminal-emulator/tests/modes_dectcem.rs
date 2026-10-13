@@ -13,7 +13,7 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 fn dectcem_enable_disable() {
     let enable = push_seq("\x1b[?25h");
     let disable = push_seq("\x1b[?25l");
-    println!("DECTCEM enable {:?} disable {:?}", enable, disable);
+    println!("DECTCEM enable {enable:?} disable {disable:?}");
     assert!(
         enable
             .iter()

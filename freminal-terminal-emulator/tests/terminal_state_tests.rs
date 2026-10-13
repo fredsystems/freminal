@@ -180,7 +180,7 @@ fn test_write_closed_channel() {
 
 // ─── alternate-screen scroll routing ─────────────────────────────────────────
 
-/// In alternate-screen mode, writing ArrowUp must send an ArrowUp escape
+/// In alternate-screen mode, writing `ArrowUp` must send an `ArrowUp` escape
 /// sequence to the PTY (CSI A when DECCKM is off, the default).
 #[test]
 fn test_alternate_screen_write_arrow_up() {
@@ -210,7 +210,7 @@ fn test_alternate_screen_write_arrow_up() {
     );
 }
 
-/// In alternate-screen mode, writing ArrowDown must send an ArrowDown escape
+/// In alternate-screen mode, writing `ArrowDown` must send an `ArrowDown` escape
 /// sequence to the PTY (CSI B when DECCKM is off, the default).
 #[test]
 fn test_alternate_screen_write_arrow_down() {

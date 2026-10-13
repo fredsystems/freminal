@@ -11,6 +11,9 @@
 //! the mode-sync loop in `internal.rs`), complementing the handler-owned
 //! mode query tests in `freminal-buffer/tests/terminal_handler_integration.rs`.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use crossbeam_channel::Receiver;
 use freminal_common::config::ThemeMode;
 use freminal_common::pty_write::PtyWrite;
@@ -598,7 +601,11 @@ fn decrpm_lnm_after_reset_is_reset() {
 /// Text of the first visible row, trailing spaces trimmed.
 fn first_row_text(state: &TerminalState) -> String {
     let rows = state.handler.buffer().visible_rows(0);
-    let text: String = rows[0].characters().iter().map(|c| c.into_utf8()).collect();
+    let text: String = rows[0]
+        .characters()
+        .iter()
+        .map(freminal_buffer::cell::Cell::into_utf8)
+        .collect();
     text.trim_end().to_string()
 }
 

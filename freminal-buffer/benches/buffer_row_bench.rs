@@ -3,11 +3,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+// Benchmark harness, not production code: unwrap/expect on setup is acceptable.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::measurement::WallTime;
 use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 
+use conv2::{ApproxFrom, RoundToZero};
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::compact_row::CompactRow;
 use freminal_buffer::compressed_block::CompressedBlock;
@@ -40,14 +44,14 @@ fn configure() -> Criterion {
 // Helpers
 // ---------------------------------------------------------------
 
-/// Generate `n` ASCII TChar values cycling through printable characters.
+/// Generate `n` ASCII `TChar` values cycling through printable characters.
 fn gen_ascii_tchars(n: usize) -> Vec<TChar> {
     (0..n)
-        .map(|i| TChar::Ascii(b'a' + (i % 26) as u8))
+        .map(|i| TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap()))
         .collect()
 }
 
-/// Generate `n` TChar values with a newline inserted every `line_len` chars,
+/// Generate `n` `TChar` values with a newline inserted every `line_len` chars,
 /// simulating a file with many short lines.
 #[allow(dead_code)]
 fn gen_line_tchars(n: usize, line_len: usize) -> Vec<TChar> {
@@ -56,7 +60,7 @@ fn gen_line_tchars(n: usize, line_len: usize) -> Vec<TChar> {
             if i % line_len == line_len - 1 {
                 TChar::NewLine
             } else {
-                TChar::Ascii(b'a' + (i % 26) as u8)
+                TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap())
             }
         })
         .collect()
@@ -468,7 +472,7 @@ fn bench_lf_eviction_scaling(c: &mut Criterion) {
 
 /// Line feeds per long-run iteration: two full live-buffer lengths, plus slack
 /// so the final partial burst cannot leave the second compaction out.
-fn long_run_line_feeds(limit: usize) -> usize {
+const fn long_run_line_feeds(limit: usize) -> usize {
     2 * (limit + EVICTION_HEIGHT) + 2 * EVICTION_LF_BURST
 }
 
@@ -491,7 +495,8 @@ fn report_burst_latency(limit: usize, passes: usize) {
     let count = u32::try_from(samples.len()).unwrap_or(u32::MAX).max(1);
     let mean = total / count;
     let at = |q: f64| {
-        let idx = ((samples.len() as f64) * q) as usize;
+        let len_f = f64::approx_from(samples.len()).unwrap_or(0.0);
+        let idx = <usize as ApproxFrom<f64, RoundToZero>>::approx_from(len_f * q).unwrap_or(0);
         samples[idx.min(samples.len() - 1)]
     };
     // A burst that contains a compaction is far above the median; count the
@@ -633,8 +638,9 @@ fn bench_insert_with_color_changes(c: &mut Criterion) {
                             url: None,
                             blink: freminal_common::buffer_states::fonts::BlinkState::None,
                         };
-                        let chars: Vec<TChar> =
-                            (0..SEGMENT).map(|j| TChar::Ascii(b'a' + j as u8)).collect();
+                        let chars: Vec<TChar> = (0..SEGMENT)
+                            .map(|j| TChar::Ascii(b'a' + u8::try_from(j).unwrap()))
+                            .collect();
                         (tag, chars)
                     })
                     .collect::<Vec<_>>()
@@ -673,7 +679,7 @@ fn bench_cursor_ops(c: &mut Criterion) {
                 for row in 0..ROWS {
                     buf.set_cursor_pos(Some(0), Some(row));
                     let line: Vec<TChar> = (0..COLS)
-                        .map(|i| TChar::Ascii(b'a' + (i % 26) as u8))
+                        .map(|i| TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap()))
                         .collect();
                     buf.insert_text(&line);
                 }
@@ -709,7 +715,7 @@ fn bench_lf_heavy(c: &mut Criterion) {
             |mut buf| {
                 for i in 0..LF_COUNT {
                     // Write one character per line so rows are not empty.
-                    buf.insert_text(&[TChar::Ascii(b'a' + (i % 26) as u8)]);
+                    buf.insert_text(&[TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap())]);
                     buf.handle_lf();
                 }
             },
@@ -921,7 +927,7 @@ fn bench_scrollback_render(c: &mut Criterion) {
     let mut data = Vec::with_capacity(total_lines * 81);
     for i in 0..total_lines {
         for j in 0..80 {
-            data.push(TChar::Ascii(b'a' + ((i + j) % 26) as u8));
+            data.push(TChar::Ascii(b'a' + u8::try_from((i + j) % 26).unwrap()));
         }
         data.push(TChar::NewLine);
     }
@@ -1077,7 +1083,7 @@ fn bench_lf_heavy_bce(c: &mut Criterion) {
             },
             |mut buf| {
                 for i in 0..LF_COUNT {
-                    buf.insert_text(&[TChar::Ascii(b'a' + (i % 26) as u8)]);
+                    buf.insert_text(&[TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap())]);
                     buf.handle_lf();
                 }
             },

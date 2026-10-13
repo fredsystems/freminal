@@ -7,7 +7,7 @@
 //! (`?47`, `?1047`, `?1049`) and the per-screen DECSC character-set slot.
 //!
 //! Everything is driven through raw bytes, exactly as the PTY thread does.
-//! The reference behaviour is the consensus of xterm, Ghostty, WezTerm and
+//! The reference behaviour is the consensus of xterm, Ghostty, `WezTerm` and
 //! kitty; see `Documents/PLAN_VERSION_130.md` ("131 Decisions").
 
 use freminal_buffer::cell::Cell;

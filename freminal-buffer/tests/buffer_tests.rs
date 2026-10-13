@@ -5,13 +5,16 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::cursor::StateColors;
 use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::colors::TerminalColor;
 
-fn ascii(c: char) -> TChar {
+const fn ascii(c: char) -> TChar {
     TChar::Ascii(c as u8)
 }
 

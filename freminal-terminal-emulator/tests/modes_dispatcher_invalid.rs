@@ -14,7 +14,7 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 #[test]
 fn unknown_private_mode_sequence_is_invalid() {
     let outs = push_seq("\x1b[?9999l");
-    println!("unknown private disable -> {:?}", outs);
+    println!("unknown private disable -> {outs:?}");
     assert!(
         outs.iter()
             .any(|o| matches!(o, TerminalOutput::Invalid | TerminalOutput::Mode { .. })),

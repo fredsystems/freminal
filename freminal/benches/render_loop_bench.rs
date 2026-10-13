@@ -27,7 +27,13 @@
 //! the render benchmarks will be updated to the snapshot-based form described
 //! in Section 8.5 of the performance plan.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+// Benchmark harness, not production code: unwrap/expect on setup is acceptable.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use criterion::measurement::WallTime;
+use criterion::{
+    BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
 use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::colors::cursor_f;
 use freminal::gui::font_manager::FontManager;
@@ -82,7 +88,7 @@ fn configure() -> Criterion {
 fn plain_text_payload(num_lines: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(num_lines * 52);
     for i in 0..num_lines {
-        let line = format!("Benchmark output line {:>6}: lorem ipsum dolor sit\n", i);
+        let line = format!("Benchmark output line {i:>6}: lorem ipsum dolor sit\n");
         out.extend_from_slice(line.as_bytes());
     }
     out
@@ -111,7 +117,7 @@ fn ansi_heavy_payload(num_lines: usize, width: usize) -> Vec<u8> {
             let (r, g, b) = colors[seg % colors.len()];
             out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
             for _ in 0..8.min(width - col) {
-                out.push(b'a' + (col % 26) as u8);
+                out.push(b'a' + u8::try_from(col % 26).unwrap());
                 col += 1;
             }
             seg += 1;
@@ -138,7 +144,7 @@ fn indexed_screen_payload(num_lines: usize, width: usize) -> Vec<u8> {
             let m = (seg * 7) % 256;
             out.extend_from_slice(format!("\x1b[38;5;{n}m\x1b[48;5;{m}m").as_bytes());
             for _ in 0..8.min(width - col) {
-                out.push(b'a' + (col % 26) as u8);
+                out.push(b'a' + u8::try_from(col % 26).unwrap());
                 col += 1;
             }
             seg += 1;
@@ -157,7 +163,7 @@ fn bursty_payload(rounds: usize) -> Vec<Vec<u8>> {
         for i in 0u8..10 {
             let len = ((r + i as usize) % 60) + 4;
             let small: Vec<u8> = (0..len)
-                .map(|j| b'a' + ((r + i as usize + j) % 26) as u8)
+                .map(|j| b'a' + u8::try_from((r + usize::from(i) + j) % 26).unwrap())
                 .collect();
             chunks.push(small);
         }
@@ -382,6 +388,85 @@ fn ligature_heavy_visible_chars(
     (chars, tags)
 }
 
+/// Partial-dirty path (issue #405 Part B): prime the cache, then change a
+/// single visible row's content each sample and re-shape. `ShapingCache` is
+/// per-row content-hashed, so only the one changed row re-shapes (rustybuzz)
+/// while every other row is an `Arc::clone` hit. This isolates the shaping
+/// stage's genuinely-incremental behaviour — in contrast to the downstream
+/// vertex builders (`build_bg_instances`/`build_fg_instances`), which are
+/// NOT per-row incremental and rebuild all instances regardless (see
+/// `instanced_bg`/`instanced_fg`). Comparing this against
+/// `shape_visible_cache_hit` (0 changed) and the cold shape (all changed)
+/// quantifies the per-row shaping win that the deferred vertex-incremental
+/// work would need to preserve end-to-end.
+fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
+    let width = 200usize;
+    let height = 50usize;
+    let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
+    group.bench_function("shape_visible_partial_dirty_200x50", |b| {
+        // `iter_batched_ref` (not `iter_batched`): the routine takes the
+        // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
+        // (freeing the cached parsed `Face` and compiled `ShapePlan`,
+        // Task #430) happens OUTSIDE the timed region. In production the
+        // `FontManager` lives for the whole session and is never dropped
+        // per frame, so timing its `Drop` here would measure a cost that
+        // never occurs in the real render loop. See `shape_visible_persistent_fm_cache`
+        // for the faithful cross-frame model where the manager persists.
+        b.iter_batched_ref(
+            || {
+                let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+                let mut cache = ShapingCache::new();
+                #[allow(clippy::cast_precision_loss)]
+                let cell_w = fm.cell_width() as f32;
+                // Prime the cache with the base content.
+                let _ = cache.shape_visible(
+                    &base_chars,
+                    &base_tags,
+                    width,
+                    &mut fm,
+                    cell_w,
+                    false,
+                    &[],
+                );
+                // Produce a variant with exactly one row changed. Rows are
+                // NewLine-delimited; flip one character on the ~middle row.
+                let mut edited = base_chars.clone();
+                let newline_positions: Vec<usize> = edited
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| {
+                        matches!(c, freminal_common::buffer_states::tchar::TChar::NewLine)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                // First char of the middle row (after the preceding newline).
+                let mid = newline_positions.len() / 2;
+                let target = if mid == 0 {
+                    0
+                } else {
+                    newline_positions[mid - 1] + 1
+                };
+                if let Some(slot) = edited.get_mut(target) {
+                    *slot = freminal_common::buffer_states::tchar::TChar::Ascii(b'Q');
+                }
+                (fm, cache, cell_w, edited)
+            },
+            |(fm, cache, cell_w, edited)| {
+                std::hint::black_box(cache.shape_visible(
+                    edited,
+                    &base_tags,
+                    width,
+                    fm,
+                    *cell_w,
+                    false,
+                    &[],
+                ));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_shaping_ligatures(c: &mut Criterion) {
     let width = 80;
     let height = 50;
@@ -444,84 +529,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         });
     });
 
-    // Partial-dirty path (issue #405 Part B): prime the cache, then change a
-    // single visible row's content each sample and re-shape. `ShapingCache` is
-    // per-row content-hashed, so only the one changed row re-shapes (rustybuzz)
-    // while every other row is an `Arc::clone` hit. This isolates the shaping
-    // stage's genuinely-incremental behaviour — in contrast to the downstream
-    // vertex builders (`build_bg_instances`/`build_fg_instances`), which are
-    // NOT per-row incremental and rebuild all instances regardless (see
-    // `instanced_bg`/`instanced_fg`). Comparing this against
-    // `shape_visible_cache_hit` (0 changed) and the cold shape (all changed)
-    // quantifies the per-row shaping win that the deferred vertex-incremental
-    // work would need to preserve end-to-end.
-    {
-        let width = 200usize;
-        let height = 50usize;
-        let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
-        group.bench_function("shape_visible_partial_dirty_200x50", |b| {
-            // `iter_batched_ref` (not `iter_batched`): the routine takes the
-            // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
-            // (freeing the cached parsed `Face` and compiled `ShapePlan`,
-            // Task #430) happens OUTSIDE the timed region. In production the
-            // `FontManager` lives for the whole session and is never dropped
-            // per frame, so timing its `Drop` here would measure a cost that
-            // never occurs in the real render loop. See `shape_visible_persistent_fm_cache`
-            // for the faithful cross-frame model where the manager persists.
-            b.iter_batched_ref(
-                || {
-                    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
-                    let mut cache = ShapingCache::new();
-                    #[allow(clippy::cast_precision_loss)]
-                    let cell_w = fm.cell_width() as f32;
-                    // Prime the cache with the base content.
-                    let _ = cache.shape_visible(
-                        &base_chars,
-                        &base_tags,
-                        width,
-                        &mut fm,
-                        cell_w,
-                        false,
-                        &[],
-                    );
-                    // Produce a variant with exactly one row changed. Rows are
-                    // NewLine-delimited; flip one character on the ~middle row.
-                    let mut edited = base_chars.clone();
-                    let newline_positions: Vec<usize> = edited
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, c)| {
-                            matches!(c, freminal_common::buffer_states::tchar::TChar::NewLine)
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
-                    // First char of the middle row (after the preceding newline).
-                    let mid = newline_positions.len() / 2;
-                    let target = if mid == 0 {
-                        0
-                    } else {
-                        newline_positions[mid - 1] + 1
-                    };
-                    if let Some(slot) = edited.get_mut(target) {
-                        *slot = freminal_common::buffer_states::tchar::TChar::Ascii(b'Q');
-                    }
-                    (fm, cache, cell_w, edited)
-                },
-                |(fm, cache, cell_w, edited)| {
-                    std::hint::black_box(cache.shape_visible(
-                        edited,
-                        &base_tags,
-                        width,
-                        fm,
-                        *cell_w,
-                        false,
-                        &[],
-                    ));
-                },
-                BatchSize::SmallInput,
-            );
-        });
-    }
+    bench_shape_partial_dirty(&mut group);
 
     group.finish();
 }
@@ -782,9 +790,10 @@ fn build_shaped_lines_for_background_corpus(
             current_background
         } else {
             let background = match corpus {
-                BackgroundCorpus::AllDefault => TerminalColor::DefaultBackground,
                 BackgroundCorpus::Sparse if cell_index % 10 == 0 => TerminalColor::Blue,
-                BackgroundCorpus::Sparse => TerminalColor::DefaultBackground,
+                BackgroundCorpus::AllDefault | BackgroundCorpus::Sparse => {
+                    TerminalColor::DefaultBackground
+                }
                 BackgroundCorpus::Dense => TerminalColor::Blue,
             };
             cell_index += 1;

@@ -24,17 +24,15 @@ fn decstbm_valid_and_default() {
         "\x1b[;r",    // both params omitted — full screen
     ];
     for s in cases {
-        println!("DECSTBM valid case: {:?}", s);
+        println!("DECSTBM valid case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
         assert!(
             outs.iter()
                 .any(|o| matches!(o, TerminalOutput::SetTopAndBottomMargins { .. })),
-            "Expected SetTopAndBottomMargins for valid DECSTBM {:?}, got: {:?}",
-            s,
-            outs,
+            "Expected SetTopAndBottomMargins for valid DECSTBM {s:?}, got: {outs:?}",
         );
     }
 }
@@ -65,12 +63,11 @@ fn decstbm_swapped_and_malformed() {
     ];
     for s in bad {
         let outs = push_seq(s);
-        println!("DECSTBM malformed {:?} -> {:?}", s, outs);
+        println!("DECSTBM malformed {s:?} -> {outs:?}");
         // parser must remain stable
         assert!(
             std::panic::catch_unwind(|| push_seq(s)).is_ok(),
-            "Parser panicked for malformed {:?}",
-            s
+            "Parser panicked for malformed {s:?}"
         );
     }
 }
@@ -79,7 +76,7 @@ fn decstbm_swapped_and_malformed() {
 fn decstbm_recovery_after_invalid() {
     let seq = "\x1b[20;10r\x1b[1;24r"; // first invalid, second valid
     let outs = push_seq(seq);
-    println!("DECSTBM recovery outs -> {:?}", outs);
+    println!("DECSTBM recovery outs -> {outs:?}");
 
     // Parser must not panic, and must emit Invalid + SetTopAndBottomMargins
     assert!(
@@ -90,13 +87,11 @@ fn decstbm_recovery_after_invalid() {
     // Expect an Invalid followed by a valid margin command
     assert!(
         outs.iter().any(|o| matches!(o, TerminalOutput::Invalid)),
-        "Expected Invalid output for malformed first sequence, got: {:?}",
-        outs
+        "Expected Invalid output for malformed first sequence, got: {outs:?}"
     );
     assert!(
         outs.iter()
             .any(|o| matches!(o, TerminalOutput::SetTopAndBottomMargins { .. })),
-        "Expected SetTopAndBottomMargins output for valid recovery, got: {:?}",
-        outs
+        "Expected SetTopAndBottomMargins output for valid recovery, got: {outs:?}"
     );
 }

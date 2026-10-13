@@ -245,7 +245,7 @@ fn il_within_scroll_region_does_not_affect_rows_outside() {
     let mut h = VtTestHelper::new_default();
     // Write content to rows 0-7.
     for i in 0..8_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     // Set scroll region: rows 3-6 (1-indexed) → rows 2-5 (0-indexed).
     h.feed(b"\x1b[3;6r"); // DECSTBM — resets cursor to (0,0).
@@ -357,7 +357,7 @@ fn dl_at_bottom_of_screen_produces_blank_bottom_row() {
 fn dl_within_scroll_region_does_not_affect_rows_outside() {
     let mut h = VtTestHelper::new_default();
     for i in 0..8_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     // Set scroll region: rows 3-6 (1-indexed) → rows 2-5 (0-indexed).
     h.feed(b"\x1b[3;6r"); // DECSTBM — resets cursor to (0,0).
@@ -549,7 +549,7 @@ fn dl_param_zero_deletes_one_line() {
 /// (leading two spaces from the final ICH(2) on 'A', then one space between each letter).
 ///
 /// Exact vttest loop (translated):
-///   for i in ('A'..='Z').rev():
+///   `for i in ('A'..='Z').rev()`:
 ///     tprintf("%c%c", i, BS)  →  write letter, then BS (0x08)
 ///     ich(2)                  →  CSI 2 @
 #[test]
@@ -575,7 +575,7 @@ fn tst_insdel_ich_alphabet_test() {
 
 /// vttest `tst_insdel` — DCH stagger test (lines 1007-1019 of main.c), single-width pass.
 ///
-/// For each row (1-indexed, 1..=max_lines):
+/// For each row (1-indexed, `1..=max_lines`):
 ///   cup(row, 1)
 ///   fill sw columns with the letter 'A'-1+row
 ///   cup(row, sw/1 - row)          →  move to column (80 - row)
@@ -596,17 +596,17 @@ fn tst_insdel_dch_stagger_single_width() {
     for row in 1..=max_lines {
         let letter = b'A' - 1 + u8::try_from(row).unwrap();
         // cup(row, 1)
-        let cup = format!("\x1b[{};1H", row);
+        let cup = format!("\x1b[{row};1H");
         h.feed(cup.as_bytes());
         // fill sw columns with the letter
         let row_content: Vec<u8> = vec![letter; sw];
         h.feed(&row_content);
         // cup(row, sw - row)  → 1-indexed col = sw - row
         let col = sw - row; // vttest: sw/dblchr - row where dblchr=1
-        let cup2 = format!("\x1b[{};{}H", row, col);
+        let cup2 = format!("\x1b[{row};{col}H");
         h.feed(cup2.as_bytes());
         // dch(row)
-        let dch = format!("\x1b[{}P", row);
+        let dch = format!("\x1b[{row}P");
         h.feed(dch.as_bytes());
     }
 
@@ -633,12 +633,12 @@ fn tst_insdel_dch_stagger_single_width() {
 ///
 /// After filling the screen with rows of letters (row N = letter 'A'+N-1 repeated),
 /// vttest does:
-///   ri()                          →  ESC M  (reverse index — scroll row 1 up)
+///   `ri()`                          →  ESC M  (reverse index — scroll row 1 up)
 ///   el(2)                         →  CSI 2 K  (erase entire row 1)
-///   decstbm(2, max_lines - 1)     →  CSI 2;23 r  (scroll region rows 2-23)
+///   `decstbm(2, max_lines - 1)`    →  CSI 2;23 r  (scroll region rows 2-23)
 ///   decom(TRUE)                   →  CSI ?6 h  (origin mode ON)
 ///   cup(1, 1)                     →  CSI 1;1 H  (in DECOM: row 1 relative to top of region)
-///   for row in 1..=max_lines:
+///   `for row in 1..=max_lines`:
 ///     il(row)                     →  CSI row L
 ///     dl(row)                     →  CSI row M
 ///   decom(FALSE)                  →  CSI ?6 l
@@ -660,7 +660,7 @@ fn tst_insdel_accordion_il_dl_loop() {
     h.feed(b"\x1b[1;1H");
     for row in 1..=max_lines {
         let letter = b'A' - 1 + u8::try_from(row).unwrap();
-        let cup = format!("\x1b[{};1H", row);
+        let cup = format!("\x1b[{row};1H");
         h.feed(cup.as_bytes());
         let row_content: Vec<u8> = vec![letter; sw];
         h.feed(&row_content);
@@ -679,9 +679,9 @@ fn tst_insdel_accordion_il_dl_loop() {
 
     // Accordion loop: il(row) + dl(row) for row in 1..=24
     for row in 1..=max_lines {
-        let il = format!("\x1b[{}L", row);
+        let il = format!("\x1b[{row}L");
         h.feed(il.as_bytes());
-        let dl = format!("\x1b[{}M", row);
+        let dl = format!("\x1b[{row}M");
         h.feed(dl.as_bytes());
     }
 
@@ -760,7 +760,7 @@ fn tst_insdel_irm_insert_mode() {
 /// 5. write 78 '*' in insert mode — pushes 'B' to col 79
 /// 6. rm("4"): IRM off  → row 0 = "A" + "*"×78 + "B"
 /// 7. cup(4,1): cursor to row 3
-/// 8. ri() = ESC M: cursor up to row 2
+/// 8. `ri()` = ESC M: cursor up to row 2
 /// 9. el(2) = CSI 2 K: erase row 2
 /// 10. cup(1,2): cursor to row 0, col 1
 /// 11. dch(78) = CSI 78 P: delete 78 chars at col 1
@@ -906,7 +906,7 @@ fn dch_vttest_ab_debug_trace() {
     eprintln!("After DCH(78): row0={:?}", s3[0]);
 }
 
-/// Full reproduction starting from the beginning of tst_insdel(), including the
+/// Full reproduction starting from the beginning of `tst_insdel()`, including the
 /// accordion test that precedes the DCH test.
 #[test]
 fn dch_vttest_ab_test_full_from_tst_insdel() {
@@ -918,7 +918,7 @@ fn dch_vttest_ab_test_full_from_tst_insdel() {
     h.feed(b"\x1b[2J"); // ed(2)
     h.feed(b"\x1b[1;1H"); // cup(1,1)
     for row in 1..=max_lines {
-        let cup = format!("\x1b[{};1H", row);
+        let cup = format!("\x1b[{row};1H");
         h.feed(cup.as_bytes());
         let letter = b'A' - 1 + u8::try_from(row).unwrap();
         h.feed(&vec![letter; sw]);
@@ -939,8 +939,8 @@ fn dch_vttest_ab_test_full_from_tst_insdel() {
     h.feed(b"\x1b[1;1H");
     // il(row) and dl(row) for row=1..=max_lines
     for row in 1..=max_lines {
-        let il = format!("\x1b[{}L", row);
-        let dl = format!("\x1b[{}M", row);
+        let il = format!("\x1b[{row}L");
+        let dl = format!("\x1b[{row}M");
         h.feed(il.as_bytes());
         h.feed(dl.as_bytes());
     }

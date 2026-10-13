@@ -41,7 +41,7 @@ fn osc8_hyperlink_valid_and_malformed() {
     assert!(p.trace_str().contains("https://example.com"));
     // malformed (missing end)
     let p = feed("\x1b]8;;https://broken.example");
-    assert!(!p.trace_str().is_empty());
+    assert_ne!(p.trace_str(), "");
 }
 
 #[test]
@@ -53,6 +53,6 @@ fn osc_palette_and_iterm_extensions() {
         "\x1b]1337;File=name=a.png;size=1;inline=1:\x07",
     ] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }

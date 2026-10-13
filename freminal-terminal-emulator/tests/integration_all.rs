@@ -55,8 +55,7 @@ fn integration_parser_smoke() {
     // or stayed safe and returned an empty Vec (both are valid tolerant behaviors).
     assert!(
         saw_control || outs.is_empty(),
-        "parser completed without panic but produced unexpected outputs: {:?}",
-        outs
+        "parser completed without panic but produced unexpected outputs: {outs:?}"
     );
 }
 
@@ -82,7 +81,7 @@ fn integration_tracer_consistency() {
     );
 
     // Also verify tracer retains the last completed sequence (no premature clear).
-    let final_trace = a.seq_tracer().as_str().to_string();
+    let final_trace = a.seq_tracer().as_str();
     assert!(
         final_trace.contains("38;2;255;0;0m"),
         "tracer should retain last complete sequence, got: {final_trace:?}"

@@ -13,7 +13,7 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 fn lnm_enable_disable() {
     let enable = push_seq("\x1b[20h");
     let disable = push_seq("\x1b[20l");
-    println!("LNM enable {:?} disable {:?}", enable, disable);
+    println!("LNM enable {enable:?} disable {disable:?}");
     assert!(
         enable
             .iter()

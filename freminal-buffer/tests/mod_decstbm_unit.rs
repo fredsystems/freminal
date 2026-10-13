@@ -38,7 +38,7 @@ fn visible_lengths(buf: &Buffer) -> Vec<usize> {
 
 /// Basic sanity: DECSTBM + LF in PRIMARY buffer scrolls region up.
 ///
-/// Key insight: set_scroll_region homes cursor to (0,0).
+/// Key insight: `set_scroll_region` homes cursor to (0,0).
 /// To test scrolling UP, we must move cursor to the BOTTOM of the region first.
 #[test]
 fn decstbm_lf_scrolls_region_up_primary() {
@@ -76,7 +76,7 @@ fn decstbm_lf_scrolls_region_up_primary() {
 
 /// DECSTBM + RI in PRIMARY buffer scrolls region down.
 ///
-/// set_scroll_region homes cursor to (0,0).  We must explicitly move the
+/// `set_scroll_region` homes cursor to (0,0).  We must explicitly move the
 /// cursor to the top of the region to test RI scroll behaviour.
 #[test]
 fn decstbm_ri_scrolls_region_down_primary() {

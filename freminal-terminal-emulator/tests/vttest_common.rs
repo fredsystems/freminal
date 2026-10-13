@@ -31,6 +31,8 @@
 //! ...
 //! ```
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 // This module is included via `mod vttest_common;` from multiple test binaries.
 // Each binary uses a different subset of helpers, so unused items are expected.
 #![allow(dead_code)]
@@ -283,6 +285,10 @@ impl VtTestHelper {
     /// This calls `to_payload()` using the terminal's current mode flags
     /// (DECCKM, LNM, etc.) and sends the resulting bytes to the PTY channel.
     /// The bytes can then be read back with [`drain_pty_writes`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if sending the encoded input to the PTY channel fails.
     pub fn write_terminal_input(&self, input: &TerminalInput) {
         self.state
             .write(input)

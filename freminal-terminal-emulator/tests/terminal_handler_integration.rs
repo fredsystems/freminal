@@ -3,6 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
@@ -23,7 +26,7 @@ fn leave_alternate_1049(handler: &mut TerminalHandler) {
     handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
 }
 
-/// Helper to convert a string slice to TChar representation as bytes
+/// Helper to convert a string slice to `TChar` representation as bytes
 fn text_to_bytes(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
@@ -64,7 +67,7 @@ fn test_clear_screen_workflow() {
 
     // Write some content
     for i in 0..10 {
-        handler.handle_data(&text_to_bytes(&format!("Line {}", i)));
+        handler.handle_data(&text_to_bytes(&format!("Line {i}")));
         handler.handle_newline();
     }
 
@@ -142,7 +145,7 @@ fn test_scroll_region_operations() {
 
     // Fill some content — should scroll within the region
     for i in 0..25 {
-        handler.handle_data(&text_to_bytes(&format!("Line {}", i)));
+        handler.handle_data(&text_to_bytes(&format!("Line {i}")));
         handler.handle_newline();
     }
 
@@ -303,7 +306,7 @@ fn test_real_world_sequence() {
     handler.handle_newline();
 
     for i in 1..=5 {
-        handler.handle_data(&text_to_bytes(&format!("Item {}", i)));
+        handler.handle_data(&text_to_bytes(&format!("Item {i}")));
         handler.handle_newline();
     }
 
@@ -321,7 +324,7 @@ fn test_scrollback_erase() {
 
     // Fill buffer with content to create scrollback
     for i in 0..100 {
-        handler.handle_data(&text_to_bytes(&format!("Line {}", i)));
+        handler.handle_data(&text_to_bytes(&format!("Line {i}")));
         handler.handle_newline();
     }
 
@@ -352,7 +355,7 @@ fn test_user_scrolling() {
 
     // Fill buffer to create scrollback
     for i in 0..50 {
-        handler.handle_data(&text_to_bytes(&format!("Line {}", i)));
+        handler.handle_data(&text_to_bytes(&format!("Line {i}")));
         handler.handle_newline();
     }
 
@@ -388,7 +391,7 @@ fn test_mixed_operations_workflow() {
     handler.handle_carriage_return();
 
     for i in 1..=10 {
-        handler.handle_data(&text_to_bytes(&format!("file{}.txt", i)));
+        handler.handle_data(&text_to_bytes(&format!("file{i}.txt")));
         handler.handle_newline();
         handler.handle_carriage_return();
     }
@@ -623,7 +626,7 @@ fn test_process_outputs_delete_lines() {
     let row0_text: String = visible[0]
         .characters()
         .iter()
-        .map(|c| c.into_utf8())
+        .map(freminal_buffer::cell::Cell::into_utf8)
         .collect();
     assert!(row0_text.starts_with("AAAAAAAAAA"), "row 0: {row0_text}");
 
@@ -631,7 +634,7 @@ fn test_process_outputs_delete_lines() {
     let row1_text: String = visible[1]
         .characters()
         .iter()
-        .map(|c| c.into_utf8())
+        .map(freminal_buffer::cell::Cell::into_utf8)
         .collect();
     assert!(row1_text.starts_with("CCCCCCCCCC"), "row 1: {row1_text}");
 }
@@ -1204,7 +1207,7 @@ fn cursor_report_sends_correct_position() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1230,7 +1233,7 @@ fn da1_sends_response() {
         .expect("RequestDeviceAttributes must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1260,7 +1263,7 @@ fn xtversion_response_starts_with_xterm_prefix() {
         .expect("RequestDeviceNameAndVersion must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
 
@@ -1343,7 +1346,7 @@ fn report_character_size_in_pixels_is_synchronous() {
         .expect("ReportCharacterSizeInPixels must produce a PTY response");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1377,7 +1380,7 @@ fn report_terminal_size_in_characters_is_synchronous() {
         .expect("ReportTerminalSizeInCharacters must produce a PTY response");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2132,7 +2135,11 @@ fn test_cpl_with_explicit_count() {
 
 /// Helper: extract the text content from a row, trimming trailing spaces.
 fn row_text(row: &freminal_buffer::row::Row) -> String {
-    let s: String = row.characters().iter().map(|c| c.into_utf8()).collect();
+    let s: String = row
+        .characters()
+        .iter()
+        .map(freminal_buffer::cell::Cell::into_utf8)
+        .collect();
     s.trim_end().to_string()
 }
 
@@ -2511,7 +2518,7 @@ fn test_dsr_ps5_device_status_report() {
         .expect("DeviceStatusReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2541,7 +2548,7 @@ fn test_dsr_ps6_cursor_position_report() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2565,7 +2572,7 @@ fn test_dsr_ps6_cursor_at_origin() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(response, "\x1b[1;1R", "Cursor at origin should report 1;1");
@@ -2586,7 +2593,7 @@ fn test_dsr_996_color_theme_report() {
         .expect("ColorThemeReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -3931,7 +3938,7 @@ fn query_handler_mode(handler: &mut TerminalHandler, mode_output: TerminalOutput
         .expect("Mode query must produce a DECRPM response on the PTY channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     String::from_utf8(bytes).expect("DECRPM response must be valid UTF-8")
 }
@@ -4094,7 +4101,7 @@ fn decrpm_lnm_default_is_line_feed() {
 
 // ── DECOM (Origin Mode ?6) ────────────────────────────────────────────────────
 
-/// Helper: fill the handler's buffer so that rows.len() >= height by writing
+/// Helper: fill the handler's buffer so that `rows.len()` >= height by writing
 /// enough newlines.  This ensures `visible_window_start(0) == 0` for simple
 /// position math in tests.
 fn fill_buffer(handler: &mut TerminalHandler) {
@@ -4589,7 +4596,7 @@ fn cursor_report_with_scrollback_reports_screen_row() {
     }
     let bytes = match last_msg.expect("CursorReport must send a message") {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -4631,7 +4638,7 @@ fn cursor_report_with_decom_reports_region_relative_row() {
     }
     let bytes = match last_msg.expect("CursorReport must send a message") {
         PtyWrite::Write(b) => b,
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -4811,7 +4818,7 @@ fn alt_buffer_lf_scrolls_after_resize_shrink() {
 
     // Fill every row with a distinct marker character
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -4859,7 +4866,7 @@ fn alt_buffer_delete_lines_works_after_resize_shrink() {
 
     // Fill screen
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -4906,7 +4913,7 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
 
     // Fill screen
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -4940,7 +4947,7 @@ fn alt_buffer_insert_lines_works_after_resize_shrink() {
     );
 }
 
-/// RI (reverse index) at scroll_region_top must scroll down after a height
+/// RI (reverse index) at `scroll_region_top` must scroll down after a height
 /// shrink.
 #[test]
 fn alt_buffer_ri_scrolls_after_resize_shrink() {
@@ -4952,7 +4959,7 @@ fn alt_buffer_ri_scrolls_after_resize_shrink() {
 
     // Fill screen
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5023,7 +5030,7 @@ fn alt_buffer_tmux_resize_scenario() {
 
     // Fill the scroll region with content
     for row in 0..23 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5095,7 +5102,7 @@ fn alt_buffer_width_shrink_maintains_row_count_invariant() {
 
     // Fill every row to full width so reflow would have split them.
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5122,7 +5129,7 @@ fn alt_buffer_width_grow_maintains_row_count_invariant() {
 
     // Fill rows with content
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5151,7 +5158,7 @@ fn alt_buffer_width_and_height_shrink_maintains_invariant() {
 
     // Fill rows with full-width content
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5179,7 +5186,7 @@ fn alt_buffer_lf_works_after_width_shrink() {
 
     // Fill rows
     for row in 0..24 {
-        let ch = b'A' + (row as u8);
+        let ch = b'A' + u8::try_from(row).unwrap();
         let chars: Vec<TChar> = vec![TChar::Ascii(ch); 80];
         buf.set_cursor_pos(Some(0), Some(row));
         buf.insert_text(&chars);
@@ -5305,7 +5312,7 @@ fn handler_application_escape_key_query_when_false() {
                 "query when false should report mode 2 (reset)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5333,7 +5340,7 @@ fn handler_application_escape_key_query_when_true() {
                 "query when true should report mode 1 (set)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5368,7 +5375,7 @@ fn handler_in_band_resize_mode_dec_set() {
                 "DECSET ?2048 must be reported as mode 1 (set)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5406,7 +5413,7 @@ fn handler_in_band_resize_mode_dec_rst() {
                 "DECRST ?2048 must be reported as mode 2 (reset)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5429,7 +5436,7 @@ fn handler_in_band_resize_mode_query_when_level_zero() {
                 "query when level=0 should report mode 2 (reset)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5460,7 +5467,7 @@ fn handler_in_band_resize_mode_query_when_level_nonzero() {
                 "query when in-band resize is enabled should report mode 1 (set)"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 }
 
@@ -5495,7 +5502,7 @@ fn handler_csi_set_then_dec_mode_reset_interaction() {
             let s = String::from_utf8(bytes).expect("valid UTF-8");
             assert_eq!(s, "\x1b[?2048;1$y", "in-band resize must be set (mode 1)");
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 
     // Reset via DECRST ?2048.
@@ -5518,7 +5525,7 @@ fn handler_csi_set_then_dec_mode_reset_interaction() {
                 "in-band resize must be reset (mode 2) after DECRST"
             );
         }
-        other => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
     }
 
     // The CSI modifyOtherKeys level is independent — it must still be 0.

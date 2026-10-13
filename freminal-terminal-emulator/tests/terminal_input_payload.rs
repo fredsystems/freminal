@@ -99,7 +99,7 @@ fn ctrl_z_is_0x1a() {
 // share the 0x40–0x5F letter block).
 // ---------------------------------------------------------------------------
 
-/// Ctrl+[ => 0x1B (ESC) — same code as Key::Escape
+/// Ctrl+[ => 0x1B (ESC) — same code as `Key::Escape`
 #[test]
 fn ctrl_open_bracket_is_0x1b() {
     assert_eq!(payload_bytes(&TerminalInput::Ctrl(b'[')), vec![0x1B]);
@@ -124,7 +124,7 @@ fn ctrl_space_is_0x00() {
     assert_eq!(payload_bytes(&TerminalInput::Ctrl(b' ')), vec![0x00]);
 }
 
-/// Ctrl+- => 0x1F (US), sent as TerminalInput::Ascii(0x1F) by the GUI layer.
+/// Ctrl+- => 0x1F (US), sent as `TerminalInput::Ascii(0x1F)` by the GUI layer.
 /// Nano binds this to "Undo".
 #[test]
 fn ctrl_minus_ascii_is_0x1f() {
@@ -320,7 +320,7 @@ fn ctrl_j_and_ctrl_k_produce_different_bytes() {
 // so we verify the payload here to guard against regressions.
 // ---------------------------------------------------------------------------
 
-/// Event::Copy → Ctrl(b'c') → 0x03 (ETX / interrupt)
+/// `Event::Copy` → Ctrl(b'c') → 0x03 (ETX / interrupt)
 /// nano: ^C = Cancel current operation
 #[test]
 fn platform_copy_event_produces_ctrl_c() {
@@ -332,7 +332,7 @@ fn platform_copy_event_produces_ctrl_c() {
     );
 }
 
-/// Event::Cut → Ctrl(b'x') → 0x18 (CAN)
+/// `Event::Cut` → Ctrl(b'x') → 0x18 (CAN)
 /// nano: ^X = Exit
 #[test]
 fn platform_cut_event_produces_ctrl_x() {
@@ -430,21 +430,21 @@ fn shift_delete_sends_csi_3_2_tilde() {
     assert_eq!(got, b"\x1b[3;2~".to_vec());
 }
 
-/// ArrowUp with no modifiers (normal mode) → ESC[A (unchanged from before)
+/// `ArrowUp` with no modifiers (normal mode) → ESC[A (unchanged from before)
 #[test]
 fn unmodified_arrow_up_normal_mode() {
     let got = payload_bytes(&TerminalInput::ArrowUp(KeyModifiers::NONE));
     assert_eq!(got, b"\x1b[A".to_vec());
 }
 
-/// ArrowUp with no modifiers in DECCKM mode → ESC O A (SS3 form)
+/// `ArrowUp` with no modifiers in DECCKM mode → ESC O A (SS3 form)
 #[test]
 fn unmodified_arrow_up_decckm_mode() {
     let got = payload_bytes_decckm(&TerminalInput::ArrowUp(KeyModifiers::NONE));
     assert_eq!(got, b"\x1bOA".to_vec());
 }
 
-/// ArrowUp with modifiers in DECCKM mode → CSI form, NOT SS3.
+/// `ArrowUp` with modifiers in DECCKM mode → CSI form, NOT SS3.
 /// Modified keys always use CSI even when DECCKM is active.
 #[test]
 fn modified_arrow_up_decckm_uses_csi_not_ss3() {
@@ -521,7 +521,7 @@ fn ctrl_end_sends_csi_1_5_f() {
     assert_eq!(got, b"\x1b[1;5F".to_vec());
 }
 
-/// KeyModifiers::NONE has modifier_param() == None.
+/// `KeyModifiers::NONE` has `modifier_param()` == None.
 #[test]
 fn key_modifiers_none_has_no_param() {
     assert!(KeyModifiers::NONE.is_empty());
@@ -787,8 +787,8 @@ fn ctrl_space_modify_other_keys_level_2() {
 // Interaction: modifyOtherKeys + Application Escape Key simultaneously
 // ---------------------------------------------------------------------------
 
-/// When both modifyOtherKeys >= 2 AND application_escape_key are active,
-/// Escape should use the application_escape_key encoding (CSI 27;1;27~).
+/// When both modifyOtherKeys >= 2 AND `application_escape_key` are active,
+/// Escape should use the `application_escape_key` encoding (CSI 27;1;27~).
 /// The Escape key is handled by its own match arm, independent of MOK.
 #[test]
 fn escape_with_both_mok2_and_aek() {
@@ -809,7 +809,7 @@ fn escape_with_both_mok2_and_aek() {
     }
 }
 
-/// When both modifyOtherKeys >= 2 AND application_escape_key are active,
+/// When both modifyOtherKeys >= 2 AND `application_escape_key` are active,
 /// Ctrl+C sends the MOK2 encoding CSI 27;5;99~ — AEK does not affect
 /// Ctrl+letter encoding, but MOK2 does.
 #[test]
@@ -831,7 +831,7 @@ fn ctrl_c_with_both_mok2_and_aek() {
     }
 }
 
-/// Ctrl+A with application_escape_key=Set and mok=0 — AEK has no effect on Ctrl.
+/// Ctrl+A with `application_escape_key=Set` and mok=0 — AEK has no effect on Ctrl.
 #[test]
 fn ctrl_a_with_aek_and_mok0() {
     match TerminalInput::Ctrl(b'A').to_payload(
@@ -867,7 +867,7 @@ fn backspace_decbkm_set_sends_bs() {
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
-            assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)")
+            assert_eq!(b, 0x08, "DECBKM set: Backspace must send BS (0x08)");
         }
         other => panic!("Expected Single(0x08), got {other:?}"),
     }
@@ -887,7 +887,7 @@ fn backspace_decbkm_reset_sends_del() {
         &KeyEventMeta::PRESS,
     ) {
         TerminalInputPayload::Single(b) => {
-            assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)")
+            assert_eq!(b, 0x7F, "DECBKM reset: Backspace must send DEL (0x7F)");
         }
         other => panic!("Expected Single(0x7F), got {other:?}"),
     }
@@ -948,7 +948,7 @@ fn enter_lnm_set_sends_cr_lf() {
     }
 }
 
-/// LineFeed is unaffected by LNM — it always sends bare LF (0x0A).
+/// `LineFeed` is unaffected by LNM — it always sends bare LF (0x0A).
 ///
 /// LNM only affects the Enter key, not `TerminalInput::LineFeed` (which
 /// represents Ctrl+J mapped to the LF byte).
@@ -1045,19 +1045,19 @@ fn kkp_disambiguate_backspace_still_legacy() {
     assert_eq!(payload_bytes_kkp(&TerminalInput::Backspace, 1), vec![0x7F]);
 }
 
-/// KKP flag 8 (REPORT_ALL_KEYS): Enter → CSI 13u.
+/// KKP flag 8 (`REPORT_ALL_KEYS`): Enter → CSI 13u.
 #[test]
 fn kkp_all_keys_enter() {
     assert_eq!(payload_bytes_kkp(&TerminalInput::Enter, 8), b"\x1b[13u");
 }
 
-/// KKP flag 8 (REPORT_ALL_KEYS): Tab → CSI 9u.
+/// KKP flag 8 (`REPORT_ALL_KEYS`): Tab → CSI 9u.
 #[test]
 fn kkp_all_keys_tab() {
     assert_eq!(payload_bytes_kkp(&TerminalInput::Tab, 8), b"\x1b[9u");
 }
 
-/// KKP flag 8 (REPORT_ALL_KEYS): Backspace → CSI 127u.
+/// KKP flag 8 (`REPORT_ALL_KEYS`): Backspace → CSI 127u.
 #[test]
 fn kkp_all_keys_backspace() {
     assert_eq!(
@@ -1066,7 +1066,7 @@ fn kkp_all_keys_backspace() {
     );
 }
 
-/// KKP flag 8 (REPORT_ALL_KEYS): Ascii(b'a') → CSI 97u.
+/// KKP flag 8 (`REPORT_ALL_KEYS`): Ascii(b'a') → CSI 97u.
 #[test]
 fn kkp_all_keys_ascii_a() {
     assert_eq!(
@@ -1075,7 +1075,7 @@ fn kkp_all_keys_ascii_a() {
     );
 }
 
-/// KKP flag 8 (REPORT_ALL_KEYS): Ascii(b'A') → CSI 97;2u (lowercase + Shift).
+/// KKP flag 8 (`REPORT_ALL_KEYS`): Ascii(b'A') → CSI 97;2u (lowercase + Shift).
 #[test]
 fn kkp_all_keys_ascii_shift_a() {
     assert_eq!(
@@ -1199,7 +1199,7 @@ fn kkp_flag_2_plus_disambiguate_ctrl_a() {
     );
 }
 
-/// KKP flag 4 + REPORT_ALL (12): plain ASCII gets CSI u encoding with
+/// KKP flag 4 + `REPORT_ALL` (12): plain ASCII gets CSI u encoding with
 /// alternate key fields: `CSI 97:65:97 u` (codepoint:shifted:base).
 #[test]
 fn kkp_flag_4_plus_report_all_ascii() {
@@ -1239,7 +1239,7 @@ fn payload_bytes_kkp_meta(input: &TerminalInput, flags: u32, meta: &KeyEventMeta
     }
 }
 
-/// Flag 2 + flag 8: plain 'a' press → CSI 97u (event_type 1 is elided).
+/// Flag 2 + flag 8: plain 'a' press → CSI 97u (`event_type` 1 is elided).
 #[test]
 fn kkp_flag_2_press_ascii_elides_event_type() {
     let meta = KeyEventMeta {
@@ -1389,7 +1389,7 @@ fn kkp_flag_4_space_no_shifted() {
     );
 }
 
-/// Flag 4 + flag 1 (no report_all): Ctrl+C → CSI 99:67:99;5u.
+/// Flag 4 + flag 1 (no `report_all`): Ctrl+C → CSI 99:67:99;5u.
 #[test]
 fn kkp_flag_4_disambiguate_ctrl_c() {
     assert_eq!(

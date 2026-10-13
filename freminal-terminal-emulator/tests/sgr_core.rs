@@ -26,10 +26,7 @@ fn sgr_basic_attributes_toggle_correctly() {
         let outputs = parse_seq(seq);
         assert!(
             outputs.iter().any(|o| matches!(o, TerminalOutput::Sgr(_))),
-            "expected SGR output for {} sequence {:?}, got {:?}",
-            label,
-            seq,
-            outputs
+            "expected SGR output for {label} sequence {seq:?}, got {outputs:?}"
         );
     }
 }
@@ -96,8 +93,7 @@ fn sgr_reset_restores_default_attributes() {
     // The parser should not panic and should yield at least one SGR output.
     assert!(
         outputs.iter().any(|o| matches!(o, TerminalOutput::Sgr(_))),
-        "expected parser to emit SGR reset output after \\x1b[0m, got: {:?}",
-        outputs
+        "expected parser to emit SGR reset output after \\x1b[0m, got: {outputs:?}"
     );
 }
 
@@ -117,8 +113,7 @@ fn sgr_malformed_sequences_are_ignored_or_graceful() {
         // Parser should never panic; may yield empty or benign output.
         assert!(
             !outputs.is_empty() || outputs.is_empty(),
-            "parser should handle malformed sequence {:?} gracefully",
-            seq
+            "parser should handle malformed sequence {seq:?} gracefully"
         );
     }
 }

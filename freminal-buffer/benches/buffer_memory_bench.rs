@@ -21,6 +21,9 @@
 //!   few characters via `Buffer::set_format`, producing many `FormatTag`
 //!   runs per line.
 
+// Benchmark harness, not production code: unwrap/expect on setup is acceptable.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
@@ -53,7 +56,7 @@ fn process_rss_bytes() -> Option<usize> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_rss_bytes() -> Option<usize> {
+const fn process_rss_bytes() -> Option<usize> {
     None
 }
 
@@ -67,12 +70,21 @@ unsafe fn libc_sysconf_pagesize() -> usize {
     // _SC_PAGESIZE == 30 on Linux/glibc.
     const SC_PAGESIZE: core::ffi::c_int = 30;
     let v = unsafe { sysconf(SC_PAGESIZE) };
-    if v > 0 { v as usize } else { 4096 }
+    match usize::try_from(v) {
+        Ok(page) if page > 0 => page,
+        _ => 4096,
+    }
 }
 
 /// Ask the allocator to return free pages to the OS (glibc `malloc_trim`), so
 /// an RSS reading reflects live memory rather than allocator-retained free
 /// pages. Mirrors the live app's post-idle-compaction trim. No-op off glibc.
+// Off glibc the body compiles to nothing, so clippy sees a `const`-able fn;
+// on glibc it calls `malloc_trim` and cannot be `const`.
+#[cfg_attr(
+    not(all(target_os = "linux", target_env = "gnu")),
+    allow(clippy::missing_const_for_fn)
+)]
 fn trim_allocator() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -201,7 +213,7 @@ fn build_high_entropy_colored_buffer() -> Buffer {
 
             let seg_len = SEGMENT.min(WIDTH - col);
             let chars: Vec<TChar> = (0..seg_len)
-                .map(|j| TChar::Ascii(b'a' + ((i + j) % 26) as u8))
+                .map(|j| TChar::Ascii(b'a' + u8::try_from((i + j) % 26).unwrap()))
                 .collect();
             buf.insert_text(&chars);
             col += seg_len;

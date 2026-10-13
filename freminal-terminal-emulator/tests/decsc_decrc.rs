@@ -12,6 +12,9 @@
 //! cursor at home had been saved.  Everything is driven through raw bytes,
 //! exactly as the PTY thread does.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_buffer::cell::Cell;
 use freminal_common::buffer_states::{
     fonts::FontWeight, format_tag::FormatTag, modes::decom::Decom,

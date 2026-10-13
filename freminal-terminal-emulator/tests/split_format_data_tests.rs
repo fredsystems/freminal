@@ -43,8 +43,8 @@ fn empty_tags_returns_both_empty() {
 #[test]
 fn empty_tags_with_include_scrollback_false() {
     let result = split_format_data_for_scrollback(vec![], 10, 20, false);
-    assert!(result.scrollback.is_empty());
-    assert!(result.visible.is_empty());
+    assert_eq!(result.scrollback, Vec::<FormatTag>::new());
+    assert_eq!(result.visible, Vec::<FormatTag>::new());
 }
 
 // ─── include_scrollback = false ──────────────────────────────────────────────
@@ -187,7 +187,7 @@ fn tag_past_visible_end_is_dropped_from_visible() {
     let tags = vec![tag(12, 25)];
     let result = split_format_data_for_scrollback(tags, 10, 20, true);
 
-    assert!(result.scrollback.is_empty());
+    assert_eq!(result.scrollback, Vec::<FormatTag>::new());
     assert!(
         result.visible.is_empty(),
         "tag with end > visible_end must be dropped from visible"
@@ -286,7 +286,7 @@ fn zero_split_puts_everything_in_visible() {
     let result = split_format_data_for_scrollback(tags, 0, 30, true);
 
     // No tag has start < 0, so scrollback is empty.
-    assert!(result.scrollback.is_empty());
+    assert_eq!(result.scrollback, Vec::<FormatTag>::new());
 
     // Both tags have end > 0 && end <= 30.
     assert_eq!(result.visible.len(), 2);
@@ -328,7 +328,7 @@ fn zero_width_tag_before_split_is_in_scrollback() {
     assert_eq!(result.scrollback.len(), 1);
     assert_eq!(result.scrollback[0].start, 5);
     assert_eq!(result.scrollback[0].end, 5);
-    assert!(result.visible.is_empty());
+    assert_eq!(result.visible, Vec::<FormatTag>::new());
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn zero_width_tag_after_split_is_in_neither() {
     let result = split_format_data_for_scrollback(tags, 10, 20, true);
 
     // start >= 10, not in scrollback.
-    assert!(result.scrollback.is_empty());
+    assert_eq!(result.scrollback, Vec::<FormatTag>::new());
     // end > 10 && end <= 20 → passes filter; rebased start = 5, end = 5.
     assert_eq!(result.visible.len(), 1);
     assert_eq!(result.visible[0].start, 5);
@@ -359,5 +359,5 @@ fn visible_end_equals_split_drops_all_from_visible() {
     // Scrollback still gets its tags.
     assert_eq!(result.scrollback.len(), 2);
     // Visible is empty.
-    assert!(result.visible.is_empty());
+    assert_eq!(result.visible, Vec::<FormatTag>::new());
 }

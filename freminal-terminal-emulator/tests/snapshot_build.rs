@@ -31,6 +31,9 @@
 //!   sticky `content_changed` bool it replaced — see Task 124.12 and
 //!   `Documents/PLAN_124_RENDER_EFFICIENCY.md` "The defect, stated once").
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashSet;
 use std::sync::Arc;
 

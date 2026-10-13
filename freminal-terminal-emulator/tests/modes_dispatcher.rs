@@ -16,11 +16,10 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 fn multiple_modes_in_stream() {
     let seq = "\x1b[?1h\x1b[?7h\x1b[?25l";
     let outs = push_seq(seq);
-    println!("multi-mode stream -> {:?}", outs);
+    println!("multi-mode stream -> {outs:?}");
     assert!(
         outs.len() >= 3,
-        "expected at least 3 mode outputs, got {:?}",
-        outs
+        "expected at least 3 mode outputs, got {outs:?}"
     );
 }
 
@@ -28,7 +27,7 @@ fn multiple_modes_in_stream() {
 fn mixed_enable_disable_modes() {
     let seq = "\x1b[?1h\x1b[?7l\x1b[20h";
     let outs = push_seq(seq);
-    println!("mixed -> {:?}", outs);
+    println!("mixed -> {outs:?}");
     assert!(
         outs.iter()
             .all(|o| matches!(o, TerminalOutput::Mode { .. }))

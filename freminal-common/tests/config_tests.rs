@@ -3,6 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_common::config::{
     Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, config_is_writable,
     load_config, save_config,
@@ -138,65 +141,65 @@ fn shell_section_parses_with_path() {
 
 #[test]
 fn shell_section_without_path_defaults_to_none() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [shell]
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse empty shell section");
     assert!(cfg.shell.path.is_none());
 }
 
 #[test]
 fn logging_section_write_to_file_true() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = true
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse logging section");
     assert!(cfg.logging.write_to_file);
 }
 
 #[test]
 fn logging_section_write_to_file_false() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = false
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse logging section");
     assert!(!cfg.logging.write_to_file);
 }
 
 #[test]
 fn scrollback_section_custom_limit() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 50000
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse scrollback section");
     assert_eq!(cfg.scrollback.limit, 50000);
 }
 
 #[test]
 fn scrollback_section_minimum_valid_limit() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 1
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should accept scrollback.limit=1");
     assert_eq!(cfg.scrollback.limit, 1);
 }
 
 #[test]
 fn scrollback_section_maximum_valid_limit() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 100000
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should accept scrollback.limit=100000");
     assert_eq!(cfg.scrollback.limit, 100_000);
 }
@@ -207,11 +210,11 @@ fn scrollback_section_maximum_valid_limit() {
 
 #[test]
 fn scrollback_limit_zero_is_rejected() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 0
-    "#;
+    ";
     let err = load_from_toml(toml).expect_err("limit=0 should fail validation");
     let msg = err.to_string();
     assert!(
@@ -222,11 +225,11 @@ fn scrollback_limit_zero_is_rejected() {
 
 #[test]
 fn scrollback_limit_too_large_is_rejected() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 100001
-    "#;
+    ";
     let err = load_from_toml(toml).expect_err("limit=100001 should fail validation");
     let msg = err.to_string();
     assert!(
@@ -241,11 +244,11 @@ fn scrollback_limit_too_large_is_rejected() {
 
 #[test]
 fn font_size_too_small_is_rejected() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [font]
         size = 2.0
-    "#;
+    ";
     let err = load_from_toml(toml).expect_err("font.size=2.0 should fail validation");
     let msg = err.to_string();
     assert!(msg.contains("font.size=2"), "error: {msg}");
@@ -253,11 +256,11 @@ fn font_size_too_small_is_rejected() {
 
 #[test]
 fn font_size_too_large_is_rejected() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [font]
         size = 100.0
-    "#;
+    ";
     let err = load_from_toml(toml).expect_err("font.size=100.0 should fail validation");
     let msg = err.to_string();
     assert!(msg.contains("font.size=100"), "error: {msg}");
@@ -265,9 +268,9 @@ fn font_size_too_large_is_rejected() {
 
 #[test]
 fn version_zero_is_rejected() {
-    let toml = r#"
+    let toml = r"
         version = 0
-    "#;
+    ";
     let err = load_from_toml(toml).expect_err("version=0 should fail validation");
     let msg = err.to_string();
     assert!(msg.contains("version must be >= 1"), "error: {msg}");
@@ -356,11 +359,11 @@ fn config_with_only_shell_section_uses_defaults_for_rest() {
 
 #[test]
 fn config_with_only_logging_section_uses_defaults_for_rest() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = true
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse");
     assert!(cfg.logging.write_to_file);
     assert!(cfg.shell.path.is_none());
@@ -369,11 +372,11 @@ fn config_with_only_logging_section_uses_defaults_for_rest() {
 
 #[test]
 fn config_with_only_scrollback_section_uses_defaults_for_rest() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 500
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse");
     assert_eq!(cfg.scrollback.limit, 500);
     assert!(cfg.shell.path.is_none());
@@ -431,11 +434,11 @@ fn explicit_config_path_that_does_not_exist_returns_io_error() {
 
 #[test]
 fn explicit_config_path_that_exists_loads_successfully() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [scrollback]
         limit = 7777
-    "#;
+    ";
     let mut file = NamedTempFile::new().expect("failed to create temp file");
     file.write_all(toml.as_bytes())
         .expect("failed to write temp file");
@@ -489,11 +492,11 @@ fn cli_shell_none_preserves_toml_shell() {
 
 #[test]
 fn cli_write_logs_override_is_ignored_deprecated() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = false
-    "#;
+    ";
     let mut cfg = load_from_toml(toml).expect("should parse");
     assert!(!cfg.logging.write_to_file);
 
@@ -503,11 +506,11 @@ fn cli_write_logs_override_is_ignored_deprecated() {
 
 #[test]
 fn cli_write_logs_none_preserves_toml_logging() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = true
-    "#;
+    ";
     let mut cfg = load_from_toml(toml).expect("should parse");
     assert!(cfg.logging.write_to_file);
 
@@ -554,11 +557,11 @@ fn cli_shell_overrides_when_toml_has_no_shell() {
 
 #[test]
 fn cli_write_logs_false_is_ignored_deprecated() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
         write_to_file = true
-    "#;
+    ";
     let mut cfg = load_from_toml(toml).expect("should parse");
     assert!(cfg.logging.write_to_file);
 
@@ -590,10 +593,10 @@ fn file_log_level_reads_from_toml() {
 
 #[test]
 fn file_log_level_absent_in_toml_defaults_to_info() {
-    let toml = r#"
+    let toml = r"
         version = 1
         [logging]
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse");
     assert_eq!(cfg.file_log_level(), "info");
 }
@@ -780,9 +783,9 @@ fn managed_by_loads_from_toml() {
 
 #[test]
 fn managed_by_absent_defaults_to_none() {
-    let toml = r#"
+    let toml = r"
         version = 1
-    "#;
+    ";
     let cfg = load_from_toml(toml).expect("should parse");
     assert!(!cfg.is_managed());
     assert!(cfg.managed_by.is_none());

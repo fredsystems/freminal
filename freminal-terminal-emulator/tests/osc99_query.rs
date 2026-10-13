@@ -98,8 +98,8 @@ fn osc99_window_commands(state: &TerminalState) -> usize {
 fn query_while_unsupported_writes_nothing_and_pushes_no_command() {
     let (mut state, rx) = make_state(HostCapabilities::default());
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    assert!(drain(&rx).is_empty());
-    assert!(state.window_commands.is_empty());
+    assert_eq!(drain(&rx), Vec::<u8>::new());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 /// Send `p=?` for id `abc` to a host with `features` and return the exact
@@ -107,7 +107,7 @@ fn query_while_unsupported_writes_nothing_and_pushes_no_command() {
 fn query_reply_bytes(features: Osc99Features) -> Vec<u8> {
     let (mut state, rx) = make_state(caps(features));
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
     drain(&rx)
 }
 
@@ -244,7 +244,7 @@ fn alive_while_unsupported_pushes_no_window_command() {
     let (mut state, _rx) = make_state(HostCapabilities::default());
     state.handle_incoming_data(b"\x1b]99;i=abc:p=alive;\x1b\\");
     assert_eq!(osc99_window_commands(&state), 0);
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -267,8 +267,8 @@ fn alive_while_supported_pushes_one_alive_control() {
 fn display_notification_while_unsupported_pushes_no_window_command() {
     let (mut state, rx) = make_state(HostCapabilities::default());
     state.handle_incoming_data(b"\x1b]99;i=1;hello\x1b\\");
-    assert!(state.window_commands.is_empty());
-    assert!(drain(&rx).is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
+    assert_eq!(drain(&rx), Vec::<u8>::new());
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn display_notification_while_supported_pushes_one_notification() {
 fn close_while_unsupported_pushes_no_window_command() {
     let (mut state, _rx) = make_state(HostCapabilities::default());
     state.handle_incoming_data(b"\x1b]99;i=abc:p=close;\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -324,13 +324,13 @@ fn query_for_a_tombstoned_id_is_answered_while_supported() {
     // A non-final title chunk with invalid base64 drops the transfer and
     // leaves a tombstone for id `1`.
     state.handle_incoming_data(b"\x1b]99;i=1:d=0:p=title:e=1;@@@@\x1b\\");
-    assert!(drain(&rx).is_empty());
-    assert!(state.window_commands.is_empty());
+    assert_eq!(drain(&rx), Vec::<u8>::new());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 
     state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
     let expected = format!("\x1b]99;i=1:p=?;{TOAST_REPLY}\x1b\\");
     assert_eq!(drain(&rx), expected.into_bytes());
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -338,12 +338,12 @@ fn query_for_a_tombstoned_id_leaves_the_tombstone_in_place() {
     let (mut state, rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;i=1:d=0:p=title:e=1;@@@@\x1b\\");
     state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
-    assert!(!drain(&rx).is_empty());
+    assert_ne!(drain(&rx), Vec::<u8>::new());
 
     // The query did not revive the id: the tail of the dropped transfer is
     // still discarded.
     state.handle_incoming_data(b"\x1b]99;i=1;tail\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -352,7 +352,7 @@ fn query_with_d0_is_answered_at_once() {
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?:d=0;\x1b\\");
     let expected = format!("\x1b]99;i=abc:p=?;{TOAST_REPLY}\x1b\\");
     assert_eq!(drain(&rx), expected.into_bytes());
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -362,12 +362,12 @@ fn query_on_a_saturated_pending_map_is_answered() {
         let seq = format!("\x1b]99;i=id-{i}:d=0;x\x1b\\");
         state.handle_incoming_data(seq.as_bytes());
     }
-    assert!(drain(&rx).is_empty());
+    assert_eq!(drain(&rx), Vec::<u8>::new());
 
     state.handle_incoming_data(b"\x1b]99;i=q:p=?;\x1b\\");
     let expected = format!("\x1b]99;i=q:p=?;{TOAST_REPLY}\x1b\\");
     assert_eq!(drain(&rx), expected.into_bytes());
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -375,7 +375,7 @@ fn alive_and_close_without_an_id_push_no_window_command() {
     let (mut state, _rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;p=alive;\x1b\\");
     state.handle_incoming_data(b"\x1b]99;p=close;\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 }
 
 #[test]
@@ -409,7 +409,7 @@ fn only_notification_title(state: &TerminalState) -> Option<String> {
 fn chunk_received_while_unsupported_is_never_accumulated() {
     let (mut state, _rx) = make_state(HostCapabilities::default());
     state.handle_incoming_data(b"\x1b]99;i=1:d=0;aaa\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 
     state.handler.set_host_capabilities(full_caps());
     state.handle_incoming_data(b"\x1b]99;i=1;bbb\x1b\\");
@@ -425,7 +425,7 @@ fn chunk_received_while_unsupported_is_never_accumulated() {
 fn pending_transfer_is_discarded_when_support_is_disabled() {
     let (mut state, _rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;i=2:d=0;aaa\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 
     state
         .handler
@@ -444,7 +444,7 @@ fn pending_transfer_is_discarded_when_support_is_disabled() {
 fn unidentified_transfer_is_discarded_when_support_is_disabled() {
     let (mut state, _rx) = make_state(full_caps());
     state.handle_incoming_data(b"\x1b]99;d=0;aaa\x1b\\");
-    assert!(state.window_commands.is_empty());
+    assert_eq!(state.window_commands, Vec::<WindowManipulation>::new());
 
     state
         .handler

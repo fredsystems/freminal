@@ -89,6 +89,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use conv2::ApproxFrom;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use freminal::gui::panes::{
     ActiveSubtree, Pane, PaneId, PaneIdGenerator, PaneTree, SplitBorder, SplitDirection,
@@ -108,6 +109,12 @@ const PANE_COUNTS: [usize; 5] = [1, 2, 4, 8, 16];
 /// A realistic full-window rect, matching a common 1080p central-rect size.
 const WINDOW_WIDTH: f32 = 1920.0;
 const WINDOW_HEIGHT: f32 = 1080.0;
+
+/// Convert a (tiny) pane count or index to `f32` for geometry arithmetic.
+fn count_to_f32(n: usize) -> f32 {
+    f32::approx_from(n)
+        .unwrap_or_else(|err| unreachable!("pane counts and indices are tiny: {err:?}"))
+}
 
 fn configure() -> Criterion {
     Criterion::default()
@@ -236,11 +243,11 @@ fn build_chain_tree(pane_count: usize) -> (PaneTree, Vec<PaneId>) {
 /// constructing a `PaneTree` at all — `pane_at_pos` only needs the slice.
 fn synthetic_layout(pane_count: usize) -> Vec<(PaneId, Rect)> {
     let mut id_gen = PaneIdGenerator::new(0);
-    let pane_width = WINDOW_WIDTH / pane_count as f32;
+    let pane_width = WINDOW_WIDTH / count_to_f32(pane_count);
     (0..pane_count)
         .map(|i| {
             let id = id_gen.next_id();
-            let x0 = i as f32 * pane_width;
+            let x0 = count_to_f32(i) * pane_width;
             let rect = Rect::from_min_max(point(x0, 0.0), point(x0 + pane_width, WINDOW_HEIGHT));
             (id, rect)
         })
@@ -389,7 +396,7 @@ fn bench_pane_at_pos(c: &mut Criterion) {
 
     for &count in &PANE_COUNTS {
         let layout = synthetic_layout(count);
-        let pane_width = WINDOW_WIDTH / count as f32;
+        let pane_width = WINDOW_WIDTH / count_to_f32(count);
 
         // Hit on the first pane: the linear scan matches immediately.
         let first_hit = point(pane_width / 2.0, WINDOW_HEIGHT / 2.0);

@@ -19,5 +19,5 @@ fn switches_between_standard_csi_osc_and_recovers() {
         let _outs = p.push(chunk);
     }
     let trace = p.current_trace_str();
-    assert!(!trace.is_empty());
+    assert_ne!(trace, "");
 }

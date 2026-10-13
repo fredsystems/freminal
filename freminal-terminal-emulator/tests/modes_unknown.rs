@@ -12,12 +12,11 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 #[test]
 fn unknown_mode_fallback() {
     let outs = push_seq("\x1b[?9999h");
-    println!("unknown enable -> {:?}", outs);
+    println!("unknown enable -> {outs:?}");
     // parser may mark as Invalid or Mode(Unknown)
     assert!(
         outs.iter()
             .any(|o| matches!(o, TerminalOutput::Mode { .. } | TerminalOutput::Invalid)),
-        "Expected Mode or Invalid for unknown private mode, got {:?}",
-        outs
+        "Expected Mode or Invalid for unknown private mode, got {outs:?}"
     );
 }

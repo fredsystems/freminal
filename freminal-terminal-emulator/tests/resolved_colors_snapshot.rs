@@ -7,6 +7,9 @@
 //! the `Arc` is shared until a content colour changes, and the colour
 //! sequences and resets drive it as specified.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use freminal_common::{

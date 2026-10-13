@@ -28,7 +28,7 @@ fn parses_empty_args_defaults() {
     assert!(args.write_logs_to_file.is_none());
     assert!(args.config.is_none());
     assert!(args.recording_path.is_none());
-    assert!(args.command.is_empty());
+    assert_eq!(args.command, Vec::<String>::new());
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn parses_command_after_double_dash() {
 #[test]
 fn no_command_gives_empty_vec() {
     let args = parse_from(["freminal"]).unwrap();
-    assert!(args.command.is_empty());
+    assert_eq!(args.command, Vec::<String>::new());
 }
 
 #[test]
@@ -172,7 +172,7 @@ proptest! {
     /// should parse consistently.
     #[test]
     fn write_logs_to_file_accepts_boolean_values(val in proptest::bool::ANY) {
-        let arg = format!("--write-logs-to-file={}", val);
+        let arg = format!("--write-logs-to-file={val}");
         let args = parse_from(["freminal", &arg]).unwrap();
         prop_assert_eq!(args.write_logs_to_file, Some(val));
     }

@@ -601,7 +601,7 @@ fn autowrap_at_scroll_region_bottom_minimal() {
 
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate() {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
     let cursor = h.cursor_pos();
     eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
@@ -610,32 +610,28 @@ fn autowrap_at_scroll_region_bottom_minimal() {
     let row2 = &screen[2];
     assert!(
         row2.starts_with("BBBBBBBBBB"),
-        "region row 1 should now have B's (scrolled up from row 2): got {:?}",
-        row2
+        "region row 1 should now have B's (scrolled up from row 2): got {row2:?}"
     );
 
     // Row 3 (screen, 0-indexed) = scroll region row 2 → was "CCCC..." + X at col 79
     let row3 = &screen[3];
     assert!(
         row3.starts_with("CCCCCCCCCC"),
-        "region row 2 should start with C's: got {:?}",
-        row3
+        "region row 2 should start with C's: got {row3:?}"
     );
     // Col 79 should be 'X'
     let row3_chars: Vec<char> = row3.chars().collect();
     assert_eq!(
         row3_chars.get(79).copied(),
         Some('X'),
-        "col 79 of region row 2 should be 'X': row = {:?}",
-        row3
+        "col 79 of region row 2 should be 'X': row = {row3:?}"
     );
 
     // Row 4 (screen, 0-indexed) = scroll region row 3 → blanked, then Y at col 0
     let row4 = &screen[4];
     assert!(
         row4.starts_with('Y'),
-        "region row 3 should start with 'Y' (autowrapped): got {:?}",
-        row4
+        "region row 3 should start with 'Y' (autowrapped): got {row4:?}"
     );
 
     // Cursor should be at col 1 (just wrote Y at col 0), row 4 (screen)
@@ -739,7 +735,7 @@ fn cursor_control_characters_inside_esc_sequences() {
 
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate().take(10) {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
 
     // Row 0: header
@@ -806,7 +802,7 @@ fn leading_zeros_in_esc_sequences() {
 
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate().take(6) {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
     let cursor = h.cursor_pos();
     eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
@@ -912,7 +908,7 @@ fn build_box_test_bytes_80col() -> Vec<u8> {
     // Draw left border with '+' using IND
     // cup(2, 2) → ESC[2;2H
     out.extend_from_slice(b"\x1b[2;2H");
-    for _row in 2..=max_lines - 1 {
+    for _row in 2..max_lines {
         out.push(b'+');
         // cub(1) → ESC[1D
         out.extend_from_slice(b"\x1b[1D");
@@ -923,7 +919,7 @@ fn build_box_test_bytes_80col() -> Vec<u8> {
     // Draw right border with '+' using RI
     // cup(max_lines-1, width-1) → ESC[23;79H
     out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, width - 1).as_bytes());
-    for _row in (2..=max_lines - 1).rev() {
+    for _row in (2..max_lines).rev() {
         out.push(b'+');
         // cub(1) → ESC[1D
         out.extend_from_slice(b"\x1b[1D");
@@ -934,7 +930,7 @@ fn build_box_test_bytes_80col() -> Vec<u8> {
     // Draw left/right '*' on each row and navigate down
     // cup(2, 1) → ESC[2;1H
     out.extend_from_slice(b"\x1b[2;1H");
-    for row in 2..=max_lines - 1 {
+    for row in 2..max_lines {
         out.push(b'*');
         // cup(row, width) → ESC[row;80H
         out.extend_from_slice(format!("\x1b[{row};{width}H").as_bytes());
@@ -1036,20 +1032,10 @@ fn build_box_test_bytes_80col() -> Vec<u8> {
     out
 }
 
-#[test]
+/// Assert the `*`/`+` border of the 80-column box test: full `*` top and
+/// bottom rows, `*` outer columns, and the `+` inner ring.
 #[allow(clippy::needless_range_loop)]
-fn box_drawing_test_80col() {
-    let mut h = VtTestHelper::new_default();
-    let bytes = build_box_test_bytes_80col();
-    h.feed(&bytes);
-
-    let screen = h.screen_text();
-    for (i, line) in screen.iter().enumerate() {
-        eprintln!("row {:2}: {:?}", i, line);
-    }
-    let cursor = h.cursor_pos();
-    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
-
+fn assert_box_borders(h: &VtTestHelper, screen: &[String]) {
     // Row 0 (screen row 1): all '*' — 80 characters
     h.assert_row(0, &"*".repeat(80));
     // Row 23 (screen row 24): all '*' — 80 characters
@@ -1115,7 +1101,12 @@ fn box_drawing_test_80col() {
             row22_chars[col]
         );
     }
+}
 
+/// Assert the E-frame, blanked areas and ED/EL results inside the 80-column
+/// box test.
+#[allow(clippy::needless_range_loop)]
+fn assert_e_frame(screen: &[String]) {
     // After DECALN + erases, the E-frame structure (0-indexed) is:
     //   Rows 0-7: fully erased by ED(1) at cup(9,10) — only border chars remain
     //   Row 8: E's in cols 10-69 (inner_l..inner_r-1, 0-indexed 9..70)
@@ -1174,24 +1165,24 @@ fn box_drawing_test_80col() {
 
     // Row 15: E-frame bottom bar — E's from col 10 to col 69 (0-indexed)
     // (Row 16 vttest = row 15 0-indexed; not cleared by inner loop which stops at row 15 vttest)
-    let row15_chars: Vec<char> = screen[15].chars().collect();
+    let bottom_bar_chars: Vec<char> = screen[15].chars().collect();
     for col in 10..=69 {
         assert_eq!(
-            row15_chars[col], 'E',
+            bottom_bar_chars[col], 'E',
             "row 15 col {col} should be 'E' (E-frame bottom), got {:?}",
-            row15_chars[col]
+            bottom_bar_chars[col]
         );
     }
 
     // Row 16 (screen row 17): fully blank except borders (EL(2))
-    let row16_chars: Vec<char> = screen[16].chars().collect();
-    assert_eq!(row16_chars[0], '*', "row 16 col 0 should be '*'");
-    assert_eq!(row16_chars[1], '+', "row 16 col 1 should be '+'");
+    let blank_row_chars: Vec<char> = screen[16].chars().collect();
+    assert_eq!(blank_row_chars[0], '*', "row 16 col 0 should be '*'");
+    assert_eq!(blank_row_chars[1], '+', "row 16 col 1 should be '+'");
     for col in 2..=77 {
         assert_eq!(
-            row16_chars[col], ' ',
+            blank_row_chars[col], ' ',
             "row 16 col {col} should be blank (EL(2)), got {:?}",
-            row16_chars[col]
+            blank_row_chars[col]
         );
     }
 
@@ -1206,31 +1197,44 @@ fn box_drawing_test_80col() {
             );
         }
     }
+}
+
+#[test]
+fn box_drawing_test_80col() {
+    let mut h = VtTestHelper::new_default();
+    let bytes = build_box_test_bytes_80col();
+    h.feed(&bytes);
+
+    let screen = h.screen_text();
+    for (i, line) in screen.iter().enumerate() {
+        eprintln!("row {i:2}: {line:?}");
+    }
+    let cursor = h.cursor_pos();
+    eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
+
+    assert_box_borders(&h, &screen);
+    assert_e_frame(&screen);
 
     // Check the descriptive text in the middle
     let row10 = &screen[10];
     assert!(
         row10.contains("The screen should be cleared"),
-        "row 10 should contain descriptive text, got: {:?}",
-        row10
+        "row 10 should contain descriptive text, got: {row10:?}"
     );
     let row11 = &screen[11];
     assert!(
         row11.contains("der of *'s and +'s around the edge"),
-        "row 11 should contain border description, got: {:?}",
-        row11
+        "row 11 should contain border description, got: {row11:?}"
     );
     let row12 = &screen[12];
     assert!(
         row12.contains("middle  there should be a frame of E's"),
-        "row 12 should contain E-frame description, got: {:?}",
-        row12
+        "row 12 should contain E-frame description, got: {row12:?}"
     );
     let row13 = &screen[13];
     assert!(
         row13.contains("with  one (1) free position around it"),
-        "row 13 should contain position description, got: {:?}",
-        row13
+        "row 13 should contain position description, got: {row13:?}"
     );
 
     // Cursor should be at the end of the last text line
@@ -1299,7 +1303,7 @@ fn build_box_test_bytes_132col() -> Vec<u8> {
 
     // Draw left border with '+' using IND
     out.extend_from_slice(b"\x1b[2;2H");
-    for _row in 2..=max_lines - 1 {
+    for _row in 2..max_lines {
         out.push(b'+');
         out.extend_from_slice(b"\x1b[1D");
         out.extend_from_slice(b"\x1bD");
@@ -1307,7 +1311,7 @@ fn build_box_test_bytes_132col() -> Vec<u8> {
 
     // Draw right border with '+' using RI
     out.extend_from_slice(format!("\x1b[{};{}H", max_lines - 1, width - 1).as_bytes());
-    for _row in (2..=max_lines - 1).rev() {
+    for _row in (2..max_lines).rev() {
         out.push(b'+');
         out.extend_from_slice(b"\x1b[1D");
         out.extend_from_slice(b"\x1bM");
@@ -1315,7 +1319,7 @@ fn build_box_test_bytes_132col() -> Vec<u8> {
 
     // Draw left/right '*' on each row
     out.extend_from_slice(b"\x1b[2;1H");
-    for row in 2..=max_lines - 1 {
+    for row in 2..max_lines {
         out.push(b'*');
         out.extend_from_slice(format!("\x1b[{row};{width}H").as_bytes());
         out.push(b'*');
@@ -1396,7 +1400,7 @@ fn box_drawing_test_132col() {
 
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate() {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
     let cursor = h.cursor_pos();
     eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
@@ -1435,8 +1439,7 @@ fn box_drawing_test_132col() {
     let row10 = &screen[10];
     assert!(
         row10.contains("The screen should be cleared"),
-        "row 10 should contain descriptive text, got: {:?}",
-        row10
+        "row 10 should contain descriptive text, got: {row10:?}"
     );
 }
 
@@ -1477,7 +1480,7 @@ fn build_autowrap_test_bytes_132col() -> Vec<u8> {
                 out.push(b'\n');
             }
             1 => {
-                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};{width}H").as_bytes());
                 out.push(on_right[i - 1]);
                 out.push(on_left[i]);
                 out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
@@ -1503,9 +1506,9 @@ fn build_autowrap_test_bytes_132col() -> Vec<u8> {
             _ => {
                 out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
                 out.push(b'\n');
-                out.extend_from_slice(format!("\x1b[{};1H", region).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};1H").as_bytes());
                 out.push(on_left[i]);
-                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};{width}H").as_bytes());
                 out.push(on_right[i]);
             }
         }
@@ -1530,7 +1533,7 @@ fn decawm_mixing_control_and_print_characters_132col() {
 
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate() {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
 
     // Check header lines (above scroll region)
@@ -1558,8 +1561,8 @@ fn decawm_mixing_control_and_print_characters_132col() {
     }
     let left_str: String = left_chars.iter().collect();
     let right_str: String = right_chars.iter().collect();
-    eprintln!("left  margin chars: {:?}", left_str);
-    eprintln!("right margin chars: {:?}", right_str);
+    eprintln!("left  margin chars: {left_str:?}");
+    eprintln!("right margin chars: {right_str:?}");
 
     assert_eq!(
         left_str.trim(),
@@ -1627,7 +1630,7 @@ fn build_autowrap_test_bytes() -> Vec<u8> {
             1 => {
                 // case 1: simple wrapping
                 // cup(region, width) → ESC[18;80H  then on_right[i-1] on_left[i]
-                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};{width}H").as_bytes());
                 out.push(on_right[i - 1]);
                 out.push(on_left[i]);
                 // cup(region+1, width) → ESC[19;80H
@@ -1664,10 +1667,10 @@ fn build_autowrap_test_bytes() -> Vec<u8> {
                 out.extend_from_slice(format!("\x1b[{};{}H", region + 1, width).as_bytes());
                 out.push(b'\n');
                 // cup(region, 1) → ESC[18;1H  then on_left[i]
-                out.extend_from_slice(format!("\x1b[{};1H", region).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};1H").as_bytes());
                 out.push(on_left[i]);
                 // cup(region, width) → ESC[18;80H  then on_right[i]
-                out.extend_from_slice(format!("\x1b[{};{}H", region, width).as_bytes());
+                out.extend_from_slice(format!("\x1b[{region};{width}H").as_bytes());
                 out.push(on_right[i]);
             }
         }
@@ -1720,7 +1723,7 @@ fn decawm_mixing_control_and_print_characters() {
     // Debug: print the full screen
     let screen = h.screen_text();
     for (i, line) in screen.iter().enumerate() {
-        eprintln!("row {:2}: {:?}", i, line);
+        eprintln!("row {i:2}: {line:?}");
     }
     let cursor = h.cursor_pos();
     eprintln!("cursor: ({}, {})", cursor.x, cursor.y);
@@ -1752,8 +1755,8 @@ fn decawm_mixing_control_and_print_characters() {
     }
     let left_str: String = left_chars.iter().collect();
     let right_str: String = right_chars.iter().collect();
-    eprintln!("left  margin chars: {:?}", left_str);
-    eprintln!("right margin chars: {:?}", right_str);
+    eprintln!("left  margin chars: {left_str:?}");
+    eprintln!("right margin chars: {right_str:?}");
 
     // The correct output has all letters in strict alphabetical order with
     // no gaps. Every letter from the visible range must appear.

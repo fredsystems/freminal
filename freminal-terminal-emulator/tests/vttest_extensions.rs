@@ -135,7 +135,7 @@ fn ecma48_su_scroll_up_default() {
     let mut h = VtTestHelper::new_default();
     // Write content to first 5 rows.
     for i in 0..5_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     // SU(1): scroll up 1 line.  Row 0 ("Row 00") scrolls away.
     h.feed(b"\x1b[S");
@@ -151,7 +151,7 @@ fn ecma48_su_scroll_up_default() {
 fn ecma48_su_scroll_up_multiple() {
     let mut h = VtTestHelper::new_default();
     for i in 0..8_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     // SU(3): scroll up 3 lines.
     h.feed(b"\x1b[3S");
@@ -168,7 +168,7 @@ fn ecma48_su_scroll_up_multiple() {
 fn ecma48_sd_scroll_down_default() {
     let mut h = VtTestHelper::new_default();
     for i in 0..5_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     h.feed(b"\x1b[1;5r"); // scroll region rows 1-5 (1-indexed) = 0-4 (0-indexed)
     h.feed(b"\x1b[1;1H"); // home cursor to top of region

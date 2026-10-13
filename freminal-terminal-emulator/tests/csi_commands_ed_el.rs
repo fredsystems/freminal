@@ -24,12 +24,12 @@ fn ed_valid_modes_and_default() {
         "\x1b[J",  // Default param (should behave like 0J)
     ];
     for s in cases {
-        println!("ED case: {:?}", s);
+        println!("ED case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
-        assert!(!outs.is_empty(), "ED produced no output for case {:?}", s);
+        assert!(!outs.is_empty(), "ED produced no output for case {s:?}");
         // Prefer specific match if TerminalOutput::Erase* exists. Otherwise, non-empty validates code path.
         // Example (uncomment if available in your enum):
         // assert!(outs.iter().any(|o| matches!(o, TerminalOutput::Erase { .. })));
@@ -45,12 +45,12 @@ fn el_valid_modes_and_default() {
         "\x1b[K",  // Default param (should behave like 0K)
     ];
     for s in cases {
-        println!("EL case: {:?}", s);
+        println!("EL case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
-        assert!(!outs.is_empty(), "EL produced no output for case {:?}", s);
+        assert!(!outs.is_empty(), "EL produced no output for case {s:?}");
         // Example (if you have a dedicated variant):
         // assert!(outs.iter().any(|o| matches!(o, TerminalOutput::EraseLine { .. })));
     }
@@ -67,17 +67,16 @@ fn ed_el_overflow_and_malformed_and_recovery() {
     let malformed = ["\x1b[xJ", "\x1b[;J", "\x1b[xK", "\x1b[;K"];
     for s in malformed {
         let outs = push_seq(s);
-        println!("malformed {:?} -> {:?}", s, outs);
+        println!("malformed {s:?} -> {outs:?}");
         assert!(
             !outs.is_empty(),
-            "Parser produced no output for malformed {:?}",
-            s
+            "Parser produced no output for malformed {s:?}"
         );
     }
 
     // Recovery: after a malformed sequence, a valid one should still parse normally.
     let rec = push_seq("\x1b[xJ\x1b[2K\x1b[2J");
-    println!("recovery outs: {:?}", rec);
+    println!("recovery outs: {rec:?}");
     assert!(
         !rec.is_empty(),
         "Recovery path produced no output after malformed + valid sequences"

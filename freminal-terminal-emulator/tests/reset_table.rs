@@ -9,6 +9,9 @@
 //! The authoritative row list is the "131 Reset table" in
 //! `Documents/PLAN_VERSION_130.md`.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::ansi::FreminalAnsiParser;

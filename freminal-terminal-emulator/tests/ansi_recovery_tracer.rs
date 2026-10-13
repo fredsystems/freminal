@@ -66,10 +66,7 @@ fn alternating_csi_osc_standard_sequences_are_tolerant() {
     // If no control-type output was seen, this is still graceful as long as
     // the parser didn’t panic and returned plain text. We only fail on *no outputs*.
     if !has_control {
-        eprintln!(
-            "⚠️  Parser produced no control outputs, only plain text: {:?}",
-            outputs
-        );
+        eprintln!("⚠️  Parser produced no control outputs, only plain text: {outputs:?}");
     }
 
     assert!(

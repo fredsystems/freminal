@@ -17,6 +17,9 @@
 //! the resulting bytes through a headless emulator, and assert that prompt rows
 //! and finished command blocks are really recorded.
 
+// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use freminal_terminal_emulator::interface::TerminalEmulator;
 
 const WORKLOADS_SH: &str = include_str!("../../assets/profiling/task125/workloads.sh");

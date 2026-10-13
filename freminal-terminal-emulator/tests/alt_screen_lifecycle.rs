@@ -16,7 +16,7 @@
 //! direction.
 //!
 //! The reference behaviour is the "131 Decisions" section of
-//! `Documents/PLAN_VERSION_130.md` (the consensus of xterm, Ghostty, WezTerm
+//! `Documents/PLAN_VERSION_130.md` (the consensus of xterm, Ghostty, `WezTerm`
 //! and kitty).
 
 use crossbeam_channel::Receiver;
@@ -150,7 +150,7 @@ fn row(snap: &TerminalSnapshot, y: usize) -> String {
 }
 
 /// The cursor's 0-based `(x, y)` position.
-fn cursor(snap: &TerminalSnapshot) -> (usize, usize) {
+const fn cursor(snap: &TerminalSnapshot) -> (usize, usize) {
     (snap.cursor_pos.x, snap.cursor_pos.y)
 }
 

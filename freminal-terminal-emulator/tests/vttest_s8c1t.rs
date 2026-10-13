@@ -77,12 +77,11 @@ fn s7c1t_revert_cursor_report_uses_7bit_csi() {
     // Response should be: ESC [ 1 ; 1 R (7-bit)
     assert_eq!(
         response, b"\x1b[1;1R",
-        "expected 7-bit CSI cursor report after S7C1T, got {:?}",
-        response
+        "expected 7-bit CSI cursor report after S7C1T, got {response:?}"
     );
 }
 
-/// Full vttest tst_S8C1T round-trip: toggle 8-bit on, check DSR; toggle off, check DSR.
+/// Full vttest `tst_S8C1T` round-trip: toggle 8-bit on, check DSR; toggle off, check DSR.
 ///
 /// Replicates vttest-20251205/vt220.c lines 191-226 exactly.
 #[test]

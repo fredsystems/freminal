@@ -330,7 +330,7 @@ fn test_scroll_offset_zero_in_alternate() {
 
 // ─── synchronized updates (?2026) timeout ────────────────────────────────────
 
-/// After the program sets DontDraw (?2026h) and then immediately resets it
+/// After the program sets `DontDraw` (?2026h) and then immediately resets it
 /// (?2026l), the snapshot must carry `skip_draw = false`.
 #[test]
 fn test_sync_updates_normal_reset() {
@@ -353,7 +353,7 @@ fn test_sync_updates_normal_reset() {
     );
 }
 
-/// When a program sets DontDraw but never resets it, `build_snapshot` must
+/// When a program sets `DontDraw` but never resets it, `build_snapshot` must
 /// automatically override `skip_draw` to `false` once 200 ms have elapsed.
 ///
 /// This test sleeps briefly past the 200 ms boundary.  It is the only test
@@ -386,7 +386,7 @@ fn test_sync_updates_timeout_auto_resume() {
     );
 }
 
-/// When DontDraw is active and then reset by the program *before* the timeout,
+/// When `DontDraw` is active and then reset by the program *before* the timeout,
 /// a subsequent `build_snapshot` call after the 200 ms window must still report
 /// `skip_draw = false` (not re-fire the timeout on stale timer state).
 #[test]

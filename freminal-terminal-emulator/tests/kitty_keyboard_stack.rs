@@ -136,16 +136,14 @@ fn query_responds_zero_when_empty() {
 
 #[test]
 fn max_stack_depth_evicts_oldest() {
+    let max_depth = u32::try_from(KittyKeyboardFlags::MAX_STACK_DEPTH).unwrap();
     let mut handler = TerminalHandler::new(80, 24);
-    for i in 0..=KittyKeyboardFlags::MAX_STACK_DEPTH as u32 {
+    for i in 0..=max_depth {
         handler.process_outputs(&[TerminalOutput::KittyKeyboardPush(i)]);
     }
     // Stack should be capped at MAX_STACK_DEPTH.  The oldest entry (0) was
     // evicted; the top should be MAX_STACK_DEPTH (the last pushed value).
-    assert_eq!(
-        handler.kitty_keyboard_flags(),
-        KittyKeyboardFlags::MAX_STACK_DEPTH as u32
-    );
+    assert_eq!(handler.kitty_keyboard_flags(), max_depth);
     // Verify by popping MAX_STACK_DEPTH - 1 times and checking the bottom entry.
     for _ in 0..KittyKeyboardFlags::MAX_STACK_DEPTH - 1 {
         handler.process_outputs(&[TerminalOutput::KittyKeyboardPop(1)]);
