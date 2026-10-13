@@ -6106,7 +6106,8 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
 - **Status:** done, for every item.
   - **`NO_AUTO_START` calls.** zbus's flag-taking blocking call has no timeout, so
     `GetNameOwner` and `GetCapabilities` run on a short-lived `freminal-osc99-call` helper
-    thread bounded at 25 s.
+    thread bounded at 25 s. (**Superseded by 138.C26:** an async call raced against a timer, with
+    no thread.)
   - **Reused D-Bus id.** The evicted instance gets `Closed`, so its registry leg cannot stay
     open.
   - **Rig.** It stamps sender headers on p2p messages, so the bus-mode owner logic is
@@ -6626,6 +6627,42 @@ review of the cleanup diff follows.
   desktop and freminal fallbacks give `None`; a rig test sees `app_icon` and `image-path`.
 - **Status:** done.
 
+#### 138.C25 — Bound the D-Bus command queue
+
+- **Surfaced:** CodeRabbit on PR #555 (`dbus_service/mod.rs`).
+- **Problem:** the GUI-to-dispatcher command channel was unbounded. Each `Show` carries a
+  full `Notification99Data` clone, icon bytes included. While a hung daemon holds the
+  dispatcher for up to 25 s per call, a program flooding OSC 99 grows the queue without
+  limit. The untracked leg already drops what does not fit its bounded queue.
+- **Fix:** a bounded channel (`COMMAND_QUEUE_CAPACITY` = 256) with `try_send`. A full queue
+  returns `Osc99SystemDispatch::Failed`, which the registry already handles by ending the
+  leg. The GUI thread never blocks.
+- **Tests:** a show and a close to a full queue both fail without blocking and queue no event.
+- **Status:** done.
+
+#### 138.C26 — No helper thread for `NO_AUTO_START` calls
+
+- **Surfaced:** Copilot on PR #555 (`dbus_service/wire.rs`).
+- **Problem:** `GetNameOwner` and `GetCapabilities` ran on a detached helper thread so they
+  could be timed out. A timed-out thread stayed blocked until a reply or the end of the
+  connection. The cooldown spaced out new probes but did not cap their number, so a daemon
+  that kept calls pending leaked one thread and one connection clone per probe.
+- **Fix:** `call_no_auto_start` builds the call with the async proxy on the blocking
+  connection's inner connection and races it against a `smol::Timer` under `smol::block_on`.
+  This is the async-io runtime zbus already uses; `smol` was already a workspace dependency.
+  On a timeout the pending call is dropped, so nothing waits on.
+- **Tests:** an unanswered call times out with zbus's timeout error, and the connection then
+  answers a normal call.
+- **Status:** done.
+
+#### 138.C27 — OSC 99 filters editor placement
+
+- **Surfaced:** CodeRabbit on PR #555 (`settings.rs`).
+- **Problem:** the filters editor (its own heading and help text) sat between the "OSC 99" and
+  "Command finished" routing rows, so the "Command finished" row read as a filter setting.
+- **Fix:** the editor now follows the last routing row.
+- **Status:** done.
+
 ### 138 Confirmation review (2026-10-12)
 
 Two CODE-REVIEW passes over `1986117d..HEAD` checked every finding in the table above.
@@ -6644,7 +6681,7 @@ The new findings are disposed of in 138.C18–C22.
 
 | Gate                                                       | Result                                         |
 | ---------------------------------------------------------- | ---------------------------------------------- |
-| `cargo xtask test`                                         | 8,837 passed, doctests pass (after C23–C24)    |
+| `cargo xtask test`                                         | 8,839 passed, doctests pass (after C23–C27)    |
 | `cargo clippy --all-targets --all-features -- -D warnings` | clean                                          |
 | `cargo fmt --all -- --check`                               | clean                                          |
 | `cargo machete`                                            | clean                                          |

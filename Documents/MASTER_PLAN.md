@@ -824,7 +824,7 @@ Update this section as tasks complete:
 | 130  | 2026-10-10 | 2026-10-11 | 130.1-130.9, C1-C3, C5-C6, two review passes; merged via PR #537 (`61b86bf5`)      |
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
-| 138  | 2026-10-12 |            | 138.1-138.18, C1-C22 done; adversarial + confirmation reviews done; PR pending     |
+| 138  | 2026-10-12 |            | 138.1-138.18, C1-C27 done; reviews + manual test done; PR #555 open                |
 
 ---
 

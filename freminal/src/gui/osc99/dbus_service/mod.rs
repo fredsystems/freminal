@@ -21,12 +21,14 @@
 //! The dispatcher owns the D-Bus-id to instance map, so a signal that arrives
 //! while a `Notify` call is in flight is only processed after the call has
 //! recorded its id. That removes the ordering race between the threads.
-//! `GetNameOwner` and `GetCapabilities` run on a short-lived helper thread
-//! (`freminal-osc99-call`) so that they can carry the `NO_AUTO_START` flag
-//! *and* be bounded by [`OSC99_DBUS_METHOD_TIMEOUT`]; see `wire::call_with_timeout`.
+//! `GetNameOwner` and `GetCapabilities` go through the async proxy, raced
+//! against a timer on the dispatcher thread, so that they can carry the
+//! `NO_AUTO_START` flag *and* be bounded by [`OSC99_DBUS_METHOD_TIMEOUT`]; see
+//! `wire::call_no_auto_start`.
 //!
 //! The GUI talks to the service through an [`Osc99DbusHandle`]: commands go in
-//! over one crossbeam channel and [`Osc99DbusEvent`]s come back over another,
+//! over one bounded crossbeam channel (a command that does not fit fails at
+//! the handle) and [`Osc99DbusEvent`]s come back over another,
 //! each event followed by a repaint wake so an idle window still drains it.
 //!
 //! # Shutdown
@@ -37,9 +39,8 @@
 //! event sender and the signal receiver. A signal pump is blocked reading the
 //! bus and notices only when it next has something to forward: it exits when
 //! that send fails, or when the connection ends. Until then it is idle and
-//! holds a clone of the connection. A helper call thread exits when its call
-//! is answered or the connection ends. None of them does any work after the
-//! dispatcher is gone, and all of them end with the process.
+//! holds a clone of the connection. Neither pump does any work after the
+//! dispatcher is gone, and both end with the process.
 //!
 //! # Owner tracking
 //!
@@ -117,7 +118,7 @@ pub use wake::Osc99Wake;
 
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, select};
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
 use zbus::blocking::{Connection, MessageIterator};
@@ -165,12 +166,20 @@ const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 /// their own, so without it a daemon that never answers would block the
 /// dispatcher thread forever and silently end the Linux leg. The bus
 /// connection carries it as its `method_timeout` (which bounds `Notify` and
-/// `CloseNotification`), and `wire::call_with_timeout` applies it to the calls zbus
+/// `CloseNotification`), and `wire::call_no_auto_start` applies it to the calls zbus
 /// cannot bound itself. A timed-out `Notify` becomes
 /// [`Osc99DbusEvent::ShowFailed`], a timed-out `CloseNotification` falls back
 /// to [`Osc99DbusEvent::Closed`], and any timeout starts the
 /// `state::OSC99_DAEMON_COOLDOWN`.
 const OSC99_DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// How many commands may wait for the dispatcher. The dispatcher serves one
+/// at a time, and a hung daemon holds each call for up to
+/// [`OSC99_DBUS_METHOD_TIMEOUT`], so a program flooding OSC 99 must not grow
+/// the queue without bound. A command that does not fit fails at the handle
+/// (the registry then ends the leg), as the untracked leg drops what does not
+/// fit its queue (138.C25).
+const COMMAND_QUEUE_CAPACITY: usize = 256;
 
 // ── Public vocabulary ──────────────────────────────────────────────────────
 
@@ -273,13 +282,21 @@ impl Osc99DbusHandle {
 }
 
 impl Osc99DbusHandle {
-    /// Queue `command`. A dispatcher that is gone will never answer, so the
-    /// caller must end the instance's system leg itself.
+    /// Queue `command` without blocking. A full queue or a dispatcher that is
+    /// gone will never answer, so the caller must end the instance's system
+    /// leg itself.
     fn dispatch(&self, command: DbusCommand, what: &'static str) -> Osc99SystemDispatch {
-        match self.commands.send(command) {
+        match self.commands.try_send(command) {
             Ok(()) => Osc99SystemDispatch::Queued,
-            Err(e) => {
-                tracing::warn!("OSC 99: notification service is gone; {what} failed: {e}");
+            Err(TrySendError::Full(_)) => {
+                tracing::debug!(
+                    "OSC 99: notification service queue is full ({COMMAND_QUEUE_CAPACITY}); \
+                     {what} failed"
+                );
+                Osc99SystemDispatch::Failed
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!("OSC 99: notification service is gone; {what} failed");
                 Osc99SystemDispatch::Failed
             }
         }
@@ -413,7 +430,7 @@ fn start<C>(
 where
     C: FnMut() -> zbus::Result<Link> + Send + 'static,
 {
-    let (command_tx, command_rx) = crossbeam_channel::unbounded();
+    let (command_tx, command_rx) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let sink = EventSink {
         events: event_tx.clone(),
@@ -1982,6 +1999,36 @@ mod tests {
             "a close fails the same way"
         );
         assert_eq!(handle.try_events().next(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_request_to_a_full_queue_returns_failed_without_blocking() -> TestResult {
+        let (waker, _woken) = counting_waker();
+        let mut handle = start(
+            || Err(zbus::Error::Failure("no bus".to_owned())),
+            waker,
+            Box::new(NoIconLookup),
+            Duration::from_secs(3600),
+        );
+        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+
+        // A queue nobody drains, filled to its capacity, as when the
+        // dispatcher is stuck on a hung daemon.
+        let (full_tx, _full_rx) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
+        for n in 0..COMMAND_QUEUE_CAPACITY {
+            full_tx.try_send(DbusCommand::Close {
+                instance: instance(u64::try_from(n)?),
+            })?;
+        }
+        handle.commands = full_tx;
+
+        assert_eq!(
+            handle.show(instance(9_000), None, &notification()),
+            Osc99SystemDispatch::Failed
+        );
+        assert_eq!(handle.close(instance(9_000)), Osc99SystemDispatch::Failed);
+        assert_eq!(handle.try_events().next(), None, "the caller ends the leg");
         Ok(())
     }
 }

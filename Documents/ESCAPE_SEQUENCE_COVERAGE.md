@@ -14,7 +14,7 @@ pending state, finalisation limits, the toast, Linux/BSD zbus and macOS/Windows
 untracked legs, per-pane lifecycle (update, close, alive), pane-aware `o=`,
 `a=focus`, terminal-side expiry, `osc99_filters` and a truthful `p=?` per
 routing, platform and daemon. The notes were re-checked against the code after
-the adversarial-review and confirmation-review cleanups (138.C6–138.C24),
+the adversarial-review and confirmation-review cleanups (138.C6–138.C27),
 including the 256-character limit on decoded `f=`, `s=`, `n=` and `t=` values,
 rejected id-less chunks, closing a gone pane's notifications, the D-Bus
 reconnect timer, the lazy icon scan, the toast exit fade and the icon

@@ -1951,12 +1951,14 @@ impl SettingsModal {
             &mut self.draft.notifications.routing_osc_text,
         );
         Self::notification_routing_row(ui, "OSC 99", &mut self.draft.notifications.routing_osc99);
-        self.show_osc99_filters_editor(ui);
         Self::notification_routing_row(
             ui,
             "Command finished",
             &mut self.draft.notifications.routing_command_finished,
         );
+        // After the last routing row: the editor opens its own heading, so
+        // any row below it would read as a filter setting.
+        self.show_osc99_filters_editor(ui);
 
         self.show_freminal_toast_routing_section(ui);
 

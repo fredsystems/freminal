@@ -1578,6 +1578,7 @@ dependencies = [
  "rustybuzz",
  "self_cell",
  "serde",
+ "smol",
  "swash",
  "sysinfo",
  "tauri-winrt-notification",

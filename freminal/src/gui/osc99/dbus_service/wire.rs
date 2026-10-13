@@ -7,10 +7,11 @@
 //! carry it: the `Notify` arguments and hints, the typed replies, and the
 //! bounded calls to the daemon and the bus driver.
 
-use crossbeam_channel::RecvTimeoutError;
+use std::time::Duration;
+
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, NotificationUrgency};
 use serde::{Serialize, Serializer};
-use zbus::blocking::{Connection, Proxy};
+use zbus::blocking::Connection;
 use zbus::proxy::MethodFlags;
 use zbus::zvariant::{Signature, Type, as_value};
 
@@ -261,88 +262,98 @@ pub(super) fn is_no_daemon(error: &zbus::Error) -> bool {
 
 /// Whether `error` is a method-call timeout.
 ///
-/// zbus has no variant for it: its `method_timeout` (and [`call_with_timeout`])
+/// zbus has no variant for it: its `method_timeout` (and [`call_no_auto_start`])
 /// fail with `Error::InputOutput` carrying an [`std::io::ErrorKind::TimedOut`]
 /// `io::Error` (zbus 5.19, `abstractions/timeout.rs`).
 pub(super) fn is_method_timeout(error: &zbus::Error) -> bool {
     matches!(error, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut)
 }
 
-/// Run `call` on a short-lived helper thread and wait at most
-/// [`OSC99_DBUS_METHOD_TIMEOUT`] for it.
+/// Call `method` with the `NO_AUTO_START` flag and wait at most `timeout`
+/// (in production [`OSC99_DBUS_METHOD_TIMEOUT`]) for the reply.
 ///
-/// A [`zbus::blocking::Proxy`] is the only public way to send a call with
-/// message flags (`NO_AUTO_START`), and it does not apply the connection's
-/// `method_timeout` the way `Connection::call_method` does, so a daemon that
-/// never answers would block the caller for good. The helper thread keeps the
-/// blocking call off the dispatcher: if it times out, the thread is left
-/// blocked until the reply or the end of the connection (it holds no state
-/// and does nothing after), and the caller gets the same error zbus itself
-/// uses for a timeout, see [`is_method_timeout`]. The cooldown
-/// (`state::OSC99_DAEMON_COOLDOWN`) bounds how many such threads can pile up.
-fn call_with_timeout<R, F>(connection: &Connection, call: F) -> zbus::Result<R>
+/// A proxy is the only public way to send a call with message flags, and it
+/// does not apply the connection's `method_timeout` the way
+/// `Connection::call_method` does, so a daemon that never answers would block
+/// the caller for good. The call is therefore made with the async proxy and
+/// raced against a timer on the calling thread. On a timeout the pending call
+/// is dropped, which ends the wait for its reply: nothing is left behind (an
+/// earlier version waited on a detached helper thread, which leaked one thread
+/// per timed-out probe while the daemon stayed hung; 138.C26). The error is
+/// the one zbus itself uses for a timeout, see [`is_method_timeout`].
+fn call_no_auto_start<B, R>(
+    connection: &Connection,
+    target: CallTarget,
+    method: &'static str,
+    body: &B,
+    timeout: Duration,
+) -> zbus::Result<R>
 where
-    R: Send + 'static,
-    F: FnOnce(&Connection) -> zbus::Result<R> + Send + 'static,
+    B: Serialize + zbus::zvariant::DynamicType,
+    R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
 {
-    let (result_tx, result_rx) = crossbeam_channel::bounded(1);
-    let connection = connection.clone();
-    std::thread::Builder::new()
-        .name("freminal-osc99-call".to_owned())
-        .spawn(move || {
-            if result_tx.send(call(&connection)).is_err() {
-                tracing::debug!("OSC 99: a call finished after its caller gave up");
-            }
-        })
-        .map_err(zbus::Error::from)?;
-    match result_rx.recv_timeout(OSC99_DBUS_METHOD_TIMEOUT) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(zbus::Error::from(std::io::Error::new(
+    use smol::future::FutureExt;
+
+    let call = async {
+        zbus::Proxy::new(
+            connection.inner(),
+            target.destination,
+            target.path,
+            target.interface,
+        )
+        .await?
+        .call_with_flags::<_, _, R>(method, MethodFlags::NoAutoStart.into(), body)
+        .await?
+        .ok_or(zbus::Error::InvalidReply)
+    };
+    let timer = async {
+        smol::Timer::after(timeout).await;
+        Err(zbus::Error::from(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "timed out",
-        ))),
-        Err(RecvTimeoutError::Disconnected) => Err(zbus::Error::Failure(
-            "the call thread ended without an answer".to_owned(),
-        )),
-    }
+        )))
+    };
+    smol::block_on(call.or(timer))
+}
+
+/// Where a [`call_no_auto_start`] call goes.
+#[derive(Debug, Clone, Copy)]
+struct CallTarget {
+    destination: &'static str,
+    path: &'static str,
+    interface: &'static str,
 }
 
 /// Call the bus driver's `GetNameOwner` for the notification daemon's name,
 /// without starting anything (`NO_AUTO_START`).
 pub(super) fn fetch_daemon_owner(connection: &Connection) -> zbus::Result<String> {
-    call_with_timeout(connection, |connection| {
-        Proxy::new(
-            connection,
-            BUS_DRIVER_NAME,
-            BUS_DRIVER_PATH,
-            BUS_DRIVER_INTERFACE,
-        )?
-        .call_with_flags::<_, _, String>(
-            "GetNameOwner",
-            MethodFlags::NoAutoStart.into(),
-            &NOTIFICATIONS_SERVICE,
-        )?
-        .ok_or(zbus::Error::InvalidReply)
-    })
+    call_no_auto_start(
+        connection,
+        CallTarget {
+            destination: BUS_DRIVER_NAME,
+            path: BUS_DRIVER_PATH,
+            interface: BUS_DRIVER_INTERFACE,
+        },
+        "GetNameOwner",
+        &NOTIFICATIONS_SERVICE,
+        OSC99_DBUS_METHOD_TIMEOUT,
+    )
 }
 
 /// Call `GetCapabilities`, without D-Bus-activating a daemon
 /// (`NO_AUTO_START`): the first `Notify` does that.
 pub(super) fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<String>> {
-    call_with_timeout(connection, |connection| {
-        Proxy::new(
-            connection,
-            NOTIFICATIONS_SERVICE,
-            NOTIFICATIONS_PATH,
-            NOTIFICATIONS_INTERFACE,
-        )?
-        .call_with_flags::<_, _, Vec<String>>(
-            "GetCapabilities",
-            MethodFlags::NoAutoStart.into(),
-            &(),
-        )?
-        .ok_or(zbus::Error::InvalidReply)
-    })
+    call_no_auto_start(
+        connection,
+        CallTarget {
+            destination: NOTIFICATIONS_SERVICE,
+            path: NOTIFICATIONS_PATH,
+            interface: NOTIFICATIONS_INTERFACE,
+        },
+        "GetCapabilities",
+        &(),
+        OSC99_DBUS_METHOD_TIMEOUT,
+    )
 }
 
 /// Call `CloseNotification` for the daemon's `dbus_id`.
@@ -522,6 +533,38 @@ mod tests {
             hint::<String>(&map, "image-path").as_deref(),
             Some("dialog-error")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unanswered_call_times_out_and_leaves_the_connection_usable() -> TestResult {
+        let rig = rig(&["body"])?;
+        let notifications = CallTarget {
+            destination: NOTIFICATIONS_SERVICE,
+            path: NOTIFICATIONS_PATH,
+            interface: NOTIFICATIONS_INTERFACE,
+        };
+
+        // The fake daemon never answers a method it does not know.
+        let outcome = call_no_auto_start::<_, String>(
+            &rig.client,
+            notifications,
+            "NeverAnswered",
+            &(),
+            Duration::from_millis(100),
+        );
+        let error = outcome.err().ok_or("the call did not time out")?;
+        assert!(is_method_timeout(&error), "{error}");
+
+        // The dropped call did not disturb the connection.
+        let advertised = call_no_auto_start::<_, Vec<String>>(
+            &rig.client,
+            notifications,
+            "GetCapabilities",
+            &(),
+            Duration::from_secs(5),
+        )?;
+        assert_eq!(advertised, ["body"]);
         Ok(())
     }
 
