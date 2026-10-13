@@ -6565,6 +6565,13 @@ review of the cleanup diff follows.
 - **Tests:** a foreign-owned directory is refused (if a foreign uid cannot be made in a
   test, the comparison is unit-tested); the sweep removes old directories and keeps fresh
   ones; `close_keyed` fades, then emits `Closed` once.
+- **Status:** done.
+  - `owned_by` returns an `Ownership` enum. The probe uid is memoised per process by the
+    orchestrator, so later checks need no extra file.
+  - The sweep runs once per store and never follows symlinks.
+  - `close_keyed` fades over `ANIM_OUT`. `Closed` now arrives from `sweep_expired` (the next
+    `show`), as expiry already does. A closing toast ignores clicks and hover.
+    `replace_keyed` on a closing toast cancels the close.
 
 #### 138.C22 — Documentation follow-ups from the confirmation review
 

@@ -3322,6 +3322,9 @@ mod tests {
 
         let effects = registry.close(a.origin, "n");
         let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
+        assert_eq!(toasts.len(), 1, "the toast fades out before it leaves");
+        assert!(toasts.take_events().is_empty(), "Closed waits for the fade");
+        toasts.finish_closing_fades();
         assert_eq!(toasts.len(), 0);
         let events = toasts.take_events();
         assert_eq!(events.len(), 1);

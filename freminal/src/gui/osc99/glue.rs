@@ -1051,6 +1051,8 @@ mod tests {
             &config(NotificationRouting::Toast),
         );
 
+        assert_eq!(rig.toasts.len(), 1, "the toast fades out first");
+        rig.toasts.finish_closing_fades();
         assert_eq!(rig.toasts.len(), 0, "the close removed the toast");
     }
 
@@ -1179,6 +1181,8 @@ mod tests {
 
         let later = Instant::now() + Duration::from_secs(5);
         let (next, _) = rig.run(|registry, _, sink| expire_due(registry, sink, later));
+        assert_eq!(rig.toasts.len(), 1, "the expired toast fades out first");
+        rig.toasts.finish_closing_fades();
         assert_eq!(rig.toasts.len(), 0, "the expired toast is closed");
         assert_eq!(next, None, "nothing is left to expire");
 
@@ -1214,6 +1218,7 @@ mod tests {
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
 
         rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.finish_closing_fades();
         rig.deliver_toast_events();
 
         assert_eq!(
@@ -1236,6 +1241,7 @@ mod tests {
         let notifications = config(NotificationRouting::Toast);
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
         rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.finish_closing_fades();
 
         rig.deliver_toast_events();
         rig.deliver_toast_events();
@@ -1780,6 +1786,8 @@ mod tests {
         drop(pane.tx);
         rig.run(|registry, _, sink| prune_dead_panes(registry, sink));
 
+        // The toast fades out first, then leaves.
+        rig.toasts.finish_closing_fades();
         assert_eq!(rig.toasts.len(), 0, "the toast does not outlive its pane");
         assert!(rig.registry.instances().is_empty());
         // The toast's `Closed` event reaches a registry that has forgotten

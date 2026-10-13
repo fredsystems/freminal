@@ -176,6 +176,10 @@ impl ToastStack {
     /// [`click_target`] (dismiss square, button, or body) and reported as
     /// events via [`Self::apply_click`].
     ///
+    /// A toast that is fading out after [`Self::close_keyed`] is not held by
+    /// hover and its click is ignored (the click is still consumed, so the
+    /// terminal beneath never sees it).
+    ///
     /// A click is acted on only when the release lands on the same part the
     /// press began on (`self.press`, see [`Self::track_press`]): pressing on a
     /// button and releasing on the body, or on another button, does nothing
@@ -239,7 +243,10 @@ impl ToastStack {
 
         if let Some(pos) = pointer.hover
             && let Some(id) = topmost_hit(outputs, pos)
-            && let Some(toast) = self.entries.iter_mut().find(|t| t.id == id)
+            && let Some(toast) = self
+                .entries
+                .iter_mut()
+                .find(|t| t.id == id && t.closing.is_none())
         {
             toast.last_hovered = Some(now);
         }

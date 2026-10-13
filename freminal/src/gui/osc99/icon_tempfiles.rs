@@ -15,12 +15,13 @@
 //! which would follow an existing path), and:
 //!
 //! - **Unix:** with mode `0700`, and its files with `0600`. A directory that
-//!   already exists is used only if it is a real directory (not a symlink) with
-//!   no group or other permission bits; anything else is refused. An existing
-//!   safe directory is one a crashed process with the same pid left behind,
-//!   and the store empties it on first use. Ownership is not checked
-//!   separately: a directory owned by someone else with mode `0700` is one this
-//!   process cannot write to, so the write fails rather than being exposed.
+//!   already exists is used only if it is a real directory (not a symlink)
+//!   with no group or other permission bits **and** owned by the current user;
+//!   anything else is refused. The current user's uid is read from a probe
+//!   file created (and deleted) in the parent temp directory, then compared
+//!   with the directory's ([`owned_by`]); this needs no unsafe code and no
+//!   `libc`. An existing safe directory is one a crashed process with the same
+//!   pid left behind, and the store empties it on first use.
 //! - **Windows:** the default ACL of the user's temp directory applies, which
 //!   is already private to the user. An existing path that is not a real
 //!   directory is refused.
@@ -48,16 +49,27 @@
 //! files forever to avoid this would leak disk space for every distinct icon a
 //! program sends, which is the worse trade.
 //!
-//! Only files this store wrote are ever deleted (the one exception is the
-//! first-use clean-up of a stale directory left by an earlier process with the
-//! same pid, which is by construction ours).
+//! # Stale directories
+//!
+//! A process that is killed cannot remove its directory, so on first use the
+//! store also sweeps its siblings ([`sweep_stale_dirs`]): a
+//! `freminal-osc99-icons-*` directory in the same parent that passes the same
+//! checks as above (a real private directory owned by the current user) and
+//! has not been modified for [`STALE_DIR_AGE`] (a day) has its files deleted
+//! and is removed. Symlinks are never followed: a symlink in a directory is
+//! removed as a link, and a symlink at a sibling's name is not a real
+//! directory, so it is left alone.
+//!
+//! Apart from that sweep and the first-use clean-up of a stale directory left
+//! by an earlier process with the same pid, only files this store wrote are
+//! ever deleted.
 
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most icon files kept on disk. The least recently used is deleted when
 /// a new one would exceed this.
@@ -66,10 +78,17 @@ pub const MAX_ICON_TEMP_FILES: usize = 64;
 /// How long a file may go unused before it is deleted.
 pub const MAX_ICON_AGE: Duration = Duration::from_mins(10);
 
+/// How long a sibling icon directory may go unmodified before the first-use
+/// sweep ([`sweep_stale_dirs`]) removes it.
+pub const STALE_DIR_AGE: Duration = Duration::from_hours(24);
+
+/// The start of every icon directory's name; the process id follows.
+const ICON_DIR_PREFIX: &str = "freminal-osc99-icons-";
+
 /// The directory the icons of process `pid` live in, under `base`:
 /// `<base>/freminal-osc99-icons-<pid>`.
 fn icon_dir_in(base: &Path, pid: u32) -> PathBuf {
-    base.join(format!("freminal-osc99-icons-{pid}"))
+    base.join(format!("{ICON_DIR_PREFIX}{pid}"))
 }
 
 /// The directory icons are written to by default, one per process:
@@ -113,6 +132,15 @@ struct Entry {
     last_used: Instant,
 }
 
+/// Whether the first-use sweep of stale sibling directories has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepState {
+    /// Not yet: the next successful [`IconTempFiles::ensure_dir`] runs it.
+    Pending,
+    /// Done; it never runs again for this store.
+    Done,
+}
+
 /// The icon files one process has written, least recently used first.
 #[derive(Debug)]
 pub struct IconTempFiles {
@@ -122,6 +150,8 @@ pub struct IconTempFiles {
     /// timestamps are non-decreasing front to back, so age eviction only ever
     /// looks at the front.
     order: VecDeque<Entry>,
+    /// Whether stale sibling directories have been swept yet.
+    sweep: SweepState,
 }
 
 impl IconTempFiles {
@@ -131,6 +161,7 @@ impl IconTempFiles {
         Self {
             dir,
             order: VecDeque::new(),
+            sweep: SweepState::Pending,
         }
     }
 
@@ -200,21 +231,26 @@ impl IconTempFiles {
     /// Make sure the private directory exists.
     ///
     /// A directory that is already there is accepted only if
-    /// [`verify_private_dir`] approves it. When the store has written nothing
+    /// [`verify_existing_dir`] approves it. When the store has written nothing
     /// yet, such a directory is a stale one from an earlier process with the
-    /// same pid, and its files are deleted.
-    fn ensure_dir(&self) -> io::Result<()> {
+    /// same pid, and its files are deleted. The first time a directory is
+    /// secured, stale sibling directories are swept ([`sweep_stale_dirs`]).
+    fn ensure_dir(&mut self) -> io::Result<()> {
         match create_private_dir(&self.dir) {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                verify_private_dir(&self.dir)?;
+                verify_existing_dir(&self.dir)?;
                 if self.order.is_empty() {
                     clear_dir_files(&self.dir);
                 }
-                Ok(())
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
         }
+        if self.sweep == SweepState::Pending {
+            self.sweep = SweepState::Done;
+            sweep_stale_dirs(&self.dir, SystemTime::now(), STALE_DIR_AGE);
+        }
+        Ok(())
     }
 
     /// Delete every file this store wrote, then the directory if it is empty.
@@ -271,6 +307,154 @@ fn verify_private_dir(dir: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Who owns a directory, relative to the current user.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ownership {
+    /// The directory belongs to the current user.
+    Ours,
+    /// Someone else owns it; it is not ours to put icons in or delete.
+    Foreign,
+}
+
+/// Whether a directory owned by `dir_uid` is owned by the user `our_uid`.
+#[cfg(unix)]
+const fn owned_by(dir_uid: u32, our_uid: u32) -> Ownership {
+    if dir_uid == our_uid {
+        Ownership::Ours
+    } else {
+        Ownership::Foreign
+    }
+}
+
+/// The current user's uid, found without unsafe code or `libc`: create a
+/// private probe file in `parent`, read the owner the file system gave it,
+/// and delete it.
+#[cfg(unix)]
+fn current_uid(parent: &Path) -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROBES: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    let probe = parent.join(format!(
+        "freminal-osc99-probe-{}-{}-{nanos}",
+        std::process::id(),
+        PROBES.fetch_add(1, Ordering::Relaxed)
+    ));
+    // `create_new`: a name someone else made is an error, never reused.
+    let file = create_new_file(&probe)?;
+    let uid = file.metadata().map(|metadata| metadata.uid());
+    drop(file);
+    remove_file_best_effort(&probe);
+    uid
+}
+
+/// The process's uid, probed once (see [`current_uid`]) and then remembered:
+/// it cannot change while the process runs, so later checks of an existing
+/// directory cost no extra file round trip.
+#[cfg(unix)]
+fn process_uid(parent: &Path) -> io::Result<u32> {
+    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    if let Some(uid) = UID.get() {
+        return Ok(*uid);
+    }
+    let uid = current_uid(parent)?;
+    Ok(*UID.get_or_init(|| uid))
+}
+
+/// Check that the existing directory `dir` belongs to the user `our_uid`.
+/// `symlink_metadata` does not follow a final symlink.
+#[cfg(unix)]
+fn verify_owned_dir(dir: &Path, our_uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = std::fs::symlink_metadata(dir)?;
+    match owned_by(metadata.uid(), our_uid) {
+        Ownership::Ours => Ok(()),
+        Ownership::Foreign => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "icon directory {} is not safe to use: it is owned by another user",
+                dir.display()
+            ),
+        )),
+    }
+}
+
+/// [`verify_private_dir`], and on Unix also that the directory is owned by the
+/// current user (see [`current_uid`]).
+fn verify_existing_dir(dir: &Path) -> io::Result<()> {
+    verify_private_dir(dir)?;
+    #[cfg(unix)]
+    {
+        let parent = dir.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("icon directory {} has no parent directory", dir.display()),
+            )
+        })?;
+        verify_owned_dir(dir, process_uid(parent)?)?;
+    }
+    Ok(())
+}
+
+/// Remove the icon directories next to `own` that an earlier process left.
+///
+/// A sibling is removed only if its name starts with [`ICON_DIR_PREFIX`], it
+/// is not `own`, it passes [`verify_private_dir`] (so a symlink or a directory
+/// open to others is left alone) and, on Unix, is owned by the current user,
+/// and its modification time is more than `max_age` before `now`. Its
+/// non-directory entries are deleted (a symlink as a link, never followed),
+/// then the directory itself; one that still holds a subdirectory stays.
+/// Failures are logged at debug and skipped: the sweep is best effort and
+/// never affects the store.
+fn sweep_stale_dirs(own: &Path, now: SystemTime, max_age: Duration) {
+    let Some(parent) = own.parent() else {
+        return;
+    };
+    #[cfg(unix)]
+    let our_uid = match process_uid(parent) {
+        Ok(uid) => uid,
+        Err(e) => {
+            tracing::debug!("OSC 99 stale icon directories not swept: {e}");
+            return;
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_sibling = path != own
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(ICON_DIR_PREFIX));
+        if !is_sibling || verify_private_dir(&path).is_err() {
+            continue;
+        }
+        #[cfg(unix)]
+        if verify_owned_dir(&path, our_uid).is_err() {
+            continue;
+        }
+        let stale = std::fs::symlink_metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age > max_age));
+        if !stale {
+            continue;
+        }
+        clear_dir_files(&path);
+        if let Err(e) = std::fs::remove_dir(&path) {
+            tracing::debug!(
+                "stale OSC 99 icon directory {} not removed: {e}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Delete the non-directory entries of `dir`, which [`verify_private_dir`]
@@ -712,6 +896,226 @@ mod tests {
 
         assert!(store.path_for(PNG).is_err());
         assert!(!root.path().join("no").exists());
+    }
+
+    // ── ownership ───────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_by_compares_the_uids() {
+        assert_eq!(owned_by(1000, 1000), Ownership::Ours);
+        assert_eq!(owned_by(0, 1000), Ownership::Foreign);
+        assert_eq!(owned_by(1000, 0), Ownership::Foreign);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_reads_our_uid_and_leaves_nothing_behind() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let ours = std::fs::metadata(root.path()).unwrap().uid();
+
+        assert_eq!(current_uid(root.path()).unwrap(), ours);
+        assert_eq!(
+            current_uid(root.path()).unwrap(),
+            ours,
+            "names do not clash"
+        );
+        assert_eq!(files_in(root.path()), 0, "the probe file is deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_fails_in_a_directory_that_does_not_exist() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(current_uid(&root.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_we_created_passes_the_ownership_check() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("icons");
+        create_private_dir(&dir).unwrap();
+
+        verify_existing_dir(&dir).unwrap();
+        verify_owned_dir(&dir, current_uid(root.path()).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_owned_by_another_uid_is_refused() {
+        // A foreign-owned directory cannot be made without privilege, so the
+        // check is driven with a uid that is not ours.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("icons");
+        create_private_dir(&dir).unwrap();
+        let ours = current_uid(root.path()).unwrap();
+
+        let err = verify_owned_dir(&dir, ours.wrapping_add(1)).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_uses_an_existing_directory_it_owns() {
+        let (root, mut store) = store();
+        create_private_dir(&root.path().join("icons")).unwrap();
+
+        assert!(store.path_for(PNG).unwrap().exists());
+    }
+
+    // ── stale directory sweep ───────────────────────────────────────────
+
+    /// A private icon directory named for process `pid` under `root`, holding
+    /// one file.
+    fn sibling(root: &Path, pid: u32) -> PathBuf {
+        let dir = icon_dir_in(root, pid);
+        create_private_dir(&dir).unwrap();
+        std::fs::write(dir.join("a.png"), b"icon").unwrap();
+        dir
+    }
+
+    /// Set `dir`'s modification time to `hours` hours before now.
+    #[cfg(unix)]
+    fn age(dir: &Path, hours: u64) {
+        let when = SystemTime::now() - Duration::from_secs(hours * 3600);
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_uses_the_injected_clock_and_threshold() {
+        let root = tempfile::tempdir().unwrap();
+        let own = icon_dir_in(root.path(), 1);
+        let other = sibling(root.path(), 2);
+        let now = SystemTime::now();
+
+        sweep_stale_dirs(&own, now, STALE_DIR_AGE);
+        assert!(other.exists(), "a directory made just now is not stale");
+
+        sweep_stale_dirs(&own, now + Duration::from_hours(23), STALE_DIR_AGE);
+        assert!(other.exists(), "23 hours is under the day");
+
+        sweep_stale_dirs(&own, now + Duration::from_hours(25), STALE_DIR_AGE);
+        assert!(!other.exists(), "25 hours is stale");
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_directory_a_shorter_threshold_would_remove() {
+        let root = tempfile::tempdir().unwrap();
+        let own = icon_dir_in(root.path(), 1);
+        let other = sibling(root.path(), 2);
+        let later = SystemTime::now() + Duration::from_hours(2);
+
+        sweep_stale_dirs(&own, later, Duration::from_hours(3));
+        assert!(other.exists());
+
+        sweep_stale_dirs(&own, later, Duration::from_hours(1));
+        assert!(!other.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_removes_an_old_private_sibling_and_keeps_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let own = sibling(root.path(), 1);
+        let old = sibling(root.path(), 2);
+        let fresh = sibling(root.path(), 3);
+        let unrelated = root.path().join("not-ours");
+        std::fs::create_dir(&unrelated).unwrap();
+        for dir in [&own, &old, &unrelated] {
+            age(dir, 48);
+        }
+
+        sweep_stale_dirs(&own, SystemTime::now(), STALE_DIR_AGE);
+
+        assert!(!old.exists(), "old and private: removed with its files");
+        assert!(fresh.exists(), "fresh: kept");
+        assert!(
+            own.join("a.png").exists(),
+            "our own directory is never swept"
+        );
+        assert!(unrelated.exists(), "a name without the prefix is not ours");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_keeps_an_old_sibling_open_to_others() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let own = icon_dir_in(root.path(), 1);
+        let open = sibling(root.path(), 2);
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        age(&open, 48);
+
+        sweep_stale_dirs(&own, SystemTime::now(), STALE_DIR_AGE);
+
+        assert!(open.join("a.png").exists(), "not private: left alone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_leaves_a_symlink_sibling_and_its_target_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let own = icon_dir_in(root.path(), 1);
+        // The target is private and old, but its own name is not an icon
+        // directory's, so only the link could lead the sweep to it.
+        let target = root.path().join("target");
+        create_private_dir(&target).unwrap();
+        std::fs::write(target.join("precious.txt"), b"keep").unwrap();
+        age(&target, 48);
+        let link = icon_dir_in(root.path(), 2);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        sweep_stale_dirs(&own, SystemTime::now(), STALE_DIR_AGE);
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is still there"
+        );
+        assert_eq!(std::fs::read(target.join("precious.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_removes_a_symlink_inside_a_stale_directory_without_following_it() {
+        let root = tempfile::tempdir().unwrap();
+        let own = icon_dir_in(root.path(), 1);
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, b"precious").unwrap();
+        let old = sibling(root.path(), 2);
+        std::os::unix::fs::symlink(&victim, old.join("link.png")).unwrap();
+        age(&old, 48);
+
+        sweep_stale_dirs(&own, SystemTime::now(), STALE_DIR_AGE);
+
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_use_of_a_store_sweeps_once() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = IconTempFiles::with_dir(icon_dir_in(root.path(), 1));
+        let old = sibling(root.path(), 2);
+        age(&old, 48);
+
+        let _ = store.path_for(b"first").unwrap();
+        assert!(!old.exists(), "the stale sibling went on first use");
+
+        let later = sibling(root.path(), 3);
+        age(&later, 48);
+        let _ = store.path_for(b"second").unwrap();
+        assert!(later.exists(), "the sweep does not run again");
     }
 
     // ── removal ─────────────────────────────────────────────────────────

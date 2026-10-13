@@ -32,8 +32,9 @@
 //! [`ToastLifetime`] and report what happened to them as [`ToastEvent`]s
 //! (drained with [`ToastStack::take_events`]): a click on the pill body is
 //! `Activated` then `Closed`, a click on the "x" is `Closed`, and expiry,
-//! eviction and [`ToastStack::close_keyed`] are `Closed`. Unkeyed toasts
-//! never produce events.
+//! eviction and [`ToastStack::close_keyed`] are `Closed` (`close_keyed`
+//! starts an exit fade, and `Closed` follows when the fade completes).
+//! Unkeyed toasts never produce events.
 //!
 //! Toasts are drawn by a fully-owned OpenGL pass (issue #433), not egui
 //! widgets: [`ToastStack::show`] measures/shapes each toast's text on the
@@ -292,6 +293,12 @@ pub(super) struct Toast {
     /// When the toast was last hovered.  `None` if never hovered.  Used
     /// to extend the lifetime of a toast the user is reading.
     last_hovered: Option<Instant>,
+    /// When [`ToastStack::close_keyed`] started this toast's exit fade, or
+    /// `None` while it is open. A closing toast is non-interactive (clicks
+    /// and hover are ignored), fades out over [`ANIM_OUT`], and is removed
+    /// (with `Closed`) by [`ToastStack::sweep_expired`] when the fade ends.
+    /// [`ToastStack::replace_keyed`] clears it.
+    closing: Option<Instant>,
     /// Anchor placement (and, for a pane-centered toast, its window+pane
     /// origin). Defaults to [`ToastPlacement::TOP_RIGHT`] for toasts pushed
     /// without an explicit placement.
@@ -319,6 +326,7 @@ impl Toast {
             lifetime: ToastLifetime::KindDefault,
             key: None,
             last_hovered: None,
+            closing: None,
             placement,
         }
     }
@@ -390,6 +398,11 @@ impl Toast {
     /// [`Self::anim`] guarantees a toast is never removed while `anim` still
     /// shows it fading (review finding #2).
     fn is_expired(&self, now: Instant) -> bool {
+        // A closing toast lives exactly as long as its exit fade, whatever
+        // its lifetime or hover state.
+        if let Some(start) = self.closing {
+            return now.saturating_duration_since(start) >= ANIM_OUT;
+        }
         // An `UntilDismissed` toast never expires on its own.
         let Some(total) = self.total_lifetime() else {
             return false;
@@ -436,10 +449,35 @@ impl Toast {
     ///    time.
     /// 5. **Hold**: fully settled, `(opacity=1, slide_x=0, scale=1)`.
     ///
+    /// A toast closed by [`ToastStack::close_keyed`] instead fades out over
+    /// [`ANIM_OUT`] from the moment it was closed, whatever phase it was in.
+    ///
     /// Phases 2-4 keep `anim` in lock-step with [`Self::is_expired`] so a
     /// toast is never removed mid-fade nor left visible after fading to zero.
     /// All outputs are clamped to their documented ranges.
     fn anim(&self, now: Instant) -> ToastAnim {
+        let Some(start) = self.closing else {
+            return self.open_anim(now);
+        };
+        // A closing toast fades out from wherever it was when the close
+        // began (so closing it mid-entry does not pop to full opacity),
+        // linearly over `ANIM_OUT`, in lock-step with `is_expired`.
+        let from = self.open_anim(start);
+        if ANIM_OUT.is_zero() {
+            return from;
+        }
+        let into_fade = now.saturating_duration_since(start);
+        let remaining = ANIM_OUT.saturating_sub(into_fade);
+        let q = remaining.as_secs_f32() / ANIM_OUT.as_secs_f32();
+        ToastAnim {
+            opacity: (from.opacity * q).clamp(0.0, 1.0),
+            ..from
+        }
+    }
+
+    /// The animation of a toast that is not closing: phases 1-5 of
+    /// [`Self::anim`].
+    fn open_anim(&self, now: Instant) -> ToastAnim {
         const SETTLED: ToastAnim = ToastAnim {
             opacity: 1.0,
             slide_x: 0.0,
@@ -787,7 +825,9 @@ impl ToastStack {
     /// The toast keeps its stack slot, placement and `created` instant (so no
     /// entry animation replays), takes the new content and `lifetime`, and
     /// **its lifetime restarts**: keeping the age would make a toast updated
-    /// every second expire mid-update. No event is produced for `old`.
+    /// every second expire mid-update. No event is produced for `old`. A toast
+    /// that [`Self::close_keyed`] has started fading out is replaced in place
+    /// too, and the replace cancels the close.
     ///
     /// If another toast already holds `new_key`, that toast is closed first
     /// (a `Closed` event for `new_key`), so a key never names two toasts.
@@ -859,7 +899,10 @@ impl ToastStack {
         toast.icon = icon;
         toast.lifetime = lifetime;
         toast.life_start = now;
-        if content_changed {
+        // An update revives a toast whose exit fade had begun: the replace
+        // wins, the toast keeps its slot and no `Closed` is produced.
+        let revived = toast.closing.take().is_some();
+        if content_changed || revived {
             // A changed toast is repainted with its new text and size, and
             // the restarted lifetime can bring a fading toast back to full
             // opacity; neither is visible to the pointer-motion repaint gate
@@ -868,19 +911,45 @@ impl ToastStack {
         }
     }
 
-    /// Remove every toast keyed `key`, recording `Closed` for each. A no-op
-    /// (no event) if none exists.
+    /// Start the exit fade of every toast keyed `key`.
+    ///
+    /// The toast is not removed here: it fades out over [`ANIM_OUT`] (from its
+    /// current opacity), ignoring clicks and hover meanwhile, and
+    /// [`Self::sweep_expired`] removes it and records `Closed` (exactly once)
+    /// when the fade completes. The owner therefore sees `Closed` on a later
+    /// frame, not synchronously. Closing a toast that is already closing is a
+    /// no-op (the fade keeps its original start), as is closing an absent key
+    /// (no event). [`Self::replace_keyed`] on a closing toast cancels the
+    /// close.
     pub(super) fn close_keyed(&mut self, key: ToastKey) {
-        let mut closed = Vec::new();
-        self.entries.retain(|t| {
-            if t.key == Some(key) {
-                closed.push(key);
-                false
-            } else {
-                true
+        self.close_keyed_at(Instant::now(), key);
+    }
+
+    /// [`Self::close_keyed`] with an injected `now` (the fade's start), so the
+    /// fade is testable without sleeping.
+    fn close_keyed_at(&mut self, now: Instant, key: ToastKey) {
+        let mut started = false;
+        for toast in &mut self.entries {
+            if toast.key == Some(key) && toast.closing.is_none() {
+                toast.closing = Some(now);
+                started = true;
             }
-        });
-        self.record_closed(closed);
+        }
+        if started {
+            // The fade is an animation the pointer-motion repaint gate must
+            // see before the next `show` recomputes the flag.
+            self.cached_is_animating = true;
+        }
+    }
+
+    /// Complete every closing toast's fade now: sweeps at one [`ANIM_OUT`]
+    /// from the present, which expires every closing toast and no toast that
+    /// is merely open (every finite lifetime is at least [`MIN_FIXED_LIFETIME`]
+    /// from creation). Lets tests in other modules observe the `Closed` a
+    /// `close_keyed` ends in without sleeping.
+    #[cfg(test)]
+    pub(super) fn finish_closing_fades(&mut self) {
+        self.sweep_expired(Instant::now() + ANIM_OUT);
     }
 
     /// Drain the events recorded by keyed toasts since the last call.
@@ -896,8 +965,10 @@ impl ToastStack {
         }));
     }
 
-    /// Remove every toast that has expired at `now`, recording `Closed` for
-    /// each keyed one.
+    /// Remove every toast that has expired at `now` (including every closing
+    /// toast whose exit fade has finished), recording `Closed` for each keyed
+    /// one. This is the only place a closing toast is removed, so its
+    /// `Closed` is recorded exactly once.
     fn sweep_expired(&mut self, now: Instant) {
         let mut closed = Vec::new();
         self.entries.retain(|t| {
@@ -915,11 +986,15 @@ impl ToastStack {
     /// and a keyed toast records `Activated` (body) or `Button(n)` (button
     /// _n_) and then `Closed`; the dismiss square records `Closed` only.
     /// Unkeyed toasts are removed with no event, whichever part was hit. A
-    /// no-op if `id` is not on the stack.
+    /// no-op if `id` is not on the stack or is already fading out.
     fn apply_click(&mut self, id: u64, part: ToastClickPart) {
         let Some(index) = self.entries.iter().position(|t| t.id == id) else {
             return;
         };
+        // A toast that is fading out is already closed; its click is ignored.
+        if self.entries[index].closing.is_some() {
+            return;
+        }
         let toast = self.entries.remove(index);
         let Some(key) = toast.key else {
             return;
@@ -1400,6 +1475,7 @@ mod tests {
             lifetime: ToastLifetime::KindDefault,
             key: None,
             last_hovered: None,
+            closing: None,
             placement: ToastPlacement::TOP_RIGHT,
         };
         let later = created + Duration::from_mins(1);
@@ -1424,6 +1500,7 @@ mod tests {
             // Hover event coincides with `later` — within the 200 ms
             // keep-alive window.
             last_hovered: Some(later),
+            closing: None,
             placement: ToastPlacement::TOP_RIGHT,
         };
         assert!(!toast.is_expired(later));
@@ -1447,6 +1524,7 @@ mod tests {
             key: None,
             // Hover was 5 s ago — well past HOVER_HOLD + ANIM_OUT.
             last_hovered: Some(stale_hover),
+            closing: None,
             placement: ToastPlacement::TOP_RIGHT,
         };
         assert!(toast.is_expired(later));
@@ -1469,6 +1547,7 @@ mod tests {
             lifetime: ToastLifetime::KindDefault,
             key: None,
             last_hovered,
+            closing: None,
             placement: ToastPlacement::TOP_RIGHT,
         }
     }
@@ -1677,10 +1756,145 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s.take_events(), NO_EVENTS, "push itself emits nothing");
 
-        s.close_keyed(ToastKey(1));
+        let t0 = Instant::now();
+        s.close_keyed_at(t0, ToastKey(1));
+        assert_eq!(s.len(), 1, "the toast fades out rather than vanishing");
+        assert_eq!(s.take_events(), NO_EVENTS, "no Closed until the fade ends");
+
+        s.sweep_expired(t0 + ANIM_OUT);
         assert!(s.is_empty());
         assert_eq!(s.take_events(), vec![closed(1)]);
-        assert_eq!(s.take_events(), NO_EVENTS, "take_events drains");
+        s.sweep_expired(t0 + ANIM_OUT * 2);
+        assert_eq!(s.take_events(), NO_EVENTS, "Closed is emitted once");
+    }
+
+    /// A settled keyed toast (past its entry), for the exit-fade tests.
+    fn settled_keyed(s: &mut ToastStack, key: u64) -> Instant {
+        push_keyed_info(s, key, ToastLifetime::UntilDismissed);
+        s.entries[0].created + ANIM_IN * 2
+    }
+
+    #[test]
+    fn close_keyed_fades_out_over_anim_out_then_expires() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        assert_eq!(s.entries[0].anim(t0), SETTLED_ANIM);
+
+        s.close_keyed_at(t0, ToastKey(1));
+
+        let toast = &s.entries[0];
+        assert_eq!(toast.anim(t0).opacity, 1.0, "the fade starts at full");
+        let half = toast.anim(t0 + ANIM_OUT / 2).opacity;
+        assert!((half - 0.5).abs() < 0.01, "linear: {half}");
+        assert_eq!(toast.anim(t0 + ANIM_OUT).opacity, 0.0);
+        assert!(!toast.is_expired(t0 + ANIM_OUT.saturating_sub(Duration::from_millis(1))));
+        assert!(toast.is_expired(t0 + ANIM_OUT));
+    }
+
+    #[test]
+    fn close_keyed_starts_the_animating_flag() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        s.cached_is_animating = false;
+
+        s.close_keyed_at(t0, ToastKey(1));
+
+        assert!(s.is_animating(), "the fade needs frames");
+    }
+
+    #[test]
+    fn close_keyed_of_an_absent_key_does_not_start_the_animating_flag() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        s.cached_is_animating = false;
+
+        s.close_keyed_at(t0, ToastKey(2));
+
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn closing_a_closing_toast_keeps_the_original_fade() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        s.close_keyed_at(t0, ToastKey(1));
+
+        s.close_keyed_at(t0 + ANIM_OUT / 2, ToastKey(1));
+
+        assert_eq!(s.entries[0].closing, Some(t0), "the fade does not restart");
+        s.sweep_expired(t0 + ANIM_OUT);
+        assert_eq!(s.take_events(), vec![closed(1)], "still exactly one Closed");
+    }
+
+    #[test]
+    fn a_closing_toast_ignores_clicks() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        let id = s.entries[0].id;
+        s.close_keyed_at(t0, ToastKey(1));
+
+        s.apply_click(id, ToastClickPart::Body);
+        s.apply_click(id, ToastClickPart::Button(1));
+        s.apply_click(id, ToastClickPart::Dismiss);
+
+        assert_eq!(s.len(), 1, "a click does not remove a fading toast");
+        assert_eq!(s.take_events(), NO_EVENTS, "and reports nothing");
+    }
+
+    #[test]
+    fn hover_does_not_hold_a_closing_toast() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        s.close_keyed_at(t0, ToastKey(1));
+        // A hover that predates the close (or any later one) cannot extend
+        // the fade.
+        s.entries[0].last_hovered = Some(t0 + ANIM_OUT);
+
+        assert!(s.entries[0].is_expired(t0 + ANIM_OUT));
+        assert_eq!(s.entries[0].anim(t0 + ANIM_OUT).opacity, 0.0);
+    }
+
+    #[test]
+    fn closing_mid_entry_fades_from_the_current_opacity() {
+        let mut s = ToastStack::default();
+        push_keyed_info(&mut s, 1, ToastLifetime::UntilDismissed);
+        let created = s.entries[0].created;
+        let t0 = created + ANIM_IN / 2;
+        let entering = s.entries[0].anim(t0).opacity;
+        assert!(entering < 1.0);
+
+        s.close_keyed_at(t0, ToastKey(1));
+
+        assert!(
+            (s.entries[0].anim(t0).opacity - entering).abs() < 1e-6,
+            "no pop to full opacity"
+        );
+    }
+
+    #[test]
+    fn replace_keyed_on_a_closing_toast_replaces_in_place_and_cancels_the_close() {
+        let mut s = ToastStack::default();
+        let t0 = settled_keyed(&mut s, 1);
+        let id = s.entries[0].id;
+        s.close_keyed_at(t0, ToastKey(1));
+        s.cached_is_animating = false;
+
+        s.replace_keyed_at(
+            t0 + ANIM_OUT / 2,
+            ToastKey(1),
+            ToastKey(2),
+            info_content("revived"),
+            ToastLifetime::UntilDismissed,
+        );
+
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.entries[0].id, id, "same slot");
+        assert_eq!(s.entries[0].closing, None);
+        assert_eq!(s.entries[0].title, "revived");
+        assert!(s.is_animating());
+        s.sweep_expired(t0 + ANIM_OUT * 4);
+        assert_eq!(s.len(), 1, "the cancelled close never completes");
+        assert_eq!(s.take_events(), NO_EVENTS);
     }
 
     #[test]
@@ -1739,7 +1953,9 @@ mod tests {
     fn until_dismissed_still_closes_by_click_and_close_keyed() {
         let mut s = ToastStack::default();
         push_keyed_info(&mut s, 1, ToastLifetime::UntilDismissed);
-        s.close_keyed(ToastKey(1));
+        let t0 = Instant::now();
+        s.close_keyed_at(t0, ToastKey(1));
+        s.sweep_expired(t0 + ANIM_OUT);
         assert_eq!(s.take_events(), vec![closed(1)]);
     }
 
@@ -1847,7 +2063,9 @@ mod tests {
         // The old key is gone, the new one is closable.
         s.close_keyed(ToastKey(2));
         assert_eq!(s.take_events(), NO_EVENTS);
-        s.close_keyed(ToastKey(20));
+        let t0 = Instant::now();
+        s.close_keyed_at(t0, ToastKey(20));
+        s.sweep_expired(t0 + ANIM_OUT);
         assert_eq!(s.take_events(), vec![closed(20)]);
     }
 
@@ -2192,7 +2410,9 @@ mod tests {
         push_keyed_info(&mut s, 7, ToastLifetime::KindDefault);
         push_keyed_info(&mut s, 7, ToastLifetime::KindDefault);
         assert_eq!(s.len(), 2);
-        s.close_keyed(ToastKey(7));
+        let t0 = Instant::now();
+        s.close_keyed_at(t0, ToastKey(7));
+        s.sweep_expired(t0 + ANIM_OUT);
         assert!(s.is_empty());
         assert_eq!(s.take_events(), vec![closed(7), closed(7)]);
     }
