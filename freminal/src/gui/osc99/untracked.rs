@@ -18,13 +18,13 @@
 //!
 //! The GUI thread never touches the disk, an image decoder or an OS
 //! notification API. `PlatformUntrackedBackend::show` only builds a plain
-//! [`DeliveryRequest`] and `try_send`s it to one long-lived thread,
+//! `DeliveryRequest` and `try_send`s it to one long-lived thread,
 //! `freminal-osc99-deliver`, spawned on the first notification. The queue holds
-//! [`QUEUE_CAPACITY`] requests; when it is full the new request is dropped (and
+//! `QUEUE_CAPACITY` requests; when it is full the new request is dropped (and
 //! logged at debug), so a program that floods notifications cannot grow memory
 //! or stall the GUI. The worker owns the icon temp-file store
-//! ([`IconTempFiles`]), rasterises each standard icon once per process,
-//! re-encodes transmitted icon bytes ([`reencode_icon_png`]) so the OS never
+//! (`IconTempFiles`), rasterises each standard icon once per process,
+//! re-encodes transmitted icon bytes (`reencode_icon_png`) so the OS never
 //! decodes a file a program wrote, and shows the notification. It exits when
 //! the backend is dropped, removing its files.
 //!

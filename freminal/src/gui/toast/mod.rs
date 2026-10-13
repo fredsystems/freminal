@@ -591,7 +591,7 @@ pub(super) enum ToastPosition {
 ///
 /// Bundled so the toast push/route APIs that carry a placement stay under
 /// the `too_many_arguments` limit (mirroring [`ToastMeasureSizes`] /
-/// [`ToastLayoutMetrics`](layout::ToastLayoutMetrics)). `origin` is consulted only when `position` is
+/// [`ToastLayoutMetrics`](input::ToastLayoutMetrics)). `origin` is consulted only when `position` is
 /// [`ToastPosition::PaneCentered`]; it is resolved to a pane rect at render
 /// time in the toast's origin window and falls back to window-centered in
 /// any other window (or when `None`).
