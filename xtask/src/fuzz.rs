@@ -21,7 +21,7 @@
 //! pure function so it can be unit-tested.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
 };
@@ -40,6 +40,22 @@ const RSS_LIMIT_MB: u32 = 2048;
 const MALLOC_LIMIT_MB: u32 = 2048;
 /// Per-input timeout handed to libFuzzer, in seconds.
 const INPUT_TIMEOUT_SECS: u32 = 25;
+
+/// libFuzzer's `TimeoutExitCode` (`FuzzerOptions.h`): a child hit `-timeout`.
+///
+/// Passed explicitly as `-timeout_exitcode` so the mapping never depends on
+/// libFuzzer's default.
+const LIBFUZZER_TIMEOUT_EXIT: i32 = 70;
+/// libFuzzer's `OOMExitCode` (`FuzzerOptions.h`): a child exceeded
+/// `-rss_limit_mb` or `-malloc_limit_mb`. Not configurable by a flag.
+const LIBFUZZER_OOM_EXIT: i32 = 71;
+/// libFuzzer's `InterruptExitCode` (`FuzzerOptions.h`): the process was
+/// interrupted (SIGINT). That is an operator action, not a finding.
+const LIBFUZZER_INTERRUPT_EXIT: i32 = 72;
+/// libFuzzer's `ErrorExitCode` (`FuzzerOptions.h`): a child crashed or
+/// libFuzzer reported a bug. Passed explicitly as `-error_exitcode`, and
+/// also the code `AddressSanitizer` is told to exit with (see [`asan_options`]).
+const LIBFUZZER_ERROR_EXIT: i32 = 77;
 
 /// How a fuzz process is isolated from the host.
 ///
@@ -255,7 +271,79 @@ fn limit_args() -> Vec<OsString> {
         OsString::from(format!("-rss_limit_mb={RSS_LIMIT_MB}")),
         OsString::from(format!("-malloc_limit_mb={MALLOC_LIMIT_MB}")),
         OsString::from(format!("-timeout={INPUT_TIMEOUT_SECS}")),
+        OsString::from(format!("-timeout_exitcode={LIBFUZZER_TIMEOUT_EXIT}")),
+        OsString::from(format!("-error_exitcode={LIBFUZZER_ERROR_EXIT}")),
     ]
+}
+
+/// The `ASAN_OPTIONS` value for a fuzz process: `existing` (when set and
+/// non-empty) followed by `exitcode=77`.
+///
+/// `AddressSanitizer` exits with its own `exitcode`, default 1, when it reports
+/// a bug. That collides with libFuzzer's usage errors, which also exit 1, so
+/// a finding could not be told apart from a bad command line. Mapping `ASan` to
+/// libFuzzer's `ErrorExitCode` ([`LIBFUZZER_ERROR_EXIT`]) makes every finding
+/// report as 77. The option is appended last because the sanitizers let a
+/// later occurrence of a key win, so it overrides any inherited `exitcode`.
+fn asan_options(existing: Option<&OsStr>) -> OsString {
+    let ours = format!("exitcode={LIBFUZZER_ERROR_EXIT}");
+    match existing {
+        Some(prev) if !prev.is_empty() => {
+            let mut value = prev.to_owned();
+            value.push(":");
+            value.push(ours);
+            value
+        }
+        _ => OsString::from(ours),
+    }
+}
+
+/// How a finished fuzz process ended, as judged by [`classify_exit`].
+#[derive(Debug, PartialEq, Eq)]
+enum RunEnd {
+    /// Exit code 0: nothing was found.
+    Clean,
+    /// The (last) process reported a crash, OOM or timeout with this exit
+    /// code. Under [`CrashPolicy::KeepGoing`] the run itself still completed.
+    Findings(i32),
+    /// The run did not complete: interrupted, killed by a signal, or an
+    /// exit code that is neither success nor a known finding code.
+    InfraFailure(String),
+}
+
+/// Classify a fuzz process exit. `code` is `ExitStatus::code()`, so `None`
+/// means the process was killed by a signal.
+///
+/// In fork mode libFuzzer's parent exits with the *last* child's exit code,
+/// so a finding code means the last child hit a finding while the run
+/// completed. Only an interrupt (72), a signal, or an unknown code is an
+/// infrastructure failure. The crash policy is deliberately not an input: the
+/// call site decides what a [`RunEnd::Findings`] means per [`CrashPolicy`]
+/// (see [`run_fuzz_binary`]).
+fn classify_exit(code: Option<i32>) -> RunEnd {
+    match code {
+        Some(0) => RunEnd::Clean,
+        Some(code @ (LIBFUZZER_TIMEOUT_EXIT | LIBFUZZER_OOM_EXIT | LIBFUZZER_ERROR_EXIT)) => {
+            RunEnd::Findings(code)
+        }
+        Some(LIBFUZZER_INTERRUPT_EXIT) => RunEnd::InfraFailure(format!(
+            "the fuzz process was interrupted (exit {LIBFUZZER_INTERRUPT_EXIT})"
+        )),
+        Some(code) => RunEnd::InfraFailure(format!(
+            "the fuzz process exited with unexpected code {code} (not a libFuzzer finding code; \
+             likely a usage error or an infrastructure failure)"
+        )),
+        None => RunEnd::InfraFailure("the fuzz process was killed by a signal".to_owned()),
+    }
+}
+
+/// What a libFuzzer finding exit code means, for messages.
+const fn finding_description(code: i32) -> &'static str {
+    match code {
+        LIBFUZZER_TIMEOUT_EXIT => "timeout",
+        LIBFUZZER_OOM_EXIT => "out-of-memory",
+        _ => "crash",
+    }
 }
 
 /// Inputs for [`fuzz_args`].
@@ -555,12 +643,48 @@ fn host_triple() -> Result<String> {
     parse_host_triple(&out)
 }
 
-/// Run `binary` with `args` under `sandbox`; non-zero exit is an error.
+/// Where a finding from a fuzz process can be looked for afterwards.
+#[derive(Debug, Clone, Copy)]
+enum FindingsLocation<'a> {
+    /// libFuzzer wrote crash artifacts into this directory.
+    Artifacts(&'a Path),
+    /// A replay run: nothing is written anywhere durable. The failing input
+    /// is one of the committed files and is named in libFuzzer's output.
+    ReplayedInput,
+}
+
+impl FindingsLocation<'_> {
+    /// A user-facing sentence fragment saying where to look.
+    fn hint(&self) -> String {
+        match self {
+            Self::Artifacts(dir) => format!("see artifacts in {}", dir.display()),
+            Self::ReplayedInput => "the failing input is one of the committed files under \
+                 fuzz/seeds or fuzz/regressions and is named in libFuzzer's output above"
+                .to_owned(),
+        }
+    }
+}
+
+/// Run `binary` with `args` under `sandbox` and judge how it ended.
+///
+/// `ASAN_OPTIONS` is always set (see [`asan_options`]); bubblewrap inherits
+/// the environment (`bwrap_argv` never passes `--clearenv`). The exit code is
+/// classified by [`classify_exit`]:
+///
+/// * clean exit: `Ok`;
+/// * a finding under [`CrashPolicy::Stop`]: an error;
+/// * a finding under [`CrashPolicy::KeepGoing`]: `Ok` with a warning, because
+///   fork mode reports the last child's code and the run itself completed;
+/// * an infrastructure failure: an error.
+///
+/// `findings` is only used to tell the user where to look for a finding.
 fn run_fuzz_binary(
     sandbox: Sandbox,
+    policy: CrashPolicy,
     binary: &Path,
     args: &[OsString],
     writable: &[PathBuf],
+    findings: FindingsLocation<'_>,
 ) -> Result<()> {
     ensure!(
         binary.is_file(),
@@ -573,15 +697,34 @@ fn run_fuzz_binary(
         .ok_or_else(|| eyre!("empty fuzz command line"))?;
     tracing::info!("running command: {cmdline:?}");
     let output = cmd(program.clone(), rest.iter().cloned())
+        .env(
+            "ASAN_OPTIONS",
+            asan_options(std::env::var_os("ASAN_OPTIONS").as_deref()),
+        )
         .unchecked()
         .run()
         .wrap_err("failed to spawn the fuzz process")?;
-    ensure!(
-        output.status.success(),
-        "fuzz process exited with {}",
-        output.status
-    );
-    Ok(())
+    match classify_exit(output.status.code()) {
+        RunEnd::Clean => Ok(()),
+        RunEnd::Findings(code) => {
+            let what = finding_description(code);
+            match policy {
+                CrashPolicy::Stop => bail!(
+                    "found a crash/oom/timeout ({what}, exit {code}); {}",
+                    findings.hint()
+                ),
+                CrashPolicy::KeepGoing => {
+                    tracing::warn!(
+                        "the run completed and found at least one crash/oom/timeout (last \
+                         process exit {code}: {what}); {}",
+                        findings.hint()
+                    );
+                    Ok(())
+                }
+            }
+        }
+        RunEnd::InfraFailure(why) => bail!("{why} ({})", output.status),
+    }
 }
 
 /// Resolved, existing, canonical directories for one fuzz session.
@@ -631,7 +774,14 @@ fn fuzz_one(
         jobs,
     });
     tracing::info!("fuzzing `{target}` for {time_secs}s");
-    run_fuzz_binary(session.sandbox, &binary, &args, &[corpus, artifacts])
+    run_fuzz_binary(
+        session.sandbox,
+        policy,
+        &binary,
+        &args,
+        &[corpus, artifacts.clone()],
+        FindingsLocation::Artifacts(&artifacts),
+    )
 }
 
 /// Replay seeds and regressions of one already-built target.
@@ -663,7 +813,14 @@ fn replay_one(ctx: &FuzzContext, host_triple: &str, session: &Session, target: &
     let scratch_path = scratch.path().canonicalize()?;
     let args = replay_args(&scratch_path, &inputs, &scratch_path);
     tracing::info!("replaying `{target}`");
-    run_fuzz_binary(session.sandbox, &binary, &args, &[scratch_path])
+    run_fuzz_binary(
+        session.sandbox,
+        CrashPolicy::Stop,
+        &binary,
+        &args,
+        std::slice::from_ref(&scratch_path),
+        FindingsLocation::ReplayedInput,
+    )
 }
 
 /// Minimise one target's working corpus.
@@ -683,7 +840,14 @@ fn cmin_one(ctx: &FuzzContext, host_triple: &str, session: &Session, target: &st
     let before = count_files(&plan.live)?;
     let args = cmin_args(&fresh, &plan.live, &artifacts);
     tracing::info!("minimising corpus of `{target}` ({before} files)");
-    run_fuzz_binary(session.sandbox, &binary, &args, &[fresh, artifacts])?;
+    run_fuzz_binary(
+        session.sandbox,
+        CrashPolicy::Stop,
+        &binary,
+        &args,
+        &[fresh, artifacts.clone()],
+        FindingsLocation::Artifacts(&artifacts),
+    )?;
 
     swap_cmin(&plan)?;
     let after = count_files(&plan.live)?;
@@ -1056,6 +1220,8 @@ mod tests {
                 "-rss_limit_mb=2048",
                 "-malloc_limit_mb=2048",
                 "-timeout=25",
+                "-timeout_exitcode=70",
+                "-error_exitcode=77",
             ])
         );
     }
@@ -1073,7 +1239,7 @@ mod tests {
         assert_eq!(args[0], OsString::from("/c/t"));
         assert_eq!(args[1], OsString::from("/s/t"));
         assert_eq!(
-            args[7..],
+            args[9..],
             os(&[
                 "-fork=3",
                 "-ignore_crashes=1",
@@ -1189,5 +1355,74 @@ mod tests {
         assert_eq!(one.selection().unwrap(), CminSelection::One("t".to_owned()));
         assert_eq!(all.selection().unwrap(), CminSelection::All);
         assert!(neither.selection().is_err());
+    }
+
+    #[test]
+    fn limit_args_pin_libfuzzer_exit_codes() {
+        let args = limit_args();
+        assert!(args.contains(&OsString::from("-timeout_exitcode=70")));
+        assert!(args.contains(&OsString::from("-error_exitcode=77")));
+    }
+
+    #[test]
+    fn asan_options_unset_is_just_our_exitcode() {
+        assert_eq!(asan_options(None), OsString::from("exitcode=77"));
+    }
+
+    #[test]
+    fn asan_options_empty_has_no_leading_separator() {
+        assert_eq!(
+            asan_options(Some(OsStr::new(""))),
+            OsString::from("exitcode=77")
+        );
+    }
+
+    #[test]
+    fn asan_options_existing_is_kept_and_ours_comes_last() {
+        assert_eq!(
+            asan_options(Some(OsStr::new("detect_leaks=0:exitcode=1"))),
+            OsString::from("detect_leaks=0:exitcode=1:exitcode=77")
+        );
+    }
+
+    #[test]
+    fn classify_exit_zero_is_clean() {
+        assert_eq!(classify_exit(Some(0)), RunEnd::Clean);
+    }
+
+    #[test]
+    fn classify_exit_finding_codes_are_findings() {
+        for code in [70, 71, 77] {
+            assert_eq!(classify_exit(Some(code)), RunEnd::Findings(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn classify_exit_interrupt_is_infra_failure() {
+        assert!(
+            matches!(classify_exit(Some(72)), RunEnd::InfraFailure(m) if m.contains("interrupted"))
+        );
+    }
+
+    #[test]
+    fn classify_exit_signal_is_infra_failure() {
+        assert!(matches!(classify_exit(None), RunEnd::InfraFailure(m) if m.contains("signal")));
+    }
+
+    #[test]
+    fn classify_exit_unknown_codes_are_infra_failures() {
+        for code in [1, 2, 69, 73, 76, 78, 134, 255, -1] {
+            assert!(
+                matches!(classify_exit(Some(code)), RunEnd::InfraFailure(m) if m.contains("unexpected")),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn finding_description_names_each_code() {
+        assert_eq!(finding_description(70), "timeout");
+        assert_eq!(finding_description(71), "out-of-memory");
+        assert_eq!(finding_description(77), "crash");
     }
 }
