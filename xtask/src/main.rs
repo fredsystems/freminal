@@ -223,10 +223,14 @@ enum Command {
 
     /// Replay seeds and regression inputs through every target (CI gate)
     ///
-    /// Deterministic (`-runs=0`): no fuzzing, nothing under `fuzz/seeds` or
-    /// `fuzz/regressions` is written. Exits non-zero if any input crashes.
+    /// First lints and unit-tests the `fuzz/` crate itself (`cargo fmt
+    /// --check`, `cargo clippy -D warnings`, `cargo test --lib`), the same
+    /// checks CI runs. Then runs every file under `fuzz/seeds/<target>` and
+    /// `fuzz/regressions/<target>` once, as an individual input, in sorted
+    /// order. No fuzzing happens and nothing under `fuzz/` is written. Exits
+    /// non-zero if any input crashes, naming the input that did.
     #[command(visible_alias = "fr")]
-    FuzzReplay(fuzz::FuzzEnvArgs),
+    FuzzReplay(fuzz::FuzzReplayArgs),
 
     /// Minimise a working corpus with libFuzzer merge
     ///
@@ -278,7 +282,7 @@ impl Command {
             Self::FuzzList => fuzz::fuzz_list(),
             Self::Fuzz(args) => fuzz::fuzz(&args),
             Self::FuzzSmoke(args) => fuzz::fuzz_smoke(&args),
-            Self::FuzzReplay(env) => fuzz::fuzz_replay(&env),
+            Self::FuzzReplay(args) => fuzz::fuzz_replay(&args),
             Self::FuzzCmin(args) => fuzz::fuzz_cmin(&args),
         }
     }
@@ -366,7 +370,18 @@ fn check_msrv() -> Result<()> {
     run_cargo(vec!["check", "--all-targets", "--all-features"])
 }
 
+/// The package selection of the clippy gates ([`lint_clippy`] and
+/// [`check_windows`]): the whole workspace except the vendored `portable-pty`.
+///
+/// The workspace's `default-members` leave out `freminal-windowing` and
+/// `xtask`, so a bare `cargo clippy` never linted them. `portable-pty` is a
+/// vendored third-party crate with its own lint baseline and stays excluded.
+const LINT_PACKAGE_SCOPE: [&str; 3] = ["--workspace", "--exclude", "portable-pty"];
+
 /// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
+///
+/// Lints [`LINT_PACKAGE_SCOPE`], so `freminal-windowing` (the crate with the
+/// most `#[cfg(windows)]` code) and `xtask` are covered too.
 ///
 /// Cross-checks the Windows-only `#[cfg(windows)]` code paths (portable-pty's
 /// `ConPTY` backend, the kitty shared-memory tests, etc.) from a Linux dev host,
@@ -386,8 +401,9 @@ fn check_msrv() -> Result<()> {
 /// (which points at the *outer* `cargo xtask` binary) so the chosen cargo
 /// dispatches its own matching `rustc`.
 fn check_windows() -> Result<()> {
-    let args = vec![
-        "clippy",
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend([
         "--target",
         "x86_64-pc-windows-gnu",
         "--all-targets",
@@ -395,7 +411,7 @@ fn check_windows() -> Result<()> {
         "--",
         "-D",
         "warnings",
-    ];
+    ]);
 
     match std::env::var("FREMINAL_WINDOWS_CARGO") {
         Ok(cargo) if !cargo.is_empty() => {
@@ -464,16 +480,13 @@ fn lint() -> Result<()> {
     Ok(())
 }
 
-/// Run clippy on the project
+/// Run clippy on the project: every workspace package except the vendored
+/// `portable-pty` ([`LINT_PACKAGE_SCOPE`]), warnings denied.
 fn lint_clippy() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
-        "--all-targets",
-        "--all-features",
-        "--",
-        "-D",
-        "warnings",
-    ])
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    run_cargo(args)
 }
 
 /// Fix clippy warnings in the project
@@ -931,7 +944,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(_path: &std::path::Path) -> bool {
+const fn is_executable(_path: &std::path::Path) -> bool {
     true
 }
 
@@ -1069,8 +1082,12 @@ fn set_executable(path: &str) -> Result<()> {
     Ok(())
 }
 
+// The signature must match the `#[cfg(unix)]` variant above, whose chmod can
+// fail, so the shared call site (`set_executable(&appimage)?`) compiles on
+// every platform. Without the `Result` the call site would need its own cfg.
 #[cfg(not(unix))]
-fn set_executable(_path: &str) -> Result<()> {
+#[allow(clippy::unnecessary_wraps)]
+const fn set_executable(_path: &str) -> Result<()> {
     Ok(())
 }
 
