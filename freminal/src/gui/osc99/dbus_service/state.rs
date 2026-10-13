@@ -197,12 +197,15 @@ impl DispatcherState {
 
     /// Start a new connection's session: `daemon_owner` is who owns the name
     /// now. Nothing displayed through an earlier connection is still tracked
-    /// (a connection only ends by being lost, which already closed it), and a
-    /// fresh connection has no history of timeouts.
+    /// (a connection only ends by being lost, which already closed it), a
+    /// fresh connection has no history of timeouts, and the capabilities of
+    /// an earlier daemon are forgotten: they are assumed again until the
+    /// daemon on this connection answers.
     pub(super) fn begin_session(&mut self, daemon_owner: Osc99SignalSender) {
         self.daemon_owner = daemon_owner;
         self.by_instance.clear();
         self.by_dbus_id.clear();
+        self.capabilities = Osc99DaemonCapabilities::default();
         self.capabilities_asked_of = None;
         self.health = Osc99DaemonHealth::Healthy;
     }
@@ -507,44 +510,6 @@ impl Default for DispatcherState {
             Osc99SignalSender::Unfiltered,
             Box::new(super::test_rig::NoIconLookup),
         )
-    }
-}
-
-/// Whether a failed connect may be retried yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reconnect {
-    /// Try to connect now.
-    Now,
-    /// Too soon after the last attempt.
-    Later,
-}
-
-/// Rate-limits reconnect attempts after a failed connect.
-pub(super) struct ReconnectGate {
-    /// The least time between two attempts.
-    interval: Duration,
-    /// When the last attempt was made.
-    last_attempt: Instant,
-}
-
-impl ReconnectGate {
-    /// A gate whose last attempt was at `last_attempt`.
-    pub(super) const fn new(interval: Duration, last_attempt: Instant) -> Self {
-        Self {
-            interval,
-            last_attempt,
-        }
-    }
-
-    /// Whether an attempt may be made at `now`. When it may, the attempt is
-    /// recorded, so the next one waits a full interval.
-    pub(super) fn decide(&mut self, now: Instant) -> Reconnect {
-        if now.saturating_duration_since(self.last_attempt) >= self.interval {
-            self.last_attempt = now;
-            Reconnect::Now
-        } else {
-            Reconnect::Later
-        }
     }
 }
 
@@ -1669,6 +1634,17 @@ mod tests {
         assert_eq!(state.health, Osc99DaemonHealth::Healthy);
     }
 
+    #[test]
+    fn a_new_session_assumes_the_capabilities_again() {
+        let mut state = DispatcherState::default();
+        state.set_capabilities(&strings(&["body", "sound"]));
+        assert_ne!(state.capabilities, Osc99DaemonCapabilities::ASSUMED);
+
+        state.begin_session(Osc99SignalSender::Unfiltered);
+
+        assert_eq!(state.capabilities, Osc99DaemonCapabilities::ASSUMED);
+    }
+
     // ── Circuit breaker (Z6) ────────────────────────────────────────────
 
     #[test]
@@ -1758,36 +1734,5 @@ mod tests {
 
         assert_eq!(state.health, Osc99DaemonHealth::Healthy);
         Ok(())
-    }
-
-    // ── Reconnect gate (Z18) ────────────────────────────────────────────
-
-    #[test]
-    fn a_reconnect_waits_one_interval_after_the_last_attempt() {
-        let start = Instant::now();
-        let interval = Duration::from_secs(30);
-        let mut gate = ReconnectGate::new(interval, start);
-
-        assert_eq!(gate.decide(start), Reconnect::Later);
-        assert_eq!(
-            gate.decide(start + interval.saturating_sub(Duration::from_millis(1))),
-            Reconnect::Later
-        );
-        assert_eq!(gate.decide(start + interval), Reconnect::Now);
-        assert_eq!(
-            gate.decide(start + interval + Duration::from_secs(1)),
-            Reconnect::Later,
-            "the attempt just made restarted the wait"
-        );
-        assert_eq!(gate.decide(start + interval * 2), Reconnect::Now);
-    }
-
-    #[test]
-    fn a_zero_interval_always_allows_a_reconnect() {
-        let start = Instant::now();
-        let mut gate = ReconnectGate::new(Duration::ZERO, start);
-
-        assert_eq!(gate.decide(start), Reconnect::Now);
-        assert_eq!(gate.decide(start), Reconnect::Now);
     }
 }

@@ -67,16 +67,26 @@
 //! # Failure handling
 //!
 //! - **Pump loss.** If either pump ends, every mapped instance is reported
-//!   closed, [`Osc99DbusEvent::Unavailable`] is emitted, and the service
-//!   answers every later command as if the bus were down.
+//!   closed, [`Osc99DbusEvent::Unavailable`] is emitted, the connection is
+//!   closed (so a pump that is still blocked on it ends too), and the service
+//!   is unavailable, as after a failed connect (below).
 //! - **Hung daemon.** A `Notify`, `CloseNotification` or `GetCapabilities`
 //!   that times out puts the daemon in `state::Osc99DaemonHealth::Unresponsive`:
 //!   for `state::OSC99_DAEMON_COOLDOWN` shows fail and closes complete without
 //!   calling it, then the next command tries again.
 //! - **No daemon at start.** `GetNameOwner` and `GetCapabilities` never
 //!   D-Bus-activate a daemon (`NO_AUTO_START`); the first `Notify` does. A
-//!   missing daemon is a debug log, not a warning. After a failed connect the
-//!   next show reconnects, at most once per [`OSC99_RECONNECT_INTERVAL`].
+//!   missing daemon is a debug log, not a warning.
+//! - **Reconnecting.** While the service is unavailable (the connect failed at
+//!   start, or the signals were lost), the dispatcher answers every command as
+//!   if the bus were down (a show is `ShowFailed`, a close is `Closed`) and
+//!   tries to connect again every [`OSC99_RECONNECT_INTERVAL`] on its own
+//!   timer; no command is needed to trigger an attempt. Only the first failure
+//!   is reported ([`Osc99DbusEvent::Unavailable`]); a failed retry is a debug
+//!   log. A successful reconnect starts a new session, which reports
+//!   [`Osc99DbusEvent::Capabilities`] (the daemon's, or the assumed ones when
+//!   nobody can be asked yet), so the GUI's daemon state becomes available
+//!   again and the capabilities are re-broadcast.
 //!
 //! Every state transition lives in the pure [`DispatcherState`], which has no
 //! bus and no threads and is unit-tested directly.
@@ -90,8 +100,12 @@
 //!
 //! How a notification is presented (icons, sounds, category, markup) is decided
 //! by the pure functions in `presentation`, and the wire form of the hints is
-//! built in `wire`; this module only carries it.
+//! built in `wire`; this module only carries it. The XDG icon scan behind
+//! `n=` and `f=` starts on the first notification that needs it, not with the
+//! service (see `icon_lookup`).
 
+#[cfg(test)]
+mod breaker_tests;
 mod pump;
 mod state;
 #[cfg(test)]
@@ -103,7 +117,7 @@ pub use wake::Osc99Wake;
 
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, select};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select};
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
 use zbus::blocking::{Connection, MessageIterator};
@@ -118,10 +132,7 @@ use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,
     parse_signal, spawn_pump,
 };
-use state::{
-    CloseTarget, DaemonGate, DispatcherState, Osc99SignalSender, OwnerTracking, Reconnect,
-    ReconnectGate,
-};
+use state::{CloseTarget, DaemonGate, DispatcherState, Osc99SignalSender, OwnerTracking};
 use wire::{
     close_notification, fetch_capabilities, fetch_daemon_owner, is_method_error, is_no_daemon,
     notify,
@@ -146,7 +157,7 @@ const ERROR_NAME_HAS_NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner
 /// and that no service file can start.
 const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
-/// The least time between two attempts to reconnect after a failed connect.
+/// The time between attempts to reconnect while the service is unavailable.
 const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a D-Bus method call waits for its reply before it fails. This is
@@ -337,8 +348,8 @@ impl Osc99DbusService {
     /// cannot be reached the handle reports [`Osc99DbusEvent::Unavailable`]
     /// once, a single warning is logged, and every show answers
     /// [`Osc99DbusEvent::ShowFailed`] and every close
-    /// [`Osc99DbusEvent::Closed`]. The next show after
-    /// [`OSC99_RECONNECT_INTERVAL`] tries to connect again.
+    /// [`Osc99DbusEvent::Closed`], until a reconnect attempt, made every
+    /// [`OSC99_RECONNECT_INTERVAL`], succeeds.
     #[must_use]
     pub fn spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle {
         start(
@@ -390,8 +401,9 @@ fn connect_session() -> zbus::Result<Link> {
 }
 
 /// Start the dispatcher thread, which obtains its connection from `connect`
-/// (again, at most once per `reconnect_interval`, after it fails) and resolves
-/// icons with `icon_lookup` (whose scan runs on its own background thread).
+/// (again every `reconnect_interval` while it is unavailable) and resolves
+/// icons with `icon_lookup` (whose scan runs on its own background thread,
+/// started by its first question).
 fn start<C>(
     connect: C,
     waker: Box<dyn Fn() + Send>,
@@ -447,8 +459,28 @@ enum ServeEnd {
     SignalsLost,
 }
 
-/// The dispatcher thread: connect, then serve commands until the GUI drops its
-/// command sender.
+/// Which session [`serve`] is starting, which decides whether the GUI must be
+/// told the daemon's capabilities even when nobody can be asked for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStart {
+    /// The first connection: the GUI assumes a daemon until told otherwise.
+    Initial,
+    /// A connection made after an outage, which the GUI was told about
+    /// ([`Osc99DbusEvent::Unavailable`]): it needs a
+    /// [`Osc99DbusEvent::Capabilities`] to see the service as available again.
+    Reconnected,
+}
+
+/// Whether [`refresh_capabilities`] sent [`Osc99DbusEvent::Capabilities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilitiesReport {
+    Sent,
+    Withheld,
+}
+
+/// The dispatcher thread: connect, serve commands until the GUI drops its
+/// command sender, and reconnect (every `reconnect_interval`) whenever there
+/// is no connection to serve on.
 fn run_dispatcher<C>(
     mut connect: C,
     commands: &Receiver<DbusCommand>,
@@ -459,70 +491,64 @@ fn run_dispatcher<C>(
     C: FnMut() -> zbus::Result<Link>,
 {
     let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, icon_lookup);
-    let (session, first) = match connect_and_subscribe(&mut connect) {
-        Ok(session) => (session, None),
+    let mut start = SessionStart::Initial;
+    let mut first = match connect_and_subscribe(&mut connect) {
+        Ok(session) => Some(session),
         Err(e) => {
             tracing::warn!("OSC 99: system notifications are unavailable: {e}");
             sink.emit(Osc99DbusEvent::Unavailable);
-            match reconnect(&mut connect, commands, sink, reconnect_interval) {
-                Some((session, command)) => (session, Some(command)),
-                None => return,
-            }
+            None
         }
     };
-    match serve(session, &mut state, commands, sink, first) {
-        ServeEnd::GuiGone => {}
-        // The dead pump's connection is not trusted again: answer every later
-        // command as if the bus were down.
-        ServeEnd::SignalsLost => fail_every_command(commands, sink),
+    loop {
+        let session = if let Some(session) = first.take() {
+            session
+        } else {
+            start = SessionStart::Reconnected;
+            let Some(session) = reconnect(&mut connect, commands, sink, reconnect_interval) else {
+                return;
+            };
+            session
+        };
+        match serve(session, &mut state, commands, sink, start) {
+            ServeEnd::GuiGone => return,
+            // `serve` reported the loss and closed the connection; wait for
+            // the next attempt as after a failed connect.
+            ServeEnd::SignalsLost => {}
+        }
     }
 }
 
-/// After a failed connect: fail every command until a show comes in that is
-/// due a new attempt, and make the attempt. Returns the new session together
-/// with the show that asked for it, or `None` when the GUI is gone.
+/// While unavailable: fail every command, and every `interval` try to connect.
+/// Returns the new session, or `None` when the GUI is gone.
 ///
 /// A failed attempt is not reported again ([`Osc99DbusEvent::Unavailable`]
-/// was sent when the service first failed): the show that triggered it is
-/// answered with `ShowFailed` and the wait starts over.
+/// was sent when the service became unavailable); the wait starts over.
 fn reconnect<C>(
     connect: &mut C,
     commands: &Receiver<DbusCommand>,
     sink: &EventSink,
     interval: Duration,
-) -> Option<(Session, DbusCommand)>
+) -> Option<Session>
 where
     C: FnMut() -> zbus::Result<Link>,
 {
-    let mut gate = ReconnectGate::new(interval, Instant::now());
     loop {
-        let command = fail_until_reconnect_due(commands, sink, &mut gate)?;
+        let due = Instant::now() + interval;
+        loop {
+            match commands.recv_deadline(due) {
+                Ok(command) => report_unserved(sink, &command),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
         match connect_and_subscribe(connect) {
-            Ok(session) => return Some((session, command)),
+            Ok(session) => return Some(session),
             Err(e) => {
                 tracing::debug!("OSC 99: reconnecting to the notification service failed: {e}");
-                report_unserved(sink, &command);
             }
         }
     }
-}
-
-/// Answer commands as [`fail_every_command`] does until a `Show` arrives that
-/// `gate` allows a reconnect for, and return it. `None` once the GUI is gone.
-fn fail_until_reconnect_due(
-    commands: &Receiver<DbusCommand>,
-    sink: &EventSink,
-    gate: &mut ReconnectGate,
-) -> Option<DbusCommand> {
-    for command in commands {
-        let due = matches!(command, DbusCommand::Show { .. })
-            && gate.decide(Instant::now()) == Reconnect::Now;
-        if due {
-            return Some(command);
-        }
-        report_unserved(sink, &command);
-    }
-    None
 }
 
 /// Connect, subscribe to the notification signals, and start the pump(s).
@@ -608,27 +634,21 @@ fn report_unserved(sink: &EventSink, command: &DbusCommand) {
     }
 }
 
-/// Answer every show with `ShowFailed` and every close with `Closed` until
-/// the GUI drops its sender: with no bus, nothing is displayed, so nothing
-/// needs closing.
-fn fail_every_command(commands: &Receiver<DbusCommand>, sink: &EventSink) {
-    for command in commands {
-        report_unserved(sink, &command);
-    }
-}
-
-/// Serve `first` (if any), `commands` and the pumps' signals until the GUI
-/// drops its command sender or a pump ends.
+/// Serve `commands` and the pumps' signals until the GUI drops its command
+/// sender or a pump ends (in which case the connection is closed, so a pump
+/// that is still blocked on it ends too).
 ///
 /// The capabilities are fetched when serving starts (unless nobody owns the
 /// name) and again whenever the owner changes to a name they were not
-/// fetched from, which also covers an owner adopted from a `Notify` reply.
+/// fetched from, which also covers an owner adopted from a `Notify` reply. A
+/// [`SessionStart::Reconnected`] session that could not ask anyone reports the
+/// assumed capabilities instead, so the GUI sees the service as available.
 fn serve(
     session: Session,
     state: &mut DispatcherState,
     commands: &Receiver<DbusCommand>,
     sink: &EventSink,
-    first: Option<DbusCommand>,
+    start: SessionStart,
 ) -> ServeEnd {
     let Session {
         connection,
@@ -636,12 +656,13 @@ fn serve(
         signals,
     } = session;
     state.begin_session(resolve_daemon_owner(&connection, owner_tracking));
-    if !matches!(state.daemon_owner, Osc99SignalSender::NoOwner) {
-        refresh_capabilities(&connection, state, sink);
-    }
-    if let Some(command) = first {
-        handle_command(&connection, state, sink, command);
-        refresh_stale_capabilities(&connection, state, sink);
+    let report = if matches!(state.daemon_owner, Osc99SignalSender::NoOwner) {
+        CapabilitiesReport::Withheld
+    } else {
+        refresh_capabilities(&connection, state, sink)
+    };
+    if start == SessionStart::Reconnected && report == CapabilitiesReport::Withheld {
+        sink.emit(Osc99DbusEvent::Capabilities(state.capabilities));
     }
     loop {
         select! {
@@ -651,6 +672,9 @@ fn serve(
             },
             recv(signals) -> signal => {
                 if let Some(end) = handle_signal(state, sink, signal.ok()) {
+                    if let Err(e) = connection.close() {
+                        tracing::debug!("OSC 99: closing the lost connection failed: {e}");
+                    }
                     return end;
                 }
             },
@@ -813,10 +837,14 @@ fn refresh_stale_capabilities(
 /// Call `GetCapabilities` and, if it answers, record and report the result.
 /// While the daemon is in its cooldown the call is not made and the
 /// capabilities stay stale, so the first command after the cooldown asks.
-fn refresh_capabilities(connection: &Connection, state: &mut DispatcherState, sink: &EventSink) {
+fn refresh_capabilities(
+    connection: &Connection,
+    state: &mut DispatcherState,
+    sink: &EventSink,
+) -> CapabilitiesReport {
     if state.daemon_gate(Instant::now()) == DaemonGate::Skip {
         tracing::debug!("OSC 99: the notification daemon is unresponsive; not asking it");
-        return;
+        return CapabilitiesReport::Withheld;
     }
     state.note_capabilities_asked();
     let outcome = fetch_capabilities(connection);
@@ -825,11 +853,16 @@ fn refresh_capabilities(connection: &Connection, state: &mut DispatcherState, si
         Ok(advertised) => {
             state.set_capabilities(&advertised);
             sink.emit(Osc99DbusEvent::Capabilities(state.capabilities));
+            CapabilitiesReport::Sent
         }
         Err(e) if is_no_daemon(&e) => {
             tracing::debug!("OSC 99: no notification daemon to ask for its capabilities: {e}");
+            CapabilitiesReport::Withheld
         }
-        Err(e) => tracing::warn!("OSC 99: GetCapabilities failed; assuming defaults: {e}"),
+        Err(e) => {
+            tracing::warn!("OSC 99: GetCapabilities failed; assuming defaults: {e}");
+            CapabilitiesReport::Withheld
+        }
     }
 }
 
@@ -873,7 +906,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use crossbeam_channel::RecvTimeoutError;
+    use crossbeam_channel::{Receiver, RecvTimeoutError};
     use freminal_common::buffer_states::osc99_notification::{
         NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
@@ -1567,65 +1600,81 @@ mod tests {
         Ok(())
     }
 
-    // ── Reconnecting after a failed connect ─────────────────────────────
+    // ── Reconnecting while unavailable ──────────────────────────────────
 
-    /// A connect that fails on its first call and succeeds on the rest over
-    /// `rig`, plus how often it was called.
-    fn connect_after_one_failure(
-        rig: &Rig,
+    /// How often a test's reconnect timer fires. Short, and nothing depends on
+    /// it: the connect closure below waits for the test, not the clock.
+    const FAST_RECONNECT: Duration = Duration::from_millis(1);
+
+    /// A connect closure that answers each attempt as the test scripts it
+    /// (`None`: the attempt fails), and how many attempts it has seen. An
+    /// attempt with nothing scripted waits for the test to script it.
+    fn scripted_connect(
+        script: Receiver<Option<Link>>,
     ) -> (
         impl FnMut() -> zbus::Result<Link> + Send + 'static,
         Arc<AtomicUsize>,
     ) {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
-        let client = rig.client.clone();
         (
             move || {
-                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Err(zbus::Error::Failure("no bus".to_owned()))
-                } else {
-                    Ok(Link {
-                        connection: client.clone(),
-                        owner_tracking: OwnerTracking::Peer,
-                    })
-                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                script
+                    .recv_timeout(EVENT_TIMEOUT)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| zbus::Error::Failure("no bus".to_owned()))
             },
             attempts,
         )
     }
 
+    fn link_to(rig: &Rig, owner_tracking: OwnerTracking) -> Link {
+        Link {
+            connection: rig.client.clone(),
+            owner_tracking,
+        }
+    }
+
     #[test]
-    fn a_show_after_a_failed_connect_reconnects_when_the_interval_has_passed() -> TestResult {
+    fn a_failed_connect_is_retried_on_the_timer_without_any_command() -> TestResult {
         let rig = rig(&["body", "actions"])?;
-        let (connect, attempts) = connect_after_one_failure(&rig);
+        let (scripted, script) = crossbeam_channel::unbounded();
+        for attempt in [None, None, Some(link_to(&rig, OwnerTracking::Peer))] {
+            scripted.send(attempt)?;
+        }
+        let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let mut handle = start(connect, waker, Box::new(NoIconLookup), Duration::ZERO);
+        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+
+        // Reported once, for the first failure; the failed retry is silent.
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
-
-        let _ = handle.show(instance(1), None, &notification());
-
-        // The new session reports the daemon again, then serves the show that
-        // asked for it.
+        // The third attempt succeeds: the new session reports the daemon.
         assert!(matches!(
             next_event(&handle)?,
             Osc99DbusEvent::Capabilities(_)
         ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+
+        // And it serves: a show reaches the daemon.
+        let _ = handle.show(instance(1), None, &notification());
         assert_eq!(
             next_event(&handle)?,
             Osc99DbusEvent::Shown {
                 instance: instance(1)
             }
         );
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(rig.recorded().len(), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "no further attempt");
         Ok(())
     }
 
     #[test]
-    fn a_show_soon_after_a_failed_connect_does_not_reconnect() -> TestResult {
-        let rig = rig(&["body"])?;
-        let (connect, attempts) = connect_after_one_failure(&rig);
+    fn commands_while_unavailable_fail_fast_and_do_not_trigger_a_reconnect() -> TestResult {
+        let (scripted, script) = crossbeam_channel::unbounded();
+        scripted.send(None)?;
+        let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
         let mut handle = start(
             connect,
@@ -1636,7 +1685,8 @@ mod tests {
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
 
         let _ = handle.show(instance(1), None, &notification());
-        let _ = handle.show(instance(2), None, &notification());
+        let _ = handle.close(instance(2));
+        let _ = handle.show(instance(3), None, &notification());
 
         assert_eq!(
             next_event(&handle)?,
@@ -1646,12 +1696,93 @@ mod tests {
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            Osc99DbusEvent::Closed {
                 instance: instance(2)
             }
         );
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::ShowFailed {
+                instance: instance(3)
+            }
+        );
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(rig.recorded(), []);
+        Ok(())
+    }
+
+    #[test]
+    fn lost_signals_are_followed_by_a_reconnect_on_a_new_connection() -> TestResult {
+        let first = rig(&["body", "actions"])?;
+        let second = rig(&["body", "sound"])?;
+        let (scripted, script) = crossbeam_channel::unbounded();
+        scripted.send(Some(link_to(&first, OwnerTracking::Peer)))?;
+        let (connect, attempts) = scripted_connect(script);
+        let (waker, _woken) = counting_waker();
+        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        assert!(matches!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(_)
+        ));
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        first.daemon.clone().close()?;
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+
+        // The next attempt finds a daemon on a new connection.
+        scripted.send(Some(link_to(&second, OwnerTracking::Peer)))?;
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
+                body: Osc99DaemonSupport::Supported,
+                actions: Osc99DaemonSupport::Unsupported,
+                body_markup: Osc99DaemonSupport::Unsupported,
+                sound: Osc99DaemonSupport::Supported,
+            })
+        );
+        let _ = handle.show(instance(2), None, &notification());
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Shown {
+                instance: instance(2)
+            }
+        );
+        assert_eq!(first.recorded().len(), 1, "the old connection is not used");
+        assert_eq!(second.recorded().len(), 1);
+        assert!(attempts.load(Ordering::SeqCst) >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reconnect_that_finds_no_daemon_owner_reports_the_assumed_capabilities() -> TestResult {
+        let rig = bus_rig(&["body"], NameOwnerAnswer::Nobody, None)?;
+        let (scripted, script) = crossbeam_channel::unbounded();
+        scripted.send(None)?;
+        scripted.send(Some(link_to(&rig, OwnerTracking::Bus)))?;
+        let (connect, _attempts) = scripted_connect(script);
+        let (waker, _woken) = counting_waker();
+        let handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+
+        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+
+        // Nobody can be asked what it can do, but the GUI must still see the
+        // service as available again.
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities::default())
+        );
+        assert_eq!(
+            rig.calls(),
+            [("GetNameOwner".to_owned(), Activation::Suppressed)],
+            "a missing daemon is still not asked"
+        );
         Ok(())
     }
 

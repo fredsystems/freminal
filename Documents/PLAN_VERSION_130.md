@@ -6540,6 +6540,16 @@ review of the cleanup diff follows.
     `f=`, not with the service. The decoded-icon cache key is length-prefixed.
 - **Tests:** reconnect after a failed connect through an injectable connect closure and
   clock; the breaker branches.
+- **Status:** done.
+  - One reconnect mechanism: a 30 s timer while the service is unavailable. The
+    reconnect-on-`Show` gate is removed.
+  - A reconnected session with no daemon to ask reports the assumed capabilities, so the
+    GUI's daemon state recovers.
+  - The breaker tests close the breaker again afterwards, so a handler that never calls the
+    daemon cannot pass.
+  - The XDG scan starts on the first query.
+  - The service tests passed 10 consecutive runs. The orchestrator re-ran the
+    real-session-bus smoke test (temporary, not committed): capabilities, show, close.
 
 #### 138.C21 — macOS/Windows and toast follow-ups from the confirmation review
 

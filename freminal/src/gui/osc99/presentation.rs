@@ -11,7 +11,7 @@
 //! only through [`Osc99IconLookup`], which tests replace with a fake.
 
 use std::collections::VecDeque;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{DefaultHasher, Hasher};
 
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 
@@ -163,7 +163,13 @@ pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
     })
 }
 
-/// What identifies a transmitted icon: a hash of its bytes and their length.
+/// What identifies a transmitted icon: a hash of its length followed by its
+/// bytes, and the length itself.
+///
+/// The length goes into the hash first, written explicitly rather than left to
+/// the slice's `Hash` impl, so the framing is part of this key's definition:
+/// two byte strings of different lengths can never feed the hasher the same
+/// stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IconKey {
     hash: u64,
@@ -173,7 +179,8 @@ struct IconKey {
 impl IconKey {
     fn of(bytes: &[u8]) -> Self {
         let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
+        hasher.write_usize(bytes.len());
+        hasher.write(bytes);
         Self {
             hash: hasher.finish(),
             len: bytes.len(),
@@ -535,6 +542,20 @@ mod tests {
             "the second decode is a hit, not a new entry"
         );
         Ok(())
+    }
+
+    #[test]
+    fn icon_keys_of_different_lengths_differ_even_when_the_bytes_are_all_zero() {
+        let keys: Vec<IconKey> = (0..8).map(|len| IconKey::of(&vec![0u8; len])).collect();
+
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(key.len, index);
+            assert!(
+                keys[index + 1..].iter().all(|other| other != key),
+                "length {index} collides with a longer run of zeros"
+            );
+        }
+        assert_eq!(IconKey::of(b"icon"), IconKey::of(b"icon"));
     }
 
     #[test]

@@ -14,12 +14,16 @@
 //! - which icon does the application called `f=` use?
 //!   ([`Osc99IconLookup::desktop_icon`], through its `.desktop` file).
 //!
-//! Both scans run once, together, on a background thread started when the
-//! lookup is created ([`XdgIconLookup::from_env`]), so neither the GUI thread
-//! nor the notification service's dispatcher ever waits for the filesystem.
-//! Until the scan has finished every question is answered "no match", which
-//! makes the caller fall through to its next icon rule. The directories are
-//! injected so tests use a temporary directory and scan synchronously
+//! Both scans run once, together, on a background thread. The thread is
+//! started by the first question the lookup is asked, which is the first
+//! notification that carries `n=` (a name that is not a standard one) or `f=`:
+//! a machine whose programs never ask for such an icon never walks the icon
+//! directories. Creating the lookup ([`XdgIconLookup::from_env`]) does no work.
+//! Neither the GUI thread nor the notification service's dispatcher ever waits
+//! for the filesystem, and until the scan has finished every question,
+//! including the one that started it, is answered "no match", which makes the
+//! caller fall through to its next icon rule. The directories are injected so
+//! tests use a temporary directory and scan synchronously
 //! (`XdgIconLookup::with_roots_sync`).
 
 use std::collections::{HashMap, HashSet};
@@ -74,15 +78,32 @@ struct Scans {
     desktop_by_name: HashMap<String, String>,
 }
 
-/// The icon and application directories, scanned in the background.
+/// What a scan walks, and how far.
+#[derive(Debug, Clone)]
+struct ScanPlan {
+    /// The icon directories, highest priority first.
+    icon_roots: Vec<PathBuf>,
+    /// The application directories, highest priority first.
+    app_roots: Vec<PathBuf>,
+    /// The most entries one scan visits.
+    max_entries: usize,
+}
+
+/// The icon and application directories, scanned in the background on the
+/// first question.
 pub struct XdgIconLookup {
     /// The scan's result; empty until the scan thread has finished.
     scans: Arc<OnceLock<Scans>>,
+    /// What the scan walks.
+    plan: ScanPlan,
+    /// Set by the first question: the scan thread's handle, or `None` if the
+    /// thread could not be started (the lookup then never matches).
+    started: OnceLock<Option<JoinHandle<()>>>,
 }
 
 impl XdgIconLookup {
     /// The lookup over the standard directories of this process's
-    /// environment. The scan starts immediately on its own thread.
+    /// environment. Nothing is scanned until the first question is asked.
     #[must_use]
     pub fn from_env() -> Self {
         let (icon_roots, app_roots) = roots_from_env(
@@ -90,32 +111,43 @@ impl XdgIconLookup {
             std::env::var_os("XDG_DATA_DIRS"),
             std::env::var_os("HOME"),
         );
-        // The thread finishes on its own; nothing ever needs to wait for it.
-        let (lookup, _detached) = Self::start_scan(icon_roots, app_roots, MAX_SCAN_ENTRIES);
-        lookup
+        Self::lazy(icon_roots, app_roots, MAX_SCAN_ENTRIES)
     }
 
-    /// Start scanning `icon_roots` and `app_roots` (highest priority first) on
-    /// a background thread, visiting at most `max_entries` entries per scan.
-    ///
-    /// Returns the lookup, which answers "no match" until the scan finishes,
-    /// and the scan thread's handle (`None` if the thread could not be
-    /// started, in which case the lookup never matches).
-    fn start_scan(
-        icon_roots: Vec<PathBuf>,
-        app_roots: Vec<PathBuf>,
-        max_entries: usize,
-    ) -> (Self, Option<JoinHandle<()>>) {
-        let scans = Arc::new(OnceLock::new());
-        let for_thread = Arc::clone(&scans);
-        let handle = std::thread::Builder::new()
-            .name(SCAN_THREAD_NAME.to_owned())
-            .spawn(move || {
-                for_thread.get_or_init(|| scan_all(&icon_roots, &app_roots, max_entries));
-            })
-            .map_err(|e| tracing::warn!("OSC 99: could not start the icon scan thread: {e}"))
-            .ok();
-        (Self { scans }, handle)
+    /// A lookup that will scan `icon_roots` and `app_roots` (highest priority
+    /// first) on a background thread, visiting at most `max_entries` entries
+    /// per scan, once it is first asked something. Until the scan finishes it
+    /// answers "no match".
+    fn lazy(icon_roots: Vec<PathBuf>, app_roots: Vec<PathBuf>, max_entries: usize) -> Self {
+        Self {
+            scans: Arc::new(OnceLock::new()),
+            plan: ScanPlan {
+                icon_roots,
+                app_roots,
+                max_entries,
+            },
+            started: OnceLock::new(),
+        }
+    }
+
+    /// The scan's result if it has finished, starting the scan if this is the
+    /// first question. The thread finishes on its own; nothing ever waits for
+    /// it.
+    fn scans(&self) -> Option<&Scans> {
+        self.started.get_or_init(|| {
+            let for_thread = Arc::clone(&self.scans);
+            let plan = self.plan.clone();
+            std::thread::Builder::new()
+                .name(SCAN_THREAD_NAME.to_owned())
+                .spawn(move || {
+                    for_thread.get_or_init(|| {
+                        scan_all(&plan.icon_roots, &plan.app_roots, plan.max_entries)
+                    });
+                })
+                .map_err(|e| tracing::warn!("OSC 99: could not start the icon scan thread: {e}"))
+                .ok()
+        });
+        self.scans.get()
     }
 
     /// The lookup over the given directories, highest priority first, scanned
@@ -123,19 +155,23 @@ impl XdgIconLookup {
     #[cfg(test)]
     #[must_use]
     pub fn with_roots_sync(icon_roots: &[PathBuf], app_roots: &[PathBuf]) -> Self {
-        let scans = Arc::new(OnceLock::new());
-        scans.get_or_init(|| scan_all(icon_roots, app_roots, MAX_SCAN_ENTRIES));
-        Self { scans }
+        let lookup = Self::lazy(icon_roots.to_vec(), app_roots.to_vec(), MAX_SCAN_ENTRIES);
+        lookup
+            .scans
+            .get_or_init(|| scan_all(icon_roots, app_roots, MAX_SCAN_ENTRIES));
+        // Nothing is left to start.
+        let _ = lookup.started.set(None);
+        lookup
     }
 }
 
 impl Osc99IconLookup for XdgIconLookup {
     fn matched_icon(&self, name: &str) -> Option<String> {
-        self.scans.get()?.icons.get(&name.to_lowercase()).cloned()
+        self.scans()?.icons.get(&name.to_lowercase()).cloned()
     }
 
     fn desktop_icon(&self, app_name: &str) -> Option<String> {
-        let scans = self.scans.get()?;
+        let scans = self.scans()?;
         let key = app_name.to_lowercase();
         // A file's ID outranks another file's `Name=`.
         scans
@@ -684,36 +720,81 @@ mod tests {
     // ── Z11: the background scan ────────────────────────────────────────
 
     #[test]
-    fn a_lookup_whose_scan_has_not_finished_matches_nothing() {
-        let lookup = XdgIconLookup {
-            scans: Arc::new(OnceLock::new()),
-        };
+    fn a_lookup_whose_scan_has_not_finished_matches_nothing() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        touch(dir.path(), "Found.png")?;
+        let lookup =
+            XdgIconLookup::lazy(vec![dir.path().to_path_buf()], Vec::new(), MAX_SCAN_ENTRIES);
+        // Mark the scan as started without a thread behind it, so it can
+        // never finish.
+        lookup
+            .started
+            .set(None)
+            .map_err(|_| "the scan had already started")?;
 
-        assert_eq!(lookup.matched_icon("anything"), None);
+        assert_eq!(lookup.matched_icon("found"), None);
         assert_eq!(lookup.desktop_icon("anything"), None);
+        Ok(())
     }
 
     #[test]
-    fn the_background_scan_fills_the_lookup_when_it_finishes() -> TestResult {
+    fn creating_a_lookup_starts_no_scan() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        touch(dir.path(), "Found.png")?;
+
+        let lookup = XdgIconLookup::lazy(
+            vec![dir.path().to_path_buf()],
+            vec![dir.path().to_path_buf()],
+            MAX_SCAN_ENTRIES,
+        );
+
+        assert!(lookup.started.get().is_none(), "no scan was started");
+        assert!(lookup.scans.get().is_none(), "and nothing was scanned");
+        Ok(())
+    }
+
+    #[test]
+    fn the_first_question_starts_the_scan_and_the_scan_fills_the_lookup() -> TestResult {
         let dir = tempfile::tempdir()?;
         touch(dir.path(), "Found.png")?;
         fs::write(
             dir.path().join("app.desktop"),
             "[Desktop Entry]\nIcon=app-icon\n",
         )?;
-
-        let (lookup, handle) = XdgIconLookup::start_scan(
+        let lookup = XdgIconLookup::lazy(
             vec![dir.path().to_path_buf()],
             vec![dir.path().to_path_buf()],
             MAX_SCAN_ENTRIES,
         );
-        handle
+
+        // Whether the scan has finished by the time the first question is
+        // answered is up to the scheduler, so the answer is not checked.
+        let _ = lookup.matched_icon("found");
+
+        let XdgIconLookup { scans, started, .. } = lookup;
+        started
+            .into_inner()
+            .ok_or("the first question did not start the scan")?
             .ok_or("the scan thread did not start")?
             .join()
             .map_err(|_| "the scan panicked")?;
+        let scans = scans.get().ok_or("the scan did not finish")?;
+        assert_eq!(scans.icons.get("found").map(String::as_str), Some("Found"));
+        assert_eq!(
+            scans.desktop_by_id.get("app").map(String::as_str),
+            Some("app-icon")
+        );
+        Ok(())
+    }
 
-        assert_eq!(lookup.matched_icon("found").as_deref(), Some("Found"));
-        assert_eq!(lookup.desktop_icon("app").as_deref(), Some("app-icon"));
+    #[test]
+    fn a_desktop_question_also_starts_the_scan() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let lookup = XdgIconLookup::lazy(Vec::new(), vec![dir.path().to_path_buf()], 10);
+
+        let _ = lookup.desktop_icon("anything");
+
+        assert!(lookup.started.get().is_some());
         Ok(())
     }
 
