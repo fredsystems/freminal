@@ -241,6 +241,11 @@
               "typos.toml"
               "\\.bin$"
               "assets/"
+              # Fuzz inputs are exact byte sequences (CR/LF, NUL, trailing
+              # whitespace and binary FREC/CompactRow encodings are the point);
+              # text fixers must never rewrite them.
+              "^fuzz/seeds/"
+              "^fuzz/regressions/"
             ];
 
             # The shared base + rust modules, exactly as mkCheck would build

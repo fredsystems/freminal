@@ -3,3 +3,8 @@
 
 # Binary recording files — never apply text fixers
 *.bin binary
+
+# Fuzz seeds and crash reproducers are exact byte sequences -- never normalise
+# line endings or treat them as text.
+fuzz/seeds/** binary
+fuzz/regressions/** binary
