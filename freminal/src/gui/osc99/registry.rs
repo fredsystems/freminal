@@ -60,8 +60,8 @@
 //!
 //! An instance remembers the pane's `Weak` reply handle. Once the pane is
 //! gone the handle no longer upgrades and [`Osc99Registry::prune_dead_panes`]
-//! drops the instance. Notifications already on screen simply stay there and
-//! produce no replies.
+//! drops the instance and returns close effects for its open legs, so nothing
+//! outlives its pane. No replies are produced.
 //!
 //! # Capacity
 //!
@@ -319,7 +319,8 @@ impl Osc99Registry {
     /// [`Osc99Effect::ShowLinuxSystem`], and an `UntrackedSystem` a
     /// [`Osc99Effect::ShowUntrackedSystem`] plus, when `c=1` was requested, the
     /// `untracked` close report. The two system effects share one copy of
-    /// `data`. An update of an instance whose new legs include the untracked
+    /// `data`, which is taken by value so that allocation is built without
+    /// copying it. An update of an instance whose new legs include the untracked
     /// one shows a new notification (nothing can be replaced in place there)
     /// and, with `c=1`, reports again.
     ///
@@ -343,7 +344,7 @@ impl Osc99Registry {
         &mut self,
         origin: Osc99Origin,
         reply_tx: Weak<Sender<InputEvent>>,
-        data: &Notification99Data,
+        data: Notification99Data,
         legs: &[Osc99Leg],
         now: Instant,
     ) -> Vec<Osc99Effect> {
@@ -365,15 +366,33 @@ impl Osc99Registry {
             }
         }
 
+        // What the instance keeps of `data`, taken before `data` may move into
+        // the shared system notification below.
+        let Notification99Data {
+            id,
+            activation_reporting,
+            activation_focus,
+            close_reporting,
+            expiry,
+            ..
+        } = &data;
+        let (id, activation_reporting, activation_focus, close_reporting, expiry) = (
+            id.clone(),
+            *activation_reporting,
+            *activation_focus,
+            *close_reporting,
+            *expiry,
+        );
+
         if wants_toast {
             effects.push(Osc99Effect::ShowToast {
                 instance,
                 replaces: replaces_toast,
-                spec: osc99_toast_spec(data),
+                spec: osc99_toast_spec(&data),
             });
         }
         if wants_linux || wants_untracked {
-            let shared = Arc::new(data.clone());
+            let shared = Arc::new(data);
             if wants_linux {
                 effects.push(Osc99Effect::ShowLinuxSystem {
                     instance,
@@ -386,11 +405,11 @@ impl Osc99Registry {
                 // Nothing can observe this notification closing, so a
                 // requested close report is answered now, in the `untracked`
                 // form.
-                if data.close_reporting == Osc99CloseReporting::Report {
+                if close_reporting == Osc99CloseReporting::Report {
                     effects.push(Osc99Effect::Reply {
                         reply_tx: Weak::clone(&reply_tx),
                         reply: GuiReply::Osc99Closed {
-                            id: data.id.clone(),
+                            id: id.clone(),
                             tracking: Osc99CloseTracking::Untracked,
                         },
                     });
@@ -411,16 +430,16 @@ impl Osc99Registry {
 
         self.instances.push(Osc99Instance {
             instance,
-            id: data.id.clone(),
+            id,
             origin,
             reply_tx,
-            activation_reporting: data.activation_reporting,
-            activation_focus: data.activation_focus,
-            close_reporting: data.close_reporting,
+            activation_reporting,
+            activation_focus,
+            close_reporting,
             open_legs,
             shown_legs: deduped,
             close_requested: Vec::new(),
-            deadline: match data.expiry {
+            deadline: match expiry {
                 Osc99Expiry::After(ms) => {
                     now.checked_add(Duration::from_millis(u64::from(ms.get())))
                 }
@@ -731,15 +750,26 @@ impl Osc99Registry {
     }
 
     /// Drop every instance whose pane is gone (its `Weak` reply handle no
-    /// longer upgrades).
-    pub fn prune_dead_panes(&mut self) {
-        self.instances.retain(|instance| {
-            let alive = instance.reply_tx.strong_count() > 0;
-            if !alive {
+    /// longer upgrades), and return the effects that close the open legs of
+    /// the dropped instances, so a `w=` toast or a desktop notification does
+    /// not outlive its pane.
+    ///
+    /// A leg already asked to close is not asked again. No reply is produced:
+    /// the pane is gone. The legs' later `Closed` events arrive for a
+    /// forgotten instance and are ignored.
+    #[must_use]
+    pub fn prune_dead_panes(&mut self) -> Vec<Osc99Effect> {
+        let (alive, gone): (Vec<Osc99Instance>, Vec<Osc99Instance>) =
+            std::mem::take(&mut self.instances)
+                .into_iter()
+                .partition(|instance| instance.reply_tx.strong_count() > 0);
+        self.instances = alive;
+        gone.iter()
+            .flat_map(|instance| {
                 instance.log_forgotten("originating pane is gone");
-            }
-            alive
-        });
+                instance.forget_effects()
+            })
+            .collect()
     }
 
     /// The instances, oldest first.
@@ -872,7 +902,7 @@ mod tests {
         let _ = registry.register(
             pane.origin,
             pane.weak(),
-            &data(id),
+            data(id),
             &[Osc99Leg::Toast],
             Instant::now(),
         );
@@ -886,7 +916,8 @@ mod tests {
         data: &Notification99Data,
         legs: &[Osc99Leg],
     ) -> (Vec<Osc99Effect>, Osc99InstanceId) {
-        let effects = registry.register(pane.origin, pane.weak(), data, legs, Instant::now());
+        let effects =
+            registry.register(pane.origin, pane.weak(), data.clone(), legs, Instant::now());
         // The registry mints ids in order, whether or not it keeps the
         // instance (a display on the untracked leg alone is not kept).
         let instance = Osc99InstanceId(registry.next_instance.wrapping_sub(1));
@@ -1417,7 +1448,7 @@ mod tests {
         let _ = registry.register(
             a.origin,
             a.weak(),
-            &data(None),
+            data(None),
             &[Osc99Leg::Toast, Osc99Leg::LinuxSystem, Osc99Leg::Toast],
             Instant::now(),
         );
@@ -1429,7 +1460,7 @@ mod tests {
         let _ = registry.register(
             a.origin,
             a.weak(),
-            &data(None),
+            data(None),
             &[Osc99Leg::Toast, Osc99Leg::UntrackedSystem],
             Instant::now(),
         );
@@ -2277,7 +2308,7 @@ mod tests {
         let effects = registry.register(
             a.origin,
             a.weak(),
-            &short_lived,
+            short_lived,
             &[Osc99Leg::UntrackedSystem],
             now,
         );
@@ -2866,10 +2897,104 @@ mod tests {
         register(&mut registry, &a, None);
 
         drop(a.tx);
-        registry.prune_dead_panes();
+        let _ = registry.prune_dead_panes();
 
         assert_eq!(registry.instances().len(), 1);
         assert_eq!(registry.instances()[0].origin.pane_id, b.origin.pane_id);
+    }
+
+    #[test]
+    fn register_takes_the_notification_by_value_without_copying_its_icon() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let notification = Notification99Data {
+            icon_data: Some(vec![1, 2, 3, 4]),
+            ..data(Some("n"))
+        };
+        let original = notification.icon_data.as_ref().map(Vec::as_ptr);
+
+        let effects = registry.register(
+            a.origin,
+            a.weak(),
+            notification,
+            &[Osc99Leg::LinuxSystem],
+            Instant::now(),
+        );
+
+        let [Osc99Effect::ShowLinuxSystem { notification, .. }] = effects.as_slice() else {
+            panic!("one system show expected, got {effects:?}");
+        };
+        assert_eq!(
+            notification.icon_data.as_ref().map(Vec::as_ptr),
+            original,
+            "the shared notification is the caller's allocation, not a copy"
+        );
+    }
+
+    #[test]
+    fn prune_dead_panes_closes_the_open_legs_of_a_gone_pane_without_replies() {
+        let (a, b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let reporting = reporting_data("a1", Osc99CloseReporting::Report);
+        let (_, toast_only) = register_with(&mut registry, &a, &reporting, &[Osc99Leg::Toast]);
+        let (_, both) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("a2", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast, Osc99Leg::LinuxSystem],
+        );
+        register(&mut registry, &b, Some("b1"));
+
+        drop(a.tx);
+        let effects = registry.prune_dead_panes();
+
+        let closes: Vec<(Osc99Leg, Osc99InstanceId)> = effects
+            .iter()
+            .map(|effect| match effect {
+                Osc99Effect::CloseToast(instance) => (Osc99Leg::Toast, *instance),
+                Osc99Effect::CloseLinuxSystem(instance) => (Osc99Leg::LinuxSystem, *instance),
+                other => panic!("pruning only closes legs, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            closes,
+            [
+                (Osc99Leg::Toast, toast_only),
+                (Osc99Leg::Toast, both),
+                (Osc99Leg::LinuxSystem, both),
+            ]
+        );
+        assert_eq!(registry.instances().len(), 1, "the live pane's stays");
+        assert!(
+            registry.prune_dead_panes().is_empty(),
+            "nothing left to prune"
+        );
+        assert!(
+            registry.on_toast_event(closed(toast_only)).is_empty(),
+            "the later Closed is for a forgotten instance and is ignored"
+        );
+    }
+
+    #[test]
+    fn prune_dead_panes_does_not_close_a_leg_already_asked_to_close() {
+        let (a, _b) = two_panes();
+        let mut registry = Osc99Registry::default();
+        let (_, instance) = register_with(
+            &mut registry,
+            &a,
+            &reporting_data("a1", Osc99CloseReporting::Report),
+            &[Osc99Leg::Toast],
+        );
+        let asked = registry.close(a.origin, "a1");
+        assert!(matches!(asked[..], [Osc99Effect::CloseToast(i)] if i == instance));
+
+        drop(a.tx);
+
+        assert!(
+            registry.prune_dead_panes().is_empty(),
+            "the toast was already asked to close"
+        );
+        assert!(registry.instances().is_empty());
     }
 
     #[test]
@@ -3238,7 +3363,7 @@ mod tests {
         legs: &[Osc99Leg],
         at: Instant,
     ) -> Osc99InstanceId {
-        let _ = registry.register(pane.origin, pane.weak(), data, legs, at);
+        let _ = registry.register(pane.origin, pane.weak(), data.clone(), legs, at);
         let Some(instance) = registry.instances().last().map(|i| i.instance) else {
             panic!("registration adds an instance");
         };

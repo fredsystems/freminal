@@ -980,7 +980,7 @@ mod window_manipulation_reply_tests {
 
         let mut cache = Osc99IconCache::default();
         for prime in drained.primes() {
-            prime.store_in(&mut cache);
+            prime.clone().store_in(&mut cache);
         }
         assert_eq!(cache.get("k"), Some([4u8, 5].as_slice()));
         assert_eq!(cache.get("other"), Some([9u8].as_slice()));

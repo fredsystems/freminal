@@ -675,13 +675,18 @@ impl NotificationRouter {
     /// this function has no access to. The result is empty when nothing was
     /// displayed.
     pub(super) fn route_osc99(
-        request: &Osc99DisplayRequest,
+        request: Osc99DisplayRequest,
         config: &NotificationsConfig,
         ctx: Osc99DisplayContext,
         icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
     ) -> Vec<Osc99Effect> {
-        let data = &request.data;
+        let Osc99DisplayRequest {
+            mut data,
+            reply_tx,
+            origin,
+            ..
+        } = request;
         if !config.enabled {
             return Vec::new();
         }
@@ -702,16 +707,15 @@ impl NotificationRouter {
         // The notification handed to the legs carries the resolved bytes in
         // `icon_data` (copied only when the `g=` cache supplied them), so
         // the Linux/BSD notification service and the macOS/Windows system
-        // leg both see the icon the program meant.
-        let displayed: Cow<'_, Notification99Data> =
-            match Self::resolve_icon_bytes(data, icon_cache) {
-                Some(bytes) if data.icon_data.is_none() => Cow::Owned(Notification99Data {
-                    icon_data: Some(bytes.into_owned()),
-                    ..data.clone()
-                }),
-                _ => Cow::Borrowed(data),
-            };
-        let data = displayed.as_ref();
+        // leg both see the icon the program meant. The notification is owned
+        // here, so nothing else is copied.
+        let from_cache = match Self::resolve_icon_bytes(&data, icon_cache) {
+            Some(bytes) if data.icon_data.is_none() => Some(bytes.into_owned()),
+            _ => None,
+        };
+        if let Some(bytes) = from_cache {
+            data.icon_data = Some(bytes);
+        }
 
         if occasion_allows_display(data.occasion, ctx.pane) == Osc99DisplayDecision::Suppress {
             return Vec::new();
@@ -720,7 +724,7 @@ impl NotificationRouter {
         // User filter (`osc99_filters`), after the occasion check as in
         // kitty. A dropped notification is displayed nowhere, registered
         // nowhere and answered with nothing.
-        if registry.filter_verdict(data) == Osc99FilterVerdict::Drop {
+        if registry.filter_verdict(&data) == Osc99FilterVerdict::Drop {
             tracing::debug!(id = ?data.id, "OSC 99 notification dropped by osc99_filters");
             return Vec::new();
         }
@@ -751,13 +755,7 @@ impl NotificationRouter {
         // carries an `i=` id and whichever leg showed it.
         if !legs.is_empty() {
             tracing::trace!(id = ?data.id, legs = ?legs, "registering OSC 99 notification");
-            return registry.register(
-                request.origin,
-                request.reply_tx.clone(),
-                data,
-                &legs,
-                ctx.now,
-            );
+            return registry.register(origin, reply_tx, data, &legs, ctx.now);
         }
         Vec::new()
     }
@@ -776,7 +774,7 @@ impl NotificationRouter {
     /// - [`Osc99Request::PrimeIcon`] stores the bytes in `icon_cache` and
     ///   returns no effects.
     pub(super) fn route_osc99_request(
-        request: &Osc99Request,
+        request: Osc99Request,
         config: &NotificationsConfig,
         window_focus: WindowFocus,
         daemon: Osc99LinuxDaemon,
@@ -796,7 +794,7 @@ impl NotificationRouter {
                     now: Instant::now(),
                     daemon,
                 };
-                Self::route_osc99(notification, config, ctx, icon_cache, registry)
+                Self::route_osc99(*notification, config, ctx, icon_cache, registry)
             }
             Osc99Request::Control(control) => {
                 tracing::trace!(
@@ -806,11 +804,9 @@ impl NotificationRouter {
                 );
                 match control.control.kind {
                     // Answer the poll with the requesting pane's live ids.
-                    Osc99ControlKind::Alive => registry.alive(
-                        control.origin,
-                        control.control.id.clone(),
-                        control.reply_tx.clone(),
-                    ),
+                    Osc99ControlKind::Alive => {
+                        registry.alive(control.origin, control.control.id, control.reply_tx)
+                    }
                     // App-driven close: close the pane's toast, if shown; the
                     // close report follows when the toast's `Closed` event
                     // arrives.
@@ -902,7 +898,8 @@ mod tests {
         registry: &mut Osc99Registry,
         system: &mut dyn Osc99SystemBackend,
     ) {
-        let effects = NotificationRouter::route_osc99(request, config, ctx, icon_cache, registry);
+        let effects =
+            NotificationRouter::route_osc99(request.clone(), config, ctx, icon_cache, registry);
         apply_osc99_effects(
             effects,
             &mut Osc99EffectSink::new(toasts, system, &mut NoUntrackedBackend),
@@ -1925,6 +1922,45 @@ mod tests {
     }
 
     #[test]
+    fn route_osc99_hands_transmitted_icon_bytes_to_the_legs_without_copying_them() {
+        let mut icon_cache = Osc99IconCache::default();
+        let mut registry = Osc99Registry::default();
+        let data = Notification99Data {
+            icon_data: Some(vec![7, 8, 9]),
+            ..default_n99()
+        };
+        let original = data.icon_data.as_ref().map(Vec::as_ptr);
+        let mut request = osc99_request(&default_n99());
+        request.data = data;
+
+        let effects = NotificationRouter::route_osc99(
+            request,
+            &NotificationsConfig {
+                enabled: true,
+                routing_osc99: NotificationRouting::System,
+                ..NotificationsConfig::default()
+            },
+            focused_ctx(),
+            &mut icon_cache,
+            &mut registry,
+        );
+
+        let shown = effects.iter().find_map(|effect| match effect {
+            Osc99Effect::ShowLinuxSystem { notification, .. }
+            | Osc99Effect::ShowUntrackedSystem(notification) => Some(notification),
+            _ => None,
+        });
+        let Some(shown) = shown else {
+            panic!("a system leg must show the notification, got {effects:?}");
+        };
+        assert_eq!(
+            shown.icon_data.as_ref().map(Vec::as_ptr),
+            original,
+            "the caller's allocation is passed on, not a copy"
+        );
+    }
+
+    #[test]
     fn route_osc99_icon_cache_miss_returns_none() {
         let mut icon_cache = Osc99IconCache::default();
         let data = Notification99Data {
@@ -2073,7 +2109,7 @@ mod tests {
         };
 
         let effects = NotificationRouter::route_osc99(
-            &osc99_request(&data),
+            osc99_request(&data),
             &config,
             focused_ctx(),
             &mut icon_cache,
@@ -2463,7 +2499,7 @@ mod tests {
         let mut effects = Vec::new();
         for request in requests {
             effects.extend(NotificationRouter::route_osc99_request(
-                request,
+                request.clone(),
                 config,
                 WindowFocus::Focused,
                 Osc99LinuxDaemon::assumed(),

@@ -6518,6 +6518,12 @@ review of the cleanup diff follows.
   - **N7, copies.** `register` takes the notification by value, so the `Arc` is built
     without copying it. Icon primes are consumed.
 - **Tests:** one per item.
+- **Status:** done.
+  - Pruning closes the pruned instance's open legs through the existing feedback path.
+  - `Osc99WindowOps` fixes the order: un-minimise, focus, repaint.
+  - `plan_osc99_routing` decides with an `Osc99CellAccess` enum.
+  - Requests and the notification travel by value end to end. Two pointer-identity tests
+    show the icon is not copied.
 
 #### 138.C20 — D-Bus follow-ups from the confirmation review
 

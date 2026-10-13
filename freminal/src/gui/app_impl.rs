@@ -2089,7 +2089,7 @@ impl freminal_windowing::App for FreminalGui {
             );
             self.route_window_manipulation_events(
                 WindowFocus::from_bool(window_focused),
-                &window_manipulation_events,
+                window_manipulation_events,
             );
             self.wake_for_osc99_pending_work(ui.ctx());
 
@@ -4465,7 +4465,7 @@ impl FreminalGui {
     fn route_window_manipulation_events(
         &self,
         window_focus: WindowFocus,
-        events: &WindowManipulationEvents,
+        events: WindowManipulationEvents,
     ) {
         // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
         // `self.config` and the toast stack are borrowable here without
@@ -4506,19 +4506,17 @@ impl FreminalGui {
         // is bounded by the registry's cap, and a busy cell only defers the
         // prune to the next frame, so it is worth a warning only when there
         // is OSC 99 work this frame.
-        match self.osc99_registry.try_borrow_mut() {
-            Ok(mut registry) => registry.prune_dead_panes(),
-            Err(_) if !events.osc99_requests.is_empty() => {
-                tracing::warn!("OSC 99: notification registry busy; dead panes not pruned");
-            }
-            Err(_) => {}
+        if self.prune_osc99_dead_panes() == super::osc99::Osc99CellAccess::Busy
+            && !events.osc99_requests.is_empty()
+        {
+            tracing::warn!("OSC 99: notification state busy; dead panes not pruned");
         }
 
         // Route every OSC 99 request of the frame (displays, `p=close` /
         // `p=alive` controls, icon primings) in the order the panes emitted
         // them. The `p=?` handshake never gets here: the PTY thread answers
         // it (Task 130.5).
-        self.route_osc99_requests(window_focus, &events.osc99_requests);
+        self.route_osc99_requests(window_focus, events.osc99_requests);
     }
 
     /// First-window spawn path when no layout or session restore will apply.

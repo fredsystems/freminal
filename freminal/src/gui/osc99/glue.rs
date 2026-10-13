@@ -142,9 +142,13 @@ fn feed_back_failed_legs(registry: &mut Osc99Registry, sink: &mut Osc99EffectSin
 /// routing choice, and `daemon` turns a system leg nobody can show into the
 /// toast leg.
 ///
+/// The requests are consumed as they are routed, so a notification's icon
+/// bytes and a priming's data move into the registry and the icon cache
+/// without being copied.
+///
 /// The panes to focus are left in `sink.focus_requests`.
-fn route_requests<'r>(
-    requests: impl IntoIterator<Item = &'r Osc99Request>,
+fn route_requests(
+    requests: impl IntoIterator<Item = Osc99Request>,
     notifications: &NotificationsConfig,
     window_focus: WindowFocus,
     daemon: Osc99LinuxDaemon,
@@ -168,16 +172,61 @@ fn route_requests<'r>(
 /// The requests to keep for the next frame when a cell was busy: `requests`
 /// in order, capped at [`MAX_DEFERRED_OSC99_REQUESTS`]. The newest requests
 /// beyond the cap are dropped, with a warning.
-fn cap_deferred<'r>(requests: impl IntoIterator<Item = &'r Osc99Request>) -> Vec<Osc99Request> {
-    let mut kept: Vec<Osc99Request> = requests.into_iter().cloned().collect();
-    if kept.len() > MAX_DEFERRED_OSC99_REQUESTS {
+fn cap_deferred(mut requests: Vec<Osc99Request>) -> Vec<Osc99Request> {
+    if requests.len() > MAX_DEFERRED_OSC99_REQUESTS {
         tracing::warn!(
-            dropped = kept.len() - MAX_DEFERRED_OSC99_REQUESTS,
+            dropped = requests.len() - MAX_DEFERRED_OSC99_REQUESTS,
             "OSC 99: deferred request queue full; newest requests dropped"
         );
-        kept.truncate(MAX_DEFERRED_OSC99_REQUESTS);
+        requests.truncate(MAX_DEFERRED_OSC99_REQUESTS);
     }
-    kept
+    requests
+}
+
+/// Whether the shared cells an OSC 99 pass needs (the toast stack, the
+/// registry and, for routing, the icon cache) could all be borrowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::gui) enum Osc99CellAccess {
+    /// Every cell was borrowed; the pass ran.
+    Free,
+    /// At least one cell was already borrowed elsewhere; the pass did not run
+    /// and its work waits for the next frame.
+    Busy,
+}
+
+/// What a routing pass does with the requests it was handed.
+#[derive(Debug)]
+struct Osc99RoutingPlan {
+    /// Requests to route now, in order.
+    route: Vec<Osc99Request>,
+    /// Requests to keep for the next frame, in order.
+    defer: Vec<Osc99Request>,
+}
+
+/// Decide what to route and what to defer: `deferred` (requests an earlier
+/// frame could not route) followed by `fresh`, in that order.
+///
+/// With every cell [`Free`](Osc99CellAccess::Free) all of them are routed.
+/// With a cell [`Busy`](Osc99CellAccess::Busy) none is: they are all deferred,
+/// in order and capped ([`cap_deferred`]), so a busy cell loses nothing it
+/// need not lose and never reorders requests.
+fn plan_osc99_routing(
+    deferred: Vec<Osc99Request>,
+    fresh: Vec<Osc99Request>,
+    cells: Osc99CellAccess,
+) -> Osc99RoutingPlan {
+    let mut all = deferred;
+    all.extend(fresh);
+    match cells {
+        Osc99CellAccess::Free => Osc99RoutingPlan {
+            route: all,
+            defer: Vec::new(),
+        },
+        Osc99CellAccess::Busy => Osc99RoutingPlan {
+            route: Vec::new(),
+            defer: cap_deferred(all),
+        },
+    }
 }
 
 /// Close the OSC 99 notifications whose `w=` deadline has passed at `now`,
@@ -197,6 +246,18 @@ fn expire_due(
         .map(|deadline| deadline.saturating_duration_since(now));
     apply_and_feed_back(effects, registry, sink);
     next
+}
+
+/// Forget the registry's instances whose pane is gone and execute the effects
+/// that close their open legs, so a notification does not outlive its pane.
+///
+/// The close a toast or desktop notification reports afterwards is for a
+/// forgotten instance, so the registry ignores it and no reply is sent.
+fn prune_dead_panes(registry: &mut Osc99Registry, sink: &mut Osc99EffectSink<'_>) {
+    let effects = registry.prune_dead_panes();
+    if !effects.is_empty() {
+        apply_and_feed_back(effects, registry, sink);
+    }
 }
 
 /// Hand the events the keyed toasts recorded (activation, close) to the
@@ -315,7 +376,7 @@ fn has_queued_work<T>(queue: &RefCell<Vec<T>>) -> bool {
     queue.try_borrow().is_ok_and(|queue| !queue.is_empty())
 }
 
-/// The windows OSC 99 focus requests are performed on.
+/// The panes OSC 99 focus requests are performed on.
 ///
 /// A trait so [`drain_focus_requests`] can be tested without a windowing
 /// layer; [`LiveWindows`] is the implementation the app uses.
@@ -323,52 +384,82 @@ trait Osc99FocusTargets {
     /// Switch to `origin`'s tab, unzoom, and make its pane the active pane.
     /// `None` when the window is gone.
     fn focus_pane(&mut self, origin: Osc99Origin) -> Option<PaneFocusOutcome>;
+}
 
-    /// Un-minimise `window_id`, raise it, and repaint it.
-    fn raise_window(&mut self, window_id: WindowId);
+/// The OS-window calls a focus request makes once its pane is focused.
+///
+/// A trait so the order of the calls is testable: the windowing handle is the
+/// implementation the app uses, a recording double stands in under test.
+trait Osc99WindowOps {
+    /// Un-minimise `window_id`.
+    fn unminimise(&self, window_id: WindowId);
+
+    /// Ask the OS to give `window_id` input focus.
+    fn focus(&self, window_id: WindowId);
+
+    /// Request a repaint of `window_id`.
+    fn repaint(&self, window_id: WindowId);
+}
+
+impl Osc99WindowOps for freminal_windowing::WindowHandle<'_> {
+    fn unminimise(&self, window_id: WindowId) {
+        // The window's minimised state is only known to its own egui context,
+        // which is not the one rendering now, so the request is always made;
+        // winit makes it a no-op for a window that is not minimised (Windows
+        // and macOS compare the real state; X11 sends the same activation
+        // `focus_window` does; Wayland cannot un-minimise and logs that it
+        // ignored the request). The `false` is the windowing API's own
+        // "minimised" flag.
+        self.set_minimized(window_id, false);
+    }
+
+    fn focus(&self, window_id: WindowId) {
+        self.focus_window(window_id);
+    }
+
+    fn repaint(&self, window_id: WindowId) {
+        self.request_repaint(window_id);
+    }
+}
+
+/// Raise `window_id`: un-minimise it first (a minimised window ignores a focus
+/// request on some platforms), then focus it, then repaint it.
+fn raise_window(ops: &impl Osc99WindowOps, window_id: WindowId) {
+    ops.unminimise(window_id);
+    ops.focus(window_id);
+    ops.repaint(window_id);
 }
 
 /// Perform the focus requests queued by activated OSC 99 notifications, in
 /// order.
 ///
 /// A request whose window is gone, or whose pane is gone, is skipped. A
-/// focused pane's window is raised.
-fn drain_focus_requests(requests: Vec<Osc99Origin>, targets: &mut impl Osc99FocusTargets) {
+/// focused pane's window is raised through `ops` ([`raise_window`]).
+fn drain_focus_requests(
+    requests: Vec<Osc99Origin>,
+    targets: &mut impl Osc99FocusTargets,
+    ops: &impl Osc99WindowOps,
+) {
     for origin in requests {
         match targets.focus_pane(origin) {
             None => trace!(?origin, "OSC 99 focus request: window is gone; skipped"),
             Some(PaneFocusOutcome::PaneNotFound) => {
                 trace!(?origin, "OSC 99 focus request: pane is gone; skipped");
             }
-            Some(PaneFocusOutcome::Focused) => targets.raise_window(origin.window_id),
+            Some(PaneFocusOutcome::Focused) => raise_window(ops, origin.window_id),
         }
     }
 }
 
-/// [`Osc99FocusTargets`] over the app's real windows and the windowing handle
-/// of the frame being rendered.
-struct LiveWindows<'a, 'h> {
+/// [`Osc99FocusTargets`] over the app's real windows.
+struct LiveWindows<'a> {
     windows: &'a mut HashMap<WindowId, PerWindowState>,
-    handle: &'a freminal_windowing::WindowHandle<'h>,
 }
 
-impl Osc99FocusTargets for LiveWindows<'_, '_> {
+impl Osc99FocusTargets for LiveWindows<'_> {
     fn focus_pane(&mut self, origin: Osc99Origin) -> Option<PaneFocusOutcome> {
         let win = self.windows.get_mut(&origin.window_id)?;
         Some(focus_pane_in_tabs(&mut win.tabs, origin.pane_id))
-    }
-
-    fn raise_window(&mut self, window_id: WindowId) {
-        // Un-minimise first: a minimised window ignores a focus request on
-        // some platforms. The window's minimised state is only known to its
-        // own egui context, which is not the one rendering now, so the request
-        // is always made; winit makes it a no-op for a window that is not
-        // minimised (Windows and macOS compare the real state; X11 sends the
-        // same activation `focus_window` does; Wayland cannot un-minimise and
-        // logs that it ignored the request).
-        self.handle.set_minimized(window_id, false);
-        self.handle.focus_window(window_id);
-        self.handle.request_repaint(window_id);
     }
 }
 
@@ -392,7 +483,7 @@ impl FreminalGui {
     pub(in crate::gui) fn route_osc99_requests(
         &self,
         window_focus: WindowFocus,
-        fresh: &[Osc99Request],
+        fresh: Vec<Osc99Request>,
     ) {
         let deferred = self.deferred_osc99_requests.try_borrow_mut().map_or_else(
             |_| {
@@ -405,19 +496,30 @@ impl FreminalGui {
             return;
         }
 
-        let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut registry)) = (
+        let cells = match (
             self.toasts.try_borrow_mut(),
             self.osc99_icon_cache.try_borrow_mut(),
             self.osc99_registry.try_borrow_mut(),
-        ) else {
+        ) {
+            (Ok(toasts), Ok(icon_cache), Ok(registry)) => Some((toasts, icon_cache, registry)),
+            _ => None,
+        };
+        let access = if cells.is_some() {
+            Osc99CellAccess::Free
+        } else {
             tracing::warn!("OSC 99: notification state busy; requests deferred to the next frame");
-            self.store_deferred_osc99_requests(cap_deferred(deferred.iter().chain(fresh)));
+            Osc99CellAccess::Busy
+        };
+
+        let Osc99RoutingPlan { route, defer } = plan_osc99_routing(deferred, fresh, access);
+        self.store_deferred_osc99_requests(defer);
+        let Some((mut toasts, mut icon_cache, mut registry)) = cells else {
             return;
         };
 
         self.with_osc99_sink(&mut toasts, |sink| {
             route_requests(
-                deferred.iter().chain(fresh),
+                route,
                 &self.config.notifications,
                 window_focus,
                 self.osc99_daemon.get(),
@@ -441,6 +543,24 @@ impl FreminalGui {
                 "OSC 99: deferred request queue busy; requests dropped"
             );
         }
+    }
+
+    /// Drop the OSC 99 instances whose pane is gone and close their open legs
+    /// ([`prune_dead_panes`]).
+    ///
+    /// Both cells are borrowed before the registry changes, so a busy cell
+    /// loses nothing: the prune is returned as [`Osc99CellAccess::Busy`] and
+    /// runs on a later frame.
+    pub(in crate::gui) fn prune_osc99_dead_panes(&self) -> Osc99CellAccess {
+        let (Ok(mut toasts), Ok(mut registry)) = (
+            self.toasts.try_borrow_mut(),
+            self.osc99_registry.try_borrow_mut(),
+        ) else {
+            return Osc99CellAccess::Busy;
+        };
+
+        self.with_osc99_sink(&mut toasts, |sink| prune_dead_panes(&mut registry, sink));
+        Osc99CellAccess::Free
     }
 
     /// Close the OSC 99 notifications whose `w=` deadline has passed, execute
@@ -650,8 +770,8 @@ impl FreminalGui {
             requests,
             &mut LiveWindows {
                 windows: &mut self.windows,
-                handle,
             },
+            handle,
         );
     }
 }
@@ -820,7 +940,7 @@ mod tests {
         ) -> Vec<Osc99Origin> {
             self.run(|registry, icons, sink| {
                 route_requests(
-                    requests,
+                    requests.iter().cloned(),
                     notifications,
                     WindowFocus::Focused,
                     Osc99LinuxDaemon::assumed(),
@@ -846,7 +966,7 @@ mod tests {
         notifications: &NotificationsConfig,
     ) -> Osc99InstanceId {
         let effects = NotificationRouter::route_osc99_request(
-            request,
+            request.clone(),
             notifications,
             WindowFocus::Focused,
             Osc99LinuxDaemon::assumed(),
@@ -1002,7 +1122,7 @@ mod tests {
             .map(|id| display(&pane, notification(id)))
             .collect();
 
-        assert_eq!(ids_of(&cap_deferred(&requests)), ["a", "b", "c"]);
+        assert_eq!(ids_of(&cap_deferred(requests)), ["a", "b", "c"]);
     }
 
     #[test]
@@ -1012,7 +1132,7 @@ mod tests {
             .map(|n| display(&pane, notification(&n.to_string())))
             .collect();
 
-        let kept = ids_of(&cap_deferred(&requests));
+        let kept = ids_of(&cap_deferred(requests));
 
         assert_eq!(kept.len(), MAX_DEFERRED_OSC99_REQUESTS);
         assert_eq!(kept.first().map(String::as_str), Some("0"));
@@ -1190,7 +1310,7 @@ mod tests {
 
             let (leftover, _) = rig.run(|registry, icons, sink| {
                 route_requests(
-                    &[display(&pane, reporting("a"))],
+                    [display(&pane, reporting("a"))],
                     &system_config(),
                     WindowFocus::Focused,
                     Osc99LinuxDaemon::assumed(),
@@ -1437,13 +1557,11 @@ mod tests {
 
     // ── drain_focus_requests ────────────────────────────────────────────
 
-    /// A fake set of windows: which panes exist in which window, and what was
-    /// raised.
+    /// A fake set of windows: which panes exist in which window.
     #[derive(Default)]
     struct FakeWindows {
         panes: HashMap<WindowId, Vec<PaneId>>,
         focused: Vec<Osc99Origin>,
-        raised: Vec<WindowId>,
     }
 
     impl Osc99FocusTargets for FakeWindows {
@@ -1456,9 +1574,41 @@ mod tests {
                 Some(PaneFocusOutcome::PaneNotFound)
             }
         }
+    }
 
-        fn raise_window(&mut self, window_id: WindowId) {
-            self.raised.push(window_id);
+    /// One OS-window call, as [`RecordingWindowOps`] saw it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WindowCall {
+        Unminimise(WindowId),
+        Focus(WindowId),
+        Repaint(WindowId),
+    }
+
+    /// An [`Osc99WindowOps`] that records its calls in order.
+    #[derive(Default)]
+    struct RecordingWindowOps {
+        calls: std::cell::RefCell<Vec<WindowCall>>,
+    }
+
+    impl RecordingWindowOps {
+        fn calls(&self) -> Vec<WindowCall> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Osc99WindowOps for RecordingWindowOps {
+        fn unminimise(&self, window_id: WindowId) {
+            self.calls
+                .borrow_mut()
+                .push(WindowCall::Unminimise(window_id));
+        }
+
+        fn focus(&self, window_id: WindowId) {
+            self.calls.borrow_mut().push(WindowCall::Focus(window_id));
+        }
+
+        fn repaint(&self, window_id: WindowId) {
+            self.calls.borrow_mut().push(WindowCall::Repaint(window_id));
         }
     }
 
@@ -1469,16 +1619,41 @@ mod tests {
         }
     }
 
+    /// The calls that raise window `window`: un-minimise, then focus, then
+    /// repaint.
+    fn raise_calls(window: u64) -> [WindowCall; 3] {
+        let id = WindowId::for_test(window);
+        [
+            WindowCall::Unminimise(id),
+            WindowCall::Focus(id),
+            WindowCall::Repaint(id),
+        ]
+    }
+
+    #[test]
+    fn raising_a_window_un_minimises_then_focuses_then_repaints() {
+        let ops = RecordingWindowOps::default();
+
+        raise_window(&ops, WindowId::for_test(3));
+
+        assert_eq!(ops.calls(), raise_calls(3));
+    }
+
     #[test]
     fn a_focus_request_focuses_the_pane_and_raises_its_window() {
         let pane = PaneIdGenerator::new(0).next_id();
         let mut windows = FakeWindows::default();
         windows.panes.insert(WindowId::for_test(1), vec![pane]);
+        let ops = RecordingWindowOps::default();
 
-        drain_focus_requests(vec![origin(1, pane)], &mut windows);
+        drain_focus_requests(vec![origin(1, pane)], &mut windows, &ops);
 
         assert_eq!(windows.focused, [origin(1, pane)]);
-        assert_eq!(windows.raised, [WindowId::for_test(1)]);
+        assert_eq!(
+            ops.calls(),
+            raise_calls(1),
+            "un-minimise before focus, then repaint"
+        );
     }
 
     #[test]
@@ -1486,11 +1661,12 @@ mod tests {
         let pane = PaneIdGenerator::new(0).next_id();
         let mut windows = FakeWindows::default();
         windows.panes.insert(WindowId::for_test(1), vec![pane]);
+        let ops = RecordingWindowOps::default();
 
-        drain_focus_requests(vec![origin(9, pane)], &mut windows);
+        drain_focus_requests(vec![origin(9, pane)], &mut windows, &ops);
 
         assert_eq!(windows.focused, Vec::new());
-        assert_eq!(windows.raised, Vec::new(), "no window to raise");
+        assert_eq!(ops.calls(), Vec::new(), "no window to raise");
     }
 
     #[test]
@@ -1499,11 +1675,12 @@ mod tests {
         let (present, gone) = (ids.next_id(), ids.next_id());
         let mut windows = FakeWindows::default();
         windows.panes.insert(WindowId::for_test(1), vec![present]);
+        let ops = RecordingWindowOps::default();
 
-        drain_focus_requests(vec![origin(1, gone)], &mut windows);
+        drain_focus_requests(vec![origin(1, gone)], &mut windows, &ops);
 
         assert_eq!(windows.focused, Vec::new());
-        assert_eq!(windows.raised, Vec::new());
+        assert_eq!(ops.calls(), Vec::new());
     }
 
     #[test]
@@ -1513,16 +1690,121 @@ mod tests {
         let mut windows = FakeWindows::default();
         windows.panes.insert(WindowId::for_test(1), vec![first]);
         windows.panes.insert(WindowId::for_test(2), vec![second]);
+        let ops = RecordingWindowOps::default();
 
         drain_focus_requests(
             vec![origin(7, first), origin(2, second), origin(1, first)],
             &mut windows,
+            &ops,
         );
 
         assert_eq!(windows.focused, [origin(2, second), origin(1, first)]);
-        assert_eq!(
-            windows.raised,
-            [WindowId::for_test(2), WindowId::for_test(1)]
+        let expected: Vec<WindowCall> = raise_calls(2).into_iter().chain(raise_calls(1)).collect();
+        assert_eq!(ops.calls(), expected);
+    }
+
+    // ── plan_osc99_routing ──────────────────────────────────────────────
+
+    #[test]
+    fn plan_routes_deferred_before_fresh_when_every_cell_is_free() {
+        let pane = LivePane::first();
+        let deferred = vec![display(&pane, notification("old"))];
+        let fresh = vec![
+            display(&pane, notification("a")),
+            display(&pane, notification("b")),
+        ];
+
+        let plan = plan_osc99_routing(deferred, fresh, Osc99CellAccess::Free);
+
+        assert_eq!(ids_of(&plan.route), ["old", "a", "b"]);
+        assert!(plan.defer.is_empty());
+    }
+
+    #[test]
+    fn plan_defers_everything_in_order_when_a_cell_is_busy() {
+        let pane = LivePane::first();
+        let deferred = vec![display(&pane, notification("old"))];
+        let fresh = vec![
+            display(&pane, notification("a")),
+            display(&pane, notification("b")),
+        ];
+
+        let plan = plan_osc99_routing(deferred, fresh, Osc99CellAccess::Busy);
+
+        assert!(
+            plan.route.is_empty(),
+            "nothing is routed through a busy cell"
         );
+        assert_eq!(ids_of(&plan.defer), ["old", "a", "b"]);
+    }
+
+    #[test]
+    fn plan_caps_what_a_busy_cell_defers_and_keeps_the_oldest() {
+        let pane = LivePane::first();
+        let deferred: Vec<Osc99Request> = (0..MAX_DEFERRED_OSC99_REQUESTS)
+            .map(|n| display(&pane, notification(&n.to_string())))
+            .collect();
+        let fresh = vec![display(&pane, notification("newest"))];
+
+        let plan = plan_osc99_routing(deferred, fresh, Osc99CellAccess::Busy);
+
+        let kept = ids_of(&plan.defer);
+        assert_eq!(kept.len(), MAX_DEFERRED_OSC99_REQUESTS);
+        assert!(
+            !kept.iter().any(|id| id == "newest"),
+            "the newest request beyond the cap is dropped"
+        );
+    }
+
+    #[test]
+    fn plan_with_nothing_to_route_has_nothing_to_defer() {
+        for cells in [Osc99CellAccess::Free, Osc99CellAccess::Busy] {
+            let plan = plan_osc99_routing(Vec::new(), Vec::new(), cells);
+
+            assert!(plan.route.is_empty() && plan.defer.is_empty());
+        }
+    }
+
+    // ── prune_dead_panes ────────────────────────────────────────────────
+
+    #[test]
+    fn a_pruned_pane_takes_its_timed_toast_with_it_and_reports_nothing() {
+        let pane = LivePane::first();
+        let mut rig = Rig::new();
+        rig.route(
+            &[display(&pane, expiring("a", 5_000))],
+            &config(NotificationRouting::Toast),
+        );
+        assert_eq!(rig.toasts.len(), 1);
+
+        drop(pane.tx);
+        rig.run(|registry, _, sink| prune_dead_panes(registry, sink));
+
+        assert_eq!(rig.toasts.len(), 0, "the toast does not outlive its pane");
+        assert!(rig.registry.instances().is_empty());
+        // The toast's `Closed` event reaches a registry that has forgotten
+        // the instance, so it is ignored.
+        rig.deliver_toast_events();
+        assert!(rig.registry.instances().is_empty());
+        assert_eq!(
+            pane.rx.try_iter().count(),
+            0,
+            "the pane is gone, so nothing is sent to it"
+        );
+    }
+
+    #[test]
+    fn pruning_leaves_a_live_panes_toast_alone() {
+        let pane = LivePane::first();
+        let mut rig = Rig::new();
+        rig.route(
+            &[display(&pane, expiring("a", 5_000))],
+            &config(NotificationRouting::Toast),
+        );
+
+        rig.run(|registry, _, sink| prune_dead_panes(registry, sink));
+
+        assert_eq!(rig.toasts.len(), 1);
+        assert_eq!(rig.registry.instances().len(), 1);
     }
 }

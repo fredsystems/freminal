@@ -63,6 +63,7 @@ pub use effects::{
 #[cfg(test)]
 pub use effects::{RecordedShow, RecordingSystemBackend};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
+pub(in crate::gui) use glue::Osc99CellAccess;
 pub use icon_cache::Osc99IconCache;
 pub use pane_state::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, PaneActivity, PaneKeyboardFocus, PaneVisibility,
@@ -190,9 +191,10 @@ pub struct Osc99IconPrime {
 
 impl Osc99IconPrime {
     /// Store the icon in `cache` under its key, as the most recently used
-    /// entry. The cache applies its own bounds.
-    pub fn store_in(&self, cache: &mut Osc99IconCache) {
-        cache.insert(self.key.clone(), self.data.clone());
+    /// entry. The cache applies its own bounds. The prime is consumed: the
+    /// cache takes the bytes without copying them.
+    pub fn store_in(self, cache: &mut Osc99IconCache) {
+        cache.insert(self.key, self.data);
     }
 }
 
