@@ -12,6 +12,8 @@
 //! This crate is **not** production code. `anyhow`/`color-eyre` are
 //! acceptable here.
 
+mod fuzz;
+
 use std::{fmt::Debug, fs, io, process::Output, vec};
 
 use cargo_metadata::MetadataCommand;
@@ -194,6 +196,44 @@ enum Command {
         #[arg(value_enum)]
         formats: Vec<LocalPackageFormat>,
     },
+
+    /// List the cargo-fuzz targets of the `fuzz/` crate
+    ///
+    /// Read from `fuzz/Cargo.toml`; works on stable (no fuzz shell needed).
+    #[command(visible_alias = "fl")]
+    FuzzList,
+
+    /// Fuzz one target (needs `nix develop .#fuzz`)
+    ///
+    /// Builds the target, then runs it under bubblewrap by default: the
+    /// `terminal_state` target can drive kitty file/shm transmission that
+    /// reads arbitrary paths and deletes kitty-marked files in /tmp and
+    /// /dev/shm. Pass `--sandbox none` only in disposable environments (CI).
+    /// Curated seeds in `fuzz/seeds/<target>` are read-only; new inputs go to
+    /// the working corpus and crashes to the artifacts directory.
+    #[command(visible_alias = "fz")]
+    Fuzz(fuzz::FuzzRunArgs),
+
+    /// Fuzz every target briefly, stopping each at its first finding
+    ///
+    /// Continues through all targets, prints a summary table, and exits
+    /// non-zero if any target failed.
+    #[command(visible_alias = "fs")]
+    FuzzSmoke(fuzz::FuzzSmokeArgs),
+
+    /// Replay seeds and regression inputs through every target (CI gate)
+    ///
+    /// Deterministic (`-runs=0`): no fuzzing, nothing under `fuzz/seeds` or
+    /// `fuzz/regressions` is written. Exits non-zero if any input crashes.
+    #[command(visible_alias = "fr")]
+    FuzzReplay(fuzz::FuzzEnvArgs),
+
+    /// Minimise a working corpus with libFuzzer merge
+    ///
+    /// Merges `<corpus-root>/<target>` into `<target>.cmin`, then replaces the
+    /// original with it. Takes a target name or `--all`.
+    #[command(visible_alias = "fcm")]
+    FuzzCmin(fuzz::FuzzCminArgs),
 }
 
 /// Linux package formats that [`package_local`] can produce.
@@ -235,6 +275,11 @@ impl Command {
             Self::Precommit => precommit(),
             Self::BumpVersion { version } => bump_version(&version),
             Self::PackageLocal { formats } => package_local(&formats),
+            Self::FuzzList => fuzz::fuzz_list(),
+            Self::Fuzz(args) => fuzz::fuzz(&args),
+            Self::FuzzSmoke(args) => fuzz::fuzz_smoke(&args),
+            Self::FuzzReplay(env) => fuzz::fuzz_replay(&env),
+            Self::FuzzCmin(args) => fuzz::fuzz_cmin(&args),
         }
     }
 }
@@ -1093,7 +1138,62 @@ impl ExpressionExt for duct::Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::rpm_version;
+    use super::{rpm_version, Args, Command};
+    use crate::fuzz::{CrashPolicy, Sandbox};
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        // Catches duplicate subcommand aliases and malformed arg definitions.
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn fuzz_defaults_are_sandboxed_and_stop_on_crash() {
+        let args = Args::try_parse_from(["cargo xtask", "fuzz", "osc99_parse"]).unwrap();
+        let Command::Fuzz(run) = args.command else {
+            panic!("expected the fuzz subcommand");
+        };
+        assert_eq!(run.target, "osc99_parse");
+        assert_eq!(run.time, 300);
+        assert_eq!(run.env.sandbox, Sandbox::Bwrap);
+        assert_eq!(run.on_crash, CrashPolicy::Stop);
+        assert_eq!(run.jobs, 1);
+    }
+
+    #[test]
+    fn fuzz_aliases_and_flags_parse() {
+        let args = Args::try_parse_from([
+            "cargo xtask",
+            "fz",
+            "ansi_parser",
+            "--time",
+            "10",
+            "--sandbox",
+            "none",
+            "--on-crash",
+            "keep-going",
+            "--jobs",
+            "4",
+        ])
+        .unwrap();
+        let Command::Fuzz(run) = args.command else {
+            panic!("expected the fuzz subcommand");
+        };
+        assert_eq!(run.env.sandbox, Sandbox::None);
+        assert_eq!(run.on_crash, CrashPolicy::KeepGoing);
+        assert_eq!(run.jobs, 4);
+        for alias in ["fl", "fs", "fr"] {
+            assert!(
+                Args::try_parse_from(["cargo xtask", alias]).is_ok(),
+                "{alias}"
+            );
+        }
+        assert!(Args::try_parse_from(["cargo xtask", "fcm", "--all"]).is_ok());
+        assert!(Args::try_parse_from(["cargo xtask", "fcm"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fcm", "t", "--all"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz", "t", "--time", "0"]).is_err());
+    }
 
     #[test]
     fn release_version_is_unchanged() {
