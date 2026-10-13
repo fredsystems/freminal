@@ -393,6 +393,11 @@ limit = 10000
 # osc_777 = true
 
 # Honour OSC 99 (kitty stateful) notifications. Default: true.
+# The protocol's `o=unfocused` / `o=invisible` occasions are pane-aware, but
+# "visible" requires the OS window to be focused: freminal cannot tell an
+# occluded window from an unfocused one, so `o=invisible` also shows for a
+# pane in an unfocused window. Minimisation is not reported by Wayland
+# compositors, so a minimised window there counts as restored.
 # osc_99 = true
 
 # When true, an OSC 133 D (command finished) event fires a notification.
@@ -425,6 +430,30 @@ limit = 10000
 # `routing_osc99 = "disabled"`, freminal does not speak the kitty OSC 99
 # protocol at all: requests are ignored and the `p=?` capability query goes
 # unanswered, so applications detect it as unsupported.
+# The routing also decides what the `p=?` query advertises, because each leg
+# honours different features:
+#   "toast"   - the full toast lifecycle: activation and focus, buttons, close
+#               events, expiry and urgency are advertised. The toast shows the
+#               eight standard icon names (error, warn/warning, info, question,
+#               help, file-manager, system-monitor, text-editor) as glyphs, but
+#               never a transmitted icon image, so `icon` is not advertised; it
+#               plays no sounds, so the standard sound names are not either.
+#   "system"  - depends on the platform and the notification daemon. On
+#               Linux/BSD, buttons and activation need the daemon's `actions`
+#               capability and the standard sound names need `sound`; if the
+#               session bus cannot be reached, OSC 99 is treated as
+#               unsupported until freminal reconnects (it retries every 30
+#               seconds while the bus is unavailable). macOS and Windows cannot report activation or
+#               close and have no buttons or expiry, so none of those are
+#               advertised.
+#   "both"    - a feature is advertised if either leg has it (buttons, icons,
+#               activation, urgency, sounds); close events and expiry only if
+#               both legs have them. If the Linux/BSD session bus cannot be
+#               reached, only the toast is shown and advertised.
+#   "system_when_unfocused" - only what both legs have, since either may show.
+#               If the Linux/BSD session bus cannot be reached, every
+#               notification is shown as a toast (focused or not), and the
+#               toast's features are advertised.
 # routing_osc99 = "both"
 
 # routing_command_finished = "system_when_unfocused"
@@ -452,6 +481,24 @@ limit = 10000
 #   {tab_name}  - the display name of the tab the command ran in
 # Default: "{command} finished in {duration} (exit {exit_code})".
 # command_finished_template = "{command} finished in {duration} (exit {exit_code})"
+
+# Filters for OSC 99 (kitty stateful) notifications, one rule per entry.
+# A rule is either the bare word `all` (matches every notification) or
+# `location:regex`, where location is one of:
+#   title - the notification title
+#   body  - the notification body (the empty string when there is none)
+#   app   - the application name (the protocol's f= key; empty when absent)
+#   type  - the notification types (the protocol's t= key); matches if ANY
+#           of the notification's types matches
+# The regex is a Rust regular expression, searched (not anchored) within the
+# field. Matching is case-sensitive; put (?i) at the start of the pattern to
+# ignore case. A notification without a body or an application name is matched
+# against the empty string (as kitty does), so `body:^$` matches it. A
+# notification matching ANY rule is dropped silently: it is not shown and the
+# application gets no reply. An invalid rule is logged and ignored; the other
+# rules still apply. Applies on config reload.
+# Default: [] (nothing is filtered).
+# osc99_filters = ["app:^slack$", "type:^im\\.", "title:(?i)spam"]
 
 ## ##############################################################################
 # CLOSE GUARD (block close on running commands)

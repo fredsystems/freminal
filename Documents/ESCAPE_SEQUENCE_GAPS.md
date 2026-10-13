@@ -1,5 +1,26 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-12 — Task 138 (OSC 99 conformance), closed. The OSC 99 row
+in "OSC Gaps" (Kitty notifications) is removed. Its last open item was the eight
+standard icon names, which the spec requires every implementation to support:
+they are now shown as bundled-font glyphs on the toast (138.C4) and as
+rasterised glyph images on the macOS/Windows system leg (138.C5), as well as
+through the freedesktop mapping on Linux/BSD. OSC 99 conforms to kitty 0.49.2:
+chunk metadata merges instead of being clobbered by defaults, buttons are
+reported 1-based, `a=report` no longer disables focus, update in place,
+`p=close`, expiry and the close report after an activation work, and `p=?` is
+truthful per routing, platform and daemon. No other gap row was itemised for the
+rest of Task 138 (per-pane lifecycle, pane-aware `o=`, `a=focus`,
+`osc99_filters`, icons, sounds, category, the zbus Linux/BSD service, bounded
+reassembly); they are recorded in `ESCAPE_SEQUENCE_COVERAGE.md`. Not a gap:
+macOS and Windows cannot observe activation or close and have no update in
+place, expiry or buttons, so their `p=?` omits those features (the OS limit,
+recorded in the coverage notes). Nothing in OSC 99 remains open. The
+confirmation-review cleanups (138.C18–138.C22) opened no gap: the stripped-then-
+limited text order and the silent drop of an OSC body over 1 MiB (before OSC 99
+sees it; spec senders use chunks of 4096 bytes or less) are deliberate
+differences, recorded in `KITTY_PROTOCOL_REFERENCE.md`.
+
 Last updated: 2026-10-11 — Task 132 (colour foundation). Closed and removed from
 "OSC Gaps": "OSC 10/11 set" — an override now reaches rendering (default
 foreground; default background through a pane base fill), and OSC 17 / OSC 19
@@ -36,8 +57,8 @@ now honour S8C1T (130.3, 130.6, 130.7); replies are produced in byte-stream
 order and RIS applies at its stream position (130.1); tmux DCS passthrough runs
 every inner sequence through the real parser and never wraps replies (130.2);
 title, icon-label and OSC 52 replies no longer echo control characters
-(130.C3). OSC 99 conformance beyond this remains Task 138. See
-`ESCAPE_SEQUENCE_COVERAGE.md`.
+(130.C3). OSC 99 conformance beyond this was closed by Task 138 (see the
+2026-10-12 entry above). See `ESCAPE_SEQUENCE_COVERAGE.md`.
 
 Last updated: 2026-10-10 — 129.C5 closed: a C0 byte inside an OSC made the
 parser emit `Invalid` and print the rest of the payload as text. Control bytes
@@ -62,8 +83,9 @@ over-cap input is consumed and dropped, warn-logged with its length only).
 wrong bytes; they now decode as one stream. (129.13) kitty graphics replies
 ignored S8C1T; they are now 8-bit framed when it is active. (129.14) `DCS
 @kitty-*` kitten strings are consumed silently; a new not-planned row records
-them under "DCS / Graphics Gaps". Kitty graphics and OSC 99 remain not
-conformant (Tasks 135, 136, 138). See `ESCAPE_SEQUENCE_COVERAGE.md`.
+them under "DCS / Graphics Gaps". Kitty graphics remains not conformant (Tasks
+135, 136); the OSC 99 conformance gap was closed by Task 138 (see the 2026-10-12
+entry above). See `ESCAPE_SEQUENCE_COVERAGE.md`.
 
 Last updated: 2026-10-09 — Task 128 (strict CSI dispatch) — the CSI router now
 matches on private-marker prefix, intermediate and final byte together, so the
@@ -85,13 +107,14 @@ Last updated: 2026-10-08 — Task 126.4 (v0.13.0 audit truth reset) — the
 claims in this document: "Kitty graphics is fully implemented" and "Kitty
 keyboard protocol is substantially compliant". Both are replaced by pointers
 to the v0.13.x tasks (graphics: Tasks 135, 136; keyboard: Task 137), and OSC 99
-conformance (Task 138) is added. New gap entries, each with its planned task:
-OSC 21 / colour stack (Task 144), OSC 22 pointer shapes (Task 139), OSC 5522
-(Task 146), OSC 5113 (Task 102), OSC 72 (Task 105), OSC 10/11 set not reaching
-rendering (Task 132; closed by the 2026-10-11 entry above), a new "CSI Gaps" section for unscroll (Task 142), DECCARA
-/ DECSACE (Task 143), XTSAVE/XTRESTORE, `CSI 22 J` and the mouse-leave report
-(Task 141), SGR 221/222 (Task 140) and multiple cursors (Task 103). The OSC 66
-entry is corrected: Contour does not use OSC 66 (its notification is
+conformance (Task 138, closed 2026-10-12; see the entry above) is added. New gap
+entries, each with its planned task: OSC 21 / colour stack (Task 144), OSC 22
+pointer shapes (Task 139), OSC 5522 (Task 146), OSC 5113 (Task 102), OSC 72
+(Task 105), OSC 10/11 set not reaching rendering (Task 132; closed by the
+2026-10-11 entry above), a new "CSI Gaps" section for unscroll (Task 142),
+DECCARA / DECSACE (Task 143), XTSAVE/XTRESTORE, `CSI 22 J` and the mouse-leave
+report (Task 141), SGR 221/222 (Task 140) and multiple cursors (Task 103). The
+OSC 66 entry is corrected: Contour does not use OSC 66 (its notification is
 `CSI ? 996 n` / `?2031`); OSC 66 is kitty text sizing (Task 104) and the
 handler is a vestigial no-op. Behaviour changes that landed with the safety
 gate: (126.1) OSC 4/10/11/12 colour specs with non-ASCII or non-hex digits,
@@ -264,12 +287,12 @@ implemented (Tasks 13, 100) but **not conformant**: the 2026-10-08 audit found a
 (Task 35, the Task 101 encoding-only wins, and Task 114's raw-winit delivery of
 keypad/media/print/pause/menu keys) has a sound encoder, but the GUI layer feeding it
 drops Alt/Super on text keys and modified Enter; that is Task 137 (v0.13.1). The
-lock-key half of Task 114 was reverted (see below). OSC 99 is implemented (Task 99) but
-not conformant (Task 138, v0.13.0). The remaining gaps are:
+lock-key half of Task 114 was reverted (see below). OSC 99 is conformant with kitty 0.49.2
+(Task 138, v0.13.0, including 138.C4 and 138.C5). The remaining gaps are:
 
 - **Kitty protocol compliance (v0.13.x):** see the 2026-10-08 audit in
   `PLAN_VERSION_130.md` and the "Kitty Protocol Gaps" tables below. Graphics (Tasks 135,
-  136), keyboard (Task 137), OSC 99 (Task 138), pointer shapes (Task 139), underlines and
+  136), keyboard (Task 137), pointer shapes (Task 139), underlines and
   SGR (Task 140), misc extensions (Task 141), unscroll (Task 142), DECCARA/DECSACE
   (Task 143), colour control (Task 144), multiple cursors (Task 103), text sizing
   (Task 104), file transfer (Task 102), clipboard (Task 146), drag and drop (Task 105)
@@ -314,7 +337,6 @@ the prior panel-fill-only white inversion.
 | OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path. Also owns `@alpha` (the colour-spec parser does not accept it), `cursor_text` and `visual_bell`, whose only setter is OSC 21                             |
 | OSC 22            | 🟨         | 🚧   | v0.13.0 Task 139 | Pointer shapes — plain set/reset works; push (`>`), pop (`<`), query (`?`) and `=` reset the shape to default; no stack, no query reply                                                                                                   |
 | OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
-| OSC 99            | 🟩         | 🚧   | v0.13.0 Task 138 | Kitty notifications implemented (Task 99) but not conformant: 0-based button reports, chunk metadata clobbered by defaults, `a=report` disables focus, close report lost after activation, no update-in-place, `p=close` does not close   |
 | OSC 5113          | 🟨         | ⬜   | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                     |
 | OSC 5522          | 🟨         | ⬜   | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                  |
 | OSC 72            | ⬜         | ⬜   | v0.13.4 Task 105 | Kitty drag and drop — missing; spec stable upstream, blocked locally by winit 0.30's DnD API                                                                                                                                              |

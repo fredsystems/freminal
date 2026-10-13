@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -11,7 +11,7 @@ use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
-use freminal_common::buffer_states::window_manipulation::{Notification99Data, WindowManipulation};
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::config::BellMode;
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::send_or_log;
@@ -21,6 +21,9 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, Window
 
 use crate::gui::chrome_style;
 use crate::gui::notifications::{NotificationRequest, Osc99Control};
+use crate::gui::osc99::{
+    Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneContext, Osc99Request,
+};
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
 /// spacing for the initial / window-creation style setup.
@@ -137,6 +140,9 @@ pub(super) struct WindowManipFlags {
     pub window_focused: bool,
     /// Whether this pane is the only pane in its tab (no splits).
     pub is_only_pane: bool,
+    /// Where this pane's OSC 99 requests come from and the pane's state this
+    /// frame, stamped onto every collected OSC 99 request.
+    pub osc99: Osc99PaneContext,
 }
 
 /// An OSC 52 clipboard event observed during a frame's window-manipulation
@@ -247,8 +253,7 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
-    osc99_notifications: &mut Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
-    osc99_controls: &mut Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
+    osc99_requests: &mut Vec<Osc99Request>,
     osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
@@ -621,13 +626,31 @@ pub(super) fn handle_window_manipulation(
             // consumer alive: a strong `Sender` clone would hold the input
             // channel open after the pane closed.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push(((*data).clone(), Arc::downgrade(reply_tx)));
+                osc99_requests.push(Osc99Request::Display(Box::new(Osc99DisplayRequest {
+                    data: *data,
+                    reply_tx: Arc::downgrade(reply_tx),
+                    origin: flags.osc99.origin,
+                    pane_state: flags.osc99.pane_state,
+                })));
             }
             // OSC 99 app→terminal control sequence (Task 99.5c). Collected
             // alongside a `Weak` reply handle for the originating pane and
-            // answered after the drain loop.
+            // answered after the drain loop, in order with the frame's other
+            // OSC 99 requests.
             WindowManipulation::Osc99Control { id, kind } => {
-                osc99_controls.push((Osc99Control { id, kind }, Arc::downgrade(reply_tx)));
+                osc99_requests.push(Osc99Request::Control(Osc99ControlRequest {
+                    control: Osc99Control { id, kind },
+                    reply_tx: Arc::downgrade(reply_tx),
+                    origin: flags.osc99.origin,
+                }));
+            }
+            // OSC 99 icon priming (`g=` with icon bytes and no text). Nothing
+            // is displayed or answered; the caller stores the bytes in the
+            // session's icon cache when it reaches this request in the
+            // frame's ordered list, so a display after it that names the key
+            // finds them.
+            WindowManipulation::Osc99CacheIcon { key, data } => {
+                osc99_requests.push(Osc99Request::PrimeIcon(Osc99IconPrime { key, data }));
             }
         }
     }
@@ -665,13 +688,22 @@ mod osc52_toast_text_tests {
 #[cfg(test)]
 mod window_manipulation_reply_tests {
     use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
-    use crate::gui::notifications::Osc99Control;
+    use crate::gui::frame_drain::WindowFocus;
+    use crate::gui::osc99::{
+        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconCache, Osc99IconPrime, Osc99Origin,
+        Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, PaneKeyboardFocus,
+        PaneVisibility, TabActivity, WindowMinimized, ZoomOcclusion,
+    };
+    use crate::gui::panes::PaneIdGenerator;
+    use freminal_windowing::WindowId;
     use std::sync::{Arc, Weak};
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
-    use freminal_common::buffer_states::window_manipulation::{
-        Notification99Data, Osc99ControlKind, WindowManipulation,
+    use freminal_common::buffer_states::osc99_notification::{
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
+    use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::BellMode;
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
@@ -680,10 +712,45 @@ mod window_manipulation_reply_tests {
     struct Drained {
         replies: Vec<GuiReply>,
         osc52_events: Vec<Osc52ToastEvent>,
-        osc99_notifications: Vec<(Notification99Data, Weak<Sender<InputEvent>>)>,
-        osc99_controls: Vec<(Osc99Control, Weak<Sender<InputEvent>>)>,
+        /// Every OSC 99 request, in arrival order.
+        osc99: Vec<Osc99Request>,
         /// The pane's only strong sender; dropping it models the pane closing.
         pane_handle: Arc<Sender<InputEvent>>,
+    }
+
+    impl Drained {
+        /// The display requests, in arrival order.
+        fn displays(&self) -> Vec<&Osc99DisplayRequest> {
+            self.osc99
+                .iter()
+                .filter_map(|request| match request {
+                    Osc99Request::Display(display) => Some(display.as_ref()),
+                    Osc99Request::Control(_) | Osc99Request::PrimeIcon(_) => None,
+                })
+                .collect()
+        }
+
+        /// The control requests, in arrival order.
+        fn controls(&self) -> Vec<&Osc99ControlRequest> {
+            self.osc99
+                .iter()
+                .filter_map(|request| match request {
+                    Osc99Request::Control(control) => Some(control),
+                    Osc99Request::Display(_) | Osc99Request::PrimeIcon(_) => None,
+                })
+                .collect()
+        }
+
+        /// The icon primings, in arrival order.
+        fn primes(&self) -> Vec<&Osc99IconPrime> {
+            self.osc99
+                .iter()
+                .filter_map(|request| match request {
+                    Osc99Request::PrimeIcon(prime) => Some(prime),
+                    Osc99Request::Display(_) | Osc99Request::Control(_) => None,
+                })
+                .collect()
+        }
     }
 
     /// Run [`handle_window_manipulation`] once over `commands` inside a real
@@ -692,6 +759,29 @@ mod window_manipulation_reply_tests {
     /// Clipboard reads are denied (`allow_clipboard_read: false`, the default),
     /// so no test depends on the host clipboard.
     fn drain_commands(commands: Vec<WindowManipulation>) -> Drained {
+        drain_commands_with(commands, test_osc99_context())
+    }
+
+    /// The OSC 99 context the plain [`drain_commands`] uses: window 1, the
+    /// first pane, focused and visible.
+    fn test_osc99_context() -> Osc99PaneContext {
+        let mut ids = PaneIdGenerator::new(0);
+        Osc99PaneContext {
+            origin: Osc99Origin {
+                window_id: WindowId::for_test(1),
+                pane_id: ids.next_id(),
+            },
+            pane_state: Osc99PaneState::compute(
+                WindowFocus::Focused,
+                WindowMinimized::Restored,
+                TabActivity::Active,
+                PaneActivity::Active,
+                ZoomOcclusion::NotOccluded,
+            ),
+        }
+    }
+
+    fn drain_commands_with(commands: Vec<WindowManipulation>, osc99: Osc99PaneContext) -> Drained {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
         let reply_tx = Arc::new(reply_tx);
@@ -706,14 +796,14 @@ mod window_manipulation_reply_tests {
             is_active: true,
             window_focused: true,
             is_only_pane: true,
+            osc99,
         };
         let mut title_stack = Vec::new();
         let mut tab_title = String::new();
         let mut bell_active = false;
         let mut bell_since = None;
         let mut notifications = Vec::new();
-        let mut osc99_notifications = Vec::new();
-        let mut osc99_controls = Vec::new();
+        let mut osc99_requests = Vec::new();
         let mut osc52_events = Vec::new();
 
         let ctx = egui::Context::default();
@@ -734,8 +824,7 @@ mod window_manipulation_reply_tests {
                 BellMode::None,
                 &flags,
                 &mut notifications,
-                &mut osc99_notifications,
-                &mut osc99_controls,
+                &mut osc99_requests,
                 &mut osc52_events,
             );
         });
@@ -751,8 +840,7 @@ mod window_manipulation_reply_tests {
         Drained {
             replies,
             osc52_events,
-            osc99_notifications,
-            osc99_controls,
+            osc99: osc99_requests,
             pane_handle: reply_tx,
         }
     }
@@ -766,22 +854,137 @@ mod window_manipulation_reply_tests {
     fn sample_notification() -> Notification99Data {
         Notification99Data {
             id: Some("n1".to_owned()),
-            title: Some("Title".to_owned()),
+            title: "Title".to_owned(),
             body: None,
             icon_data: None,
             icon_names: Vec::new(),
             icon_cache_key: None,
-            button_labels: Vec::new(),
-            report_activation: false,
-            focus_on_activation: true,
-            close_report: false,
-            urgency: None,
-            occasion: None,
-            sound: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
             app_name: None,
-            notification_type: Vec::new(),
-            expire_ms: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
         }
+    }
+
+    #[test]
+    fn osc99_requests_carry_the_panes_origin_and_state() {
+        let mut ids = PaneIdGenerator::new(7);
+        let osc99 = Osc99PaneContext {
+            origin: Osc99Origin {
+                window_id: WindowId::for_test(42),
+                pane_id: ids.next_id(),
+            },
+            pane_state: Osc99PaneState {
+                focus: PaneKeyboardFocus::Unfocused,
+                visibility: PaneVisibility::Hidden,
+            },
+        };
+        let drained = drain_commands_with(
+            vec![
+                WindowManipulation::Notification99(Box::new(sample_notification())),
+                WindowManipulation::Osc99Control {
+                    id: "n1".to_owned(),
+                    kind: Osc99ControlKind::Close,
+                },
+            ],
+            osc99,
+        );
+
+        let (displays, controls) = (drained.displays(), drained.controls());
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].origin, osc99.origin);
+        assert_eq!(displays[0].pane_state, osc99.pane_state);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].origin, osc99.origin);
+    }
+
+    #[test]
+    fn osc99_requests_of_every_kind_are_collected_in_arrival_order() {
+        let drained = drain_commands(vec![
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![1],
+            },
+            WindowManipulation::Notification99(Box::new(sample_notification())),
+            WindowManipulation::Osc99Control {
+                id: "n1".to_owned(),
+                kind: Osc99ControlKind::Close,
+            },
+            WindowManipulation::Notification99(Box::new(sample_notification())),
+            WindowManipulation::Osc99Control {
+                id: "n1".to_owned(),
+                kind: Osc99ControlKind::Alive,
+            },
+        ]);
+
+        let shape: Vec<&str> = drained
+            .osc99
+            .iter()
+            .map(|request| match request {
+                Osc99Request::Display(_) => "display",
+                Osc99Request::Control(_) => "control",
+                Osc99Request::PrimeIcon(_) => "prime",
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["prime", "display", "control", "display", "control"],
+            "one ordered list: the order between kinds is the order the pane emitted them"
+        );
+    }
+
+    #[test]
+    fn osc99_cache_icon_is_collected_and_reaches_the_icon_cache() {
+        let drained = drain_commands(vec![
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![1, 2, 3],
+            },
+            // A later priming under the same key replaces the earlier bytes.
+            WindowManipulation::Osc99CacheIcon {
+                key: "other".to_owned(),
+                data: vec![9],
+            },
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![4, 5],
+            },
+        ]);
+        assert_eq!(
+            drained.primes(),
+            [
+                &Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![1, 2, 3]
+                },
+                &Osc99IconPrime {
+                    key: "other".to_owned(),
+                    data: vec![9]
+                },
+                &Osc99IconPrime {
+                    key: "k".to_owned(),
+                    data: vec![4, 5]
+                },
+            ],
+            "priming is collected in arrival order"
+        );
+        assert!(drained.displays().is_empty());
+        assert!(drained.controls().is_empty());
+        assert!(drained.replies.is_empty(), "priming is never answered");
+
+        let mut cache = Osc99IconCache::default();
+        for prime in drained.primes() {
+            prime.clone().store_in(&mut cache);
+        }
+        assert_eq!(cache.get("k"), Some([4u8, 5].as_slice()));
+        assert_eq!(cache.get("other"), Some([9u8].as_slice()));
+        assert_eq!(cache.get("missing"), None);
     }
 
     #[test]
@@ -789,19 +992,19 @@ mod window_manipulation_reply_tests {
         let drained = drain_commands(vec![
             WindowManipulation::Notification99(Box::new(sample_notification())),
             WindowManipulation::Osc99Control {
-                id: Some("n1".to_owned()),
+                id: "n1".to_owned(),
                 kind: Osc99ControlKind::Alive,
             },
         ]);
-        assert_eq!(drained.osc99_notifications.len(), 1);
-        assert_eq!(drained.osc99_controls.len(), 1);
+        assert_eq!(drained.displays().len(), 1);
+        assert_eq!(drained.controls().len(), 1);
         assert!(
             drained.replies.is_empty(),
             "OSC 99 commands are routed, not answered, here"
         );
 
-        let notification_handle = Weak::clone(&drained.osc99_notifications[0].1);
-        let control_handle = Weak::clone(&drained.osc99_controls[0].1);
+        let notification_handle = Weak::clone(&drained.displays()[0].reply_tx);
+        let control_handle = Weak::clone(&drained.controls()[0].reply_tx);
 
         // While the pane lives, the collected handles reach its input channel.
         assert!(notification_handle.upgrade().is_some());

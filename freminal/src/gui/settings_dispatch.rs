@@ -3,19 +3,115 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::cell::RefCell;
+
 use freminal_common::config::Config;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::{error, warn};
 
 use super::FreminalGui;
+use super::osc99::{Osc99Filter, Osc99Registry};
 use super::settings::SettingsAction;
 use super::visual_preview::{
     self, FONT_PREVIEW_DEBOUNCE, FontPreview, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, VisualPreview,
     VisualPreviewDiff,
 };
+use super::window::PerWindowState;
+
+/// Every window in `windows`, followed by `current` when there is one.
+///
+/// `update()` removes the window it is rendering from `FreminalGui::windows`
+/// for the duration of the frame, so a fan-out run from inside that frame
+/// (Reload Config) walks the map and must add that window itself or its panes
+/// miss the change. Works for `&W` and `&mut W` items alike. `current` must
+/// not also be in `windows`, or it would be visited twice.
+fn with_current<W>(
+    windows: impl IntoIterator<Item = W>,
+    current: Option<W>,
+) -> impl Iterator<Item = W> {
+    windows.into_iter().chain(current)
+}
+
+/// What became of an `osc99_filters` change handed to
+/// [`install_osc99_filter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Osc99FilterInstall {
+    /// The registry took the filter.
+    Applied,
+    /// The registry was busy: the filter waits in the pending slot for
+    /// [`apply_pending_osc99_filter`].
+    Deferred,
+    /// The registry and the pending slot were both busy, so the change is
+    /// lost until the setting changes again. Nothing holds the slot across a
+    /// call, so this does not happen in practice.
+    Dropped,
+}
+
+/// Install `filter` as the registry's user filter, or park it in `pending`
+/// (replacing any older parked filter: only the latest change matters) when
+/// the registry is busy. A successful install also clears `pending`, so an
+/// older parked filter can never overwrite a newer one.
+fn install_osc99_filter(
+    registry: &RefCell<Osc99Registry>,
+    pending: &RefCell<Option<Osc99Filter>>,
+    filter: Osc99Filter,
+) -> Osc99FilterInstall {
+    if let Ok(mut registry) = registry.try_borrow_mut() {
+        registry.set_filter(filter);
+        if let Ok(mut pending) = pending.try_borrow_mut() {
+            *pending = None;
+        }
+        return Osc99FilterInstall::Applied;
+    }
+    pending
+        .try_borrow_mut()
+        .map_or(Osc99FilterInstall::Dropped, |mut pending| {
+            *pending = Some(filter);
+            Osc99FilterInstall::Deferred
+        })
+}
+
+/// Install the filter parked by [`install_osc99_filter`], if there is one and
+/// the registry is free now. A busy registry leaves it parked for the next
+/// attempt.
+pub(super) fn apply_pending_osc99_filter(
+    registry: &RefCell<Osc99Registry>,
+    pending: &RefCell<Option<Osc99Filter>>,
+) {
+    let (Ok(mut registry), Ok(mut pending)) = (registry.try_borrow_mut(), pending.try_borrow_mut())
+    else {
+        return;
+    };
+    if let Some(filter) = pending.take() {
+        registry.set_filter(filter);
+    }
+}
 
 impl FreminalGui {
+    /// Recompile the OSC 99 user filter when `new_cfg` changes
+    /// `[notifications] osc99_filters`, logging each invalid rule.
+    ///
+    /// Compares against `self.config`, so it must run before `self.config`
+    /// is replaced. A busy registry parks the filter, and the next frame's
+    /// [`apply_pending_osc99_filter`] installs it, so the change is not lost.
+    fn apply_osc99_filters(&self, new_cfg: &Config) {
+        if new_cfg.notifications.osc99_filters == self.config.notifications.osc99_filters {
+            return;
+        }
+        let filter =
+            super::osc99::Osc99Filter::compile_logged(&new_cfg.notifications.osc99_filters);
+        match install_osc99_filter(&self.osc99_registry, &self.pending_osc99_filter, filter) {
+            Osc99FilterInstall::Applied => {}
+            Osc99FilterInstall::Deferred => {
+                warn!("OSC 99 registry busy; osc99_filters change deferred to the next frame");
+            }
+            Osc99FilterInstall::Dropped => {
+                warn!("OSC 99 registry and pending filter busy; osc99_filters change not applied");
+            }
+        }
+    }
+
     /// Replace `self.config` with `new_cfg` and broadcast every derived
     /// state change — theme, font, keybindings, URL detection, background
     /// image, shader source, opacity, and theme-mode updates — to every
@@ -28,11 +124,18 @@ impl FreminalGui {
     ///
     /// The caller is responsible for having already produced `new_cfg`
     /// (either from the settings draft or by re-reading `config.toml`).
+    ///
+    /// `current` is the window being rendered, when the caller runs inside a
+    /// terminal window's `update()` (Reload Config): that window is out of
+    /// `self.windows` for the frame, so every per-window change below visits it
+    /// in addition to the map. Pass `None` when no window is out of the map
+    /// (the Settings window's Apply).
     #[allow(clippy::too_many_lines)] // Broadcasts 7 distinct config dimensions.
     pub(super) fn apply_new_config(
         &mut self,
         new_cfg: Config,
         handle: &freminal_windowing::WindowHandle<'_>,
+        mut current: Option<&mut PerWindowState>,
     ) {
         // The theme is being committed: drop the live preview override so
         // chrome styling returns to the snapshot's theme (which now carries the
@@ -42,7 +145,7 @@ impl FreminalGui {
         self.preview_theme = None;
 
         // Apply theme change to all windows.
-        for win in self.windows.values_mut() {
+        for win in with_current(self.windows.values_mut(), current.as_deref_mut()) {
             if new_cfg.theme.active_slug(win.os_dark_mode)
                 != self.config.theme.active_slug(win.os_dark_mode)
                 && let Some(theme) =
@@ -86,7 +189,7 @@ impl FreminalGui {
         }
 
         // Apply font changes to all windows.
-        for win in self.windows.values_mut() {
+        for win in with_current(self.windows.values_mut(), current.as_deref_mut()) {
             let font_changed = win
                 .terminal_widget
                 .apply_config_changes_no_ctx(&self.config, &new_cfg);
@@ -103,7 +206,7 @@ impl FreminalGui {
         // Broadcast auto URL detection toggle to all panes when changed.
         if new_cfg.ui.auto_detect_urls != self.config.ui.auto_detect_urls {
             let enabled = new_cfg.ui.auto_detect_urls;
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
@@ -137,7 +240,7 @@ impl FreminalGui {
                 &new_cfg.cursor.shape,
                 new_cfg.cursor.blink,
             );
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
@@ -162,32 +265,22 @@ impl FreminalGui {
 
         // Broadcast host-dependent capability changes to all panes (Task
         // 130.4), e.g. when the OSC 99 routing gains or loses a system leg.
-        let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg);
-        if new_host_capabilities != super::host_capabilities::host_capabilities(&self.config) {
-            for win in self.windows.values() {
-                for tab in &win.tabs {
-                    match tab.pane_tree.iter_panes() {
-                        Ok(panes) => {
-                            for pane in panes {
-                                send_or_log!(
-                                    pane.input_tx,
-                                    InputEvent::HostCapabilitiesChange(new_host_capabilities),
-                                    "Failed to send HostCapabilitiesChange to PTY thread"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "iter_panes() failed on tab during host capabilities \
-                                 apply: {e}; skipping this tab"
-                            );
-                        }
-                    }
-                }
-            }
+        let daemon = self.osc99_daemon.get();
+        let new_host_capabilities = super::host_capabilities::host_capabilities(&new_cfg, daemon);
+        if new_host_capabilities
+            != super::host_capabilities::host_capabilities(&self.config, daemon)
+        {
+            self.broadcast_host_capabilities(new_host_capabilities, current.as_deref());
         }
 
+        self.apply_osc99_filters(&new_cfg);
+
         self.config = new_cfg;
+
+        // Routing may now use the system leg: have the notification service
+        // up before the next OSC 99 is routed, not at the next frame.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.ensure_osc99_dbus_started();
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed
         // profile may have set `gui_theme` ephemerally; on Apply we re-derive it
@@ -240,7 +333,7 @@ impl FreminalGui {
 
         // Apply background image to all panes in all windows.
         let new_bg_path = self.config.ui.background_image.clone();
-        for win in self.windows.values() {
+        for win in with_current(self.windows.values(), current.as_deref()) {
             for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
@@ -263,7 +356,7 @@ impl FreminalGui {
         // Apply shader changes to all windows.
         let has_shader_path = self.config.shader.path.is_some();
         if !has_shader_path {
-            for win in self.windows.values() {
+            for win in with_current(self.windows.values(), current.as_deref()) {
                 if let Ok(mut wpr) = win.window_post.lock() {
                     wpr.pending_shader = Some(None);
                 }
@@ -271,7 +364,7 @@ impl FreminalGui {
         } else if let Some(ref p) = self.config.shader.path {
             match std::fs::read_to_string(p) {
                 Ok(src) => {
-                    for win in self.windows.values() {
+                    for win in with_current(self.windows.values(), current.as_deref()) {
                         if let Ok(mut wpr) = win.window_post.lock() {
                             wpr.pending_shader = Some(Some(src.clone()));
                         }
@@ -287,7 +380,7 @@ impl FreminalGui {
         }
 
         // Notify all panes of theme mode update.
-        for win in self.windows.values() {
+        for win in with_current(self.windows.values(), current.as_deref()) {
             for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
@@ -330,9 +423,13 @@ impl FreminalGui {
     /// before any config existed and no `--config` was supplied) this is a
     /// no-op with a user-visible toast.  Parse errors are logged and a
     /// toast is shown; `self.config` is left unchanged.
+    ///
+    /// `current` is the window the reload was triggered from; see
+    /// [`Self::apply_new_config`].
     pub(super) fn reload_config_from_disk(
         &mut self,
         handle: &freminal_windowing::WindowHandle<'_>,
+        current: Option<&mut PerWindowState>,
     ) {
         let Some(path) = self.config_path.clone() else {
             self.push_error_toast(
@@ -350,7 +447,7 @@ impl FreminalGui {
                     return;
                 }
             };
-        self.apply_new_config(new_cfg, handle);
+        self.apply_new_config(new_cfg, handle, current);
         // Re-sync the Settings modal's draft so opening Settings after a
         // reload shows the now-live values, not a stale draft.
         self.settings_modal.sync_from_config(&self.config);
@@ -1144,7 +1241,10 @@ impl FreminalGui {
         match action {
             SettingsAction::Applied => {
                 let new_cfg = self.settings_modal.applied_config().clone();
-                self.apply_new_config(new_cfg, handle);
+                // The Settings window's frame has no terminal window out of the
+                // map (it returns before `update()` removes one), so every
+                // window is in `self.windows`.
+                self.apply_new_config(new_cfg, handle, None);
             }
             SettingsAction::Preview(next, trigger) => {
                 self.apply_visual_preview(next, *trigger, handle);
@@ -1214,5 +1314,172 @@ impl FreminalGui {
                 self.settings_modal.discovered_layouts = self.discovered_layouts.clone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use freminal_common::buffer_states::osc99_notification::{
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
+    };
+
+    use super::{
+        Osc99FilterInstall, apply_pending_osc99_filter, install_osc99_filter, with_current,
+    };
+    use crate::gui::osc99::{Osc99Filter, Osc99FilterVerdict, Osc99Registry};
+
+    /// A filter that drops every notification.
+    fn drop_all() -> Osc99Filter {
+        let (filter, errors) = Osc99Filter::compile(&["all".to_owned()]);
+        assert_eq!(errors, Vec::new());
+        filter
+    }
+
+    fn verdict(registry: &RefCell<Osc99Registry>) -> Osc99FilterVerdict {
+        let data = Notification99Data {
+            id: None,
+            title: "Title".to_owned(),
+            body: None,
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
+            app_name: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
+        };
+        registry.borrow().filter_verdict(&data)
+    }
+
+    #[test]
+    fn a_free_registry_takes_the_filter_at_once_and_clears_the_pending_slot() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(Some(Osc99Filter::default()));
+
+        let outcome = install_osc99_filter(&registry, &pending, drop_all());
+
+        assert_eq!(outcome, Osc99FilterInstall::Applied);
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Drop);
+        assert!(pending.borrow().is_none());
+    }
+
+    #[test]
+    fn a_busy_registry_parks_the_filter_and_a_later_attempt_applies_it() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        let outcome = install_osc99_filter(&registry, &pending, drop_all());
+        assert_eq!(outcome, Osc99FilterInstall::Deferred);
+        // Still busy: the retry leaves the filter parked.
+        apply_pending_osc99_filter(&registry, &pending);
+        assert!(pending.borrow().is_some(), "a busy retry keeps it parked");
+        drop(held);
+
+        assert_eq!(
+            verdict(&registry),
+            Osc99FilterVerdict::Keep,
+            "not applied while busy"
+        );
+        apply_pending_osc99_filter(&registry, &pending);
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Drop);
+        assert!(pending.borrow().is_none(), "the parked filter is consumed");
+    }
+
+    #[test]
+    fn only_the_latest_deferred_filter_is_applied() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        install_osc99_filter(&registry, &pending, drop_all());
+        install_osc99_filter(&registry, &pending, Osc99Filter::default());
+        drop(held);
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
+
+    #[test]
+    fn a_direct_install_after_a_deferral_beats_the_stale_parked_filter() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let held = registry.borrow_mut();
+        install_osc99_filter(&registry, &pending, drop_all());
+        drop(held);
+        // The setting changed again while nothing was busy.
+        install_osc99_filter(&registry, &pending, Osc99Filter::default());
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
+
+    #[test]
+    fn a_busy_registry_and_pending_slot_drop_the_change() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        let _held_registry = registry.borrow_mut();
+        let _held_pending = pending.borrow_mut();
+        assert_eq!(
+            install_osc99_filter(&registry, &pending, drop_all()),
+            Osc99FilterInstall::Dropped
+        );
+    }
+
+    #[test]
+    fn applying_with_nothing_parked_changes_nothing() {
+        let registry = RefCell::new(Osc99Registry::default());
+        let pending = RefCell::new(None);
+
+        apply_pending_osc99_filter(&registry, &pending);
+
+        assert_eq!(verdict(&registry), Osc99FilterVerdict::Keep);
+    }
+
+    #[test]
+    fn with_current_visits_the_in_flight_window_once_after_the_map() {
+        let mut in_map = [1_u32, 2];
+        let mut in_flight = 3_u32;
+
+        let mut visited = Vec::new();
+        for win in with_current(in_map.iter_mut(), Some(&mut in_flight)) {
+            visited.push(*win);
+            *win += 10;
+        }
+
+        assert_eq!(visited, [1, 2, 3], "every window, in-flight one last, once");
+        assert_eq!(in_map, [11, 12], "mapped windows were mutable");
+        assert_eq!(in_flight, 13, "the in-flight window was mutable");
+    }
+
+    #[test]
+    fn with_current_without_an_in_flight_window_visits_only_the_map() {
+        let in_map = [1_u32, 2];
+
+        let visited: Vec<u32> = with_current(in_map.iter(), None).copied().collect();
+
+        assert_eq!(visited, [1, 2]);
+    }
+
+    #[test]
+    fn with_current_visits_the_in_flight_window_when_the_map_is_empty() {
+        let in_flight = 7_u32;
+
+        let visited: Vec<u32> = with_current(std::iter::empty(), Some(&in_flight))
+            .copied()
+            .collect();
+
+        assert_eq!(visited, [7], "the only window is the in-flight one");
     }
 }

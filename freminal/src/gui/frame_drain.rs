@@ -24,7 +24,7 @@
 //! [`FreminalGui::route_window_manipulation_events`] (`app_impl.rs`)
 //! deliberately stays behind: it takes `&self` and touches enough
 //! `FreminalGui` fields (`toasts`, `config`, `osc99_icon_cache`,
-//! `osc99_live`, plus the `route_freminal_toast` method) that converting it
+//! `osc99_registry`, plus the `route_freminal_toast` method) that converting it
 //! to a free function taking explicit references would either balloon the
 //! signature or require threading `&FreminalGui` through anyway, which
 //! defeats the point. `WindowManipulationEvents` (the struct it reads) and
@@ -47,9 +47,14 @@
 use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::recording::RecordingSwap;
+use freminal_windowing::WindowId;
 use tracing::{error, trace};
 
-use super::panes;
+use super::osc99::{
+    Osc99Origin, Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, TabActivity,
+    WindowMinimized, ZoomOcclusion,
+};
+use super::panes::{self, PaneId};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 use super::{rendering, toast};
@@ -345,27 +350,53 @@ pub(super) struct WindowManipulationEvents {
     /// OSC 9 / OSC 777 notifications collected from every pane this frame,
     /// routed after the drain loop (Task 76.4).
     pub(super) osc_notifications: Vec<crate::gui::notifications::NotificationRequest>,
-    /// OSC 99 stateful notifications collected from every pane this frame,
-    /// routed after the drain loop (Task 99.5a) alongside
-    /// `osc_notifications`. Each item is paired with a clone of the
-    /// originating pane's `reply_tx` (a `Weak` handle, so a closed
-    /// pane's PTY consumer is never kept alive by a pending notification)
-    /// so the reverse-path reply can target the right pane.
-    pub(super) osc99_notifications: Vec<(
-        freminal_common::buffer_states::window_manipulation::Notification99Data,
-        std::sync::Weak<crossbeam_channel::Sender<InputEvent>>,
-    )>,
-    /// OSC 99 app→terminal control sequences (p=close/p=alive) collected
-    /// from every pane this frame (Task 99.5c), answered after the drain
-    /// loop.
-    pub(super) osc99_controls: Vec<(
-        crate::gui::notifications::Osc99Control,
-        std::sync::Weak<crossbeam_channel::Sender<InputEvent>>,
-    )>,
+    /// Every OSC 99 request collected from every pane this frame, in the
+    /// order the panes emitted them (Task 138.C10, G1), routed after the
+    /// drain loop in that order:
+    /// - displays (Task 99.5a). Each carries a `Weak` clone of the
+    ///   originating pane's `reply_tx` (so a closed pane's PTY consumer is
+    ///   never kept alive by a pending notification), the pane's
+    ///   [`Osc99Origin`], and its [`Osc99PaneState`] for the `o=` check
+    ///   (Task 138.5);
+    /// - app-to-terminal controls (`p=close` / `p=alive`, Task 99.5c);
+    /// - icon bytes transmitted under a `g=` key with no text to show, which
+    ///   a later display in the same list may name.
+    pub(super) osc99_requests: Vec<Osc99Request>,
     /// OSC 52 clipboard events (remote write / blocked read) collected from
     /// every pane this frame, routed to a toast after the drain loop (issue
     /// #433).
     pub(super) osc52_events: Vec<rendering::Osc52ToastEvent>,
+}
+
+/// The [`Osc99PaneState`] of `pane_id` within one tab, for the `o=` check.
+///
+/// Pure: every input is already resolved by the caller. `tab_active_pane` is
+/// the tab's *own* active pane (not the window's), and a zoomed pane other
+/// than `pane_id` occludes it.
+fn osc99_pane_state(
+    window_focus: WindowFocus,
+    window_minimized: WindowMinimized,
+    tab_activity: TabActivity,
+    tab_active_pane: PaneId,
+    tab_zoomed_pane: Option<PaneId>,
+    pane_id: PaneId,
+) -> Osc99PaneState {
+    let pane_activity = if pane_id == tab_active_pane {
+        PaneActivity::Active
+    } else {
+        PaneActivity::Inactive
+    };
+    let zoom = match tab_zoomed_pane {
+        Some(zoomed) if zoomed != pane_id => ZoomOcclusion::Occluded,
+        _ => ZoomOcclusion::NotOccluded,
+    };
+    Osc99PaneState::compute(
+        window_focus,
+        window_minimized,
+        tab_activity,
+        pane_activity,
+        zoom,
+    )
 }
 
 /// Drain pending `WindowCommand`s for every pane in every tab of `tabs`,
@@ -394,7 +425,9 @@ pub(super) struct WindowManipulationEvents {
 /// Report* responses), so `ui` is threaded straight through. `window_focus`
 /// is computed by the caller (`ui.input(|i| i.focused)`) and passed in as a
 /// named enum per `freminal-state-representation`, since it crosses this
-/// function boundary.
+/// function boundary. `window_id` is the OS window being drained; together
+/// with each pane's id it forms the [`Osc99Origin`] stamped onto that pane's
+/// OSC 99 requests, alongside the pane's [`Osc99PaneState`] (Task 138.5).
 ///
 /// Takes the whole `config` rather than its `security`, `bell`, and
 /// `tab_title` sections individually to stay under clippy's
@@ -410,21 +443,32 @@ pub(super) fn drain_window_manipulation_commands(
     font_width: usize,
     font_height: usize,
     window_focus: WindowFocus,
+    window_id: WindowId,
     config: &Config,
 ) -> WindowManipulationEvents {
     let window_content_rect = ui.input(|i: &egui::InputState| i.content_rect());
+    let window_minimized = WindowMinimized::from_bool(
+        ui.ctx()
+            .input(|i: &egui::InputState| i.viewport().minimized.unwrap_or(false)),
+    );
     let active_idx = tabs.active_index();
     let active_pane_id_for_drain = tabs.active_tab().active_pane;
 
     let mut events = WindowManipulationEvents {
         osc_notifications: Vec::new(),
-        osc99_notifications: Vec::new(),
-        osc99_controls: Vec::new(),
+        osc99_requests: Vec::new(),
         osc52_events: Vec::new(),
     };
 
     for (idx, tab) in tabs.iter_mut().enumerate() {
         let is_active_tab = idx == active_idx;
+        let tab_activity = if is_active_tab {
+            TabActivity::Active
+        } else {
+            TabActivity::Background
+        };
+        let tab_active_pane = tab.active_pane;
+        let tab_zoomed_pane = tab.zoomed_pane;
         let is_only_pane = match tab.pane_tree.pane_count() {
             Ok(count) => count == 1,
             Err(e) => {
@@ -436,6 +480,20 @@ pub(super) fn drain_window_manipulation_commands(
             let mut tab_shell_set_title = false;
             for pane in panes {
                 let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
+                let osc99 = Osc99PaneContext {
+                    origin: Osc99Origin {
+                        window_id,
+                        pane_id: pane.id,
+                    },
+                    pane_state: osc99_pane_state(
+                        window_focus,
+                        window_minimized,
+                        tab_activity,
+                        tab_active_pane,
+                        tab_zoomed_pane,
+                        pane.id,
+                    ),
+                };
                 let shell_set = rendering::handle_window_manipulation(
                     ui,
                     &pane.window_cmd_rx,
@@ -453,10 +511,10 @@ pub(super) fn drain_window_manipulation_commands(
                         is_active: is_fully_active,
                         window_focused: window_focus.is_focused(),
                         is_only_pane,
+                        osc99,
                     },
                     &mut events.osc_notifications,
-                    &mut events.osc99_notifications,
-                    &mut events.osc99_controls,
+                    &mut events.osc99_requests,
                     &mut events.osc52_events,
                 );
                 if shell_set {
@@ -477,17 +535,25 @@ pub(super) fn drain_window_manipulation_commands(
 mod tests {
     use super::{
         DeadPaneOutcome, WindowFocus, drain_command_finished_events,
-        drain_window_manipulation_commands,
+        drain_window_manipulation_commands, osc99_pane_state,
+    };
+    use crate::gui::osc99::{
+        Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
     };
     use crate::gui::panes::{Pane, PaneId, PaneIdGenerator};
     use crate::gui::pty::CommandFinishedEvent;
     use crate::gui::tabs::{Tab, TabId, TabManager};
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::osc99_notification::{
+        Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
+        Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
+    };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
     use freminal_terminal_emulator::io::WindowCommand;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+    use freminal_windowing::WindowId;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, SystemTime};
@@ -842,6 +908,7 @@ mod tests {
                 8,
                 16,
                 WindowFocus::Focused,
+                WindowId::for_test(1),
                 &config,
             ));
         });
@@ -873,8 +940,7 @@ mod tests {
         // This scenario produces no OSC 9/99/52 events; a title-only frame
         // must not spuriously populate any of the routed vectors.
         assert!(events.osc_notifications.is_empty());
-        assert!(events.osc99_notifications.is_empty());
-        assert!(events.osc99_controls.is_empty());
+        assert!(events.osc99_requests.is_empty());
         assert!(events.osc52_events.is_empty());
     }
 
@@ -906,6 +972,7 @@ mod tests {
                 8,
                 16,
                 WindowFocus::Focused,
+                WindowId::for_test(1),
                 &config,
             );
         });
@@ -926,5 +993,235 @@ mod tests {
             "exactly one Minimized(true) command must reach the OS window — from the \
              active pane only, never from the non-active tab's discarded copy"
         );
+    }
+
+    // ── Per-pane OSC 99 state (Task 138.5) ───────────────────────────────
+
+    fn sample_osc99_notification() -> Notification99Data {
+        Notification99Data {
+            id: Some("n1".to_owned()),
+            title: "Title".to_owned(),
+            body: None,
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            buttons: Vec::new(),
+            activation_reporting: Osc99ActivationReporting::Silent,
+            activation_focus: Osc99ActivationFocus::Focus,
+            close_reporting: Osc99CloseReporting::Silent,
+            urgency: NotificationUrgency::Normal,
+            occasion: NotificationOccasion::Always,
+            sound: Osc99Sound::System,
+            app_name: None,
+            notification_types: Vec::new(),
+            expiry: Osc99Expiry::OsDefault,
+        }
+    }
+
+    /// The display requests among a frame's OSC 99 requests, in order.
+    fn osc99_displays(
+        events: &super::WindowManipulationEvents,
+    ) -> Vec<&crate::gui::osc99::Osc99DisplayRequest> {
+        events
+            .osc99_requests
+            .iter()
+            .filter_map(|request| match request {
+                Osc99Request::Display(display) => Some(display.as_ref()),
+                Osc99Request::Control(_) | Osc99Request::PrimeIcon(_) => None,
+            })
+            .collect()
+    }
+
+    /// Drain a frame where both the active and the background tab's pane
+    /// emitted an OSC 99 notification, with the given window focus.
+    fn drain_osc99_from_two_tabs(
+        window_focus: WindowFocus,
+    ) -> (super::WindowManipulationEvents, PaneId, PaneId) {
+        drain_command_from_two_tabs(window_focus, || {
+            WindowManipulation::Notification99(Box::new(sample_osc99_notification()))
+        })
+    }
+
+    /// Drain a frame where both the active and the background tab's pane
+    /// emitted the window command `make` builds, with the given window focus.
+    fn drain_command_from_two_tabs(
+        window_focus: WindowFocus,
+        make: impl Fn() -> WindowManipulation,
+    ) -> (super::WindowManipulationEvents, PaneId, PaneId) {
+        let (mut tabs, active_tx, bg_tx) = two_tab_manager_with_window_cmd_senders();
+        let tab_ids: Vec<PaneId> = tabs
+            .iter()
+            .map(|t| match t.pane_tree.iter_panes() {
+                Ok(panes) => panes[0].id,
+                Err(e) => panic!("pane tree must resolve: {e}"),
+            })
+            .collect();
+        let (active_id, bg_id) = (tab_ids[0], tab_ids[1]);
+
+        for tx in [&active_tx, &bg_tx] {
+            if let Err(e) = tx.send(WindowCommand::Report(make())) {
+                panic!("send window command: {e}");
+            }
+        }
+
+        let config = Config::default();
+        let ctx = egui::Context::default();
+        let mut events = None;
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            events = Some(drain_window_manipulation_commands(
+                ui,
+                &mut tabs,
+                8,
+                16,
+                window_focus,
+                WindowId::for_test(5),
+                &config,
+            ));
+        });
+        full_output.textures_delta.clear();
+        let Some(events) = events else {
+            panic!("closure runs synchronously inside run_ui");
+        };
+        (events, active_id, bg_id)
+    }
+
+    #[test]
+    fn drain_computes_osc99_origin_and_state_per_pane_across_tabs() {
+        let (events, active_id, bg_id) = drain_osc99_from_two_tabs(WindowFocus::Focused);
+
+        let displays = osc99_displays(&events);
+        assert_eq!(displays.len(), 2);
+        let by_pane = |id: PaneId| {
+            displays
+                .iter()
+                .copied()
+                .find(|r| r.origin.pane_id == id)
+                .unwrap_or_else(|| panic!("a request from pane {id:?}"))
+        };
+
+        let active = by_pane(active_id);
+        assert_eq!(active.origin.window_id, WindowId::for_test(5));
+        assert_eq!(active.pane_state.focus, PaneKeyboardFocus::Focused);
+        assert_eq!(active.pane_state.visibility, PaneVisibility::Visible);
+
+        let background = by_pane(bg_id);
+        assert_eq!(background.origin.window_id, WindowId::for_test(5));
+        assert_eq!(background.pane_state.focus, PaneKeyboardFocus::Unfocused);
+        assert_eq!(background.pane_state.visibility, PaneVisibility::Hidden);
+    }
+
+    #[test]
+    fn drain_carries_osc99_icon_priming_from_every_pane_across_tabs() {
+        let (events, _, _) = drain_command_from_two_tabs(WindowFocus::Focused, || {
+            WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![1, 2, 3],
+            }
+        });
+
+        assert_eq!(events.osc99_requests.len(), 2);
+        for request in &events.osc99_requests {
+            let Osc99Request::PrimeIcon(prime) = request else {
+                panic!("expected an icon priming, got {request:?}");
+            };
+            assert_eq!(prime.key, "k");
+            assert_eq!(prime.data, [1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn drain_marks_every_pane_unfocused_and_hidden_when_the_window_is_unfocused() {
+        let (events, _, _) = drain_osc99_from_two_tabs(WindowFocus::Unfocused);
+
+        let displays = osc99_displays(&events);
+        assert_eq!(displays.len(), 2);
+        for request in displays {
+            assert_eq!(request.pane_state.focus, PaneKeyboardFocus::Unfocused);
+            assert_eq!(request.pane_state.visibility, PaneVisibility::Hidden);
+        }
+    }
+
+    /// Multi-pane and zoom cases are covered through the pure per-pane
+    /// helper: building a split pane tree headlessly would need a real PTY
+    /// per pane, and the helper is exactly what the drain loop calls.
+    #[test]
+    fn osc99_pane_state_distinguishes_panes_within_one_tab() {
+        let mut ids = PaneIdGenerator::new(0);
+        let first = ids.next_id();
+        let second = ids.next_id();
+        let state_of = |zoomed: Option<PaneId>, pane: PaneId| {
+            osc99_pane_state(
+                WindowFocus::Focused,
+                WindowMinimized::Restored,
+                TabActivity::Active,
+                first,
+                zoomed,
+                pane,
+            )
+        };
+
+        // No zoom: the tab's active pane is focused, the other is visible only.
+        let s = state_of(None, first);
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Focused, PaneVisibility::Visible)
+        );
+        let s = state_of(None, second);
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Unfocused, PaneVisibility::Visible)
+        );
+
+        // The active pane zoomed: the other pane is occluded.
+        let s = state_of(Some(first), first);
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Focused, PaneVisibility::Visible)
+        );
+        let s = state_of(Some(first), second);
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden)
+        );
+
+        // The other pane zoomed: the (active) pane is occluded yet still the
+        // tab's active pane, so it keeps keyboard focus.
+        let s = state_of(Some(second), first);
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Focused, PaneVisibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn osc99_pane_state_uses_the_tabs_own_active_pane_and_activity() {
+        let mut ids = PaneIdGenerator::new(0);
+        let pane = ids.next_id();
+        let other = ids.next_id();
+
+        // A background tab's active pane is not focused and not visible.
+        let s = osc99_pane_state(
+            WindowFocus::Focused,
+            WindowMinimized::Restored,
+            TabActivity::Background,
+            pane,
+            None,
+            pane,
+        );
+        assert_eq!(
+            (s.focus, s.visibility),
+            (PaneKeyboardFocus::Unfocused, PaneVisibility::Hidden)
+        );
+
+        // A minimised window hides an otherwise-visible pane.
+        let s = osc99_pane_state(
+            WindowFocus::Focused,
+            WindowMinimized::Minimized,
+            TabActivity::Active,
+            other,
+            None,
+            pane,
+        );
+        assert_eq!(s.visibility, PaneVisibility::Hidden);
     }
 }

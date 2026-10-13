@@ -743,7 +743,7 @@ impl FreminalGui {
             pending_terminal_requested_delay: None,
             frame_stats: super::window::FrameStats::default(),
         };
-        self.windows.insert(window_id, win);
+        self.insert_terminal_window(window_id, win);
 
         self.emit_window_create_recording(window_id, inner_size);
 

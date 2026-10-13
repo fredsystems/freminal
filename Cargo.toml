@@ -94,6 +94,11 @@ swash = "0.2.10"
 sys-locale = "0.3.2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tar = "0.4.46"
+# Direct dependency for the Windows OSC 99 untracked leg (Task 138.C15): the
+# toast is built with its own image (`appLogoOverride`) instead of through
+# `notify-rust`, which only offers an inline image. Same version `notify-rust`
+# already resolves, so the lock file keeps a single copy.
+tauri-winrt-notification = "0.8.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
 thiserror = "2.0.21"
@@ -108,6 +113,14 @@ vergen = { version = "10.0.3", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
 winit = { version = "0.30.13", features = ["rwh_06"] }
 winreg = "0.56.0"
+# Direct dependency for the Linux/BSD OSC 99 notification service (Task 138.12):
+# one blocking-API D-Bus connection owns `Notify` / `CloseNotification` /
+# `GetCapabilities` and observes `ActionInvoked` / `NotificationClosed`.
+# `async-io` + `blocking-api` are zbus's own default set, which is the same
+# executor `notify-rust`'s `z` backend already resolves, so the lock file keeps
+# a single zbus copy. Listed with `default-features = false` so the choice is
+# explicit and a future default (for example `tokio`) cannot slip in.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]

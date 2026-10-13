@@ -180,6 +180,9 @@ winit.workspace = true
 # dev dependencies
 [dev-dependencies]
 criterion.workspace = true
+# `test-utils` exposes `WindowId::for_test`, so unit tests can construct a
+# `WindowId` (it wraps a winit handle and has no production constructor).
+freminal-windowing = { path = "../freminal-windowing", features = ["test-utils"] }
 tempfile.workspace = true
 
 # Platform-specific: CWD readback for layout save / recording snapshots.
@@ -189,6 +192,25 @@ tempfile.workspace = true
 # built-in `/proc/<pid>/cwd` readlink path and does not need sysinfo.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 sysinfo.workspace = true
+
+# Windows OSC 99 untracked leg (Task 138.C15): the toast is built directly so
+# its image is an `appLogoOverride`. Same version `notify-rust` already pulls
+# in, so there is one copy.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification.workspace = true
+
+# Linux/BSD OSC 99 notification service (Task 138.12). The `p2p` feature is
+# only needed by the in-process fake notification server in the service's
+# integration test, so it is enabled for tests alone.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+serde.workspace = true
+# Times out the service's `NO_AUTO_START` calls without a helper thread
+# (138.C26). The same async-io runtime zbus already runs on.
+smol.workspace = true
+zbus.workspace = true
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }
 
 [features]
 default = []

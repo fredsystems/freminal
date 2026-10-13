@@ -204,7 +204,8 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 | Command                                                    | Purpose                                                       |
 | ---------------------------------------------------------- | ------------------------------------------------------------- |
 | `cargo xtask ci`                                           | Full CI: lint + deny + machete + build + test + bench compile |
-| `cargo test --all`                                         | Run all unit and integration tests                            |
+| `cargo xtask test`                                         | Full test suite: nextest (lib/bin/integration) + doctests     |
+| `cargo nextest run --all`                                  | Quick test run while iterating (does NOT run doctests)        |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Lint with strict warnings                                     |
 | `cargo machete`                                            | Detect unused dependencies                                    |
 | `cargo bench --all`                                        | Run all benchmarks (Criterion)                                |
@@ -215,7 +216,7 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 
 ### Verification suite (mandatory before "done")
 
-1. `cargo test --all`
+1. `cargo xtask test`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `cargo machete`
 
@@ -250,7 +251,7 @@ skill expands the "what done means" definition.
 suppressions in freminal-common`. Combining multiple subtasks into
   one commit is acceptable under specific conditions; see
   `commit-discipline`.
-- Each commit must leave `cargo test --all` passing. No broken
+- Each commit must leave the test suite (`cargo xtask test`) passing. No broken
   intermediate states.
 - `--no-verify` is forbidden on commits. See `precommit-fix-loop` if a
   hook rejects.
@@ -302,7 +303,7 @@ For tasks with ordered dependencies (e.g. multi-phase refactors):
    note.
 7. Continue to the next step.
 
-Each step must leave `cargo test --all` passing before the next one
+Each step must leave the test suite (`cargo xtask test`) passing before the next one
 starts -- a red suite is a full stop, not something to fix on the way
 past. `autonomy-boundaries` governs when to continue and when to stop;
 the assigned scope is the boundary, not a step count. Finish the

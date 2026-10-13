@@ -63,6 +63,20 @@ pub enum ChromeIcon {
     Plus,
     /// Warning triangle — keybinding-conflict and risky-paste warnings.
     Warning,
+    /// Crossed circle — the OSC 99 standard `error` icon name.
+    Error,
+    /// Circled "i" — the OSC 99 standard `info` icon name.
+    Info,
+    /// Circled "?" — the OSC 99 standard `question` icon name.
+    Question,
+    /// Life ring — the OSC 99 standard `help` icon name.
+    Help,
+    /// Open folder — the OSC 99 standard `file-manager` icon name.
+    FileManager,
+    /// Gauge — the OSC 99 standard `system-monitor` icon name.
+    SystemMonitor,
+    /// Text document — the OSC 99 standard `text-editor` icon name.
+    TextEditor,
 }
 
 impl ChromeIcon {
@@ -80,6 +94,13 @@ impl ChromeIcon {
         Self::Minus,
         Self::Plus,
         Self::Warning,
+        Self::Error,
+        Self::Info,
+        Self::Question,
+        Self::Help,
+        Self::FileManager,
+        Self::SystemMonitor,
+        Self::TextEditor,
     ];
 
     /// The Nerd Font codepoint for this icon.
@@ -111,6 +132,20 @@ impl ChromeIcon {
             Self::Plus => '\u{f067}',
             // nf-fa-warning (exclamation triangle)
             Self::Warning => '\u{f071}',
+            // nf-fa-times_circle
+            Self::Error => '\u{f057}',
+            // nf-fa-info_circle
+            Self::Info => '\u{f05a}',
+            // nf-fa-question_circle
+            Self::Question => '\u{f059}',
+            // nf-fa-life_ring
+            Self::Help => '\u{f1cd}',
+            // nf-fa-folder_open
+            Self::FileManager => '\u{f07c}',
+            // nf-fa-tachometer
+            Self::SystemMonitor => '\u{f0e4}',
+            // nf-fa-file_text
+            Self::TextEditor => '\u{f15c}',
         }
     }
 
@@ -136,6 +171,27 @@ impl ChromeIcon {
     #[must_use]
     pub fn rich_text_colored(self, color: Color32) -> RichText {
         self.rich_text().color(color)
+    }
+}
+
+/// The bundled glyph for one of the OSC 99 standard icon names (`n=`), or
+/// `None` when `name` is not one of them.
+///
+/// The standard names are `error`, `warn` / `warning`, `info`, `question`,
+/// `help`, `file-manager`, `system-monitor` and `text-editor`. Matching is
+/// case-sensitive, as in kitty's own table.
+#[must_use]
+pub fn standard_icon_glyph(name: &str) -> Option<ChromeIcon> {
+    match name {
+        "error" => Some(ChromeIcon::Error),
+        "warn" | "warning" => Some(ChromeIcon::Warning),
+        "info" => Some(ChromeIcon::Info),
+        "question" => Some(ChromeIcon::Question),
+        "help" => Some(ChromeIcon::Help),
+        "file-manager" => Some(ChromeIcon::FileManager),
+        "system-monitor" => Some(ChromeIcon::SystemMonitor),
+        "text-editor" => Some(ChromeIcon::TextEditor),
+        _ => None,
     }
 }
 
@@ -183,13 +239,48 @@ mod tests {
             codepoints.len(),
             "duplicate codepoints in ChromeIcon::ALL"
         );
-        assert_eq!(before, 10, "ChromeIcon::ALL must list every variant");
+        assert_eq!(before, 17, "ChromeIcon::ALL must list every variant");
     }
 
     #[test]
     fn glyph_is_single_char() {
         for icon in ChromeIcon::ALL {
             assert_eq!(icon.glyph().chars().count(), 1);
+        }
+    }
+
+    #[test]
+    fn standard_names_map_to_their_glyphs() {
+        let cases = [
+            ("error", ChromeIcon::Error),
+            ("warn", ChromeIcon::Warning),
+            ("warning", ChromeIcon::Warning),
+            ("info", ChromeIcon::Info),
+            ("question", ChromeIcon::Question),
+            ("help", ChromeIcon::Help),
+            ("file-manager", ChromeIcon::FileManager),
+            ("system-monitor", ChromeIcon::SystemMonitor),
+            ("text-editor", ChromeIcon::TextEditor),
+        ];
+        for (name, icon) in cases {
+            assert_eq!(standard_icon_glyph(name), Some(icon), "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn non_standard_names_have_no_glyph() {
+        for name in [
+            "",
+            "Error",
+            "WARN",
+            "Warning",
+            "Info",
+            "file_manager",
+            "folder",
+            "error ",
+            "dialog-error",
+        ] {
+            assert_eq!(standard_icon_glyph(name), None, "name {name:?}");
         }
     }
 }

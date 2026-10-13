@@ -323,6 +323,12 @@ pub enum AnsiOscType {
     /// fully-parsed [`crate::buffer_states::osc_notify_99::Osc99Command`].
     /// Chunk reassembly / transport / GUI are handled downstream (Tasks 99.3+).
     Notify99(crate::buffer_states::osc_notify_99::Osc99Command),
+    /// OSC 99 chunk the parser refused (an oversized sequence or too many
+    /// metadata items).  Carries only the best-effort `i=` and `d=` it held,
+    /// so the handler can abandon the transfer the chunk belonged to instead
+    /// of assembling the rest of it into a truncated notification.  Subject to
+    /// the same support gate as [`AnsiOscType::Notify99`].
+    Notify99Rejected(crate::buffer_states::osc_notify_99::Osc99RejectedChunk),
     /// OSC 9;4 — ConEmu-style progress-state update (issue #507).
     ///
     /// Parsed from `OSC 9 ; 4 ; s [ ; v ] ST` by the OSC 9 handler. Carries
@@ -390,6 +396,11 @@ impl std::fmt::Display for AnsiOscType {
                 "Notify(source={source:?}, title={title:?}, body={body:?})"
             ),
             Self::Notify99(cmd) => write!(f, "Notify99(id={:?})", cmd.id),
+            Self::Notify99Rejected(rejected) => write!(
+                f,
+                "Notify99Rejected(id={:?}, chunk_state={:?})",
+                rejected.id, rejected.chunk_state
+            ),
             Self::Progress(update) => write!(f, "Progress({update:?})"),
         }
     }
@@ -1035,29 +1046,41 @@ mod tests {
     #[test]
     fn display_ansi_osc_notify99() {
         use crate::buffer_states::osc_notify_99::{
-            NotificationOccasion, Osc99Actions, Osc99Command, Osc99PayloadEncoding,
-            Osc99PayloadType,
+            Osc99ChunkState, Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
         };
         let cmd = Osc99Command {
             id: Some("abc".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"Hello".to_vec(),
             payload_encoding: Osc99PayloadEncoding::Plain,
-            actions: Osc99Actions::default(),
-            close_report: false,
+            action_edits: Vec::new(),
+            close_reporting: None,
             app_name: None,
             icon_cache_key: None,
             icon_names: Vec::new(),
-            occasion: NotificationOccasion::Always,
+            occasion: None,
             sound: None,
-            notification_type: Vec::new(),
+            notification_types: Vec::new(),
             urgency: None,
-            expire_ms: -1,
+            expiry: None,
         };
         let s = AnsiOscType::Notify99(cmd).to_string();
         assert!(s.contains("Notify99"), "got: {s}");
         assert!(s.contains("abc"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_notify99_rejected_names_the_transfer() {
+        use crate::buffer_states::osc_notify_99::{Osc99ChunkState, Osc99RejectedChunk};
+        let s = AnsiOscType::Notify99Rejected(Osc99RejectedChunk {
+            id: Some("abc".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+        })
+        .to_string();
+        assert!(s.contains("Notify99Rejected"), "got: {s}");
+        assert!(s.contains("abc"), "got: {s}");
+        assert!(s.contains("More"), "got: {s}");
     }
 
     #[test]

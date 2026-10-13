@@ -132,7 +132,7 @@ pub struct ToastTextRun {
 ///
 /// Measured without rasterising it into any atlas. Returned by
 /// [`ToastTextRenderer::measure`] and consumed by the toast layout model
-/// (`crate::gui::toast::layout_toasts`) to size pills to their content.
+/// (`crate::gui::toast::layout::layout_toasts`) to size pills to their content.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToastTextMetrics {
     /// Total advance width in physical pixels.

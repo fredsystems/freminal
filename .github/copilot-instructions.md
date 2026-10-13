@@ -29,7 +29,7 @@ freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
 ## Build & Test
 
 - Full CI: `cargo xtask ci`
-- Tests: `cargo test --all`
+- Tests: `cargo xtask test`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - Unused deps: `cargo-machete`
 - Benchmarks: `cargo bench --all`

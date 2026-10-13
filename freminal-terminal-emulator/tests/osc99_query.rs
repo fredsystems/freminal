@@ -8,31 +8,63 @@
 //!
 //! Each test feeds raw bytes through `TerminalState::handle_incoming_data` and
 //! inspects the bytes written to the PTY and the window commands produced.
+//!
+//! # What these tests do and do not pin
+//!
+//! The capability value the GUI really sends lives in the `freminal` binary
+//! crate (`gui::host_capabilities`), which an integration test of this crate
+//! cannot reach, and the reply builder is private to the handler. So each test
+//! here supplies its own [`Osc99Features`] and compares against an explicit
+//! expected reply string. They pin the handler's mapping from features to
+//! reply (key order, key omission, value lists), one test per distinct feature
+//! set; they do **not** notice a change in what the production host
+//! advertises. That is covered where the value is built, by the tests in
+//! `freminal`'s `gui::host_capabilities`. The expected strings are literal on
+//! purpose: a helper that assembled them would repeat the production logic
+//! and could not catch a regression in it.
 
 use crossbeam_channel::Receiver;
-use freminal_common::buffer_states::window_manipulation::{Osc99ControlKind, WindowManipulation};
+use freminal_common::buffer_states::osc99_notification::Osc99ControlKind;
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
-    HostCapabilities, Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
+    Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
+    Osc99Support, Osc99UrgencySupport,
 };
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
 
-const TAIL: &str = "o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+/// The reply for [`toast_like`]: every optional feature but icons.
+const TOAST_REPLY: &str = "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent";
 
-fn caps(
-    activation_report: Osc99ActivationReport,
-    close_events: Osc99CloseEvents,
-) -> HostCapabilities {
-    HostCapabilities {
-        osc99: Osc99Support::Supported(Osc99Features {
-            activation_report,
-            close_events,
-        }),
+/// The features of the in-window toast leg, which is what a host without a
+/// desktop-notification daemon advertises: activation and close reported,
+/// focus, expiry, urgency, body and buttons, but no icons and only the
+/// well-known sound names. Mirrors `toast_leg()` in `freminal`'s
+/// `gui::host_capabilities`, kept in step by hand because that crate is not
+/// reachable from here.
+const fn toast_like() -> Osc99Features {
+    Osc99Features {
+        activation_report: Osc99ActivationReport::Reported,
+        close_events: Osc99CloseEvents::Reported,
+        activation_focus: Osc99FocusSupport::Supported,
+        auto_expiry: Osc99AutoExpiry::Supported,
+        urgency: Osc99UrgencySupport::Supported,
+        sound_names: Osc99SoundNames::SystemAndSilent,
+        body: Osc99BodySupport::Supported,
+        buttons: Osc99ButtonSupport::Supported,
+        icons: Osc99IconSupport::Unsupported,
     }
 }
 
-fn full_caps() -> HostCapabilities {
-    caps(Osc99ActivationReport::Reported, Osc99CloseEvents::Reported)
+const fn caps(features: Osc99Features) -> HostCapabilities {
+    HostCapabilities {
+        osc99: Osc99Support::Supported(features),
+    }
+}
+
+const fn full_caps() -> HostCapabilities {
+    caps(toast_like())
 }
 
 /// A state with the given capabilities and the PTY write receiver.
@@ -70,46 +102,100 @@ fn query_while_unsupported_writes_nothing_and_pushes_no_command() {
     assert!(state.window_commands.is_empty());
 }
 
-#[test]
-fn query_with_full_features_replies_with_exact_bytes_and_no_command() {
-    let (mut state, rx) = make_state(full_caps());
+/// Send `p=?` for id `abc` to a host with `features` and return the exact
+/// bytes written back, asserting that no window command was produced.
+fn query_reply_bytes(features: Osc99Features) -> Vec<u8> {
+    let (mut state, rx) = make_state(caps(features));
     state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;a=report:c=1:{TAIL}\x1b\\");
-    assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
+    drain(&rx)
+}
+
+/// The full wire form of a reply whose capability list is `capabilities`.
+fn framed(capabilities: &str) -> Vec<u8> {
+    format!("\x1b]99;i=abc:p=?;{capabilities}\x1b\\").into_bytes()
 }
 
 #[test]
-fn query_with_activation_not_reported_omits_a_key() {
-    let (mut state, rx) = make_state(caps(
-        Osc99ActivationReport::NotReported,
-        Osc99CloseEvents::Reported,
-    ));
-    state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;c=1:{TAIL}\x1b\\");
-    assert_eq!(drain(&rx), expected.into_bytes());
+fn query_with_toast_like_features_replies_with_exact_bytes_and_no_command() {
+    assert_eq!(query_reply_bytes(toast_like()), framed(TOAST_REPLY));
+}
+
+#[test]
+fn query_with_activation_not_reported_keeps_focus_in_the_a_key() {
+    let features = Osc99Features {
+        activation_report: Osc99ActivationReport::NotReported,
+        ..toast_like()
+    };
+    assert_eq!(
+        query_reply_bytes(features),
+        framed(
+            "a=focus:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent"
+        )
+    );
 }
 
 #[test]
 fn query_with_close_not_reported_omits_c_key() {
-    let (mut state, rx) = make_state(caps(
-        Osc99ActivationReport::Reported,
-        Osc99CloseEvents::NotReported,
-    ));
-    state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;a=report:{TAIL}\x1b\\");
-    assert_eq!(drain(&rx), expected.into_bytes());
+    let features = Osc99Features {
+        close_events: Osc99CloseEvents::NotReported,
+        ..toast_like()
+    };
+    assert_eq!(
+        query_reply_bytes(features),
+        framed(
+            "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:w=1:s=system,silent"
+        )
+    );
 }
 
 #[test]
-fn query_with_neither_reported_starts_with_occasion_key() {
-    let (mut state, rx) = make_state(caps(
-        Osc99ActivationReport::NotReported,
-        Osc99CloseEvents::NotReported,
-    ));
-    state.handle_incoming_data(b"\x1b]99;i=abc:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=abc:p=?;{TAIL}\x1b\\");
-    assert_eq!(drain(&rx), expected.into_bytes());
+fn query_with_no_supported_action_starts_with_occasion_key() {
+    let features = Osc99Features {
+        activation_report: Osc99ActivationReport::NotReported,
+        activation_focus: Osc99FocusSupport::Unsupported,
+        ..toast_like()
+    };
+    assert_eq!(
+        query_reply_bytes(features),
+        framed(
+            "o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent"
+        )
+    );
+}
+
+#[test]
+fn query_with_system_leg_features_adds_icons_and_standard_sounds() {
+    let features = Osc99Features {
+        sound_names: Osc99SoundNames::Standard,
+        icons: Osc99IconSupport::Supported,
+        ..toast_like()
+    };
+    assert_eq!(
+        query_reply_bytes(features),
+        framed(
+            "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning"
+        )
+    );
+}
+
+#[test]
+fn query_with_only_the_always_present_features_is_minimal() {
+    let features = Osc99Features {
+        activation_report: Osc99ActivationReport::NotReported,
+        close_events: Osc99CloseEvents::NotReported,
+        activation_focus: Osc99FocusSupport::Unsupported,
+        auto_expiry: Osc99AutoExpiry::Unsupported,
+        urgency: Osc99UrgencySupport::Unsupported,
+        sound_names: Osc99SoundNames::SystemAndSilent,
+        body: Osc99BodySupport::Unsupported,
+        buttons: Osc99ButtonSupport::Unsupported,
+        icons: Osc99IconSupport::Unsupported,
+    };
+    assert_eq!(
+        query_reply_bytes(features),
+        framed("o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent")
+    );
 }
 
 #[test]
@@ -168,7 +254,7 @@ fn alive_while_supported_pushes_one_alive_control() {
     assert_eq!(state.window_commands.len(), 1);
     match &state.window_commands[0] {
         WindowManipulation::Osc99Control { id, kind } => {
-            assert_eq!(id.as_deref(), Some("abc"));
+            assert_eq!(id, "abc");
             assert_eq!(*kind, Osc99ControlKind::Alive);
         }
         other => panic!("expected Osc99Control, got: {other:?}"),
@@ -192,7 +278,7 @@ fn display_notification_while_supported_pushes_one_notification() {
     assert_eq!(state.window_commands.len(), 1);
     match &state.window_commands[0] {
         WindowManipulation::Notification99(data) => {
-            assert_eq!(data.title.as_deref(), Some("hello"));
+            assert_eq!(data.title, "hello");
         }
         other => panic!("expected Notification99, got: {other:?}"),
     }
@@ -212,7 +298,7 @@ fn close_while_supported_pushes_one_close_control() {
     assert_eq!(state.window_commands.len(), 1);
     match &state.window_commands[0] {
         WindowManipulation::Osc99Control { id, kind } => {
-            assert_eq!(id.as_deref(), Some("abc"));
+            assert_eq!(id, "abc");
             assert_eq!(*kind, Osc99ControlKind::Close);
         }
         other => panic!("expected Osc99Control, got: {other:?}"),
@@ -242,9 +328,67 @@ fn query_for_a_tombstoned_id_is_answered_while_supported() {
     assert!(state.window_commands.is_empty());
 
     state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
-    let expected = format!("\x1b]99;i=1:p=?;a=report:c=1:{TAIL}\x1b\\");
+    let expected = format!("\x1b]99;i=1:p=?;{TOAST_REPLY}\x1b\\");
     assert_eq!(drain(&rx), expected.into_bytes());
     assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_for_a_tombstoned_id_leaves_the_tombstone_in_place() {
+    let (mut state, rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=1:d=0:p=title:e=1;@@@@\x1b\\");
+    state.handle_incoming_data(b"\x1b]99;i=1:p=?;\x1b\\");
+    assert!(!drain(&rx).is_empty());
+
+    // The query did not revive the id: the tail of the dropped transfer is
+    // still discarded.
+    state.handle_incoming_data(b"\x1b]99;i=1;tail\x1b\\");
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_with_d0_is_answered_at_once() {
+    let (mut state, rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=abc:p=?:d=0;\x1b\\");
+    let expected = format!("\x1b]99;i=abc:p=?;{TOAST_REPLY}\x1b\\");
+    assert_eq!(drain(&rx), expected.into_bytes());
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn query_on_a_saturated_pending_map_is_answered() {
+    let (mut state, rx) = make_state(full_caps());
+    for i in 0..128 {
+        let seq = format!("\x1b]99;i=id-{i}:d=0;x\x1b\\");
+        state.handle_incoming_data(seq.as_bytes());
+    }
+    assert!(drain(&rx).is_empty());
+
+    state.handle_incoming_data(b"\x1b]99;i=q:p=?;\x1b\\");
+    let expected = format!("\x1b]99;i=q:p=?;{TOAST_REPLY}\x1b\\");
+    assert_eq!(drain(&rx), expected.into_bytes());
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn alive_and_close_without_an_id_push_no_window_command() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;p=alive;\x1b\\");
+    state.handle_incoming_data(b"\x1b]99;p=close;\x1b\\");
+    assert!(state.window_commands.is_empty());
+}
+
+#[test]
+fn close_with_d0_is_forwarded_at_once() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;i=c:p=close:d=0;\x1b\\");
+    assert_eq!(
+        state.window_commands,
+        [WindowManipulation::Osc99Control {
+            id: "c".to_owned(),
+            kind: Osc99ControlKind::Close,
+        }]
+    );
 }
 
 // ── Gate before reassembly; pending cleared on disable (130 review N5) ──────
@@ -258,7 +402,7 @@ fn only_notification_title(state: &TerminalState) -> Option<String> {
     });
     let first = titles.next()?;
     assert!(titles.next().is_none(), "expected exactly one notification");
-    first
+    Some(first)
 }
 
 #[test]
@@ -293,5 +437,24 @@ fn pending_transfer_is_discarded_when_support_is_disabled() {
         only_notification_title(&state).as_deref(),
         Some("bbb"),
         "disabling OSC 99 must discard the in-flight accumulator"
+    );
+}
+
+#[test]
+fn unidentified_transfer_is_discarded_when_support_is_disabled() {
+    let (mut state, _rx) = make_state(full_caps());
+    state.handle_incoming_data(b"\x1b]99;d=0;aaa\x1b\\");
+    assert!(state.window_commands.is_empty());
+
+    state
+        .handler
+        .set_host_capabilities(HostCapabilities::default());
+    state.handler.set_host_capabilities(full_caps());
+    state.handle_incoming_data(b"\x1b]99;;bbb\x1b\\");
+
+    assert_eq!(
+        only_notification_title(&state).as_deref(),
+        Some("bbb"),
+        "disabling OSC 99 must discard the unidentified slot too"
     );
 }

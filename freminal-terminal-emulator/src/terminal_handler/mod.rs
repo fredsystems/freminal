@@ -460,14 +460,17 @@ pub struct TerminalHandler {
     /// neither entering nor leaving the alternate screen touches either one.
     /// Each is bounded to [`KittyKeyboardFlags::MAX_STACK_DEPTH`](freminal_common::buffer_states::modes::kitty_keyboard::KittyKeyboardFlags::MAX_STACK_DEPTH) (256) entries.
     kitty_keyboard_stack: ScreenScoped<KittyKeyboardStack>,
-    /// In-flight OSC 99 notification accumulators, keyed by the `i=` id.
+    /// In-flight OSC 99 notification accumulators: one per `i=` id (bounded,
+    /// least-recently-touched eviction) plus one slot shared by every chunk
+    /// that carries no id.
     ///
     /// Multi-chunk notifications arrive with `d=0` chunks that must be
     /// concatenated until the final `d=1` (or default-done) chunk arrives.
-    /// Each entry is removed when its notification finalizes.
-    /// See [`notify_99::PendingNotification`] and
+    /// Each entry is removed when its notification finalizes. Control
+    /// payloads (`p=?`, `p=close`, `p=alive`) never touch it.
+    /// See [`notify_99::PendingOsc99`] and
     /// [`TerminalHandler::reassemble_osc99`].
-    pub(in crate::terminal_handler) pending_notifications: notify_99::PendingNotifications,
+    pub(in crate::terminal_handler) pending_osc99: notify_99::PendingOsc99,
 }
 
 impl TerminalHandler {
@@ -520,7 +523,7 @@ impl TerminalHandler {
             sixel_shared_palette: None,
             s8c1t_mode: S8c1t::SevenBit,
             kitty_keyboard_stack: ScreenScoped::default(),
-            pending_notifications: notify_99::PendingNotifications::new(),
+            pending_osc99: notify_99::PendingOsc99::default(),
         }
     }
 
@@ -556,13 +559,14 @@ impl TerminalHandler {
     /// the host, not terminal state.
     ///
     /// When the new value leaves OSC 99 unsupported, every in-flight OSC 99
-    /// chunk accumulator is discarded. Chunks received while unsupported are
+    /// chunk accumulator (identified and unidentified) is discarded. Chunks
+    /// received while unsupported are
     /// dropped before reassembly, so without this a transfer begun while
     /// supported could be completed by a later chunk after re-enabling,
     /// splicing text from two separate eras of host configuration.
     pub fn set_host_capabilities(&mut self, host_capabilities: HostCapabilities) {
         if matches!(host_capabilities.osc99, Osc99Support::Unsupported) {
-            self.pending_notifications.clear();
+            self.pending_osc99.clear();
         }
         self.host_capabilities = host_capabilities;
     }
@@ -4359,7 +4363,9 @@ mod tests {
     #[test]
     fn host_capabilities_default_then_set_and_get() {
         use freminal_common::host_capabilities::{
-            Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+            Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
+            Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
+            Osc99Support, Osc99UrgencySupport,
         };
 
         let mut handler = TerminalHandler::new(80, 24);
@@ -4370,6 +4376,13 @@ mod tests {
             osc99: Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
                 close_events: Osc99CloseEvents::Reported,
+                activation_focus: Osc99FocusSupport::Unsupported,
+                auto_expiry: Osc99AutoExpiry::Supported,
+                urgency: Osc99UrgencySupport::Supported,
+                sound_names: Osc99SoundNames::SystemAndSilent,
+                body: Osc99BodySupport::Supported,
+                buttons: Osc99ButtonSupport::Supported,
+                icons: Osc99IconSupport::Supported,
             }),
         };
         handler.set_host_capabilities(caps);

@@ -72,6 +72,19 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(winit::window::WindowId);
 
+impl WindowId {
+    /// Build a `WindowId` from an arbitrary number, for tests only.
+    ///
+    /// Distinct `n` yield distinct ids; equal `n` yield equal ids. The id
+    /// does not refer to any real window. Available only under `cfg(test)`
+    /// or the `test-utils` feature, which production builds never enable.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn for_test(n: u64) -> Self {
+        Self(winit::window::WindowId::from(n))
+    }
+}
+
 /// A rectangle in **physical framebuffer pixels**, origin at the
 /// **bottom-left** of the surface (OpenGL / EGL convention).
 ///

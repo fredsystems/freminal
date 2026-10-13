@@ -8,20 +8,32 @@
 //! A multi-chunk OSC 99 notification arrives as a series of escape sequences,
 //! each carrying `d=0` (more chunks follow) or `d=1`/default (final chunk).
 //! This module holds the in-flight accumulator ([`PendingNotification`]), the
-//! finalized output type ([`FinalizedNotification`]), and the reassembly method
-//! [`TerminalHandler::reassemble_osc99`].
+//! bounded store of in-flight accumulators ([`PendingOsc99`]), the finalized
+//! output type ([`FinalizedNotification`]), the finalisation helpers
+//! (control-character stripping, size limits), and the entry point
+//! [`TerminalHandler::handle_osc99`].
+//!
+//! Control payloads (`p=?`, `p=close`, `p=alive`) act immediately, whatever
+//! `d=` says, and never touch the pending store. Only content payloads
+//! (`title`, `body`, `icon`, `buttons`, and unknown types) are reassembled.
+//! A chunk the parser rejected ([`AnsiOscType::Notify99Rejected`](freminal_common::buffer_states::osc::AnsiOscType::Notify99Rejected))
+//! abandons the transfer it belonged to.
 
 use std::collections::HashMap;
 
 use freminal_common::buffer_states::osc_notify_99::{
-    MAX_OSC99_SEQUENCE_BYTES, NotificationOccasion, NotificationUrgency, Osc99Command,
-    Osc99PayloadEncoding, Osc99PayloadType,
+    MAX_OSC99_SEQUENCE_BYTES, Osc99ActionEdit, Osc99ChunkState, Osc99Command, Osc99PayloadEncoding,
+    Osc99PayloadType, Osc99RejectedChunk, resolve_osc99_actions,
 };
-use freminal_common::buffer_states::window_manipulation::{
-    Notification99Data, Osc99ControlKind, WindowManipulation,
+use freminal_common::buffer_states::osc99_notification::{
+    Notification99Data, NotificationOccasion, NotificationUrgency, Osc99CloseReporting,
+    Osc99ControlKind, Osc99Expiry, Osc99Sound,
 };
+use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
-    Osc99ActivationReport, Osc99CloseEvents, Osc99Features, Osc99Support,
+    Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents,
+    Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames, Osc99Support,
+    Osc99UrgencySupport,
 };
 
 use super::TerminalHandler;
@@ -31,7 +43,8 @@ use crate::ansi_components::tracer::lossy_sequence_for_log_bounded;
 
 // ── Accumulator ──────────────────────────────────────────────────────────────
 
-/// Accumulator for a multi-chunk OSC 99 notification, keyed by its `i=` id.
+/// Accumulator for a multi-chunk OSC 99 notification, keyed by its `i=` id
+/// (or held in the single unidentified slot when it has none).
 ///
 /// OSC 99 notifications may arrive across multiple escape sequences: each
 /// non-final chunk carries `d=0`, and the final chunk carries `d=1` (or omits
@@ -52,33 +65,118 @@ pub(in crate::terminal_handler) struct PendingNotification {
     icon: BoundedChunkAssembler,
     /// Accumulated `p=buttons` payload bytes (U+2028-separated labels).
     buttons: BoundedChunkAssembler,
-    /// The most-recent non-payload metadata (id, actions, urgency, occasion,
-    /// sound, app name, icon names/cache key, close/report flags, expiry).
+    /// The metadata merged across every chunk received so far (see
+    /// [`MergedOsc99Metadata::merge_chunk`]).
     ///
-    /// `None` until the first chunk arrives; updated to `Some(chunk)` on each
-    /// subsequent chunk.  Later chunks override earlier scalar fields; the
-    /// terminating chunk's metadata wins.  The `payload` field of the stored
-    /// command is not meaningful here — the accumulators above are
-    /// authoritative.
-    meta: Option<Osc99Command>,
+    /// `None` until the first chunk arrives. It holds no payload bytes: the
+    /// accumulators above are authoritative.
+    meta: Option<MergedOsc99Metadata>,
+    /// Running cost of the list-valued metadata in `meta` (`n=` names, `t=`
+    /// types and `a=` edits), charged once per newly merged entry at
+    /// [`OSC99_LIST_ENTRY_OVERHEAD`] plus the entry's byte length. Kept as a
+    /// counter so a chunk costs time proportional to its own entries, not to
+    /// everything merged so far.
+    list_cost: usize,
 }
 
 /// Maximum number of distinct in-flight (`i=`) OSC 99 notifications retained
-/// while awaiting their terminating chunk. A process emitting endless `d=0`
-/// chunks with unique ids could otherwise grow `pending_notifications`
-/// without bound. Terminal input is untrusted, so this is a hard cap.
+/// while awaiting their terminating chunk. Terminal input is untrusted, so
+/// this is a hard cap; when a new id arrives at the cap, the
+/// least-recently-touched entry is evicted rather than the chunk refused.
 const MAX_PENDING_OSC99_NOTIFICATIONS: usize = 128;
 
 /// Maximum accumulated payload bytes for a single in-flight notification
-/// (across title/body/icon/buttons). A stream of `d=0` chunks under one id
-/// could otherwise grow a single accumulator without bound.
+/// (across title/body/icon/buttons), plus its list-valued metadata cost. A
+/// stream of `d=0` chunks under one id could otherwise grow a single
+/// accumulator without bound.
 const MAX_OSC99_NOTIFICATION_BYTES: usize = 1_048_576;
 
-/// Caps for each of a notification's four payload accumulators.
-const OSC99_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+/// Maximum accumulated bytes for the title, body or buttons payload of one
+/// notification. Finalisation cuts a title or body to
+/// [`MAX_OSC99_TEXT_CHARS`] characters and the buttons to
+/// [`MAX_OSC99_BUTTONS`] labels of [`MAX_OSC99_BUTTON_CHARS`] characters, so
+/// bytes beyond this cap could never be shown.
+const MAX_OSC99_TEXT_PAYLOAD_BYTES: usize = 65_536;
+
+/// Maximum accumulated bytes for the icon payload of one notification.
+const MAX_OSC99_ICON_PAYLOAD_BYTES: usize = 1_048_576;
+
+/// Maximum number of `n=` icon names merged into one notification.
+const MAX_OSC99_ICON_NAMES: usize = 64;
+
+/// Maximum number of `t=` notification types merged into one notification.
+const MAX_OSC99_NOTIFICATION_TYPES: usize = 64;
+
+/// Maximum number of `a=` action edits merged into one notification.
+const MAX_OSC99_ACTION_EDITS: usize = 64;
+
+/// Bytes charged for each list-valued metadata entry on top of its own
+/// length, standing in for the entry's allocation and bookkeeping.
+const OSC99_LIST_ENTRY_OVERHEAD: usize = 32;
+
+/// Budget for the bytes held by every in-flight notification of one handler
+/// together, the unidentified slot included: accumulated payload bytes plus
+/// list-valued metadata cost. Per-notification caps alone leave the total
+/// bounded only by [`MAX_PENDING_OSC99_NOTIFICATIONS`] times the per-
+/// notification cap.
+const MAX_OSC99_PENDING_TOTAL_BYTES: usize = 8 * 1_048_576;
+
+/// Maximum length, in characters, of a notification's title or body.
+const MAX_OSC99_TEXT_CHARS: usize = 1024;
+
+/// Maximum length, in characters, of one button label.
+const MAX_OSC99_BUTTON_CHARS: usize = 256;
+
+/// Maximum number of button labels kept.
+const MAX_OSC99_BUTTONS: usize = 8;
+
+/// Caps for the title, body and buttons accumulators.
+const OSC99_TEXT_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
     max_chunk_bytes: MAX_OSC99_SEQUENCE_BYTES,
-    max_total_bytes: MAX_OSC99_NOTIFICATION_BYTES,
+    max_total_bytes: MAX_OSC99_TEXT_PAYLOAD_BYTES,
 };
+
+/// Caps for the icon accumulator.
+const OSC99_ICON_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
+    max_chunk_bytes: MAX_OSC99_SEQUENCE_BYTES,
+    max_total_bytes: MAX_OSC99_ICON_PAYLOAD_BYTES,
+};
+
+/// Why a chunk made the handler abandon its notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(in crate::terminal_handler) enum Osc99Reject {
+    /// A payload accumulator or the per-notification total rejected it.
+    #[error(transparent)]
+    Chunk(#[from] ChunkError),
+    /// The notification would hold more than [`MAX_OSC99_ICON_NAMES`] `n=`
+    /// names.
+    #[error("more than {max} icon names")]
+    TooManyIconNames {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification would hold more than [`MAX_OSC99_NOTIFICATION_TYPES`]
+    /// `t=` types.
+    #[error("more than {max} notification types")]
+    TooManyNotificationTypes {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification would hold more than [`MAX_OSC99_ACTION_EDITS`] `a=`
+    /// edits.
+    #[error("more than {max} action edits")]
+    TooManyActionEdits {
+        /// The cap.
+        max: usize,
+    },
+    /// The notification alone exceeds the handler-wide pending budget
+    /// ([`MAX_OSC99_PENDING_TOTAL_BYTES`]).
+    #[error("notification exceeds the pending budget of {max} bytes")]
+    PendingBudget {
+        /// The budget.
+        max: usize,
+    },
+}
 
 /// The four payload byte strings of a notification once every chunk has been
 /// concatenated and decoded.
@@ -96,11 +194,12 @@ struct FinishedPayloads {
 impl Default for PendingNotification {
     fn default() -> Self {
         Self {
-            title: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            body: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            icon: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
-            buttons: BoundedChunkAssembler::new(OSC99_CHUNK_LIMITS),
+            title: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
+            body: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
+            icon: BoundedChunkAssembler::new(OSC99_ICON_CHUNK_LIMITS),
+            buttons: BoundedChunkAssembler::new(OSC99_TEXT_CHUNK_LIMITS),
             meta: None,
+            list_cost: 0,
         }
     }
 }
@@ -110,6 +209,82 @@ const fn chunk_encoding(encoding: Osc99PayloadEncoding) -> ChunkEncoding {
     match encoding {
         Osc99PayloadEncoding::Plain => ChunkEncoding::Raw,
         Osc99PayloadEncoding::Base64 => ChunkEncoding::Base64,
+    }
+}
+
+/// The metadata of one notification, merged across every chunk of it.
+///
+/// Only what a finalised notification reads is here: the per-chunk keys
+/// (`p`, `d`, `e`) and the payload are consumed while the chunks arrive and
+/// are not kept. Every scalar is unset-aware (`None`) so that a later chunk's
+/// silence does not override an earlier chunk's value, and defaults are
+/// applied once, at [`FinalizedNotification::into_notification99_data`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(in crate::terminal_handler) struct MergedOsc99Metadata {
+    /// Notification id (`i=`); the store key, so every chunk agrees.
+    pub(in crate::terminal_handler) id: Option<String>,
+    /// Every `a=` edit, in arrival order; resolved once at finalisation.
+    pub(in crate::terminal_handler) action_edits: Vec<Osc99ActionEdit>,
+    /// Close reporting (`c=`).
+    pub(in crate::terminal_handler) close_reporting: Option<Osc99CloseReporting>,
+    /// App name (`f=`).
+    pub(in crate::terminal_handler) app_name: Option<String>,
+    /// Icon-data cache key (`g=`).
+    pub(in crate::terminal_handler) icon_cache_key: Option<String>,
+    /// Icon names (`n=`), in arrival order.
+    pub(in crate::terminal_handler) icon_names: Vec<String>,
+    /// Occasion (`o=`).
+    pub(in crate::terminal_handler) occasion: Option<NotificationOccasion>,
+    /// Raw sound name (`s=`).
+    pub(in crate::terminal_handler) sound: Option<String>,
+    /// Type/category tags (`t=`), in arrival order.
+    pub(in crate::terminal_handler) notification_types: Vec<String>,
+    /// Urgency (`u=`).
+    pub(in crate::terminal_handler) urgency: Option<NotificationUrgency>,
+    /// Auto-expiry (`w=`).
+    pub(in crate::terminal_handler) expiry: Option<Osc99Expiry>,
+}
+
+impl MergedOsc99Metadata {
+    /// Fold the metadata of a later `chunk` of the same notification into
+    /// this one.
+    ///
+    /// - Scalars (`c`, `o`, `u`, `w`, `f`, `g`, `s`) take the chunk's value
+    ///   when the chunk set one, and otherwise keep the accumulated value.
+    /// - Lists (`n`, `t`) and the `a=` edits extend in arrival order. The
+    ///   edits are resolved once, at finalisation, so a later chunk that omits
+    ///   `a=` cannot resurrect an action an earlier chunk removed.
+    /// - The id is the chunk's (it is the store key, so it is the same).
+    ///
+    /// The chunk is borrowed and only what is kept is cloned; its payload is
+    /// never copied, because payload bytes live in the accumulators.
+    fn merge_chunk(&mut self, chunk: &Osc99Command) {
+        self.id.clone_from(&chunk.id);
+        if chunk.close_reporting.is_some() {
+            self.close_reporting = chunk.close_reporting;
+        }
+        if chunk.occasion.is_some() {
+            self.occasion = chunk.occasion;
+        }
+        if chunk.urgency.is_some() {
+            self.urgency = chunk.urgency;
+        }
+        if chunk.expiry.is_some() {
+            self.expiry = chunk.expiry;
+        }
+        if chunk.app_name.is_some() {
+            self.app_name.clone_from(&chunk.app_name);
+        }
+        if chunk.icon_cache_key.is_some() {
+            self.icon_cache_key.clone_from(&chunk.icon_cache_key);
+        }
+        if chunk.sound.is_some() {
+            self.sound.clone_from(&chunk.sound);
+        }
+        self.icon_names.extend_from_slice(&chunk.icon_names);
+        self.notification_types
+            .extend_from_slice(&chunk.notification_types);
+        self.action_edits.extend_from_slice(&chunk.action_edits);
     }
 }
 
@@ -124,12 +299,67 @@ impl PendingNotification {
             .saturating_add(self.buttons.len())
     }
 
+    /// Bytes this notification holds: accumulated payloads plus the running
+    /// cost of the list-valued metadata.
+    const fn cost(&self) -> usize {
+        self.accumulated_len().saturating_add(self.list_cost)
+    }
+
+    /// Check that merging `chunk`'s lists stays within the entry caps and
+    /// return the cost they add.
+    ///
+    /// Only the chunk's own entries are visited; the entries already merged
+    /// are accounted for by their lengths and by [`list_cost`](Self::list_cost).
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Osc99Reject`] for the first list that would pass its cap.
+    fn admit_list_entries(&self, chunk: &Osc99Command) -> Result<usize, Osc99Reject> {
+        let (held_names, held_types, held_edits) = self.meta.as_ref().map_or((0, 0, 0), |meta| {
+            (
+                meta.icon_names.len(),
+                meta.notification_types.len(),
+                meta.action_edits.len(),
+            )
+        });
+        if held_names.saturating_add(chunk.icon_names.len()) > MAX_OSC99_ICON_NAMES {
+            return Err(Osc99Reject::TooManyIconNames {
+                max: MAX_OSC99_ICON_NAMES,
+            });
+        }
+        if held_types.saturating_add(chunk.notification_types.len()) > MAX_OSC99_NOTIFICATION_TYPES
+        {
+            return Err(Osc99Reject::TooManyNotificationTypes {
+                max: MAX_OSC99_NOTIFICATION_TYPES,
+            });
+        }
+        if held_edits.saturating_add(chunk.action_edits.len()) > MAX_OSC99_ACTION_EDITS {
+            return Err(Osc99Reject::TooManyActionEdits {
+                max: MAX_OSC99_ACTION_EDITS,
+            });
+        }
+        let strings = chunk
+            .icon_names
+            .iter()
+            .chain(&chunk.notification_types)
+            .fold(0usize, |total, s| {
+                total
+                    .saturating_add(s.len())
+                    .saturating_add(OSC99_LIST_ENTRY_OVERHEAD)
+            });
+        let edits = chunk
+            .action_edits
+            .len()
+            .saturating_mul(OSC99_LIST_ENTRY_OVERHEAD);
+        Ok(strings.saturating_add(edits))
+    }
+
     /// Append `payload` to the accumulator selected by `payload_type`,
     /// decoding it according to `encoding`.
     ///
-    /// For `Close`, `Alive`, and `Query` payload types nothing is accumulated
-    /// (they are not chunked content payloads); only the metadata is updated
-    /// (done by the caller).
+    /// For `Unknown` (whose payload is discarded), the control types `Close`,
+    /// `Alive` and `Query` nothing is accumulated; only the metadata is merged (done by
+    /// [`accept`](Self::accept)).
     ///
     /// # Errors
     ///
@@ -146,12 +376,47 @@ impl PendingNotification {
             Osc99PayloadType::Body => &mut self.body,
             Osc99PayloadType::Icon => &mut self.icon,
             Osc99PayloadType::Buttons => &mut self.buttons,
-            // Non-accumulating types: Close, Alive, Query.
-            Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {
+            // Non-accumulating types. Control payloads never reach the
+            // reassembler (they act immediately); an unknown type's payload
+            // is discarded and its metadata still applies.
+            Osc99PayloadType::Close
+            | Osc99PayloadType::Alive
+            | Osc99PayloadType::Query
+            | Osc99PayloadType::Unknown => {
                 return Ok(());
             }
         };
         target.push(payload, chunk_encoding(encoding))
+    }
+
+    /// Take one chunk into this accumulation: append its payload, merge its
+    /// metadata, and check the combined size.
+    ///
+    /// The chunk is borrowed: its payload goes straight into the accumulator
+    /// and only the metadata that is kept is cloned, so a large final
+    /// icon/body chunk is never copied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Osc99Reject::Chunk`] for an accumulator's [`ChunkError`]
+    /// (cap exceeded or invalid base64) or when the payloads plus the list
+    /// metadata exceed [`MAX_OSC99_NOTIFICATION_BYTES`], and the
+    /// `TooMany...` variants when a list passes its entry cap. The caller
+    /// drops the whole notification.
+    fn accept(&mut self, chunk: &Osc99Command) -> Result<(), Osc99Reject> {
+        self.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)?;
+        let added = self.admit_list_entries(chunk)?;
+
+        self.meta.get_or_insert_default().merge_chunk(chunk);
+        self.list_cost = self.list_cost.saturating_add(added);
+
+        if self.cost() > MAX_OSC99_NOTIFICATION_BYTES {
+            return Err(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Finish all four accumulators, flushing any pending base64 quantum.
@@ -187,56 +452,55 @@ impl PendingNotification {
 
 // ── Finalized output type ─────────────────────────────────────────────────────
 
-/// A fully-reassembled OSC 99 notification (all chunks concatenated).
+/// A fully-reassembled OSC 99 notification (all chunks concatenated, controls
+/// stripped, sizes limited).
 ///
-/// Produced by [`TerminalHandler::reassemble_osc99`] when a terminating
-/// (`done == true`) chunk arrives. Task 99.4 maps this into
-/// `WindowManipulation::Notification99` for transport to the GUI.
+/// Produced by [`TerminalHandler::reassemble_osc99`] when a terminating chunk
+/// (`d=1`, or no `d=`) arrives with something to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FinalizedNotification {
-    /// The concatenated title text (UTF-8), if any title chunks arrived.
-    pub title: Option<String>,
-    /// The concatenated body text (UTF-8), if any body chunks arrived.
-    pub body: Option<String>,
+pub(in crate::terminal_handler) struct FinalizedNotification {
+    /// The notification title. **Never empty**: when no title arrived the
+    /// body is promoted into it, and a notification with neither is not built.
+    pub(in crate::terminal_handler) title: String,
+    /// The notification body, if any (non-empty when present).
+    pub(in crate::terminal_handler) body: Option<String>,
     /// The concatenated icon bytes, if any icon chunks arrived.
-    pub icon: Option<Vec<u8>>,
-    /// Button labels (`p=buttons`), split from the U+2028-separated payload.
-    /// Empty if no button chunks arrived.
-    pub buttons: Vec<String>,
-    /// The terminating chunk's metadata (id, actions, urgency, occasion, sound,
-    /// app name, icon names/cache key, close/report flags, expiry, `payload_type`).
-    pub meta: Osc99Command,
+    pub(in crate::terminal_handler) icon: Option<Vec<u8>>,
+    /// Button labels (`p=buttons`), split from the U+2028-separated payload,
+    /// at most eight, none empty.
+    pub(in crate::terminal_handler) buttons: Vec<String>,
+    /// The metadata merged across every chunk (id, actions, urgency, occasion,
+    /// sound, app name, icon names/cache key, close/report flags, expiry).
+    pub(in crate::terminal_handler) meta: MergedOsc99Metadata,
+}
+
+/// Map the raw `s=` sound name to an [`Osc99Sound`].
+///
+/// Unset and the well-known `system` both mean the daemon's default sound;
+/// `silent` means no sound; anything else is forwarded verbatim.
+pub(in crate::terminal_handler) fn sound_from_name(sound: Option<String>) -> Osc99Sound {
+    sound.map_or(Osc99Sound::System, |name| match name.as_str() {
+        "system" => Osc99Sound::System,
+        "silent" => Osc99Sound::Silent,
+        _ => Osc99Sound::Named(name),
+    })
 }
 
 impl FinalizedNotification {
-    /// Map this finalized OSC 99 notification into the transport shell
+    /// Map this finalized OSC 99 notification into the transport type
     /// [`Notification99Data`] carried by `WindowManipulation::Notification99`.
     ///
-    /// Field mapping (Task 99.4 execution decisions): `id`/`title`/`body`
-    /// direct; `icon_data` from `self.icon`; `icon_names`/`icon_cache_key`/
-    /// `sound`/`app_name`/`notification_type` from `meta`;
-    /// `report_activation`/`focus_on_activation` from `meta.actions`;
-    /// `close_report` from `meta.close_report`; `urgency` maps
-    /// `Low`/`Normal`/`Critical` to `Some(0)`/`Some(1)`/`Some(2)`; `occasion`
-    /// maps `Always` to `None` (behaviourally identical to unset),
-    /// `Unfocused`/`Invisible` to `Some("unfocused")`/`Some("invisible")`;
-    /// `expire_ms` maps the spec's `-1` "OS default" sentinel to `None`, any
-    /// other value to `Some(v)`. `button_labels` comes directly from
-    /// `self.buttons` (the split `p=buttons` payload).
+    /// Field mapping: `id`/`title`/`body` direct (the title is non-empty);
+    /// `icon_data` from `self.icon`; `buttons` from `self.buttons`;
+    /// `icon_names`/`icon_cache_key`/`app_name`/`notification_types` from
+    /// `meta`; `activation_reporting`/`activation_focus` from
+    /// [`resolve_osc99_actions`] over the merged `meta.action_edits` (default:
+    /// focus only); `close_reporting` defaults to `Silent`; `urgency` defaults
+    /// to `Normal`; `occasion` defaults to `Always`; `expiry` defaults to
+    /// `OsDefault`; `sound` via [`sound_from_name`].
     pub(in crate::terminal_handler) fn into_notification99_data(self) -> Notification99Data {
-        let urgency = self.meta.urgency.map(|u| match u {
-            NotificationUrgency::Low => 0u8,
-            NotificationUrgency::Normal => 1u8,
-            NotificationUrgency::Critical => 2u8,
-        });
-        let occasion = match self.meta.occasion {
-            // Always is the default — behaviourally identical to unset → None.
-            NotificationOccasion::Always => None,
-            NotificationOccasion::Unfocused => Some("unfocused".to_owned()),
-            NotificationOccasion::Invisible => Some("invisible".to_owned()),
-        };
-        // -1 is the spec's "OS default" sentinel → None; any other value → Some.
-        let expire_ms = (self.meta.expire_ms != -1).then_some(self.meta.expire_ms);
+        let (activation_reporting, activation_focus) =
+            resolve_osc99_actions(&self.meta.action_edits);
         Notification99Data {
             id: self.meta.id,
             title: self.title,
@@ -244,63 +508,20 @@ impl FinalizedNotification {
             icon_data: self.icon,
             icon_names: self.meta.icon_names,
             icon_cache_key: self.meta.icon_cache_key,
-            button_labels: self.buttons,
-            report_activation: self.meta.actions.report_activation,
-            focus_on_activation: self.meta.actions.focus_on_activation,
-            close_report: self.meta.close_report,
-            urgency,
-            occasion,
-            sound: self.meta.sound,
+            buttons: self.buttons,
+            activation_reporting,
+            activation_focus,
+            close_reporting: self
+                .meta
+                .close_reporting
+                .unwrap_or(Osc99CloseReporting::Silent),
+            urgency: self.meta.urgency.unwrap_or(NotificationUrgency::Normal),
+            occasion: self.meta.occasion.unwrap_or(NotificationOccasion::Always),
+            sound: sound_from_name(self.meta.sound),
             app_name: self.meta.app_name,
-            notification_type: self.meta.notification_type,
-            expire_ms,
+            notification_types: self.meta.notification_types,
+            expiry: self.meta.expiry.unwrap_or(Osc99Expiry::OsDefault),
         }
-    }
-}
-
-// ── Control payload routing (Task 99.5c) ─────────────────────────────────────
-
-/// Map an OSC 99 payload type to its GUI-bound control kind, if it is one
-/// (`p=close`/`p=alive`).
-///
-/// `p=?` also returns `None`: the handler answers it itself and never forwards
-/// it to the GUI (Task 130.5), so the `Notify99` arm checks for
-/// [`Osc99PayloadType::Query`] before consulting this function. Display
-/// payload types (`Title`/`Body`/`Icon`/`Buttons`) return `None` too — they
-/// keep flowing to `WindowManipulation::Notification99` in
-/// `terminal_handler/osc.rs`.
-///
-/// `Osc99PayloadType` is defined in `freminal-common`, so this cannot be an
-/// inherent method on it from this crate (orphan rule) — a free function is
-/// the correct shape.
-pub(in crate::terminal_handler) const fn control_kind(
-    payload_type: Osc99PayloadType,
-) -> Option<Osc99ControlKind> {
-    match payload_type {
-        Osc99PayloadType::Close => Some(Osc99ControlKind::Close),
-        Osc99PayloadType::Alive => Some(Osc99ControlKind::Alive),
-        Osc99PayloadType::Query
-        | Osc99PayloadType::Title
-        | Osc99PayloadType::Body
-        | Osc99PayloadType::Icon
-        | Osc99PayloadType::Buttons => None,
-    }
-}
-
-/// Whether an OSC 99 payload type is a control request (`p=close`,
-/// `p=alive` or `p=?`) rather than display content.
-///
-/// Unlike [`control_kind`], this includes `p=?`, which the handler answers
-/// itself and so has no GUI-bound control kind.
-pub(in crate::terminal_handler) const fn is_control_payload(
-    payload_type: Osc99PayloadType,
-) -> bool {
-    match payload_type {
-        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => true,
-        Osc99PayloadType::Title
-        | Osc99PayloadType::Body
-        | Osc99PayloadType::Icon
-        | Osc99PayloadType::Buttons => false,
     }
 }
 
@@ -311,51 +532,155 @@ pub(in crate::terminal_handler) const fn is_control_payload(
 ///
 /// The result is the part after the `;` in
 /// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`: colon-separated `key=value`
-/// pairs in a stable order, with no leading or trailing `:`. It advertises
-/// only what is genuinely implemented (the truthful-advertisement rule from
-/// Task 76):
+/// pairs in kitty's key order, with no leading or trailing `:`. Every key is
+/// derived from `features`, so the reply advertises only what the host
+/// genuinely implements:
 ///
-/// - `a=report` (NOT `focus` — `focus_on_activation` is parsed but freminal
-///   does not act on it), present only when activation can be reported. With
-///   no supported actions the `a` key is omitted entirely, per the spec's
-///   query table ("If no actions are supported, the `a` key must be
-///   absent");
+/// - `a=` the supported activation actions, as a comma list in the order
+///   `focus,report`. `focus` is present only when activating a notification
+///   focuses the source window; `report` only when activation can be reported.
+///   With no supported action the `a` key is omitted entirely, per the spec's
+///   query table ("If no actions are supported, the `a` key must be absent");
+/// - `o=always,unfocused,invisible` (all three occasions, always present);
+/// - `u=0,1,2` (urgency levels), present only when urgency is honoured;
+/// - `p=` the payload types, in the order
+///   `title,body,?,close,icon,alive,buttons`. `title`, `?`, `close` and
+///   `alive` are always present; `body`, `icon` and `buttons` are present only
+///   when the host displays them;
 /// - `c=1` (close reports), present only when close events can be reported;
-/// - `o=` all three occasions;
-/// - `p=` the payload types freminal handles (display types plus the control
-///   types it answers);
-/// - `s=system,silent` (forwarded freedesktop sound-name hints — freminal
-///   forwards the name, playback is the daemon's concern);
-/// - `u=0,1,2` (urgency levels — advertised even though the setter is
-///   unavailable on macOS, matching Task 76's handling of the same gap);
-/// - `w=1` (auto-expiry, wired via `.timeout()`).
-///
-/// Full conformance of the advertised set against the spec is Task 138.
+/// - `w=1` (auto-expiry), present only when the requested expiry is honoured;
+/// - `s=` the sound names: `system,silent` when only the well-known names are
+///   understood, plus `error,info,question,warn,warning` when the standard
+///   names are understood too.
 pub(in crate::terminal_handler) fn osc99_query_reply_body(features: Osc99Features) -> String {
-    let mut keys: Vec<&str> = Vec::with_capacity(7);
-    if features.activation_report == Osc99ActivationReport::Reported {
-        keys.push("a=report");
+    let mut keys: Vec<String> = Vec::with_capacity(7);
+
+    let mut actions: Vec<&str> = Vec::with_capacity(2);
+    match features.activation_focus {
+        Osc99FocusSupport::Supported => actions.push("focus"),
+        Osc99FocusSupport::Unsupported => {}
     }
-    if features.close_events == Osc99CloseEvents::Reported {
-        keys.push("c=1");
+    match features.activation_report {
+        Osc99ActivationReport::Reported => actions.push("report"),
+        Osc99ActivationReport::NotReported => {}
     }
-    keys.extend([
-        "o=always,unfocused,invisible",
-        "p=title,body,icon,buttons,alive,close,?",
-        "s=system,silent",
-        "u=0,1,2",
-        "w=1",
-    ]);
+    if !actions.is_empty() {
+        keys.push(format!("a={}", actions.join(",")));
+    }
+
+    keys.push("o=always,unfocused,invisible".to_owned());
+
+    match features.urgency {
+        Osc99UrgencySupport::Supported => keys.push("u=0,1,2".to_owned()),
+        Osc99UrgencySupport::Unsupported => {}
+    }
+
+    let mut payload_types: Vec<&str> = Vec::with_capacity(7);
+    payload_types.push("title");
+    match features.body {
+        Osc99BodySupport::Supported => payload_types.push("body"),
+        Osc99BodySupport::Unsupported => {}
+    }
+    payload_types.extend(["?", "close"]);
+    match features.icons {
+        Osc99IconSupport::Supported => payload_types.push("icon"),
+        Osc99IconSupport::Unsupported => {}
+    }
+    payload_types.push("alive");
+    match features.buttons {
+        Osc99ButtonSupport::Supported => payload_types.push("buttons"),
+        Osc99ButtonSupport::Unsupported => {}
+    }
+    keys.push(format!("p={}", payload_types.join(",")));
+
+    match features.close_events {
+        Osc99CloseEvents::Reported => keys.push("c=1".to_owned()),
+        Osc99CloseEvents::NotReported => {}
+    }
+
+    match features.auto_expiry {
+        Osc99AutoExpiry::Supported => keys.push("w=1".to_owned()),
+        Osc99AutoExpiry::Unsupported => {}
+    }
+
+    keys.push(match features.sound_names {
+        Osc99SoundNames::SystemAndSilent => "s=system,silent".to_owned(),
+        Osc99SoundNames::Standard => "s=system,silent,error,info,question,warn,warning".to_owned(),
+    });
+
     keys.join(":")
 }
 
-// ── Helper: build a FinalizedNotification from accumulated bytes + meta ───────
+// ── Finalisation helpers ──────────────────────────────────────────────────────
+
+/// Whether `c` is removed from notification text: the C0 controls except LF
+/// (U+0000–U+0009, U+000B–U+001F), DEL, and the C1 controls (U+007F–U+009F).
+///
+/// This is kitty's `[\x00-\x09\x0b-\x1f\x7f-\x9f]`.
+const fn is_osc99_control(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{9}' | '\u{b}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
+}
+
+/// Remove every [`is_osc99_control`] character from `text`. LF is kept.
+fn strip_osc99_controls(text: &str) -> String {
+    text.chars().filter(|&c| !is_osc99_control(c)).collect()
+}
+
+/// Limit `text` to `max_chars` characters (Unicode scalar values): a longer
+/// string is cut after its first `max_chars` characters, with no marker. A
+/// string that already fits is returned unchanged.
+///
+/// This is the cut kitty's `limit_size` makes, but freminal applies it after
+/// stripping (see [`sanitize_osc99_text`]), where kitty applies it before.
+fn limit_osc99_text(mut text: String, max_chars: usize) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(cut);
+    }
+    text
+}
+
+/// Strip then limit one piece of text (title, body).
+///
+/// The order is a deliberate difference from kitty, which limits the text when
+/// it is committed and strips control characters later. Stripping first means
+/// the limit counts only characters that are kept, so a text with control
+/// characters among its first `max_chars` keeps more printable characters
+/// than kitty would. Promoting the body into the title when the title strips
+/// to nothing (see [`build_finalized`]) is likewise freminal's choice, not
+/// kitty's behaviour. Neither is exact kitty parity.
+fn sanitize_osc99_text(text: &str, max_chars: usize) -> String {
+    limit_osc99_text(strip_osc99_controls(text), max_chars)
+}
+
+/// Remove from a single-line name (app name, type, icon name, sound name) the
+/// characters [`strip_osc99_controls`] removes, and LF too: a name has no
+/// line structure, unlike a title or body.
+fn strip_osc99_name(name: &str) -> String {
+    name.chars()
+        .filter(|&c| c != '\n' && !is_osc99_control(c))
+        .collect()
+}
+
+/// Strip an optional name, treating an empty result as absent.
+fn sanitize_optional_name(name: Option<String>) -> Option<String> {
+    name.map(|n| strip_osc99_name(&n)).filter(|n| !n.is_empty())
+}
+
+/// Strip each name in a list, dropping those that become empty.
+fn sanitize_name_list(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .map(|n| strip_osc99_name(&n))
+        .filter(|n| !n.is_empty())
+        .collect()
+}
 
 /// Split an accumulated `p=buttons` payload into individual labels.
 ///
 /// kitty separates button labels with U+2028 (LINE SEPARATOR). The payload is
 /// decoded as UTF-8 (lossy — never panics) and split on U+2028; empty labels
-/// (from leading/trailing/doubled separators) are dropped.
+/// (from leading/trailing/doubled separators) are dropped here, before any
+/// stripping, because they are not buttons at all.
 fn split_button_labels(bytes: &[u8]) -> Vec<String> {
     if bytes.is_empty() {
         return Vec::new();
@@ -367,38 +692,93 @@ fn split_button_labels(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Build a [`FinalizedNotification`] from the finished title/body/icon/
-/// buttons bytes and the final `meta` command. The terminating chunk's
-/// payload must already have been pushed into the appropriate accumulator
-/// before the accumulators were finished.
-fn build_finalized(payloads: FinishedPayloads, meta: Osc99Command) -> FinalizedNotification {
-    let title = if payloads.title.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&payloads.title).into_owned())
-    };
-    let body = if payloads.body.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&payloads.body).into_owned())
-    };
-    let icon = if payloads.icon.is_empty() {
-        None
-    } else {
-        Some(payloads.icon)
-    };
-    FinalizedNotification {
-        title,
-        body,
-        icon,
-        buttons: split_button_labels(&payloads.buttons),
-        meta,
-    }
+/// Sanitise button labels, keeping at most [`MAX_OSC99_BUTTONS`]: strip
+/// controls and limit each label to [`MAX_OSC99_BUTTON_CHARS`].
+///
+/// Every label in `labels` is a button the application sent, so none is
+/// dropped. A label that strips to nothing becomes U+FFFD, which keeps the
+/// button numbers that activation reports back stable: dropping it would
+/// renumber every button after it.
+fn sanitize_button_labels(labels: Vec<String>) -> Vec<String> {
+    labels
+        .into_iter()
+        .map(|label| {
+            let stripped = strip_osc99_controls(&label);
+            if stripped.is_empty() {
+                char::REPLACEMENT_CHARACTER.to_string()
+            } else {
+                limit_osc99_text(stripped, MAX_OSC99_BUTTON_CHARS)
+            }
+        })
+        .take(MAX_OSC99_BUTTONS)
+        .collect()
 }
 
-// ── PendingNotifications type alias ──────────────────────────────────────────
+/// What a notification's finished chunks amount to.
+#[derive(Debug, PartialEq, Eq)]
+enum Finalization {
+    /// Something to show. Boxed so the other variants do not pay for it.
+    Display(Box<FinalizedNotification>),
+    /// No title and no body, but icon bytes under a `g=` key: nothing to
+    /// show, but the icon is wanted in the GUI's cache.
+    CacheIcon {
+        /// The sanitised `g=` key.
+        key: String,
+        /// The icon bytes.
+        data: Vec<u8>,
+    },
+    /// Nothing to show and nothing to keep.
+    Nothing,
+}
 
-/// The state held for one `i=` identifier in [`PendingNotifications`].
+/// Build a [`Finalization`] from the finished title/body/icon/buttons bytes
+/// and the merged `meta`.
+///
+/// Decodes the text lossily, strips control characters from every
+/// user-visible string, limits sizes, and promotes the body into the title
+/// when there is no title. With neither a title nor a body there is nothing
+/// to show and no reply (spec), but icon bytes with a `g=` key are still a
+/// [`Finalization::CacheIcon`], as kitty caches the icon before it looks for
+/// text.
+fn build_finalized(payloads: FinishedPayloads, mut meta: MergedOsc99Metadata) -> Finalization {
+    let mut title = sanitize_osc99_text(
+        &String::from_utf8_lossy(&payloads.title),
+        MAX_OSC99_TEXT_CHARS,
+    );
+    let mut body = sanitize_osc99_text(
+        &String::from_utf8_lossy(&payloads.body),
+        MAX_OSC99_TEXT_CHARS,
+    );
+    if title.is_empty() {
+        title = std::mem::take(&mut body);
+    }
+    if title.is_empty() {
+        return match meta.icon_cache_key.take() {
+            Some(key) if !payloads.icon.is_empty() => Finalization::CacheIcon {
+                key,
+                data: payloads.icon,
+            },
+            _ => Finalization::Nothing,
+        };
+    }
+
+    meta.app_name = sanitize_optional_name(meta.app_name.take());
+    meta.sound = sanitize_optional_name(meta.sound.take());
+    meta.icon_names = sanitize_name_list(std::mem::take(&mut meta.icon_names));
+    meta.notification_types = sanitize_name_list(std::mem::take(&mut meta.notification_types));
+
+    Finalization::Display(Box::new(FinalizedNotification {
+        title,
+        body: (!body.is_empty()).then_some(body),
+        icon: (!payloads.icon.is_empty()).then_some(payloads.icon),
+        buttons: sanitize_button_labels(split_button_labels(&payloads.buttons)),
+        meta,
+    }))
+}
+
+// ── Pending store ─────────────────────────────────────────────────────────────
+
+/// The state held for one in-flight notification.
 #[derive(Debug)]
 pub(in crate::terminal_handler) enum PendingEntry {
     /// Chunks are being accumulated; the notification is still valid.
@@ -406,235 +786,594 @@ pub(in crate::terminal_handler) enum PendingEntry {
     /// Boxed so the tombstone variant does not pay for four assemblers.
     Accumulating(Box<PendingNotification>),
     /// The notification was dropped mid-transfer (invalid base64 or a cap
-    /// breach). The id is remembered as a tombstone so the remaining chunks
-    /// of the same transfer are discarded instead of starting a fresh
+    /// breach). It is remembered as a tombstone so the remaining chunks of
+    /// the same transfer are discarded instead of starting a fresh
     /// accumulation from a tail fragment. The terminating (`d=1`) chunk
-    /// removes it. It counts toward [`MAX_PENDING_OSC99_NOTIFICATIONS`] like
-    /// any other pending entry, so the map stays bounded.
+    /// removes it. A tombstone is an ordinary entry for eviction purposes, so
+    /// the store stays bounded.
     Dropped,
 }
 
-/// Map of in-flight OSC 99 notifications keyed by their `i=` identifier.
-pub(in crate::terminal_handler) type PendingNotifications = HashMap<String, PendingEntry>;
+/// A [`PendingEntry`] plus the logical time it was last touched and the bytes
+/// it is charged for.
+#[derive(Debug)]
+struct PendingSlot {
+    /// The in-flight state.
+    entry: PendingEntry,
+    /// The store's clock at the last touch; the smallest value is evicted
+    /// first.
+    last_touched: u64,
+    /// Bytes charged against the store's budget: the entry's
+    /// [`PendingNotification::cost`] as of the last accepted chunk, and zero
+    /// for a tombstone.
+    cost: usize,
+}
 
-// ── Reassembly impl on TerminalHandler ───────────────────────────────────────
+impl PendingSlot {
+    /// An empty accumulation touched at `now`.
+    fn new(now: u64) -> Self {
+        Self {
+            entry: PendingEntry::Accumulating(Box::default()),
+            last_touched: now,
+            cost: 0,
+        }
+    }
+}
+
+/// Which slot of a [`PendingOsc99`] store.
+#[derive(Debug)]
+enum SlotKey {
+    /// The entry for an `i=` id.
+    Identified(String),
+    /// The single entry for chunks without an id.
+    Unidentified,
+}
+
+/// The in-flight OSC 99 notifications of one terminal handler.
+///
+/// Identified notifications live in a map keyed by `i=`, bounded at
+/// [`MAX_PENDING_OSC99_NOTIFICATIONS`] with least-recently-touched eviction
+/// (tombstones included), so the map never refuses a chunk. Content chunks
+/// without an id share the single `unidentified` slot, like kitty's one
+/// pending command keyed by "no id".
+///
+/// The bytes held by every entry together are bounded by
+/// [`MAX_OSC99_PENDING_TOTAL_BYTES`]. `total_cost` is the sum of every slot's
+/// `cost`, maintained on each insert, accepted chunk, removal, eviction and
+/// clear rather than recomputed.
+#[derive(Debug)]
+pub(in crate::terminal_handler) struct PendingOsc99 {
+    /// Identified entries.
+    by_id: HashMap<String, PendingSlot>,
+    /// Monotonic touch counter; incremented on every touch of an entry.
+    clock: u64,
+    /// The single entry for chunks that carry no id.
+    unidentified: Option<PendingSlot>,
+    /// The sum of every slot's `cost`.
+    total_cost: usize,
+    /// The most `total_cost` may reach.
+    budget: usize,
+}
+
+impl Default for PendingOsc99 {
+    fn default() -> Self {
+        Self {
+            by_id: HashMap::new(),
+            clock: 0,
+            unidentified: None,
+            total_cost: 0,
+            budget: MAX_OSC99_PENDING_TOTAL_BYTES,
+        }
+    }
+}
+
+impl PendingOsc99 {
+    /// A store with a custom byte budget.
+    #[cfg(test)]
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            ..Self::default()
+        }
+    }
+
+    /// Advance and return the clock.
+    const fn tick(&mut self) -> u64 {
+        self.clock = self.clock.saturating_add(1);
+        self.clock
+    }
+
+    /// Remove the identified entry `id`, releasing its cost.
+    fn remove_identified(&mut self, id: &str) -> Option<PendingSlot> {
+        let slot = self.by_id.remove(id)?;
+        self.total_cost = self.total_cost.saturating_sub(slot.cost);
+        Some(slot)
+    }
+
+    /// Remove the unidentified entry, releasing its cost.
+    fn take_unidentified(&mut self) -> Option<PendingSlot> {
+        let slot = self.unidentified.take()?;
+        self.total_cost = self.total_cost.saturating_sub(slot.cost);
+        Some(slot)
+    }
+
+    /// Discard the unidentified slot if it is accumulating, releasing its
+    /// cost. A tombstone is left alone: it holds nothing and still has to
+    /// swallow the rest of its dropped transfer.
+    fn discard_unidentified_accumulation(&mut self) {
+        let accumulating = self
+            .unidentified
+            .as_ref()
+            .is_some_and(|slot| matches!(slot.entry, PendingEntry::Accumulating(_)));
+        if accumulating {
+            self.take_unidentified();
+        }
+    }
+
+    /// Remove the identified entry with the smallest `last_touched`.
+    fn evict_least_recently_touched(&mut self) {
+        let oldest = self
+            .by_id
+            .iter()
+            .min_by_key(|(_, slot)| slot.last_touched)
+            .map(|(id, _)| id.clone());
+        if let Some(oldest) = oldest {
+            self.remove_identified(&oldest);
+        }
+    }
+
+    /// Whether `id` currently holds a tombstone, touching the slot when it
+    /// does: a tombstone that is looked up counts as touched, because its
+    /// transfer is still in progress. A lookup that finds no tombstone still
+    /// advances the clock but touches nothing.
+    fn touch_if_tombstone(&mut self, id: Option<&str>) -> bool {
+        let now = self.tick();
+        let slot = match id {
+            Some(id) => self.by_id.get_mut(id),
+            None => self.unidentified.as_mut(),
+        };
+        slot.is_some_and(|slot| {
+            let dropped = matches!(slot.entry, PendingEntry::Dropped);
+            if dropped {
+                slot.last_touched = now;
+            }
+            dropped
+        })
+    }
+
+    /// The slot for `id` (`None` is the unidentified slot), created as an
+    /// empty accumulation when absent, and marked as touched.
+    ///
+    /// Inserting a new id into a full map first evicts the
+    /// least-recently-touched entry, tombstones included.
+    fn slot_mut(&mut self, id: Option<&str>) -> &mut PendingSlot {
+        let now = self.tick();
+        let Some(id) = id else {
+            let slot = self
+                .unidentified
+                .get_or_insert_with(|| PendingSlot::new(now));
+            slot.last_touched = now;
+            return slot;
+        };
+        if !self.by_id.contains_key(id) && self.by_id.len() >= MAX_PENDING_OSC99_NOTIFICATIONS {
+            self.evict_least_recently_touched();
+        }
+        let slot = self
+            .by_id
+            .entry(id.to_owned())
+            .or_insert_with(|| PendingSlot::new(now));
+        slot.last_touched = now;
+        slot
+    }
+
+    /// Feed one content chunk into the accumulation for `id` and keep the
+    /// store within its byte budget.
+    ///
+    /// The accumulation is created when absent. A tombstone ignores the chunk.
+    /// When accepting the chunk pushes the store past its budget, the
+    /// least-recently-touched entries *other than* `id` that hold bytes are
+    /// evicted until it fits; the budget is checked after the chunk lands, so
+    /// it can be overshot transiently by at most one chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Osc99Reject`] of the notification's own caps, or
+    /// [`Osc99Reject::PendingBudget`] when `id`'s accumulation alone exceeds
+    /// the budget (nothing else is evicted in that case). The caller then
+    /// abandons the transfer.
+    fn accept(&mut self, id: Option<&str>, chunk: &Osc99Command) -> Result<(), Osc99Reject> {
+        let slot = self.slot_mut(id);
+        let PendingEntry::Accumulating(entry) = &mut slot.entry else {
+            return Ok(());
+        };
+        entry.accept(chunk)?;
+        let new_cost = entry.cost();
+        let old_cost = std::mem::replace(&mut slot.cost, new_cost);
+        self.total_cost = self
+            .total_cost
+            .saturating_sub(old_cost)
+            .saturating_add(new_cost);
+        self.enforce_budget(id, new_cost)
+    }
+
+    /// Evict until `total_cost` fits the budget, never touching `keep`.
+    fn enforce_budget(&mut self, keep: Option<&str>, keep_cost: usize) -> Result<(), Osc99Reject> {
+        let over = Osc99Reject::PendingBudget { max: self.budget };
+        if keep_cost > self.budget {
+            return Err(over);
+        }
+        while self.total_cost > self.budget {
+            let Some(victim) = self.least_recently_touched_other(keep) else {
+                return Err(over);
+            };
+            match victim {
+                SlotKey::Identified(id) => {
+                    self.remove_identified(&id);
+                }
+                SlotKey::Unidentified => {
+                    self.take_unidentified();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The least-recently-touched slot other than `keep` that holds bytes
+    /// (evicting a zero-cost tombstone would free nothing).
+    fn least_recently_touched_other(&self, keep: Option<&str>) -> Option<SlotKey> {
+        let identified = self
+            .by_id
+            .iter()
+            .filter(|(id, slot)| slot.cost > 0 && keep != Some(id.as_str()))
+            .min_by_key(|(_, slot)| slot.last_touched)
+            .map(|(id, slot)| (slot.last_touched, SlotKey::Identified(id.clone())));
+        let unidentified = self
+            .unidentified
+            .as_ref()
+            .filter(|slot| slot.cost > 0 && keep.is_some())
+            .map(|slot| (slot.last_touched, SlotKey::Unidentified));
+        [identified, unidentified]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(touched, _)| *touched)
+            .map(|(_, key)| key)
+    }
+
+    /// Whether an entry (accumulating or tombstone) exists for `id`.
+    fn contains(&self, id: Option<&str>) -> bool {
+        id.map_or_else(
+            || self.unidentified.is_some(),
+            |id| self.by_id.contains_key(id),
+        )
+    }
+
+    /// Replace the entry for `id` with a tombstone, releasing its cost.
+    fn tombstone(&mut self, id: Option<&str>) {
+        let slot = self.slot_mut(id);
+        slot.entry = PendingEntry::Dropped;
+        let released = std::mem::take(&mut slot.cost);
+        self.total_cost = self.total_cost.saturating_sub(released);
+    }
+
+    /// Remove and return the entry for `id`, releasing its cost.
+    fn remove(&mut self, id: Option<&str>) -> Option<PendingEntry> {
+        let slot = match id {
+            Some(id) => self.remove_identified(id),
+            None => self.take_unidentified(),
+        };
+        slot.map(|slot| slot.entry)
+    }
+
+    /// Discard every in-flight notification, identified or not.
+    pub(in crate::terminal_handler) fn clear(&mut self) {
+        self.by_id.clear();
+        self.unidentified = None;
+        self.total_cost = 0;
+    }
+
+    /// Whether nothing is in flight.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) fn is_empty(&self) -> bool {
+        self.by_id.is_empty() && self.unidentified.is_none()
+    }
+
+    /// The number of identified entries (tombstones included).
+    #[cfg(test)]
+    pub(in crate::terminal_handler) fn identified_len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    /// The entry for `id` (`None` is the unidentified slot), without touching it.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) fn get(&self, id: Option<&str>) -> Option<&PendingEntry> {
+        id.map_or(self.unidentified.as_ref(), |id| self.by_id.get(id))
+            .map(|slot| &slot.entry)
+    }
+
+    /// The bytes currently charged against the budget.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) const fn total_cost(&self) -> usize {
+        self.total_cost
+    }
+
+    /// Recompute every cost from the entries and assert the running counters
+    /// agree: each slot's `cost` against its entry, and `total_cost` against
+    /// the sum.
+    #[cfg(test)]
+    pub(in crate::terminal_handler) fn assert_costs_consistent(&self) {
+        let mut sum = 0usize;
+        for slot in self.by_id.values().chain(self.unidentified.as_ref()) {
+            let recomputed = match &slot.entry {
+                PendingEntry::Accumulating(entry) => entry.cost(),
+                PendingEntry::Dropped => 0,
+            };
+            assert_eq!(slot.cost, recomputed, "slot cost must match its entry");
+            sum += recomputed;
+        }
+        assert_eq!(self.total_cost, sum, "total cost must match the sum");
+        assert!(self.total_cost <= self.budget, "budget must hold");
+    }
+}
+
+// ── Handling on TerminalHandler ───────────────────────────────────────────────
+
+/// A short, bounded, log-safe description of a notification key.
+fn log_key(id: Option<&str>) -> String {
+    id.map_or_else(
+        || "<unidentified>".to_owned(),
+        |id| lossy_sequence_for_log_bounded(id.as_bytes()),
+    )
+}
 
 impl TerminalHandler {
-    /// Abandon the in-flight notification `id` after a decode or cap failure.
-    ///
-    /// If the offending chunk was the terminating one (`done`) the
-    /// notification is over and the entry is removed. Otherwise the id is
-    /// kept as a [`PendingEntry::Dropped`] tombstone so the remaining chunks
-    /// of the same transfer cannot start a fresh, truncated notification.
-    fn abandon_notification(&mut self, id: String, done: bool) {
-        if done {
-            self.pending_notifications.remove(&id);
-        } else {
-            self.pending_notifications.insert(id, PendingEntry::Dropped);
-        }
-    }
-
-    /// Feed one parsed OSC 99 chunk into the notification reassembly machine.
-    ///
-    /// Returns `Some(finalized)` when the chunk terminates a notification
-    /// (`done == true`), where `finalized` carries the fully-concatenated
-    /// bytes for that notification's payload fields and whose metadata reflects
-    /// the latest chunk. Returns `None` while more chunks are expected
-    /// (`done == false`).
-    ///
-    /// Chunking is keyed by `i=`. A chunk WITHOUT an `i=` id is never merged
-    /// into the pending map: if it is `done`, it finalizes immediately as a
-    /// standalone notification; if `done == false` (a non-final chunk with no
-    /// id), it is dropped and `None` is returned.
-    /// An `i=` seen again after finalize starts a fresh accumulation.
-    ///
-    /// A notification dropped mid-transfer (invalid base64, or a size cap)
-    /// leaves a tombstone for its id: further content chunks are ignored and
-    /// the terminating chunk removes the tombstone without emitting anything.
-    /// Control chunks (`p=close`/`p=alive`/`p=?`) are not swallowed by a
-    /// tombstone; they are handled as if the id had no entry.
-    pub(in crate::terminal_handler) fn reassemble_osc99(
-        &mut self,
-        chunk: Osc99Command,
-    ) -> Option<FinalizedNotification> {
-        match &chunk.id {
-            // ── No id: standalone or drop ────────────────────────────────────
-            None => {
-                if chunk.done {
-                    // Standalone, single-chunk notification — decode it
-                    // through a temporary accumulator and finalize immediately.
-                    let mut pending = PendingNotification::default();
-                    let decoded = pending
-                        .push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
-                        .and_then(|()| pending.finish_payloads());
-                    match decoded {
-                        Ok(payloads) => Some(build_finalized(payloads, chunk)),
-                        Err(err) => {
-                            tracing::debug!("OSC 99: dropping standalone notification: {err}");
-                            None
-                        }
-                    }
-                } else {
-                    // Non-final chunk with no id — no key to accumulate under; drop.
-                    tracing::trace!(
-                        "OSC 99: dropping non-final chunk with no id (no key to accumulate under)"
-                    );
-                    None
-                }
-            }
-
-            // ── Has id: accumulate or finalize ────────────────────────────────
-            Some(id) => {
-                let id = id.clone();
-
-                let done = chunk.done;
-
-                if matches!(
-                    self.pending_notifications.get(&id),
-                    Some(PendingEntry::Dropped)
-                ) {
-                    if is_control_payload(chunk.payload_type) {
-                        // A control request (`p=close`/`p=alive`/`p=?`) is not
-                        // part of the dropped content transfer: forget the
-                        // tombstone and handle it as if no entry existed.
-                        self.pending_notifications.remove(&id);
-                    } else {
-                        // The rest of a dropped transfer: ignore the payload;
-                        // the terminating chunk ends the notification.
-                        if done {
-                            self.pending_notifications.remove(&id);
-                        }
-                        tracing::trace!("OSC 99: ignoring chunk of a dropped notification");
-                        return None;
-                    }
-                }
-
-                // Bound the number of concurrent in-flight notifications: a
-                // new id is refused once the map is full (existing ids may
-                // still receive their remaining chunks and finalize).
-                if !self.pending_notifications.contains_key(&id)
-                    && self.pending_notifications.len() >= MAX_PENDING_OSC99_NOTIFICATIONS
-                {
-                    tracing::debug!(
-                        "OSC 99: dropping chunk; too many pending notifications ({})",
-                        MAX_PENDING_OSC99_NOTIFICATIONS
-                    );
-                    return None;
-                }
-
-                let PendingEntry::Accumulating(entry) = self
-                    .pending_notifications
-                    .entry(id.clone())
-                    .or_insert_with(|| PendingEntry::Accumulating(Box::default()))
-                else {
-                    // Unreachable: a tombstone was handled above.
-                    return None;
-                };
-
-                // Append the chunk's payload to the matching accumulator. An
-                // invalid base64 stream or an exceeded cap drops the whole
-                // in-flight notification rather than keeping a partial one.
-                if let Err(err) =
-                    entry.push_payload(chunk.payload_type, &chunk.payload, chunk.payload_encoding)
-                {
-                    self.abandon_notification(id.clone(), done);
-                    tracing::debug!(
-                        "OSC 99: dropping notification {:?}: {err}",
-                        lossy_sequence_for_log_bounded(id.as_bytes())
-                    );
-                    return None;
-                }
-
-                // Bound the accumulated payload for this id across all four
-                // accumulators: if it now exceeds the per-notification cap,
-                // drop the whole in-flight accumulation rather than grow
-                // without limit.
-                if entry.accumulated_len() > MAX_OSC99_NOTIFICATION_BYTES {
-                    self.abandon_notification(id, done);
-                    tracing::debug!(
-                        "OSC 99: dropping notification; accumulated payload exceeds {} bytes",
-                        MAX_OSC99_NOTIFICATION_BYTES
-                    );
-                    return None;
-                }
-
-                // Latest metadata wins (payload bytes are accumulated above, not here).
-                // Move (not clone) the payload out of the chunk before storing
-                // metadata, so a large final icon/body chunk is not retained
-                // twice (once in the accumulator, once in `meta`).
-                let mut chunk = chunk;
-                chunk.payload = Vec::new();
-                entry.meta = Some(chunk);
-
-                if done {
-                    // Remove from the map and build the finalized notification.
-                    let Some(PendingEntry::Accumulating(mut entry)) =
-                        self.pending_notifications.remove(&id)
-                    else {
-                        return None;
-                    };
-                    // SAFETY: we just set entry.meta = Some(chunk) before inserting,
-                    // so this is always Some when we removed a live entry.
-                    let meta = entry.meta.take()?;
-
-                    match entry.finish_payloads() {
-                        Ok(payloads) => Some(build_finalized(payloads, meta)),
-                        Err(err) => {
-                            tracing::debug!(
-                                "OSC 99: dropping notification {:?}: {err}",
-                                lossy_sequence_for_log_bounded(id.as_bytes())
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// Act on a finalized OSC 99 request, branching on its payload type
-    /// (Tasks 99.5c and 130.5, 130 adversarial review finding 14).
+    /// Handle one parsed OSC 99 chunk.
     ///
     /// While OSC 99 is unsupported by the host
-    /// ([`TerminalHandler::host_capabilities`]) every request is dropped
-    /// BEFORE reassembly by the `Notify99` arm in `osc.rs` (which logs the
-    /// single payload-free debug line), so nothing reaches this function. The
-    /// check below is a defensive backstop only and deliberately does not log
-    /// again.
+    /// ([`TerminalHandler::host_capabilities`]) the chunk is dropped BEFORE
+    /// anything else, with a single payload-free debug line, so the terminal
+    /// looks like one that does not speak the protocol and no state
+    /// accumulates for a transfer that could complete after the host later
+    /// enables it.
     ///
-    /// While supported:
+    /// While supported, control payloads act at once whatever `d=` says, and
+    /// never read or change the pending store:
     ///
-    /// - `p=?` is answered here, from the host capabilities, and never
-    ///   reaches the GUI.
-    /// - `p=alive` and `p=close` are forwarded as `Osc99Control`.
-    /// - Display payloads push `Notification99`.
-    pub(in crate::terminal_handler) fn dispatch_finalized_osc99(
-        &mut self,
-        finalized: FinalizedNotification,
-    ) {
+    /// - `p=?` is answered here from the host capabilities (Task 130.5) and
+    ///   never reaches the GUI; an id-less query is answered with `i=0`.
+    /// - `p=close` and `p=alive` with an id are forwarded as `Osc99Control`;
+    ///   without an id they are no-ops.
+    ///
+    /// Everything else is content and goes through
+    /// [`reassemble_osc99`](Self::reassemble_osc99); a finalised notification
+    /// is pushed as `Notification99` (an icon-only one as `Osc99CacheIcon`).
+    pub(in crate::terminal_handler) fn handle_osc99(&mut self, cmd: &Osc99Command) {
         let Osc99Support::Supported(features) = self.host_capabilities().osc99 else {
+            tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
             return;
         };
 
-        if finalized.meta.payload_type == Osc99PayloadType::Query {
-            let id = osc99_reply_id(finalized.meta.id.as_deref());
-            let caps = osc99_query_reply_body(features);
-            self.write_osc_response(&format!("99;i={id}:p=?;{caps}"));
+        match cmd.payload_type {
+            Osc99PayloadType::Query => {
+                let id = osc99_reply_id(cmd.id.as_deref());
+                let caps = osc99_query_reply_body(features);
+                self.write_osc_response(&format!("99;i={id}:p=?;{caps}"));
+            }
+            Osc99PayloadType::Close => self.forward_osc99_control(cmd, Osc99ControlKind::Close),
+            Osc99PayloadType::Alive => self.forward_osc99_control(cmd, Osc99ControlKind::Alive),
+            Osc99PayloadType::Title
+            | Osc99PayloadType::Body
+            | Osc99PayloadType::Icon
+            | Osc99PayloadType::Buttons
+            | Osc99PayloadType::Unknown => {
+                if let Some(finalized) = self.reassemble_osc99(cmd) {
+                    self.window_commands
+                        .push(WindowManipulation::Notification99(Box::new(
+                            finalized.into_notification99_data(),
+                        )));
+                }
+            }
+        }
+    }
+
+    /// Handle a chunk the parser rejected ([`AnsiOscType::Notify99Rejected`](freminal_common::buffer_states::osc::AnsiOscType::Notify99Rejected)).
+    ///
+    /// Gated like [`handle_osc99`](Self::handle_osc99): while OSC 99 is
+    /// unsupported the chunk is dropped and nothing is abandoned (nothing
+    /// could be pending). While supported the transfer it names is abandoned;
+    /// see [`reject_osc99_chunk`](Self::reject_osc99_chunk).
+    pub(in crate::terminal_handler) fn handle_osc99_rejected(
+        &mut self,
+        rejected: &Osc99RejectedChunk,
+    ) {
+        if matches!(self.host_capabilities().osc99, Osc99Support::Unsupported) {
+            tracing::debug!("OSC 99 request dropped: OSC 99 is unsupported");
             return;
         }
+        self.reject_osc99_chunk(rejected.id.as_deref(), rejected.chunk_state);
+    }
 
-        if let Some(kind) = control_kind(finalized.meta.payload_type) {
-            self.window_commands.push(WindowManipulation::Osc99Control {
-                id: finalized.meta.id,
-                kind,
-            });
-        } else {
-            self.window_commands
-                .push(WindowManipulation::Notification99(Box::new(
-                    finalized.into_notification99_data(),
-                )));
+    /// Forward a `p=close` / `p=alive` request to the GUI.
+    ///
+    /// Without an id there is nothing to refer to (spec: an id-less
+    /// `p=close` is ignored), so nothing is sent.
+    fn forward_osc99_control(&mut self, cmd: &Osc99Command, kind: Osc99ControlKind) {
+        let Some(id) = &cmd.id else {
+            tracing::trace!("OSC 99: ignoring a control request without an id");
+            return;
+        };
+        self.window_commands.push(WindowManipulation::Osc99Control {
+            id: id.clone(),
+            kind,
+        });
+    }
+
+    /// Abandon the in-flight notification `id` after a decode or cap failure.
+    ///
+    /// If the offending chunk was the terminating one the notification is
+    /// over and the entry is removed. Otherwise the key is kept as a
+    /// [`PendingEntry::Dropped`] tombstone so the remaining chunks of the same
+    /// transfer cannot start a fresh, truncated notification.
+    fn abandon_notification(&mut self, id: Option<&str>, chunk_state: Osc99ChunkState) {
+        match chunk_state {
+            Osc99ChunkState::Done => {
+                self.pending_osc99.remove(id);
+            }
+            Osc99ChunkState::More => self.pending_osc99.tombstone(id),
+        }
+    }
+
+    /// Abandon the transfer a rejected chunk belonged to (a sequence the
+    /// parser refused for its size or metadata item count).
+    ///
+    /// The chunk's payload and metadata are gone, but its `i=` and `d=` were
+    /// recovered, which is enough: the transfer is abandoned exactly as if the
+    /// chunk had overrun a cap, so a non-final chunk leaves a tombstone and
+    /// the rest of the transfer, final chunk included, emits nothing.
+    ///
+    /// Chunks without an id share the single unidentified slot, which may
+    /// belong to an unrelated transfer or to none. A rejected id-less
+    /// non-final chunk (`d=0`) tombstones that slot even when nothing was
+    /// pending, because it is the start or middle of a transfer whose
+    /// remaining chunks must be discarded: otherwise a later chunk would
+    /// assemble a truncated notification. The tombstone costs nothing, and the
+    /// transfer's final chunk removes it. A rejected id-less final chunk has
+    /// nothing after it to swallow, so with nothing in the slot it changes
+    /// nothing; with something in the slot it ends that transfer.
+    fn reject_osc99_chunk(&mut self, id: Option<&str>, chunk_state: Osc99ChunkState) {
+        if id.is_none()
+            && chunk_state == Osc99ChunkState::Done
+            && !self.pending_osc99.contains(None)
+        {
+            tracing::trace!("OSC 99: rejected final chunk without an id, nothing pending");
+            return;
+        }
+        tracing::debug!(
+            "OSC 99: abandoning notification {}: chunk rejected",
+            log_key(id)
+        );
+        self.abandon_notification(id, chunk_state);
+    }
+
+    /// Feed one parsed OSC 99 content chunk into the notification reassembly
+    /// machine.
+    ///
+    /// Returns `Some(finalized)` when the chunk terminates a notification
+    /// (`d=1` or no `d=`) that has something to show, where `finalized`
+    /// carries the sanitised title/body/buttons and the metadata merged over
+    /// every chunk. Returns `None` while more chunks are expected, when the
+    /// transfer was dropped, or when the finished notification has neither a
+    /// title nor a body. The one such notification that is still acted on is
+    /// an icon-only one with a `g=` key: it pushes
+    /// `WindowManipulation::Osc99CacheIcon` here, since there is nothing to
+    /// return for it.
+    ///
+    /// A chunk with an id discards an accumulating id-less transfer first:
+    /// kitty keeps one pending command, which a chunk of a different id
+    /// replaces.
+    ///
+    /// Chunks are keyed by `i=`; chunks without one share a single
+    /// unidentified slot. An id seen again after finalisation starts a fresh
+    /// accumulation.
+    ///
+    /// A notification dropped mid-transfer (invalid base64, or a size cap)
+    /// leaves a tombstone for its key: further chunks are ignored and the
+    /// terminating chunk removes the tombstone without emitting anything.
+    ///
+    /// A notification that passes a list cap, its byte cap, or (alone) the
+    /// handler-wide pending budget is dropped the same way. A chunk that
+    /// pushes the pending store past its budget evicts other entries, least
+    /// recently touched first.
+    ///
+    /// The chunk is borrowed (the parser's event stream owns it): its payload
+    /// goes straight into the accumulator and only the metadata that is kept
+    /// is cloned.
+    ///
+    /// Control payloads are handled by [`handle_osc99`](Self::handle_osc99)
+    /// and never get here.
+    pub(in crate::terminal_handler) fn reassemble_osc99(
+        &mut self,
+        chunk: &Osc99Command,
+    ) -> Option<FinalizedNotification> {
+        let key = chunk.id.as_deref();
+        let chunk_state = chunk.chunk_state;
+        let done = chunk_state == Osc99ChunkState::Done;
+
+        if key.is_some() {
+            self.pending_osc99.discard_unidentified_accumulation();
+        }
+
+        if self.pending_osc99.touch_if_tombstone(key) {
+            // The rest of a dropped transfer: ignore the payload; the
+            // terminating chunk ends the notification.
+            if done {
+                self.pending_osc99.remove(key);
+            }
+            tracing::trace!("OSC 99: ignoring chunk of a dropped notification");
+            return None;
+        }
+
+        // A complete notification with no pending entry cannot be followed by
+        // more chunks, so it is finalised without touching the store: on a
+        // full map it must not evict another key's in-progress transfer.
+        if done && !self.pending_osc99.contains(key) {
+            let mut entry = PendingNotification::default();
+            if let Err(err) = entry.accept(chunk) {
+                tracing::debug!("OSC 99: dropping notification {}: {err}", log_key(key));
+                return None;
+            }
+            let meta = entry.meta.take()?;
+            return match entry.finish_payloads() {
+                Ok(payloads) => self.finalize_osc99(payloads, meta),
+                Err(err) => {
+                    tracing::debug!("OSC 99: dropping notification {}: {err}", log_key(key));
+                    None
+                }
+            };
+        }
+
+        // An invalid base64 stream or an exceeded cap drops the whole
+        // in-flight notification rather than keeping a partial one.
+        if let Err(err) = self.pending_osc99.accept(key, chunk) {
+            self.abandon_notification(key, chunk_state);
+            tracing::debug!("OSC 99: dropping notification {}: {err}", log_key(key));
+            return None;
+        }
+
+        if !done {
+            return None;
+        }
+
+        let Some(PendingEntry::Accumulating(mut entry)) = self.pending_osc99.remove(key) else {
+            return None;
+        };
+        // `accept` stored the metadata, so it is present for a live entry.
+        let meta = entry.meta.take()?;
+        match entry.finish_payloads() {
+            Ok(payloads) => self.finalize_osc99(payloads, meta),
+            Err(err) => {
+                tracing::debug!("OSC 99: dropping notification {}: {err}", log_key(key));
+                None
+            }
+        }
+    }
+
+    /// Turn a notification's finished payloads and merged metadata into what
+    /// [`reassemble_osc99`](Self::reassemble_osc99) returns, acting on the one
+    /// finalisation that is not displayed: icon bytes with a `g=` key and no
+    /// text are pushed to the GUI as `Osc99CacheIcon`.
+    fn finalize_osc99(
+        &mut self,
+        payloads: FinishedPayloads,
+        meta: MergedOsc99Metadata,
+    ) -> Option<FinalizedNotification> {
+        match build_finalized(payloads, meta) {
+            Finalization::Display(finalized) => Some(*finalized),
+            Finalization::CacheIcon { key, data } => {
+                self.window_commands
+                    .push(WindowManipulation::Osc99CacheIcon { key, data });
+                None
+            }
+            Finalization::Nothing => None,
         }
     }
 }
@@ -643,172 +1382,321 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use freminal_common::buffer_states::osc_notify_99::{Osc99Actions, parse_osc_99};
+    use freminal_common::buffer_states::osc_notify_99::{
+        Osc99Action, Osc99ActionEdit, parse_osc_99,
+    };
+    use freminal_common::buffer_states::osc99_notification::{
+        Osc99ActivationFocus, Osc99ActivationReporting,
+    };
+    use freminal_common::host_capabilities::{
+        Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport, Osc99FocusSupport, Osc99IconSupport,
+        Osc99SoundNames, Osc99UrgencySupport,
+    };
+    use std::num::NonZeroU32;
 
     /// Build a default `Osc99Command` for use in mapping tests.
     fn default_cmd() -> Osc99Command {
         Osc99Command {
             id: None,
             payload_type: Osc99PayloadType::Title,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: Vec::new(),
             payload_encoding: Osc99PayloadEncoding::Plain,
-            actions: Osc99Actions::default(),
-            close_report: false,
+            action_edits: Vec::new(),
+            close_reporting: None,
             app_name: None,
             icon_cache_key: None,
             icon_names: Vec::new(),
-            occasion: NotificationOccasion::Always,
+            occasion: None,
             sound: None,
-            notification_type: Vec::new(),
+            notification_types: Vec::new(),
             urgency: None,
-            expire_ms: -1,
+            expiry: None,
         }
     }
 
     /// Build a default `FinalizedNotification` wrapping `default_cmd()`.
     fn default_finalized() -> FinalizedNotification {
         FinalizedNotification {
-            title: None,
+            title: "t".to_owned(),
             body: None,
             icon: None,
             buttons: Vec::new(),
-            meta: default_cmd(),
+            meta: MergedOsc99Metadata::default(),
         }
     }
 
     #[test]
-    fn urgency_maps_critical_to_some_two() {
+    fn urgency_critical_passes_through() {
         let finalized = FinalizedNotification {
-            meta: Osc99Command {
+            meta: MergedOsc99Metadata {
                 urgency: Some(NotificationUrgency::Critical),
-                ..default_cmd()
+                ..MergedOsc99Metadata::default()
             },
             ..default_finalized()
         };
         let data = finalized.into_notification99_data();
-        assert_eq!(data.urgency, Some(2));
+        assert_eq!(data.urgency, NotificationUrgency::Critical);
     }
 
     #[test]
-    fn urgency_low_and_normal_map_to_zero_and_one() {
+    fn urgency_low_and_normal_pass_through() {
         let low = FinalizedNotification {
-            meta: Osc99Command {
+            meta: MergedOsc99Metadata {
                 urgency: Some(NotificationUrgency::Low),
-                ..default_cmd()
+                ..MergedOsc99Metadata::default()
             },
             ..default_finalized()
         };
-        assert_eq!(low.into_notification99_data().urgency, Some(0));
+        assert_eq!(
+            low.into_notification99_data().urgency,
+            NotificationUrgency::Low
+        );
 
         let normal = FinalizedNotification {
-            meta: Osc99Command {
+            meta: MergedOsc99Metadata {
                 urgency: Some(NotificationUrgency::Normal),
-                ..default_cmd()
+                ..MergedOsc99Metadata::default()
             },
             ..default_finalized()
         };
-        assert_eq!(normal.into_notification99_data().urgency, Some(1));
+        assert_eq!(
+            normal.into_notification99_data().urgency,
+            NotificationUrgency::Normal
+        );
     }
 
     #[test]
-    fn urgency_none_maps_to_none() {
+    fn urgency_unset_maps_to_normal() {
         let finalized = default_finalized();
         let data = finalized.into_notification99_data();
-        assert_eq!(data.urgency, None);
+        assert_eq!(data.urgency, NotificationUrgency::Normal);
     }
 
     #[test]
-    fn occasion_always_maps_to_none() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Always,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion, None);
+    fn occasion_passes_through_unchanged() {
+        for occasion in [
+            NotificationOccasion::Always,
+            NotificationOccasion::Unfocused,
+            NotificationOccasion::Invisible,
+        ] {
+            let finalized = FinalizedNotification {
+                meta: MergedOsc99Metadata {
+                    occasion: Some(occasion),
+                    ..MergedOsc99Metadata::default()
+                },
+                ..default_finalized()
+            };
+            assert_eq!(finalized.into_notification99_data().occasion, occasion);
+        }
     }
 
     #[test]
-    fn occasion_unfocused_maps_to_some_string() {
+    fn expiry_mapped_into_notification99_data() {
         let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Unfocused,
-                ..default_cmd()
+            meta: MergedOsc99Metadata {
+                expiry: Some(Osc99Expiry::After(NonZeroU32::new(5000).unwrap())),
+                ..MergedOsc99Metadata::default()
             },
             ..default_finalized()
         };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion.as_deref(), Some("unfocused"));
+        assert_eq!(
+            finalized.into_notification99_data().expiry,
+            Osc99Expiry::After(NonZeroU32::new(5000).unwrap())
+        );
     }
 
     #[test]
-    fn occasion_invisible_maps_to_some_string() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                occasion: NotificationOccasion::Invisible,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.occasion.as_deref(), Some("invisible"));
+    fn sound_unset_and_system_map_to_system() {
+        assert_eq!(sound_from_name(None), Osc99Sound::System);
+        assert_eq!(
+            sound_from_name(Some("system".to_owned())),
+            Osc99Sound::System
+        );
     }
 
     #[test]
-    fn expire_ms_minus_one_maps_to_none() {
-        let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                expire_ms: -1,
-                ..default_cmd()
-            },
-            ..default_finalized()
-        };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.expire_ms, None);
+    fn sound_silent_maps_to_silent() {
+        assert_eq!(
+            sound_from_name(Some("silent".to_owned())),
+            Osc99Sound::Silent
+        );
     }
 
     #[test]
-    fn expire_ms_5000_maps_to_some_5000() {
+    fn sound_other_maps_to_named() {
+        assert_eq!(
+            sound_from_name(Some("bell".to_owned())),
+            Osc99Sound::Named("bell".to_owned())
+        );
+    }
+
+    #[test]
+    fn sound_mapped_into_notification99_data() {
         let finalized = FinalizedNotification {
-            meta: Osc99Command {
-                expire_ms: 5000,
-                ..default_cmd()
+            meta: MergedOsc99Metadata {
+                sound: Some("silent".to_owned()),
+                ..MergedOsc99Metadata::default()
             },
             ..default_finalized()
         };
-        let data = finalized.into_notification99_data();
-        assert_eq!(data.expire_ms, Some(5000));
+        assert_eq!(
+            finalized.into_notification99_data().sound,
+            Osc99Sound::Silent
+        );
     }
 
     #[test]
     fn title_body_icon_and_flags_carried_through() {
         let finalized = FinalizedNotification {
-            title: Some("Title".to_owned()),
+            title: "Title".to_owned(),
             body: Some("Body".to_owned()),
             icon: Some(vec![1, 2, 3]),
             buttons: Vec::new(),
-            meta: Osc99Command {
+            meta: MergedOsc99Metadata {
                 id: Some("id-1".to_owned()),
-                close_report: true,
-                actions: Osc99Actions {
-                    report_activation: true,
-                    focus_on_activation: false,
-                },
-                ..default_cmd()
+                close_reporting: Some(Osc99CloseReporting::Report),
+                action_edits: vec![
+                    Osc99ActionEdit::Add(Osc99Action::Report),
+                    Osc99ActionEdit::Remove(Osc99Action::Focus),
+                ],
+                ..MergedOsc99Metadata::default()
             },
         };
         let data = finalized.into_notification99_data();
         assert_eq!(data.id.as_deref(), Some("id-1"));
-        assert_eq!(data.title.as_deref(), Some("Title"));
+        assert_eq!(data.title, "Title");
         assert_eq!(data.body.as_deref(), Some("Body"));
         assert_eq!(data.icon_data.as_deref(), Some(&[1u8, 2, 3][..]));
-        assert!(data.report_activation);
-        assert!(!data.focus_on_activation);
-        assert!(data.close_report);
-        assert_eq!(data.button_labels, [] as [String; 0]);
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Report);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::NoFocus);
+        assert_eq!(data.close_reporting, Osc99CloseReporting::Report);
+        assert_eq!(data.buttons, [] as [String; 0]);
+    }
+
+    #[test]
+    fn default_flags_map_to_silent_and_focus() {
+        let data = default_finalized().into_notification99_data();
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Silent);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::Focus);
+        assert_eq!(data.close_reporting, Osc99CloseReporting::Silent);
+    }
+
+    #[test]
+    fn action_edits_resolve_from_the_focus_only_default() {
+        let finalized = FinalizedNotification {
+            meta: MergedOsc99Metadata {
+                action_edits: vec![Osc99ActionEdit::Add(Osc99Action::Report)],
+                ..MergedOsc99Metadata::default()
+            },
+            ..default_finalized()
+        };
+        let data = finalized.into_notification99_data();
+        assert_eq!(data.activation_reporting, Osc99ActivationReporting::Report);
+        assert_eq!(data.activation_focus, Osc99ActivationFocus::Focus);
+    }
+
+    #[test]
+    fn close_reporting_unset_is_silent_and_explicit_values_pass_through() {
+        assert_eq!(
+            default_finalized()
+                .into_notification99_data()
+                .close_reporting,
+            Osc99CloseReporting::Silent
+        );
+        let reported = FinalizedNotification {
+            meta: MergedOsc99Metadata {
+                close_reporting: Some(Osc99CloseReporting::Report),
+                ..MergedOsc99Metadata::default()
+            },
+            ..default_finalized()
+        };
+        assert_eq!(
+            reported.into_notification99_data().close_reporting,
+            Osc99CloseReporting::Report
+        );
+    }
+
+    #[test]
+    fn unset_occasion_and_expiry_take_their_defaults() {
+        let data = default_finalized().into_notification99_data();
+        assert_eq!(data.occasion, NotificationOccasion::Always);
+        assert_eq!(data.expiry, Osc99Expiry::OsDefault);
+    }
+
+    #[test]
+    fn notification_types_are_carried_through() {
+        let finalized = FinalizedNotification {
+            meta: MergedOsc99Metadata {
+                notification_types: vec!["alert".to_owned(), "info".to_owned()],
+                ..MergedOsc99Metadata::default()
+            },
+            ..default_finalized()
+        };
+        assert_eq!(
+            finalized.into_notification99_data().notification_types,
+            vec!["alert".to_owned(), "info".to_owned()]
+        );
+    }
+
+    /// An unknown `p=` type discards its payload, but still finalizes on `d=1`
+    /// with the content accumulated earlier, and its metadata still applies.
+    #[test]
+    fn unknown_payload_type_discards_payload_but_keeps_metadata() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let first = Osc99Command {
+            id: Some("u".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+            payload: b"Title".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&first).is_none());
+        let cmd = Osc99Command {
+            id: Some("u".to_owned()),
+            payload_type: Osc99PayloadType::Unknown,
+            payload: b"ignored".to_vec(),
+            urgency: Some(NotificationUrgency::Critical),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(&cmd)
+            .expect("a done unknown chunk finalizes the accumulated content");
+        assert_eq!(finalized.title, "Title");
+        assert_eq!(finalized.body, None);
+        assert_eq!(finalized.icon, None);
+        assert_eq!(finalized.meta.urgency, Some(NotificationUrgency::Critical));
+    }
+
+    /// An unknown-typed final chunk with no accumulated content finalizes
+    /// nothing: there is neither a title nor a body.
+    #[test]
+    fn unknown_payload_type_alone_finalizes_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            id: Some("u".to_owned()),
+            payload_type: Osc99PayloadType::Unknown,
+            payload: b"ignored".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&cmd).is_none());
+        assert!(handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn unknown_payload_type_chunk_with_d0_stays_pending_without_content() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            id: Some("u".to_owned()),
+            payload_type: Osc99PayloadType::Unknown,
+            chunk_state: Osc99ChunkState::More,
+            payload: b"ignored".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&cmd).is_none());
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some("u")) else {
+            panic!("entry should be accumulating");
+        };
+        assert_eq!(entry.accumulated_len(), 0);
     }
 
     // ── 99.9: button-label extraction ────────────────────────────────────────
@@ -837,18 +1725,24 @@ mod tests {
         );
     }
 
-    /// Standalone (no-id), single-chunk `done` `Buttons` payload finalizes
-    /// immediately with the split labels.
+    /// Standalone (no-id) `Buttons` chunk completing a notification that has
+    /// a title finalizes with the split labels.
     #[test]
     fn standalone_done_buttons_no_id_splits_labels() {
         let mut handler = TerminalHandler::new(80, 24);
+        let title = Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            payload: b"T".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&title).is_none());
         let cmd = Osc99Command {
             payload_type: Osc99PayloadType::Buttons,
             payload: "OK\u{2028}Cancel".as_bytes().to_vec(),
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(cmd)
+            .reassemble_osc99(&cmd)
             .expect("single done Buttons chunk must finalize");
         assert_eq!(
             finalized.buttons,
@@ -862,25 +1756,33 @@ mod tests {
     fn chunked_buttons_by_id_concatenate_across_separator_boundary() {
         let mut handler = TerminalHandler::new(80, 24);
 
+        let title = Osc99Command {
+            id: Some("btn-1".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+            payload: b"T".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&title).is_none());
+
         let chunk1 = Osc99Command {
             id: Some("btn-1".to_owned()),
             payload_type: Osc99PayloadType::Buttons,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: "Yes\u{2028}N".as_bytes().to_vec(),
             ..default_cmd()
         };
-        let r1 = handler.reassemble_osc99(chunk1);
+        let r1 = handler.reassemble_osc99(&chunk1);
         assert!(r1.is_none(), "first chunk must not finalize");
 
         let chunk2 = Osc99Command {
             id: Some("btn-1".to_owned()),
             payload_type: Osc99PayloadType::Buttons,
-            done: true,
+            chunk_state: Osc99ChunkState::Done,
             payload: b"o".to_vec(),
             ..default_cmd()
         };
         let finalized = handler
-            .reassemble_osc99(chunk2)
+            .reassemble_osc99(&chunk2)
             .expect("terminating chunk must finalize");
         assert_eq!(finalized.buttons, vec!["Yes".to_owned(), "No".to_owned()]);
     }
@@ -892,93 +1794,67 @@ mod tests {
             ..default_finalized()
         };
         let data = finalized.into_notification99_data();
-        assert_eq!(data.button_labels, vec!["A".to_owned(), "B".to_owned()]);
-    }
-
-    // ── 99.5c: control_kind mapping ───────────────────────────────────────────
-
-    #[test]
-    fn control_kind_maps_close_and_alive() {
-        assert_eq!(
-            control_kind(Osc99PayloadType::Close),
-            Some(Osc99ControlKind::Close)
-        );
-        assert_eq!(
-            control_kind(Osc99PayloadType::Alive),
-            Some(Osc99ControlKind::Alive)
-        );
-    }
-
-    #[test]
-    fn control_kind_maps_query_to_none() {
-        // The handler answers `p=?` itself; it is never forwarded to the GUI.
-        assert_eq!(control_kind(Osc99PayloadType::Query), None);
-    }
-
-    #[test]
-    fn is_control_payload_covers_close_alive_query_only() {
-        assert!(is_control_payload(Osc99PayloadType::Close));
-        assert!(is_control_payload(Osc99PayloadType::Alive));
-        assert!(is_control_payload(Osc99PayloadType::Query));
-        assert!(!is_control_payload(Osc99PayloadType::Title));
-        assert!(!is_control_payload(Osc99PayloadType::Body));
-        assert!(!is_control_payload(Osc99PayloadType::Icon));
-        assert!(!is_control_payload(Osc99PayloadType::Buttons));
-    }
-
-    #[test]
-    fn control_kind_maps_display_types_to_none() {
-        assert_eq!(control_kind(Osc99PayloadType::Title), None);
-        assert_eq!(control_kind(Osc99PayloadType::Body), None);
-        assert_eq!(control_kind(Osc99PayloadType::Icon), None);
-        assert_eq!(control_kind(Osc99PayloadType::Buttons), None);
+        assert_eq!(data.buttons, vec!["A".to_owned(), "B".to_owned()]);
     }
 
     // ── Reassembly bounds (memory-growth guards) ──────────────────────────────
 
+    /// A chunk with a new id always reaches the store: at the cap the
+    /// least-recently-touched entry is evicted instead of the chunk refused.
     #[test]
-    fn reassembly_caps_number_of_pending_notifications() {
+    fn reassembly_evicts_the_least_recently_touched_id_at_the_cap() {
         let mut handler = TerminalHandler::new(80, 24);
-
-        // Fill the pending map to the cap with distinct, unfinished ids.
-        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
-            let chunk = Osc99Command {
-                id: Some(format!("id-{i}")),
-                payload_type: Osc99PayloadType::Title,
-                done: false,
-                payload: b"x".to_vec(),
-                ..default_cmd()
-            };
-            assert!(handler.reassemble_osc99(chunk).is_none());
-        }
-        assert_eq!(
-            handler.pending_notifications.len(),
-            MAX_PENDING_OSC99_NOTIFICATIONS
-        );
-
-        // One more distinct id is refused; the map does not grow.
-        let overflow = Osc99Command {
-            id: Some("overflow".to_owned()),
+        let chunk_for = |id: String, payload: &[u8]| Osc99Command {
+            id: Some(id),
             payload_type: Osc99PayloadType::Title,
-            done: false,
-            payload: b"x".to_vec(),
+            chunk_state: Osc99ChunkState::More,
+            payload: payload.to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(overflow).is_none());
+
+        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
+            assert!(
+                handler
+                    .reassemble_osc99(&chunk_for(format!("id-{i}"), b"x"))
+                    .is_none()
+            );
+        }
         assert_eq!(
-            handler.pending_notifications.len(),
+            handler.pending_osc99.identified_len(),
             MAX_PENDING_OSC99_NOTIFICATIONS
         );
 
-        // An existing id can still receive chunks and finalize.
+        // Touching `id-0` makes `id-1` the oldest.
+        assert!(
+            handler
+                .reassemble_osc99(&chunk_for("id-0".to_owned(), b"y"))
+                .is_none()
+        );
+
+        // One more distinct id is accepted; the map does not grow.
+        assert!(
+            handler
+                .reassemble_osc99(&chunk_for("overflow".to_owned(), b"x"))
+                .is_none()
+        );
+        assert_eq!(
+            handler.pending_osc99.identified_len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+        assert!(handler.pending_osc99.get(Some("overflow")).is_some());
+        assert!(handler.pending_osc99.get(Some("id-1")).is_none());
+        assert!(handler.pending_osc99.get(Some("id-0")).is_some());
+
+        // The protected id still finalizes with everything it accumulated.
         let finish = Osc99Command {
             id: Some("id-0".to_owned()),
             payload_type: Osc99PayloadType::Title,
-            done: true,
-            payload: b"y".to_vec(),
+            chunk_state: Osc99ChunkState::Done,
+            payload: b"z".to_vec(),
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(finish).is_some());
+        let finalized = handler.reassemble_osc99(&finish).expect("finalizes");
+        assert_eq!(finalized.title, "xyz");
     }
 
     #[test]
@@ -990,64 +1866,25 @@ mod tests {
         let chunk1 = Osc99Command {
             id: Some(id.clone()),
             payload_type: Osc99PayloadType::Body,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: vec![b'a'; 1024],
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(chunk1).is_none());
-        assert!(handler.pending_notifications.contains_key(&id));
+        assert!(handler.reassemble_osc99(&chunk1).is_none());
+        assert!(handler.pending_osc99.get(Some(&id)).is_some());
 
         // Second chunk that would push the accumulation past the cap: the
         // whole in-flight notification is dropped rather than grown.
         let chunk2 = Osc99Command {
             id: Some(id.clone()),
             payload_type: Osc99PayloadType::Body,
-            done: false,
+            chunk_state: Osc99ChunkState::More,
             payload: vec![b'b'; MAX_OSC99_NOTIFICATION_BYTES],
             ..default_cmd()
         };
-        assert!(handler.reassemble_osc99(chunk2).is_none());
+        assert!(handler.reassemble_osc99(&chunk2).is_none());
         // The id stays as a tombstone until the terminating chunk.
         assert!(is_dropped(&handler, &id));
-    }
-
-    #[test]
-    fn reassembly_does_not_retain_payload_bytes_twice_in_meta() {
-        let mut handler = TerminalHandler::new(80, 24);
-        let id = "meta".to_owned();
-
-        let chunk = Osc99Command {
-            id: Some(id.clone()),
-            payload_type: Osc99PayloadType::Body,
-            done: false,
-            payload: b"hello".to_vec(),
-            ..default_cmd()
-        };
-        assert!(handler.reassemble_osc99(chunk).is_none());
-
-        // The stored metadata must not keep a copy of the payload bytes: they
-        // live only in the body accumulator now.
-        let Some(PendingEntry::Accumulating(entry)) = handler.pending_notifications.get(&id) else {
-            panic!("entry should be accumulating");
-        };
-        assert_eq!(entry.body.len(), 5);
-        assert!(
-            entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()),
-            "meta.payload must be cleared after accumulation"
-        );
-
-        // And the accumulated bytes are the payload itself.
-        let done = Osc99Command {
-            id: Some(id),
-            payload_type: Osc99PayloadType::Body,
-            done: true,
-            payload: Vec::new(),
-            ..default_cmd()
-        };
-        let finalized = handler
-            .reassemble_osc99(done)
-            .expect("terminating chunk finalizes");
-        assert_eq!(finalized.body.as_deref(), Some("hello"));
     }
 
     // ── 129.12: stream decoding through the real wire path ───────────────────
@@ -1060,7 +1897,7 @@ mod tests {
         payload: &[u8],
     ) -> Option<FinalizedNotification> {
         let cmd = parse_osc_99(metadata.as_bytes(), payload).expect("sequence must parse");
-        handler.reassemble_osc99(cmd)
+        handler.reassemble_osc99(&cmd)
     }
 
     /// Reassemble a two-chunk `p=title` notification whose payload slices are
@@ -1082,11 +1919,7 @@ mod tests {
             let (a, b) = encoded.as_bytes().split_at(at);
             let finalized = two_base64_title_chunks(a, b)
                 .unwrap_or_else(|| panic!("split at {at} must finalize"));
-            assert_eq!(
-                finalized.title.as_deref(),
-                Some(SAMPLE_TITLE),
-                "split at {at}"
-            );
+            assert_eq!(finalized.title, SAMPLE_TITLE, "split at {at}");
         }
     }
 
@@ -1098,11 +1931,7 @@ mod tests {
             let (a, b) = encoded.as_bytes().split_at(at);
             let finalized = two_base64_title_chunks(a, b)
                 .unwrap_or_else(|| panic!("split at {at} must finalize"));
-            assert_eq!(
-                finalized.title.as_deref(),
-                Some(SAMPLE_TITLE),
-                "split at {at}"
-            );
+            assert_eq!(finalized.title, SAMPLE_TITLE, "split at {at}");
         }
     }
 
@@ -1128,11 +1957,8 @@ mod tests {
             );
         }
         let finalized = result.expect("last chunk must finalize");
-        assert_eq!(
-            finalized.title.as_deref(),
-            Some("Hello, notification world")
-        );
-        assert!(handler.pending_notifications.is_empty());
+        assert_eq!(finalized.title, "Hello, notification world");
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// A `Plain` chunk, then a `Base64` chunk ending on a quantum boundary,
@@ -1144,7 +1970,9 @@ mod tests {
         // "world" -> "d29ybGQ=" (padded, so the quantum is complete).
         assert!(feed(&mut handler, "i=m:p=body:d=0:e=1", b"d29ybGQ=").is_none());
         let finalized = feed(&mut handler, "i=m:p=body", b"!").expect("final chunk must finalize");
-        assert_eq!(finalized.body.as_deref(), Some("Hello, world!"));
+        // A body-only notification is promoted into the title.
+        assert_eq!(finalized.title, "Hello, world!");
+        assert_eq!(finalized.body, None);
     }
 
     /// A `Plain` chunk arriving while a base64 quantum is incomplete is an
@@ -1167,7 +1995,7 @@ mod tests {
         assert!(feed(&mut handler, "i=t:d=0:e=1", b"SGVs").is_none());
         assert!(feed(&mut handler, "i=t:p=body:d=0", b"plain body").is_none());
         let finalized = feed(&mut handler, "i=t:e=1", b"bG8=").expect("must finalize");
-        assert_eq!(finalized.title.as_deref(), Some("Hello"));
+        assert_eq!(finalized.title, "Hello");
         assert_eq!(finalized.body.as_deref(), Some("plain body"));
     }
 
@@ -1177,7 +2005,7 @@ mod tests {
     fn invalid_base64_in_middle_chunk_drops_notification() {
         let mut handler = TerminalHandler::new(80, 24);
         assert!(feed(&mut handler, "i=bad:d=0:e=1", b"SGVs").is_none());
-        assert!(handler.pending_notifications.contains_key("bad"));
+        assert!(handler.pending_osc99.get(Some("bad")).is_some());
         assert!(feed(&mut handler, "i=bad:d=0:e=1", b"!!!!").is_none());
         assert!(
             is_dropped(&handler, "bad"),
@@ -1192,7 +2020,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         assert!(feed(&mut handler, "i=d:d=0:e=1", b"SGVs").is_none());
         assert!(feed(&mut handler, "i=d:e=1", b"b").is_none());
-        assert!(handler.pending_notifications.is_empty());
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// Standalone (no id) base64 payload still decodes.
@@ -1200,8 +2028,8 @@ mod tests {
     fn standalone_base64_title_decodes() {
         let mut handler = TerminalHandler::new(80, 24);
         let finalized = feed(&mut handler, "e=1", b"SGVsbG8=").expect("must finalize");
-        assert_eq!(finalized.title.as_deref(), Some("Hello"));
-        assert!(handler.pending_notifications.is_empty());
+        assert_eq!(finalized.title, "Hello");
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// Standalone base64 without trailing padding still decodes.
@@ -1209,7 +2037,7 @@ mod tests {
     fn standalone_unpadded_base64_title_decodes() {
         let mut handler = TerminalHandler::new(80, 24);
         let finalized = feed(&mut handler, "e=1", b"SGVsbG8").expect("must finalize");
-        assert_eq!(finalized.title.as_deref(), Some("Hello"));
+        assert_eq!(finalized.title, "Hello");
     }
 
     /// Standalone invalid base64 drops the notification.
@@ -1226,11 +2054,10 @@ mod tests {
     fn single_chunk_base64_body_with_id_decodes() {
         let mut handler = TerminalHandler::new(80, 24);
         let finalized = feed(&mut handler, "i=one:p=body:e=1", b"SGVsbG8=").expect("must finalize");
-        assert_eq!(finalized.body.as_deref(), Some("Hello"));
-        assert_eq!(
-            finalized.meta.payload_encoding,
-            Osc99PayloadEncoding::Base64
-        );
+        // A body-only notification is promoted into the title.
+        assert_eq!(finalized.title, "Hello");
+        assert_eq!(finalized.body, None);
+        assert_eq!(finalized.meta.id.as_deref(), Some("one"));
     }
 
     /// The notification cap applies to the decoded length: two chunks whose
@@ -1243,7 +2070,7 @@ mod tests {
         // together they exceed the 1 MiB notification cap.
         let chunk = vec![b'A'; 1_048_572 - 100];
         assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
-        assert!(handler.pending_notifications.contains_key(id));
+        assert!(handler.pending_osc99.get(Some(id)).is_some());
         assert!(feed(&mut handler, "i=huge:p=icon:d=0:e=1", &chunk).is_none());
         assert!(is_dropped(&handler, id));
     }
@@ -1252,25 +2079,29 @@ mod tests {
     /// base64 tail adds when the accumulators are finished.
     #[test]
     fn base64_tail_flushed_at_finish_cannot_exceed_the_combined_cap() {
-        let half = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let half = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2];
+        let almost_half = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
         let mut handler = TerminalHandler::new(80, 24);
-        // Exactly 1 MiB of plain title: at the cap, still accepted.
-        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
-        assert!(feed(&mut handler, "i=cap:d=0:p=title", &half).is_none());
+        // Exactly 1 MiB across icon and title: at the cap, still accepted.
+        assert!(feed(&mut handler, "i=cap:d=0:p=icon", &half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=icon", &almost_half).is_none());
+        assert!(feed(&mut handler, "i=cap:d=0:p=title", b"T").is_none());
         // `YQ` decodes to one byte, but only when the stream is finished.
         assert!(feed(&mut handler, "i=cap:d=1:p=body:e=1", b"YQ").is_none());
-        assert!(!handler.pending_notifications.contains_key("cap"));
+        assert!(handler.pending_osc99.get(Some("cap")).is_none());
 
-        // The same shape one byte smaller finalises with both parts intact.
+        // The same shape one byte smaller finalises with every part intact.
         let mut handler = TerminalHandler::new(80, 24);
-        let short = vec![b't'; MAX_OSC99_NOTIFICATION_BYTES / 2 - 1];
-        assert!(feed(&mut handler, "i=ok:d=0:p=title", &half).is_none());
-        assert!(feed(&mut handler, "i=ok:d=0:p=title", &short).is_none());
+        let shorter = vec![0x89; MAX_OSC99_NOTIFICATION_BYTES / 2 - 2];
+        assert!(feed(&mut handler, "i=ok:d=0:p=icon", &half).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=icon", &shorter).is_none());
+        assert!(feed(&mut handler, "i=ok:d=0:p=title", b"T").is_none());
         let done = feed(&mut handler, "i=ok:d=1:p=body:e=1", b"YQ").expect("within the cap");
         assert_eq!(done.body.as_deref(), Some("a"));
+        assert_eq!(done.title, "T");
         assert_eq!(
-            done.title.map(|t| t.len()),
-            Some(MAX_OSC99_NOTIFICATION_BYTES - 1)
+            done.icon.as_ref().map(Vec::len),
+            Some(MAX_OSC99_NOTIFICATION_BYTES - 2)
         );
     }
 
@@ -1279,7 +2110,7 @@ mod tests {
     /// Whether `id` is currently held as a [`PendingEntry::Dropped`] tombstone.
     fn is_dropped(handler: &TerminalHandler, id: &str) -> bool {
         matches!(
-            handler.pending_notifications.get(id),
+            handler.pending_osc99.get(Some(id)),
             Some(PendingEntry::Dropped)
         )
     }
@@ -1294,7 +2125,7 @@ mod tests {
         assert!(is_dropped(&handler, "1"));
         assert!(feed(&mut handler, "i=1:d=1:p=title", b"TAILONLY").is_none());
         assert!(
-            handler.pending_notifications.is_empty(),
+            handler.pending_osc99.is_empty(),
             "the terminating chunk must remove the tombstone"
         );
     }
@@ -1309,8 +2140,8 @@ mod tests {
 
         assert!(feed(&mut handler, "i=1:d=0:p=title", b"Fresh ").is_none());
         let finalized = feed(&mut handler, "i=1:d=1:p=title", b"start").expect("must finalize");
-        assert_eq!(finalized.title.as_deref(), Some("Fresh start"));
-        assert!(handler.pending_notifications.is_empty());
+        assert_eq!(finalized.title, "Fresh start");
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// Intermediate chunks of a dropped transfer are ignored and keep the
@@ -1322,7 +2153,7 @@ mod tests {
         assert!(feed(&mut handler, "i=1:d=0:p=title", b"more").is_none());
         assert!(feed(&mut handler, "i=1:d=0:p=body", b"more").is_none());
         assert!(is_dropped(&handler, "1"));
-        assert_eq!(handler.pending_notifications.len(), 1);
+        assert_eq!(handler.pending_osc99.identified_len(), 1);
     }
 
     /// If the offending chunk is itself the terminating one, the notification
@@ -1332,7 +2163,7 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"SGVs").is_none());
         assert!(feed(&mut handler, "i=1:d=1:p=title:e=1", b"@@@@").is_none());
-        assert!(handler.pending_notifications.is_empty());
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// A combined-cap breach tombstones the id: further chunks and the
@@ -1349,129 +2180,1197 @@ mod tests {
 
         assert!(feed(&mut handler, "i=big:d=0:p=title", b"tail").is_none());
         assert!(feed(&mut handler, "i=big:d=1:p=title", b"tail").is_none());
-        assert!(handler.pending_notifications.is_empty());
+        assert!(handler.pending_osc99.is_empty());
     }
 
     /// Tombstones occupy slots in the pending map like any other entry, so
-    /// the 128-entry cap bounds them too.
+    /// the 128-entry cap bounds them too: a new id evicts the
+    /// least-recently-touched tombstone rather than being refused.
     #[test]
-    fn tombstones_count_toward_pending_cap() {
+    fn tombstones_are_evicted_least_recently_touched_first() {
         let mut handler = TerminalHandler::new(80, 24);
         for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
             let metadata = format!("i=id-{i}:d=0:p=title:e=1");
             assert!(feed(&mut handler, &metadata, b"@@@@").is_none());
         }
         assert_eq!(
-            handler.pending_notifications.len(),
+            handler.pending_osc99.identified_len(),
             MAX_PENDING_OSC99_NOTIFICATIONS
         );
         assert!(
-            handler
-                .pending_notifications
-                .values()
-                .all(|e| matches!(e, PendingEntry::Dropped))
+            (0..MAX_PENDING_OSC99_NOTIFICATIONS).all(|i| is_dropped(&handler, &format!("id-{i}")))
         );
 
-        // A new id is refused: the map does not grow past the cap.
-        assert!(feed(&mut handler, "i=overflow:d=0:p=title", b"x").is_none());
+        // A chunk of a dropped transfer touches its tombstone.
+        assert!(feed(&mut handler, "i=id-0:d=0:p=title", b"x").is_none());
+
+        // A new id evicts `id-1`, now the least recently touched: the map
+        // does not grow past the cap.
+        assert!(feed(&mut handler, "i=fresh:d=0:p=title", b"x").is_none());
         assert_eq!(
-            handler.pending_notifications.len(),
+            handler.pending_osc99.identified_len(),
             MAX_PENDING_OSC99_NOTIFICATIONS
         );
-        assert!(!handler.pending_notifications.contains_key("overflow"));
+        assert!(handler.pending_osc99.get(Some("fresh")).is_some());
+        assert!(handler.pending_osc99.get(Some("id-1")).is_none());
+        assert!(is_dropped(&handler, "id-0"));
 
         // Terminating a tombstoned id frees its slot.
         assert!(feed(&mut handler, "i=id-0:d=1:p=title", b"x").is_none());
         assert_eq!(
-            handler.pending_notifications.len(),
+            handler.pending_osc99.identified_len(),
             MAX_PENDING_OSC99_NOTIFICATIONS - 1
         );
     }
 
-    /// A control request for a tombstoned id is handled as if the id had no
-    /// entry: a done `p=close` finalizes as a control notification and the
-    /// tombstone is gone.
-    #[test]
-    fn close_for_tombstoned_id_behaves_as_if_no_entry() {
-        let mut handler = TerminalHandler::new(80, 24);
-        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
-        assert!(is_dropped(&handler, "1"));
+    // ── 138.C7: plain multi-byte text, stale unidentified slot ───────────────
 
-        let finalized = feed(&mut handler, "i=1:p=close", b"").expect("close must finalize");
-        assert_eq!(finalized.meta.payload_type, Osc99PayloadType::Close);
-        assert_eq!(finalized.meta.id.as_deref(), Some("1"));
-        assert!(finalized.title.is_none());
-        assert!(handler.pending_notifications.is_empty());
+    /// A plain (non-base64) character split across two chunks is decoded
+    /// after the chunks are joined, not per chunk.
+    #[test]
+    fn plain_multibyte_char_split_across_chunks_reassembles() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // "é" is C3 A9.
+        assert!(feed(&mut handler, "i=u:d=0", b"Ol\xC3").is_none());
+        let finalized = feed(&mut handler, "i=u", b"\xA9!").expect("must finalize");
+        assert_eq!(finalized.title, "Ol\u{e9}!");
+
+        // A 4-byte character split three ways, on the unidentified slot.
+        let mut handler = TerminalHandler::new(80, 24);
+        let grin = "\u{1f600}".as_bytes();
+        assert!(feed(&mut handler, "d=0", &grin[..1]).is_none());
+        assert!(feed(&mut handler, "d=0", &grin[1..3]).is_none());
+        let finalized = feed(&mut handler, "", &grin[3..]).expect("must finalize");
+        assert_eq!(finalized.title, "\u{1f600}");
     }
 
-    /// Same for `p=alive` and `p=?`, and a non-final control chunk leaves a
-    /// normal accumulating entry (not a tombstone), as with no prior entry.
     #[test]
-    fn alive_and_query_for_tombstoned_id_behave_as_if_no_entry() {
-        for (metadata, kind) in [
-            ("i=1:p=alive", Osc99PayloadType::Alive),
-            ("i=1:p=?", Osc99PayloadType::Query),
-        ] {
-            let mut handler = TerminalHandler::new(80, 24);
-            assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
-            let finalized = feed(&mut handler, metadata, b"").expect("must finalize");
-            assert_eq!(finalized.meta.payload_type, kind);
-            assert!(handler.pending_notifications.is_empty());
+    fn an_identified_chunk_discards_an_accumulating_unidentified_slot() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "d=0", b"stale ").is_none());
+        assert!(handler.pending_osc99.get(None).is_some());
+        assert_eq!(handler.pending_osc99.total_cost(), 6);
+
+        // Even a complete identified notification, which never enters the
+        // store, replaces the pending id-less one.
+        let shown = feed(&mut handler, "i=x", b"X").expect("must finalize");
+        assert_eq!(shown.title, "X");
+        assert!(handler.pending_osc99.get(None).is_none());
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+        handler.pending_osc99.assert_costs_consistent();
+
+        // The next id-less transfer starts afresh rather than inheriting it.
+        let fresh = feed(&mut handler, "", b"fresh").expect("must finalize");
+        assert_eq!(fresh.title, "fresh");
+    }
+
+    #[test]
+    fn a_discarded_unidentified_slot_stays_discarded_for_its_tail() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "d=0", b"head ").is_none());
+        assert!(feed(&mut handler, "i=y:d=0", b"Y").is_none());
+        // The id-less tail now starts a new accumulation: no "head ".
+        let tail = feed(&mut handler, "", b"tail").expect("must finalize");
+        assert_eq!(tail.title, "tail");
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn an_identified_chunk_leaves_an_unidentified_tombstone_alone() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "d=0:e=1", b"@@@@").is_none());
+        assert!(matches!(
+            handler.pending_osc99.get(None),
+            Some(PendingEntry::Dropped)
+        ));
+        assert!(feed(&mut handler, "i=z", b"Z").is_some());
+        assert!(
+            matches!(handler.pending_osc99.get(None), Some(PendingEntry::Dropped)),
+            "a tombstone holds nothing and must still swallow its tail"
+        );
+        assert!(feed(&mut handler, "", b"tail").is_none());
+        assert!(handler.pending_osc99.is_empty());
+    }
+
+    // ── 138.C7: icon-only priming ─────────────────────────────────────────────
+
+    /// The commands `handler` has queued for the GUI.
+    fn queued(handler: &TerminalHandler) -> &[WindowManipulation] {
+        &handler.window_commands
+    }
+
+    #[test]
+    fn an_icon_only_notification_with_a_key_pushes_cache_icon() {
+        let mut handler = TerminalHandler::new(80, 24);
+        // base64 "AAAA" is three zero bytes.
+        assert!(feed(&mut handler, "i=p:p=icon:e=1:g=my-key", b"AAAA").is_none());
+        assert_eq!(
+            queued(&handler),
+            [WindowManipulation::Osc99CacheIcon {
+                key: "my-key".to_owned(),
+                data: vec![0, 0, 0],
+            }]
+        );
+        assert!(handler.pending_osc99.is_empty());
+    }
+
+    #[test]
+    fn a_chunked_icon_with_the_key_on_an_earlier_chunk_primes_once() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=p:p=icon:e=1:d=0:g=k", b"AAAA").is_none());
+        assert!(feed(&mut handler, "i=p:p=icon:e=1:d=0", b"AQID").is_none());
+        assert_eq!(queued(&handler), []);
+        assert!(feed(&mut handler, "i=p:p=icon:e=1", b"BAUG").is_none());
+        assert_eq!(
+            queued(&handler),
+            [WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![0, 0, 0, 1, 2, 3, 4, 5, 6],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_icon_without_a_key_or_without_bytes_pushes_nothing() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "p=icon:e=1", b"AAAA").is_none());
+        assert!(feed(&mut handler, "p=icon:g=k", b"").is_none());
+        assert!(feed(&mut handler, "p=icon:e=1:g=///", b"AAAA").is_none());
+        assert_eq!(queued(&handler), []);
+    }
+
+    #[test]
+    fn an_icon_with_a_title_is_displayed_not_primed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(feed(&mut handler, "i=p:p=icon:e=1:g=k:d=0", b"AAAA").is_none());
+        let shown = feed(&mut handler, "i=p", b"Title").expect("must finalize");
+        assert_eq!(shown.title, "Title");
+        assert_eq!(shown.icon.as_deref(), Some(&[0u8, 0, 0][..]));
+        assert_eq!(queued(&handler), []);
+    }
+
+    // ── 138.3: metadata merge ─────────────────────────────────────────────────
+
+    /// Merge `chunks` in order and return the accumulated metadata.
+    fn merged(chunks: &[Osc99Command]) -> MergedOsc99Metadata {
+        let mut acc = MergedOsc99Metadata::default();
+        for chunk in chunks {
+            acc.merge_chunk(chunk);
+        }
+        acc
+    }
+
+    fn edits(edits: &[Osc99ActionEdit]) -> Osc99Command {
+        Osc99Command {
+            action_edits: edits.to_vec(),
+            ..default_cmd()
+        }
+    }
+
+    #[test]
+    fn merge_report_then_chunk_without_a_resolves_to_report_and_focus() {
+        let acc = merged(&[
+            edits(&[Osc99ActionEdit::Add(Osc99Action::Report)]),
+            default_cmd(),
+        ]);
+        assert_eq!(
+            resolve_osc99_actions(&acc.action_edits),
+            (
+                Osc99ActivationReporting::Report,
+                Osc99ActivationFocus::Focus
+            )
+        );
+    }
+
+    #[test]
+    fn merge_minus_focus_then_focus_resolves_to_focus() {
+        let acc = merged(&[
+            edits(&[Osc99ActionEdit::Remove(Osc99Action::Focus)]),
+            edits(&[Osc99ActionEdit::Add(Osc99Action::Focus)]),
+        ]);
+        assert_eq!(
+            resolve_osc99_actions(&acc.action_edits),
+            (
+                Osc99ActivationReporting::Silent,
+                Osc99ActivationFocus::Focus
+            )
+        );
+    }
+
+    #[test]
+    fn merge_minus_focus_then_chunk_without_a_stays_unfocused() {
+        // A later chunk's silence must not resurrect a removed action.
+        let acc = merged(&[
+            edits(&[Osc99ActionEdit::Remove(Osc99Action::Focus)]),
+            default_cmd(),
+        ]);
+        assert_eq!(
+            resolve_osc99_actions(&acc.action_edits).1,
+            Osc99ActivationFocus::NoFocus
+        );
+    }
+
+    #[test]
+    fn merge_urgency_takes_the_latest_explicit_value() {
+        let with = |urgency| Osc99Command {
+            urgency,
+            ..default_cmd()
+        };
+        let kept = merged(&[with(Some(NotificationUrgency::Critical)), with(None)]);
+        assert_eq!(kept.urgency, Some(NotificationUrgency::Critical));
+
+        let overridden = merged(&[
+            with(Some(NotificationUrgency::Low)),
+            with(Some(NotificationUrgency::Critical)),
+        ]);
+        assert_eq!(overridden.urgency, Some(NotificationUrgency::Critical));
+    }
+
+    #[test]
+    fn merge_lists_extend_in_arrival_order() {
+        let with = |name: &str, kind: &str| Osc99Command {
+            icon_names: vec![name.to_owned()],
+            notification_types: vec![kind.to_owned()],
+            ..default_cmd()
+        };
+        let acc = merged(&[with("a", "ta"), with("b", "tb")]);
+        assert_eq!(acc.icon_names, ["a", "b"]);
+        assert_eq!(acc.notification_types, ["ta", "tb"]);
+    }
+
+    #[test]
+    fn merge_close_reporting_and_other_scalars_survive_a_silent_chunk() {
+        let first = Osc99Command {
+            close_reporting: Some(Osc99CloseReporting::Report),
+            occasion: Some(NotificationOccasion::Unfocused),
+            expiry: Some(Osc99Expiry::Never),
+            app_name: Some("app".to_owned()),
+            icon_cache_key: Some("key".to_owned()),
+            sound: Some("silent".to_owned()),
+            ..default_cmd()
+        };
+        let acc = merged(&[first, default_cmd()]);
+        assert_eq!(acc.close_reporting, Some(Osc99CloseReporting::Report));
+        assert_eq!(acc.occasion, Some(NotificationOccasion::Unfocused));
+        assert_eq!(acc.expiry, Some(Osc99Expiry::Never));
+        assert_eq!(acc.app_name.as_deref(), Some("app"));
+        assert_eq!(acc.icon_cache_key.as_deref(), Some("key"));
+        assert_eq!(acc.sound.as_deref(), Some("silent"));
+
+        let later = Osc99Command {
+            close_reporting: Some(Osc99CloseReporting::Silent),
+            app_name: Some("other".to_owned()),
+            ..default_cmd()
+        };
+        let first = Osc99Command {
+            close_reporting: Some(Osc99CloseReporting::Report),
+            app_name: Some("app".to_owned()),
+            ..default_cmd()
+        };
+        let acc = merged(&[first, later]);
+        assert_eq!(acc.close_reporting, Some(Osc99CloseReporting::Silent));
+        assert_eq!(acc.app_name.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn merge_takes_the_chunks_id() {
+        let with_id = |id: &str| Osc99Command {
+            id: Some(id.to_owned()),
+            ..default_cmd()
+        };
+        assert_eq!(merged(&[with_id("i")]).id.as_deref(), Some("i"));
+    }
+
+    #[test]
+    fn list_metadata_counts_toward_the_notification_cap() {
+        let mut pending = PendingNotification::default();
+        let chunk = |name: String| Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec![name],
+            ..default_cmd()
+        };
+        let big = "n".repeat(MAX_OSC99_NOTIFICATION_BYTES / 2 + 1);
+        assert!(pending.accept(&chunk(big.clone())).is_ok());
+        assert_eq!(
+            pending.accept(&chunk(big)),
+            Err(Osc99Reject::Chunk(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES
+            }))
+        );
+    }
+
+    // ── 138.3: finalisation helpers ───────────────────────────────────────────
+
+    #[test]
+    fn strip_removes_c0_del_and_c1_but_keeps_lf() {
+        assert_eq!(
+            strip_osc99_controls(
+                "a\u{0}b\u{9}c\u{b}d\u{1b}e\u{1f}f\u{7f}g\u{80}h\u{85}i\u{9f}j\nk"
+            ),
+            "abcdefghij\nk"
+        );
+    }
+
+    #[test]
+    fn strip_keeps_printable_and_neighbouring_code_points() {
+        // U+0020 and U+00A0 sit just outside the removed ranges.
+        let text = "a b\u{a0}c é ✓ \u{fffd}";
+        assert_eq!(strip_osc99_controls(text), text);
+    }
+
+    #[test]
+    fn limit_leaves_a_fitting_string_alone() {
+        assert_eq!(limit_osc99_text("abcd".to_owned(), 4), "abcd");
+        assert_eq!(limit_osc99_text(String::new(), 4), "");
+    }
+
+    #[test]
+    fn limit_cuts_hard_after_n_chars_with_no_marker() {
+        assert_eq!(limit_osc99_text("abcde".to_owned(), 4), "abcd");
+        assert_eq!(limit_osc99_text("abcde".to_owned(), 0), "");
+    }
+
+    #[test]
+    fn limit_counts_characters_not_bytes() {
+        // Each of these is more than one byte, so a byte count would cut early.
+        assert_eq!(limit_osc99_text("✓✓✓✓✓".to_owned(), 4), "✓✓✓✓");
+        assert_eq!(limit_osc99_text("✓✓✓✓".to_owned(), 4), "✓✓✓✓");
+    }
+
+    #[test]
+    fn button_labels_are_stripped_limited_and_capped() {
+        let long = "b".repeat(300);
+        let mut labels = vec![long, "ok\u{9}".to_owned()];
+        labels.extend((0..10).map(|i| format!("{i}")));
+        let out = sanitize_button_labels(labels);
+        assert_eq!(out.len(), MAX_OSC99_BUTTONS);
+        assert_eq!(out[0], "b".repeat(MAX_OSC99_BUTTON_CHARS));
+        assert_eq!(out[1], "ok");
+        assert_eq!(&out[2..], ["0", "1", "2", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn a_button_label_that_strips_to_nothing_becomes_a_replacement_character() {
+        // Dropping it would renumber the buttons after it.
+        let out = sanitize_button_labels(vec![
+            "\u{1b}\u{7f}".to_owned(),
+            "ok".to_owned(),
+            "\u{85}".to_owned(),
+        ]);
+        assert_eq!(out, ["\u{fffd}", "ok", "\u{fffd}"]);
+    }
+
+    #[test]
+    fn an_empty_button_label_is_dropped_before_stripping() {
+        // Doubled, leading and trailing U+2028 separators are not buttons;
+        // a control-only label between them still is.
+        let labels =
+            split_button_labels("\u{2028}A\u{2028}\u{2028}\u{1b}\u{2028}B\u{2028}".as_bytes());
+        assert_eq!(
+            sanitize_button_labels(labels),
+            ["A", "\u{fffd}", "B"],
+            "button numbers must follow the labels the application sent"
+        );
+    }
+
+    fn payloads(title: &str, body: &str) -> FinishedPayloads {
+        FinishedPayloads {
+            title: title.as_bytes().to_vec(),
+            body: body.as_bytes().to_vec(),
+            icon: Vec::new(),
+            buttons: Vec::new(),
+        }
+    }
+
+    /// The notification `build_finalized` would display, if it displays one.
+    fn displayed(
+        payloads: FinishedPayloads,
+        meta: MergedOsc99Metadata,
+    ) -> Option<FinalizedNotification> {
+        match build_finalized(payloads, meta) {
+            Finalization::Display(finalized) => Some(*finalized),
+            Finalization::CacheIcon { .. } | Finalization::Nothing => None,
+        }
+    }
+
+    #[test]
+    fn build_promotes_the_body_when_there_is_no_title() {
+        let f =
+            displayed(payloads("", "Body"), MergedOsc99Metadata::default()).expect("has content");
+        assert_eq!(f.title, "Body");
+        assert_eq!(f.body, None);
+    }
+
+    #[test]
+    fn build_promotes_the_body_when_the_title_strips_to_nothing() {
+        let f = displayed(
+            payloads("\u{1b}\u{85}", "Body"),
+            MergedOsc99Metadata::default(),
+        )
+        .expect("content");
+        assert_eq!(f.title, "Body");
+        assert_eq!(f.body, None);
+    }
+
+    #[test]
+    fn build_keeps_title_and_body_apart() {
+        let f =
+            displayed(payloads("Title", "Body"), MergedOsc99Metadata::default()).expect("content");
+        assert_eq!(f.title, "Title");
+        assert_eq!(f.body.as_deref(), Some("Body"));
+    }
+
+    #[test]
+    fn build_without_title_or_body_is_nothing() {
+        let build = |p| build_finalized(p, MergedOsc99Metadata::default());
+        assert_eq!(build(payloads("", "")), Finalization::Nothing);
+        assert_eq!(build(payloads("\u{1}", "\u{2}")), Finalization::Nothing);
+        // Icon bytes without a `g=` key, and buttons, are not a notification.
+        let mut only_icon = payloads("", "");
+        only_icon.icon = vec![1, 2, 3];
+        only_icon.buttons = b"OK".to_vec();
+        assert_eq!(build(only_icon), Finalization::Nothing);
+    }
+
+    #[test]
+    fn build_without_text_but_with_icon_and_key_primes_the_cache() {
+        let meta = MergedOsc99Metadata {
+            icon_cache_key: Some("key".to_owned()),
+            ..MergedOsc99Metadata::default()
+        };
+        let mut icon_only = payloads("\u{1}", "");
+        icon_only.icon = vec![1, 2, 3];
+        icon_only.buttons = b"OK".to_vec();
+        assert_eq!(
+            build_finalized(icon_only, meta.clone()),
+            Finalization::CacheIcon {
+                key: "key".to_owned(),
+                data: vec![1, 2, 3],
+            }
+        );
+        // A key with no icon bytes has nothing to cache.
+        assert_eq!(
+            build_finalized(payloads("", ""), meta),
+            Finalization::Nothing
+        );
+    }
+
+    #[test]
+    fn build_with_text_displays_even_when_it_also_carries_icon_and_key() {
+        let meta = MergedOsc99Metadata {
+            icon_cache_key: Some("key".to_owned()),
+            ..MergedOsc99Metadata::default()
+        };
+        let mut with_icon = payloads("T", "");
+        with_icon.icon = vec![1, 2, 3];
+        let f = displayed(with_icon, meta).expect("content");
+        assert_eq!(f.icon.as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(f.meta.icon_cache_key.as_deref(), Some("key"));
+    }
+
+    #[test]
+    fn build_decodes_lossily_and_leaves_icon_bytes_untouched() {
+        let mut p = payloads("", "");
+        p.title = vec![b'a', 0xff, b'b'];
+        p.icon = vec![0, 1, 0x1b, 0x7f, 0xff];
+        let f = displayed(p, MergedOsc99Metadata::default()).expect("content");
+        assert_eq!(f.title, "a\u{fffd}b");
+        assert_eq!(f.icon.as_deref(), Some(&[0u8, 1, 0x1b, 0x7f, 0xff][..]));
+    }
+
+    #[test]
+    fn build_cuts_title_and_body_hard_at_1024_chars() {
+        let f = displayed(
+            payloads(&"t".repeat(2000), &"b".repeat(1024)),
+            MergedOsc99Metadata::default(),
+        )
+        .expect("content");
+        assert_eq!(f.title, "t".repeat(1024));
+        assert_eq!(f.body, Some("b".repeat(1024)));
+
+        let f = displayed(
+            payloads("T", &"b".repeat(1025)),
+            MergedOsc99Metadata::default(),
+        )
+        .expect("content");
+        assert_eq!(f.body, Some("b".repeat(1024)));
+    }
+
+    #[test]
+    fn build_sanitises_the_metadata_names() {
+        let meta = MergedOsc99Metadata {
+            app_name: Some("\u{1b}".to_owned()),
+            sound: Some("\u{7f}".to_owned()),
+            icon_names: vec!["a\u{1b}".to_owned(), "\u{85}".to_owned(), "b".to_owned()],
+            notification_types: vec!["\u{9}".to_owned(), "t\u{0}x".to_owned()],
+            ..MergedOsc99Metadata::default()
+        };
+        let f = displayed(payloads("T", ""), meta).expect("content");
+        assert_eq!(f.meta.app_name, None);
+        assert_eq!(f.meta.sound, None);
+        assert_eq!(f.meta.icon_names, ["a", "b"]);
+        assert_eq!(f.meta.notification_types, ["tx"]);
+        assert_eq!(
+            f.into_notification99_data().sound,
+            Osc99Sound::System,
+            "a sound that strips to nothing is the system default"
+        );
+    }
+
+    #[test]
+    fn build_strips_lf_from_names_but_not_from_title_and_body() {
+        let meta = MergedOsc99Metadata {
+            app_name: Some("my\napp".to_owned()),
+            sound: Some("\n".to_owned()),
+            icon_names: vec!["a\nb".to_owned(), "\n".to_owned()],
+            notification_types: vec!["t\nx".to_owned()],
+            ..MergedOsc99Metadata::default()
+        };
+        let f = displayed(payloads("Ti\ntle", "Bo\ndy"), meta).expect("content");
+        assert_eq!(f.title, "Ti\ntle");
+        assert_eq!(f.body.as_deref(), Some("Bo\ndy"));
+        assert_eq!(f.meta.app_name.as_deref(), Some("myapp"));
+        assert_eq!(f.meta.sound, None);
+        assert_eq!(f.meta.icon_names, ["ab"]);
+        assert_eq!(f.meta.notification_types, ["tx"]);
+    }
+
+    #[test]
+    fn build_keeps_a_named_sound_and_app_name() {
+        let meta = MergedOsc99Metadata {
+            app_name: Some("my app".to_owned()),
+            sound: Some("bell".to_owned()),
+            ..MergedOsc99Metadata::default()
+        };
+        let data = displayed(payloads("T", ""), meta)
+            .expect("content")
+            .into_notification99_data();
+        assert_eq!(data.app_name.as_deref(), Some("my app"));
+        assert_eq!(data.sound, Osc99Sound::Named("bell".to_owned()));
+    }
+
+    // ── 138.3: pending store ──────────────────────────────────────────────────
+
+    #[test]
+    fn store_creates_touches_and_removes_entries() {
+        let mut store = PendingOsc99::default();
+        assert!(store.is_empty());
+        assert!(matches!(
+            store.slot_mut(Some("a")).entry,
+            PendingEntry::Accumulating(_)
+        ));
+        assert!(matches!(
+            store.slot_mut(None).entry,
+            PendingEntry::Accumulating(_)
+        ));
+        assert_eq!(store.identified_len(), 1);
+        assert!(!store.is_empty());
+        assert!(store.remove(Some("a")).is_some());
+        assert!(store.remove(Some("a")).is_none());
+        assert!(store.remove(None).is_some());
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn store_evicts_the_smallest_last_touched_at_the_cap() {
+        let mut store = PendingOsc99::default();
+        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
+            store.slot_mut(Some(&format!("id-{i}")));
+        }
+        // Touch the two oldest again, leaving `id-2` as the least recent.
+        store.slot_mut(Some("id-0"));
+        store.slot_mut(Some("id-1"));
+
+        store.slot_mut(Some("new"));
+        assert_eq!(store.identified_len(), MAX_PENDING_OSC99_NOTIFICATIONS);
+        assert!(store.get(Some("id-2")).is_none());
+        for kept in ["id-0", "id-1", "id-3", "new"] {
+            assert!(store.get(Some(kept)).is_some(), "{kept} must survive");
         }
 
+        // Re-touching an existing id at the cap evicts nothing.
+        store.slot_mut(Some("id-3"));
+        assert_eq!(store.identified_len(), MAX_PENDING_OSC99_NOTIFICATIONS);
+        assert!(store.get(Some("id-4")).is_some());
+    }
+
+    #[test]
+    fn store_never_evicts_the_unidentified_slot() {
+        let mut store = PendingOsc99::default();
+        store.slot_mut(None);
+        for i in 0..=MAX_PENDING_OSC99_NOTIFICATIONS {
+            store.slot_mut(Some(&format!("id-{i}")));
+        }
+        assert!(store.get(None).is_some());
+    }
+
+    #[test]
+    fn store_tombstone_replaces_and_is_detected() {
+        let mut store = PendingOsc99::default();
+        assert!(!store.touch_if_tombstone(Some("a")));
+        assert!(!store.touch_if_tombstone(None));
+        store.slot_mut(Some("a"));
+        assert!(!store.touch_if_tombstone(Some("a")));
+        store.tombstone(Some("a"));
+        assert!(store.touch_if_tombstone(Some("a")));
+        store.tombstone(None);
+        assert!(store.touch_if_tombstone(None));
+    }
+
+    #[test]
+    fn store_clear_empties_both_halves() {
+        let mut store = PendingOsc99::default();
+        store.slot_mut(Some("a"));
+        store.slot_mut(None);
+        store.clear();
+        assert!(store.is_empty());
+        assert!(store.get(None).is_none());
+        assert_eq!(store.identified_len(), 0);
+    }
+
+    // ── 138.C6: bounded, linear-cost reassembly ───────────────────────────────
+
+    /// How many entries the pending notification for `id` holds in the list
+    /// selected by `len`, or `None` when it holds no live accumulation.
+    fn live_list_len(
+        handler: &TerminalHandler,
+        id: &str,
+        len: fn(&MergedOsc99Metadata) -> usize,
+    ) -> Option<usize> {
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some(id)) else {
+            return None;
+        };
+        entry.meta.as_ref().map(len)
+    }
+
+    /// Stream 100k tiny `d=0` chunks that each add one entry to one list and
+    /// assert the list never passes `cap` and the transfer ends as a tombstone.
+    fn assert_hostile_list_stream_is_capped(
+        metadata: &str,
+        cap: usize,
+        len: fn(&MergedOsc99Metadata) -> usize,
+    ) {
         let mut handler = TerminalHandler::new(80, 24);
-        assert!(feed(&mut handler, "i=1:d=0:p=title:e=1", b"@@@@").is_none());
-        assert!(feed(&mut handler, "i=1:d=0:p=close", b"").is_none());
-        assert!(!is_dropped(&handler, "1"));
-        assert!(handler.pending_notifications.contains_key("1"));
+        for _ in 0..100_000 {
+            assert!(feed(&mut handler, metadata, b"").is_none());
+            if let Some(held) = live_list_len(&handler, "hostile", len) {
+                assert!(held <= cap, "list grew to {held}, past the cap of {cap}");
+            }
+        }
+        assert!(is_dropped(&handler, "hostile"));
+        assert_eq!(handler.pending_osc99.identified_len(), 1);
+        handler.pending_osc99.assert_costs_consistent();
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
     }
 
-    // ── 130.5: osc99_query_reply_body ─────────────────────────────────────────
-
-    const REPLY_TAIL: &str = "o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+    #[test]
+    fn hostile_icon_name_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:n=YQ",
+            MAX_OSC99_ICON_NAMES,
+            |m| m.icon_names.len(),
+        );
+    }
 
     #[test]
-    fn query_reply_body_full_features_matches_legacy_string() {
-        let features = Osc99Features {
+    fn hostile_notification_type_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:t=YQ",
+            MAX_OSC99_NOTIFICATION_TYPES,
+            |m| m.notification_types.len(),
+        );
+    }
+
+    #[test]
+    fn hostile_action_edit_stream_is_dropped_at_the_cap() {
+        assert_hostile_list_stream_is_capped(
+            "i=hostile:d=0:p=title:a=report",
+            MAX_OSC99_ACTION_EDITS,
+            |m| m.action_edits.len(),
+        );
+    }
+
+    #[test]
+    fn list_caps_admit_exactly_the_cap_and_reject_one_more() {
+        let chunk = |names: usize| Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["a".to_owned(); names],
+            ..default_cmd()
+        };
+        let mut pending = PendingNotification::default();
+        assert!(pending.accept(&chunk(MAX_OSC99_ICON_NAMES)).is_ok());
+        assert_eq!(
+            pending.accept(&chunk(1)),
+            Err(Osc99Reject::TooManyIconNames {
+                max: MAX_OSC99_ICON_NAMES
+            })
+        );
+        // A rejected chunk merges nothing.
+        assert_eq!(
+            pending.meta.as_ref().map(|m| m.icon_names.len()),
+            Some(MAX_OSC99_ICON_NAMES)
+        );
+    }
+
+    #[test]
+    fn list_cost_charges_len_plus_overhead_per_string_and_overhead_per_edit() {
+        let mut pending = PendingNotification::default();
+        let chunk = Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["ab".to_owned()],
+            notification_types: vec!["c".to_owned(), "defg".to_owned()],
+            action_edits: vec![Osc99ActionEdit::Add(Osc99Action::Report)],
+            ..default_cmd()
+        };
+        pending.accept(&chunk).unwrap();
+        let expected = (2 + OSC99_LIST_ENTRY_OVERHEAD)
+            + (1 + OSC99_LIST_ENTRY_OVERHEAD)
+            + (4 + OSC99_LIST_ENTRY_OVERHEAD)
+            + OSC99_LIST_ENTRY_OVERHEAD;
+        assert_eq!(pending.list_cost, expected);
+
+        // A chunk without lists adds nothing, however much is already held.
+        pending.accept(&default_cmd()).unwrap();
+        assert_eq!(pending.list_cost, expected);
+        assert_eq!(pending.cost(), expected);
+    }
+
+    #[test]
+    fn list_cost_counts_toward_the_byte_budget_before_the_entry_cap() {
+        let mut pending = PendingNotification::default();
+        let name_len = 20_000;
+        let chunk = Osc99Command {
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["n".repeat(name_len)],
+            ..default_cmd()
+        };
+        let mut accepted = 0usize;
+        let rejection = loop {
+            match pending.accept(&chunk) {
+                Ok(()) => accepted += 1,
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(
+            rejection,
+            Osc99Reject::Chunk(ChunkError::TotalTooLarge {
+                max: MAX_OSC99_NOTIFICATION_BYTES
+            })
+        );
+        // The byte budget bites before the 64-entry cap does.
+        assert!(accepted < MAX_OSC99_ICON_NAMES);
+        assert_eq!(
+            accepted,
+            MAX_OSC99_NOTIFICATION_BYTES / (name_len + OSC99_LIST_ENTRY_OVERHEAD)
+        );
+    }
+
+    #[test]
+    fn title_body_and_buttons_are_capped_at_64_kib() {
+        for (payload_type, name) in [
+            (Osc99PayloadType::Title, "title"),
+            (Osc99PayloadType::Body, "body"),
+            (Osc99PayloadType::Buttons, "buttons"),
+        ] {
+            let chunk = |len: usize| Osc99Command {
+                payload_type,
+                chunk_state: Osc99ChunkState::More,
+                payload: vec![b'x'; len],
+                ..default_cmd()
+            };
+            let mut at_cap = PendingNotification::default();
+            assert!(
+                at_cap.accept(&chunk(MAX_OSC99_TEXT_PAYLOAD_BYTES)).is_ok(),
+                "{name} at the cap must be accepted"
+            );
+            assert!(
+                matches!(
+                    at_cap.accept(&chunk(1)),
+                    Err(Osc99Reject::Chunk(ChunkError::TotalTooLarge {
+                        max: MAX_OSC99_TEXT_PAYLOAD_BYTES
+                    }))
+                ),
+                "{name} one byte over the cap must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_title_drops_the_transfer() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let chunk = vec![b't'; MAX_OSC99_TEXT_PAYLOAD_BYTES + 1];
+        assert!(feed(&mut handler, "i=big:d=0:p=title", &chunk).is_none());
+        assert!(is_dropped(&handler, "big"));
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+    }
+
+    #[test]
+    fn icon_keeps_the_one_mebibyte_cap() {
+        let half = Osc99Command {
+            payload_type: Osc99PayloadType::Icon,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![0x89; MAX_OSC99_ICON_PAYLOAD_BYTES / 2],
+            ..default_cmd()
+        };
+        let mut pending = PendingNotification::default();
+        assert!(pending.accept(&half).is_ok());
+        assert!(pending.accept(&half).is_ok());
+        assert_eq!(pending.cost(), MAX_OSC99_ICON_PAYLOAD_BYTES);
+        let one_more = Osc99Command {
+            payload: vec![0x89],
+            ..half
+        };
+        assert!(pending.accept(&one_more).is_err());
+    }
+
+    /// A content chunk of `len` payload bytes for the transfer `id`.
+    fn icon_chunk(id: Option<&str>, len: usize) -> Osc99Command {
+        Osc99Command {
+            id: id.map(str::to_owned),
+            payload_type: Osc99PayloadType::Icon,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![0x89; len],
+            ..default_cmd()
+        }
+    }
+
+    #[test]
+    fn aggregate_budget_evicts_the_least_recently_touched_other_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let each = 1_000_000;
+        for i in 0..8 {
+            assert!(
+                handler
+                    .reassemble_osc99(&icon_chunk(Some(&format!("a{i}")), each))
+                    .is_none()
+            );
+        }
+        assert_eq!(handler.pending_osc99.total_cost(), 8 * each);
+        handler.pending_osc99.assert_costs_consistent();
+
+        // Touching `a0` makes `a1` the least recently touched.
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("a0"), 1))
+                .is_none()
+        );
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("b"), each))
+                .is_none()
+        );
+
+        assert!(handler.pending_osc99.get(Some("a1")).is_none());
+        for kept in ["a0", "a2", "a3", "a4", "a5", "a6", "a7", "b"] {
+            assert!(
+                handler.pending_osc99.get(Some(kept)).is_some(),
+                "{kept} must survive"
+            );
+        }
+        assert_eq!(handler.pending_osc99.total_cost(), 8 * each + 1);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_never_evicts_the_chunks_own_entry() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("old"), 600))
+                .is_none()
+        );
+        // The same id keeps growing: the other entry is evicted, not this one.
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("new"), 600))
+                .is_none()
+        );
+        assert!(handler.pending_osc99.get(Some("old")).is_none());
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("new"), 300))
+                .is_none()
+        );
+        assert!(matches!(
+            handler.pending_osc99.get(Some("new")),
+            Some(PendingEntry::Accumulating(_))
+        ));
+        assert_eq!(handler.pending_osc99.total_cost(), 900);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_can_evict_the_unidentified_slot() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(handler.reassemble_osc99(&icon_chunk(None, 600)).is_none());
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("id"), 600))
+                .is_none()
+        );
+        assert!(handler.pending_osc99.get(None).is_none());
+        assert!(handler.pending_osc99.get(Some("id")).is_some());
+        assert_eq!(handler.pending_osc99.total_cost(), 600);
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn aggregate_budget_drops_an_entry_that_alone_exceeds_it() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(1_000);
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("other"), 400))
+                .is_none()
+        );
+        assert!(
+            handler
+                .reassemble_osc99(&icon_chunk(Some("huge"), 1_001))
+                .is_none()
+        );
+        // The oversized transfer is a tombstone; the bystander was not evicted.
+        assert!(is_dropped(&handler, "huge"));
+        assert!(matches!(
+            handler.pending_osc99.get(Some("other")),
+            Some(PendingEntry::Accumulating(_))
+        ));
+        assert_eq!(handler.pending_osc99.total_cost(), 400);
+        handler.pending_osc99.assert_costs_consistent();
+
+        // Its terminating chunk removes the tombstone and emits nothing.
+        let done = Osc99Command {
+            chunk_state: Osc99ChunkState::Done,
+            ..icon_chunk(Some("huge"), 0)
+        };
+        assert!(handler.reassemble_osc99(&done).is_none());
+        assert!(handler.pending_osc99.get(Some("huge")).is_none());
+        handler.pending_osc99.assert_costs_consistent();
+    }
+
+    #[test]
+    fn running_total_matches_a_recomputed_total_through_a_mixed_sequence() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.pending_osc99 = PendingOsc99::with_budget(5_000);
+        let check = |handler: &TerminalHandler| handler.pending_osc99.assert_costs_consistent();
+
+        for i in 0..6 {
+            handler.reassemble_osc99(&icon_chunk(Some(&format!("x{i}")), 1_200));
+            check(&handler);
+        }
+        handler.reassemble_osc99(&icon_chunk(None, 700));
+        check(&handler);
+
+        // List metadata is charged too.
+        let named = Osc99Command {
+            id: Some("named".to_owned()),
+            chunk_state: Osc99ChunkState::More,
+            icon_names: vec!["n".repeat(100)],
+            ..default_cmd()
+        };
+        handler.reassemble_osc99(&named);
+        check(&handler);
+
+        // Tombstone, then its terminating chunk.
+        handler.reassemble_osc99(&icon_chunk(Some("bad"), 9_999));
+        check(&handler);
+        let done_bad = Osc99Command {
+            chunk_state: Osc99ChunkState::Done,
+            ..icon_chunk(Some("bad"), 0)
+        };
+        handler.reassemble_osc99(&done_bad);
+        check(&handler);
+
+        // Finalise one, standalone-finalise another, then clear.
+        let finish = Osc99Command {
+            payload_type: Osc99PayloadType::Title,
+            chunk_state: Osc99ChunkState::Done,
+            payload: b"t".to_vec(),
+            ..icon_chunk(Some("named"), 0)
+        };
+        assert!(handler.reassemble_osc99(&finish).is_some());
+        check(&handler);
+        let standalone = Osc99Command {
+            payload: b"solo".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&standalone).is_some());
+        check(&handler);
+
+        handler.pending_osc99.clear();
+        check(&handler);
+        assert_eq!(handler.pending_osc99.total_cost(), 0);
+    }
+
+    #[test]
+    fn reassembly_borrows_the_chunk_and_accumulates_its_payload_once() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let chunk = Osc99Command {
+            id: Some("borrow".to_owned()),
+            payload_type: Osc99PayloadType::Body,
+            chunk_state: Osc99ChunkState::More,
+            payload: vec![b'p'; 4096],
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(&chunk).is_none());
+        // The caller still owns the payload: nothing was moved out of it.
+        assert_eq!(chunk.payload.len(), 4096);
+        let Some(PendingEntry::Accumulating(entry)) = handler.pending_osc99.get(Some("borrow"))
+        else {
+            panic!("entry should be accumulating");
+        };
+        assert_eq!(entry.body.len(), 4096);
+        assert_eq!(handler.pending_osc99.total_cost(), 4096);
+    }
+
+    // ── 138.4: osc99_query_reply_body ─────────────────────────────────────────
+
+    const ALL_SUPPORTED_REPLY: &str = "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning";
+
+    /// Every feature supported, with the standard sound names.
+    fn all_supported() -> Osc99Features {
+        Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
             close_events: Osc99CloseEvents::Reported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1"
-        );
+            activation_focus: Osc99FocusSupport::Supported,
+            auto_expiry: Osc99AutoExpiry::Supported,
+            urgency: Osc99UrgencySupport::Supported,
+            sound_names: Osc99SoundNames::Standard,
+            body: Osc99BodySupport::Supported,
+            buttons: Osc99ButtonSupport::Supported,
+            icons: Osc99IconSupport::Supported,
+        }
     }
 
-    #[test]
-    fn query_reply_body_activation_not_reported_omits_a_key() {
-        let features = Osc99Features {
+    /// Every feature unsupported, with only the well-known sound names.
+    fn none_supported() -> Osc99Features {
+        Osc99Features {
             activation_report: Osc99ActivationReport::NotReported,
-            close_events: Osc99CloseEvents::Reported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            format!("c=1:{REPLY_TAIL}")
-        );
+            close_events: Osc99CloseEvents::NotReported,
+            activation_focus: Osc99FocusSupport::Unsupported,
+            auto_expiry: Osc99AutoExpiry::Unsupported,
+            urgency: Osc99UrgencySupport::Unsupported,
+            sound_names: Osc99SoundNames::SystemAndSilent,
+            body: Osc99BodySupport::Unsupported,
+            buttons: Osc99ButtonSupport::Unsupported,
+            icons: Osc99IconSupport::Unsupported,
+        }
     }
 
     #[test]
-    fn query_reply_body_close_not_reported_omits_c_key() {
-        let features = Osc99Features {
+    fn query_reply_body_table() {
+        let cases: Vec<(&str, Osc99Features, &str)> = vec![
+            ("all supported", all_supported(), ALL_SUPPORTED_REPLY),
+            (
+                "none supported",
+                none_supported(),
+                "o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "focus only",
+                Osc99Features {
+                    activation_focus: Osc99FocusSupport::Supported,
+                    ..none_supported()
+                },
+                "a=focus:o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "report only",
+                Osc99Features {
+                    activation_report: Osc99ActivationReport::Reported,
+                    ..none_supported()
+                },
+                "a=report:o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent",
+            ),
+            (
+                "standard sounds only",
+                Osc99Features {
+                    sound_names: Osc99SoundNames::Standard,
+                    ..none_supported()
+                },
+                "o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no body",
+                Osc99Features {
+                    body: Osc99BodySupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no icon",
+                Osc99Features {
+                    icons: Osc99IconSupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no buttons",
+                Osc99Features {
+                    buttons: Osc99ButtonSupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no urgency",
+                Osc99Features {
+                    urgency: Osc99UrgencySupport::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:p=title,body,?,close,icon,alive,buttons:c=1:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no close events",
+                Osc99Features {
+                    close_events: Osc99CloseEvents::NotReported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:w=1:s=system,silent,error,info,question,warn,warning",
+            ),
+            (
+                "no auto expiry",
+                Osc99Features {
+                    auto_expiry: Osc99AutoExpiry::Unsupported,
+                    ..all_supported()
+                },
+                "a=focus,report:o=always,unfocused,invisible:u=0,1,2:p=title,body,?,close,icon,alive,buttons:c=1:s=system,silent,error,info,question,warn,warning",
+            ),
+        ];
+        for (name, features, expected) in cases {
+            assert_eq!(osc99_query_reply_body(features), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn query_reply_body_all_supported_is_the_full_reply() {
+        assert_eq!(osc99_query_reply_body(all_supported()), ALL_SUPPORTED_REPLY);
+    }
+
+    #[test]
+    fn query_reply_body_none_supported_has_no_a_key() {
+        let body = osc99_query_reply_body(none_supported());
+        assert!(body.starts_with("o="), "reply: {body}");
+    }
+
+    #[test]
+    fn query_reply_body_focus_only_begins_with_a_focus() {
+        let body = osc99_query_reply_body(Osc99Features {
+            activation_focus: Osc99FocusSupport::Supported,
+            ..none_supported()
+        });
+        assert!(body.starts_with("a=focus:"), "reply: {body}");
+    }
+
+    #[test]
+    fn query_reply_body_report_only_begins_with_a_report() {
+        let body = osc99_query_reply_body(Osc99Features {
             activation_report: Osc99ActivationReport::Reported,
-            close_events: Osc99CloseEvents::NotReported,
-        };
-        assert_eq!(
-            osc99_query_reply_body(features),
-            format!("a=report:{REPLY_TAIL}")
-        );
-    }
-
-    #[test]
-    fn query_reply_body_neither_reported_starts_with_occasion() {
-        let features = Osc99Features {
-            activation_report: Osc99ActivationReport::NotReported,
-            close_events: Osc99CloseEvents::NotReported,
-        };
-        assert_eq!(osc99_query_reply_body(features), REPLY_TAIL);
+            ..none_supported()
+        });
+        assert!(body.starts_with("a=report:"), "reply: {body}");
     }
 }

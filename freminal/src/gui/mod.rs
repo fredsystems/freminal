@@ -53,6 +53,7 @@ pub(crate) mod icons;
 mod layout_ops;
 mod menu;
 mod notifications;
+mod osc99;
 pub mod paste_guard;
 mod platform;
 mod pointer_motion;
@@ -393,15 +394,60 @@ struct FreminalGui {
 
     /// Session cache of transmitted OSC 99 icon data, keyed by the `g=` cache
     /// key. Populated when a notification transmits icon bytes with a `g=`; later
-    /// notifications sending `g=` alone reuse the cached bytes. Session lifetime
-    /// (never persisted). Single-threaded GUI, so `RefCell` suffices.
-    osc99_icon_cache: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>,
+    /// notifications sending `g=` alone reuse the cached bytes. Bounded, with
+    /// least-recently-used eviction. Session lifetime (never persisted). Single-threaded GUI, so `RefCell` suffices.
+    osc99_icon_cache: std::cell::RefCell<osc99::Osc99IconCache>,
 
-    /// Live OSC 99 notifications by their `i=` id, for update/close tracking
-    /// (99.5a records identity; handle retention for activation/close is 99.5b).
-    /// Value carries what 99.5b/99.6 need to reconcile a notification later.
-    osc99_live:
-        std::cell::RefCell<std::collections::HashMap<String, notifications::Osc99LiveEntry>>,
+    /// Displayed OSC 99 notifications, scoped per pane, for `p=alive` /
+    /// `p=close` handling. A pure state machine; see [`osc99::Osc99Registry`].
+    osc99_registry: std::cell::RefCell<osc99::Osc99Registry>,
+
+    /// Panes an activated OSC 99 notification asked to focus
+    /// ([`osc99::Osc99Effect::FocusPane`]). The effect executor has no window
+    /// access, so requests queue here and the next `update()` drains them.
+    /// Single-threaded GUI, so `RefCell` suffices.
+    osc99_focus_requests: std::cell::RefCell<Vec<osc99::Osc99Origin>>,
+
+    /// OSC 99 requests a frame could not route because a cell they need was
+    /// busy, oldest first. The next frame routes them before its own, so
+    /// nothing is dropped and the order is kept (Task 138.C10, G14).
+    /// Single-threaded GUI, so `RefCell` suffices.
+    deferred_osc99_requests: std::cell::RefCell<Vec<osc99::Osc99Request>>,
+
+    /// An `osc99_filters` change the registry could not take because its cell
+    /// was busy, applied at the next opportunity (Task 138.C10, D9). Holds
+    /// only the latest. Single-threaded GUI, so `RefCell` suffices.
+    pending_osc99_filter: std::cell::RefCell<Option<osc99::Osc99Filter>>,
+
+    /// What is known about the Linux/BSD notification daemon: assumed until
+    /// the service reports its `GetCapabilities` answer or that the bus is
+    /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
+    /// by the service-event router, which re-broadcasts the capabilities when
+    /// the change alters them. Read on every platform (it is
+    /// [`osc99::Osc99LinuxDaemon::assumed`] throughout where no service
+    /// exists). Single-threaded GUI, so `Cell` suffices.
+    osc99_daemon: std::cell::Cell<osc99::Osc99LinuxDaemon>,
+
+    /// The Linux/BSD desktop-notification service's handle, started the first
+    /// frame the config can route OSC 99 to the system leg
+    /// (`FreminalGui::ensure_osc99_dbus_started`) and kept for the rest of the
+    /// process (dropping it stops the service). `None` until then.
+    /// Single-threaded GUI, so `RefCell` suffices.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
+
+    /// The macOS and Windows fire-and-forget desktop notification, which owns
+    /// the OSC 99 icon temp files and deletes them when it is dropped (the
+    /// application dropping this struct is the shutdown hook: the windowing
+    /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
+    /// Linux/BSD hold the no-op backend, the registry never routing to the
+    /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
+    osc99_untracked: std::cell::RefCell<Box<dyn osc99::Osc99UntrackedBackend>>,
+
+    /// Where the notification service's repaint wake-ups go: re-pointed at the
+    /// window being rendered each frame, so the service can wake an idle GUI.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    osc99_wake: osc99::Osc99Wake,
 
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
@@ -546,6 +592,13 @@ impl FreminalGui {
         let shader_preview_debounce =
             visual_preview::DebouncedPreview::new(applied_preview.shader_path.clone());
 
+        // The user's OSC 99 filter rules, compiled once from the loaded
+        // config (and again on every config apply). Invalid rules are logged.
+        let mut osc99_registry = osc99::Osc99Registry::default();
+        osc99_registry.set_filter(osc99::Osc99Filter::compile_logged(
+            &config.notifications.osc99_filters,
+        ));
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
@@ -593,8 +646,17 @@ impl FreminalGui {
             welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
-            osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
-            osc99_live: std::cell::RefCell::new(HashMap::new()),
+            osc99_icon_cache: std::cell::RefCell::new(osc99::Osc99IconCache::default()),
+            osc99_registry: std::cell::RefCell::new(osc99_registry),
+            osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
+            deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
+            pending_osc99_filter: std::cell::RefCell::new(None),
+            osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
+            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend()),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            osc99_dbus: std::cell::RefCell::new(None),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            osc99_wake: osc99::Osc99Wake::default(),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

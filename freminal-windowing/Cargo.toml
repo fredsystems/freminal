@@ -51,6 +51,10 @@ gl-offscreen = []
 # measurement infrastructure with no default-build presence, mirroring
 # `frame-profiling`'s rationale. No new dependency.
 gpu-profiling = []
+# Test-only constructors for types that wrap winit handles (e.g.
+# `WindowId::for_test`). Never enabled in production builds; enabled by the
+# `freminal` crate's dev-dependencies.
+test-utils = []
 
 [[example]]
 name = "hello"

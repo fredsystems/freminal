@@ -14,7 +14,9 @@
 //! [`AnsiOscType::Notify99`] carrying a fully-parsed
 //! [`freminal_common::buffer_states::osc_notify_99::Osc99Command`].
 //! Chunk reassembly, transport to the GUI, and reverse-write are handled
-//! downstream (Tasks 99.3+).
+//! downstream (Tasks 99.3+).  A sequence the parser rejects produces an
+//! [`AnsiOscType::Notify99Rejected`] carrying only its `i=` and `d=`, so the
+//! handler can abandon the transfer it belonged to.
 //!
 //! OSC 9 also carries the conflicting `ConEmu` progress-report sub-protocol
 //! (`9;4;<state>[;<value>]`, issue #507). A valid progress report produces an
@@ -231,8 +233,13 @@ pub(super) fn handle_osc_notify_777(raw_params: &[u8], output: &mut Vec<Terminal
 ///
 /// The metadata and payload byte slices are then forwarded to
 /// [`parse_osc_99`] which returns a typed [`Osc99Command`].  On success an
-/// [`AnsiOscType::Notify99`] is appended to `output`; on error the failure
-/// is logged at `debug!` level and the function returns without output.
+/// [`AnsiOscType::Notify99`] is appended to `output`.  On error the failure
+/// is logged at `debug!` level and an [`AnsiOscType::Notify99Rejected`]
+/// naming the rejected chunk's transfer is appended instead, so the handler
+/// can abandon it rather than let the rest of it assemble into a truncated
+/// notification.  The parser only fails on its two size guards (an
+/// oversized sequence or too many metadata items); every other irregularity
+/// is ignored by the parser itself.
 ///
 /// OSC 99 payloads can carry notification text, icon data, and other
 /// application metadata, so the raw sequence must never be copied into logs
@@ -263,12 +270,12 @@ pub(super) fn handle_osc_notify_99(raw_params: &[u8], output: &mut Vec<TerminalO
             output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd)));
         }
         Err(e) => {
-            // `Osc99ParseError`'s Display embeds the offending token or
-            // payload verbatim, so bound it before it reaches the log.
-            tracing::debug!(
-                "OSC 99: parse error (ignored): {}",
-                lossy_sequence_for_log_bounded(e.to_string().as_bytes())
-            );
+            // `Osc99ParseError` is only ever a size-guard failure; its Display
+            // carries numbers, never sequence content, so it is safe to log.
+            tracing::debug!("OSC 99: chunk rejected: {e}");
+            output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99Rejected(
+                e.rejected().clone(),
+            )));
         }
     }
 }
@@ -316,7 +323,8 @@ mod tests {
     use crate::log_capture::capture;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
-        Osc99Command, Osc99PayloadEncoding, Osc99PayloadType,
+        MAX_OSC99_METADATA_ITEMS, MAX_OSC99_SEQUENCE_BYTES, Osc99ChunkState, Osc99Command,
+        Osc99PayloadEncoding, Osc99PayloadType, Osc99RejectedChunk,
     };
     use freminal_common::buffer_states::progress::ProgressUpdate;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -741,6 +749,16 @@ mod tests {
         }
     }
 
+    /// Extract the rejected chunk from a single-element output, panicking on
+    /// mismatch.
+    fn expect_notify99_rejected(output: &[TerminalOutput]) -> &Osc99RejectedChunk {
+        assert_eq!(output.len(), 1, "expected one output, got: {output:?}");
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::Notify99Rejected(rejected)) => rejected,
+            other => panic!("expected Notify99Rejected, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn osc99_title_payload_bel() {
         // 99 ; p=title ; Hello  BEL
@@ -805,38 +823,93 @@ mod tests {
     }
 
     #[test]
-    fn osc99_invalid_metadata_no_output() {
-        // "foo" has no `=` → `parse_osc_99` returns `InvalidMetadata` → handler swallows.
+    fn osc99_bare_metadata_token_is_ignored_and_payload_still_parsed() {
+        // "foo" has no `=`: the parser skips it rather than failing the sequence.
         let output = feed_osc(b"99;foo;body\x07");
-        assert!(output.is_empty(), "got: {output:?}");
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.payload_type, Osc99PayloadType::Title);
+        assert_eq!(cmd.payload, b"body");
     }
 
     #[test]
-    fn osc99_direct_call_invalid_metadata_no_output() {
-        // Direct-call test: invalid metadata bytes → empty output, no panic.
+    fn osc99_direct_call_multi_byte_key_is_ignored() {
+        // Direct-call test: a multi-char key is skipped, the rest still applies.
         let mut output = Vec::new();
-        // "foo=bar" has a multi-char key → InvalidMetadata
-        super::handle_osc_notify_99(b"99;foo=bar;body", &mut output);
-        assert_eq!(output, []);
+        super::handle_osc_notify_99(b"99;foo=bar:i=x;body", &mut output);
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.id, Some("x".to_owned()));
+        assert_eq!(cmd.payload, b"body");
+    }
+
+    #[test]
+    fn osc99_non_utf8_plain_payload_is_accepted_with_bytes_preserved() {
+        let output = feed_osc(b"99;i=1:p=title;\xFF\xFE\x07");
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.payload, [0xFF, 0xFE]);
+        assert_eq!(cmd.payload_encoding, Osc99PayloadEncoding::Plain);
+    }
+
+    #[test]
+    fn osc99_illegal_id_characters_are_sanitised() {
+        let output = feed_osc(b"99;i=a/b:p=title;x\x07");
+        let cmd = expect_notify99(&output);
+        assert_eq!(cmd.id, Some("ab".to_owned()));
+    }
+
+    #[test]
+    fn osc99_too_many_metadata_items_yields_a_rejected_chunk() {
+        // 65 items, the id and the not-done marker among them: the sequence
+        // is rejected, but its identity survives as a `Notify99Rejected`.
+        let mut sequence = b"99;i=mid:d=0:".to_vec();
+        sequence.extend(
+            vec!["u=1"; MAX_OSC99_METADATA_ITEMS - 1]
+                .join(":")
+                .into_bytes(),
+        );
+        sequence.extend_from_slice(b";x\x07");
+        let output = feed_osc(&sequence);
+        let rejected = expect_notify99_rejected(&output);
+        assert_eq!(
+            rejected,
+            &Osc99RejectedChunk {
+                id: Some("mid".to_owned()),
+                chunk_state: Osc99ChunkState::More,
+            },
+            "only the identity of the transfer survives"
+        );
+    }
+
+    #[test]
+    fn osc99_direct_call_oversized_sequence_yields_a_rejected_chunk() {
+        // The OSC accumulator caps the body first, so reach the parser's own
+        // guard by calling the handler directly.
+        let mut raw = b"99;i=1:d=0:p=title;".to_vec();
+        raw.extend(std::iter::repeat_n(b'x', MAX_OSC99_SEQUENCE_BYTES));
+        let mut output = Vec::new();
+        super::handle_osc_notify_99(&raw, &mut output);
+        let rejected = expect_notify99_rejected(&output);
+        assert_eq!(rejected.id, Some("1".to_owned()));
+        assert_eq!(rejected.chunk_state, Osc99ChunkState::More);
     }
 
     /// A parse failure on an OSC 99 with a huge payload must not copy the
     /// payload into the log: every event stays small.
     #[test]
     fn osc99_parse_error_log_is_bounded() {
-        let mut sequence = b"99;i=1:p=title;".to_vec();
-        // Not valid UTF-8, so the plain payload is rejected by the parser.
+        let mut sequence = b"99;".to_vec();
+        // Too many metadata items, so the parser rejects it.
+        sequence.extend(
+            vec!["d=1"; MAX_OSC99_METADATA_ITEMS + 1]
+                .join(":")
+                .into_bytes(),
+        );
+        sequence.push(b';');
         sequence.extend(std::iter::repeat_n(0xFFu8, 100_000));
         sequence.push(0x07);
 
         let events = capture(|| {
             let output = feed_osc(&sequence);
-            assert!(
-                output
-                    .iter()
-                    .all(|o| !matches!(o, TerminalOutput::OscResponse(AnsiOscType::Notify99(_)))),
-                "an invalid payload must not produce a notification"
-            );
+            let _ = expect_notify99_rejected(&output);
         });
 
         assert!(

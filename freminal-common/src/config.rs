@@ -1043,6 +1043,7 @@ pub enum FreminalToastCategory {
 /// routing_osc99 = "both"
 /// routing_command_finished = "system_when_unfocused"
 /// command_finished_template = "{command} finished in {duration} (exit {exit_code})"
+/// osc99_filters = ["app:^slack$", "type:^im\\.", "title:(?i)spam"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1146,6 +1147,20 @@ pub struct NotificationsConfig {
     ///
     /// Default: `"{command} finished in {duration} (exit {exit_code})"`.
     pub command_finished_template: String,
+
+    /// User filters for OSC 99 (kitty stateful) notifications, one rule per
+    /// entry, in kitty's style.
+    ///
+    /// A rule is either the bare word `all` (matches every notification) or
+    /// `location:regex`, where `location` is one of `title`, `body`, `app`
+    /// (the `f=` application name) or `type` (any `t=` value) and `regex` is
+    /// a Rust regular expression searched (not anchored) within that field.
+    /// Matching is case-sensitive; use `(?i)` for case-insensitive.
+    ///
+    /// A notification matching any rule is dropped silently: it is not
+    /// displayed and the application gets no reply. An invalid rule is
+    /// logged and ignored. Default: empty (nothing is filtered).
+    pub osc99_filters: Vec<String>,
 }
 
 impl Default for NotificationsConfig {
@@ -1171,6 +1186,7 @@ impl Default for NotificationsConfig {
             command_finished_template: String::from(
                 "{command} finished in {duration} (exit {exit_code})",
             ),
+            osc99_filters: Vec::new(),
         }
     }
 }
@@ -2468,6 +2484,33 @@ size = 14.0
     }
 
     #[test]
+    fn osc99_filters_default_to_empty() {
+        assert_eq!(
+            NotificationsConfig::default().osc99_filters,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn osc99_filters_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.notifications.osc99_filters = vec![
+            "all".to_owned(),
+            r"app:^slack$".to_owned(),
+            r"type:^im\.".to_owned(),
+            "title:(?i)spam".to_owned(),
+        ];
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert_eq!(
+            parsed.notifications.osc99_filters,
+            cfg.notifications.osc99_filters
+        );
+    }
+
+    #[test]
     fn freminal_toast_categories_default_to_toast() {
         let cfg = NotificationsConfig::default();
         assert_eq!(cfg.routing_clipboard_copy, FreminalToastRouting::Toast);
@@ -3567,6 +3610,7 @@ mode = "none"
             !Config::default().shell_integration.set_term_program;
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
         original.notifications.enabled = !Config::default().notifications.enabled;
+        original.notifications.osc99_filters = vec!["title:^build".to_owned()];
         original.chrome.profile = crate::gui_theme::StyleProfile::Retro;
         original.progress.enabled = !Config::default().progress.enabled;
         original
@@ -3648,6 +3692,10 @@ mode = "none"
         assert_eq!(
             loaded.notifications.enabled, original.notifications.enabled,
             "notifications section dropped"
+        );
+        assert_eq!(
+            loaded.notifications.osc99_filters, original.notifications.osc99_filters,
+            "notifications osc99_filters dropped"
         );
         assert_eq!(
             loaded.chrome.profile,
@@ -3796,6 +3844,32 @@ osc_99 = false
         assert!(!cfg.notifications.enabled);
         assert!(cfg.notifications.osc_9);
         assert!(cfg.notifications.osc_777);
+    }
+
+    #[test]
+    fn notifications_osc99_filters_survive_partial_merge() {
+        // The filters must come through the real load path
+        // (ConfigPartial -> apply_partial), not only a direct `Config`
+        // deserialise, and must not disturb the section's other defaults.
+        let mut cfg = Config::default();
+        assert_eq!(cfg.notifications.osc99_filters, Vec::<String>::new());
+
+        let partial: ConfigPartial = toml::from_str(
+            r#"
+[notifications]
+osc99_filters = ["app:^slack$", "all"]
+"#,
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+
+        assert_eq!(
+            cfg.notifications.osc99_filters,
+            vec!["app:^slack$".to_owned(), "all".to_owned()],
+            "[notifications] osc99_filters must merge through ConfigPartial"
+        );
+        assert!(cfg.notifications.osc_99);
+        assert!(!cfg.notifications.enabled);
     }
 
     #[test]

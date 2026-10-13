@@ -30,7 +30,8 @@ one plan document, grouped into milestones that ship as point releases:
 
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
-(activated 2026-10-10), **147** (created 2026-10-11), and **132** (activated 2026-10-11).
+(activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
+**138** (activated 2026-10-12).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -49,8 +50,8 @@ enriched stubs again and get re-decomposed at activation.
 | 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
 | 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Pending merge | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Planned       | 129, 130                           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Pending merge | 129, 130                           |
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
@@ -142,7 +143,7 @@ claims to verify, not as evidence.
 | Underlines            | Complete                                            | Mostly compliant. SGR 21 means bold-off where kitty means double underline; `4:N>5` clears instead of clamping; underline geometry untested and unclamped; default colour wrong under SGR 7 + DECSCNM                                                | 140           |
 | Graphics              | "Fully implemented", "graphics surface is complete" | ~30 deviations, 5 high. Replies to id-less commands; `t=t` deletes arbitrary files; text and erase destroy image tiles; placing an image pre-clears others below; no negative-z layering; cursor-after-placement rule wrong                          | 126, 135, 136 |
 | Keyboard              | "Substantially compliant, remainder tracked"        | Encoder machinery sound, but the GUI layer feeding it is not. Alt/Super never applied to text keys; modified Enter dropped; Enter/Tab/BS/Esc carry no modifiers; key identity from typed text; flag-4 shifted-key rule violated; F13–F35 unreachable | 137           |
-| Desktop notifications | Done, incl. reports and `p=?` handshake             | Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close; ~~`p=?` answered after DA1~~ (fixed by 130)                              | 138           |
+| Desktop notifications | Done, incl. reports and `p=?` handshake             | ~~Buttons reported 0-based; chunk metadata clobbered by defaults; `a=report` disables focus; close report lost after activation; no update-in-place; `p=close` doesn't close~~ (all closed by Task 138); ~~`p=?` answered after DA1~~ (fixed by 130) | 138           |
 | Pointer shapes        | Undocumented                                        | Plain set works. Push, pop and query (and `=`) all reset the shape to default instead; a query gets no reply; no stack                                                                                                                               | 139           |
 | Clipboard (OSC 5522)  | Not mentioned                                       | Entirely missing; payloads would be warn-logged by the unknown-OSC path                                                                                                                                                                              | 146           |
 | Color control         | Not mentioned                                       | OSC 21 and colour stack missing. OSC 10/11 "set" never reaches rendering. `CSI # P` deletes characters. `parse_color_spec` panics on non-ASCII input                                                                                                 | 126, 132, 144 |
@@ -231,7 +232,8 @@ Two seams were considered and **not** made separate tasks:
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
-Every implementation subtask leaves `cargo test --all` and
+Every implementation subtask leaves `cargo xtask test` (nextest plus doctests; the repo
+moved to cargo-nextest in PR #541) and
 `cargo clippy --all-targets --all-features -- -D warnings` green. Every PR runs
 `cargo machete` and `cargo xtask check-windows`.
 
@@ -3073,6 +3075,7 @@ Prohibitions: do NOT touch code.
   `freminal/src/gui/notifications.rs`.
 - **Routing:** Task 138 (OSC 99 conformance) rewrites exactly this data model; doing it there
   avoids changing it twice. Not scheduled in Task 130.
+- **Status:** resolved by 138.1 (the typed transport enums).
 
 #### 130.C5 — XTGETTCAP echoes the raw request on an invalid name
 
@@ -4186,9 +4189,9 @@ the call sites of the removed function in `freminal-common` and `freminal` (`gui
 
 What:
 
-- One function computes the default 256-colour entry: `default_palette_rgb(index: u8, theme)
-  -> (u8, u8, u8)`. 0–15 come from `theme.ansi`; 16–231 are the cube; 232–255 the greyscale
-  ramp. Index 16 is `(0,0,0)`.
+- One function computes the default 256-colour entry:
+  `default_palette_rgb(index: u8, theme) -> (u8, u8, u8)`. 0–15 come from `theme.ansi`; 16–231
+  are the cube; 232–255 the greyscale ramp. Index 16 is `(0,0,0)`.
 - `lookup_default_256_color`, `default_index_to_rgb` and `resolve_palette_default` are replaced
   by it (or become thin wrappers over it, if a caller needs `TerminalColor`). The `256..` arm
   disappears with the `usize` signature.
@@ -4295,8 +4298,8 @@ Scope: new `freminal-terminal-emulator/src/ansi_components/csi_commands/sgr_colo
 What:
 
 - `pub enum SgrColorForm { Semicolon, Colon }`.
-- `pub fn parse_sgr_color(params: &[Option<usize>], form: SgrColorForm) -> Result<SgrColor,
-  SgrColorError>` where `params` starts at the colour-type value (the element after 38/48/58),
+- `pub fn parse_sgr_color(params: &[Option<usize>], form: SgrColorForm) -> Result<SgrColor, SgrColorError>`
+  where `params` starts at the colour-type value (the element after 38/48/58),
   `SgrColor { color: TerminalColor, consumed: usize }` (`color` is `PaletteIndex` or `Custom`;
   `consumed` counts the elements used, including the type), and `SgrColorError` distinguishes
   `Incomplete` from `UnknownType(usize)`.
@@ -4541,8 +4544,9 @@ Deliverable: the doc changes, markdownlint clean.
   `Region(pane rect)` rather than `Full`. The links on either side are tested
   (`frame_dirty.rs` decides `content_changed`; `frame_damage.rs` aggregates `Region`).
 - **Scope of fix:** `freminal/src/gui/terminal/widget.rs`.
-- **Suggested approach:** the mapping from `(FullRebuildDamage, Option<PaneDamageRect>,
-  EmptyBoundedDamage inputs)` to `PaneFrameDamage` is a decision with real branches (the
+- **Suggested approach:** the mapping from
+  `(FullRebuildDamage, Option<PaneDamageRect>, EmptyBoundedDamage inputs)` to `PaneFrameDamage`
+  is a decision with real branches (the
   `Bounded` arm's search-only fallback); per `freminal-extend-or-extract`, give it a named
   function because it is a decision, not only to test it, then unit-test every arm.
 - **Verification:** a test per arm, including `Full` with and without a degenerate pane rect.
@@ -4771,8 +4775,9 @@ R1 partial. No blockers or majors. New findings and dispositions:
 - **132.C4 (done).** `UploadByteCounts::background_quad_vbo_bytes` counts the base-fill quad
   (144 bytes) and the background-image quad (96 bytes) on full and cursor-only frames; added
   to the flush line. Compiled away without `frame-profiling`.
-- **132.C2 (done).** `decide_full_rebuild(VertexRebuild, FrameDirtyObservations,
-  PriorVertexState)` and `pane_damage_for_full_rebuild(Option<PaneDamageRect>)` named and
+- **132.C2 (done).**
+  `decide_full_rebuild(VertexRebuild, FrameDirtyObservations, PriorVertexState)` and
+  `pane_damage_for_full_rebuild(Option<PaneDamageRect>)` named and
   unit-tested; `osc4_change_in_one_of_two_panes_damages_only_that_pane` runs the real chain to
   `decide_frame_damage` and gets `Partial` with exactly that pane's rect. The never-built read
   of `cursor_vert_range` is now taken on every non-skipped frame (one uncontended lock).
@@ -4796,6 +4801,2151 @@ R1 partial. No blockers or majors. New findings and dispositions:
   `.#gl-pixel`). C6's first commit attempt was rejected by `xtask-check` ("files were modified
   by this hook") because the orchestrator started the C7 agent concurrently with the commit;
   retried alone, it passed.
+- **Merged** 2026-10-11 via PR #539 (`9a04f73e`).
+
+---
+
+## Task 138 — Desktop Notifications (OSC 99) Conformance
+
+### 138 Summary
+
+**Goal.** Close every OSC 99 deviation, so freminal matches the kitty desktop-notification
+spec (kitty 0.49.2): parse and reassembly fidelity, a correct reverse path, the full lifecycle
+(update in place, close, activation followed by close, expiry, focus), presentation (icons,
+sounds, urgency, category, markup), user filtering, and a `p=?` reply that is truthful for
+every routing and platform.
+
+Activated and decomposed on 2026-10-12 on `task-138/osc99-conformance`, branched from `main`
+at `8c040150` (after PR #541) and since rebased onto `724b291c` (after PR #551). The branch
+contains a `chore(deps): cargo update` commit (`794a7980`) that is not Task 138 work. Closes
+130.C4 and the 147 routing note on the saturated 128-id map.
+
+### 138 Activation recon (2026-10-12)
+
+Four read-only passes: the PTY-side data model, parser and reassembly; the GUI routing,
+notify-rust usage and toast leg; the notify-rust 4.18.1 / zbus 5.19.0 source; and kitty's
+reference implementation (`kitty/notifications.py`, `constants.py`, `xdg.py`,
+`glfw/linux_notify.c`) for the points the spec leaves to the implementation.
+
+Every stub finding was confirmed, except one: **chunked base64 is already decoded as one
+stream** (Task 129's `BoundedChunkAssembler`, tests in `notify_99.rs`). Findings beyond the
+stub:
+
+- **Parse.** An invalid value for any known key (`d=2`, `c=2`, `u=3`, `w<-1`, bad base64 in
+  `f`/`n`/`s`/`t`, a bad id character) drops the whole sequence. Dropping a middle chunk this
+  way silently truncates the transfer. An empty `a=` clears both actions. A plain payload that
+  is not UTF-8 drops the sequence. Ids have no length cap.
+- **Reassembly.** Control payloads (`p=close` / `p=alive` / `p=?`) wait for `d=1` and occupy a
+  pending slot. A saturated map also refuses `p=?`. A final control chunk for an id with
+  pending content discards that content, because routing uses the final chunk's `p=`.
+- **Reverse path.** No `"default"` action is registered, so a click on the notification body
+  may never be reported on many daemons. `p=alive` without an id replies with `i=0`; kitty does
+  not reply. The live-id map is global across panes, so one pane sees and can forget another
+  pane's ids.
+- **Lifecycle.** notify-rust's `wait_for_action` is one-shot and consuming, and `show()` opens
+  a D-Bus connection per notification. A close after an activation, update in place and
+  programmatic close are impossible through its public API. macOS and Windows backends have no
+  `close()`, `update()` or `id()`.
+- **Presentation.** The icon temp file is deleted as soon as `show()` returns, which races the
+  daemon reading it. `s=system` is forwarded as the sound name `"system"`. On Windows, no
+  `s=` means _no sound_, because notify-rust maps a missing sound name to a silent toast. The
+  body is passed to daemons that interpret markup. A missing title duplicates the body into
+  both summary and detail. Buttons are uncapped.
+- **Advertisement.** `p=?` advertises `w=1` (OS-advisory only), `s=system,silent` (`silent`
+  not honoured), `p=close` (does nothing), `u=0,1,2` on macOS (no urgency there), `c=1` on
+  macOS/Windows (the "close" is fabricated at display) and never `a=focus`.
+- **GUI.** Pane identity is dropped before routing, so `o=` uses OS-window focus only. A failed
+  `RefCell` borrow silently drops a frame's OSC 99 notifications. The toast leg has no keyed
+  lifecycle, no per-toast lifetime and no buttons.
+- **Tests that pin non-conformant behaviour** (updated by the subtasks that change it):
+  `a_equals_report_report_true_focus_false`, `a_equals_minus_report`,
+  `empty_value_for_actions_clears_both_flags`, `p_equals_unknown_ignored_stays_title`,
+  `d_equals_two_invalid_integer`, `u_equals_three_invalid`, `w_equals_minus_two_invalid`,
+  `empty_value_for_flag_keys_is_invalid_integer`, `i_equals_illegal_char_returns_invalid_id`,
+  `e_equals_zero_non_utf8_payload_is_rejected`, `unidentified_non_final_never_merged`,
+  `reassembly_caps_number_of_pending_notifications`, `tombstones_count_toward_pending_cap`,
+  the `query_reply_body_*` tests, `tests/osc99_query.rs` `TAIL`, and the
+  `route_osc99_occasion_*` tests.
+
+### 138 Decisions (maintainer, 2026-10-12)
+
+1. **Linux/BSD system leg moves to a zbus service.** `zbus` becomes a direct dependency on
+   `cfg(all(unix, not(target_os = "macos")))`. One dispatcher thread owns one D-Bus
+   connection and calls `Notify`, `CloseNotification` and `GetCapabilities`. One signal-pump
+   thread forwards `ActionInvoked` and `NotificationClosed`. They talk to the GUI over two
+   GUI-internal crossbeam channels (commands in, events out, with a repaint wake). No new PTY
+   channel. OSC 9 / OSC 777 / command-finished notifications stay on notify-rust.
+2. **macOS and Windows: truthful advertisement only.** No new lifecycle code on those
+   platforms. Their system leg is _untracked_: no activation reports, no close tracking (a
+   `c=1` request gets `p=close;untracked` at display, as kitty does on macOS), no update, no
+   programmatic close, no expiry. `p=?` omits whatever the routing cannot honour (see the leg
+   capability rules below).
+3. **The toast leg gets full lifecycle parity.** Update in place by id, close by id, a
+   per-toast lifetime from `w=`, rendered clickable buttons (1-based reports), body click →
+   activation (report and focus), dismiss / expiry / eviction / app close → close report.
+4. **User filtering is a `location:regex` rule list**: `[notifications] osc99_filters`, kitty
+   semantics (regex _search_, any match drops silently, no reply), locations `title`, `body`,
+   `app`, `type`, plus the bare rule `all`. No boolean `and`/`or`/`not`. Invalid rules are
+   logged and ignored.
+
+### 138 Decisions (orchestrator, recorded so they are not re-litigated)
+
+freminal is MIT and kitty is GPLv3: kitty is read for observable behaviour only, no code is
+copied. Where the spec is silent kitty's behaviour is the tie-breaker; every place freminal
+deliberately differs from kitty is marked **(differs from kitty)**.
+
+**Parsing (PTY thread).**
+
+- An invalid value for a known key **ignores that key**; the rest of the sequence still
+  applies (spec line 826 allows this; kitty does it). `c=` and `d=` are true for any value
+  other than `0`; `e=` is base64 only for `1`; an unparsable `u=` is ignored; `w=` is clamped
+  to `max(-1, v)` and an unparsable `w=` is ignored; a `f`/`n`/`s`/`t` value that is not
+  base64 UTF-8 is ignored.
+- A malformed metadata token (no `=`, or a key that is not exactly one byte) is ignored, not a
+  sequence error. Unknown keys are ignored, as today.
+- `i=` and `g=` are **sanitised, not rejected**: characters outside `[A-Za-z0-9_+.-]` are
+  removed and the result is truncated to 512 bytes (kitty). An id that is empty after
+  sanitisation is treated as absent. `i=0` is an ordinary id (the spec only tells
+  applications not to use it).
+- An empty `a=` changes nothing. `a=` tokens are **edits applied in arrival order**, starting
+  from the default `{focus}`; `report`/`focus` add, `-report`/`-focus` remove, unknown words
+  are ignored. Across chunks the edits keep accumulating **(differs from kitty**, whose union
+  merge lets a later chunk without `a=` resurrect a removed `focus`).
+- An unknown `p=` value is its own payload type: its payload is discarded and its metadata
+  and `d=` still apply.
+- A plain payload that is not valid UTF-8 is decoded lossily (U+FFFD), not rejected.
+- The per-chunk 1 MiB cap stays. Receiving larger chunks than the spec's 2048 / 4096-byte
+  sender limit is receiver leniency, not a defect.
+
+**Reassembly (PTY thread).**
+
+- **Control payloads act immediately, whatever `d=` says**, and never enter or touch the
+  pending map (kitty acts immediately but also discards the window's pending command;
+  freminal keeps it **(differs from kitty)**).
+  - `p=?` is answered (id-less replies use `i=0`, as today).
+  - `p=close` and `p=alive` without an id are no-ops (spec line 868; kitty for `alive`).
+  - With an id they are forwarded to the GUI as `Osc99Control`.
+- **Id-less content chunks accumulate in one unidentified slot** per handler (kitty's single
+  pending command, keyed by "no id"). A `d=0` id-less chunk no longer drops.
+- **Metadata merges across chunks.** Scalars (`c`, `o`, `u`, `w`, `f`, `g`, `s`) take the
+  latest explicitly-set value; lists (`n`, `t`) concatenate in arrival order; `a=` edits
+  accumulate (above); `e=` and `p=` are per chunk. Defaults are applied once, at finalisation.
+- **The pending map never refuses.** At 128 entries the least-recently-touched entry
+  (tombstones included) is evicted. Combined with the 512-byte id cap this bounds tombstones.
+- At finalisation:
+  - Title and body have C0 controls except LF, DEL and C1 controls removed, matching kitty's
+    `[\x00-\x09\x0b-\x1f\x7f-\x9f]`. The same stripping applies to button labels, icon names,
+    app name, types and sound name **(differs from kitty**, which leaves those alone; they are
+    shown in freminal's toast and sent over D-Bus).
+  - A title or body longer than 1024 characters is cut to 1023 characters plus `…` (kitty's
+    `limit_size`). At most 8 buttons are kept, each limited to 256 characters the same way.
+    **Superseded by 138.C7:** the cut is a hard one at 1024 / 256 characters with no `…`,
+    which is what `limit_size` does.
+  - An empty title takes the body, and the body becomes empty. A notification with neither is
+    dropped with no reply (spec line 1132).
+
+**Transport (130.C4).** Every transported OSC 99 flag is a named domain enum
+(`freminal-state-representation`). Urgency, occasion and expiry use typed values, not
+`Option<u8>` / `Option<String>` / `Option<i64>`. The title is guaranteed non-empty.
+
+**GUI lifecycle.**
+
+- The GUI owns an `Osc99Registry`: notification instances keyed by `(PaneId, id)`, plus
+  id-less instances, each with a fresh `Osc99InstanceId`. The registry is a pure state machine
+  that returns effects (reply, focus, show/update/close per leg). A thin executor in the GUI
+  applies them. It is capped at 128 instances (oldest forgotten, with no reply), like kitty.
+- **Scoping is per pane.** Update in place, `p=close` and `p=alive` only see the requesting
+  pane's instances **(differs from kitty**, whose `p=close` looks across all windows). Ids are
+  meant to be unique, and pane scoping stops one pane closing or seeing another's
+  notifications.
+- Pane identity is the `Weak` reply handle plus `(WindowId, PaneId)`. An instance whose pane
+  is gone (`Weak` no longer upgrades) is pruned every frame. Its displayed notifications stay
+  on screen and simply produce no replies. No close-path hooks are needed.
+- **Legs.** An instance is shown on one or more legs (toast, Linux system, untracked system)
+  chosen by the existing routing at display time.
+  - Activation from any leg is reported (when `a=report`) and focuses (when `focus`), and
+    closes the instance's other legs (the user has acted on it).
+  - An activation without `c=1` forgets the instance (kitty). With `c=1` the instance stays
+    until its last tracked leg closes, and then exactly one close report is sent.
+  - `p=close` and expiry close every leg.
+  - An update replaces every leg in place and suppresses the replaced notification's close
+    report (kitty).
+  - If any displayed leg is untracked and `c=1` was requested, `p=close;untracked` is sent at
+    display and no later close report is sent.
+- **Expiry.** A positive `w=` is enforced by the registry on every leg: at the deadline every
+  leg is closed, whatever the OS or hover state. The GUI schedules a repaint for the nearest
+  deadline. `w=0` means never expire (toast: until dismissed). `w=-1` uses the leg's default.
+- **`o=` is pane-aware** (spec line 1124, kitty `ui_state`).
+  - _Focused_ means the OS window is focused, the pane's tab is active and the pane is the
+    tab's active pane.
+  - _Visible_ means the OS window is focused and not minimised, the tab is active, and no
+    other pane is zoomed.
+  - `unfocused` shows only when not focused. `invisible` shows only when not focused and not
+    visible.
+  - The routing choice (`wants_toast` / `wants_system`) keeps using OS-window focus. That is
+    freminal's own routing semantics, not the protocol's.
+- **Focus action.** Activation with `focus` switches the pane's window to the pane's tab,
+  unzooms that tab if another pane is zoomed, makes the pane active (with the usual
+  `FocusChange` events), and calls `WindowHandle::focus_window`. Compositor focus-stealing
+  rules (for example on Wayland) can refuse the OS-window raise. That is platform policy, so
+  the D-Bus `ActivationToken` signal is not consumed.
+- **Filtering** runs after the `o=` check, as in kitty. A filtered notification is dropped
+  with no reply.
+- **The `g=` icon cache stays global** (spec: it lives as long as the terminal runs) but
+  becomes least-recently-used, as the spec asks, keeping today's 64-entry / 4 MiB bound.
+
+**Toast leg.**
+
+- `ToastStack` gains a generic keyed lifecycle (`ToastKey`, opaque to the toast module) and
+  emits `ToastEvent`s for keyed toasts only. Freminal's own toasts are unchanged.
+- Body click gives `Activated` then `Closed`. The `×` gives `Closed`. Button _n_ gives
+  `Button(n)` then `Closed`. Expiry, eviction past `MAX_TOASTS` and `close_keyed` give
+  `Closed`.
+- Urgency: `Critical` uses `ToastKind::Error` and stays until dismissed unless `w>0`;
+  `Normal` uses `ToastKind::Info` with its default lifetime; `Low` uses `ToastKind::Info` at
+  half the Info lifetime.
+- Toasts do not render icons and play no sounds (see the capability rules). **Superseded by
+  138.C4 for icons:** the first standard `n=` name shows as a bundled-font glyph in the toast's
+  icon slot. Toasts still render no transmitted images and play no sounds.
+
+**Linux/BSD system leg (zbus).**
+
+- The service is started on the first capability resolution where OSC 99 is supported and the
+  routing can take the system leg. It lives for the rest of the process. The dispatcher thread
+  exits when the GUI drops its command sender. The pump exits on its next send after that.
+- The pump forwards signals **into the dispatcher's input channel**, not to the GUI. The
+  dispatcher owns the D-Bus-id ↔ instance map. A signal that arrives during a `Notify` call
+  is therefore processed after the call has recorded its id, which removes the ordering race
+  between the two threads.
+- One match rule (signals on interface `org.freedesktop.Notifications`, path
+  `/org/freedesktop/Notifications`) on the pump. Members other than `ActionInvoked` and
+  `NotificationClosed` are ignored.
+- `Notify` arguments:
+  - `app_name` is the `f=` value, else `freminal`.
+  - `replaces_id` is the replaced instance's D-Bus id, else 0.
+  - `expire_timeout` is −1 / 0 / ms.
+  - `actions` is `["default", ""]` plus `["1", label1, …]`, sent only when the daemon has the
+    `actions` capability.
+  - Hints: `urgency` (byte), `category` (the first non-empty `t=`), `suppress-sound=true` for
+    `silent`, `sound-name` for a named sound, and `image-data` (`(iiibiiay)`, RGBA) when
+    transmitted icon data is used.
+- The body has `<` and `&` followed by U+200C when the daemon reports `body-markup` (kitty).
+- Icon resolution (kitty order):
+  - Each `n=` name in order: a standard name maps to its freedesktop name; otherwise the name is
+    used if it exists in the XDG icon scan.
+  - If none matches, the transmitted icon data (decoded with the workspace `image` crate) is
+    used, else the first `n=` name verbatim.
+  - With no `n=` names: icon data, else the icon of the `.desktop` file matching `f=`, else
+    freminal's icon.
+  - Standard names: `error`→`dialog-error`, `warn`/`warning`→`dialog-warning`,
+    `info`→`dialog-information`, `question`→`dialog-question`, `help`→`system-help`,
+    `file-manager`→`system-file-manager`, `system-monitor`→`utilities-system-monitor`,
+    `text-editor`→`utilities-text-editor`.
+- Sounds:
+  - `system` sends no sound hint. `silent` sends `suppress-sound`.
+  - `error`/`warn`/`warning`/`info`/`question` send `sound-name` `dialog-error` /
+    `dialog-warning` / `dialog-information` / `dialog-question`. Any other name is sent
+    verbatim as `sound-name`.
+  - **(differs from kitty**, which plays named sounds itself through libcanberra; freminal has
+    no sound library and uses the freedesktop hint.)
+- Until `GetCapabilities` answers, the daemon is assumed to have `body`, `actions` and
+  `body-markup`, and not `sound` (kitty also assumes support before the reply). If the session
+  bus cannot be reached, the system leg is unavailable: displays on it close immediately, it
+  contributes no capabilities, `System` routing becomes `Osc99Support::Unsupported` (nothing
+  could ever be displayed), and one warning is logged.
+- Signals are mapped as follows:
+  - `ActionInvoked("default")` is a body activation; `"1"`–`"8"` are button activations.
+  - `NotificationClosed` with any reason is a close.
+  - A close or action for a D-Bus id with no live instance is ignored (this covers replaced
+    notifications).
+- The `image-data` hint key is used unconditionally; notification spec 1.2 daemons are
+  universal. A decoded icon with a side over 256 is downscaled to fit 256×256 before sending
+  (superseded at 138.14 from "over 1024", for transport cost). Decoding is limited to
+  4096×4096 and 64 MiB.
+
+**macOS / Windows system leg.**
+
+- Fire-and-forget notify-rust, with no waiting thread. Buttons are not registered, because
+  their activation cannot be observed. (**Superseded by 138.C15:** one delivery thread with a
+  queue of 16 does the work, and Windows builds its toast directly with
+  `tauri-winrt-notification`.)
+- Sound: `system` uses the platform default (`NSUserNotificationDefaultSoundName` on macOS,
+  `"Default"` on Windows). `silent` sets no sound name, which both backends treat as silent.
+  Other names fall back to the platform default.
+- Icon temp files are written once per content hash into
+  `std::env::temp_dir()/freminal-osc99-icons/`, capped at 64 files (oldest deleted), and the
+  directory is removed at shutdown. This replaces deleting the file right after `show()`.
+  (**Superseded by 138.C15:** the directory is per process, `freminal-osc99-icons-<pid>`, mode
+  `0700`, and files are also deleted by age.)
+
+**Leg capabilities and `p=?` truthfulness.** Each leg has a capability set:
+
+| Capability           | Toast | Linux/BSD system     | macOS system | Windows system |
+| -------------------- | ----- | -------------------- | ------------ | -------------- |
+| Activation report    | yes   | daemon has `actions` | no           | no             |
+| Focus on activation  | yes   | daemon has `actions` | no           | no             |
+| Close events (track) | yes   | yes                  | no           | no             |
+| Auto-expiry          | yes   | yes                  | no           | no             |
+| Urgency              | yes   | yes                  | no           | yes            |
+| Standard sound names | no    | daemon has `sound`   | no           | no             |
+| Body                 | yes   | daemon has `body`    | yes          | yes            |
+| Buttons              | yes   | daemon has `actions` | no           | no             |
+| Icons                | no    | yes                  | yes          | yes            |
+
+The routing combines its legs:
+
+- `Toast` and `System` use their one leg.
+- `Both` shows both legs together. A feature that one leg suffices for (report, focus, urgency,
+  sound names, body, buttons, icons) is advertised if **either** leg has it. A per-notification
+  guarantee (close events, auto-expiry) is advertised only if **both** legs have it.
+- `SystemWhenUnfocused` shows either leg depending on focus, so every feature needs **both**
+  legs.
+
+The reply follows kitty's key order and values:
+
+```text
+a=focus,report : o=always,unfocused,invisible : u=0,1,2 : p=title,body,?,close,icon,alive,buttons : c=1 : w=1 : s=system,silent,error,info,question,warn,warning
+```
+
+Absent features drop their key or list item: `a` lists only supported actions and is omitted
+if none; `body` / `icon` / `buttons` drop out of `p`; `u`, `c` and `w` are omitted;
+`s` is `system,silent` without standard sound names.
+
+### 138 Types (decided)
+
+In `freminal-common/src/buffer_states/osc99_notification.rs` (new; 138.1). The transport
+types move here from `window_manipulation.rs`:
+
+```rust
+pub enum Osc99ActivationReporting { Report, Silent }
+pub enum Osc99ActivationFocus { Focus, NoFocus }
+pub enum Osc99CloseReporting { Report, Silent }
+pub enum Osc99Expiry { OsDefault, Never, After(NonZeroU32) }   // milliseconds
+pub enum Osc99Sound { System, Silent, Named(String) }
+pub enum Osc99ControlKind { Close, Alive }                      // moved, unchanged
+pub struct Notification99Data {
+    pub id: Option<String>,
+    pub title: String,                     // non-empty after 138.3
+    pub body: Option<String>,
+    pub icon_data: Option<Vec<u8>>,
+    pub icon_names: Vec<String>,
+    pub icon_cache_key: Option<String>,
+    pub buttons: Vec<String>,
+    pub activation_reporting: Osc99ActivationReporting,
+    pub activation_focus: Osc99ActivationFocus,
+    pub close_reporting: Osc99CloseReporting,
+    pub urgency: NotificationUrgency,      // Normal when unset
+    pub occasion: NotificationOccasion,
+    pub sound: Osc99Sound,
+    pub app_name: Option<String>,
+    pub notification_types: Vec<String>,
+    pub expiry: Osc99Expiry,
+}
+```
+
+`WindowManipulation::Osc99Control { id: String, kind }`. After 138.3 the id is mandatory,
+because id-less controls never leave the PTY thread.
+
+In `freminal-common/src/host_capabilities.rs` (138.1), `Osc99Features` gains the following
+fields, each a two-variant enum (`Supported` / `Unsupported`, except where named):
+
+```rust
+pub struct Osc99Features {
+    pub activation_report: Osc99ActivationReport,   // existing
+    pub activation_focus: Osc99FocusAction,          // Supported | Unsupported
+    pub close_events: Osc99CloseEvents,              // existing
+    pub auto_expiry: Osc99AutoExpiry,
+    pub urgency: Osc99UrgencySupport,
+    pub sound_names: Osc99SoundNames,                // SystemAndSilent | Standard
+    pub body: Osc99BodySupport,
+    pub buttons: Osc99ButtonSupport,
+    pub icons: Osc99IconSupport,
+}
+```
+
+In `freminal-common/src/buffer_states/osc_notify_99.rs` (138.2), `Osc99Command` becomes
+unset-aware, so reassembly can merge:
+
+```rust
+pub enum Osc99ChunkState { More, Done }
+pub enum Osc99ActionEdit { Add(Osc99Action), Remove(Osc99Action) }
+pub enum Osc99Action { Report, Focus }
+pub enum Osc99PayloadType { Title, Body, Close, Icon, Alive, Buttons, Query, Unknown }
+pub struct Osc99Command {
+    pub id: Option<String>,
+    pub payload_type: Osc99PayloadType,
+    pub chunk_state: Osc99ChunkState,
+    pub payload: Vec<u8>,
+    pub payload_encoding: Osc99PayloadEncoding,
+    pub action_edits: Vec<Osc99ActionEdit>,
+    pub close_reporting: Option<Osc99CloseReporting>,
+    pub app_name: Option<String>,
+    pub icon_cache_key: Option<String>,
+    pub icon_names: Vec<String>,
+    pub occasion: Option<NotificationOccasion>,
+    pub sound: Option<String>,             // raw name; mapped to Osc99Sound at finalisation
+    pub notification_types: Vec<String>,
+    pub urgency: Option<NotificationUrgency>,
+    pub expiry: Option<Osc99Expiry>,
+}
+```
+
+In the GUI (`freminal/src/gui/osc99/`, new directory; 138.6 onward):
+
+```rust
+pub(crate) struct Osc99InstanceId(u64);
+pub(crate) struct Osc99Origin { pub window_id: WindowId, pub pane_id: PaneId }
+pub(crate) enum PaneKeyboardFocus { Focused, Unfocused }
+pub(crate) enum PaneVisibility { Visible, Hidden }
+pub(crate) struct Osc99PaneState { pub focus: PaneKeyboardFocus, pub visibility: PaneVisibility }
+pub(crate) enum Osc99Leg { Toast, LinuxSystem, UntrackedSystem }
+pub(crate) enum Osc99Effect {
+    Reply { reply_tx: Weak<Sender<InputEvent>>, reply: GuiReply },
+    FocusPane(Osc99Origin),
+    ShowToast { instance: Osc99InstanceId, replaces: Option<Osc99InstanceId>, spec: Osc99ToastSpec },
+    CloseToast(Osc99InstanceId),
+    ShowLinuxSystem { instance: Osc99InstanceId, replaces: Option<Osc99InstanceId>, spec: Box<Notification99Data> },
+    CloseLinuxSystem(Osc99InstanceId),
+    ShowUntrackedSystem(Box<Notification99Data>),
+}
+```
+
+In `freminal/src/gui/toast/mod.rs` (138.7; `gui/toast.rs` until 138.C1 split it):
+
+```rust
+pub(super) struct ToastKey(pub u64);
+pub(super) enum ToastLifetime { KindDefault, Fixed(Duration), UntilDismissed }
+pub(super) enum ToastEventKind { Activated, Button(u8), Closed }   // Button is 1-based
+pub(super) struct ToastEvent { pub key: ToastKey, pub kind: ToastEventKind }
+```
+
+### 138 Execution model
+
+Serial, on one checkout (`task-138/osc99-conformance`). The subtasks share
+`notify_99.rs`, `notifications.rs`, the new `gui/osc99/` modules and `toast.rs` (later
+`toast/`), so worktrees
+would buy nothing.
+
+Each subtask is done in four steps:
+
+1. A sub-agent implements it.
+2. The orchestrator reviews it in full against the subtask text, reading the diff line by line.
+3. The orchestrator re-runs the verification suite itself.
+4. Only then does the orchestrator commit it.
+
+A sub-agent that ends without a report is treated as unverified. Its tree state is inspected,
+and the work is then finished by a fresh agent, re-decomposed, or discarded.
+
+Order: 138.1 → 138.18 in number order (138.7 runs as 138.7a then 138.7b; 138.17, the pure
+capability tables, runs before 138.15, which wires them). The adversarial
+review of the whole branch follows
+138.18, and its findings become `138.Cn` entries.
+
+No benchmark subtask: OSC 99 is not on a benchmarked path (`freminal-bench-table` lists none,
+and no bench feeds OSC 99). The parser change keeps `MAX_OSC99_SEQUENCE_BYTES` and the
+tokenizer, so the general OSC path is untouched.
+
+### 138 Subtasks
+
+Every subtask's verification is `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings`, plus anything named below.
+
+Every subtask's prohibitions include: do NOT touch files outside scope, do NOT commit, do NOT
+update plan documents, and do NOT proceed to the next subtask.
+
+Coding rules for every subtask: no `unwrap`/`expect` outside tests, no raw numeric `as`
+casts (`conv2`), no new `bool` fields or parameters, and no `#[allow(dead_code)]`.
+
+The stop condition is the same for all: report files changed and verification results, then
+await review.
+
+#### 138.1 — Transport and capability types (no behaviour change)
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc99_notification.rs` (new),
+  `freminal-common/src/buffer_states/mod.rs`,
+  `freminal-common/src/buffer_states/window_manipulation.rs`;
+- `freminal-common/src/host_capabilities.rs`;
+- `freminal-terminal-emulator/src/terminal_handler/notify_99.rs`
+  (`into_notification99_data`, `osc99_query_reply_body`), and the OSC 99 test fixtures in
+  `terminal_handler/osc.rs`;
+- `freminal/src/gui/host_capabilities.rs`, `freminal/src/gui/notifications.rs`,
+  `freminal/src/gui/rendering.rs` (test fixture only), `freminal/src/gui/app_impl.rs` (only
+  where `Notification99Data` / `Osc99ControlKind` paths change).
+
+What:
+
+- Create `osc99_notification.rs` with the enums and `Notification99Data` exactly as in
+  "138 Types". Move `Osc99ControlKind` there. `window_manipulation.rs` imports both;
+  `Osc99Control.id` stays `Option<String>` in this subtask.
+- Behaviour is preserved:
+  - **Title:** `title` becomes `String`; a missing title maps to `String::new()` in
+    `into_notification99_data`. The GUI reproduces today's "title else body" choice from that.
+  - **Mapping from today's fields:**
+    - `urgency` is `meta.urgency.unwrap_or(Normal)`.
+    - `occasion` is passed through.
+    - `expiry` maps −1 → `OsDefault`, 0 → `Never`, n>0 → `After(n)` (clamped to `u32::MAX`).
+    - `sound` maps `None` → `System`, `Some("silent")` → `Silent`, `Some("system")` →
+      `System`, other → `Named`.
+  - **GUI reads:** the GUI is adapted to read the new fields with today's semantics.
+    `Silent` is still sent to notify-rust as the sound name `"silent"`, `System` sends no
+    sound name, and the toast leg uses `urgency == Critical` for `error`.
+    `Osc99LiveEntry` stores the two enums instead of `bool`s, and `osc99_action_report` takes
+    `Osc99ActivationReporting` and `Osc99CloseReporting` instead of `bool`s.
+- Add the seven new capability enums and fields to `Osc99Features`. `host_capabilities()`
+  fills them with values that reproduce today's reply:
+  - `activation_focus: Unsupported`, `auto_expiry: Supported`, `urgency: Supported`,
+    `sound_names: SystemAndSilent`;
+  - `body`, `buttons` and `icons`: `Supported`.
+- `osc99_query_reply_body` reads the new fields but keeps its current output and key order
+  byte-for-byte (138.4 changes the format).
+
+Deliverable:
+
+- The types, with doc comments.
+- Every existing test passing with only mechanical fixture updates.
+- New unit tests for each mapping above: expiry −1 / 0 / 5000 / > `u32::MAX`, the four sound
+  cases, urgency unset.
+
+Prohibitions: do NOT change any observable behaviour; do NOT touch the parser
+(`osc_notify_99.rs`) or reassembly logic.
+
+#### 138.2 — Parser fidelity
+
+Scope:
+
+- `freminal-common/src/buffer_states/osc_notify_99.rs` (parser and its tests);
+- `freminal-terminal-emulator/src/terminal_handler/notify_99.rs` and
+  `terminal_handler/osc.rs`, only to adapt to the new `Osc99Command` shape with **today's**
+  reassembly semantics. The latest chunk still wins, now computed from the unset-aware
+  fields with the same defaults.
+
+What:
+
+- `Osc99Command` and its new enums exactly as in "138 Types". `Osc99Actions` is deleted.
+- Lenient values, id sanitisation (strip to `[A-Za-z0-9_+.-]`, truncate to 512 bytes, empty
+  means absent), malformed tokens ignored, `Unknown` payload type, and lossy plain payload,
+  all as in "138 Decisions (orchestrator) → Parsing".
+- `Osc99ParseError` loses the variants that can no longer occur. Any variant left without a
+  producer is deleted. Only `SequenceTooLarge` and `TooManyMetadataItems` remain errors.
+- Update the parser tests that pinned the old behaviour (listed in the recon). Each becomes a
+  test of the new behaviour, keeping its name only if the name is still accurate.
+
+Deliverable: the parser plus tests for every rule:
+
+- `c=2` reports; `d=2` is done; `e=2` is plain;
+- `u=3` is ignored and an earlier `u=` survives in the same sequence;
+- `w=-5` is −1; `w=abc` is ignored;
+- a bad `f=` is ignored while the rest of the sequence applies;
+- `i=a/b` becomes `ab`; a 600-byte id is truncated to 512; `i=///` is absent;
+- empty `a=`, and `a=report` giving edits `[Add(Report)]`;
+- `p=frobnicate` is `Unknown`; a bare token is ignored; a two-byte key is ignored;
+- a non-UTF-8 plain payload is lossy.
+
+Prohibitions: do NOT change reassembly semantics (138.3); do NOT change the GUI.
+
+#### 138.3 — Reassembly rework
+
+Scope:
+
+- `freminal-terminal-emulator/src/terminal_handler/notify_99.rs`,
+  `terminal_handler/osc.rs` (the `Notify99` arm and its tests),
+  `terminal_handler/mod.rs` (the pending-state fields), `terminal_handler/reset.rs`;
+- `freminal-terminal-emulator/tests/osc99_query.rs`;
+- `freminal-common/src/buffer_states/window_manipulation.rs` (`Osc99Control.id: String`)
+  and the GUI match arms that destructure it (`freminal/src/gui/app_impl.rs`,
+  `rendering.rs`).
+
+What, as in "138 Decisions (orchestrator) → Reassembly":
+
+- Control payloads act immediately and never touch pending state. Id-less `p=close` /
+  `p=alive` are no-ops.
+- One unidentified slot. Metadata merge. LRU eviction at 128 instead of refusal.
+- Finalisation does the stripping, truncation, title promotion and the empty drop.
+- `into_notification99_data` builds the transport from the merged metadata.
+- RIS clears the unidentified slot as well as the map. DECSTR keeps both, as today.
+
+Deliverable:
+
+- **Merging:** a chunk with `a=report` followed by a final chunk with no `a=` yields report
+  plus focus; earlier `u=2` survives a final chunk without `u=`; `n=` from two chunks keeps
+  both in order.
+- **Id-less chunks:** id-less `d=0` then id-less `d=1` assembles one notification.
+- **Controls:** `p=?` with `d=0` is answered at once; `p=close` with `d=0` and an id is
+  forwarded at once, and an id's pending content survives a control chunk for the same id.
+- **Saturation:** 128 pending ids plus a new complete single-chunk notification displays
+  without evicting anything (it never enters the store); a new `d=0` id evicts the
+  least-recently-touched entry; a `p=?` on a saturated map is answered.
+- **Finalisation:** controls are stripped from the title (ESC, C1 U+0085 and TAB removed, LF
+  kept); a 2000-character body becomes 1024 characters ending in `…` (superseded by 138.C7:
+  no `…`); nine buttons become
+  eight; a body-only notification becomes title-only; a notification with no title and no
+  body pushes nothing.
+- **Existing tests:** the existing pinning tests are updated.
+
+Prohibitions: do NOT change the `p=?` reply format (138.4); do NOT change GUI behaviour beyond
+the `Osc99Control.id` type.
+
+#### 138.4 — Truthful `p=?` reply body
+
+Scope: `freminal-terminal-emulator/src/terminal_handler/notify_99.rs`
+(`osc99_query_reply_body` and its tests), `freminal-terminal-emulator/tests/osc99_query.rs`.
+
+What: build the reply from every `Osc99Features` field, in kitty's key order, exactly as in
+"Leg capabilities and `p=?` truthfulness". The `p` list order is
+`title,body,?,close,icon,alive,buttons`, with absent items removed.
+
+Deliverable:
+
+- A table test over the features. It must cover: all supported; all unsupported (giving
+  `o=always,unfocused,invisible:p=title,?,close,alive:s=system,silent`); focus-only; and
+  standard sounds.
+- The integration test's expected tail updated to the reply produced by the 138.1 defaults.
+
+Prohibitions: do NOT change `host_capabilities()` (138.17).
+
+#### 138.5 — Origin and pane-state plumbing; pane-aware `o=`
+
+Scope: `freminal/src/gui/frame_drain.rs`, `freminal/src/gui/rendering.rs`,
+`freminal/src/gui/app_impl.rs` (`route_window_manipulation_events` and its caller),
+`freminal/src/gui/notifications.rs` (`Osc99DisplayContext`, `occasion_allows_display` and
+their tests), and the new `freminal/src/gui/osc99/mod.rs` (just `Osc99Origin`,
+`PaneKeyboardFocus`, `PaneVisibility`, `Osc99PaneState`, registered in `gui/mod.rs`).
+
+What:
+
+- The OSC 99 collector tuples carry `Osc99Origin` and, for display requests,
+  `Osc99PaneState`, computed in `drain_window_manipulation_commands`, where `is_active_tab`,
+  the active pane, the zoom state, OS-window focus and minimisation are known.
+  `route_window_manipulation_events` takes the `WindowId`.
+- `occasion_allows_display(NotificationOccasion, Osc99PaneState) -> Osc99DisplayDecision`,
+  where `Osc99DisplayDecision` is `Show` or `Suppress`. It follows the pane-aware rule in
+  "GUI lifecycle".
+- `Osc99DisplayContext` keeps `window_focused` for routing only.
+- Remove the silent drop when a `RefCell` borrow fails. If a borrow cannot be taken, log one
+  `warn!` naming the cell; nothing is dropped silently.
+
+Deliverable:
+
+- Unit tests for the decision table. They must cover: `unfocused` in a background tab of a
+  focused window shows; `unfocused` on the active pane of a focused window is suppressed;
+  `invisible` for a non-active pane in the active tab is suppressed (visible); `invisible`
+  for a pane hidden by another pane's zoom shows.
+- A `frame_drain` test that the pane state is computed per pane.
+- The `route_osc99_occasion_*` tests updated.
+
+#### 138.6 — `Osc99Registry`: instances, pane scoping, alive and close
+
+Scope: `freminal/src/gui/osc99/registry.rs` (new), `freminal/src/gui/osc99/mod.rs`,
+`freminal/src/gui/notifications.rs`, `freminal/src/gui/mod.rs` (the `osc99_live` field becomes
+`osc99_registry`), `freminal/src/gui/app_impl.rs` (control handling and the effect executor).
+
+What:
+
+- `Osc99Registry` replaces `Osc99LiveEntry`, `osc99_live`, `forget_osc99`, `live_ids_sorted`
+  and `send_osc99_alive`.
+- Its API is pure: methods take inputs and return `Vec<Osc99Effect>`.
+- Instances are keyed by `(PaneId, id)` plus id-less instances, capped at 128 (the oldest is
+  forgotten).
+- Registration happens on display, after the occasion check, recording the legs that fired.
+- `p=alive` replies with the requesting pane's ids only, sorted.
+- `p=close` forgets the pane's instance for that id (leg closing arrives in 138.7 and 138.13).
+- `prune_dead_panes()` runs every frame and drops instances whose `Weak` no longer upgrades.
+- `Osc99Effect::Reply` is executed through `send_reply_weak`. Other variants are added when
+  their subtask needs them (no unused variants).
+
+Deliverable:
+
+- Registry unit tests: pane A's ids are not in pane B's alive reply; pane B's `p=close` cannot
+  forget pane A's id; the cap evicts the oldest; a dead pane is pruned; an id-less instance is
+  never listed.
+- Existing alive/close tests ported.
+
+#### 138.7 — Toast keyed lifecycle; toast leg through the registry
+
+Split at execution time (2026-10-12) into 138.7a and 138.7b, so each sub-agent pass stays
+bounded.
+
+##### 138.7a — `ToastStack` keyed lifecycle and events
+
+Scope: `freminal/src/gui/toast.rs` only (now the `gui/toast/` directory, split by 138.C1).
+
+What:
+
+- **Types** (as in "138 Types"): `ToastKey(pub u64)`;
+  `ToastLifetime { KindDefault, Fixed(Duration), UntilDismissed }`;
+  `ToastEventKind { Activated, Button(u8), Closed }`
+  (`Button` unused until 138.8, so not added yet); `ToastEvent { key, kind }`.
+- **API:**
+  - `push_keyed(key, kind, title, detail, lifetime, placement)`;
+  - `replace_keyed(old, new_key, kind, title, detail, lifetime)`. This updates the toast in
+    place: it keeps its stack slot, placement and entry-animation state, and **its lifetime
+    restarts**. Keeping the age would make a toast updated every second expire mid-update.
+    Returns whether `old` existed; if not, it behaves as `push_keyed`;
+  - `close_keyed(key)`;
+  - `take_events() -> Vec<ToastEvent>`.
+- **Events** are produced for keyed toasts only:
+  - a body click gives `Activated` then `Closed`;
+  - a click on the dismiss glyph gives `Closed`;
+  - expiry, eviction past `MAX_TOASTS` and `close_keyed` give `Closed`;
+  - `replace_keyed` produces no event for the replaced toast.
+- **Dismiss rect:** `ToastLayoutOutput` gains a dismiss hit rect (logical points) around the
+  "x" glyph. It is tested before the body rect, for keyed toasts only.
+- `Toast::is_expired` honours `ToastLifetime` (`UntilDismissed` never expires).
+- **Unkeyed toasts** (every existing caller) behave and lay out exactly as today: any click
+  dismisses and no events are produced.
+
+Deliverable: unit tests for every event path and lifetime, eviction of a keyed toast, replace
+keeping the slot, and unkeyed behaviour unchanged.
+
+##### 138.7b — Toast leg through the registry
+
+Scope: `freminal/src/gui/osc99/registry.rs`, `freminal/src/gui/osc99/mod.rs`,
+`freminal/src/gui/notifications.rs`, `freminal/src/gui/app_impl.rs` (drain toast events after
+`ToastStack::show`; executor sink).
+
+What:
+
+- **Effects and executor.** `Osc99Effect` gains `ShowToast { instance, replaces, spec }` and
+  `CloseToast(instance)`. `Osc99ToastSpec { kind, title, detail, lifetime }` is built by a pure
+  function from `Notification99Data`, using the urgency and `w=` mapping in "Toast leg". The
+  executor takes an `Osc99EffectSink { toasts: &mut ToastStack }` (later subtasks add fields).
+  `ToastKey` is the instance's raw id.
+- **Routing.** `route_osc99` no longer pushes toasts directly: `register` returns the
+  effects.
+- **Instance state.** Each instance tracks its open legs.
+  - An update of a live `(pane, id)` replaces the toast in place (or closes the old toast when
+    the new routing has no toast leg) and forgets the old instance silently.
+  - `p=close` emits `CloseToast`. The instance stays until the toast's `Closed` event arrives,
+    and then a close report is sent when `c=1`.
+  - `Activated` sends `GuiReply::Osc99Activation { button: None }` when `a=report`. Without
+    `c=1` the instance is forgotten. With `c=1` it waits for the last tracked leg to close,
+    then sends exactly one `Osc99Closed { Tracked }`.
+  - An event for an unknown instance is ignored. This covers replaced and forgotten
+    instances.
+- **Interim rules until 138.12, 138.13 and 138.16.**
+  - The `LinuxSystem` leg is still driven by the old per-notification thread, which sends its
+    own activation and close reports. The registry treats it as externally managed: it never
+    reports for it, `p=close` drops it silently, and while it is open no registry close report
+    is sent (otherwise `Both` routing would report twice).
+  - An instance with an `UntrackedSystem` leg never gets a registry close report, because the
+    old code already sent `untracked` at display. This is the final 138.16 rule, applied now.
+
+Deliverable: the registry tests listed below.
+
+- update-in-place suppresses the old close;
+- activation without `c=1` sends no close;
+- activation with `c=1` sends the activation and then exactly one close when the toast
+  closes;
+- `p=close` sends a close report only when `c=1`;
+- the interim `LinuxSystem` and `UntrackedSystem` rules.
+
+The "activation on one leg closes the other legs" test moves to 138.13, the first point at
+which two closable legs exist.
+
+#### 138.8 — Toast buttons
+
+Scope: `freminal/src/gui/toast.rs` (layout, rendering, hit-test; now the `gui/toast/`
+directory, split by 138.C1), `freminal/src/gui/osc99/registry.rs`.
+
+What:
+
+- **Layout.** Keyed toasts carry up to 8 button labels, laid out in a row under the detail.
+  Labels are fitted with the existing `fit_text`, and the row wraps onto further rows when it
+  does not fit `MAX_PILL_WIDTH_PTS`. Each button is a rounded rect in the toast's colours.
+- **Hit-testing.** Each button has its own hit rect, tested before the body rect.
+  `ToastEventKind::Button(n)` is 1-based, followed by `Closed`.
+- **Reports.** The registry reports `GuiReply::Osc99Activation { button: Some("n") }`.
+
+Deliverable:
+
+- Layout unit tests: rect count and order, wrapping at width, hit-test priority over the body.
+- A registry test that button 2 is reported as `"2"`.
+- A layout test that unkeyed toasts' geometry is unchanged.
+
+#### 138.9 — Focus on activation
+
+Scope: `freminal/src/gui/osc99/registry.rs` (emit `FocusPane`), `freminal/src/gui/app_impl.rs`
+(executor), plus the pane/tab helpers it calls (`freminal/src/gui/actions.rs`,
+`freminal/src/gui/tabs.rs`, `freminal/src/gui/panes/mod.rs`) only if a missing helper must be
+added.
+
+What:
+
+- An activation of an instance with `Osc99ActivationFocus::Focus` emits
+  `Osc99Effect::FocusPane(origin)`.
+- The executor finds the origin window, switches to the pane's tab (`TabManager::switch_to`
+  through the existing UI wrapper that also clears `bell_active`), unzooms if another pane is
+  zoomed, and makes the pane active with the `FocusChange(false/true)` pair, reusing the
+  existing click-to-focus helper.
+- It then calls `WindowHandle::focus_window(window_id)` and requests a repaint of that window.
+- A missing window or pane is a no-op.
+- `FocusPane` applies to every leg that reports activation. Today that is the toast leg; the
+  Linux leg arrives in 138.12.
+
+Deliverable:
+
+- Registry tests: focus is emitted only with `Focus`, and both focus and report are emitted
+  for `a=focus,report`.
+- An executor test on a two-tab window: the pane's tab becomes active and the pane becomes
+  active.
+
+#### 138.10 — Terminal-side expiry
+
+Scope: `freminal/src/gui/osc99/registry.rs`, `freminal/src/gui/app_impl.rs` (tick and repaint
+scheduling).
+
+What:
+
+- Each instance with `Osc99Expiry::After(ms)` gets a deadline measured from display (and from
+  each update).
+- `registry.tick(now) -> Vec<Osc99Effect>` closes every leg of every instance past its
+  deadline, through the same path as `p=close`.
+- `registry.next_deadline() -> Option<Instant>` feeds the frame's repaint scheduling, through
+  the same mechanism the toast stack's repaint delay uses.
+- `now` is injected, so the tests use no real time.
+
+Deliverable: registry tests with injected `Instant`s — closed at the deadline even though the
+toast leg's own lifetime is longer; an update resets the deadline; `w=0` never expires;
+`next_deadline` is the minimum across instances.
+
+#### 138.11 — `osc99_filters` config option and filtering
+
+Scope:
+
+- The full `freminal-config-options` checklist: `freminal-common/src/config.rs`
+  (`NotificationsConfig` field, its defaults and `ConfigPartial` coverage),
+  `freminal/src/gui/settings.rs` (settings UI), `config_example.toml`,
+  `nix/home-manager-module.nix`;
+- `freminal/src/gui/osc99/filter.rs` (new), `freminal/src/gui/osc99/registry.rs`.
+
+What:
+
+- **Config.** `osc99_filters: Vec<String>`, defaulting to empty.
+- **Filter type.** `Osc99Filter::compile(&[String]) -> (Osc99Filter, Vec<Osc99FilterError>)`.
+  - Each rule is `all` or `location:regex`, with location `title`, `body`, `app` or `type`.
+    Matching is a regex search, case-sensitive (kitty).
+  - `type` matches if any `t=` value matches.
+  - Invalid rules are returned as errors and skipped. Each is logged once at config apply.
+- **Registry.** The registry drops a matching notification after the occasion check, sending
+  no reply. The compiled filter is rebuilt on config change.
+- **Settings UI.** A multi-line text field with one rule per line, showing the invalid lines
+  below it.
+- **Nix.** The Nix option is `listOf str`.
+
+Deliverable:
+
+- Filter unit tests: each location; `all`; an invalid regex skipped while the others still
+  apply; `type` with multiple values.
+- A registry test that a filtered notification is not displayed and gets no reply.
+- Config round-trip and partial-apply tests per the checklist.
+
+#### 138.12 — zbus notification service; Linux system leg
+
+Scope: `Cargo.toml` (workspace dependency), `freminal/Cargo.toml` (target-specific dependency,
+dev-dependency features), `freminal/src/gui/osc99/dbus_service.rs` (new),
+`freminal/src/gui/osc99/mod.rs`, `freminal/src/gui/osc99/registry.rs`,
+`freminal/src/gui/notifications.rs`, `freminal/src/gui/app_impl.rs` and
+`freminal/src/gui/mod.rs` (service handle, event drain, repaint wake).
+
+What:
+
+- **Dependency.** `zbus = { version = "5.19.0", default-features = false, features = [...] }`,
+  added under `[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]`. The
+  features are those needed for the blocking API on the async-io executor that notify-rust
+  already uses. Verify the feature names against the registry source. If the blocking API
+  needs a different executor than notify-rust's, stop and report.
+- **Service.** `Osc99DbusService::spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle`
+  (session bus) and `spawn_with_connection(conn, waker)` (used by tests).
+  - The dispatcher thread is `freminal-osc99-dbus`; the pump thread is
+    `freminal-osc99-signals`.
+  - Commands: `Show { instance, replaces, notification }` and `Close { instance }`.
+  - Events: `Shown { instance }`, `ShowFailed { instance }`, `Activated { instance, action }`
+    (action is `Default` or `Button(u8)`), `Closed { instance }`, `Capabilities(..)`,
+    `Unavailable`.
+  - The dispatcher's state transitions live in a pure `DispatcherState`, which owns the
+    D-Bus-id ↔ instance map, so they are unit-testable without a bus.
+- **This subtask's protocol coverage.** `Notify` sends title, body, app name, the `default`
+  action plus 1-based button actions, urgency and `expire_timeout`. Presentation hints come in
+  138.14. `GetCapabilities` is called once at start.
+- **Registry.** The registry's `LinuxSystem` leg sends `ShowLinuxSystem`. Its events feed
+  activation (report, focus), button (1-based) and close, exactly like the toast leg's events.
+  This retires `show_system_osc99`'s Linux path, its per-notification threads,
+  `osc99_action_report` and the `#[allow(clippy::too_many_arguments)]` builder
+  (`build_osc99_notification` keeps only what the macOS/Windows path needs).
+
+Deliverable:
+
+- `DispatcherState` unit tests: a signal for an unknown id is ignored; a close after an
+  activation maps both.
+- An integration test over a peer-to-peer zbus connection (a socket pair, so no daemon is
+  needed) against an in-test fake `org.freedesktop.Notifications` server. It must check that
+  `Notify` arguments include `default`, `1` and `2`; that an emitted `ActionInvoked("2")` and
+  then `NotificationClosed` arrive as `Activated(Button(2))` and then `Closed`; and that
+  `GetCapabilities` is reported.
+- Run `cargo machete` (the new dependency is used) and `cargo xtask check-windows` (the cfg
+  gates compile out on Windows).
+
+#### 138.13 — Linux update in place, `p=close` and expiry through the service
+
+Scope: `freminal/src/gui/osc99/dbus_service.rs`, `freminal/src/gui/osc99/registry.rs`.
+
+What:
+
+- **Update in place.** `Show` with `replaces` sends the replaced instance's D-Bus id as
+  `replaces_id` and drops the replaced mapping, so a later `NotificationClosed` for it is
+  ignored.
+- **Close.** `Close` calls `CloseNotification`, and the resulting signal produces `Closed`.
+  `Close` for an instance with no D-Bus id yet (not shown, or show failed) emits `Closed`
+  immediately (kitty's fallback).
+- **Registry.** The registry routes update, `p=close` and expiry to the Linux leg.
+
+Deliverable:
+
+- `DispatcherState` tests for each path.
+- The fake-server integration test extended: an update sends `replaces_id`, and the old id's
+  close signal produces no event; `Close` calls `CloseNotification` once.
+- A registry test: an activation on one leg (toast or Linux) emits a close for the
+  instance's other leg (moved here from 138.7).
+
+#### 138.14 — Linux presentation: icons, sounds, category, markup
+
+Scope: `freminal/src/gui/osc99/presentation.rs` (new), `freminal/src/gui/osc99/icon_lookup.rs`
+(new, Linux/BSD), `freminal/src/gui/osc99/dbus_service.rs`, `freminal/src/gui/notifications.rs`
+(the `g=` icon cache becomes LRU), `freminal/src/gui/mod.rs` if the cache type changes.
+
+What, as in "Linux/BSD system leg":
+
+- Standard icon-name table and resolution order. The XDG icon scan and the `.desktop` `Icon=`
+  lookup for `f=` run lazily once on the dispatcher thread.
+  - Icon dirs: `$XDG_DATA_HOME/icons`, each `$XDG_DATA_DIRS/icons`, `~/.icons`,
+    `/usr/share/pixmaps`.
+  - Applications dirs: `$XDG_DATA_HOME/applications`, each `$XDG_DATA_DIRS/applications`.
+  - A desktop file matches when its stem or its `Name=` equals `f=` case-insensitively.
+- Icon data is decoded to RGBA for the `image-data` hint, and downscaled to 256×256 when over
+  1024×1024 (**superseded at 138.14 execution:** it is downscaled whenever a side exceeds 256;
+  see the 138.14 status note). A decode failure falls back to the next source.
+- Sound hints, the `category` hint, and body-markup escaping when the daemon reports
+  `body-markup`.
+- The `g=` cache is least-recently-used, keeping the 64-entry / 4 MiB bound.
+- The resolution functions are pure; the filesystem roots are injected so tests use a temp
+  dir.
+
+Deliverable:
+
+- Unit tests:
+  - icons: each standard name; an existing name beats data; data beats an unknown name; an
+    unknown name with no data is passed verbatim; `f=` resolves through a temp `.desktop`;
+  - sounds: `silent` gives `suppress-sound`; `system` gives no hint; `warn` gives
+    `dialog-warning`;
+  - markup: `<` and `&` are escaped only with `body-markup`;
+  - the LRU order.
+- The fake-server test asserts the hints.
+
+#### 138.15 — Daemon capabilities feed `HostCapabilities`; bus failure
+
+Scope: `freminal/src/gui/host_capabilities.rs`, `freminal/src/gui/osc99/mod.rs` (leg capability
+type), `freminal/src/gui/osc99/dbus_service.rs`, `freminal/src/gui/app_impl.rs`,
+`freminal/src/gui/settings_dispatch.rs` (where the capability broadcast lives).
+
+What:
+
+- **Capability type.** `Osc99LegCapabilities` is a typed struct holding the table's rows
+  (**superseded by 138.17:** the rows are `Osc99Features` values, and the daemon types live
+  in `osc99/capabilities.rs`).
+- **Daemon reply.** The `Capabilities(..)` event updates the Linux leg's capabilities, from
+  the defaults until it arrives.
+- **Recompute and broadcast.** `host_capabilities` now takes the config plus the Linux
+  daemon's capability state. If the result changed, it is re-broadcast to every pane as
+  `InputEvent::HostCapabilitiesChange`, the same path config changes use.
+- **Bus failure.** `Unavailable` marks the Linux leg unavailable. Its displays close
+  immediately, it contributes no capabilities, `System` routing becomes `Unsupported`, and one
+  `warn!` is logged.
+- **Service start.** The service is started at the first capability resolution where OSC 99 is
+  supported and the routing can take the system leg.
+
+Deliverable:
+
+- Tests: a capability reply without `actions` removes `a=` and `buttons` from a System-routed
+  pane's next `p=?` (end to end through the pane's capabilities); `Unavailable` makes a
+  System-routed pane answer no `p=?` at all, and a Both-routed pane advertise the toast leg's
+  capabilities only.
+- The routing truth-table test is extended.
+
+#### 138.16 — macOS / Windows untracked system leg
+
+Scope: `freminal/src/gui/notifications.rs` (the macOS/Windows OSC 99 path),
+`freminal/src/gui/osc99/registry.rs` (the `UntrackedSystem` leg), and a new
+`freminal/src/gui/osc99/icon_tempfiles.rs` (macOS/Windows only).
+
+What, as in "macOS / Windows system leg" and the untracked-leg rules:
+
+- Fire-and-forget display with no buttons.
+- `p=close;untracked` at display when `c=1`.
+- An untracked leg never holds an instance alive.
+- Platform sound mapping.
+- Content-hash icon temp files.
+- On these platforms the registry never emits `ShowLinuxSystem`.
+
+Deliverable:
+
+- Registry tests, which are platform-independent because the leg is a value: an untracked-only
+  display with `c=1` sends the untracked close immediately and nothing later; `Both` with a
+  toast plus an untracked leg sends the untracked close and no tracked close.
+- Unit tests for the sound mapping function and the temp-file naming/cap. Both are pure and
+  compiled on every platform, used only behind the cfg.
+- `cargo xtask check-windows` passes. macOS is compiled by CI only, which the report must
+  state.
+
+#### 138.17 — Leg capability tables and routing combination
+
+Scope: `freminal/src/gui/host_capabilities.rs`, `freminal/src/gui/osc99/mod.rs`.
+
+What:
+
+- Implement the leg capability table and the routing combination rules exactly as in "Leg
+  capabilities and `p=?` truthfulness". Every routing variant and every platform is classified
+  with no wildcard arm.
+- The toast leg's capabilities are constants.
+- The macOS and Windows rows are selected by `cfg!`, so all of them are compiled and tested on
+  every platform through a platform parameter in the pure combination function.
+
+Deliverable:
+
+- A truth-table test over routing × platform × daemon state, asserting the full `p=?` reply
+  string for: Toast (all platforms); Both on Linux with a full daemon; SystemWhenUnfocused on
+  macOS; and System on Windows.
+
+#### 138.18 — Documentation
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/KITTY_PROTOCOL_REFERENCE.md` (OSC 99 section to the kitty 0.49.2 baseline),
+`config_example.toml` (the `[notifications]` OSC 99 comments only).
+
+What:
+
+- The dual-document update per `freminal-escape-sequence-docs`, with the "Last updated"
+  header.
+- The OSC 99 rows describe the shipped behaviour, the leg capability rules and the platform
+  limits.
+- The GAPS entries closed by Task 138 get "closed by" pointers.
+- The config comments describe the routing's effect on `p=?`.
+
+Deliverable: docs that pass markdownlint, with every claim checked against the code.
+
+### 138 Cleanup entries
+
+#### 138.C1 — Split `gui/toast.rs` into a `gui/toast/` module directory
+
+- **Surfaced:** 138.8 (sub-agent report, confirmed by the orchestrator). After 138.7a and
+  138.8, `freminal/src/gui/toast.rs` is about 4,700 lines: about 2,500 of production code
+  (stack and lifecycle, measurement, layout, the button flow, hit-testing) plus about 2,200 of
+  tests.
+- **Impact:** module cohesion (`freminal-module-cohesion`). One file holds several concepts. A
+  sibling `toast_buttons.rs` would have to widen the visibility of private layout helpers,
+  which that skill forbids, so the fix is a directory module.
+- **Fix:** a move-only split into `gui/toast/mod.rs` (types, `ToastStack`, lifecycle and
+  events), `gui/toast/layout.rs` (measurement inputs, `layout_toasts`, `layout_one_toast`,
+  anchors), `gui/toast/buttons.rs` (button flow and quads) and `gui/toast/hit.rs` (hit-testing
+  and click targeting). Tests move with their code. Visibility is `pub(super)` within the
+  directory only, and nothing outside `gui::toast` changes.
+- **Verification:** `git diff -M` shows moves; the test count is unchanged; clippy is clean.
+- **Scheduling:** in Task 138, after 138.18 and before the adversarial review.
+- **Status:** done. The files are `mod.rs` (1,903 lines), `layout.rs` (2,189), `buttons.rs`
+  (282), `hit.rs` (310) and `test_support.rs` (135), at commit time (138.C14 added
+  `input.rs` and grew the others). The 2,084-test count is identical
+  before and after. The orchestrator confirmed the move is move-only with a sorted-line
+  multiset diff: only visibility prefixes, imports and rustfmt re-wraps differ. Nothing is
+  visible outside `gui::toast`.
+  - The orchestrator compared rustdoc against `main` and found 15 intra-doc links the branch
+    had broken: 13 from this move and 2 from 138.16. All are fixed. Four links to private
+    sibling items became plain backticks rather than widening visibility. The branch adds no
+    rustdoc link warnings compared with `main`.
+
+#### 138.C2 — The OSC 99 signal pump does not filter signals by sender
+
+- **Surfaced:** 138.12 (sub-agent report, confirmed by the orchestrator).
+- **Impact:** the match rule selects `org.freedesktop.Notifications` signals on
+  `/org/freedesktop/Notifications` from any sender. A session-bus peer that guesses a live
+  D-Bus id can forge `ActionInvoked` or `NotificationClosed`. That makes freminal send an
+  activation or close report (and possibly a focus) for one of its notifications. The old
+  notify-rust path had the same exposure, and a session-bus peer can already do more harmful
+  things.
+- **Fix:** at start, resolve the unique name that owns `org.freedesktop.Notifications`
+  (`GetNameOwner`) and drop signals whose sender differs. Re-resolve on `NameOwnerChanged` for
+  that name, so a daemon restart keeps working. zbus's client-side match does not resolve
+  well-known sender names, so this is done in `parse_signal` / the dispatcher, not by putting
+  a well-known name in the match rule. Over p2p (tests) there is no sender, and filtering is
+  skipped.
+- **Verification:** a `DispatcherState` test showing that a signal from a non-owner is
+  ignored, and an owner change re-targets.
+- **Scheduling:** in Task 138, with 138.13 (same files).
+- **Status:** done (see the 138.C2 status note).
+
+#### 138.C3 — Reload Config does not reach the window it was triggered from
+
+- **Surfaced:** 138.15 (sub-agent report, confirmed by the orchestrator: `KeyAction::ReloadConfig`
+  is dispatched from `actions.rs` inside `update()`, while the window being rendered is out of
+  `self.windows`). Predates 138.
+- **Impact:** `reload_config_from_disk` → `apply_new_config` broadcasts theme, cursor,
+  host-capability and every other per-pane change only to the windows in the map. The window
+  where the user pressed the key or clicked the menu entry, usually the only window, misses
+  them until something else re-sends them. For OSC 99 this means a reloaded routing change is
+  not advertised in that window's panes. The Settings-window Apply path is unaffected.
+- **Fix:** thread `current: Option<&PerWindowState>` through `reload_config_from_disk` and
+  `apply_new_config`. Every per-pane loop in `apply_new_config` goes through the existing
+  window iteration plus `current` (as the 138.15 broadcast helper does). Pass `Some(win)` from
+  the `ReloadConfig` dispatch and `None` from the Settings Apply path.
+- **Verification:** a test that `apply_new_config`'s per-pane fan-out reaches a passed
+  in-flight window (through the extracted helper); the existing settings tests stay green.
+- **Scheduling:** in Task 138, after 138.18 and before the adversarial review (with 138.C1).
+- **Status:** done. The sub-agent verified the callers:
+  - Reload Config (shortcut and menu) runs with the window out of the map, and now passes
+    `Some(win)`.
+  - The Settings window's Apply runs with every terminal window in the map, and passes `None`.
+  - There are no other callers.
+
+  Every per-window loop in `apply_new_config` goes through `with_current`. The 50 ms
+  follow-up repaint is also requested for the in-flight window.
+
+#### 138.C4 — Standard icon names on the toast leg
+
+- **Surfaced:** orchestrator review of 138.18.
+- **Impact:** the spec says the eight standard names (`error`, `warn`/`warning`, `info`,
+  `question`, `help`, `file-manager`, `system-monitor`, `text-editor`) must be supported. The
+  toast leg (`toast`, and the toast half of `both` / `system_when_unfocused`) shows only its
+  kind icon.
+- **Fix:**
+  - `ChromeIcon` gains glyphs from the bundled CaskaydiaCove Nerd Font for the names it lacks
+    (`Warning` exists). The existing all-glyphs-resolve regression test covers the new ones.
+  - A pure `standard_icon_glyph(name) -> Option<ChromeIcon>` is added.
+  - The toast spec carries an optional icon override: the first `n=` name that is standard,
+    names in order. The toast draws that glyph in its icon slot instead of the kind icon. The
+    accent colour still follows the kind.
+  - A non-standard name or transmitted data leaves the kind icon. Toasts render no images,
+    and that stays a documented toast limit.
+- **Verification:** unit tests for the mapping, that the spec carries the override, and that
+  layout uses the override glyph. The glyph-resolves test covers every new `ChromeIcon`.
+- **Scheduling:** in Task 138, before the adversarial review.
+- **Status:** done. The new glyphs, all FontAwesome codepoints proven present in the bundled
+  font, are:
+
+  | Variant         | Codepoint | Nerd Font name          |
+  | --------------- | --------- | ----------------------- |
+  | `Error`         | U+F057    | `nf-fa-times_circle`    |
+  | `Info`          | U+F05A    | `nf-fa-info_circle`     |
+  | `Question`      | U+F059    | `nf-fa-question_circle` |
+  | `Help`          | U+F1CD    | `nf-fa-life_ring`       |
+  | `FileManager`   | U+F07C    | `nf-fa-folder_open`     |
+  | `SystemMonitor` | U+F0E4    | `nf-fa-tachometer`      |
+  | `TextEditor`    | U+F15C    | `nf-fa-file_text`       |
+
+  `standard_icon_glyph` lives in `icons.rs` (all platforms). `Toast::icon()` is the single
+  source for measuring and drawing, and the accent colour stays per kind.
+
+#### 138.C5 — Standard icon names on the macOS/Windows system leg
+
+- **Surfaced:** orchestrator review of 138.18.
+- **Impact:** the untracked backend passes names to `notify-rust`'s `icon()`, which is a no-op
+  on both platforms, so standard names are never shown.
+- **Fix:**
+  - When the first resolvable icon is a standard name (names first, as on Linux), rasterise
+    the 138.C4 `ChromeIcon` glyph from the embedded bundled font to a 256×256 RGBA PNG
+    (swash, encoded with the workspace `image` crate) and send it through the existing
+    `IconTempFiles` / `image_path` path.
+  - Otherwise use transmitted data, as today.
+  - The rasteriser is a pure function, compiled for macOS, Windows and tests.
+- **Verification:** unit tests that every standard name rasterises to a non-empty 256×256 PNG
+  with non-transparent pixels, and that a standard name beats transmitted data.
+  `check-windows` must pass.
+- **Scheduling:** in Task 138, after 138.C4. When both land, the OSC 99 docs rows move to ✅,
+  and that change is part of 138.C5.
+- **Status:** done. `rasterize_chrome_icon_png` renders the bundled glyph with swash: white,
+  on an opaque `#5A5A5A` rounded tile, so it reads on light and dark notification
+  backgrounds.
+  - The original `#404040` glyph was changed at orchestrator review because it is invisible
+    on dark backgrounds. The orchestrator inspected the rendered PNGs visually.
+  - The untracked backend tries names first (the first standard name, rasterised at 256 px),
+    then transmitted data.
+  - The OSC 99 rows in COVERAGE and the kitty reference are now ✅, and the GAPS row is
+    removed.
+
+#### 138.C6 — Bounded, linear-cost OSC 99 reassembly
+
+- **Surfaced:** adversarial review, PTY findings P1, P6 and P7.
+- **Fix:**
+  - **P1, list metadata.** `PendingNotification` keeps a running list-metadata cost, charged
+    only for newly merged items at `len + 32` bytes per entry. `n=` and `t=` are capped at 64
+    entries each and `a=` edits at 64; a breach drops the transfer through the tombstone path.
+  - **P6, aggregate budget.** A handler-wide budget of 8 MiB applies across every pending
+    entry, the unidentified slot included. A chunk that would exceed it evicts
+    least-recently-touched entries first, and if that is still not enough the transfer is
+    dropped. Title, body and button accumulators are capped at 64 KiB each, because
+    finalisation cuts them to 1024 / 8 × 256 characters anyway. Icon data keeps the 1 MiB cap.
+  - **P7, per-chunk copy.** The content path no longer clones the whole command. The handler
+    passes the payload by reference into the assembler and clones metadata only.
+- **Tests:** a hostile stream of 100k tiny `n=` chunks is dropped early (assert entry count,
+  not time); the aggregate budget evicts and then drops; a large icon chunk is not copied
+  (assert through the assembler API that no owned clone of the payload is made).
+- **Status:** done.
+  - A typed `Osc99Reject` covers the list caps and the budget. `ChunkError` is shared with
+    graphics, so it is left alone.
+  - The running costs are kept per slot and per store, with a test-only consistency check.
+  - The command cannot be moved (`handle_osc` takes `&AnsiOscType`), so reassembly takes
+    `&Osc99Command` and the payload slice goes straight into the assembler.
+  - The budget is checked after a chunk lands, so it can be exceeded by at most one chunk
+    (1 MiB) before eviction; this is documented.
+  - Evicted entries are removed, not tombstoned, as with the count cap.
+
+#### 138.C7 — OSC 99 parse and finalisation fidelity
+
+- **Surfaced:** adversarial review, PTY findings P2–P5, P8–P11, P13 and P14.
+- **Fix:**
+  - **P2, icon priming.** A finalised notification with no title and no body but with icon
+    data and a `g=` key is not displayed. Instead it pushes a new
+    `WindowManipulation::Osc99CacheIcon { key, data }`, which the GUI stores in the `g=`
+    cache (kitty caches before its no-title check). Anything else with no title and no body
+    is still dropped silently.
+  - **P3, truncation.** Over-length text is a hard cut at 1024 / 256 characters with no `…`,
+    as kitty's `limit_size` does. The plan's citation is corrected.
+  - **P4, rejected chunks.** When the parser rejects a sequence (item cap or size cap), the
+    handler extracts `i=` and `d=` from the raw metadata, best effort, and tombstones a
+    non-final id, so the rest of the transfer cannot assemble a truncated notification.
+  - **P5, stale unidentified slot.** An identified content chunk discards an `Accumulating`
+    unidentified slot. kitty's single pending command is replaced by any chunk with a
+    different id.
+  - **P8, name fields.** App name, types, icon names and sound name also have LF removed.
+    Bidi controls are reviewed-not-a-defect (kitty parity).
+  - **P9, kitty value parity.** An empty `c=` / `d=` counts as not `0` (report / done);
+    `w=` beyond the `i64` range is clamped to the maximum. (Correction at execution: kitty
+    strips `+` only after a leading `-`, so a bare `+report` stays an unknown word; the
+    review's `+` item was wrong, and freminal matches kitty.)
+  - **P10, dead metadata.** Finalisation goes into a narrow `MergedOsc99Metadata`, so the
+    dead per-chunk fields and their pinning test are removed.
+  - **P11, docs and visibility.** Stale docs are fixed, and `FinalizedNotification` becomes
+    `pub(in crate::terminal_handler)`.
+  - **P13, button numbering.** A button label is dropped only if it was empty before
+    stripping. One that strips to nothing becomes `U+FFFD`, so later button numbers do not
+    shift.
+- **Tests (P14):**
+  - DECSTR keeps pending state.
+  - `i=0` end to end.
+  - A plain multi-byte character split across chunks.
+  - `g=` priming.
+  - The trivial derive-only tests are removed.
+  - The `tests/osc99_query.rs` replies use the production `host_capabilities` value through a
+    shared helper rather than hard-coded strings.
+- **Status:** done, for every item.
+  - P2 pushes `Osc99CacheIcon` and the GUI stores it in the `g=` cache. It is collected in
+    its own per-frame vector and stored before that frame's displays; 138.C10's ordered
+    requests remove the remaining same-frame ordering gap.
+  - P4 carries the rejected chunk's id and `d=` inside `Osc99ParseError`, through a
+    temporary stand-in that 138.C8 replaces.
+  - P9 deviates from the review where the review was wrong (see above). An empty `e=` stays
+    unchanged.
+  - The integration test cannot reach `host_capabilities`, which lives in the `freminal`
+    crate, so it keeps explicit literals per feature set, documented in the file header.
+
+#### 138.C8 — OSC 99 type placement and naming
+
+- **Surfaced:** adversarial review, PTY finding P12.
+- **Fix:**
+  - `NotificationUrgency` and `NotificationOccasion` move to `osc99_notification.rs`, which
+    breaks the import cycle; `osc_notify_99.rs` imports from there.
+  - The `window_manipulation.rs` re-exports are removed and every import uses one path.
+  - `PendingOsc99::is_tombstone` becomes `touch_if_tombstone`.
+  - `Osc99FocusAction` is renamed `Osc99FocusSupport`.
+  - The 138.C7 stand-in `Osc99PayloadType::Rejected` (a non-wire value in the wire enum) is
+    replaced by a dedicated `AnsiOscType::Notify99Rejected(Osc99RejectedChunk)` variant,
+    handled by the `Notify99` handler path.
+  - The 130-era `Reported` / `NotReported` capability enums stay (reviewed: their meaning is
+    "reported", not "supported").
+- **Verification:** mechanical; the test count is unchanged.
+- **Status:** done.
+  - The import cycle is broken, and the `window_manipulation` re-exports are removed.
+  - `touch_if_tombstone` and `Osc99FocusSupport` are in place.
+  - `AnsiOscType::Notify99Rejected` replaces the stand-in, gated on OSC 99 support by
+    `handle_osc99_rejected`.
+  - The test count is 8526 before and after; one test was replaced by a `Display` test.
+
+#### 138.C9 — D-Bus service robustness
+
+- **Surfaced:** adversarial review, zbus findings Z1, Z2, Z4–Z6, Z12–Z15, Z17 and Z18.
+- **Fix:**
+  - **Z1 and Z2, owner tracking.** Each mapping records the unique name that answered its
+    `Notify` (the reply header sender). An owner change closes only the instances recorded
+    under a different owner. Only `NameHasNoOwner` from `GetNameOwner` means `NoOwner`; any
+    other failure (or `NoOwner`) adopts the sender of the next successful `Notify` reply.
+  - **Z4, pump loss.** If either pump ends, every mapped instance gets `Closed` and the
+    service emits `Unavailable`.
+  - **Z5, capabilities.** They are fetched again on every owner change, and a new
+    `Capabilities` event is emitted.
+  - **Z6, circuit breaker.** After a method timeout the dispatcher fails queued `Show`s
+    immediately, without calling the daemon, for 30 s. Then it tries again.
+  - **Z12, reused ids.** `record_shown` evicts a different instance that held the same D-Bus
+    id.
+  - **Z13, failed replacement.** A failed replacing `Notify` sends a best-effort
+    `CloseNotification` for the old id.
+  - **Z14, docs.** The shutdown docs say what actually exits. A failed pump spawn stops the
+    already-started pump.
+  - **Z15, fail-closed default.** `Osc99SignalSender` loses its `Default`.
+  - **Z18, auto-start.** `GetNameOwner` and `GetCapabilities` are sent with `NO_AUTO_START`,
+    so starting freminal does not D-Bus-activate a daemon. A missing daemon is logged at
+    debug, and the first real `Notify` activates it; the resulting owner change refreshes the
+    capabilities. After `Unavailable`, the service tries to reconnect on the next show, at
+    most once per 30 s.
+- **Tests (Z17):**
+  - Owner mode is injectable, so the p2p rig covers the bus branch: owner filter, owner
+    change, pump loss, and a failed `GetNameOwner`.
+  - The handle drop ends the dispatcher.
+  - Vacuous `try_events().next().is_none()` checks become sentinel round trips.
+  - The two method-timeout tests are removed. They depended on a 2 s bound on calls the fake
+    does answer, and the timeout itself is zbus behaviour. The error paths are covered by the
+    error-reply tests.
+- **Status:** done, for every item.
+  - **`NO_AUTO_START` calls.** zbus's flag-taking blocking call has no timeout, so
+    `GetNameOwner` and `GetCapabilities` run on a short-lived `freminal-osc99-call` helper
+    thread bounded at 25 s. (**Superseded by 138.C26:** an async call raced against a timer, with
+    no thread.)
+  - **Reused D-Bus id.** The evicted instance gets `Closed`, so its registry leg cannot stay
+    open.
+  - **Rig.** It stamps sender headers on p2p messages, so the bus-mode owner logic is
+    exercised end to end.
+  - **Re-checks by the orchestrator.**
+    - Deliberately broken versions of Z1, Z2, Z4 and Z13 are each caught.
+    - `freminal` passed 15 consecutive runs, and the service tests 40 runs under CPU load.
+    - The real-session-bus smoke tests were run again (temporary, not committed):
+      capabilities, show, 3,000 forged closes ignored, real close.
+
+#### 138.C10 — Registry, routing and GUI-glue correctness
+
+- **Surfaced:** adversarial review, GUI findings G1, G2, G4–G9, G11, G13 and G14; zbus
+  finding Z3; docs finding D9.
+- **Fix:**
+  - **G1, ordering.** One ordered `Vec<Osc99Request>` (display or control) per frame,
+    routed in arrival order.
+  - **G2, untracked-only instances.** An instance with no open leg after registration is not
+    kept, but an update still forgets the old instance.
+  - **G4, alive.** `p=alive` leaves out instances whose close was requested.
+  - **G5, activation.** A repeated activation of an already activated instance is ignored.
+    The deadline still applies to legs left open after an activation: expiry closes them.
+  - **G6 and Z3, wake and focus.** The wake falls back to any live window: windows are
+    registered on creation and removed on close. The focus drain un-minimises a minimised
+    window before focusing it.
+  - **G7, quota.** Each pane may hold at most 32 instances and evicts its own oldest first.
+    The global 128 cap stays as a backstop.
+  - **G8, bus down.** `SystemWhenUnfocused` with the daemon unavailable routes to the toast
+    leg and advertises the toast leg (as `Both` does).
+  - **G9, filters.** An absent body or app name is matched as `""` (kitty), and the docs are
+    updated.
+  - **G11, capability helpers.** A generic per-field helper replaces the copied
+    union/intersection chains.
+  - **G13, icon copies.** No redundant icon clones; system effects share the data through an
+    `Arc`.
+  - **G14, smaller items:**
+    - the low-urgency lifetime is derived from `ToastKind::Info`;
+    - `Osc99Instance` fields become private;
+    - the registry eviction doc is corrected;
+    - a busy cell defers display requests instead of dropping them;
+    - `Osc99FailedSystemLegs` is folded into the sink;
+    - the Settings editor compares normalised rules;
+    - `set_osc99_daemon`'s warning names the effect per routing.
+  - **D9, filter recompile.** A busy registry when recompiling the filter defers the config
+    swap of `osc99_filters`, so the change is not lost.
+- **Tests:** one per item (G3's extraction in 138.C13 makes the glue testable).
+- **Status:**
+  - **138.C10a (done):** G2, G4, G5 (each leg is asked to close at most once, and expiry
+    still closes legs left open after an activation), G7, the `combine` half of G8, G9, G11,
+    G13 (`Arc` effect payloads, `Cow` icon bytes) and part of G14.
+    - Orchestrator change: `p=alive` lists an instance while it has an open leg that has not
+      been asked to close. An activated `c=1` instance whose notification is still displayed
+      stays listed, as in kitty. The sub-agent's `closing == Open` filter would have hidden
+      it.
+  - **Left for 138.C10b, because they need `app_impl.rs`:** the routing half of G8, the fold
+    of `Osc99FailedSystemLegs`, the busy-cell defer and the daemon-warning wording.
+  - **138.C10b (done):**
+    - **G1.** One ordered `Vec<Osc99Request>` (display, control, icon priming) is routed in
+      arrival order.
+    - **G6 / Z3.** `Osc99Wake` tracks live terminal windows, registered at creation and
+      removed on close or destroy, and falls back to any live window. The focus drain
+      un-minimises before focusing; `set_minimized(false)` is a no-op on a window that is not
+      minimised (winit 0.30.13, verified by reading the source).
+    - **G8 routing.** `resolve_osc99_legs` substitutes the toast leg when the Linux leg is
+      unavailable.
+    - **D9.** A pending filter is retried every frame.
+    - **G14.** Busy cells defer requests (at most 256, with a repaint wake), and the warning
+      wording is corrected.
+    - Deferred requests use the window focus of the frame that routes them. This only matters
+      for a busy cell, which cannot happen single-threaded.
+    - `Osc99FailedSystemLegs` is still not folded (its registry tests construct it), so the
+      fold moves to 138.C13.
+
+#### 138.C11 — Linux presentation fixes
+
+- **Surfaced:** adversarial review, zbus findings Z7–Z11 and Z19.
+- **Fix:**
+  - **Z7, desktop fallback.** Undecodable icon data falls back to the `.desktop` icon for
+    `f=`, then to `freminal`.
+  - **Z8, name case.** `icon_exists` returns the matched on-disk stem, and that stem is what
+    is sent.
+  - **Z9, decoding.**
+    - Decode into `into_rgba8`, without a copy.
+    - Premultiply around the resize so transparent edges do not get dark fringes.
+    - Apply the EXIF orientation.
+    - Keep decoded icons in an 8-entry cache keyed by content hash.
+    - WebP stays accepted (reviewed: same bounded decoder, receiver leniency).
+  - **Z10, wire format.** The hints are serialised through a typed
+    `#[derive(SerializeDict, Type)]` struct with `as_value` fields, so `image-data` is no
+    longer one `Value` per byte.
+  - **Z11, XDG scan.** The scan runs on a background thread started with the service, so
+    `Notify` never waits for it; until it finishes, unknown names fall through. It uses
+    `file_type()`, caps visited entries at 200k and logs truncation once.
+  - **Z19:**
+    - a `desktop-entry` hint of `freminal` is added;
+    - a BOM is stripped from `.desktop` files;
+    - file stems take precedence over `Name=`;
+    - desktop IDs in subdirectories are mapped (`sub/x.desktop` becomes `sub-x`).
+- **Reviewed, not defects:**
+  - Zero-width non-joiner markup escaping (kitty parity, a recorded decision).
+  - `n=` paths passed verbatim (kitty parity).
+  - `ActivationToken` not consumed (a recorded decision).
+  - The cfg covers non-Linux Unix targets freminal does not ship.
+  - No fallback timer after `CloseNotification`: the notification spec requires the daemon
+    to emit `NotificationClosed`. (**Superseded by 138.C23:** wayle 0.1.3 does not, so a
+    successful call now counts as the close.)
+- **Status:** done, for every item.
+  - **Hints (Z10).** Serialised through `WireHints` / `WireImage` (`serde` + `zvariant::Type`
+    with `as_value`). The image bytes are borrowed straight onto the wire, with no `Value`
+    tree.
+  - **Decoding.**
+    - The decoded-icon LRU lives on `DispatcherState`.
+    - EXIF orientation is applied, with the allocation check re-added by hand on that decode
+      path.
+    - Resizing is premultiplied.
+  - **XDG scan.** It runs on a `freminal-osc99-icons` thread and falls through until it is
+    done.
+  - **`serde` dependency.** `serde` became a direct Linux/BSD dependency of `freminal`,
+    because the derive needs it; it was already a workspace dependency.
+  - **Real-bus check.** The orchestrator re-ran a real-session-bus smoke test (temporary, not
+    committed). A notification with an `image-data` hint, category, `suppress-sound`, the
+    desktop-entry hint and markup was accepted (`Shown`) and then closed.
+
+#### 138.C12 — Split `osc99/dbus_service.rs` into a directory (move only)
+
+- **Surfaced:** adversarial review, zbus finding Z16.
+- **Fix:** `osc99/dbus_service/{mod.rs, wake.rs, state.rs, wire.rs, pump.rs}` plus a
+  `test_rig.rs`, following 138.C1's rules. Run after 138.C9 and 138.C11.
+- **Status:** done. The files are `mod.rs` (1,740 lines), `state.rs` (1,793), `wire.rs` (500),
+  `pump.rs` (301), `wake.rs` (62) and `test_rig.rs` (669), at commit time (later cleanups
+  changed them); about half of `mod.rs` and `state.rs` is tests.
+  - The 114 service test names are identical before and after; `freminal` has 2,165 tests
+    both times.
+  - The orchestrator confirmed the move with a sorted-line diff: only re-wraps, imports and
+    one helper path differ.
+  - Nothing is visible outside `osc99::dbus_service`, and no rustdoc links are broken.
+
+#### 138.C13 — Move the OSC 99 GUI glue out of `app_impl.rs`; split `osc99/mod.rs`
+
+- **Surfaced:** adversarial review, GUI findings G3 and G12.
+- **Fix:**
+  - The nine OSC 99 methods move into `gui/osc99/glue.rs` as an `impl FreminalGui` block.
+  - Their decisions are extracted into free functions over `&mut Osc99Registry`,
+    `&mut ToastStack` and the window map, with unit tests: route a frame, expire, deliver
+    toast and system events, feed back failed legs, drain focus requests.
+  - `osc99/mod.rs` is split into `pane_state.rs`, `effects.rs` and `toast_spec.rs`.
+  - The stale "four separate blocks" doc is fixed.
+  - `Osc99FailedSystemLegs` is folded into the sink's vectors (moved here from 138.C10).
+- **Status:** done. `app_impl.rs` went from 6,030 to 5,515 lines.
+  - `osc99/glue.rs` has the OSC 99 `impl FreminalGui` block plus eight tested free functions
+    (frame routing, the deferral cap, expiry, toast and system event delivery, failed-leg
+    feedback, daemon-state recording, and the focus drain over an `Osc99FocusTargets`
+    trait), with 28 new tests. Disabling the feedback pass makes the failed-leg tests fail.
+  - `osc99/mod.rs` went from 837 to 214 lines, split into `pane_state.rs`, `effects.rs` and
+    `toast_spec.rs`.
+  - Two behaviour-neutral simplifications: the cells are borrowed once per frame rather than
+    once per request, and the registry stays borrowed through the feedback pass. That removes
+    an unreachable busy-warning path. No `FreminalGui` field visibility changed.
+
+#### 138.C14 — Toast interaction and layout fixes
+
+- **Surfaced:** adversarial review, toast findings T1 and T9–T17, plus the toast nits.
+- **Fix:**
+  - **T1, affordance.** Toast areas call `.clickable()` (pointer hand), and buttons get a
+    hover and pressed fill.
+  - **T9, press and release.** The press part comes from `press_origin` and must match the
+    release part.
+  - **T10, missing hover position.** Fall back to `interact_pos` when `hover_pos` is `None`.
+  - **T11, light themes.** Buttons darken on light pills.
+  - **T12, `w=` toasts.** `w=` toasts use `UntilDismissed` and the registry enforces the
+    deadline, which makes the hover behaviour consistent; the docs are updated.
+  - **T13, short lifetimes.** `Fixed` is clamped to at least `ANIM_IN + ANIM_OUT`.
+  - **T14, eviction order.** Eviction prefers the oldest toast that is not `UntilDismissed`.
+  - **T15, `replace_keyed`.** It closes any other toast holding `new_key`, sets
+    `cached_is_animating`, and loses its unused return value.
+  - **T16, overflow.** Toasts that would extend below the content rect are not laid out until
+    space frees up; they stay on the stack.
+  - **T17, docs and tests.** The stale `WindowId` docs are fixed. Tests for
+    `layout_positioned` (two `WindowId::for_test`) and a headless egui `hit_test` are added.
+  - **Nits:**
+    - shared input types move to `toast/input.rs`, which breaks the `buttons` ↔ `layout`
+      cycle;
+    - `layout.rs` docs are corrected;
+    - the test-support bool parameter becomes an enum;
+    - the `Toast::id` doc is corrected.
+  - **Test gaps:**
+    - duplicate keys;
+    - hover past the lifetime;
+    - replace while fading;
+    - short `Fixed`;
+    - buttons at ppp 2 mid-animation;
+    - dismiss rect versus button rects;
+    - `measure_buttons` truncation.
+- **Status:** done, for every item.
+  - **T1.** The hand cursor is set with `HoverAffordance::clickable()` on each toast area's
+    response (the cursor skill's sanctioned path; `output.cursor_icon` is never written).
+    Buttons get hover and pressed fills.
+  - **T9.** The press part is captured from the frame's own raw press event, because egui
+    clears `press_origin` on release.
+  - **T12.** `w=` toasts are `UntilDismissed`, and the registry owns the deadline.
+  - **T14.** A just-pushed toast is never the one evicted.
+  - **T16.** The oldest toast in a group is always placed, so a tall `UntilDismissed` toast
+    can still be dismissed.
+  - **`is_animating`.** The flag (which only drives repaint on pointer motion) stays set while
+    the pointer is over a toast, so hover state clears when the pointer leaves.
+  - **Structure.** `toast/input.rs` breaks the `layout` ↔ `buttons` cycle.
+  - **Orchestrator re-check.** Reverting the press-part check, the position fallback or
+    `.clickable()` makes the new headless tests fail.
+  - **Not changed.** The pre-existing `resolve_anchor(is_origin_window: bool)` parameter is
+    untouched; it predates Task 138 and only its stale justification doc was corrected. It is
+    routed to 147.29.
+
+#### 138.C15 — macOS/Windows untracked leg hardening
+
+- **Surfaced:** adversarial review, toast findings T2–T8, plus the icon nits.
+- **Fix:**
+  - **T3, worker thread.** One long-lived delivery thread with a bounded queue of 16 (excess
+    dropped with a debug log) does the temp-file writes and `show()`. The GUI thread only
+    builds a request. The rasterised PNG is cached per `ChromeIcon`.
+  - **T4 and T5, temp directory.** Each process gets its own directory,
+    `freminal-osc99-icons-<pid>`. On Unix it is created with `create_dir` and mode `0700`,
+    and refused if it is a symlink or owned by someone else.
+  - **T6, untrusted image bytes.** Transmitted bytes are decoded with the bounded `image`
+    decoder (moved into a shared module) and re-encoded as PNG before the OS sees them.
+  - **T7, file lifetime.** Files are deleted by age (older than 10 minutes) as well as by the
+    64-file cap, and the directory is removed at exit. The limit that Action Center may show a
+    blank image after exit is documented.
+  - **T8, macOS failure docs.** They now state that delivery failures cannot be observed.
+  - **T2, Windows icon.**
+    - Windows builds its toast directly with `tauri-winrt-notification` (a new direct Windows
+      dependency, same version as the lock file), so the icon is an `appLogoOverride`.
+    - The `Critical` → reminder claim is dropped.
+    - The `appname` docs are corrected.
+    - The file URI is checked for spaces and `%`.
+  - **Nits:**
+    - `write_exclusive` and symlink tests;
+    - a test with two stores holding the same content;
+    - `size_px` is capped at 1024;
+    - `get_pixel_mut_checked` replaces `get_pixel_mut`.
+- **Status:** done.
+  - **Recovery.** The first sub-agent was killed by an upstream error before it reported.
+    Its uncommitted work compiled cleanly. A fresh agent audited it item by item against this
+    entry, found every item present and correct, and fixed one over-long doc line. The
+    orchestrator then reviewed the worker, the directory-safety checks and the Windows URI
+    encoding directly.
+  - **Worker.** One bounded `freminal-osc99-deliver` worker (queue of 16, drop when full)
+    does the image preparation and `show()`, with the PNG cached per `ChromeIcon`.
+  - **Directory.** `freminal-osc99-icons-<pid>` is created `0700` with `0600` files.
+    Symlinked or permissive existing directories are refused.
+  - **Images.** Transmitted bytes are re-encoded through the shared bounded decoder
+    (`icon_decode.rs`).
+  - **Eviction.** Files older than 10 minutes are evicted, in addition to the 64-file cap.
+  - **Windows.** The toast is built directly with `tauri-winrt-notification` 0.8.1 (one copy
+    in the lock file), using `appLogoOverride` and a percent-encoded `file:///` path.
+  - **Ownership check.** It is done by mode rather than uid, which would need unsafe or
+    libc: a `0700` directory owned by someone else cannot be written by us anyway.
+  - **macOS** was checked by reading the source only.
+
+#### 138.C16 — Documentation and plan corrections from the adversarial review
+
+- **Surfaced:** adversarial review, docs findings D1–D8 and D10–D15.
+- **Fix:**
+  - **D1:** markdownlint (`cargo xtask lint-markdown` / `markdownlint-cli2`) passes; the
+    MD060 tables are re-padded.
+  - **D2–D5:** stale icon and toast claims in COVERAGE, `config_example.toml`, the
+    `toast_leg` doc and plan line "Toasts do not render icons" (marked superseded by C4);
+    `toast.rs` paths in `KITTY_PROTOCOL_REFERENCE.md`, the plan and the
+    `freminal-toast-options` skill.
+  - **D6:** the stale 138.1 commit hash.
+  - **D7 and D8:** closed markers on the 147 routing bullet, 130.C4 and the audit row.
+  - **D10:** the `p=close` advertisement rationale on macOS and Windows.
+  - **D11:** the `cargo test --all` mentions in `README.md` and
+    `.github/copilot-instructions.md`.
+  - **D12:** the MASTER_PLAN note.
+  - **D13:** superseded plan text in 138.14, 138.15, 138.18 and the 138.C1 line counts.
+  - **D14 and D15:** formatting artefacts, the `c=`/`d=` empty-value wording (after 138.C7),
+    the `config_example.toml` key order, the `dbus_service.rs` doc tense, and a branch-base
+    note that the branch was rebased and contains a `cargo update` commit.
+- Runs last, after every code cleanup, and re-checks every OSC 99 doc claim.
+- **Status:** done. Every item was applied. Every OSC 99 claim in COVERAGE, GAPS and the
+  kitty reference was re-checked against the code as it stands after the cleanup work, and
+  about 20 claims made stale by 138.C6–C15 were corrected. The re-check found one code
+  defect, recorded as 138.C17.
+
+#### 138.C17 — Windows advertised urgency it no longer honours
+
+- **Surfaced:** 138.C16's docs re-check.
+- **Defect:** 138.C15 dropped the `Critical` → reminder mapping (a reminder needs buttons),
+  so the Windows toast has no urgency levels. `system_leg(Windows)` still advertised
+  `u=0,1,2`, which is untruthful.
+- **Fix:** both untracked platforms now advertise `Osc99UrgencySupport::Unsupported`; the
+  `system_on_windows` test and the docs are updated.
+- **Status:** done (orchestrator).
+
+### 138 Adversarial review (2026-10-12)
+
+Five parallel CODE-REVIEW passes covered the whole `main...HEAD` diff: PTY side, GUI
+registry and glue, D-Bus leg, toast and macOS/Windows leg, and docs/config/plan. Three passes
+failed on an upstream error before reporting and were re-run in full. Every finding has a
+disposition; nothing is left as an informal note.
+
+| Finding                                 | Severity | Disposition                     |
+| --------------------------------------- | -------- | ------------------------------- |
+| P1 quadratic list metadata cost         | major    | 138.C6                          |
+| P2 icon-only `g=` priming dropped       | minor    | 138.C7                          |
+| P3 `…` truncation not kitty's           | minor    | 138.C7                          |
+| P4 rejected middle chunk truncates      | minor    | 138.C7                          |
+| P5 stale unidentified slot              | minor    | 138.C7                          |
+| P6 no aggregate memory budget           | minor    | 138.C6                          |
+| P7 per-chunk command clone              | minor    | 138.C6                          |
+| P8 LF in names; bidi controls           | minor    | 138.C7; bidi: not a defect      |
+| P9 empty `c`/`d`, `+report`, huge `w`   | nit      | 138.C7                          |
+| P10 dead per-chunk metadata             | nit      | 138.C7                          |
+| P11 stale docs, `pub` visibility        | nit      | 138.C7                          |
+| P12 naming, cycle, double paths         | nit      | 138.C8                          |
+| P13 stripped button shifts numbering    | nit      | 138.C7                          |
+| P14 PTY test gaps                       | minor    | 138.C7                          |
+| Z1 owner change closes new daemon's     | major    | 138.C9                          |
+| Z2 `GetNameOwner` error → deaf forever  | major    | 138.C9                          |
+| Z3 wake targets a dead window           | major    | 138.C10                         |
+| Z4 pump loss unhandled                  | minor    | 138.C9                          |
+| Z5 capabilities never refreshed         | minor    | 138.C9                          |
+| Z6 hung daemon serialises failures      | minor    | 138.C9                          |
+| Z7 bad icon data skips `.desktop`       | minor    | 138.C11                         |
+| Z8 icon-name case mismatch              | minor    | 138.C11                         |
+| Z9 decode copies, fringes, EXIF, WebP   | minor    | 138.C11; WebP: not a defect     |
+| Z10 `image-data` one `Value` per byte   | minor    | 138.C11                         |
+| Z11 XDG scan cost and blocking          | minor    | 138.C11                         |
+| Z12 reused D-Bus id orphan              | minor    | 138.C9                          |
+| Z13 failed replace leaves old shown     | nit      | 138.C9                          |
+| Z14 shutdown docs, orphan pump          | nit      | 138.C9                          |
+| Z15 fail-open `Default`                 | nit      | 138.C9                          |
+| Z16 `dbus_service.rs` size              | minor    | 138.C12                         |
+| Z17 D-Bus test gaps, vacuous checks     | minor    | 138.C9                          |
+| Z18 daemon auto-start, noisy warn       | nit      | 138.C9                          |
+| Z19 markup, hints, `.desktop` details   | nit      | 138.C11 (partly not defects)    |
+| G1 same-frame display/control order     | major    | 138.C10                         |
+| G2 untracked-only instances kept        | major    | 138.C10                         |
+| G3 GUI glue untested                    | major    | 138.C13                         |
+| G4 alive lists closing instances        | minor    | 138.C10                         |
+| G5 sticky state after activation        | minor    | 138.C10                         |
+| G6 wake loss; focus of minimised window | minor    | 138.C10                         |
+| G7 one pane evicts another's instances  | minor    | 138.C10                         |
+| G8 `SystemWhenUnfocused` with bus down  | minor    | 138.C10                         |
+| G9 filter on absent fields              | minor    | 138.C10                         |
+| G10 `o=` on Wayland, occlusion          | minor    | 138.C16 (doc note)              |
+| G11 repetitive capability helpers       | minor    | 138.C10                         |
+| G12 `app_impl.rs` growth, mixed module  | minor    | 138.C13                         |
+| G13 wasted icon copies                  | nit      | 138.C10                         |
+| G14 smaller GUI items                   | nit      | 138.C10; `from_bool`: precedent |
+| T1 no cursor or hover affordance        | major    | 138.C14                         |
+| T2 Windows inline image, reminder claim | major    | 138.C15                         |
+| T3 untracked leg unbounded, GUI thread  | major    | 138.C15                         |
+| T4 cross-process temp-file collisions   | minor    | 138.C15                         |
+| T5 temp directory hardening             | minor    | 138.C15                         |
+| T6 unvalidated bytes to OS decoders     | minor    | 138.C15                         |
+| T7 temp-file lifetime vs OS read        | minor    | 138.C15                         |
+| T8 macOS failure docs                   | minor    | 138.C15                         |
+| T9 press and release on different parts | minor    | 138.C14                         |
+| T10 click lost without hover position   | minor    | 138.C14                         |
+| T11 buttons invisible on light themes   | minor    | 138.C14                         |
+| T12 hover pause defeated for `w=`       | minor    | 138.C14                         |
+| T13 `Fixed` shorter than animation      | minor    | 138.C14                         |
+| T14 eviction ignores lifetime           | minor    | 138.C14                         |
+| T15 `replace_keyed` edge cases          | minor    | 138.C14                         |
+| T16 tall stacks overflow                | minor    | 138.C14                         |
+| T17 stale `WindowId` docs; tests        | minor    | 138.C14                         |
+| Toast and icon nits, test gaps          | nit      | 138.C14, 138.C15                |
+| D1 markdownlint MD060 failures          | major    | 138.C16                         |
+| D2–D8, D10–D15 doc and plan drift       | minor    | 138.C16                         |
+| D9 filter change lost on busy borrow    | minor    | 138.C10                         |
+| C16 re-check: Windows advertises `u`    | minor    | 138.C17                         |
+
+Execution order: 138.C6, C7, C8, C9, C11, C12, C10, C13, C14, C15, C16. Each goes through
+sub-agent implementation, orchestrator review and the verification suite. A confirmation
+review of the cleanup diff follows.
+
+#### 138.C18 — PTY follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, PTY findings N2, N3, N4, N5 and N8.
+- **Fix:**
+  - **N3, name lengths.** The parser caps a decoded `f=`, `s=`, `n=` or `t=` value at 256
+    characters and ignores a longer one. This bounds the scalar metadata outside the
+    pending budget.
+  - **N4, rejected id-less chunk.** A rejected `d=0` chunk with no id tombstones the
+    unidentified slot even when nothing is pending, so the rest of that transfer cannot
+    assemble a truncated notification. A rejected final chunk with no id stays a no-op.
+  - **N5, doc.** The `Osc99Closing::Requested` doc is corrected to match how `alive` behaves.
+  - **N8, strip order.** The strip-then-limit order is documented as a deliberate difference
+    from kitty, which limits first. freminal keeps more printable characters, and it
+    promotes the body when the title strips to nothing.
+  - **N2, size cap.** A chunk over 1 MiB is dropped silently by the OSC accumulator, before
+    OSC 99 sees it. The spec limits chunks to 4096 bytes, so only a non-conforming sender is
+    affected. Reviewed and documented, not a defect. The P4 status wording and the
+    rejected-oversized test's doc say that the path is reachable only from a direct call.
+- **Tests:** a long `f=` is ignored; a rejected id-less `d=0` chunk tombstones the slot.
+- **Status:** done. A rejected id-less final chunk still ends an accumulating unidentified
+  transfer, as it did before, and is a no-op only when nothing is pending. The name cap
+  counts characters, not bytes.
+
+#### 138.C19 — GUI follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, GUI findings N1, N6 and N7.
+- **Fix:**
+  - **N1, pruned panes.** `prune_dead_panes` returns close effects for the open legs of the
+    instances it prunes, so a `w=` toast does not outlive its pane. The glue applies them.
+  - **N6, focus and deferral tests.** The window calls of the focus drain go through a small
+    trait whose test double records call order (un-minimise before focus). The busy-cell
+    deferral decision is a plain function and is tested.
+  - **N7, copies.** `register` takes the notification by value, so the `Arc` is built
+    without copying it. Icon primes are consumed.
+- **Tests:** one per item.
+- **Status:** done.
+  - Pruning closes the pruned instance's open legs through the existing feedback path.
+  - `Osc99WindowOps` fixes the order: un-minimise, focus, repaint.
+  - `plan_osc99_routing` decides with an `Osc99CellAccess` enum.
+  - Requests and the notification travel by value end to end. Two pointer-identity tests
+    show the icon is not copied.
+
+#### 138.C20 — D-Bus follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, D-Bus findings 1, 2 and 7.
+- **Fix:**
+  - **Reconnect (1).** While unavailable, after a failed connect or lost signals, the
+    dispatcher retries connecting every 30 s on its own timer (`recv_timeout`), with no
+    `Show` needed. A successful reconnect emits `Capabilities`, so the GUI's daemon state
+    becomes available again and the capabilities are re-broadcast. The surviving pump and
+    the connection from the lost session are closed.
+  - **Breaker wiring (2).** Dispatcher-level tests cover the `Skip` branches (show, close,
+    replaced close, capability refresh), with the breaker forced open.
+  - **Icon scan (7).** The XDG scan starts on the first notification that carries `n=` or
+    `f=`, not with the service. The decoded-icon cache key is length-prefixed.
+- **Tests:** reconnect after a failed connect through an injectable connect closure and
+  clock; the breaker branches.
+- **Status:** done.
+  - One reconnect mechanism: a 30 s timer while the service is unavailable. The
+    reconnect-on-`Show` gate is removed.
+  - A reconnected session with no daemon to ask reports the assumed capabilities, so the
+    GUI's daemon state recovers.
+  - The breaker tests close the breaker again afterwards, so a handler that never calls the
+    daemon cannot pass.
+  - The XDG scan starts on the first query.
+  - The service tests passed 10 consecutive runs. The orchestrator re-ran the
+    real-session-bus smoke test (temporary, not committed): capabilities, show, close.
+
+#### 138.C21 — macOS/Windows and toast follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, toast/platform findings 4, 5 and 6.
+- **Fix:**
+  - **Ownership (4).** On Unix, an existing icon directory must also be owned by the current
+    user. The uid is taken from a probe file created in the parent temp directory and
+    compared with the directory's uid (`MetadataExt::uid`, no unsafe code).
+  - **Stale directories (5).** On first use, sibling `freminal-osc99-icons-*` directories
+    that pass the same checks and are more than a day old are removed.
+  - **Fade-out (6).** `close_keyed` starts the exit fade instead of removing the toast. The
+    toast is removed, and `Closed` is emitted, when the fade completes.
+- **Tests:** a foreign-owned directory is refused (if a foreign uid cannot be made in a
+  test, the comparison is unit-tested); the sweep removes old directories and keeps fresh
+  ones; `close_keyed` fades, then emits `Closed` once.
+- **Status:** done.
+  - `owned_by` returns an `Ownership` enum. The probe uid is memoised per process by the
+    orchestrator, so later checks need no extra file.
+  - The sweep runs once per store and never follows symlinks.
+  - `close_keyed` fades over `ANIM_OUT`. `Closed` now arrives from `sweep_expired` (the next
+    `show`), as expiry already does. A closing toast ignores clicks and hover.
+    `replace_keyed` on a closing toast cancels the close.
+
+#### 138.C22 — Documentation follow-ups from the confirmation review
+
+- **Surfaced:** confirmation review, docs findings 3, D12 and D11 (`opencode.json`).
+- **Fix:**
+  - COVERAGE's "urgency is advertised on Windows only" is removed.
+  - The COVERAGE header range becomes 138.C6–138.C22.
+  - The MASTER_PLAN note is updated.
+  - The 138.C12 `wake.rs` line count is marked "at commit time".
+  - `opencode.json`'s `cargo test --all` becomes `cargo xtask test`.
+  - The reconnect and scan docs follow 138.C20.
+  - Runs after 138.C18–C21.
+- **Status:** done. The C18–C21 behaviour is reflected in COVERAGE and the kitty reference,
+  including two stale claims there (the parser rejecting >1 MiB, and notifications staying on
+  screen after their pane closes). Strip-then-limit is listed as deliberate difference 6.
+
+#### 138.C23 — A successful `CloseNotification` is the close
+
+- **Surfaced:** maintainer manual test with `test-scripts/osc99_notifications.py` against
+  wayle 0.1.3. Steps 9 and 10 waited out their 25 s timeout with no `c=1` close report.
+- **Cause:** wayle treats `expire_timeout` 0 (spec: "never expires") as already expired. It
+  drops the notification from its tracking list without a signal, so a later
+  `CloseNotification` emits no `NotificationClosed`. This was confirmed with a zbus probe:
+  timeouts of -1 and 8000 get the signal and 0 never does. freminal, like kitty, waited for
+  the signal. The leg stayed open forever, so the close report never came and `p=alive` kept
+  listing the notification. The same happens after a desktop activation, because wayle
+  removes the activated notification the same silent way.
+- **Fix (maintainer decision; differs from kitty):**
+  - `close_instance` drops the mappings and emits `Closed` after any `CloseNotification`
+    outcome. The daemon's own signal, if it comes, is for a forgotten id and is ignored.
+  - After an `Activated` event the service closes the activated notification.
+    freminal never sends `resident`, so the spec has the daemon remove it anyway.
+  - The test rig's `fail_close` bool becomes a `CloseAnswer` enum (`CloseAndSignal` /
+    `CloseSilently` / `Fail`).
+- **Tests:** a close the daemon never signals is reported once; an activation the daemon
+  never follows with a close still closes; a desktop activation calls `CloseNotification`;
+  forged-signal and adopted-owner tests now expect the follow-up `Closed`.
+- **Status:** done.
+
+#### 138.C24 — Named icons also travel as `image-path`
+
+- **Surfaced:** the same manual test, step 14. wayle's default `icon-source = "automatic"`
+  ignores `app_icon` and draws only `image-path` / `image-data`, so the standard icon names
+  showed no icon. Transmitted data (step 15) did show.
+- **Fix (maintainer decision; differs from kitty):** an icon chosen from the notification's
+  own `n=` names goes in both `app_icon` and the `image-path` hint. The `.desktop` icon and
+  freminal's own icon are the application's icon and stay `app_icon`-only. The hints carry a
+  `NotifyImage` enum (`None` / `Path` / `Data`) in place of `Option<Osc99IconImage>`, so
+  path and data cannot both be set.
+- **Tests:** `image-path` on the wire; standard, matched and verbatim names give `Path`; the
+  desktop and freminal fallbacks give `None`; a rig test sees `app_icon` and `image-path`.
+- **Status:** done.
+
+#### 138.C25 — Bound the D-Bus command queue
+
+- **Surfaced:** CodeRabbit on PR #555 (`dbus_service/mod.rs`).
+- **Problem:** the GUI-to-dispatcher command channel was unbounded. Each `Show` carries a
+  full `Notification99Data` clone, icon bytes included. While a hung daemon holds the
+  dispatcher for up to 25 s per call, a program flooding OSC 99 grows the queue without
+  limit. The untracked leg already drops what does not fit its bounded queue.
+- **Fix:** a bounded channel (`COMMAND_QUEUE_CAPACITY` = 256) with `try_send`. A full queue
+  returns `Osc99SystemDispatch::Failed`, which the registry already handles by ending the
+  leg. The GUI thread never blocks.
+- **Tests:** a show and a close to a full queue both fail without blocking and queue no event.
+- **Status:** done.
+
+#### 138.C26 — No helper thread for `NO_AUTO_START` calls
+
+- **Surfaced:** Copilot on PR #555 (`dbus_service/wire.rs`).
+- **Problem:** `GetNameOwner` and `GetCapabilities` ran on a detached helper thread so they
+  could be timed out. A timed-out thread stayed blocked until a reply or the end of the
+  connection. The cooldown spaced out new probes but did not cap their number, so a daemon
+  that kept calls pending leaked one thread and one connection clone per probe.
+- **Fix:** `call_no_auto_start` builds the call with the async proxy on the blocking
+  connection's inner connection and races it against a `smol::Timer` under `smol::block_on`.
+  This is the async-io runtime zbus already uses; `smol` was already a workspace dependency.
+  On a timeout the pending call is dropped, so nothing waits on.
+- **Tests:** an unanswered call times out with zbus's timeout error, and the connection then
+  answers a normal call.
+- **Status:** done.
+
+#### 138.C27 — OSC 99 filters editor placement
+
+- **Surfaced:** CodeRabbit on PR #555 (`settings.rs`).
+- **Problem:** the filters editor (its own heading and help text) sat between the "OSC 99" and
+  "Command finished" routing rows, so the "Command finished" row read as a filter setting.
+- **Fix:** the editor now follows the last routing row.
+- **Status:** done.
+
+### 138 Confirmation review (2026-10-12)
+
+Two CODE-REVIEW passes over `1986117d..HEAD` checked every finding in the table above.
+
+- **Verified:** every finding, with the partials below.
+- **P4:** partial; see C18 N2.
+- **P14:** partial. The integration test cannot reach `host_capabilities`, which lives in
+  another crate; that is documented and accepted.
+- **G6:** partial; see C19 N6.
+- **G13:** partial; see C19 N7.
+- **D12:** partial; see C22.
+
+The new findings are disposed of in 138.C18–C22.
+
+### 138 Pre-PR gates (2026-10-12)
+
+| Gate                                                       | Result                                         |
+| ---------------------------------------------------------- | ---------------------------------------------- |
+| `cargo xtask test`                                         | 8,839 passed, doctests pass (after C23–C27)    |
+| `cargo clippy --all-targets --all-features -- -D warnings` | clean                                          |
+| `cargo fmt --all -- --check`                               | clean                                          |
+| `cargo machete`                                            | clean                                          |
+| `cargo xtask check-windows`                                | clean (macOS checked by reading source only)   |
+| `cargo bench --no-run --all`                               | compiles                                       |
+| rustdoc intra-doc links vs `main`                          | no new broken links                            |
+| `cargo deny check`                                         | advisories fail, identically on `main` (below) |
+
+- **Benchmarks.** `buffer_benches` against a `main` baseline, isolated runs, all within noise
+  (threshold 15%):
+  - `parse_plain_text`: +1.2%
+  - `parse_sgr_heavy`: +0.7%
+  - `parse_osc9`: notification −24% (p=0.08), progress +2.1%
+  - `handle_incoming_data`: +0.8%
+  - `handle_sgr_indexed`: +2.0%
+
+  OSC 99 itself has no benchmark; no bench feeds it.
+- **`cargo deny` advisories.** RUSTSEC-2026-0206 (`rustybuzz` unmaintained) and
+  RUSTSEC-2026-0192 (`ttf-parser` unmaintained) also fail on `main`. They predate Task 138
+  and come from the font-shaping stack. Task 138 does not address them; they are for the
+  maintainer to route.
+
+### 138 Status notes
+
+- **138.1 (done, `061cdc39`).** Types as decided; `window_manipulation.rs` re-exports
+  `Notification99Data` / `Osc99ControlKind` from the new module. Out-of-scope edits accepted
+  as mechanical: `Osc99Features` struct literals in test fixtures in
+  `terminal_handler/mod.rs`, `gui/pty.rs` and `tests/osc99_query.rs`. Intended observable
+  changes: `s=system` no longer forwards a `"system"` sound name, and an empty title falls back
+  to the body. `route_osc99_unrecognised_occasion_treated_as_always` was deleted because it can
+  no longer be written (`NotificationOccasion` is exhaustive). The toast-title fallback test
+  can only check the toast count; 138.7 adds title/detail assertions. Orchestrator change: the
+  `Osc99SoundNames::Standard` doc names the OSC 99 standard sounds, not freedesktop sounds.
+- **138.2 (done).** `ParseState` is removed; the parser fills `Osc99Command` directly, so there
+  is no mirror struct and no `bool`. `osc99_expiry_from_ms` and `resolve_osc99_actions` are
+  public in `osc_notify_99.rs` (one implementation each). Malformed tokens still count toward
+  the 64-item cap. An empty `c`/`d`/`e`/`o`/`u`/`w`/`i`/`g` is ignored, and an empty `p=` is
+  `Unknown`. Two orchestrator changes:
+  - an `f`/`n`/`s`/`t` value that decodes to the empty string is ignored (kitty treats an empty
+    name as unset);
+  - the payload is copied only after the metadata is accepted.
+
+  The pre-existing `abandon_notification(.., done: bool)` parameter is removed by 138.3.
+
+- **138.3 (done).** `handle_osc99` is the single entry point. Controls act at once and never
+  touch `PendingOsc99`, which holds the by-id map with LRU eviction plus the unidentified
+  slot. A looked-up tombstone counts as touched. Merged list metadata (`n`, `t`, `a` edits)
+  counts toward the 1 MiB per-notification cap, so endless `d=0` chunks cannot grow it.
+  `dispatch_finalized_osc99`, `control_kind` and `is_control_payload` are deleted. Content
+  chunks are still cloned once, because `handle_osc` takes `&AnsiOscType`; controls clone
+  nothing. Orchestrator change, and a plan correction: a complete chunk for a key with no
+  pending entry is finalised without entering the store. The plan text asked for an
+  eviction, which would have destroyed another key's in-progress transfer for no reason.
+  Verification from this subtask on uses `cargo xtask test`, which runs nextest plus the
+  doctests (main moved to nextest in PR #541).
+- **138.4 (done).** The reply is built from every `Osc99Features` field in kitty's key order,
+  with exhaustive matches. For the 138.1 defaults the reply now carries `u` before `p`, and `p`
+  in kitty's order. Its content is unchanged until 138.17 changes the inputs.
+- **138.5 (done).** The sub-agent stopped correctly because `freminal_windowing::WindowId`
+  had no test constructor. The orchestrator re-scoped the subtask: `WindowId::for_test(n)`
+  sits behind a new `freminal-windowing` feature, `test-utils` (the `-support` suffix is
+  rejected by `clippy::cargo`), which `freminal`'s dev-dependencies enable. Production builds
+  never enable it. Other changes:
+  - `route_window_manipulation_events` lost its `ui` parameter (minimisation moved into the
+    drain); the `WindowId` comes back with the 138.9 focus executor.
+  - The new `gui/osc99` types are `pub` inside the private module (`redundant_pub_crate`).
+  - `Osc99DisplayContext` holds `WindowFocus` and `Osc99PaneState` (no `bool`s).
+  - A focused-but-minimised window reports Focused and Hidden.
+  - Zoom and split occlusion are tested through the pure per-pane helper, because a split
+    tree needs a PTY per pane.
+  - Orchestrator change: the drained `Notification99Data` is moved out of its `Box`, not
+    cloned.
+- **138.6 (done).** `Osc99Registry` keeps a `Vec` in registration order, so the oldest is
+  index 0. Lookups are linear, bounded by the 128-instance cap. Toast-only and id-less
+  notifications are now registered. Until 138.7, a dismissed toast or an OS-dismissed
+  notification is still listed by `p=alive`; the old code had the same over-reporting for
+  system notifications. Instance fields with no reader yet are read by a `trace!` when the
+  instance is forgotten, so no `dead_code` allow is needed; 138.7 adds the real readers.
+  Orchestrator change: a stale `osc99_live` mention in the `frame_drain.rs` module doc.
+- **138.7a (done).** The keyed API, events, the dismiss rect and `sweep_expired(now)` are in
+  place.
+  - `replace_keyed` has no placement parameter, as the plan states: a replaced toast keeps its
+    placement and the `Pushed` fallback uses `TOP_RIGHT`. Adding the parameter would exceed
+    `too_many_arguments`.
+  - Clicks are resolved by the pure `click_target` plus `apply_click`, so `hit_test` removes
+    clicked toasts itself.
+  - Six temporary `expect(dead_code)` attributes (reason: wired by Task 138.7b) must all be
+    gone after 138.7b: `ToastLifetime::Fixed`,
+    `ToastLifetime::UntilDismissed`, `push_keyed`, `replace_keyed`, `close_keyed` and
+    `take_events`.
+  - Unkeyed layout and behaviour are unchanged; no existing layout test was edited.
+- **138.7b (done).** `register` returns the toast effects, and the toast events are delivered
+  once per window frame through `route_osc99_toast_events`. Both cells are borrowed before the
+  events are taken, so a busy cell defers delivery to the next frame and loses nothing.
+  - Instances keep `open_legs` (legs still displayed and observable) and `shown_legs` (legs
+    ever shown). `UntrackedSystem` is never an open leg, because it cannot be observed
+    closing.
+  - Interim rule: the close report is suppressed whenever the instance was ever shown on a
+    `LinuxSystem` or `UntrackedSystem` leg, so the old notification thread and the registry
+    never both report. 138.12 and 138.16 replace this rule.
+  - All six temporary `expect(dead_code)` attributes from 138.7a are removed.
+  - The toast title/body test checks the `osc99_toast_spec` mapping, because `ToastStack` has
+    no title accessor.
+- **138.8 (done).** Toast buttons are laid out under the text, wrap at `MAX_PILL_WIDTH_PTS`,
+  and are drawn as lightened `ToastQuad`s straight after their own pill. `ToastLayoutOutput`
+  gains `button_quads` and `button_rects_logical`, and `ToastContent` keeps `push_keyed` and
+  `replace_keyed` under the argument limit. Geometry without buttons is unchanged (178×40, and
+  178×60 with a detail). Button quads reuse the pill shader, so they carry its small drop
+  shadow; accepted. `toast.rs` reached about 4,700 lines (about 2,500 of production code);
+  the move-only directory split is 138.C1.
+- **138.9 (done).** `FocusPane` follows the activation reply, on body and button activations,
+  whatever `a=report` says.
+  - `route_osc99` now returns its effects, and every effect is applied through
+    `apply_osc99_effects_queueing_focus` in `app_impl`.
+  - The executor has no window access, so focus requests are queued, and
+    `drain_osc99_focus_requests` runs at the very top of `update()`. That has to happen before
+    the current window is taken out of `self.windows`. A repaint wake makes an idle window run
+    the drain.
+  - `focus_pane_in_tabs` switches the tab, clears another pane's zoom, and sends the
+    `FocusChange` pair. Tested on a two-tab manager. The `FocusChange(false)` to a real old
+    split pane is not asserted, because a split needs a PTY per pane; the path copies the
+    click-to-focus code.
+- **138.10 (done).** Instances gain a `deadline` and an `Osc99Closing { Open, Requested }`
+  state, so `p=close` and expiry are idempotent and share `close_instance_at`. `tick(now)` and
+  `next_deadline()` run once per window frame, through `expire_osc99_notifications`, just
+  before toast events are delivered; the next deadline is folded into the window's repaint
+  scheduling. `Osc99DisplayContext` carries `now`, so `register` measures the deadline from
+  display. A busy cell retries after 16 ms.
+- **138.11 (done).** `osc99_filters` is wired through every step of the config checklist:
+  the field, the guard-test mutation, a load-path test, the Settings editor (which keeps a
+  text buffer apart from the draft `Vec`, so blank lines can be typed), `config_example.toml`
+  and the Nix option (nixfmt, statix and deadnix clean).
+  - The compiled filter lives in `Osc99Registry`. It is checked after the occasion gate, is
+    compiled at startup, and is recompiled on config apply only when the rules change.
+  - Regexes are built with a 1 MiB size limit.
+  - The Settings window is a separate OS window, so modal input suppression does not apply.
+  - A pre-existing gap the sub-agent found, the Nix module missing
+    `command_finished_template`, is routed to 147.28.
+- **138.12 (done).** zbus 5.19.0 is a direct dependency on Linux/BSD only (`async-io` and
+  `blocking-api`; `p2p` only for the dev-dependency), and there is still a single copy in the
+  lock file. The service follows the decided design: one dispatcher, one pump that forwards
+  into the dispatcher, the pure `DispatcherState`, and connection and subscription on the
+  dispatcher thread.
+  - The integration tests run a hand-written fake daemon over a p2p socket pair. The
+    `#[zbus::interface]` macro expansion trips pedantic lints that would need allows. The
+    orchestrator re-ran the 30 service tests 5 more times; all passed.
+  - Wake: `Osc99Wake` keeps the `RepaintProxy` and the most recently rendered window, and is
+    re-pointed every frame. Any window's frame drains the shared event channel.
+  - The registry now owns the Linux leg's activation and close reports. Only
+    `UntrackedSystem` still suppresses the close report. Toast and system activation share one
+    path (`Osc99LegActivation`).
+  - Review fix by the orchestrator: a show that cannot be queued (handle busy, service gone)
+    used to leave the Linux leg open forever. `Osc99SystemBackend::show` now returns
+    `Osc99ShowDispatch`, and a failure is fed back to the registry as `ShowFailed`.
+  - Until 138.13, `p=close`, expiry and cap eviction drop the Linux leg silently and the
+    desktop notification stays on screen. Until 138.14, Linux icons are not sent.
+  - `Capabilities` and `Unavailable` are logged only; 138.15 consumes them.
+  - Signals are not filtered by sender; see 138.C2.
+  - The stale `host_capabilities.rs` doc is fixed by 138.15.
+- **138.13 (done).**
+  - **Close and update.** `CloseLinuxSystem` and `DbusCommand::Close` (through the pure
+    `close_target`) are in place, as is the `Closed` fallback when a call fails or no id is
+    known. Failed closes are fed back as `Closed`.
+  - **Legs on close and activation.** `p=close`, expiry and cap eviction close every open leg.
+    An update that drops the Linux leg closes the old notification. An activation closes the
+    instance's other legs.
+  - **Activation with `c=1`.** The instance enters `Requested` and reports once, after every
+    leg has closed. As in kitty, freminal does not close the activated desktop notification
+    itself.
+  - **Flake (root-caused).** The orchestrator's re-runs caught a load-dependent test flake,
+    about 1 in 6 full `freminal` runs. The fake daemon's message stream was created on its
+    thread after the client could already have called it, so the call was lost and the client
+    blocked.
+    - Fix: the rig subscribes before the service starts.
+    - Hardening exposed by the same analysis: production calls now carry a 25 s method timeout
+      (the libdbus default), so a hung daemon cannot block the dispatcher forever. Two
+      deterministic timeout tests cover it.
+    - After the fix: 28 consecutive full `freminal` runs and 20 service-only runs all passed.
+  - One out-of-scope edit was accepted: a sink struct literal in the `notifications.rs` test
+    helper.
+- **138.C2 (done).** Signals carry their sender, and the dispatcher believes only the current
+  owner of `org.freedesktop.Notifications`.
+  - The owner is resolved with `GetNameOwner` and followed by a second pump on
+    `NameOwnerChanged`; a forged `NameOwnerChanged` not sent by `org.freedesktop.DBus` is
+    rejected. A p2p connection is `Unfiltered`.
+  - A change from one owner to another (or to nobody) closes every mapped instance, so no leg
+    stays open after a daemon restart.
+  - The orchestrator verified the filter against the real session bus on the development
+    machine (daemon `:1.21`), using temporary ignored tests that were not committed. A real
+    show and `CloseNotification` produced `Shown` then `Closed`. 5,000 forged
+    `NotificationClosed` signals from a second connection produced no event.
+- **138.14 (done).** Presentation is pure (`presentation.rs`). The XDG scans
+  (`icon_lookup.rs`) are lazy and run on the dispatcher thread.
+  - The scans follow symlinks, which NixOS profiles need, but enter each canonical directory
+    only once. They are bounded at depth 6, 100k icon names and 20k `.desktop` files.
+  - `Osc99IconCache` is LRU (64 entries / 4 MiB). Resolved bytes reach every system leg
+    through `icon_data`.
+  - When no rule finds an icon, `app_icon` is `freminal`. Tests use an empty lookup and never
+    touch the real filesystem.
+  - Orchestrator review fixes, both decisions:
+    - Icon decoding goes through `ImageReader` with strict limits: 4096×4096 and a 64 MiB
+      allocation cap. A 1 MiB PNG declaring 30000×30000 is rejected; a header-patched test
+      covers this.
+    - `image-data` is downscaled whenever a side exceeds 256, because zvariant encodes the
+      byte array as one `Value` per byte; a 1024² icon would cost about 100 MB in transit.
+      The plan's "over 1024 → 256" is superseded.
+  - Sound hints are sent whatever the daemon's `sound` capability says (daemons ignore
+    unknown hints). The advertisement follows the capability (138.17).
+- **138.17 (done, before 138.15).** Legs are expressed as `Osc99Features` values. The pure
+  functions are `toast_leg`, `system_leg(platform, daemon)`, `union`, `intersection` and
+  `combine(routing, platform, daemon)`, with no wildcard arms.
+  - The daemon-capability types moved to `osc99/capabilities.rs` for all platforms, with
+    `Osc99LinuxDaemon` and `Osc99Platform::current()`.
+  - With the Linux leg unavailable, `System` is `Unsupported` and `Both` is the toast leg.
+    `SystemWhenUnfocused` is `Supported` with every optional feature off.
+  - `Osc99LinuxDaemon::assumed()` is `Unavailable` off Linux/BSD, so that no variant goes
+    unconstructed.
+  - `body_markup` is gated to Linux/BSD, its only reader.
+  - The full reply string is covered by 138.4's features-to-string table, because the reply
+    builder is private to the emulator crate.
+  - Interim: a one-argument `host_capabilities(config)` wrapper (passing `assumed()`) remains
+    because `tab_spawning.rs` was out of scope; 138.15 removes it.
+- **138.15 (done).** `FreminalGui::osc99_daemon` (a `Cell<Osc99LinuxDaemon>`) feeds every
+  `host_capabilities` call, and the one-argument wrapper is gone.
+  - The daemon's `Capabilities` and `Unavailable` events update the cell through
+    `set_osc99_daemon`, which re-broadcasts only when the resolved capabilities change (pure
+    `daemon_state_change`).
+  - One broadcast helper, shared with config apply, takes the in-flight window explicitly,
+    because the window being rendered is out of `self.windows`.
+  - The service starts from `ensure_osc99_dbus_started` early in every `update()`, and after
+    a config apply, whenever the config can use the system leg.
+  - The end-to-end test drives a real `TerminalState`: after a no-`actions` capability
+    change, `p=?` loses `a=` and `buttons`; `System` with the bus down gives no reply.
+  - The sub-agent found that Reload Config already missed the in-flight window for every
+    config dimension; recorded as 138.C3.
+- **138.16 (done).** The registry now produces the untracked leg: `ShowUntrackedSystem`, plus
+  the `p=close;untracked` reply at display when `c=1`.
+  - The old per-notification thread, `build_osc99_notification`, the temp-file functions and
+    the `cfg!(test)` guard are gone.
+  - `NotifyRustUntrackedBackend` (macOS/Windows) builds the notification on the GUI thread,
+    with no buttons, per-platform urgency and sound mapping, and an icon from
+    `IconTempFiles`.
+  - Windows shows inline.
+  - macOS shows on a short-lived `freminal-osc99-deliver` thread. This is an orchestrator
+    decision: the sub-agent found by reading the source that mac-notification-sys blocks until
+    delivery confirmation, up to 2 s, even on the asynchronous drop path, so an inline call
+    could stall the render thread.
+  - Icon temp files are content-hash named, written with `create_new`, capped at 64 (LRU),
+    and removed when the backend is dropped at shutdown. The windowing layer has no app exit
+    hook, so files survive a crash.
+  - Fixed on the way: Windows `s=system` used to be silent; it now plays the default sound.
+  - macOS was not compiled locally. Its code paths were checked against the notify-rust and
+    mac-notification-sys source, and macOS CI is the first compile. Windows passes
+    `check-windows`.
+- **138.18 (done).** COVERAGE, GAPS, `KITTY_PROTOCOL_REFERENCE.md` (0.49.2 baseline,
+  including freminal's deliberate differences from kitty) and the `config_example.toml`
+  routing comments are rewritten.
+  - The orchestrator found that the eight standard icon names, a spec MUST, are honoured only
+    on the Linux system leg; the docs agent had called this a platform limit. OSC 99 therefore
+    stayed 🚧, with exactly that gap, and the fix was scheduled as 138.C4 and 138.C5.
+    🚧 superseded by 138.C5: OSC 99 is ✅ in every document, and the docs were rewritten by
+    138.C16 against the post-cleanup code.
+  - The orchestrator checked the example `p=?` replies (macOS `both` and
+    `system_when_unfocused`) against `combine`.
 
 ---
 
@@ -4865,7 +7015,7 @@ Source review: PR #537 (Copilot and CodeRabbit).
 
 ### 147 Subtasks
 
-Every subtask leaves `cargo test --all` and
+Every subtask leaves `cargo xtask test` and
 `cargo clippy --all-targets --all-features -- -D warnings` green. Parser and encoder subtasks
 name their benchmark (`freminal-bench-table`) and record before and after results in their
 status note (`performance-benchmarks`, 15% threshold). Escape-sequence behaviour changes are
@@ -5422,6 +7572,30 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   (double reversal shows the default background), via the `.#gl-pixel` harness.
 - **Depends on:** nothing.
 
+#### 147.28 — Nix module lacks `[notifications] command_finished_template`
+
+- **Source:** Task 138.11 (sub-agent report, confirmed by the orchestrator). Predates 138.
+- **Defect today:** `NotificationsConfig::command_finished_template`
+  (`freminal-common/src/config.rs`) and `config_example.toml` both have the key, but
+  `nix/home-manager-module.nix` has no option for it. Managed installs cannot set it, against
+  `freminal-config-options` step 5.
+- **Scope:** `nix/home-manager-module.nix` only: the option, plus its entry in the
+  notifications section binding.
+- **Tests:** `nixfmt --check`, `statix check`, `deadnix --fail`; evaluate a module config that
+  sets the key and check it reaches the generated TOML.
+- **Depends on:** nothing.
+
+#### 147.29 — `resolve_anchor` takes a bool parameter
+
+- **Source:** Task 138.C14 (found while editing the toast layout). Predates 138.
+- **Defect today:** `freminal/src/gui/toast/layout.rs`
+  `resolve_anchor(.., is_origin_window: bool)` violates `freminal-state-representation` (no
+  bool parameters).
+- **Scope:** `toast/layout.rs` and its tests: a two-variant named enum
+  (`ToastOriginWindow { This, Other }`).
+- **Tests:** the existing anchor tests, ported.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -5454,7 +7628,8 @@ task's stub:
 
 - **Task 138:** a saturated 128-id OSC 99 map refuses even complete single-chunk
   notifications. Tombstoned ids are unbounded strings. (129 review; previously routed, but
-  missing from the stub.)
+  missing from the stub.) Closed by 138.3 (LRU, never refuses) and 138.2 (ids capped at 512
+  bytes).
 - **Task 138:** the transported OSC 99 `bool`s (130.C4). Already present.
 - **Task 135:** cap `o=z` inflation at the size implied by `s`/`v`/`f`, not only at
   `MAX_KITTY_DATA_BYTES`. (129 review; previously routed, but missing from the stub.)
@@ -5498,7 +7673,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26 and 147.27 are independent.
+- 147.19, 147.26, 147.27, 147.28 and 147.29 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -5506,7 +7681,7 @@ Stale stub text was corrected at the same time:
 
 ### 147 Verification
 
-- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+- `cargo xtask test`, `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
   `cargo xtask check-windows`, `cargo xtask lint-markdown`.
 - Benchmarks for 147.2, 147.4, 147.8, 147.12, 147.15, 147.18 and 147.20 stay within the 15% threshold, or
@@ -5752,59 +7927,10 @@ This is a `freminal-architecture` and `autonomy-boundaries` stop.
 - Ctrl+`-` maps to 0x1F (xterm) or `-` (kitty spec).
 - Shipping CapsLock/NumLock/ScrollLock key events under flag 8 without the lock bits.
 
-### Task 138 — Desktop Notifications (OSC 99) Conformance (stub, v0.13.0)
+### Task 138 — Desktop Notifications (OSC 99) Conformance (activated)
 
-**Goal.** Close every OSC 99 deviation, so freminal matches kitty's notification semantics.
-
-**Audit findings.**
-
-- **Parse and reassembly.**
-  - `a=` is not cumulative over the default `{focus}`, so `a=report` disables focus
-    (test-pinned).
-  - Chunk metadata is replaced by the final chunk's defaults.
-  - Id-less `d=0` chunks are dropped.
-  - Unknown `p=` payloads are appended to the title (test-pinned).
-  - Chunked base64 is decoded per chunk (Task 129).
-  - Empty notifications are displayed.
-  - C1 bytes are not rejected.
-- **Reverse path.**
-  - Buttons are reported **0-based**; the spec says 1-based.
-  - The close report is lost after activation (notify-rust `FnOnce`).
-  - ~~`p=?` is answered after DA1~~: fixed by Task 130 (answered on the PTY thread in stream
-    order).
-  - ~~Capabilities are advertised while notifications are disabled~~: fixed by Task 130 (every
-    OSC 99 request is dropped while unsupported; `a=report` / `c=1` follow platform and
-    routing).
-  - Ids, buttons and live-id lists are sanitised at the reply serialiser since Task 130; the
-    transported `report_activation` / `focus_on_activation` / `close_report` bools are
-    130.C4, routed here.
-  - The `p=alive` map is global across panes, unbounded and never pruned on user dismissal.
-  - A saturated 128-id reassembly map refuses even complete single-chunk notifications, and
-    nothing expires an unterminated id except its final chunk or RIS. Tombstoned
-    (`PendingEntry::Dropped`) ids are unbounded strings. Needs expiry or LRU eviction and an
-    id-length cap (129 review; written here by Task 147).
-- **Lifecycle.**
-  - No update-in-place for a repeated `i=`.
-  - `p=close` does not close the notification.
-  - `a=focus` is never acted on.
-  - There is no robust `w=` expiry.
-  - One thread per notification.
-- **Presentation.**
-  - The 8 mandatory icon names are not mapped.
-  - Data beats name; the spec says name first.
-  - `s=silent` becomes sound-name "silent".
-  - `o=` is OS-window-only, not pane-aware.
-  - `t=` and `f=` filtering is never consumed.
-
-**Scope sketch.** Work items A-T1 to A-T4 from the audit: parse fidelity, reverse-path
-correctness, lifecycle (retain the notify-rust handle; a single listener), and presentation.
-User filtering goes through `freminal-config-options`.
-
-**Open questions.**
-
-- Whether the toast leg gains buttons and expiry.
-- Platform parity for macOS and Windows activation reports: implement, or stop advertising
-  them there.
+Activated and decomposed on 2026-10-12. The audit findings, decisions and subtasks now live
+under "Task 138 — Desktop Notifications (OSC 99) Conformance" above.
 
 ### Task 139 — Pointer Shapes (OSC 22) Completion (stub, v0.13.0)
 

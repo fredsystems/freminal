@@ -232,13 +232,13 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 129 | Kitty Wire Infrastructure                   | `PLAN_VERSION_130.md` (Task 129)              | Complete      | None                          |
 | 130 | Reverse-Path & Capability-Query Consistency | `PLAN_VERSION_130.md` (Task 130)              | Complete      | Task 129                      |
 | 131 | Screen-Scoped State & Reset Lifecycle       | `PLAN_VERSION_130.md` (Task 131)              | Complete      | Task 130.1-130.3 (foundation) |
-| 132 | Colour Foundation                           | `PLAN_VERSION_130.md` (Task 132)              | Pending merge | Task 126                      |
+| 132 | Colour Foundation                           | `PLAN_VERSION_130.md` (Task 132)              | Complete      | Task 126                      |
 | 133 | Shared Consent Prompt                       | `PLAN_VERSION_130.md` (Task 133)              | Planned       | None                          |
 | 134 | Unicode Width & Segmentation Conformance    | `PLAN_VERSION_130.md` (Task 134)              | Planned       | None                          |
 | 135 | Graphics Protocol Conformance               | `PLAN_VERSION_130.md` (Task 135)              | Planned       | Tasks 126, 129–131            |
 | 136 | Graphics Placement Model & Z-Layers         | `PLAN_VERSION_130.md` (Task 136)              | Planned       | Task 135                      |
 | 137 | Keyboard Protocol Conformance               | `PLAN_VERSION_130.md` (Task 137)              | Planned       | Tasks 128, 131; arch sign-off |
-| 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Planned       | Tasks 129, 130                |
+| 138 | Desktop Notifications (OSC 99) Conformance  | `PLAN_VERSION_130.md` (Task 138)              | Pending merge | Tasks 129, 130                |
 | 139 | Pointer Shapes (OSC 22) Completion          | `PLAN_VERSION_130.md` (Task 139)              | Planned       | Tasks 129–131                 |
 | 140 | Underline & SGR Parity                      | `PLAN_VERSION_130.md` (Task 140)              | Planned       | None                          |
 | 141 | Misc Protocol Extensions                    | `PLAN_VERSION_130.md` (Task 141)              | Planned       | Tasks 128, 131                |
@@ -503,7 +503,7 @@ was reverted and is tracked separately. All target stable kitty specs; v0.11.0 k
 
 **Tasks 102–105 and 126–147 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–132 and 147 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–132, 138 and 147 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -823,7 +823,8 @@ Update this section as tasks complete:
 | 129  | 2026-10-09 | 2026-10-10 | 129.1-129.15, two review passes, 129.C1-C6; merged via PR #536 (`2862acb9`)        |
 | 130  | 2026-10-10 | 2026-10-11 | 130.1-130.9, C1-C3, C5-C6, two review passes; merged via PR #537 (`61b86bf5`)      |
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
-| 132  | 2026-10-11 |            | 132.1-132.14, C1-C7, adversarial review; PR #539                                   |
+| 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
+| 138  | 2026-10-12 |            | 138.1-138.18, C1-C27 done; reviews + manual test done; PR #555 open                |
 
 ---
 
@@ -846,7 +847,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–147; audit + 126–132, 147 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–147; audit + 126–132, 138, 147 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)

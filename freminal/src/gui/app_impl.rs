@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
-use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::send_or_log;
@@ -834,7 +833,10 @@ impl freminal_windowing::App for FreminalGui {
                         &self.config.cursor.shape,
                         self.config.cursor.blink,
                     ),
-                    host_capabilities: super::host_capabilities::host_capabilities(&self.config),
+                    host_capabilities: super::host_capabilities::host_capabilities(
+                        &self.config,
+                        self.osc99_daemon.get(),
+                    ),
                 },
                 &repaint_handle,
                 initial_size,
@@ -900,7 +902,7 @@ impl freminal_windowing::App for FreminalGui {
                         window_post,
                         repaint_handle,
                     );
-                    self.windows.insert(window_id, win);
+                    self.insert_terminal_window(window_id, win);
 
                     self.emit_window_create_recording(window_id, inner_size);
                 }
@@ -1065,6 +1067,9 @@ impl freminal_windowing::App for FreminalGui {
         // Drop the window's state (its panes retire their GL renderers) but
         // keep the handles to destroy the window's remaining GL state: this
         // call has no GL context current, `on_window_destroying` will.
+        // Stop the OSC 99 wake-up targeting the closing window.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.unregister(window_id);
         if let Some(win) = self.windows.remove(&window_id) {
             self.closing_window_gl
                 .insert(window_id, win.into_gl_teardown());
@@ -1099,6 +1104,10 @@ impl freminal_windowing::App for FreminalGui {
         gl: &glow::Context,
         context: GlContextState,
     ) {
+        // Idempotent with `on_close_requested`; this also covers a window that
+        // is destroyed without a close request.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.unregister(window_id);
         let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
             self.windows
                 .remove(&window_id)
@@ -1410,6 +1419,10 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(feature = "frame-profiling")]
         let update_start = std::time::Instant::now();
 
+        // Focus the panes activated OSC 99 notifications asked for, before any
+        // window state is read this frame.
+        self.drain_osc99_focus_requests(handle);
+
         // ── Settings window rendering ────────────────────────────────────────
         // If this update is for the settings window, render settings directly
         // and return — no terminal state to process.
@@ -1542,6 +1555,21 @@ impl freminal_windowing::App for FreminalGui {
             }
             return;
         };
+
+        // Keep the OSC 99 notification service's wake-up pointed at a window
+        // that exists: this one is rendering right now.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake
+            .retarget(window_id, || handle.event_loop_proxy());
+
+        // Start the notification service as soon as the config can route OSC 99
+        // to the system leg, before any OSC 99 is routed this frame. Starting
+        // here (rather than at the first desktop notification) means the
+        // daemon's `GetCapabilities` answer normally arrives before an
+        // application's first `p=?`; an answer that arrives later is
+        // broadcast to the panes as a capability change.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.ensure_osc99_dbus_started();
 
         // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
         //
@@ -2056,13 +2084,14 @@ impl freminal_windowing::App for FreminalGui {
                 font_width,
                 font_height,
                 WindowFocus::from_bool(window_focused),
+                window_id,
                 &self.config,
             );
             self.route_window_manipulation_events(
-                ui,
                 WindowFocus::from_bool(window_focused),
-                &window_manipulation_events,
+                window_manipulation_events,
             );
+            self.wake_for_osc99_pending_work(ui.ctx());
 
             // ── Multi-pane rendering loop ────────────────────────────
             //
@@ -3932,6 +3961,36 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
+        // Expire OSC 99 notifications past their `w=` deadline. Once per
+        // window frame, here, because every window runs this point every
+        // frame and it precedes the delivery below: the `Closed` events the
+        // expiry produces are delivered in this same frame. The registry is
+        // shared by all windows, so any window's frame may be the one that
+        // expires an instance; each window also schedules its own wake-up
+        // for the nearest remaining deadline, so an idle app still ticks.
+        if let Some(delay) = self.expire_osc99_notifications() {
+            win.pending_terminal_requested_delay = Some(
+                win.pending_terminal_requested_delay
+                    .map_or(delay, |prev| prev.min(delay)),
+            );
+            ctx.request_repaint_after(delay);
+        }
+
+        // Deliver the events the Linux/BSD desktop-notification service queued
+        // (activation, close, failed show) to the registry. Like the toast
+        // events below, every window drains the one shared channel.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.route_osc99_system_events(&win);
+
+        // Deliver the events keyed (OSC 99) toasts recorded this frame to the
+        // registry. Outside the block above on purpose: the last toast
+        // closing leaves the stack empty, and that `Closed` must still be
+        // delivered.
+        self.route_osc99_toast_events();
+        // An activation that asked for focus queued it; the drain at the top
+        // of `update()` needs a frame to run in.
+        self.wake_for_osc99_pending_work(ctx);
+
         // ── Retired GL objects need one more frame (125.C2 review) ──────────
         // A pane closed during this update retired its renderer after the
         // top-of-frame drain ran. Without a further frame the objects would
@@ -4384,26 +4443,29 @@ impl FreminalGui {
     /// drain: OSC 9/777 notifications go through
     /// [`crate::gui::notifications::NotificationRouter::route`], OSC 52
     /// clipboard events surface as a toast via [`Self::route_freminal_toast`],
-    /// OSC 99 stateful notifications go through
-    /// [`crate::gui::notifications::NotificationRouter::route_osc99`], and
-    /// OSC 99 control sequences (alive/close/query) get PTY-written
-    /// responses.
+    /// every OSC 99 request (stateful notifications, `p=alive` / `p=close`
+    /// controls, icon primings) goes through
+    /// [`crate::gui::notifications::NotificationRouter::route_osc99_request`],
+    /// in arrival order; controls get PTY-written responses.
     ///
     /// Called after `drain_window_manipulation_commands` returns, i.e. after
     /// its mutable borrow of the tab list has ended, so `self.config`,
     /// `self.toasts`, and the OSC 99 session maps (`self.osc99_icon_cache`,
-    /// `self.osc99_live`) are all borrowable here without conflicting with
+    /// `self.osc99_registry`) are all borrowable here without conflicting with
     /// that borrow.
     ///
-    /// The four routing destinations are kept as four separate blocks
-    /// deliberately (Task 122.8 prohibition): they route to different
-    /// destinations, and the OSC 99 control block writes PTY responses via
-    /// `send_or_log!`. Do not fold them into one.
+    /// There are three routing destinations (OSC 9/777 toasts, OSC 52 toasts,
+    /// and OSC 99 requests), and each has its own block below, deliberately
+    /// (Task 122.8 prohibition): they route to different destinations. The
+    /// OSC 99 block installs a deferred filter change and prunes dead panes,
+    /// then routes displays, controls and icon primings as ONE ordered list
+    /// (Task 138.C10, G1); its controls write PTY responses through the
+    /// effects they return. Do not fold the blocks into one. The OSC 99 routing
+    /// itself lives in `gui::osc99::glue`.
     fn route_window_manipulation_events(
         &self,
-        ui: &egui::Ui,
         window_focus: WindowFocus,
-        events: &WindowManipulationEvents,
+        events: WindowManipulationEvents,
     ) {
         // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
         // `self.config` and the toast stack are borrowable here without
@@ -4433,68 +4495,28 @@ impl FreminalGui {
             );
         }
 
-        // Route OSC 99 stateful notifications collected above (Task 99.5a).
-        // `self.config`, the toast stack, and the OSC 99 session maps are
-        // borrowable here without conflicting with the drain's tab-list
-        // borrow.
-        if !events.osc99_notifications.is_empty() {
-            let window_minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-            if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
-                self.toasts.try_borrow_mut(),
-                self.osc99_icon_cache.try_borrow_mut(),
-                self.osc99_live.try_borrow_mut(),
-            ) {
-                let ctx = crate::gui::notifications::Osc99DisplayContext {
-                    window_focused: window_focus.is_focused(),
-                    window_minimized,
-                };
-                // `tx` (a `Weak` handle to the originating pane's reply
-                // sender) is threaded into the reverse-reply path: the
-                // notification thread upgrades it per send to deliver
-                // activation/close replies to the pane that produced this
-                // OSC 99 sequence, without keeping that pane alive.
-                for (data, tx) in &events.osc99_notifications {
-                    crate::gui::notifications::NotificationRouter::route_osc99(
-                        data,
-                        &self.config.notifications,
-                        ctx,
-                        &mut toasts,
-                        &mut icon_cache,
-                        &mut live,
-                        tx,
-                    );
-                }
-            }
+        // Install an `osc99_filters` change a busy registry deferred, before
+        // this frame's notifications are filtered.
+        super::settings_dispatch::apply_pending_osc99_filter(
+            &self.osc99_registry,
+            &self.pending_osc99_filter,
+        );
+
+        // Drop registry instances whose pane is gone. Every frame: the scan
+        // is bounded by the registry's cap, and a busy cell only defers the
+        // prune to the next frame, so it is worth a warning only when there
+        // is OSC 99 work this frame.
+        if self.prune_osc99_dead_panes() == super::osc99::Osc99CellAccess::Busy
+            && !events.osc99_requests.is_empty()
+        {
+            tracing::warn!("OSC 99: notification state busy; dead panes not pruned");
         }
 
-        // Answer OSC 99 control sequences collected above (Task 99.6 for
-        // Close/Alive; the `p=?` handshake is answered on the PTY thread, Task 130.5). Run
-        // after the display-routing block above so its `osc99_live` borrow
-        // has already been released.
-        for (control, tx) in &events.osc99_controls {
-            match control.kind {
-                Osc99ControlKind::Alive => {
-                    // Answer the poll with the current live notification ids.
-                    if let Ok(live) = self.osc99_live.try_borrow() {
-                        crate::gui::notifications::send_osc99_alive(&live, control.id.clone(), tx);
-                    }
-                }
-                Osc99ControlKind::Close => {
-                    // App-driven close request: prune the live entry.
-                    // freminal cannot programmatically close an OS
-                    // notification it already delegated to the desktop
-                    // environment, so this only reconciles our liveness
-                    // map — no report is sent here (the close report is
-                    // emitted only when WE observe a close on the
-                    // notification thread with `c=1`).
-                    if let (Some(id), Ok(mut live)) =
-                        (control.id.as_deref(), self.osc99_live.try_borrow_mut())
-                    {
-                        crate::gui::notifications::forget_osc99(&mut live, id);
-                    }
-                }
-            }
-        }
+        // Route every OSC 99 request of the frame (displays, `p=close` /
+        // `p=alive` controls, icon primings) in the order the panes emitted
+        // them. The `p=?` handshake never gets here: the PTY thread answers
+        // it (Task 130.5).
+        self.route_osc99_requests(window_focus, events.osc99_requests);
     }
 
     /// First-window spawn path when no layout or session restore will apply.
@@ -4549,7 +4571,10 @@ impl FreminalGui {
                     &self.config.cursor.shape,
                     self.config.cursor.blink,
                 ),
-                host_capabilities: super::host_capabilities::host_capabilities(&self.config),
+                host_capabilities: super::host_capabilities::host_capabilities(
+                    &self.config,
+                    self.osc99_daemon.get(),
+                ),
             },
             &repaint_handle,
             initial_size,
@@ -4621,7 +4646,23 @@ impl FreminalGui {
             window_post,
             repaint_handle,
         );
+        self.insert_terminal_window(window_id, win);
+    }
+
+    /// Add a newly created terminal window's state to `self.windows` and make
+    /// the OSC 99 notification service's wake-up able to reach it.
+    ///
+    /// Every creation of a terminal window goes through here. The Settings
+    /// window has no [`PerWindowState`] and never does, so it is never
+    /// registered: a wake sent to it would drain nothing. The per-frame
+    /// re-inserts in `update()` are not creations and use `self.windows`
+    /// directly. The window is unregistered when it closes (`on_close_requested`
+    /// and `on_window_destroying`; unregistering a window that was never
+    /// registered, such as the Settings window, is harmless).
+    pub(super) fn insert_terminal_window(&mut self, window_id: WindowId, win: PerWindowState) {
         self.windows.insert(window_id, win);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.osc99_wake.register(window_id);
     }
 
     /// Render the fatal-error panel for a window that has no
