@@ -13,7 +13,9 @@ confirmation-review cleanups (138.C18 to 138.C22): hard text limits, name-length
 limits, reassembly bounds, rejected-chunk handling, per-pane quotas, `p=alive`
 semantics, pruning of a gone pane's notifications, bus-down routing, the D-Bus
 service and its reconnect timer, the lazy icon scan, the toast's exit fade, and
-the macOS/Windows delivery worker and icon directory. No other section changed.
+the macOS/Windows delivery worker and icon directory. Manual-test fixes
+(138.C23, 138.C24): a successful `CloseNotification` is the close, and named
+icons also travel as `image-path`. No other section changed.
 
 Last updated: 2026-10-10 — Task 131 — the keyboard mode stack is per screen
 (131.3, fixes B15) and kitty graphics placements are per screen (131.7, 131.C5);
@@ -474,6 +476,10 @@ freminal:
   and downscales anything over 256 pixels to fit 256x256 (premultiplied, so
   transparent edges do not darken); the decoded pixels are sent as the
   `image-data` hint, as one byte array, and the last 8 decoded icons are kept.
+  An icon chosen from the `n=` names is sent as `app_icon` and also as the
+  `image-path` hint (138.C24; **differs from kitty**), because some daemons draw
+  only the notification image. The `.desktop` and freminal fallbacks are
+  `app_icon` only.
   Every notification also carries the `desktop-entry` hint `freminal`.
 - **Linux/BSD sounds:** `system` sends no sound hint, `silent` sends
   `suppress-sound`, `error`, `warn`, `warning`, `info` and `question` send
@@ -606,10 +612,17 @@ Lifecycle summary:
   untracked leg (macOS, Windows) cannot update, so it shows another
   notification.
 - `p=close` and expiry close every open leg (`CloseNotification` on Linux/BSD).
+  A successful `CloseNotification` counts as the close; freminal does not wait
+  for the daemon's `NotificationClosed` (**differs from kitty**). Some daemons
+  never send it: wayle 0.1.3 drops a notification sent with `w=0`
+  (`expire_timeout` 0) from its own tracking, so the signal never comes.
 - Activation from any leg sends the activation report (when `a=report`), focuses
   (when `focus`: switch to the pane's tab, unzoom, activate the pane, raise the
   OS window; a compositor may refuse the raise, and freminal does not consume the
-  D-Bus `ActivationToken`), and closes the other legs. Without `c=1` the instance
+  D-Bus `ActivationToken`), and closes the other legs. A desktop activation
+  also closes the activated desktop notification with `CloseNotification`
+  (freminal never sends `resident`, so the daemon should have removed it
+  anyway). Without `c=1` the instance
   is then forgotten; with `c=1` exactly one close report is sent once every
   tracked leg has closed.
 - On Linux/BSD the signals `ActionInvoked` and `NotificationClosed` are believed

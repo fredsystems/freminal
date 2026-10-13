@@ -65,6 +65,24 @@ impl Type for AlwaysTrue {
 /// its extension, which lets the daemon group and attribute the notification.
 const DESKTOP_ENTRY_HINT: &str = "freminal";
 
+/// The notification's own image hint: the per-notification icon, as opposed
+/// to `app_icon`, which the specification describes as the calling
+/// program's icon.
+///
+/// Daemons that draw both show the image as the notification's picture.
+/// Some (wayle's default `icon-source = "automatic"`) ignore `app_icon`
+/// entirely, so an icon the application asked for is sent here as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NotifyImage {
+    /// No image hint: the notification asked for no icon of its own.
+    None,
+    /// The `image-path` hint with an icon-theme name (the specification
+    /// allows a name or a `file://` URI; freminal sends names only).
+    Path(String),
+    /// The `image-data` hint, for transmitted icon data.
+    Data(Osc99IconImage),
+}
+
 /// The `hints` argument of `Notify`, as presentation decided it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NotifyHints {
@@ -74,8 +92,8 @@ pub(super) struct NotifyHints {
     pub(super) category: Option<String>,
     /// The `suppress-sound` / `sound-name` hint.
     pub(super) sound: Osc99SoundHint,
-    /// The `image-data` hint, for transmitted icon data.
-    pub(super) image: Option<Osc99IconImage>,
+    /// The `image-path` / `image-data` hint.
+    pub(super) image: NotifyImage,
 }
 
 impl NotifyHints {
@@ -87,12 +105,18 @@ impl NotifyHints {
             Osc99SoundHint::Suppress => (Some(AlwaysTrue), None),
             Osc99SoundHint::Named(name) => (None, Some(name.clone())),
         };
+        let (image_path, image_data) = match &self.image {
+            NotifyImage::None => (None, None),
+            NotifyImage::Path(name) => (Some(name.clone()), None),
+            NotifyImage::Data(image) => (None, Some(WireImage::from(image))),
+        };
         WireHints {
             urgency: self.urgency,
             category: self.category.clone(),
             suppress_sound,
             sound_name,
-            image_data: self.image.as_ref().map(WireImage::from),
+            image_path,
+            image_data,
             desktop_entry: DESKTOP_ENTRY_HINT,
         }
     }
@@ -142,6 +166,8 @@ struct WireHints<'a> {
     #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
     sound_name: Option<String>,
     #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    image_path: Option<String>,
+    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
     image_data: Option<WireImage<'a>>,
     #[serde(with = "as_value")]
     desktop_entry: &'static str,
@@ -161,16 +187,25 @@ pub(super) struct NotifyArgs {
 }
 
 impl NotifyArgs {
-    /// The `app_icon` and `image-data` for `notification`.
+    /// The `app_icon` and the image hint for `notification`.
     ///
     /// Transmitted icon data that does not decode counts as no data: the
     /// icon is then the first name verbatim, else the `.desktop` icon of the
     /// application, else freminal's own, as in [`choose_icon`].
+    ///
+    /// An icon chosen from the notification's own `n=` names is sent both as
+    /// `app_icon` (kitty's behaviour) and as the `image-path` hint, so a
+    /// daemon that only draws the notification image shows it too. The
+    /// `.desktop` icon and freminal's own are the application's icon, not the
+    /// notification's, so they go in `app_icon` only. With names present,
+    /// [`choose_icon`] never picks the `.desktop` icon, and it returns `None`
+    /// only when there are no names, so a named choice with names present is
+    /// always one of them.
     pub(super) fn icon(
         lookup: &dyn Osc99IconLookup,
         cache: &mut Osc99DecodedIconCache,
         notification: &Notification99Data,
-    ) -> (String, Option<Osc99IconImage>) {
+    ) -> (String, NotifyImage) {
         let choose = |data: Option<&[u8]>| {
             choose_icon(
                 &notification.icon_names,
@@ -179,9 +214,12 @@ impl NotifyArgs {
                 lookup,
             )
         };
-        let freminal_icon = || (FREMINAL_ICON_NAME.to_owned(), None);
+        let freminal_icon = || (FREMINAL_ICON_NAME.to_owned(), NotifyImage::None);
         let named = |choice| match choice {
-            Some(Osc99IconChoice::Named(name)) => (name, None),
+            Some(Osc99IconChoice::Named(name)) if !notification.icon_names.is_empty() => {
+                (name.clone(), NotifyImage::Path(name))
+            }
+            Some(Osc99IconChoice::Named(name)) => (name, NotifyImage::None),
             // No rule found an icon: the last one is freminal's own.
             Some(Osc99IconChoice::Data(_)) | None => freminal_icon(),
         };
@@ -191,7 +229,7 @@ impl NotifyArgs {
                     tracing::debug!("OSC 99: the transmitted icon did not decode");
                     named(choose(None))
                 },
-                |image| (String::new(), Some(image)),
+                |image| (String::new(), NotifyImage::Data(image)),
             ),
             choice => named(choice),
         }
@@ -380,7 +418,7 @@ mod tests {
             urgency: 1,
             category: Some("im".to_owned()),
             sound: Osc99SoundHint::Suppress,
-            image: None,
+            image: NotifyImage::None,
         };
         assert_eq!(<WireHints<'_> as Type>::SIGNATURE.to_string(), "a{sv}");
         let map = round_trip(&hints.to_wire())?;
@@ -412,7 +450,7 @@ mod tests {
             urgency: 0,
             category: None,
             sound: Osc99SoundHint::None,
-            image: None,
+            image: NotifyImage::None,
         };
         let map = round_trip(&hints.to_wire())?;
 
@@ -438,14 +476,16 @@ mod tests {
             urgency: 1,
             category: None,
             sound: Osc99SoundHint::None,
-            image: Some(image.clone()),
+            image: NotifyImage::Data(image.clone()),
         };
 
         // Structurally: the wire hints borrow the pixel buffer. They hold no
         // `Value` (and no copy) for it, so nothing per byte is built.
         let wire = hints.to_wire();
         let wire_image = wire.image_data.as_ref().ok_or("no image on the wire")?;
-        let held = hints.image.as_ref().ok_or("no image in the hints")?;
+        let NotifyImage::Data(held) = &hints.image else {
+            return Err("no image in the hints".into());
+        };
         assert!(std::ptr::eq(wire_image.data.as_ptr(), held.rgba.as_ptr()));
         assert_eq!(wire_image.data.len(), 256 * 256 * 4);
 
@@ -460,6 +500,28 @@ mod tests {
             (256, 256, 1024, true, 8, 4)
         );
         assert_eq!(data, image.rgba);
+        assert!(!map.contains_key("image-path"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_named_image_travels_as_the_image_path_hint() -> TestResult {
+        let hints = NotifyHints {
+            urgency: 1,
+            category: None,
+            sound: Osc99SoundHint::None,
+            image: NotifyImage::Path("dialog-error".to_owned()),
+        };
+        let map = round_trip(&hints.to_wire())?;
+
+        assert_eq!(
+            sorted_keys(&map),
+            ["desktop-entry", "image-path", "urgency"]
+        );
+        assert_eq!(
+            hint::<String>(&map, "image-path").as_deref(),
+            Some("dialog-error")
+        );
         Ok(())
     }
 

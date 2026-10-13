@@ -852,7 +852,10 @@ def step_sounds() -> None:
         "the toast never plays sound. Desktop (Linux/BSD): `system` sends no sound",
         "hint (daemon default), `silent` sends suppress-sound, `warn` sends",
         "sound-name=dialog-warning -- but only a daemon with the `sound` capability",
-        "plays it, and many daemons ignore the hints entirely.",
+        "plays it, and many daemons ignore the hints entirely. A daemon without",
+        "`sound` (check: busctl --user call org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications org.freedesktop.Notifications GetCapabilities)",
+        "plays NOTHING for any of the three; that is correct, not a freminal bug.",
         "macOS/Windows: `silent` is silent; the others play the platform default.",
     )
     emit(f"i=snd-system:s={b64('system')}", "Sound: system")
@@ -879,7 +882,8 @@ def step_icon_names() -> None:
     expect(
         "eight notifications, one per standard name. Toast: the matching bundled-",
         "font glyph in the icon slot (the accent colour still follows urgency).",
-        "Desktop (Linux/BSD): the matching freedesktop icon (error=dialog-error,",
+        "Desktop (Linux/BSD): the matching freedesktop icon, sent as both app_icon",
+        "and the image-path hint (error=dialog-error,",
         "warn=dialog-warning, info=dialog-information, question=dialog-question,",
         "help=system-help, file-manager=system-file-manager,",
         "system-monitor=utilities-system-monitor, text-editor=utilities-text-editor).",
@@ -898,7 +902,8 @@ def step_icon_data_cache_prime() -> None:
     expect(
         "A) 'Icon by data': a notification with the transmitted rainbow icon,",
         "   cached under g=cachekey1. Shown on the DESKTOP leg (Linux/BSD, macOS,",
-        "   Windows); the toast never shows transmitted image data.",
+        "   Windows) only. The TOAST shows NO icon here: toasts never render",
+        "   transmitted image data, and no standard n= name was sent.",
         "B) 'Icon from cache': sent with g=cachekey1 and NO icon bytes -> same icon.",
         "C) priming: `i=prime1:p=icon:e=1:g=cachekey2` with no title shows NOTHING and",
         "   sends no reply (it only fills the cache). D) 'Primed icon' with only",
@@ -964,21 +969,25 @@ def step_occasion_unfocused() -> None:
         "After the countdown (you have clicked another window): the o=unfocused AND",
         "o=invisible notifications BOTH show -- 'visible' requires OS-window focus,",
         "so an unfocused window counts as not visible even when fully on screen.",
+        "With the default routing_osc99 = 'both', each shown notification ALSO",
+        "appears as a toast in the freminal window (routing does not depend on",
+        "focus; only `system_when_unfocused` does). These use w=20000 so the toasts",
+        "are still there when you come back to look.",
         "(Wayland compositors do not report minimisation: minimised = restored.)",
     )
     emit("i=occ-f-unf:o=unfocused", "SHOULD NOT SHOW (focused, o=unfocused)")
     emit("i=occ-f-inv:o=invisible", "SHOULD NOT SHOW (focused, o=invisible)")
-    emit("i=occ-f-alw:o=always", "Shows: o=always while focused")
+    emit("i=occ-f-alw:o=always:w=20000", "Shows: o=always while focused")
     print(
         "    NOW unfocus freminal: click another app or minimise it. Do NOT press Enter."
     )
     countdown(6, "sending the unfocused/invisible set")
-    emit("i=occ-unf:o=unfocused", "Shows: o=unfocused (window unfocused)")
+    emit("i=occ-unf:o=unfocused:w=20000", "Shows: o=unfocused (window unfocused)")
     emit(
-        "i=occ-inv:o=invisible",
+        "i=occ-inv:o=invisible:w=20000",
         "Shows: o=invisible (window unfocused counts as hidden)",
     )
-    emit("i=occ-alw:o=always", "Shows: o=always")
+    emit("i=occ-alw:o=always:w=20000", "Shows: o=always")
 
 
 def step_occasion_background_tab() -> None:
@@ -992,8 +1001,8 @@ def step_occasion_background_tab() -> None:
     print("    Open ANOTHER TAB and switch to it (keep the freminal window focused).")
     print("    This script keeps running in the background tab. Do NOT come back yet.")
     countdown(8, "sending from the background tab")
-    emit("i=bg-unf:o=unfocused", "Background tab: o=unfocused shows")
-    emit("i=bg-inv:o=invisible", "Background tab: o=invisible shows")
+    emit("i=bg-unf:o=unfocused:w=20000", "Background tab: o=unfocused shows")
+    emit("i=bg-inv:o=invisible:w=20000", "Background tab: o=invisible shows")
     note("switch back to the original tab to continue.")
 
 

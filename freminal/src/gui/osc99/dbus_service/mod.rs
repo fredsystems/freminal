@@ -671,7 +671,7 @@ fn serve(
                 Err(_) => return ServeEnd::GuiGone,
             },
             recv(signals) -> signal => {
-                if let Some(end) = handle_signal(state, sink, signal.ok()) {
+                if let Some(end) = handle_signal(&connection, state, sink, signal.ok()) {
                     if let Err(e) = connection.close() {
                         tracing::debug!("OSC 99: closing the lost connection failed: {e}");
                     }
@@ -686,7 +686,17 @@ fn serve(
 /// Apply a pump `signal` (`None`: every pump is gone and the channel closed
 /// without a word). Returns [`ServeEnd::SignalsLost`] once no more signals can
 /// come, so the caller stops serving.
+///
+/// An activation is followed by a close of the activated notification.
+/// freminal never sends the `resident` hint, so the specification has the
+/// daemon remove the notification itself once an action is invoked and emit
+/// `NotificationClosed`. Not every daemon emits it (wayle 0.1.3 does not for
+/// a notification sent with `expire_timeout` 0), and without it the leg would
+/// stay open forever. Closing it explicitly ends the leg either way: the call
+/// fails harmlessly when the daemon already removed it, and the daemon's own
+/// signal, if it comes, arrives for a forgotten id and is ignored (138.C23).
 fn handle_signal(
+    connection: &Connection,
     state: &mut DispatcherState,
     sink: &EventSink,
     signal: Option<PumpSignal>,
@@ -702,7 +712,14 @@ fn handle_signal(
         }
     };
     for event in events {
+        let activated = match event {
+            Osc99DbusEvent::Activated { instance, .. } => Some(instance),
+            _ => None,
+        };
         sink.emit(event);
+        if let Some(instance) = activated {
+            close_instance(connection, state, sink, instance);
+        }
     }
     end
 }
@@ -793,12 +810,20 @@ fn close_replaced(connection: &Connection, state: &mut DispatcherState, dbus_id:
 
 /// Carry out a `Close`.
 ///
-/// An instance the daemon displays is closed with `CloseNotification`, and the
-/// daemon's `NotificationClosed` signal then produces the `Closed` event. If
-/// the call fails, or the daemon is in its cooldown and is not called, the
-/// signal may never come, so the mappings are dropped and `Closed` is emitted
-/// here (kitty's fallback). An instance with no D-Bus id is reported closed at
-/// once.
+/// An instance the daemon displays is closed with `CloseNotification`. The
+/// mappings are then dropped and `Closed` is emitted here, whatever the
+/// outcome, so the daemon's own `NotificationClosed` for it (if it sends one)
+/// arrives for an unknown id and is ignored. An instance with no D-Bus id is
+/// reported closed at once.
+///
+/// **Differs from kitty**, which waits for `NotificationClosed` after a
+/// successful call. The specification says the call closes the notification
+/// and emits the signal, but not every daemon emits it: wayle 0.1.3 silently
+/// drops a notification sent with `expire_timeout` 0 ("never expires") from
+/// its own tracking, and a later `CloseNotification` then emits nothing.
+/// Waiting would leave the leg open forever: no `c=1` close report, and a
+/// `p=alive` that keeps listing the notification. A successful call is taken
+/// as the close it is specified to be (138.C23).
 fn close_instance(
     connection: &Connection,
     state: &mut DispatcherState,
@@ -814,9 +839,8 @@ fn close_instance(
     } else {
         let outcome = close_notification(connection, dbus_id);
         state.note_call(&outcome, Instant::now());
-        match outcome {
-            Ok(()) => return,
-            Err(e) => tracing::warn!("OSC 99: CloseNotification failed: {e}"),
+        if let Err(e) = outcome {
+            tracing::debug!("OSC 99: CloseNotification failed: {e}");
         }
     }
     state.forget_instance(instance);
@@ -999,6 +1023,11 @@ mod tests {
                 instance: instance(1)
             }
         );
+
+        // The activation itself asked the daemon to close the notification
+        // (138.C23); the daemon's own signal after it was ignored.
+        assert_eq!(rig.closes(), [dbus_id]);
+        assert_no_queued_events(&mut handle)?;
 
         // Every event was followed by a wake.
         for _ in 0..4 {
@@ -1263,9 +1292,80 @@ mod tests {
     }
 
     #[test]
+    fn a_close_the_daemon_never_signals_is_still_reported_once() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        rig.answer_close(CloseAnswer::CloseSilently);
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        let dbus_id = rig.recorded()[0].assigned_id;
+
+        let _ = handle.close(instance(1));
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), [dbus_id]);
+        // A late signal for the forgotten id changes nothing.
+        rig.emit_closed(dbus_id, 3)?;
+        assert_no_queued_events(&mut handle)
+    }
+
+    #[test]
+    fn an_activation_the_daemon_never_follows_with_a_close_still_closes() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        rig.answer_close(CloseAnswer::CloseSilently);
+        let _ = handle.show(instance(1), None, &notification());
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        let dbus_id = rig.recorded()[0].assigned_id;
+
+        rig.emit_action(dbus_id, "default")?;
+
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Activated {
+                instance: instance(1),
+                action: Osc99SystemAction::Default,
+            }
+        );
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
+        assert_eq!(rig.closes(), [dbus_id]);
+        assert_no_queued_events(&mut handle)
+    }
+
+    #[test]
+    fn a_named_icon_is_sent_as_app_icon_and_image_path() -> TestResult {
+        let (rig, mut handle, _woken) = started(&["body", "actions"])?;
+        let _ = handle.show(
+            instance(1),
+            None,
+            &Notification99Data {
+                icon_names: strings(&["warn"]),
+                ..notification()
+            },
+        );
+        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+
+        let notify = &rig.recorded()[0];
+        assert_eq!(notify.app_icon, "dialog-warning");
+        assert_eq!(
+            notify.hint_keys,
+            strings(&["desktop-entry", "image-path", "urgency"])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_failing_close_notification_call_falls_back_to_closed() -> TestResult {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
-        rig.log.fail_close.store(true, Ordering::SeqCst);
+        rig.answer_close(CloseAnswer::Fail);
         let _ = handle.show(instance(1), None, &notification());
         assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
         let dbus_id = rig.recorded()[0].assigned_id;
@@ -1463,6 +1563,13 @@ mod tests {
                 action: Osc99SystemAction::Button(1),
             }
         );
+        // The activation closes the notification (138.C23).
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
+            }
+        );
         assert_no_queued_events(&mut handle)
     }
 
@@ -1566,6 +1673,13 @@ mod tests {
             Osc99DbusEvent::Activated {
                 instance: instance(1),
                 action: Osc99SystemAction::Default,
+            }
+        );
+        // The activation closes the notification (138.C23).
+        assert_eq!(
+            next_event(&handle)?,
+            Osc99DbusEvent::Closed {
+                instance: instance(1)
             }
         );
         assert_no_queued_events(&mut handle)

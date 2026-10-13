@@ -40,7 +40,8 @@ pub trait Osc99IconLookup {
 /// The icon the notification is shown with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Osc99IconChoice {
-    /// A freedesktop icon name, sent as the `app_icon` argument.
+    /// A freedesktop icon name, sent as the `app_icon` argument (and, when it
+    /// came from the notification's own `n=` names, as the `image-path` hint).
     Named(String),
     /// Transmitted icon data, sent as the `image-data` hint.
     Data(Vec<u8>),

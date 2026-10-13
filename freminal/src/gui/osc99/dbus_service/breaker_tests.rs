@@ -152,13 +152,19 @@ fn a_close_with_the_breaker_open_reports_closed_without_calling_the_daemon() -> 
     assert_eq!(f.state.close_target(instance(1)), CloseTarget::AlreadyGone);
     f.assert_daemon_untouched();
 
-    // Control: with the breaker closed the daemon is called, and it is the
-    // daemon's signal, not the handler, that reports the close.
+    // Control: with the breaker closed the daemon is called, and the
+    // successful call itself reports the close (138.C23).
     f.close_the_breaker();
     f.state.record_shown(instance(2), None, peer_reply(8));
     close_instance(&f.rig.client, &mut f.state, &f.sink, instance(2));
     assert_eq!(f.rig.closes(), [8]);
-    assert_eq!(f.queued(), []);
+    assert_eq!(
+        f.queued(),
+        [Osc99DbusEvent::Closed {
+            instance: instance(2)
+        }]
+    );
+    assert_eq!(f.state.close_target(instance(2)), CloseTarget::AlreadyGone);
     Ok(())
 }
 

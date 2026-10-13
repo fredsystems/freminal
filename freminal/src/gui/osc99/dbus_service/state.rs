@@ -387,8 +387,9 @@ impl DispatcherState {
             .map_or(CloseTarget::AlreadyGone, CloseTarget::CallDaemon)
     }
 
-    /// The event for an `ActionInvoked` signal. The mappings stay: a
-    /// `NotificationClosed` normally follows. `None` for an id with no live
+    /// The event for an `ActionInvoked` signal. The mappings stay: the
+    /// service closes the activated notification next, which drops them
+    /// (138.C23). `None` for an id with no live
     /// instance or an action freminal never registered.
     fn on_action(&self, dbus_id: u32, action_key: &str) -> Option<Osc99DbusEvent> {
         let instance = *self.by_dbus_id.get(&dbus_id)?;
@@ -524,6 +525,7 @@ mod tests {
 
     use super::super::pump::PumpKind;
     use super::super::test_rig::*;
+    use super::super::wire::NotifyImage;
     use super::*;
     use crate::gui::osc99::presentation::Osc99SoundHint;
 
@@ -553,7 +555,7 @@ mod tests {
                 urgency: 2,
                 category: None,
                 sound: Osc99SoundHint::None,
-                image: None,
+                image: NotifyImage::None,
             }
         );
     }
@@ -676,7 +678,10 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "mail-unread");
-        assert_eq!(args.hints.image, None);
+        assert_eq!(
+            args.hints.image,
+            NotifyImage::Path("mail-unread".to_owned())
+        );
         Ok(())
     }
 
@@ -692,7 +697,9 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "");
-        let image = args.hints.image.ok_or("no image hint")?;
+        let NotifyImage::Data(image) = args.hints.image else {
+            return Err("no image hint".into());
+        };
         assert_eq!((image.width, image.height, image.rowstride), (3, 2, 12));
         assert_eq!(image.rgba.len(), 3 * 2 * 4);
         Ok(())
@@ -708,7 +715,9 @@ mod tests {
             },
         );
 
-        let image = args.hints.image.ok_or("no image hint")?;
+        let NotifyImage::Data(image) = args.hints.image else {
+            return Err("no image hint".into());
+        };
         assert_eq!(
             (image.width, image.height, image.rowstride),
             (256, 128, 1024)
@@ -729,7 +738,7 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "unknown");
-        assert_eq!(args.hints.image, None);
+        assert_eq!(args.hints.image, NotifyImage::Path("unknown".to_owned()));
     }
 
     #[test]
@@ -750,6 +759,7 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "MailIcon");
+        assert_eq!(args.hints.image, NotifyImage::Path("MailIcon".to_owned()));
     }
 
     #[test]
@@ -765,7 +775,7 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "my-app-icon");
-        assert_eq!(args.hints.image, None);
+        assert_eq!(args.hints.image, NotifyImage::None);
     }
 
     #[test]
@@ -795,7 +805,7 @@ mod tests {
         let first = state.notify_args(None, &with_icon).hints.image;
         let second = state.notify_args(None, &with_icon).hints.image;
 
-        assert!(first.is_some());
+        assert!(matches!(first, NotifyImage::Data(_)));
         assert_eq!(first, second);
         Ok(())
     }
@@ -812,7 +822,7 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "freminal");
-        assert_eq!(args.hints.image, None);
+        assert_eq!(args.hints.image, NotifyImage::None);
     }
 
     #[test]
@@ -827,6 +837,31 @@ mod tests {
         );
 
         assert_eq!(args.app_icon, "my-app-icon");
+        assert_eq!(args.hints.image, NotifyImage::None);
+    }
+
+    #[test]
+    fn notify_args_send_a_standard_name_as_app_icon_and_image_path() {
+        let args = DispatcherState::default().notify_args(
+            None,
+            &Notification99Data {
+                icon_names: strings(&["error"]),
+                ..notification()
+            },
+        );
+
+        assert_eq!(args.app_icon, "dialog-error");
+        assert_eq!(
+            args.hints.image,
+            NotifyImage::Path("dialog-error".to_owned())
+        );
+    }
+
+    #[test]
+    fn notify_args_without_names_send_no_image_hint() {
+        let args = DispatcherState::default().notify_args(None, &notification());
+
+        assert_eq!(args.hints.image, NotifyImage::None);
     }
 
     #[test]

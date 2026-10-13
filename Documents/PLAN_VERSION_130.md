@@ -6211,7 +6211,8 @@ Deliverable: docs that pass markdownlint, with every claim checked against the c
   - `ActivationToken` not consumed (a recorded decision).
   - The cfg covers non-Linux Unix targets freminal does not ship.
   - No fallback timer after `CloseNotification`: the notification spec requires the daemon
-    to emit `NotificationClosed`.
+    to emit `NotificationClosed`. (**Superseded by 138.C23:** wayle 0.1.3 does not, so a
+    successful call now counts as the close.)
 - **Status:** done, for every item.
   - **Hints (Z10).** Serialised through `WireHints` / `WireImage` (`serde` + `zvariant::Type`
     with `as_value`). The image bytes are borrowed straight onto the wire, with no `Value`
@@ -6588,6 +6589,43 @@ review of the cleanup diff follows.
   including two stale claims there (the parser rejecting >1 MiB, and notifications staying on
   screen after their pane closes). Strip-then-limit is listed as deliberate difference 6.
 
+#### 138.C23 — A successful `CloseNotification` is the close
+
+- **Surfaced:** maintainer manual test with `test-scripts/osc99_notifications.py` against
+  wayle 0.1.3. Steps 9 and 10 waited out their 25 s timeout with no `c=1` close report.
+- **Cause:** wayle treats `expire_timeout` 0 (spec: "never expires") as already expired. It
+  drops the notification from its tracking list without a signal, so a later
+  `CloseNotification` emits no `NotificationClosed`. This was confirmed with a zbus probe:
+  timeouts of -1 and 8000 get the signal and 0 never does. freminal, like kitty, waited for
+  the signal. The leg stayed open forever, so the close report never came and `p=alive` kept
+  listing the notification. The same happens after a desktop activation, because wayle
+  removes the activated notification the same silent way.
+- **Fix (maintainer decision; differs from kitty):**
+  - `close_instance` drops the mappings and emits `Closed` after any `CloseNotification`
+    outcome. The daemon's own signal, if it comes, is for a forgotten id and is ignored.
+  - After an `Activated` event the service closes the activated notification.
+    freminal never sends `resident`, so the spec has the daemon remove it anyway.
+  - The test rig's `fail_close` bool becomes a `CloseAnswer` enum (`CloseAndSignal` /
+    `CloseSilently` / `Fail`).
+- **Tests:** a close the daemon never signals is reported once; an activation the daemon
+  never follows with a close still closes; a desktop activation calls `CloseNotification`;
+  forged-signal and adopted-owner tests now expect the follow-up `Closed`.
+- **Status:** done.
+
+#### 138.C24 — Named icons also travel as `image-path`
+
+- **Surfaced:** the same manual test, step 14. wayle's default `icon-source = "automatic"`
+  ignores `app_icon` and draws only `image-path` / `image-data`, so the standard icon names
+  showed no icon. Transmitted data (step 15) did show.
+- **Fix (maintainer decision; differs from kitty):** an icon chosen from the notification's
+  own `n=` names goes in both `app_icon` and the `image-path` hint. The `.desktop` icon and
+  freminal's own icon are the application's icon and stay `app_icon`-only. The hints carry a
+  `NotifyImage` enum (`None` / `Path` / `Data`) in place of `Option<Osc99IconImage>`, so
+  path and data cannot both be set.
+- **Tests:** `image-path` on the wire; standard, matched and verbatim names give `Path`; the
+  desktop and freminal fallbacks give `None`; a rig test sees `app_icon` and `image-path`.
+- **Status:** done.
+
 ### 138 Confirmation review (2026-10-12)
 
 Two CODE-REVIEW passes over `1986117d..HEAD` checked every finding in the table above.
@@ -6606,7 +6644,7 @@ The new findings are disposed of in 138.C18–C22.
 
 | Gate                                                       | Result                                         |
 | ---------------------------------------------------------- | ---------------------------------------------- |
-| `cargo xtask test`                                         | 8,831 passed, doctests pass                    |
+| `cargo xtask test`                                         | 8,837 passed, doctests pass (after C23–C24)    |
 | `cargo clippy --all-targets --all-features -- -D warnings` | clean                                          |
 | `cargo fmt --all -- --check`                               | clean                                          |
 | `cargo machete`                                            | clean                                          |

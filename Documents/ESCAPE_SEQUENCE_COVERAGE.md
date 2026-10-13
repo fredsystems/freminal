@@ -14,7 +14,7 @@ pending state, finalisation limits, the toast, Linux/BSD zbus and macOS/Windows
 untracked legs, per-pane lifecycle (update, close, alive), pane-aware `o=`,
 `a=focus`, terminal-side expiry, `osc99_filters` and a truthful `p=?` per
 routing, platform and daemon. The notes were re-checked against the code after
-the adversarial-review and confirmation-review cleanups (138.C6–138.C22),
+the adversarial-review and confirmation-review cleanups (138.C6–138.C24),
 including the 256-character limit on decoded `f=`, `s=`, `n=` and `t=` values,
 rejected id-less chunks, closing a gone pane's notifications, the D-Bus
 reconnect timer, the lazy icon scan, the toast exit fade and the icon
@@ -689,8 +689,9 @@ icon names are covered by the leg notes below.
   for an update, `expire_timeout` (-1, 0 or milliseconds), a `default` action plus
   one action per button (only when the daemon has `actions`), and the hints
   `urgency`, `category` (first `t=`), `suppress-sound` for `silent`, `sound-name`
-  for a named sound, `image-data` for a transmitted icon and `desktop-entry`
-  (`freminal`). The icon is the first `n=` name that is standard (mapped to its
+  for a named sound, `image-data` for a transmitted icon, `image-path` for an
+  icon chosen from the `n=` names (also sent as `app_icon`; 138.C24) and
+  `desktop-entry` (`freminal`). The icon is the first `n=` name that is standard (mapped to its
   freedesktop name) or found in the XDG icon scan (run once on a background
   thread, started by the first lookup: a notification with a non-standard `n=`
   name, or an `f=` and no names or icon data, not at service start), else the transmitted data (decoded as PNG, JPEG, GIF or WebP, at most

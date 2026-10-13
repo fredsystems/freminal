@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -214,6 +213,20 @@ pub(super) enum NameOwnerAnswer {
     Broken,
 }
 
+/// How the fake daemon answers `CloseNotification`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum CloseAnswer {
+    /// Reply, then emit `NotificationClosed(id, 3)`, as the specification
+    /// says a daemon does.
+    #[default]
+    CloseAndSignal,
+    /// Reply but emit no signal, as wayle 0.1.3 does for a notification sent
+    /// with `expire_timeout` 0.
+    CloseSilently,
+    /// Answer with an error instead of closing.
+    Fail,
+}
+
 /// Whether a call carried the `NO_AUTO_START` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Activation {
@@ -230,8 +243,8 @@ pub(super) struct DaemonLog {
     pub(super) closes: Mutex<Vec<u32>>,
     /// Every method call, in call order, with its `NO_AUTO_START` flag.
     pub(super) calls: Mutex<Vec<(String, Activation)>>,
-    /// Answer `CloseNotification` with an error instead of closing.
-    pub(super) fail_close: AtomicBool,
+    /// How `CloseNotification` is answered.
+    pub(super) close_answer: Mutex<CloseAnswer>,
     /// What `GetCapabilities` answers.
     pub(super) capabilities: Mutex<Vec<String>>,
     /// The sender stamped on replies, as a bus stamps them. Over a
@@ -311,8 +324,8 @@ pub(super) fn fake_notify(
 /// - `Notify` records the call and returns a fresh, incrementing id (even
 ///   for a replacement), and errors for [`REJECTED_SUMMARY`].
 /// - `CloseNotification` records the id, then replies and emits
-///   `NotificationClosed(id, 3)` as a real daemon does, or errors when
-///   `fail_close` is set.
+///   `NotificationClosed(id, 3)` as a real daemon does, unless the log's
+///   [`CloseAnswer`] says to stay silent or to fail.
 /// - `GetCapabilities` answers the log's capabilities.
 /// - `GetNameOwner` answers as the log's [`NameOwnerAnswer`] says.
 ///
@@ -395,21 +408,29 @@ pub(super) fn serve_fake_daemon(
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(dbus_id);
-                if log.fail_close.load(Ordering::SeqCst) {
-                    daemon.reply_error(
+                let answer = *log
+                    .close_answer
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                match answer {
+                    CloseAnswer::Fail => daemon.reply_error(
                         &header,
                         "org.freedesktop.DBus.Error.Failed",
                         &"cannot close",
-                    )?;
-                } else {
-                    reply_with(daemon, &header, stamp.as_deref(), |reply| reply.build(&()))?;
-                    daemon.emit_signal(
-                        None::<&str>,
-                        NOTIFICATIONS_PATH,
-                        NOTIFICATIONS_INTERFACE,
-                        "NotificationClosed",
-                        &(dbus_id, 3u32),
-                    )?;
+                    )?,
+                    CloseAnswer::CloseSilently => {
+                        reply_with(daemon, &header, stamp.as_deref(), |reply| reply.build(&()))?;
+                    }
+                    CloseAnswer::CloseAndSignal => {
+                        reply_with(daemon, &header, stamp.as_deref(), |reply| reply.build(&()))?;
+                        daemon.emit_signal(
+                            None::<&str>,
+                            NOTIFICATIONS_PATH,
+                            NOTIFICATIONS_INTERFACE,
+                            "NotificationClosed",
+                            &(dbus_id, 3u32),
+                        )?;
+                    }
                 }
             }
             "GetServerInformation" => {
@@ -498,6 +519,15 @@ impl Rig {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Set how the daemon answers `CloseNotification` from now on.
+    pub(super) fn answer_close(&self, answer: CloseAnswer) {
+        *self
+            .log
+            .close_answer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = answer;
     }
 
     /// The id of every `CloseNotification` call the daemon served.
