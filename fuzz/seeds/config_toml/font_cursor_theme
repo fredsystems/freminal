@@ -1,0 +1,17 @@
+version = 1
+[font]
+family = "CaskaydiaCove Nerd Font"
+size = 12.0
+ligatures = true
+line_height = 1.05
+[cursor]
+shape = "block"
+blink = true
+trail = false
+trail_duration_ms = 150
+unfocused_style = "hollow"
+[theme]
+mode = "dark"
+dark_name = "catppuccin-mocha"
+light_name = "catppuccin-latte"
+name = "catppuccin-mocha"

@@ -1,0 +1,14 @@
+[ui]
+hide_menu_bar = false
+background_opacity = 1.0
+background_image = "/path/to/image.png"
+background_image_mode = "cover"
+background_image_opacity = 0.5
+auto_detect_urls = true
+[chrome]
+profile = "modern"
+[tabs]
+show_single_tab = false
+position = "top"
+confirm_broadcast = false
+focus_follows_mouse = true

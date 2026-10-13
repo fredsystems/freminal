@@ -1,0 +1,7 @@
+[font]
+size = 1e308
+line_height = -1.0
+[scrollback]
+limit = 18446744073709551615
+[ui]
+background_opacity = nan

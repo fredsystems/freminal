@@ -1,0 +1,12 @@
+[[tabs]]
+[[tabs.panes]]
+id = "r"
+split = "vertical"
+ratio = 0.5
+[[tabs.panes]]
+id = "c"
+parent = "r"
+[[tabs.panes]]
+id = "d"
+parent = "nope"
+position = "second"

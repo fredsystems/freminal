@@ -1,0 +1,11 @@
+[[tabs]]
+[[tabs.panes]]
+id = "r"
+[[tabs.panes]]
+id = "a"
+parent = "b"
+position = "first"
+[[tabs.panes]]
+id = "b"
+parent = "a"
+position = "first"

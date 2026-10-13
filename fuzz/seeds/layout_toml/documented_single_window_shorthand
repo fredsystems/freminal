@@ -1,0 +1,9 @@
+[layout]
+name = "Simple"
+
+[[tabs]]
+title = "Main"
+
+  [[tabs.panes]]
+  id = "main"
+  directory = "~/projects"

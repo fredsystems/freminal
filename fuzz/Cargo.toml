@@ -1,0 +1,113 @@
+[package]
+name = "freminal-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+freminal-buffer = { path = "../freminal-buffer" }
+freminal-common = { path = "../freminal-common" }
+freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
+libfuzzer-sys = "0.4.13"
+toml = "1.1.6"
+
+# Keep this crate out of the root workspace: it needs a nightly toolchain and
+# sanitizer flags that must never leak into the normal build. The root
+# `Cargo.toml` lists it under `exclude` as well.
+[workspace]
+
+[[bin]]
+name = "ansi_parser"
+path = "fuzz_targets/ansi_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal_state"
+path = "fuzz_targets/terminal_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frec_parse"
+path = "fuzz_targets/frec_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kitty_graphics_parse"
+path = "fuzz_targets/kitty_graphics_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "osc99_parse"
+path = "fuzz_targets/osc99_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sixel_parse"
+path = "fuzz_targets/sixel_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compact_row"
+path = "fuzz_targets/compact_row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "base64"
+path = "fuzz_targets/base64.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "layout_toml"
+path = "fuzz_targets/layout_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+# Mirrors the root `[workspace.lints.clippy]` so harness code is held to the
+# same bar as production code. Harness code must not panic on its own: only
+# the code under test may.
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+all = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+# Not published and not part of the root workspace, so it inherits no
+# workspace metadata; transitive duplicate versions are tracked in `deny.toml`.
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"

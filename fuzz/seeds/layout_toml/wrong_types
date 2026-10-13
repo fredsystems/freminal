@@ -1,0 +1,6 @@
+[[windows]]
+size = ["a", -1]
+position = [1]
+monitor = "x"
+[[windows.tabs]]
+title = 5

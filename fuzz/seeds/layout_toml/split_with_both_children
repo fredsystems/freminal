@@ -1,0 +1,20 @@
+[[tabs]]
+title = "t"
+custom_name = "mine"
+active = true
+[[tabs.panes]]
+id = "r"
+split = "horizontal"
+ratio = 0.3
+[[tabs.panes]]
+id = "l"
+parent = "r"
+position = "first"
+command = "top"
+env = { A = "1", B = "$ENV{HOME}" }
+[[tabs.panes]]
+id = "m"
+parent = "r"
+position = "second"
+shell = "/bin/sh"
+active = true
