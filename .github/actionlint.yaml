@@ -1,0 +1,8 @@
+# actionlint configuration (also used by CodeRabbit's actionlint run).
+self-hosted-runner:
+  labels:
+    # Self-hosted fuzzing runner (fuzz-nightly.yml; issue 553).
+    - freminal-fuzz
+    # GitHub-hosted images not yet in actionlint's built-in label list.
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

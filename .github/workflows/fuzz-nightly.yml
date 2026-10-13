@@ -1,0 +1,233 @@
+# Long-running continuous fuzzing (issue 553).
+#
+# Runs every cargo-fuzz target in `fuzz/` for a fixed time budget on a
+# SELF-HOSTED runner, keeps a persistent corpus between runs, and reports
+# findings through a run summary, an artifact and a single tracking issue.
+#
+# SECURITY: this workflow must NEVER be triggered by `pull_request` or
+# `pull_request_target`. The repository is public and the job runs on a
+# self-hosted runner, so any trigger that can execute fork-controlled code
+# would hand that code a machine on the maintainer's network. Only `schedule`
+# and `workflow_dispatch` (which requires write access) are allowed.
+#
+# RUNNER CONTRACT. The runner must:
+#   * carry the labels `self-hosted`, `Linux` and `freminal-fuzz`;
+#   * provide `nix` (flakes enabled) on PATH -- it is not installed here;
+#   * export FREMINAL_FUZZ_CORPUS_DIR in its environment, pointing at a
+#     persistent, writable directory (it holds the working corpus between
+#     runs, which is the whole point of nightly fuzzing). The job fails fast
+#     if the variable is unset or the directory is not writable.
+#
+# Deliberately NOT used on the self-hosted runner:
+#   * DeterminateSystems/determinate-nix-action -- nix is already installed.
+#   * DeterminateSystems/magic-nix-cache-action -- several runners on one
+#     host would fight over the cache daemon's port.
+#   * Swatinem/rust-cache -- the runner is non-ephemeral, so its work
+#     directory (with `target/` and `fuzz/target/`) survives between jobs.
+#     The NixOS runner unit resets that directory only when the service
+#     restarts, which costs one cold build -- the corpus is unaffected
+#     because it lives in FREMINAL_FUZZ_CORPUS_DIR, not the work directory.
+#   * The runner must therefore be registered non-ephemeral.
+name: Fuzz (nightly)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes_per_target:
+        description: "Minutes to fuzz each target"
+        type: string
+        default: "20"
+      jobs:
+        description: "Parallel fuzz workers per target"
+        type: string
+        default: "8"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz all targets
+    if: github.repository == 'fredsystems/freminal'
+    runs-on: [self-hosted, Linux, freminal-fuzz]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check runner contract
+        run: |
+          set -euo pipefail
+          if ! command -v nix > /dev/null; then
+            echo "::error::nix is not on PATH; the freminal-fuzz runner must provide it"
+            exit 1
+          fi
+          if [ -z "${FREMINAL_FUZZ_CORPUS_DIR:-}" ]; then
+            echo "::error::FREMINAL_FUZZ_CORPUS_DIR is not set; the runner must export it, pointing at persistent storage"
+            exit 1
+          fi
+          if [ ! -d "${FREMINAL_FUZZ_CORPUS_DIR}" ] || [ ! -w "${FREMINAL_FUZZ_CORPUS_DIR}" ]; then
+            echo "::error::FREMINAL_FUZZ_CORPUS_DIR (${FREMINAL_FUZZ_CORPUS_DIR}) is not a writable directory"
+            exit 1
+          fi
+
+      # Inputs are passed through `env:` and validated here; they are never
+      # interpolated into the script text.
+      #
+      # `--sandbox none`: bubblewrap cannot create user namespaces under the
+      # runner's hardened systemd unit. That unit is the sandbox, and the
+      # trigger set above guarantees only maintainer-controlled code runs.
+      #
+      # `--on-crash keep-going` never stops on a finding, so a non-zero exit
+      # from `xtask fuzz` means infrastructure trouble (build failure, missing
+      # tool, ...). Those are recorded per target without aborting the loop
+      # and fail the job in the final step.
+      - name: Fuzz all targets
+        env:
+          MINUTES: ${{ inputs.minutes_per_target || '20' }}
+          JOBS: ${{ inputs.jobs || '8' }}
+          FREMINAL_FUZZ_ARTIFACTS_DIR: ${{ runner.temp }}/fuzz-artifacts
+        run: |
+          set -euo pipefail
+
+          for var in MINUTES JOBS; do
+            case "${!var}" in
+              '' | *[!0-9]* | 0*)
+                echo "::error::${var} must be a positive integer without leading zeros (got '${!var}')"
+                exit 1
+                ;;
+            esac
+          done
+
+          rm -rf "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
+          mkdir -p "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
+          : > "${RUNNER_TEMP}/infra-failures.txt"
+          rm -f "${RUNNER_TEMP}/findings.md" "${RUNNER_TEMP}/findings-total.txt"
+
+          nix develop .#fuzz --command bash -e -c '
+            set -euo pipefail
+
+            list="$(cargo xtask fuzz-list)"
+            mapfile -t targets <<< "${list}"
+            if [ "${#targets[@]}" -eq 0 ] || [ -z "${targets[0]}" ]; then
+              echo "::error::cargo xtask fuzz-list returned no targets"
+              exit 1
+            fi
+
+            for t in "${targets[@]}"; do
+              echo "::group::fuzz ${t}"
+              if ! cargo xtask fuzz "${t}" \
+                --time "$((MINUTES * 60))" \
+                --on-crash keep-going \
+                --jobs "${JOBS}" \
+                --sandbox none; then
+                echo "::error::fuzz run for ${t} failed (infrastructure)"
+                echo "${t}" >> "${RUNNER_TEMP}/infra-failures.txt"
+              fi
+              echo "::endgroup::"
+            done
+
+            # Keep the persistent corpus lean.
+            if ! cargo xtask fuzz-cmin --all --sandbox none; then
+              echo "::error::corpus minimisation failed (infrastructure)"
+              echo "fuzz-cmin" >> "${RUNNER_TEMP}/infra-failures.txt"
+            fi
+
+            total=0
+            {
+              echo "| target | findings |"
+              echo "| --- | --- |"
+              for t in "${targets[@]}"; do
+                n=0
+                if [ -d "${FREMINAL_FUZZ_ARTIFACTS_DIR}/${t}" ]; then
+                  n="$(find "${FREMINAL_FUZZ_ARTIFACTS_DIR}/${t}" -type f | wc -l | tr -d " ")"
+                fi
+                total=$((total + n))
+                echo "| ${t} | ${n} |"
+              done
+            } > "${RUNNER_TEMP}/findings.md"
+            echo "${total}" > "${RUNNER_TEMP}/findings-total.txt"
+          '
+
+      - name: Publish findings summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/findings.md" ]; then
+            {
+              echo '### Fuzz (nightly) findings'
+              echo
+              cat "${RUNNER_TEMP}/findings.md"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-nightly-findings
+          path: |
+            ${{ runner.temp }}/fuzz-artifacts
+            ${{ runner.temp }}/findings.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Sync tracking issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_TITLE: "Fuzzing: findings from nightly run"
+        run: |
+          set -euo pipefail
+
+          total=0
+          if [ -f "${RUNNER_TEMP}/findings-total.txt" ]; then
+            total="$(cat "${RUNNER_TEMP}/findings-total.txt")"
+          fi
+          if [ "${total}" -eq 0 ]; then
+            echo "No findings; nothing to sync."
+            exit 0
+          fi
+
+          number="$(
+            gh issue list --state open \
+              --search "in:title \"${ISSUE_TITLE}\"" \
+              --json number,title \
+              | jq -r --arg title "${ISSUE_TITLE}" \
+                '[.[] | select(.title == $title)] | first | .number // empty'
+          )"
+
+          {
+            echo "The nightly fuzz run found ${total} finding file(s)."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            cat "${RUNNER_TEMP}/findings.md"
+            echo
+            echo "The finding inputs are attached to the run as the \`fuzz-nightly-findings\` artifact."
+          } > "${RUNNER_TEMP}/body.md"
+
+          if [ -z "${number}" ]; then
+            gh issue create \
+              --title "${ISSUE_TITLE}" \
+              --body-file "${RUNNER_TEMP}/body.md"
+          else
+            gh issue comment "${number}" --body-file "${RUNNER_TEMP}/body.md"
+          fi
+
+      - name: Fail on infrastructure failures
+        run: |
+          if [ -s "${RUNNER_TEMP}/infra-failures.txt" ]; then
+            echo "::error::infrastructure failures recorded for: $(tr '\n' ' ' < "${RUNNER_TEMP}/infra-failures.txt")"
+            exit 1
+          fi
