@@ -36,8 +36,6 @@
 //! emulating VT52 updates **only the column** — the row is silently ignored.
 //! vttest exercises this deliberately in the box-drawing loop.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -692,7 +690,9 @@ fn vt52_exit_restores_ansi_mode() {
 #[test]
 // Linear 1:1 replay of the vttest vt52.c box sequence with per-step
 // diagnostics; splitting it would obscure the correspondence to the
-// original script.
+// original script. Unlike `vttest_cursor`'s box test (whose independent
+// border / E-frame assertion groups are split into helpers), this is a
+// single ordered replay whose diagnostics depend on step order.
 #[allow(clippy::too_many_lines)]
 fn vt52_comprehensive_box_drawing() {
     let mut h = VtTestHelper::new_default();
@@ -1068,6 +1068,9 @@ fn vt52_box_left_side_and_top_edge() {
 #[test]
 // Linear 1:1 replay of the vttest vt52.c box sequence (lines 50-148);
 // splitting it would obscure the correspondence to the original script.
+// Unlike `vttest_cursor`'s box test (whose independent border / E-frame
+// assertion groups are split into helpers), this is a single ordered replay
+// whose diagnostics depend on step order.
 #[allow(clippy::too_many_lines)]
 fn vt52_box_full_sequence() {
     let mut h = VtTestHelper::new_default();

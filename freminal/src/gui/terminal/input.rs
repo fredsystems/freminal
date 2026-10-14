@@ -2898,7 +2898,6 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod fold_target_tests {
     //! Tests for [`find_fold_target`].
     //!
@@ -3232,7 +3231,6 @@ mod fold_target_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod scroll_window_tests {
     //! Tests for the fold-aware scroll helpers [`scroll_event`] and
     //! [`screen_row_to_buffer_row`].
@@ -3371,7 +3369,6 @@ mod scroll_window_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod broadcast_tests {
     //! Tests for [`broadcast_key_bytes`] — the Task 74 keyboard-input
     //! fan-out helper. These verify the bytes are mirrored verbatim to
@@ -3534,7 +3531,6 @@ mod modifier_keys_as_keys_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod raw_key_tests {
     //! Tests for the Task 114.7 egui-blocked raw-key delivery path:
     //! [`kitty_keycode_to_codepoint`]'s codepoint table and
@@ -3823,7 +3819,6 @@ mod raw_key_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod finalize_selection_drag_tests {
     //! Regression tests for [`finalize_selection_drag`] (Task 116.1 /
     //! 116.2) and [`SelectionState::finalize_interrupted_drag`] reachability
@@ -3959,7 +3954,6 @@ mod finalize_selection_drag_tests {
 /// requirement: the OLD frame-path site is proven to send nothing, so it
 /// can never fire alongside the hook for the same motion.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod pointer_moved_frame_path_tests {
     use super::*;
     use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
@@ -4175,7 +4169,6 @@ mod pointer_moved_frame_path_tests {
 /// the copy requests built from them are stable logical rows, converted from
 /// screen coordinates at the `snap.row_base` seam.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod logical_row_seam_tests {
     use super::*;
     use freminal_common::buffer_states::command_block::CommandBlock;
@@ -4419,7 +4412,6 @@ mod logical_row_seam_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod key_encoding_characterisation_tests {
     //! Cleanup entry 122.C1: characterisation tests for the two key-encoding
     //! functions in this module.

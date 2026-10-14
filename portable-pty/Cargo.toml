@@ -4,6 +4,8 @@ version = "0.9.3"
 # Originally authored by Wez Furlong as part of wezterm; the `authors` key is
 # deprecated by Cargo, so attribution is retained here as a comment.
 edition.workspace = true
+# Vendored from wezterm: deliberately has no `[lints] workspace = true`, so the
+# workspace clippy policy (`[workspace.lints.clippy]`) does not apply here.
 description = "Cross platform pty interface"
 documentation = "https://docs.rs/portable-pty"
 repository = "https://github.com/wezterm/wezterm"

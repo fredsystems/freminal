@@ -304,6 +304,8 @@ const KITTY_APC_CHUNK_PAYLOAD: usize = 4096;
 fn kitty_apc_chunks_payload() -> Vec<u8> {
     let mut payload = Vec::with_capacity(KITTY_APC_CHUNK_COUNT * (KITTY_APC_CHUNK_PAYLOAD + 32));
     for i in 0..KITTY_APC_CHUNK_COUNT {
+        // `m=1` means more chunks follow; `m=0` marks the final chunk.
+        // (`i32::from(bool)` is the form clippy::bool_to_int_with_if requires.)
         let more = i32::from(i + 1 != KITTY_APC_CHUNK_COUNT);
         payload.extend_from_slice(b"\x1b_Ga=t,f=100,i=1,m=");
         payload.extend_from_slice(more.to_string().as_bytes());

@@ -7,9 +7,6 @@
 //! the `Arc` is shared until a content colour changes, and the colour
 //! sequences and resets drive it as specified.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::sync::Arc;
 
 use freminal_common::{
@@ -240,6 +237,8 @@ fn osc12_changes_cursor_override_but_not_the_resolved_arc() {
 // --- Palette-index cells keep the index; the renderer resolves it -----------
 
 /// The foreground colour stored for the first `X` in the snapshot.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn fg_of_first_x(snap: &TerminalSnapshot) -> TerminalColor {
     let pos = snap
         .visible_chars

@@ -143,7 +143,6 @@ pub fn sync_to_disk(dir: &Path) -> InstallResult {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

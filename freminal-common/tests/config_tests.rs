@@ -3,9 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_common::config::{
     Config, ConfigError, LoggingConfig, ScrollbackConfig, ShellConfig, config_is_writable,
     load_config, save_config,
@@ -15,6 +12,8 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// Helper: write TOML content to a temp file and load it via `load_config`.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn load_from_toml(toml: &str) -> Result<Config, freminal_common::config::ConfigError> {
     let mut file = NamedTempFile::new().expect("failed to create temp file");
     file.write_all(toml.as_bytes())

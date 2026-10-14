@@ -620,7 +620,6 @@ fn encode_x11_mouse_button(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use egui::Vec2;

@@ -80,8 +80,11 @@ fn run_chrome_frame(
             let painter = ui.painter();
             let stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(90));
             for i in 0..borders {
-                #[allow(clippy::cast_precision_loss)]
-                let x = (i as f32).mul_add(40.0, 100.0);
+                // Keep the benchmark's original arithmetic so before/after comparisons
+                // stay like-for-like (`mul_add` can lower to a libm `fmaf` call inside
+                // this timed loop); the values are exactly representable.
+                #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
+                let x = 100.0 + i as f32 * 40.0;
                 painter.line_segment([egui::pos2(x, 60.0), egui::pos2(x, 780.0)], stroke);
             }
         });

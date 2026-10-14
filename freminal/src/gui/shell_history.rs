@@ -651,7 +651,6 @@ pub fn classify_osc_reload(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::collections::HashMap;
 

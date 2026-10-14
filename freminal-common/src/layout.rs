@@ -946,7 +946,6 @@ pub fn discover_layouts_with_errors(dir: &Path) -> (Vec<LayoutSummary>, Vec<(Pat
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

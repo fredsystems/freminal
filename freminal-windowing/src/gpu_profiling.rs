@@ -975,8 +975,6 @@ impl GpuTimestampSource<glow::Query> for GlowTimestampSource<'_> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::{
         CompletedSample, FRAME_TIMING_FLUSH_EVERY, FrameGpuTiming, FramePhaseBoundary, GlProfile,
         GlVersion, GlVersionInfo, GpuProfilePhase, GpuQueryRing, GpuQuerySource,

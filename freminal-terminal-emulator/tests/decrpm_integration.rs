@@ -11,9 +11,6 @@
 //! the mode-sync loop in `internal.rs`), complementing the handler-owned
 //! mode query tests in `freminal-buffer/tests/terminal_handler_integration.rs`.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use crossbeam_channel::Receiver;
 use freminal_common::config::ThemeMode;
 use freminal_common::pty_write::PtyWrite;
@@ -29,6 +26,8 @@ fn make_state() -> (TerminalState, Receiver<PtyWrite>) {
 
 /// Drain all pending `PtyWrite::Write` messages from the channel, concatenate
 /// the bytes, and return as a `String`.  Non-`Write` variants are ignored.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn drain_pty_writes(rx: &Receiver<PtyWrite>) -> String {
     let mut buf = Vec::new();
     while let Ok(msg) = rx.try_recv() {

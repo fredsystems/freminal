@@ -2390,7 +2390,6 @@ fn splice_auto_urls(tags: &[FormatTag], ranges: &[AutoUrlRange]) -> Vec<FormatTa
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod extended_window_tests {
     use crate::buffer::Buffer;
     use freminal_common::buffer_states::tchar::TChar;
@@ -2564,7 +2563,6 @@ mod extended_window_tests {
 /// full-scrollback flatten, while output stays byte-identical across
 /// repeated flattens and visible-row caches stay warm.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod scrollback_eviction_tests {
     use crate::buffer::Buffer;
     use crate::image_store::{ImagePlacement, ImageProtocol};
@@ -2768,7 +2766,6 @@ mod scrollback_eviction_tests {
 /// DECAWM-wraps across two or more physical rows must be auto-detected as
 /// one full, untruncated URL — not as several independent per-row fragments.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod wrapped_url_tests {
     use crate::buffer::Buffer;
     use crate::row::RowJoin;
@@ -2959,7 +2956,6 @@ mod wrapped_url_tests {
 /// oracle-equivalence check, and the output invariants that a later
 /// incremental merge path must also satisfy against this same oracle.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod incremental_merge_equivalence_tests {
     use crate::buffer::Buffer;
     use freminal_common::buffer_states::{
@@ -3236,7 +3232,6 @@ mod incremental_merge_equivalence_tests {
 /// check still exists even if these tests were ever run with
 /// `debug_assertions` off.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod incremental_merge_tests {
     use crate::buffer::Buffer;
     use crate::row::RowJoin;
@@ -4162,7 +4157,6 @@ mod incremental_merge_tests {
 /// control that would fail if the stamp were frozen or otherwise
 /// degenerate.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod row_epoch_tests {
     use crate::buffer::Buffer;
     use crate::image_store::{ImagePlacement, ImageProtocol};

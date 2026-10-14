@@ -554,7 +554,6 @@ pub fn format_kitty_response_body(id: KittyResponseId, ok: bool, message: &str) 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

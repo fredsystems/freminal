@@ -5,9 +5,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_buffer::cell::Cell;
 use freminal_buffer::response::InsertResponse;
 use freminal_buffer::row::Row;
@@ -28,6 +25,8 @@ const fn ascii(c: char) -> TChar {
     TChar::Ascii(c as u8)
 }
 
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::unwrap_used)]
 fn emoji(s: &str) -> TChar {
     TChar::new_from_many_chars(s.as_bytes()).unwrap()
 }

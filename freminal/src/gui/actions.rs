@@ -953,7 +953,6 @@ impl super::FreminalGui {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::gui::panes::{Pane, PaneId};

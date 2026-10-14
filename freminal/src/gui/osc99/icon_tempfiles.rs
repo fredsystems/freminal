@@ -520,7 +520,6 @@ fn remove_file_best_effort(path: &Path) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

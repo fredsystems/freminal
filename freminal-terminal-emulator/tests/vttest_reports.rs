@@ -16,8 +16,6 @@
 //! - DA2 (secondary device attributes)
 //! - DECRQM for a selection of implemented DEC private modes
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;

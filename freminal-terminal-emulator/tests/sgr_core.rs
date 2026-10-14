@@ -109,11 +109,8 @@ fn sgr_malformed_sequences_are_ignored_or_graceful() {
     ];
 
     for seq in malformed {
-        let outputs = parse_seq(seq);
-        // Parser should never panic; may yield empty or benign output.
-        assert!(
-            !outputs.is_empty() || outputs.is_empty(),
-            "parser should handle malformed sequence {seq:?} gracefully"
-        );
+        // Reaching the next iteration without a panic is the assertion: the
+        // parser must not panic on malformed SGR, whatever it yields.
+        let _outputs = parse_seq(seq);
     }
 }

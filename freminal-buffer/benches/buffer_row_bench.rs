@@ -44,6 +44,13 @@ fn configure() -> Criterion {
 // Helpers
 // ---------------------------------------------------------------
 
+/// The 26 lowercase ASCII letters as `TChar`s, so a timed routine can pick one
+/// with a plain table lookup (`letters[i % 26]`) instead of converting and
+/// unwrapping inside the measured region.
+fn lowercase_tchars() -> [TChar; 26] {
+    std::array::from_fn(|k| TChar::Ascii(b'a' + u8::try_from(k).unwrap()))
+}
+
 /// Generate `n` ASCII `TChar` values cycling through printable characters.
 fn gen_ascii_tchars(n: usize) -> Vec<TChar> {
     (0..n)
@@ -495,8 +502,10 @@ fn report_burst_latency(limit: usize, passes: usize) {
     let count = u32::try_from(samples.len()).unwrap_or(u32::MAX).max(1);
     let mean = total / count;
     let at = |q: f64| {
-        let len_f = f64::approx_from(samples.len()).unwrap_or(0.0);
-        let idx = <usize as ApproxFrom<f64, RoundToZero>>::approx_from(len_f * q).unwrap_or(0);
+        let len_f = f64::approx_from(samples.len())
+            .expect("sample count is far below 2^53, so it converts to f64 exactly");
+        let idx = <usize as ApproxFrom<f64, RoundToZero>>::approx_from(len_f * q)
+            .expect("a quantile in [0, 1] of the sample count fits in usize");
         samples[idx.min(samples.len() - 1)]
     };
     // A burst that contains a compaction is far above the median; count the
@@ -669,6 +678,8 @@ fn bench_cursor_ops(c: &mut Criterion) {
     const ROWS: usize = 24;
     const COLS: usize = 80;
 
+    let letters = lowercase_tchars();
+
     let mut group = c.benchmark_group("bench_cursor_ops");
     group.throughput(Throughput::Elements((ROWS * COLS) as u64));
 
@@ -678,9 +689,7 @@ fn bench_cursor_ops(c: &mut Criterion) {
             |mut buf| {
                 for row in 0..ROWS {
                     buf.set_cursor_pos(Some(0), Some(row));
-                    let line: Vec<TChar> = (0..COLS)
-                        .map(|i| TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap()))
-                        .collect();
+                    let line: Vec<TChar> = (0..COLS).map(|i| letters[i % 26]).collect();
                     buf.insert_text(&line);
                 }
             },
@@ -706,6 +715,8 @@ fn bench_lf_heavy(c: &mut Criterion) {
     // `bench_lf_eviction_scaling` (Task 125.12).
     const LF_COUNT: usize = 4_100;
 
+    let letters = lowercase_tchars();
+
     let mut group = c.benchmark_group("bench_lf_heavy");
     group.throughput(Throughput::Elements(LF_COUNT as u64));
 
@@ -715,7 +726,7 @@ fn bench_lf_heavy(c: &mut Criterion) {
             |mut buf| {
                 for i in 0..LF_COUNT {
                     // Write one character per line so rows are not empty.
-                    buf.insert_text(&[TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap())]);
+                    buf.insert_text(&[letters[i % 26]]);
                     buf.handle_lf();
                 }
             },
@@ -1071,6 +1082,8 @@ fn bench_lf_heavy_bce(c: &mut Criterion) {
         ..FormatTag::default()
     };
 
+    let letters = lowercase_tchars();
+
     let mut group = c.benchmark_group("bench_lf_heavy_bce");
     group.throughput(Throughput::Elements(LF_COUNT as u64));
 
@@ -1083,7 +1096,7 @@ fn bench_lf_heavy_bce(c: &mut Criterion) {
             },
             |mut buf| {
                 for i in 0..LF_COUNT {
-                    buf.insert_text(&[TChar::Ascii(b'a' + u8::try_from(i % 26).unwrap())]);
+                    buf.insert_text(&[letters[i % 26]]);
                     buf.handle_lf();
                 }
             },

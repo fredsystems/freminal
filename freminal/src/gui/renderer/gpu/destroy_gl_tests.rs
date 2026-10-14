@@ -14,8 +14,6 @@
 //! `xvfb-run -a cargo test -p freminal --features gl-pixel`. It lives under
 //! `gpu/` because it must read `TerminalRenderer`'s private handle fields.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_windowing::gl_context_offscreen::OffscreenGl;
 use glow::HasContext;
 

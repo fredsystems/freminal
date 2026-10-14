@@ -12,9 +12,6 @@
 //! cursor at home had been saved.  Everything is driven through raw bytes,
 //! exactly as the PTY thread does.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_buffer::cell::Cell;
 use freminal_common::buffer_states::{
     fonts::FontWeight, format_tag::FormatTag, modes::decom::Decom,
@@ -37,6 +34,8 @@ fn pos(handler: &TerminalHandler) -> (usize, usize) {
 }
 
 /// The cell at 0-based screen `(x, y)` of the active screen.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn cell_at(handler: &TerminalHandler, x: usize, y: usize) -> Cell {
     let rows = handler.buffer().visible_rows(0);
     let row = rows.get(y).expect("row exists");

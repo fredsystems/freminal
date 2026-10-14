@@ -228,8 +228,6 @@ impl OffscreenGl {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::OffscreenGl;
     use glow::HasContext;
 

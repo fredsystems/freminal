@@ -1913,7 +1913,6 @@ pub fn by_slug(slug: &str) -> Option<&'static ThemePalette> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

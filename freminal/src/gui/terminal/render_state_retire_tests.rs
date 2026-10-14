@@ -10,6 +10,7 @@
 //! pane's render state hands its renderer to the window's retire queue
 //! exactly once, never early, and that draining deletes its GL objects.
 
+// Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this module's `cfg(all(test, ...))` gate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::{Arc, Mutex};

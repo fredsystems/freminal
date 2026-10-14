@@ -13,8 +13,6 @@
 //! Each test constructs its own `TerminalState` — tests are hermetic and
 //! order-independent.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;

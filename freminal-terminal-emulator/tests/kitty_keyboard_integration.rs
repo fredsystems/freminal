@@ -9,8 +9,6 @@
 //! the bytes the PTY receives back, following the pattern in
 //! `terminal_state_tests.rs`.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;

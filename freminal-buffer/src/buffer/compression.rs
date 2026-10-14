@@ -429,7 +429,6 @@ impl BlockRowRef {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 

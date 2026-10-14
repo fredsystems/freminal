@@ -3,9 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_common::buffer_states::mode::Mode;
 use freminal_common::buffer_states::modes::application_escape_key::ApplicationEscapeKey;
 use freminal_common::buffer_states::modes::in_band_resize_mode::InBandResizeMode;
@@ -3929,6 +3926,8 @@ fn mode_from_params_maps_1048_to_save_cursor() {
 
 /// Helper: create a handler with a PTY write channel, send a Mode Query
 /// output, and return the response string.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn query_handler_mode(handler: &mut TerminalHandler, mode_output: TerminalOutput) -> String {
     let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
     handler.set_write_tx(tx);

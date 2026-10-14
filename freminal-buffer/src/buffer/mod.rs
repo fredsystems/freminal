@@ -52,16 +52,12 @@ mod erase;
 mod eviction;
 mod flatten;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_alt_screen_tests;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_cell_trim_tests;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_clip_tests;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_delete_tests;
 mod images;
 mod lifecycle;
@@ -69,14 +65,11 @@ mod lines;
 mod reflow_remap;
 mod resize_and_alt;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod resize_and_alt_tests;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod row_number_tests;
 mod row_store;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod screen_switch_tests;
 mod scroll;
 mod tabs;
@@ -1811,7 +1804,6 @@ mod pty_behavior_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod resize_tests {
     use super::*;
     use crate::row::{RowJoin, RowOrigin};
@@ -3692,7 +3684,6 @@ mod scrollback_limit_tests {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_tests {
     use super::*;
     use crate::image_store::{ImagePlacement, ImageProtocol, InlineImage, next_image_id};
@@ -8584,7 +8575,6 @@ mod image_clearing_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod coverage_gap_tests {
     use super::*;
 

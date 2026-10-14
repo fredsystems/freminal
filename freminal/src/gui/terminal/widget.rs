@@ -5282,7 +5282,6 @@ impl FreminalTerminalWidget {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod visual_preview_tests {
     //! Tests for the cheap, GUI-side preview setters used by
     //! `apply_visual_preview` (issue #452 phase B): `set_ligatures_preview`
@@ -6336,7 +6335,6 @@ mod patch_cursor_only_deco_verts_tests {
 
 #[cfg(test)]
 mod subtask_1_7_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Verify that an empty `RenderState` has empty vertex buffers.
@@ -6472,7 +6470,6 @@ mod subtask_1_7_tests {
 /// side), never a real rendered frame.
 #[cfg(all(test, feature = "frame-profiling"))]
 mod live_profiling_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::gui::renderer::profiling::{PaneFrameOutcome, RenderWorkClass};
 
@@ -6683,7 +6680,6 @@ mod live_profiling_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_pixels_changed_tests {
     //! Regression coverage for Task 100.12: a Kitty `a=c` animation compose
     //! overwrites an existing frame's pixels in place (a new
@@ -6823,7 +6819,6 @@ mod image_pixels_changed_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod build_bounded_damage_tests {
     //! Task 124.14b-i introduced [`build_bounded_damage`]'s union of the
     //! changed-row list (124.14a) with the selection's current/previous
@@ -7308,7 +7303,6 @@ mod build_bounded_damage_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod full_pane_rebuild_damage_rect_tests {
     //! Task 124.21 finding 2's fix: [`full_pane_rebuild_damage_rect`] builds
     //! the damage rect a full pane rebuild reports instead of escalating to
@@ -7491,7 +7485,6 @@ mod full_pane_rebuild_damage_rect_tests {
 /// "OSC 4 in one pane of two" test lives in `frame_dirty.rs`, next to the
 /// fixtures it builds on.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod full_rebuild_decision_tests {
     use super::*;
     use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
@@ -7698,7 +7691,6 @@ mod full_rebuild_decision_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod progress_bar_geometry_tests {
     //! Issue #507 phase B2: [`progress_bar_track_rect`], [`progress_fill_rect`],
     //! and [`merge_progress_damage`] exercised directly at the pure-function
@@ -7866,7 +7858,6 @@ mod progress_bar_geometry_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod gutter_hover_trigger_tests {
     //! 73.5: the gutter strip is the sole hover trigger; hovering output
     //! cells does not tint a command block.
@@ -8588,7 +8579,6 @@ mod overlay_suppress_input_tests {
 
 #[cfg(test)]
 mod shell_escape_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::path::Path;
 
     use super::{dropped_files_payload, shell_escape_path};
@@ -8692,7 +8682,6 @@ mod shell_escape_tests {
 
 #[cfg(test)]
 mod placeholder_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::{format_placeholder_text, hit_test_placeholder};
     use egui::{Pos2, Rect, pos2, vec2};
     use freminal_common::buffer_states::command_block::CommandBlockId;
@@ -8933,7 +8922,6 @@ mod terminal_rect_origin_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod pane_cursor_focus_geometry_tests {
     //! Task 127.5: what each pane's cursor looks like once focus is wired in.
     //!

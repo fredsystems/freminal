@@ -427,8 +427,6 @@ fn read_back(gl: &glow::Context, width: u32, height: u32) -> PixelFrame {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::headless::{CursorPresence, SyntheticFrame, ToastPresence};
     use super::super::pixel_golden::{
         GoldenComparison, compare, recorded_renderer, update_requested, write_golden,
@@ -712,8 +710,6 @@ mod tests {
 
 #[cfg(test)]
 mod wasted_work_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::headless::SyntheticFrame;
     use super::{capture, capture_after_cursor_only_frames};
     // Reuse the tests module's variant-aware guard rather than duplicating
@@ -843,8 +839,6 @@ mod wasted_work_tests {
 /// scope (`freminal/src/gui/terminal/widget.rs` and this file only).
 #[cfg(test)]
 mod present_region_scissor_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::headless::{CursorPresence, SyntheticFrame};
     use super::{capture, capture_scissored_overdraw, capture_with_full_viewport_scissor};
 
@@ -993,8 +987,6 @@ mod present_region_scissor_tests {
 /// state, per the deliverable's own wording.
 #[cfg(test)]
 mod region_present_matches_full_present_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::headless::SyntheticFrame;
     use super::capture_scissored_overdraw;
 
@@ -1077,8 +1069,6 @@ mod region_present_matches_full_present_tests {
 /// needed, because the renderer never sets a viewport itself.
 #[cfg(test)]
 mod unfocused_cursor_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use freminal_common::themes::CATPPUCCIN_MOCHA;
 
     use super::super::headless::{CursorPresence, SyntheticFrame};
@@ -1303,8 +1293,6 @@ mod unfocused_cursor_tests {
 /// lies outside its glyph's quad, so it shows whatever is underneath.
 #[cfg(test)]
 mod base_fill_pixel_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::headless::{CursorPresence, SyntheticFrame};
     use super::{
         PixelFrame, capture, capture_after_cursor_only_frames,

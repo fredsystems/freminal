@@ -31,8 +31,6 @@
 //! ...
 //! ```
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 // This module is included via `mod vttest_common;` from multiple test binaries.
 // Each binary uses a different subset of helpers, so unused items are expected.
 #![allow(dead_code)]
@@ -289,6 +287,8 @@ impl VtTestHelper {
     /// # Panics
     ///
     /// Panics if sending the encoded input to the PTY channel fails.
+    // Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+    #[allow(clippy::expect_used)]
     pub fn write_terminal_input(&self, input: &TerminalInput) {
         self.state
             .write(input)
@@ -309,6 +309,8 @@ fn golden_file_path(test_name: &str) -> PathBuf {
 }
 
 /// Write a golden reference file.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn write_golden_file(path: &Path, lines: &[String], cursor: &CursorPos) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("failed to create golden directory");

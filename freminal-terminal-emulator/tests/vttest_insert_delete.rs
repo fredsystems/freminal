@@ -21,8 +21,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row). CSI sequences use **1-indexed** row;col parameters.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -633,9 +631,9 @@ fn tst_insdel_dch_stagger_single_width() {
 ///
 /// After filling the screen with rows of letters (row N = letter 'A'+N-1 repeated),
 /// vttest does:
-///   `ri()`                          →  ESC M  (reverse index — scroll row 1 up)
+///   `ri()`                        →  ESC M  (reverse index — scroll row 1 up)
 ///   el(2)                         →  CSI 2 K  (erase entire row 1)
-///   `decstbm(2, max_lines - 1)`    →  CSI 2;23 r  (scroll region rows 2-23)
+///   `decstbm(2, max_lines - 1)`   →  CSI 2;23 r  (scroll region rows 2-23)
 ///   decom(TRUE)                   →  CSI ?6 h  (origin mode ON)
 ///   cup(1, 1)                     →  CSI 1;1 H  (in DECOM: row 1 relative to top of region)
 ///   `for row in 1..=max_lines`:

@@ -25,8 +25,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row). CSI sequences use **1-indexed** row;col parameters.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -1034,7 +1032,6 @@ fn build_box_test_bytes_80col() -> Vec<u8> {
 
 /// Assert the `*`/`+` border of the 80-column box test: full `*` top and
 /// bottom rows, `*` outer columns, and the `+` inner ring.
-#[allow(clippy::needless_range_loop)]
 fn assert_box_borders(h: &VtTestHelper, screen: &[String]) {
     // Row 0 (screen row 1): all '*' — 80 characters
     h.assert_row(0, &"*".repeat(80));
@@ -1042,8 +1039,7 @@ fn assert_box_borders(h: &VtTestHelper, screen: &[String]) {
     h.assert_row(23, &"*".repeat(80));
 
     // Rows 1-22: first and last characters should be '*'
-    for row in 1..=22 {
-        let text = &screen[row];
+    for (row, text) in (1..=22).zip(&screen[1..=22]) {
         let chars: Vec<char> = text.chars().collect();
         assert!(!chars.is_empty(), "row {row} should not be empty");
         assert_eq!(
@@ -1066,8 +1062,7 @@ fn assert_box_borders(h: &VtTestHelper, screen: &[String]) {
     }
 
     // Rows 1-22: col 1 and col 78 should be '+'
-    for row in 1..=22 {
-        let text = &screen[row];
+    for (row, text) in (1..=22).zip(&screen[1..=22]) {
         let chars: Vec<char> = text.chars().collect();
         assert_eq!(
             chars[1], '+',
@@ -1084,28 +1079,19 @@ fn assert_box_borders(h: &VtTestHelper, screen: &[String]) {
     // Row 1 (screen row 2): should be "*+...+*" with '+' border along the top
     // Cols 2-77 should all be '+'
     let row1_chars: Vec<char> = screen[1].chars().collect();
-    for col in 2..=77 {
-        assert_eq!(
-            row1_chars[col], '+',
-            "row 1 col {col} should be '+', got {:?}",
-            row1_chars[col]
-        );
+    for (col, &ch) in (2..=77).zip(&row1_chars[2..=77]) {
+        assert_eq!(ch, '+', "row 1 col {col} should be '+', got {ch:?}");
     }
 
     // Row 22 (screen row 23): should be "*+...+*" with '+' border along bottom
     let row22_chars: Vec<char> = screen[22].chars().collect();
-    for col in 2..=77 {
-        assert_eq!(
-            row22_chars[col], '+',
-            "row 22 col {col} should be '+', got {:?}",
-            row22_chars[col]
-        );
+    for (col, &ch) in (2..=77).zip(&row22_chars[2..=77]) {
+        assert_eq!(ch, '+', "row 22 col {col} should be '+', got {ch:?}");
     }
 }
 
 /// Assert the E-frame, blanked areas and ED/EL results inside the 80-column
 /// box test.
-#[allow(clippy::needless_range_loop)]
 fn assert_e_frame(screen: &[String]) {
     // After DECALN + erases, the E-frame structure (0-indexed) is:
     //   Rows 0-7: fully erased by ED(1) at cup(9,10) — only border chars remain
@@ -1118,13 +1104,12 @@ fn assert_e_frame(screen: &[String]) {
     //   Rows 17-22: erased by ED(0) at cup(18,60)
 
     // Rows 2-7 should be blank between borders (cleared by ED(1))
-    for row in 2..=7 {
-        let chars: Vec<char> = screen[row].chars().collect();
-        for col in 2..=77 {
+    for (row, line) in (2..=7).zip(&screen[2..=7]) {
+        let chars: Vec<char> = line.chars().collect();
+        for (col, &ch) in (2..=77).zip(&chars[2..=77]) {
             assert_eq!(
-                chars[col], ' ',
-                "row {row} col {col} should be blank (cleared by ED(1)), got {:?}",
-                chars[col]
+                ch, ' ',
+                "row {row} col {col} should be blank (cleared by ED(1)), got {ch:?}"
             );
         }
     }
@@ -1134,11 +1119,10 @@ fn assert_e_frame(screen: &[String]) {
     // ED(1) cleared cols 0-9 (0-indexed), EL(0) cleared cols 70-79 (0-indexed)
     // So E's remain at 0-indexed cols 10..69
     let row8_chars: Vec<char> = screen[8].chars().collect();
-    for col in 10..=69 {
+    for (col, &ch) in (10..=69).zip(&row8_chars[10..=69]) {
         assert_eq!(
-            row8_chars[col], 'E',
-            "row 8 col {col} should be 'E' (E-frame top), got {:?}",
-            row8_chars[col]
+            ch, 'E',
+            "row 8 col {col} should be 'E' (E-frame top), got {ch:?}"
         );
     }
 
@@ -1155,22 +1139,20 @@ fn assert_e_frame(screen: &[String]) {
         "row 9 col 69 should be 'E' (E-frame right)"
     );
     // Verify inner area is blank
-    for col in 11..=68 {
+    for (col, &ch) in (11..=68).zip(&row9_chars[11..=68]) {
         assert_eq!(
-            row9_chars[col], ' ',
-            "row 9 col {col} should be blank (inner area cleared), got {:?}",
-            row9_chars[col]
+            ch, ' ',
+            "row 9 col {col} should be blank (inner area cleared), got {ch:?}"
         );
     }
 
     // Row 15: E-frame bottom bar — E's from col 10 to col 69 (0-indexed)
     // (Row 16 vttest = row 15 0-indexed; not cleared by inner loop which stops at row 15 vttest)
     let bottom_bar_chars: Vec<char> = screen[15].chars().collect();
-    for col in 10..=69 {
+    for (col, &ch) in (10..=69).zip(&bottom_bar_chars[10..=69]) {
         assert_eq!(
-            bottom_bar_chars[col], 'E',
-            "row 15 col {col} should be 'E' (E-frame bottom), got {:?}",
-            bottom_bar_chars[col]
+            ch, 'E',
+            "row 15 col {col} should be 'E' (E-frame bottom), got {ch:?}"
         );
     }
 
@@ -1178,22 +1160,20 @@ fn assert_e_frame(screen: &[String]) {
     let blank_row_chars: Vec<char> = screen[16].chars().collect();
     assert_eq!(blank_row_chars[0], '*', "row 16 col 0 should be '*'");
     assert_eq!(blank_row_chars[1], '+', "row 16 col 1 should be '+'");
-    for col in 2..=77 {
+    for (col, &ch) in (2..=77).zip(&blank_row_chars[2..=77]) {
         assert_eq!(
-            blank_row_chars[col], ' ',
-            "row 16 col {col} should be blank (EL(2)), got {:?}",
-            blank_row_chars[col]
+            ch, ' ',
+            "row 16 col {col} should be blank (EL(2)), got {ch:?}"
         );
     }
 
     // Rows 17-21: blank between borders (cleared by ED(0) at cup(18,60))
-    for row in 17..=21 {
-        let chars: Vec<char> = screen[row].chars().collect();
-        for col in 2..=77 {
+    for (row, line) in (17..=21).zip(&screen[17..=21]) {
+        let chars: Vec<char> = line.chars().collect();
+        for (col, &ch) in (2..=77).zip(&chars[2..=77]) {
             assert_eq!(
-                chars[col], ' ',
-                "row {row} col {col} should be blank (cleared by ED(0)), got {:?}",
-                chars[col]
+                ch, ' ',
+                "row {row} col {col} should be blank (cleared by ED(0)), got {ch:?}"
             );
         }
     }
@@ -1389,7 +1369,6 @@ fn build_box_test_bytes_132col() -> Vec<u8> {
 }
 
 #[test]
-#[allow(clippy::needless_range_loop)]
 fn box_drawing_test_132col() {
     // NOTE: Freminal must support DECCOLM (ESC[?3h) to switch to 132 columns.
     // If DECCOLM is not supported, the terminal remains at 80 columns and
@@ -1411,8 +1390,7 @@ fn box_drawing_test_132col() {
     h.assert_row(23, &"*".repeat(132));
 
     // Rows 1-22: first and last characters should be '*'
-    for row in 1..=22 {
-        let text = &screen[row];
+    for (row, text) in (1..=22).zip(&screen[1..=22]) {
         let chars: Vec<char> = text.chars().collect();
         assert!(
             chars.len() >= 132,
@@ -1427,12 +1405,8 @@ fn box_drawing_test_132col() {
 
     // Row 1: all '+' between the borders
     let row1_chars: Vec<char> = screen[1].chars().collect();
-    for col in 2..=129 {
-        assert_eq!(
-            row1_chars[col], '+',
-            "row 1 col {col} should be '+', got {:?}",
-            row1_chars[col]
-        );
+    for (col, &ch) in (2..=129).zip(&row1_chars[2..=129]) {
+        assert_eq!(ch, '+', "row 1 col {col} should be '+', got {ch:?}");
     }
 
     // Check descriptive text
@@ -1525,7 +1499,6 @@ fn build_autowrap_test_bytes_132col() -> Vec<u8> {
 }
 
 #[test]
-#[allow(clippy::needless_range_loop)]
 fn decawm_mixing_control_and_print_characters_132col() {
     let mut h = VtTestHelper::new(132, 24);
     let bytes = build_autowrap_test_bytes_132col();
@@ -1543,8 +1516,7 @@ fn decawm_mixing_control_and_print_characters_132col() {
     // Collect left and right margin characters from the scroll region (rows 2-20)
     let mut left_chars = Vec::new();
     let mut right_chars = Vec::new();
-    for row_idx in 2..21 {
-        let row_text = &screen[row_idx];
+    for row_text in &screen[2..21] {
         if row_text.is_empty() {
             left_chars.push(' ');
             right_chars.push(' ');

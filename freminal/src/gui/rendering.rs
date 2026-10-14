@@ -658,7 +658,6 @@ pub(super) fn handle_window_manipulation(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod osc52_toast_text_tests {
     use super::{Osc52ToastEvent, osc52_toast_text};
 

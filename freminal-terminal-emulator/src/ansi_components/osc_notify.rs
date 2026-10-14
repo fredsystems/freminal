@@ -317,7 +317,6 @@ fn decode_utf8(bytes: &[u8], raw_params: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
     use crate::log_capture::capture;

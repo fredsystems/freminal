@@ -15,8 +15,6 @@
 //! - `extract_selection_text` — text written to the buffer is extractable by
 //!   buffer-absolute coordinates; empty regions return empty/whitespace strings
 
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 
 use freminal_common::pty_write::PtyWrite;

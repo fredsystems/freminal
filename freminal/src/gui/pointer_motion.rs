@@ -1772,8 +1772,6 @@ mod tests {
 /// instead of the whole pane.
 #[cfg(test)]
 mod suppression_rates {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use conv2::ConvUtil;
     use freminal_common::geometry::{Rect, point};
 

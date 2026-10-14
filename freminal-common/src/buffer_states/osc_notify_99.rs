@@ -644,7 +644,6 @@ fn scan_rejected_chunk(metadata: &[u8]) -> Osc99RejectedChunk {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

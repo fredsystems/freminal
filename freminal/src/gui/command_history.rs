@@ -580,7 +580,6 @@ pub fn log_submit_failure(pane_id: PaneId, len: usize) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 

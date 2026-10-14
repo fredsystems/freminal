@@ -275,7 +275,6 @@ impl WindowGlTeardown {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -341,6 +340,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "gl-recording"))]
+// Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this `cfg(all(test, ...))` gate.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod recording_tests {
     use super::*;

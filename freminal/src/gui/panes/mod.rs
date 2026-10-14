@@ -1600,7 +1600,6 @@ pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: Point) -> Option<PaneId> {
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use freminal_common::buffer_states::row_number::RowNumber;

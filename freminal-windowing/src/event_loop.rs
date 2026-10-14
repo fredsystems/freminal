@@ -1443,7 +1443,6 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         App, MIN_REPAINT_INTERVAL, PointerMotionHistory, SUPPRESSED_POINTER_FALLBACK_DELAY,

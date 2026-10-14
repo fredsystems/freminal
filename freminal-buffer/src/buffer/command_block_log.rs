@@ -158,7 +158,6 @@ impl Deref for CommandBlockLog {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use freminal_common::buffer_states::row_number::RowNumber;

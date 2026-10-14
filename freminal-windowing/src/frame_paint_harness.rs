@@ -450,8 +450,6 @@ impl HarnessDriver {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use conv2::ConvUtil;
     use egui::{Color32, LayerId, Pos2, Rect, pos2, vec2};
 

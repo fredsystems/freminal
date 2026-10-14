@@ -27,8 +27,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row).
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;

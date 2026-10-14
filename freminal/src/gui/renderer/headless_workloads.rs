@@ -49,7 +49,6 @@
 
 // This module is declared `#[cfg(all(test, feature = "gl-recording"))]`, so
 // it is test-only code and the repo's panic-free rule does not apply.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::gl_facade::recording::{GlCall, GlCallPayload};
 use super::gl_facade::surface::{DRAW_CALL_METHODS, STATE_CHANGE_METHODS, UPLOAD_METHODS};

@@ -754,7 +754,6 @@ impl Buffer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod image_count_tests {
     use std::sync::Arc;
 

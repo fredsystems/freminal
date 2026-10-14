@@ -112,7 +112,6 @@ fn strip_ascii_prefix<'a>(haystack: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]>
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::osc::AnsiOscParser;
     use freminal_common::buffer_states::osc::AnsiOscType;

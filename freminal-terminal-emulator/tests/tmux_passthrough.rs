@@ -17,8 +17,6 @@
 //! Replies are never tmux-wrapped (tmux does not unwrap application-bound
 //! passthrough), so every reply asserted here is the bare reply.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_common::{
     buffer_states::{modes::decckm::Decckm, window_manipulation::WindowManipulation},

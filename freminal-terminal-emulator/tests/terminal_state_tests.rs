@@ -11,8 +11,6 @@
 //! - Alternate-screen scroll routing (ArrowUp/Down via `write`)
 //! - Mode accessors: `screen_inversion`, `should_repeat_keys`, `skip_draw_always`
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{

@@ -31,9 +31,6 @@
 //!   sticky `content_changed` bool it replaced — see Task 124.12 and
 //!   `Documents/PLAN_124_RENDER_EFFICIENCY.md` "The defect, stated once").
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -715,6 +712,8 @@ fn task_113_new_data_resets_extra_rows() {
 
 /// Resize `emu` to a small, exact-row-count terminal so tests can target one
 /// row without guessing at the default 100×100 window.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn resize_small(emu: &mut TerminalEmulator, width: usize, height: usize) {
     emu.set_win_size(width, height, 0, 0)
         .expect("resizing a headless emulator must not fail");

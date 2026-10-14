@@ -342,7 +342,6 @@ impl TerminalHandler {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::buffer_states::osc::{AnsiOscType, ITerm2InlineImageData, ImageDimension};
     use freminal_common::pty_write::PtyWrite;

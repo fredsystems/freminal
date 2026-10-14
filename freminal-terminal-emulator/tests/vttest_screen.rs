@@ -22,8 +22,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row). CSI sequences use **1-indexed** row;col parameters.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use freminal_common::buffer_states::{

@@ -17,9 +17,6 @@
 //! the resulting bytes through a headless emulator, and assert that prompt rows
 //! and finished command blocks are really recorded.
 
-// Integration-test crate: unwrap/expect permitted in tests/ (agents.md).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use freminal_terminal_emulator::interface::TerminalEmulator;
 
 const WORKLOADS_SH: &str = include_str!("../../assets/profiling/task125/workloads.sh");
@@ -40,6 +37,8 @@ fn script_format(name: &str) -> String {
 
 /// Expand a printf format the way bash's `printf` does for the subset the
 /// workload uses: `\NNN` octal escapes and a single `%d` per occurrence.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn expand_printf(format: &str, id: u64) -> Vec<u8> {
     let bytes = format.as_bytes();
     let mut out = Vec::new();
