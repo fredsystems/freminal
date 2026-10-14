@@ -108,6 +108,18 @@ Short aliases exist: `fz`, `fs`, `fr`, `fcm`, `fl`.
 | `fuzz-cmin <t>`          | libFuzzer merge: rewrites `<corpus-root>/<t>` as a minimal corpus with the same coverage.                                                                  |
 | `fuzz-cmin --all`        | The same for every target; targets with no working corpus are skipped.                                                                                     |
 
+`fuzz-cmin` replaces the corpus by renaming, so an interrupted run is
+recoverable. It merges `<corpus-root>/<t>` into `<t>.cmin`, parks the original
+as `<t>.old`, renames `.cmin` into place and then deletes `.old`. On the next
+run: if `<t>` is missing but `<t>.old` exists, the original is restored
+automatically before minimising; if both exist, `xtask` stops and deletes
+nothing (it cannot know which is the good corpus), so keep the one you want as
+`<t>` and remove the other. A merge that produces no files from a non-empty
+corpus is refused and leaves `<t>` untouched. If only the final deletion of
+`.old` fails, the minimised corpus is already installed: `xtask` logs a warning
+naming the leftover `.old` directory and succeeds, but the next `fuzz-cmin`
+stops at the both-exist check until you delete it by hand.
+
 Every run passes libFuzzer limits of 2048 MB RSS, 2048 MB per allocation and 25 s
 per input.
 
@@ -171,7 +183,10 @@ finding code means "the run completed and the last worker hit a finding", not
 worker usually exits cleanly after the time budget stops it. A keep-going run
 therefore never trusts the exit code for findings: it counts the new
 `crash-`/`oom-`/`timeout-`/`leak-`/`slow-unit-` artifacts and always prints how
-many there are and where. It fails only when the run itself did not complete.
+many there are and where. Artifact names are content hashes, so re-finding a
+known input writes no new file; when nothing is new but the directory already
+holds finding files, the summary says how many. It fails only when the run
+itself did not complete.
 AddressSanitizer would exit `1` by default, which collides with libFuzzer usage
 errors, so `xtask` appends `exitcode=77` to `ASAN_OPTIONS` (after any value you
 already set) so that every sanitizer finding reports as `77`.

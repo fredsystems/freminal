@@ -200,10 +200,11 @@ jobs:
   # `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
   # `cargo test --lib` in the standalone `fuzz/` crate (it is excluded from the
   # root workspace, so none of the jobs above see it), then replays every
-  # committed seed and regression input through every fuzz target with
-  # `-runs=0`. No fuzzing happens here: a replay is deterministic, so a failure
-  # is a real regression and this job is required. The time-boxed fuzzing lives
-  # in `fuzz-smoke` (advisory) and `fuzz-nightly.yml`.
+  # committed seed and regression input through every fuzz target, each file
+  # as an individual input (`-runs=1`). No fuzzing happens here: a replay is
+  # deterministic, so a failure is a real regression and this job is required.
+  # The time-boxed fuzzing lives in `fuzz-smoke` (advisory) and
+  # `fuzz-nightly.yml`.
   #
   # Everything runs inside `nix develop .#fuzz` (pinned nightly + cargo-fuzz).
   # `xtask` builds in the root `target/`, the fuzz crate in `fuzz/target/`, so

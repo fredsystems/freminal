@@ -1245,10 +1245,10 @@ trouble.
 
 Miri is **not** adopted for now. `freminal-buffer` and `freminal-common`, the
 crates whose logic is pure Rust, contain no `unsafe` in production code (the
-only `unsafe` in their `src` is `std::env::set_var` in test modules), so Miri
-would have nothing to check there. The `unsafe` that remains is GL, mmap and other OS
-FFI, which Miri cannot execute. **Revisit if pure-Rust `unsafe` is introduced**
-(for example in a hot-path data structure).
+only `unsafe` in their `src` is `std::env::set_var` / `std::env::remove_var`
+in test modules), so Miri would have nothing to check there. The `unsafe` that
+remains is GL, mmap and other OS FFI, which Miri cannot execute. **Revisit if
+pure-Rust `unsafe` is introduced** (for example in a hot-path data structure).
 
 ### AddressSanitizer is already covered
 
@@ -1260,5 +1260,5 @@ detected. Code that no fuzz target reaches is not covered by this.
 
 `fuzz/` is outside the workspace, so the `deny` job and `security-audit.yml`
 do not see `fuzz/Cargo.lock`. That is accepted: the fuzz crate never ships, and
-its only dependencies beyond the workspace crates are `libfuzzer-sys` and
-`arbitrary`.
+its only direct dependencies beyond the workspace crates are `libfuzzer-sys`
+and `toml` (`arbitrary` is pulled in transitively by `libfuzzer-sys`).

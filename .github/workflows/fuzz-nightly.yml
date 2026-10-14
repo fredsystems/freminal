@@ -140,8 +140,7 @@ jobs:
           rm -rf "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
           mkdir -p "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
           : > "${RUNNER_TEMP}/infra-failures.txt"
-          rm -f "${RUNNER_TEMP}/findings.md" "${RUNNER_TEMP}/findings-total.txt" \
-            "${RUNNER_TEMP}/findings-names.txt"
+          rm -f "${RUNNER_TEMP}/findings.md" "${RUNNER_TEMP}/findings-names.txt"
 
           nix develop .#fuzz --command bash -e -c '
             set -euo pipefail
@@ -168,8 +167,6 @@ jobs:
               echo "| target | findings |"
               echo "| --- | --- |"
             } > "${RUNNER_TEMP}/findings.md"
-            total=0
-            echo "${total}" > "${RUNNER_TEMP}/findings-total.txt"
 
             for t in "${targets[@]}"; do
               echo "::group::fuzz ${t}"
@@ -200,9 +197,7 @@ jobs:
                     -printf "%f\n" | LC_ALL=C sort
                 )
               fi
-              total=$((total + n))
               echo "| ${t} | ${n} |" >> "${RUNNER_TEMP}/findings.md"
-              echo "${total}" > "${RUNNER_TEMP}/findings-total.txt"
             done
 
             # Keep the persistent corpus lean.
@@ -237,11 +232,13 @@ jobs:
       # Only findings the tracking issue has not been told about are reported.
       # The artifacts dir is wiped at the start of every run and an open crash
       # is found again every night, so without this the issue would get the
-      # same comment nightly. A finding is identified by its basename
-      # (`crash-<sha1 of the input>`, so content-addressed); it counts as
-      # already reported when that basename appears anywhere in the open
-      # issue's body or comments. Every report therefore carries the full list
-      # of `<target>/<basename>` lines in a text block, which is what the next
+      # same comment nightly. A finding is identified by its
+      # `<target>/<basename>` line (the basename is `crash-<sha1 of the input>`,
+      # so content-addressed); it counts as already reported when that whole
+      # line appears anywhere in the open issue's body or comments. The target
+      # is part of the key so one input that crashes two targets is reported
+      # for both. Every report therefore carries the full list of
+      # `<target>/<basename>` lines in a text block, which is what the next
       # run dedupes against. If the issue is closed (or does not exist) a new
       # one is created and everything is reported again.
       #
@@ -285,8 +282,7 @@ jobs:
           new="${RUNNER_TEMP}/findings-new.txt"
           : > "${new}"
           while IFS= read -r line; do
-            base="${line#*/}"
-            if ! grep -qF -e "${base}" "${known}"; then
+            if ! grep -qF -e "${line}" "${known}"; then
               echo "${line}" >> "${new}"
             fi
           done < "${names}"

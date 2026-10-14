@@ -227,7 +227,8 @@ enum Command {
     /// --check`, `cargo clippy -D warnings`, `cargo test --lib`), the same
     /// checks CI runs. Then runs every file under `fuzz/seeds/<target>` and
     /// `fuzz/regressions/<target>` once, as an individual input, in sorted
-    /// order. No fuzzing happens and nothing under `fuzz/` is written. Exits
+    /// order. No fuzzing happens and no seeds, regressions, corpus or artifacts
+    /// are written (building the targets writes only `fuzz/target`). Exits
     /// non-zero if any input crashes, naming the input that did.
     #[command(visible_alias = "fr")]
     FuzzReplay(fuzz::FuzzReplayArgs),
@@ -236,6 +237,14 @@ enum Command {
     ///
     /// Merges `<corpus-root>/<target>` into `<target>.cmin`, then replaces the
     /// original with it. Takes a target name or `--all`.
+    ///
+    /// The swap parks the original as `<target>.old` and deletes it once the
+    /// merged corpus is installed. If a run is interrupted in between, the
+    /// next one restores `<target>.old` automatically when the corpus is
+    /// missing; if both exist it stops and deletes nothing, so keep the one
+    /// you want and remove the other. If only deleting `.old` fails, the
+    /// minimised corpus is already installed: delete `.old` by hand before
+    /// the next run, which refuses to start while it exists.
     #[command(visible_alias = "fcm")]
     FuzzCmin(fuzz::FuzzCminArgs),
 }
@@ -341,16 +350,16 @@ fn build() -> Result<()> {
 /// is a genuine fail-on-warning gate. This is what catches platform-specific
 /// warnings (e.g. `dead_code` for a function whose only non-test caller is
 /// behind `#[cfg(...)]` on another OS) that a warning-permissive `cargo
-/// check` would emit but not fail on. Mirrors [`lint_clippy`]'s flags.
+/// check` would emit but not fail on.
+///
+/// Lints [`LINT_PACKAGE_SCOPE`], the same packages as [`lint_clippy`], so the
+/// per-OS matrix also covers `freminal-windowing` (the crate with the most
+/// platform-specific code) and `xtask`, neither of which is a default member.
 fn check() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
-        "--all-targets",
-        "--all-features",
-        "--",
-        "-D",
-        "warnings",
-    ])
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    run_cargo(args)
 }
 
 /// Verify the workspace compiles on the MSRV toolchain.
@@ -366,16 +375,25 @@ fn check() -> Result<()> {
 ///
 /// The caller selects the toolchain (CI: `dtolnay/rust-toolchain` pinned to
 /// the `rust-version` in the workspace `Cargo.toml`).
+///
+/// Deliberately left on the workspace `default-members` rather than
+/// [`LINT_PACKAGE_SCOPE`]: this is a build check of the crates that ship on
+/// the MSRV, and `freminal` (a default member) depends on `freminal-windowing`,
+/// so that crate is compiled here as part of the shipped binary. `xtask` is
+/// build tooling that never ships and is not held to the MSRV.
 fn check_msrv() -> Result<()> {
     run_cargo(vec!["check", "--all-targets", "--all-features"])
 }
 
-/// The package selection of the clippy gates ([`lint_clippy`] and
-/// [`check_windows`]): the whole workspace except the vendored `portable-pty`.
+/// The package selection of every lint and test gate ([`check`],
+/// [`lint_clippy`], [`fix_clippy`], [`check_windows`], [`test_libs`],
+/// [`test_docs`] and [`test_default_features`]): the whole workspace except
+/// the vendored `portable-pty`.
 ///
 /// The workspace's `default-members` leave out `freminal-windowing` and
-/// `xtask`, so a bare `cargo clippy` never linted them. `portable-pty` is a
-/// vendored third-party crate with its own lint baseline and stays excluded.
+/// `xtask`, so a bare `cargo clippy` / `cargo test` never covered them.
+/// `portable-pty` is a vendored third-party crate with its own lint and test
+/// baseline and stays excluded.
 const LINT_PACKAGE_SCOPE: [&str; 3] = ["--workspace", "--exclude", "portable-pty"];
 
 /// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
@@ -489,10 +507,12 @@ fn lint_clippy() -> Result<()> {
     run_cargo(args)
 }
 
-/// Fix clippy warnings in the project
+/// Fix clippy warnings in the project, over the same [`LINT_PACKAGE_SCOPE`]
+/// as [`lint_clippy`].
 fn fix_clippy() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend([
         "--all-targets",
         "--all-features",
         "--fix",
@@ -501,7 +521,8 @@ fn fix_clippy() -> Result<()> {
         "--",
         "-D",
         "warnings",
-    ])
+    ]);
+    run_cargo(args)
 }
 
 /// Check that docs build without errors using flags for docs.rs
@@ -572,12 +593,21 @@ fn test() -> Result<()> {
     Ok(())
 }
 
-/// Run doc tests for the workspace's default packages
+/// Run doc tests for [`LINT_PACKAGE_SCOPE`] (every workspace package except
+/// the vendored `portable-pty`)
 fn test_docs() -> Result<()> {
-    run_cargo(vec!["test", "--doc", "--all-features"])
+    let mut args = vec!["test"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--doc", "--all-features"]);
+    run_cargo(args)
 }
 
-/// Run lib tests for the workspace's default packages
+/// Run lib tests for [`LINT_PACKAGE_SCOPE`] (every workspace package except
+/// the vendored `portable-pty`)
+///
+/// The scope is not the workspace's `default-members`: those leave out
+/// `freminal-windowing` and `xtask`, whose tests would then never run in any
+/// gate.
 ///
 /// Runs under `cargo-nextest` (configured in `.config/nextest.toml`), which
 /// executes each test in its own process scheduled across every core and
@@ -593,15 +623,10 @@ fn test_docs() -> Result<()> {
 /// especially in the pre-commit hook.  Benchmark compilation is verified
 /// separately by `bench_compile()`.
 fn test_libs() -> Result<()> {
-    run_cargo(vec![
-        "nextest",
-        "run",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-        "--all-features",
-    ])
+    let mut args = vec!["nextest", "run"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--lib", "--bins", "--tests", "--examples", "--all-features"]);
+    run_cargo(args)
 }
 
 /// Compile all benchmarks without running them.
@@ -619,22 +644,27 @@ fn bench_compile() -> Result<()> {
 /// It catches `#[cfg(feature = "…")]` gating errors where code behind an
 /// optional feature flag accidentally leaks into or breaks the default build.
 /// For example, the `playback` feature gates recording/playback code; this
-/// step ensures the workspace compiles and tests pass without it.
+/// step ensures the workspace compiles and tests pass without it. Covers the
+/// same [`LINT_PACKAGE_SCOPE`] as the all-features passes.
 fn test_default_features() -> Result<()> {
     tracing::info!("running default-features pass (no optional features)");
     // Unset CARGO_BUILD_FEATURES so the Nix devshell's "playback" default
     // doesn't leak into this pass — we need to verify the code compiles and
     // passes tests with NO optional features enabled.
-    run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo_no_features(vec![
-        "nextest",
-        "run",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-    ])?;
-    run_cargo_no_features(vec!["test", "--doc"])?;
+    let mut clippy = vec!["clippy"];
+    clippy.extend(LINT_PACKAGE_SCOPE);
+    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
+    run_cargo_no_features(clippy)?;
+
+    let mut nextest = vec!["nextest", "run"];
+    nextest.extend(LINT_PACKAGE_SCOPE);
+    nextest.extend(["--lib", "--bins", "--tests", "--examples"]);
+    run_cargo_no_features(nextest)?;
+
+    let mut doc = vec!["test"];
+    doc.extend(LINT_PACKAGE_SCOPE);
+    doc.push("--doc");
+    run_cargo_no_features(doc)?;
     Ok(())
 }
 
