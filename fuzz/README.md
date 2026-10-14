@@ -75,7 +75,7 @@ fuzz/
   runner, in the directory named by `FREMINAL_FUZZ_CORPUS_DIR`.
 - Seeds and regressions are **byte-exact**: CR/LF, NUL, trailing whitespace and
   binary encodings are the point. They are excluded from the pre-commit text
-  fixers (`.pre-commit-config.yaml` / `extraExcludes` in `flake.nix`) and marked
+  fixers (`extraExcludes` in `flake.nix`, which generates `.pre-commit-config.yaml`) and marked
   `binary` in `.gitattributes` so git never normalises them. Do not open and
   re-save them in an editor.
 
@@ -104,7 +104,7 @@ Short aliases exist: `fz`, `fs`, `fr`, `fcm`, `fl`.
 | `fuzz <t> [--time SECS]` | Builds the target and fuzzes it for `--time` seconds (default 300). `--on-crash stop` (default) ends at the first finding.                                 |
 | `--on-crash keep-going`  | Fork mode (`-fork=<jobs>`, ignoring crashes, OOMs and timeouts): collects every finding as an artifact. `--jobs N` sets the workers; stop mode ignores it. |
 | `fuzz-smoke`             | Builds and fuzzes every target briefly in stop mode, prints a summary table, exits non-zero if any target failed.                                          |
-| `fuzz-replay`            | Deterministic (`-runs=0`) replay of `seeds/<t>` and `regressions/<t>` through every target. This is the CI gate; run it before pushing.                    |
+| `fuzz-replay`            | Lints and tests this crate, then runs every file in `seeds/<t>` and `regressions/<t>` once through its target, naming any file that fails. The CI gate.    |
 | `fuzz-cmin <t>`          | libFuzzer merge: rewrites `<corpus-root>/<t>` as a minimal corpus with the same coverage.                                                                  |
 | `fuzz-cmin --all`        | The same for every target; targets with no working corpus are skipped.                                                                                     |
 
@@ -167,8 +167,11 @@ and only the corpus and artifact directories bound read-write. Consequences:
 
 In fork mode libFuzzer's parent exits with the **last** child's exit code, so a
 finding code means "the run completed and the last worker hit a finding", not
-"the run broke". A keep-going run therefore only warns on findings and points at
-the artifacts directory; it fails only when the run itself did not complete.
+"the run broke". Equally, a clean `0` does not mean nothing was found: the last
+worker usually exits cleanly after the time budget stops it. A keep-going run
+therefore never trusts the exit code for findings: it counts the new
+`crash-`/`oom-`/`timeout-`/`leak-`/`slow-unit-` artifacts and always prints how
+many there are and where. It fails only when the run itself did not complete.
 AddressSanitizer would exit `1` by default, which collides with libFuzzer usage
 errors, so `xtask` appends `exitcode=77` to `ASAN_OPTIONS` (after any value you
 already set) so that every sanitizer finding reports as `77`.
@@ -229,11 +232,11 @@ already set) so that every sanitizer finding reports as `77`.
 
 ## CI
 
-| Job / workflow   | Where                                | Gate                                                                                                                                                                                              |
-| ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fuzz-replay`    | `.github/workflows/ci.yml`           | **Required** (part of `CI Success`). `cargo fmt --check`, clippy and `cargo test --lib` in `fuzz/`, then `cargo xtask fuzz-replay --sandbox none`. Deterministic: a failure is a real regression. |
-| `fuzz-smoke`     | `.github/workflows/ci.yml`           | **Advisory** (`continue-on-error`). `cargo xtask fuzz-smoke --time 30 --sandbox none`; results go to the step summary and the `fuzz-smoke-artifacts` artifact.                                    |
-| `Fuzz (nightly)` | `.github/workflows/fuzz-nightly.yml` | Not a PR check. Self-hosted, keep-going, persistent corpus, then `fuzz-cmin --all`.                                                                                                               |
+| Job / workflow   | Where                                | Gate                                                                                                                                                             |
+| ---------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fuzz-replay`    | `.github/workflows/ci.yml`           | **Required** (part of `CI Success`). `cargo xtask fuzz-replay --sandbox none` (lints and tests this crate first). Deterministic: a failure is a real regression. |
+| `fuzz-smoke`     | `.github/workflows/ci.yml`           | **Advisory** (`continue-on-error`). `cargo xtask fuzz-smoke --time 30 --sandbox none`; results go to the step summary and the `fuzz-smoke-artifacts` artifact.   |
+| `Fuzz (nightly)` | `.github/workflows/fuzz-nightly.yml` | Not a PR check. Self-hosted, keep-going, persistent corpus, then `fuzz-cmin --all`.                                                                              |
 
 CI passes `--sandbox none` because bubblewrap cannot create user namespaces on
 the hosted runners, which are disposable VMs anyway.

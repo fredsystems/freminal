@@ -1194,8 +1194,9 @@ and add a second ignore list to keep in sync.
   and a run can never rewrite them; seeds and regressions are also byte-exact,
   so they are excluded from the pre-commit text fixers and marked `binary` in
   `.gitattributes`.
-- **Three CI tiers.** `fuzz-replay` is **required**: it replays seeds and
-  regressions deterministically (`-runs=0`), so a failure is a real regression
+- **Three CI tiers.** `fuzz-replay` is **required**: it runs every seed and
+  regression file once, as an individual input (libFuzzer only names the
+  failing file in that mode), so a failure is a real regression
   and never flaky. `fuzz-smoke` is **advisory** (`continue-on-error`): a short
   time-boxed run is stochastic, and gating merges on a random search would make
   CI flaky. `fuzz-nightly.yml` is the real fuzzing: it runs on a self-hosted
@@ -1215,7 +1216,10 @@ than the production code path, so the process is isolated instead: locally,
 private `/tmp` and `/dev/shm`, no network). In CI, bubblewrap cannot create user
 namespaces on hosted runners or under the self-hosted runner's hardened systemd
 unit, so CI passes `--sandbox none` and relies on isolation that already exists:
-a disposable VM for hosted jobs, the hardened unit for the self-hosted runner.
+a disposable VM for hosted jobs, the hardened unit for the self-hosted runner
+(the nixpkgs `services.github-runners` defaults: `DynamicUser`, `PrivateTmp`,
+`PrivateDevices`, `ProtectSystem=strict`, `ProtectHome`; the runner itself is
+provisioned in the separate NixOS configuration repository).
 The runner's hardening was **deliberately not relaxed** to make bubblewrap work;
 weakening the host's isolation to enable a second layer would be a net loss.
 
@@ -1230,15 +1234,19 @@ stop mode, a warning pointing at the artifacts in keep-going mode); 72
 (interrupt), death by signal and any other code are infrastructure failures in
 both modes. AddressSanitizer exits `1` by default, which collides with
 libFuzzer usage errors, so `ASAN_OPTIONS` gets `exitcode=77` appended and every
-sanitizer finding reports as a crash. The nightly workflow depends on this: a
-non-zero exit from a keep-going run means infrastructure trouble, and findings
-are counted from the artifacts instead.
+sanitizer finding reports as a crash. The exit code is never the finding
+signal in keep-going mode, in either direction: after the time budget stops the
+workers, the last one usually exits `0` even when earlier ones found crashes, so
+`xtask` counts new artifact files and reports them, and the nightly workflow
+counts them too. A non-zero exit from a keep-going run means infrastructure
+trouble.
 
 ### Miri: deferred
 
 Miri is **not** adopted for now. `freminal-buffer` and `freminal-common`, the
-crates whose logic is pure Rust, contain no `unsafe` in `src`, so Miri would
-have nothing to check there. The `unsafe` that remains is GL, mmap and other OS
+crates whose logic is pure Rust, contain no `unsafe` in production code (the
+only `unsafe` in their `src` is `std::env::set_var` in test modules), so Miri
+would have nothing to check there. The `unsafe` that remains is GL, mmap and other OS
 FFI, which Miri cannot execute. **Revisit if pure-Rust `unsafe` is introduced**
 (for example in a hot-path data structure).
 
@@ -1247,3 +1255,10 @@ FFI, which Miri cannot execute. **Revisit if pure-Rust `unsafe` is introduced**
 cargo-fuzz builds fuzz targets with AddressSanitizer by default, so memory
 errors in any `unsafe` or FFI code **reachable from a fuzz target** are already
 detected. Code that no fuzz target reaches is not covered by this.
+
+### The fuzz crate's own dependencies
+
+`fuzz/` is outside the workspace, so the `deny` job and `security-audit.yml`
+do not see `fuzz/Cargo.lock`. That is accepted: the fuzz crate never ships, and
+its only dependencies beyond the workspace crates are `libfuzzer-sys` and
+`arbitrary`.
