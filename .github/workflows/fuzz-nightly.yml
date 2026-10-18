@@ -1,8 +1,12 @@
 # Long-running continuous fuzzing (issue 553).
 #
 # Runs every cargo-fuzz target in `fuzz/` for a fixed time budget on a
-# SELF-HOSTED runner, keeps a persistent corpus between runs, and reports
-# findings through a run summary, an artifact and a single tracking issue.
+# SELF-HOSTED runner and reports findings through a run summary, an artifact
+# and a single tracking issue. The working corpus is NOT kept on the runner: it
+# lives in the private repository fredsystems/freminal-fuzz-corpus. The job
+# pulls it before fuzzing (`cargo xtask fuzz-corpus pull`) and publishes the
+# grown, minimised corpus afterwards (`fuzz-corpus push`), so coverage
+# accumulates across runs and the runner's disk holds only build cache.
 # The tracking issue only receives findings it has not already been told
 # about: libFuzzer names an artifact `<kind>-<sha1 of the input>`, so the name
 # is content-addressed and a re-found crash has the same name every night.
@@ -11,30 +15,30 @@
 # `pull_request_target`. The repository is public and the job runs on a
 # self-hosted runner, so any trigger that can execute fork-controlled code
 # would hand that code a machine on the maintainer's network. Only `schedule`
-# and `workflow_dispatch` (which requires write access) are allowed.
+# and `workflow_dispatch` (which requires write access) are allowed. This is
+# also what keeps the `PAT` secret (used only by the pull and push steps) out
+# of reach: secrets are never available to fork pull requests.
 #
 # RUNNER CONTRACT. The runner must:
 #   * carry the labels `self-hosted`, `Linux` and `freminal-fuzz`;
 #   * provide `nix` (flakes enabled) on PATH -- it is not installed here;
-#   * export FREMINAL_FUZZ_CORPUS_DIR in its environment, pointing at a
-#     persistent, writable directory (it holds the working corpus between
-#     runs, which is the whole point of nightly fuzzing). The job fails fast
-#     if the variable is unset or the directory is not writable;
 #   * have enough memory: each target runs `jobs` (default 8) fork workers,
 #     and libFuzzer is started with `-rss_limit_mb=2048`, so the workers of
 #     one target can use up to 8 x 2 GiB. Plan for >= 16 GiB available to the
 #     runner, or lower the `jobs` input.
+# No persistent corpus directory is needed: the job points
+# FREMINAL_FUZZ_CORPUS_DIR at a directory under the runner's temp dir itself.
 #
 # Deliberately NOT used on the self-hosted runner:
 #   * DeterminateSystems/determinate-nix-action -- nix is already installed.
 #   * DeterminateSystems/magic-nix-cache-action -- several runners on one
 #     host would fight over the cache daemon's port.
-#   * Swatinem/rust-cache -- the runner is non-ephemeral, so its work
-#     directory (with `target/` and `fuzz/target/`) survives between jobs.
-#     The NixOS runner unit resets that directory only when the service
-#     restarts, which costs one cold build -- the corpus is unaffected
-#     because it lives in FREMINAL_FUZZ_CORPUS_DIR, not the work directory.
-#   * The runner must therefore be registered non-ephemeral.
+#   * Swatinem/rust-cache -- the runner should be registered non-ephemeral, so
+#     its work directory (with `target/` and `fuzz/target/`) survives between
+#     jobs and spares a cold build. That is only an optimisation: if the work
+#     directory is wiped (for example when the NixOS runner unit restarts) the
+#     next job pays one cold build and nothing else is lost, because the
+#     corpus comes from the corpus repository, not from this machine.
 name: Fuzz (nightly)
 
 on:
@@ -84,14 +88,33 @@ jobs:
             echo "::error::nix is not on PATH; the freminal-fuzz runner must provide it"
             exit 1
           fi
-          if [ -z "${FREMINAL_FUZZ_CORPUS_DIR:-}" ]; then
-            echo "::error::FREMINAL_FUZZ_CORPUS_DIR is not set; the runner must export it, pointing at persistent storage"
-            exit 1
-          fi
-          if [ ! -d "${FREMINAL_FUZZ_CORPUS_DIR}" ] || [ ! -w "${FREMINAL_FUZZ_CORPUS_DIR}" ]; then
-            echo "::error::FREMINAL_FUZZ_CORPUS_DIR (${FREMINAL_FUZZ_CORPUS_DIR}) is not a writable directory"
-            exit 1
-          fi
+
+      # The corpus lives in a temp directory: it is a checkout of the private
+      # corpus repository, recreated by the pull step every run. Written to
+      # GITHUB_ENV because the `runner` context is not available in a job-level
+      # `env:`. Every later step (pull, fuzz, push) sees the same directory.
+      - name: Select corpus directory
+        run: |
+          set -euo pipefail
+          echo "FREMINAL_FUZZ_CORPUS_DIR=${RUNNER_TEMP}/fuzz-corpus" >> "${GITHUB_ENV}"
+
+      # Fetches the corpus from the private corpus repository. This step must
+      # succeed for the job to go on: there is deliberately no `if:` on the
+      # steps after it, so a failed pull stops the job before any fuzzing, and
+      # the push step below refuses to run (a run that started from an empty
+      # corpus by accident must not be published over the real one).
+      #
+      # Secrets are only available here because this workflow runs on
+      # `schedule` / `workflow_dispatch`, never `pull_request`. The token is
+      # given to this step only and reaches git through an inline credential
+      # helper that reads it from the environment: it is never put on a command
+      # line or written to disk (`persist-credentials: false` above likewise
+      # keeps the checkout token out of `.git/config`).
+      - name: Pull corpus
+        id: pull
+        env:
+          FREMINAL_FUZZ_CORPUS_TOKEN: ${{ secrets.PAT }}
+        run: nix develop .#fuzz --command cargo xtask fuzz-corpus pull
 
       # Inputs are passed through `env:` and validated here; they are never
       # interpolated into the script text.
@@ -105,15 +128,18 @@ jobs:
       # tool, ...). Those are recorded per target without aborting the loop
       # and fail the job in the final step.
       #
-      # TIME BUDGET. Every target gets MINUTES, one after the other, then the
-      # corpus is minimised, all inside `timeout-minutes: 300`. A job killed by
-      # that timeout never reaches the steps that write findings, so the budget
-      # is checked BEFORE fuzzing starts and the job fails fast if it cannot
-      # fit: MINUTES * targets + 45 must be <= 290. The 290 is the 300 minute
+      # TIME BUDGET. Every target gets MINUTES, one after the other, all inside
+      # `timeout-minutes: 300`. A job killed by that timeout never reaches the
+      # steps that write findings or push the corpus, so the budget is checked
+      # BEFORE fuzzing starts and the job fails fast if it cannot fit:
+      # MINUTES * targets + 45 must be <= 290. The 290 is the 300 minute
       # timeout less a 10 minute margin for the reporting steps; the 45 is the
-      # allowance for the cold fuzz build plus `fuzz-cmin`, which also runs
-      # inside the timeout. Findings are additionally written after each
-      # target, so even a run that is cut short leaves partial results.
+      # allowance for the work around the fuzzing that also runs inside the
+      # timeout: the pull (a small clone), the cold fuzz build, and the push
+      # step (`fuzz-corpus push` minimises every corpus, then commits and
+      # pushes). The minimisation is the same work the loop used to do itself,
+      # so the allowance is unchanged. Findings are additionally written after
+      # each target, so even a run that is cut short leaves partial results.
       - name: Fuzz all targets
         env:
           MINUTES: ${{ inputs.minutes_per_target || '20' }}
@@ -199,13 +225,25 @@ jobs:
               fi
               echo "| ${t} | ${n} |" >> "${RUNNER_TEMP}/findings.md"
             done
-
-            # Keep the persistent corpus lean.
-            if ! cargo xtask fuzz-cmin --all --sandbox none; then
-              echo "::error::corpus minimisation failed (infrastructure)"
-              echo "fuzz-cmin" >> "${RUNNER_TEMP}/infra-failures.txt"
-            fi
           '
+
+      # Publishes the grown corpus: pull again, minimise every target, commit,
+      # push (retrying with a rebase when another run pushed meanwhile).
+      # `always()` so progress is kept even if a target had an infrastructure
+      # failure or the fuzz step failed, but only after a successful pull: with
+      # no pull there is no trustworthy checkout, and `push` would refuse it
+      # anyway. A job killed by `timeout-minutes` never reaches this step, which
+      # is what the time budget check in the fuzz step guards against.
+      #
+      # `--sandbox none` for the same reason as the fuzz step (the runner's
+      # hardened unit is the sandbox; bubblewrap cannot create user namespaces
+      # there). The token is again given to this step only and reaches git
+      # through the inline credential helper, never argv or disk.
+      - name: Push corpus
+        if: always() && steps.pull.outcome == 'success'
+        env:
+          FREMINAL_FUZZ_CORPUS_TOKEN: ${{ secrets.PAT }}
+        run: nix develop .#fuzz --command cargo xtask fuzz-corpus push --sandbox none
 
       - name: Publish findings summary
         if: always()

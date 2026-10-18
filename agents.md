@@ -218,6 +218,7 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 | `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)  |
 | `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)            |
 | `nix develop .#fuzz --command cargo xtask fuzz <t> --time 300` | Fuzz one target for 5 minutes (see `fuzz-list`)               |
+| `nix develop .#fuzz --command cargo xtask fuzz-corpus pull`    | Fetch the persistent fuzz corpus (`push` publishes it)        |
 
 Fuzzing procedures (targets, corpus policy, sandbox, triage) are in
 `fuzz/README.md`.

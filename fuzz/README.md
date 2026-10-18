@@ -56,7 +56,8 @@ fuzz/
   src/lib.rs               helpers shared by more than one target
   seeds/<t>/               curated, small, COMMITTED, never written by any run
   regressions/<t>/         minimized crash reproducers, COMMITTED with the fix
-  corpus/<t>/              local working corpus        (gitignored)
+  corpus/<t>/              local working corpus        (gitignored; a checkout of the
+                           private corpus repository, see "Persistent corpus")
   artifacts/<t>/           crashes, OOMs, timeouts     (gitignored)
   target/                  build output                (gitignored)
 ```
@@ -71,8 +72,12 @@ fuzz/
   directory and is a required CI gate, so a live reproducer would block every PR.
   Attach an unfixed reproducer to the GitHub issue instead.
 - **`corpus/`** and **`artifacts/`** are local working directories and are
-  gitignored. The nightly run keeps its persistent corpus on the self-hosted
-  runner, in the directory named by `FREMINAL_FUZZ_CORPUS_DIR`.
+  gitignored. The corpus is a **checkout of the private repository
+  `fredsystems/freminal-fuzz-corpus`** (layout `<target>/<sha1>`), kept in sync
+  with `cargo xtask fuzz-corpus pull` / `push` (see
+  [Persistent corpus](#persistent-corpus)). It is never committed to this
+  repository. **Seeds and regressions stay here**, in `seeds/` and
+  `regressions/`: they are curated and reviewed, the corpus is machine-grown.
 - Seeds and regressions are **byte-exact**: CR/LF, NUL, trailing whitespace and
   binary encodings are the point. They are excluded from the pre-commit text
   fixers (`extraExcludes` in `flake.nix`, which generates `.pre-commit-config.yaml`) and marked
@@ -95,6 +100,8 @@ cargo xtask fuzz-smoke --time 45            # every target, 45 s each (the defau
 cargo xtask fuzz-replay                     # replay seeds + regressions, no fuzzing
 cargo xtask fuzz-cmin ansi_parser           # minimise one working corpus
 cargo xtask fuzz-cmin --all                 # minimise every working corpus
+cargo xtask fuzz-corpus pull                # fetch the persistent corpus
+cargo xtask fuzz-corpus push                # minimise, commit and publish it
 ```
 
 Short aliases exist: `fz`, `fs`, `fr`, `fcm`, `fl`.
@@ -107,6 +114,7 @@ Short aliases exist: `fz`, `fs`, `fr`, `fcm`, `fl`.
 | `fuzz-replay`            | Lints and tests this crate, then runs every file in `seeds/<t>` and `regressions/<t>` once through its target, naming any file that fails. The CI gate.    |
 | `fuzz-cmin <t>`          | libFuzzer merge: rewrites `<corpus-root>/<t>` as a minimal corpus with the same coverage.                                                                  |
 | `fuzz-cmin --all`        | The same for every target; targets with no working corpus are skipped.                                                                                     |
+| `fuzz-corpus pull\|push` | Syncs the working corpus with the private corpus repository; see [Persistent corpus](#persistent-corpus).                                                  |
 
 `fuzz-cmin` replaces the corpus by renaming, so an interrupted run is
 recoverable. It merges `<corpus-root>/<t>` into `<t>.cmin`, parks the original
@@ -138,6 +146,71 @@ Relative paths resolve against the workspace root.
 **Suggested cadence:** when you change parser, buffer or other code a target
 covers, run that target for one to five minutes (`--time 60` to `--time 300`)
 and run `cargo xtask fuzz-replay` before pushing.
+
+### Persistent corpus
+
+Coverage accumulates over days, so the working corpus is persisted in a
+separate **private** git repository, `fredsystems/freminal-fuzz-corpus`, laid
+out as `<target>/<sha1>` at its root. The corpus root (`fuzz/corpus`, or
+`FREMINAL_FUZZ_CORPUS_DIR`) **is** the working tree of a clone of it.
+
+Long local run:
+
+```bash
+cargo xtask fuzz-corpus pull     # clone (first time) or update the corpus
+# ... fuzz as long as you like ...
+cargo xtask fuzz-corpus push     # minimise, commit, publish
+```
+
+- **`pull`** clones the repository into the corpus root, or updates an existing
+  checkout. Local corpus files that are not yet in the repository are first
+  set aside in a local commit, then rebased onto the remote. It refuses to touch
+  a root that is a checkout of some other repository, or a non-empty directory
+  that holds anything other than target directories.
+- **`push`** pulls again, runs `fuzz-cmin` on every target, commits whatever
+  changed (`corpus: <host> <timestamp>`, with a per-target file count in the
+  body) and pushes. If the remote moved in the meantime it fetches, rebases and
+  pushes again, up to three pushes in all. It fails, publishing nothing, if the
+  minimisation fails or if the root is not a checkout (run `pull` first).
+  Minimisation also **deletes** corpus files whose coverage is redundant; that
+  deletion is published too.
+- **Merging is conflict-free.** libFuzzer names each corpus file by the SHA-1 of
+  its content, so one name always means the same bytes. Two machines that find
+  the same input add the same file, and a rebase can never hit a content
+  conflict.
+- **History can be squashed.** Only the latest tree matters; the repository's
+  history exists to make concurrent pushes mergeable, and may be squashed and
+  force-pushed by the maintainer whenever it grows too large. A checkout made
+  before a squash needs a fresh clone (delete the corpus root and `pull`).
+- **Options.** `--repo-url` / `FREMINAL_FUZZ_CORPUS_REPO` (default
+  `https://github.com/fredsystems/freminal-fuzz-corpus.git`), `--corpus-root` /
+  `FREMINAL_FUZZ_CORPUS_DIR`, `--artifacts-root` and `--sandbox` (applies to the
+  minimisation `push` runs).
+- **Authentication.** Locally, git uses your normal credentials for github.com
+  (credential manager, `gh auth setup-git`, ssh via `--repo-url`, ...) and may
+  prompt. In CI, the `PAT` repository secret is passed to the pull and push
+  steps as `FREMINAL_FUZZ_CORPUS_TOKEN`; `xtask` hands it to git through an
+  inline credential helper that reads it from the environment, so it never
+  appears in a command line or on disk, and git never prompts.
+- **Adopting an existing local corpus.** If `fuzz/corpus` already holds a corpus
+  from before the repository existed (only target directories, plus `.cmin` /
+  `.old` scratch directories), `pull` turns it into a checkout in place: files
+  that are already in the repository are identical by name, and everything else
+  stays untracked until `push` commits it.
+- **Why private.** Corpus inputs are by construction close to the inputs that
+  crash the code, including crashes behind advisories that are still open.
+
+Recipe for a long local run over every target:
+
+```bash
+cargo xtask fuzz-corpus pull
+for t in $(cargo xtask fuzz-list); do
+  cargo xtask fuzz "$t" --on-crash keep-going --jobs 4 --time 1200
+done
+cargo xtask fuzz-corpus push
+```
+
+That is 20 minutes per target; findings land in `fuzz/artifacts/<t>/`.
 
 ### Why a sandbox
 
@@ -251,7 +324,7 @@ already set) so that every sanitizer finding reports as `77`.
 | ---------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fuzz-replay`    | `.github/workflows/ci.yml`           | **Required** (part of `CI Success`). `cargo xtask fuzz-replay --sandbox none` (lints and tests this crate first). Deterministic: a failure is a real regression. |
 | `fuzz-smoke`     | `.github/workflows/ci.yml`           | **Advisory** (`continue-on-error`). `cargo xtask fuzz-smoke --time 30 --sandbox none`; results go to the step summary and the `fuzz-smoke-artifacts` artifact.   |
-| `Fuzz (nightly)` | `.github/workflows/fuzz-nightly.yml` | Not a PR check. Self-hosted, keep-going, persistent corpus, then `fuzz-cmin --all`.                                                                              |
+| `Fuzz (nightly)` | `.github/workflows/fuzz-nightly.yml` | Not a PR check. Self-hosted, keep-going; `fuzz-corpus pull` first, `fuzz-corpus push` (minimise, commit, publish) last.                                          |
 
 CI passes `--sandbox none` because bubblewrap cannot create user namespaces on
 the hosted runners, which are disposable VMs anyway.
@@ -267,12 +340,21 @@ reach it.
 Runner contract:
 
 - labels `self-hosted`, `Linux`, `freminal-fuzz`;
-- registered **non-ephemeral** (the work directory, including `fuzz/target`,
-  survives between jobs; only the corpus must be persistent);
 - `nix` (flakes enabled) on `PATH`;
-- `FREMINAL_FUZZ_CORPUS_DIR` exported in the runner environment, pointing at a
-  persistent, writable directory. The job fails fast if it is unset or not
-  writable.
+- registered **non-ephemeral** (recommended): the work directory, including
+  `fuzz/target`, then survives between jobs and saves a cold build. This is
+  only a build-cache optimisation; nothing breaks if the work directory is
+  wiped.
+
+The runner needs **no persistent corpus directory**. The job sets
+`FREMINAL_FUZZ_CORPUS_DIR` to a directory under the runner's temp dir, runs
+`fuzz-corpus pull` (a failed pull fails the job before any fuzzing), fuzzes, and
+then runs `fuzz-corpus push` (`if: always()` after a successful pull, so progress
+is published even when a target had an infrastructure failure, but never after a
+failed pull). Both steps authenticate with the `PAT` repository secret as
+`FREMINAL_FUZZ_CORPUS_TOKEN`, set on those two steps only. Secrets are
+available because the workflow runs only on `schedule` and `workflow_dispatch`.
+`PAT` needs read/write access to the corpus repository.
 
 Each target runs with `--on-crash keep-going --sandbox none` (the hardened
 systemd unit of the runner is the sandbox). Findings are listed in the run

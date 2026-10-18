@@ -1200,11 +1200,34 @@ and add a second ignore list to keep in sync.
   and never flaky. `fuzz-smoke` is **advisory** (`continue-on-error`): a short
   time-boxed run is stochastic, and gating merges on a random search would make
   CI flaky. `fuzz-nightly.yml` is the real fuzzing: it runs on a self-hosted
-  runner with `--on-crash keep-going` and a **persistent corpus**
-  (`FREMINAL_FUZZ_CORPUS_DIR`), because coverage accumulates over days and a
-  fresh runner starts from nothing each time. It is triggered only by `schedule`
-  and `workflow_dispatch`, never `pull_request`, since a self-hosted runner on a
-  public repository must not execute fork-controlled code.
+  runner with `--on-crash keep-going` and a **persistent corpus** (pulled from
+  and pushed to the corpus repository, below), because coverage accumulates
+  over days and a fresh run starts from nothing otherwise. It is triggered only
+  by `schedule` and `workflow_dispatch`, never `pull_request`, since a
+  self-hosted runner on a public repository must not execute fork-controlled
+  code.
+- **The persistent corpus lives in a separate private git repository**
+  (`fredsystems/freminal-fuzz-corpus`, layout `<target>/<sha1>`), synced by
+  `cargo xtask fuzz-corpus pull|push`. Alternatives rejected:
+  - _In this repository:_ every clone and every CI checkout would fetch the
+    corpus and its ever-growing history, for data almost nobody needs.
+  - _Actions cache or artifacts:_ both are evicted or expire, which loses
+    exactly the accumulated coverage the corpus exists to keep.
+  - _The runner's disk:_ ties the corpus to one machine and one wipe of its
+    work directory. It now holds only build cache.
+
+  The corpus is small: after a 90 s run plus `fuzz-cmin`, `ansi_parser` held
+  3,286 files / 868 KB, `frec_parse` 3,284 files / 2.8 MB and `terminal_state`
+  3,262 files / 2.7 MB; individual files are hundreds of bytes to a few KB.
+  libFuzzer names a corpus file by the SHA-1 of its content, so names are
+  content-addressed: machines that find the same input add the same file and a
+  rebase never conflicts, which is what lets `push` simply rebase and retry.
+  The repository is **private** because corpus inputs sit close to the inputs
+  that crash the code, including crashes behind advisories that are still
+  open. Its history exists only to make concurrent pushes mergeable and may be
+  squashed whenever it grows. CI authenticates with the `PAT` repository
+  secret, handed to git through an inline credential helper so the token is
+  never on a command line or on disk.
 
 ### Sandbox decision
 
