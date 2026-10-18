@@ -331,11 +331,25 @@ the hosted runners, which are disposable VMs anyway.
 
 ### Nightly run
 
-`fuzz-nightly.yml` runs on `schedule` (02:00 UTC) and `workflow_dispatch` (inputs:
-`minutes_per_target`, default 20; `jobs`, default 8). It must **never** be
+`fuzz-nightly.yml` runs on `schedule` (01:07 UTC) and `workflow_dispatch` (inputs:
+`minutes_per_target`, empty by default; `jobs`, default 8). It must **never** be
 triggered by `pull_request` or `pull_request_target`: the repository is public
 and the job runs on a self-hosted machine, so only maintainer-controlled code may
 reach it.
+
+**Time plan.** Each target's minutes come from [`nightly-plan.txt`](nightly-plan.txt)
+(200 minutes in total). Targets whose coverage was still growing get more time,
+and plateaued ones get a short top-up run. Retune it after long runs: compare
+`cov` / `ft` growth over the last quarter of each target's run. A manual
+dispatch with `minutes_per_target` set gives every target that many minutes
+instead.
+
+**Quiet window.** The runner shares fredhub with the NixOS fleet's CI, which
+uses every core from about 08:00 UTC onward (see the SCHEDULING comment in the
+workflow). A scheduled run must finish by 07:30 UTC. If it starts late, every
+target's time is scaled down proportionally, and it skips when less than a
+quarter of the plan fits. Manual dispatches are not limited. The runner's
+systemd unit also runs at the lowest CPU and I/O priority.
 
 Runner contract:
 

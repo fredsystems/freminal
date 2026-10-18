@@ -1,0 +1,27 @@
+# Minutes per target for the nightly fuzz run (.github/workflows/fuzz-nightly.yml).
+#
+# Format: `<target> <minutes>`, one per line; `#` starts a comment. Every name
+# must be a target in fuzz/Cargo.toml; a target missing here gets 10 minutes
+# (with a warning). The total must leave room in the quiet window: the
+# workflow scales every entry down proportionally when a run starts late.
+#
+# Weights come from the 2026-10-18 long run (20 min per target, 8 workers),
+# measured as coverage growth in the last quarter of each target's run:
+#   still climbing   -> more time;  plateaued -> a short top-up run.
+# Retune when a target plateaus or a fix unblocks one.
+
+# Still climbing fast (cov +9%, ft +29% in the last 5 min).
+terminal_state 50
+# Still climbing (+30% / +14% / +45%; frec partly throttled by #556).
+config_toml 30
+layout_toml 30
+frec_parse 30
+# Slowing but still growing (+7%).
+ansi_parser 25
+# Throttled by the open sixel crash (59 exec/s); raise once it is fixed.
+sixel_parse 10
+# Plateaued (<1% growth).
+osc99_parse 10
+compact_row 5
+kitty_graphics_parse 5
+base64 5

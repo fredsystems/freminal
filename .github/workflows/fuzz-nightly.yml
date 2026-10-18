@@ -53,8 +53,13 @@
 # starts at 01:07 (off the top of the hour, where GitHub's schedule delays are
 # worst) and must END by 07:30. Because the cron start cannot be trusted, the
 # "Fit into the quiet window" step enforces that end: a late scheduled run
-# shortens every target's time to fit and skips when less than 5 min per
-# target would remain. Manual dispatches are not limited. As a second layer,
+# scales every target's time down proportionally and skips when less than a
+# quarter of the plan would fit. Manual dispatches are not limited.
+#
+# TIME PLAN. Minutes per target come from `fuzz/nightly-plan.txt` (weighted
+# by measured coverage growth: targets still finding new code get more time,
+# plateaued ones a short top-up). A manual dispatch may override it with one
+# uniform `minutes_per_target`. As a second layer,
 # the runner's systemd unit runs at the lowest CPU and I/O priority, so the
 # fleet builds win if anything still overlaps.
 name: Fuzz (nightly)
@@ -66,9 +71,9 @@ on:
   workflow_dispatch:
     inputs:
       minutes_per_target:
-        description: "Minutes to fuzz each target"
+        description: "Uniform minutes per target (empty: use fuzz/nightly-plan.txt)"
         type: string
-        default: "20"
+        default: ""
       jobs:
         description: "Parallel fuzz workers per target"
         type: string
@@ -108,55 +113,60 @@ jobs:
             exit 1
           fi
 
-      # Enforces the quiet window (see SCHEDULING). Outputs `skip` and the
-      # effective `minutes` per target for the steps below.
+      # Enforces the quiet window (see SCHEDULING). Outputs `skip` and
+      # `scale` (percent applied to every target's planned minutes).
       - name: Fit into the quiet window
         id: window
         env:
           EVENT: ${{ github.event_name }}
-          REQUESTED: ${{ inputs.minutes_per_target || '20' }}
+          OVERRIDE: ${{ inputs.minutes_per_target }}
           WINDOW_END_UTC: "07:30"
           # Pull + cold build + push (45) plus a 10 min reporting margin; the
           # same allowance as the time budget check in the fuzz step.
           OVERHEAD_MIN: "55"
-          MIN_PER_TARGET: "5"
+          # Below a quarter of the plan a run is not worth the overlap risk.
+          MIN_SCALE: "25"
         run: |
           set -euo pipefail
-          case "${REQUESTED}" in
-            '' | *[!0-9]* | 0*)
-              echo "::error::minutes_per_target must be a positive integer without leading zeros (got '${REQUESTED}')"
-              exit 1
-              ;;
-          esac
+          targets="$(grep -c '^\[\[bin\]\]' fuzz/Cargo.toml)"
+          if [ -n "${OVERRIDE}" ]; then
+            case "${OVERRIDE}" in
+              *[!0-9]* | 0*)
+                echo "::error::minutes_per_target must be empty or a positive integer without leading zeros (got '${OVERRIDE}')"
+                exit 1
+                ;;
+            esac
+            planned=$((OVERRIDE * targets))
+          else
+            planned="$(awk '!/^#/ && NF { s += $2 } END { print s + 0 }' fuzz/nightly-plan.txt)"
+          fi
           if [ "${EVENT}" != "schedule" ]; then
             echo "skip=false" >> "${GITHUB_OUTPUT}"
-            echo "minutes=${REQUESTED}" >> "${GITHUB_OUTPUT}"
+            echo "scale=100" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          targets="$(grep -c '^\[\[bin\]\]' fuzz/Cargo.toml)"
           now="$(date -u +%s)"
           end="$(date -u -d "today ${WINDOW_END_UTC}" +%s)"
           available=$(((end - now) / 60 - OVERHEAD_MIN))
-          fit=0
-          if [ "${available}" -gt 0 ]; then
-            fit=$((available / targets))
+          scale=100
+          if [ "${available}" -lt "${planned}" ]; then
+            scale=0
+            if [ "${available}" -gt 0 ]; then
+              scale=$((available * 100 / planned))
+            fi
           fi
-          minutes="${REQUESTED}"
-          if [ "${fit}" -lt "${minutes}" ]; then
-            minutes="${fit}"
-          fi
-          if [ "${minutes}" -lt "${MIN_PER_TARGET}" ]; then
-            msg="Started at $(date -u +%H:%M) UTC: only ${fit} min per target fit before ${WINDOW_END_UTC} UTC (minimum ${MIN_PER_TARGET}); skipping so the run does not overlap the fleet's CI window."
+          if [ "${scale}" -lt "${MIN_SCALE}" ]; then
+            msg="Started at $(date -u +%H:%M) UTC: only ${scale}% of the ${planned} min plan fits before ${WINDOW_END_UTC} UTC (minimum ${MIN_SCALE}%); skipping so the run does not overlap the fleet's CI window."
             echo "::notice::${msg}"
             echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          if [ "${minutes}" -lt "${REQUESTED}" ]; then
-            echo "::notice::started late ($(date -u +%H:%M) UTC): ${minutes} min per target instead of ${REQUESTED}, to finish by ${WINDOW_END_UTC} UTC"
+          if [ "${scale}" -lt 100 ]; then
+            echo "::notice::started late ($(date -u +%H:%M) UTC): running ${scale}% of the ${planned} min plan to finish by ${WINDOW_END_UTC} UTC"
           fi
           echo "skip=false" >> "${GITHUB_OUTPUT}"
-          echo "minutes=${minutes}" >> "${GITHUB_OUTPUT}"
+          echo "scale=${scale}" >> "${GITHUB_OUTPUT}"
 
       # The corpus lives in a temp directory: it is a checkout of the private
       # corpus repository, recreated by the pull step every run. Written to
@@ -198,28 +208,29 @@ jobs:
       # tool, ...). Those are recorded per target without aborting the loop
       # and fail the job in the final step.
       #
-      # TIME BUDGET. Every target gets MINUTES, one after the other, all inside
-      # `timeout-minutes: 300`. A job killed by that timeout never reaches the
-      # steps that write findings or push the corpus, so the budget is checked
-      # BEFORE fuzzing starts and the job fails fast if it cannot fit:
-      # MINUTES * targets + 45 must be <= 290. The 290 is the 300 minute
+      # TIME BUDGET. Every target gets its planned minutes (fuzz/nightly-plan.txt,
+      # or the uniform override), scaled by the window step, one after the
+      # other, all inside `timeout-minutes: 300`. A job killed by that timeout
+      # never reaches the steps that write findings or push the corpus, so the
+      # budget is checked BEFORE fuzzing starts and the job fails fast if it
+      # cannot fit: total minutes + 45 must be <= 290. The 290 is the 300 minute
       # timeout less a 10 minute margin for the reporting steps; the 45 is the
       # allowance for the work around the fuzzing that also runs inside the
       # timeout: the pull (a small clone), the cold fuzz build, and the push
       # step (`fuzz-corpus push` minimises every corpus, then commits and
-      # pushes). The minimisation is the same work the loop used to do itself,
-      # so the allowance is unchanged. Findings are additionally written after
-      # each target, so even a run that is cut short leaves partial results.
+      # pushes). Findings are additionally written after each target, so even a
+      # run that is cut short leaves partial results.
       - name: Fuzz all targets
         if: steps.window.outputs.skip != 'true'
         env:
-          MINUTES: ${{ steps.window.outputs.minutes }}
+          OVERRIDE: ${{ inputs.minutes_per_target }}
+          SCALE: ${{ steps.window.outputs.scale }}
           JOBS: ${{ inputs.jobs || '8' }}
           FREMINAL_FUZZ_ARTIFACTS_DIR: ${{ runner.temp }}/fuzz-artifacts
         run: |
           set -euo pipefail
 
-          for var in MINUTES JOBS; do
+          for var in SCALE JOBS; do
             case "${!var}" in
               '' | *[!0-9]* | 0*)
                 echo "::error::${var} must be a positive integer without leading zeros (got '${!var}')"
@@ -249,12 +260,46 @@ jobs:
               exit 1
             fi
 
+            # Minutes per target: the uniform override, or the plan file
+            # (unknown names are an error: a stale plan must be noticed;
+            # targets missing from it get 10 min), scaled by the window.
+            declare -A plan=()
+            if [ -z "${OVERRIDE}" ]; then
+              while read -r name mins; do
+                case " ${targets[*]} " in
+                  *" ${name} "*) ;;
+                  *)
+                    echo "::error::fuzz/nightly-plan.txt names unknown target ${name}"
+                    exit 1
+                    ;;
+                esac
+                plan["${name}"]="${mins}"
+              done < <(awk "!/^#/ && NF { print \$1, \$2 }" fuzz/nightly-plan.txt)
+            fi
+            declare -A minutes=()
+            total=0
+            for t in "${targets[@]}"; do
+              if [ -n "${OVERRIDE}" ]; then
+                m="${OVERRIDE}"
+              elif [ -n "${plan[${t}]:-}" ]; then
+                m="${plan[${t}]}"
+              else
+                echo "::warning::${t} is not in fuzz/nightly-plan.txt; giving it 10 min"
+                m=10
+              fi
+              m=$((m * SCALE / 100))
+              if [ "${m}" -lt 1 ]; then
+                m=1
+              fi
+              minutes["${t}"]="${m}"
+              total=$((total + m))
+            done
+
             limit=290
             overhead=45
-            needed=$((MINUTES * ${#targets[@]} + overhead))
+            needed=$((total + overhead))
             if [ "${needed}" -gt "${limit}" ]; then
-              max=$(((limit - overhead) / ${#targets[@]}))
-              echo "::error::${MINUTES} min x ${#targets[@]} targets + ${overhead} min overhead = ${needed} min exceeds the ${limit} min budget; at most ${max} min per target fit with ${#targets[@]} targets"
+              echo "::error::${total} min of fuzzing + ${overhead} min overhead = ${needed} min exceeds the ${limit} min budget; lower the plan or the override"
               exit 1
             fi
 
@@ -266,9 +311,9 @@ jobs:
             } > "${RUNNER_TEMP}/findings.md"
 
             for t in "${targets[@]}"; do
-              echo "::group::fuzz ${t}"
+              echo "::group::fuzz ${t} (${minutes[${t}]} min)"
               if ! cargo xtask fuzz "${t}" \
-                --time "$((MINUTES * 60))" \
+                --time "$((minutes[${t}] * 60))" \
                 --on-crash keep-going \
                 --jobs "${JOBS}" \
                 --sandbox none; then
