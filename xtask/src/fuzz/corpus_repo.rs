@@ -901,10 +901,26 @@ fn push_with_retry(git: &Git, root: &Path) -> Result<u32> {
 ///
 /// This is the git-level half of `push` (minimisation happens before it), so
 /// it can be exercised without a fuzz binary.
+///
+/// Local commits not yet on the remote (a pull's snapshot, an earlier push
+/// that failed) are squashed into the new commit first: a snapshot holds the
+/// corpus *before* minimisation, and publishing it would keep every redundant
+/// file in the repository's history for good. Only the minimised tree is
+/// published, as a single commit.
 fn commit_and_push(git: &Git, root: &Path, message: &CommitMessage) -> Result<PushOutcome> {
+    let onto = format!("origin/{BRANCH}");
+    let ahead = git.run_ok(
+        GitScope::Local,
+        Some(root),
+        &["rev-list", "--count", &format!("{onto}..HEAD")],
+    )?;
+    if ahead != "0" {
+        // Keeps the working tree and index; only moves the branch pointer, so
+        // the next commit records the current (minimised) tree on top of the
+        // remote.
+        git.run_ok(GitScope::Local, Some(root), &["reset", "--soft", &onto])?;
+    }
     stage_and_commit(git, root, message)?;
-    // Commits made earlier (a pull's snapshot, a push that failed to reach the
-    // remote) also need publishing, so ask git rather than trusting the outcome.
     let ahead = git.run_ok(
         GitScope::Local,
         Some(root),
@@ -1657,6 +1673,50 @@ mod tests {
             assert_eq!(decoy_head(), before, "the decoy repository was written to");
             assert!(root.join(".git").is_dir());
             assert_eq!(log_subjects(&clean, &root).len(), 2);
+        }
+
+        /// Regression: a pull's snapshot commit holds the corpus before
+        /// minimisation. Publishing it as-is kept every redundant file in the
+        /// corpus repository's history. Only the minimised tree may reach the
+        /// remote, as one commit.
+        #[test]
+        fn push_publishes_one_commit_without_the_pre_minimisation_snapshot() {
+            let base = tempfile::tempdir().unwrap();
+            let git = hermetic();
+            let url = seeded_remote(&git, base.path(), "remote");
+            let root = base.path().join("corpus");
+            pull_into(&git, &root, &url).unwrap();
+
+            write_files(&root, &[("t1/kept", "k"), ("t1/redundant", "r")]);
+            // A pull with local files commits a snapshot of them.
+            pull_into(&git, &root, &url).unwrap();
+            // Minimisation removes the redundant input.
+            fs::remove_file(root.join("t1").join("redundant")).unwrap();
+            assert_eq!(publish(&git, &root), PushOutcome::Published { attempts: 1 });
+
+            let check = clone_of(&git, base.path(), &url, "check");
+            assert_eq!(
+                git.run_ok(
+                    GitScope::Local,
+                    Some(&check),
+                    &["rev-list", "--count", "HEAD"]
+                )
+                .unwrap(),
+                "2",
+                "seed commit plus exactly one published commit"
+            );
+            let every_path = git
+                .run_ok(
+                    GitScope::Local,
+                    Some(&check),
+                    &["log", "--all", "--name-only", "--format="],
+                )
+                .unwrap();
+            assert!(every_path.contains("t1/kept"));
+            assert!(
+                !every_path.contains("t1/redundant"),
+                "a pre-minimisation file reached the remote history"
+            );
         }
 
         #[test]
