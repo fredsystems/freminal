@@ -8181,7 +8181,19 @@ Group F — Hygiene:
 
 ### 148 Status notes
 
-(none yet)
+- **148.1 (done):** REP clamps its count to 65535 and writes in 256-char chunks
+  (`terminal_handler/edit_ops.rs`). Clamp citation: xterm-412 caps every CSI numeric
+  parameter at `MAX_I_PARAM` = 65535 (`ptyx.h:406`, applied in `charproc.c` `CASE_ESC_DIGIT`)
+  and `CASE_REP` prints the character through `dotext`, so xterm's REP maximum is 65535 and
+  autowrap/scroll apply as for text. This deliberately clamps to xterm's limit rather than to
+  the visible cell count: a visible-cell clamp would change the cursor column and scrollback
+  for counts past one screen. Chunked `insert_text` is equivalent to one call (cursor,
+  including pending wrap, is the only carried state); pinned by
+  `tests/rep_repeat_count.rs` (autowrap on/off, DECSLRM, DECDWL, wide glyph, cap,
+  `usize::MAX`, full parser). Reproducer `fuzz/regressions/terminal_state/rep-huge-count`
+  fails on the old code (36 GB malloc) and replays clean. Benchmarks vs `main`:
+  `bench_parse_plain_text/parser_push/4096` −3.5%, `buffer_insert_chunks/insert_chunks_1000/500`
+  −2.0% (noise; REP is not on either path).
 
 ---
 
