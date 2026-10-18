@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138, 139, 140, 147  |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147, 148   |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -31,7 +31,7 @@ one plan document, grouped into milestones that ship as point releases:
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
-**138** (activated 2026-10-12).
+**138** (activated 2026-10-12), and **148** (created 2026-10-18).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -42,34 +42,35 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status   | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | -------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned  | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned  | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned  | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Planned  | None (148.20 waits for 147.4)      |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned  | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned  | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned  | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned  | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned  | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned  | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned  | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned  | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned  | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned  | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned  | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned  | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned  | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned  | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned  | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -227,8 +228,10 @@ Two seams were considered and **not** made separate tasks:
   behaviour-disjoint.
 - **Then 129, 130, 131 and 132.** 130 depends on 129. 130 and 131 run as parallel worktrees
   after a shared foundation (130.1–130.3); see "130 Execution model". 132 is independent.
-- **Then 138, 139, 140 and 147**, which close out v0.13.0. Task 147 fixes everything Tasks
-  126–131 left unscheduled; see "147 Execution model".
+- **Then 138, 139, 140, 147 and 148**, which close out v0.13.0. Task 147 fixes everything Tasks
+  126–131 left unscheduled; see "147 Execution model". Task 148 fixes the #553 fuzzing and
+  security-audit findings; see "148 Execution model". Its high-severity subtasks should land
+  first, ahead of the rest of Task 147 if the two are not run in parallel.
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
@@ -6699,6 +6702,7 @@ The new findings are disposed of in 138.C18–C22.
   - `handle_sgr_indexed`: +2.0%
 
   OSC 99 itself has no benchmark; no bench feeds it.
+
 - **`cargo deny` advisories.** RUSTSEC-2026-0206 (`rustybuzz` unmaintained) and
   RUSTSEC-2026-0192 (`ttf-parser` unmaintained) also fail on `main`. They predate Task 138
   and come from the font-shaping stack. Task 138 does not address them; they are for the
@@ -7690,6 +7694,487 @@ Stale stub text was corrected at the same time:
   unfocused cursor style on its first frame (127.C1).
 
 ### 147 Status notes
+
+(none yet)
+
+---
+
+## Task 148 — Security & Fuzz Findings Remediation
+
+### 148 Summary
+
+Fix every finding from the #553 fuzzing and trust-boundary audit: the thirteen published
+security advisories, the open fuzz-crash issues, and the audit's lower-severity items. Created
+and decomposed on 2026-10-18 on branch `issues-552-553-554/lints-fuzz-coderabbit`, from the
+published advisories (read with `gh api repos/fredsystems/freminal/security-advisories`) and
+issues #556–#564, #566 and #568.
+
+Scope is exactly those items. Out of scope:
+
+- **#567 and #530** (unmaintained dependencies): fixed after this task, as their own work.
+- **#565** (xtask is never linted for Windows): tooling, not a security or fuzz finding.
+- **#554** (CodeRabbit configuration) and **#552** (lint relocation): already handled on this
+  branch.
+
+Why this is v0.13.0 work: three of the advisories are high severity and are triggered by output
+from a benign command (`cat` of a file, remote `ssh` output), so they must ship before the
+v0.13.x protocol tasks add more parser surface. Task 126 is the precedent for a safety gate in
+this version.
+
+**Severity order is not subtask order.** The subtasks are grouped by the code they touch, so
+that parallel worktrees stay file-disjoint (see "148 Execution model"). Priority within a group
+is: high-severity advisories first, then medium, then low, then hygiene.
+
+### 148 Maintainer decisions (2026-10-18)
+
+- **All thirteen advisories are published**, before their fixes ship. The public `sixel_parse`
+  and `terminal_state` fuzz targets rediscover several of them within seconds, and public CI
+  uploads fuzz artifacts, so withholding the details would not have kept them confidential.
+  `.github/SECURITY.md` records the policy: public disclosure before a fix is allowed when the
+  maintainers judge it serves users better.
+- **Remediation is tracked openly** in this task and in the published advisories. When a release
+  contains a fix, the matching advisory is updated with its patched version (see 148.27).
+- **Reproducers are committed only together with their fix.** `fuzz-replay` is a required CI
+  gate, so a reproducer without a fix turns main red. Every subtask that fixes a crash adds its
+  minimised reproducer to `fuzz/regressions/<target>/` in the same commit as the fix, plus a
+  unit test in the owning crate that fails on the old code. Reproducers live in the advisories
+  and issues, not in this document.
+
+### 148 Open decisions (not yet made; resolve at the start of the named subtask)
+
+Per `autonomy-boundaries`, these are stop conditions for their subtask, not inferences to make.
+The "leaning" column is the orchestrator's suggestion, not a decision.
+
+| Subtask | Question                                                                      | Leaning                                                      |
+| ------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 148.15  | Default for kitty file/shm transmission: off, ask (needs Task 133), or on     | Off by default; `ask` waits for Task 133                     |
+| 148.16  | Default for OSC 52 clipboard write: active pane only, ask, or off             | Active pane only, capped at 1 MiB                            |
+| 148.17  | Default for XTWINOPS window operations                                        | Off, as xterm's `allowWindowOps`; reports stay on            |
+| 148.21  | Recordings: redact keystrokes while echo is off, or document only             | 0600 mode now; redaction only if echo state is cheap to read |
+| 148.22  | Layouts that run `command` / `shell` / `env`: document as trusted, or confirm | Document as trusted input; confirm only if cheap             |
+
+### 148 Subtasks
+
+Every subtask leaves `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings` green. Every fix has a regression
+test that fails on the old code. Parser, buffer and handler subtasks name their benchmark
+(`freminal-bench-table`) and record before and after results in their status note
+(`performance-benchmarks`, 15% threshold). A subtask that adds or changes a `Config` field
+follows `freminal-config-options` in full: `ConfigPartial`, `apply_partial`, the Settings
+modal, `config_example.toml` and `nix/home-manager-module.nix`. Escape-sequence behaviour
+changes are documented in 148.26. No subtask may weaken a limit to make a test pass.
+
+Group A — Output-triggered crashes and unbounded allocation:
+
+#### 148.1 — REP allocates its repeat count with no cap
+
+- **Source:** advisory GHSA-2746-x3cj-58c7 (high).
+- **Defect:** `handle_repeat_character` (`terminal_handler/edit_ops.rs`) builds a `Vec` of the
+  CSI parameter's length before inserting, so one short sequence requests tens of gigabytes.
+- **Scope:** clamp the count to what can still be visible, and insert without materialising the
+  whole repeat. Check xterm's REP semantics in `ctlseqs.txt` and its source before choosing the
+  clamp, and record the citation; do not infer them.
+- **Deliverable:** a huge REP count completes in bounded time and memory; normal REP output is
+  unchanged. Test at the handler and through the full parser.
+- **Benchmark:** `bench_parse_plain_text`, `buffer_insert_chunks`.
+- **Closes:** GHSA-2746-x3cj-58c7, when the fix is released.
+
+#### 148.2 — Sixel raster attributes allocate unbounded images; `ensure_size` panics
+
+- **Source:** advisory GHSA-w475-m9wf-775r (medium), including its 2026-10-18 addendum.
+- **Defect:** `parse_sixel` (`freminal-common/src/buffer_states/sixel.rs`) feeds declared and
+  grown dimensions to `SixelDecoder::ensure_size` with no bound, so a 33-byte DCS requests
+  multiple gigabytes. `ensure_size` also panics on a slice index and overflows capacity when
+  growing.
+- **Scope:**
+  - cap declared and grown dimensions before any allocation, against the image-store pixel
+    quota (or one named constant if the decoder has no access to it);
+  - validate dimensions and the old buffer size before copying rows, with checked arithmetic;
+  - a capped image is drawn at the cap or rejected; pick one and record why.
+- **Deliverable:** the `sixel_parse` regressions replay clean; a unit test covers each of the
+  three failure shapes (oversize declaration, oversize growth, the slice-index panic).
+- **Benchmark:** the sixel decode benchmark if one exists; otherwise add one first.
+- **Closes:** GHSA-w475-m9wf-775r, when the fix is released.
+
+#### 148.3 — Cursor can end up past the right margin; CBT panics
+
+- **Source:** advisory GHSA-8f32-mj37-fw6v (high); the column half of #568 (the `:568`
+  invariant, 70 of 793 findings).
+- **Defect:** some escape-sequence paths leave `cursor.pos.x` greater than the width. `CSI Z`
+  then slices `tab_stops[..col]` out of range in `tab_backward`
+  (`freminal-buffer/src/buffer/tabs.rs`), which panics in release builds and kills the process.
+- **Scope:**
+  - find every path that produces the out-of-range column (the fuzz findings span sizes from
+    2x1 to 80x24; minimise first, and expect more than one path);
+  - fix the producers, not only the consumer;
+  - also make `tab_backward` and `tab_forward` tolerate a stale column (defence in depth),
+    since a resize can strand it too;
+  - the `lifecycle.rs` invariant stays as the tripwire.
+- **Deliverable:** the minimised reproducers replay clean; a unit test per producer found.
+- **Benchmark:** `bench_cursor_ops`, `bench_move_cursor_relative`.
+- **Closes:** GHSA-8f32-mj37-fw6v, when the fix is released.
+
+#### 148.4 — BS in a 1-column terminal underflows
+
+- **Source:** issue #557.
+- **Defect:** `effective_x - 1` in `freminal-buffer/src/buffer/lines.rs` underflows when the
+  width is 1 (debug panic; wraps to `usize::MAX` in release). A one-column pane is reachable
+  from the GUI.
+- **Scope:** saturate or return early at column 0, matching the margin-aware BS semantics;
+  audit the neighbouring `- 1` sites in the same file for the same one-column assumption.
+- **Deliverable:** a one-column regression test for BS; reproducer added to
+  `fuzz/regressions/terminal_state/`.
+- **Closes:** #557.
+
+#### 148.5 — A glyph wider than the line makes wrap loop forever
+
+- **Source:** issue #558 (hypothesis in the issue is unconfirmed).
+- **Defect:** `Buffer::push_row`, via `advance_row_for_wrap` and `insert_text`, grows without
+  bound in a one-column terminal until it requests a multi-gigabyte `Vec<Row>`.
+- **Scope:** confirm the cause first (the issue's hypothesis is a double-width glyph that can
+  never fit); define what happens to a glyph wider than the line (replace or drop), checking
+  xterm and kitty rather than guessing; and guarantee wrap always makes progress.
+- **Deliverable:** the reproducers replay clean; a unit test for a wide glyph in a one-column
+  buffer; a note in the status entry on the chosen behaviour and its precedent.
+- **Benchmark:** `softwrap_heavy`, `buffer_insert_large_line`.
+- **Closes:** #558.
+
+#### 148.6 — Incremental flatten diverges from the full-merge oracle
+
+- **Source:** issue #559 (a `#[cfg(debug_assertions)]` oracle in `flatten.rs`).
+- **Defect:** the incremental fast path (#405 Part C) produces a different hyperlink tag range
+  than the full merge, so release builds silently render the incremental, wrong, result.
+- **Scope:**
+  - minimise the 1128-byte reproducer;
+  - decide which result is correct and fix the other path;
+  - keep the oracle, and add a property-style test that drives the same sequence and compares
+    both paths.
+- **Deliverable:** reproducer replays clean; a unit test for the minimised case.
+- **Benchmark:** `bench_build_snapshot`, `bench_visible_flatten`,
+  `bench_flatten_url_heavy`. The fast path exists for speed, so any fix must keep the
+  `build_snapshot_80x24_partial_dirty` result.
+- **Closes:** #559.
+
+#### 148.7 — Buffer invariant violations (alternate rows, cursor row, image accounting)
+
+- **Source:** issue #568 (the three remaining rows; the `:568` column row is 148.3).
+- **Defect:** four `debug_assert_invariants` checks in `freminal-buffer/src/buffer/lifecycle.rs`
+  fire under fuzzing: the alternate buffer not having exactly `height` rows (156 findings),
+  `cursor.y` equal to the row count, `image_cell_count` disagreeing with the real count, and
+  the parked alternate store not having `height` rows. Release builds do not panic; they carry
+  a state the buffer's own rules forbid, which is a basis for later index panics.
+- **Scope:** minimise each reproducer, find the producer, fix it. The four may share causes;
+  record which do. A resize or an alternate-screen transition is the likely common ground.
+- **Deliverable:** all four reproducers replay clean; a unit test per distinct root cause.
+- **Benchmark:** `buffer_resize`, `bench_alternate_screen_switch`,
+  `bench_alt_screen_transition_e2e`.
+- **Closes:** #568, when 148.3 and this subtask are both done.
+
+#### 148.8 — `.frec` parser requests multi-terabyte allocations
+
+- **Source:** issue #556.
+- **Defect:** `parse_recording_from_bytes` (`freminal-terminal-emulator/src/recording.rs`) takes
+  counts and lengths from the file and uses them for `Vec::with_capacity` and as unchecked
+  position arithmetic. Fuzzing reaches multi-terabyte requests, `capacity overflow` panics and
+  OOMs. Recordings are only parsed by tests and tooling today, so this is robustness, not a
+  remote vector.
+- **Scope:** bound every count and length against the bytes actually remaining; use checked
+  arithmetic for positions; a malformed file returns the existing typed error.
+- **Deliverable:** the `frec_parse` regressions replay clean; a test per bound.
+- **Closes:** #556.
+
+Group B — PTY output reaches GUI-side state:
+
+#### 148.9 — OSC 1338 `HISTFILE` makes freminal read any file
+
+- **Source:** advisory GHSA-4whv-2cx6-772h (high).
+- **Defect:** `HISTFILE=<path>` from terminal output is stored unvalidated and handed to a
+  loader that does `std::fs::read` with no size cap and no regular-file check
+  (`freminal/src/gui/shell_history.rs`). The basename allow-list only runs for shells other
+  than bash, zsh and fish.
+- **Scope:**
+  - open the file without following symlinks, require a regular file, and cap the read;
+  - always apply the basename allow-list, whatever the shell;
+  - check the loader cannot hang on a FIFO (open non-blocking, or check the type first);
+  - the cap is a named constant with a test.
+- **Deliverable:** a device file, a FIFO, an oversized file and a non-history basename each
+  produce no allocation and no history entries; a normal history file still loads.
+- **Closes:** GHSA-4whv-2cx6-772h, when the fix is released.
+
+#### 148.10 — The title stack is unbounded
+
+- **Source:** advisory GHSA-jh4m-7w5g-j4qg (medium).
+- **Defect:** `Vec<String>` in `freminal/src/gui/panes/mod.rs`, pushed from
+  `freminal/src/gui/rendering.rs` for both inactive and active panes. Each push clones a title
+  that can be up to 1 MiB.
+- **Scope:** cap the depth (xterm uses 10; verify it); truncate titles at parse time to a
+  sane length; the oldest entry is dropped on overflow, as xterm does.
+- **Deliverable:** a test that thousands of pushes stay within the cap, for an active and a
+  background pane.
+- **Closes:** GHSA-jh4m-7w5g-j4qg, when the fix is released.
+
+#### 148.11 — Terminal replies queue without bound
+
+- **Source:** advisory GHSA-6cxq-f7hx-92v2 (low).
+- **Defect:** terminal-generated replies share an unbounded channel with user input; the writer
+  blocks when the child does not read its tty, so output made of queries amplifies memory 8–12x
+  and freezes keystrokes.
+- **Scope:** a separate bounded channel (drop or coalesce) for terminal-generated replies; cap
+  the number of names answered per XTGETTCAP.
+- **Constraint:** this touches the PTY-thread / writer boundary. Follow `freminal-architecture`;
+  no locks, and the GUI thread stays a pure reader. Stop and report if the fix needs a design
+  change to that boundary.
+- **Deliverable:** a test with a writer that never drains: memory stays bounded, input still
+  flows.
+- **Benchmark:** `bench_handle_incoming_data`.
+- **Closes:** GHSA-6cxq-f7hx-92v2, when the fix is released.
+
+#### 148.12 — OSC 7 working directory is unauthenticated
+
+- **Source:** advisory GHSA-8836-pm5j-jcp4 (low).
+- **Defect:** the host is ignored, `%00` is decoded, and the path is used as-is for new tabs
+  and panes and written to the auto-saved session.
+- **Scope:** check the host against the local hostname (or accept empty and `localhost`);
+  require an existing directory with no NUL or control characters; otherwise fall back to the
+  process working directory (`/proc/<pid>/cwd` on Linux).
+- **Deliverable:** table tests for host, NUL, non-directory and valid cases; a restored
+  session never contains a rejected path.
+- **Closes:** GHSA-8836-pm5j-jcp4, when the fix is released.
+
+Group C — Kitty graphics file, shm and path handling:
+
+All three live in `terminal_handler/graphics_kitty.rs`, so they run in order.
+
+#### 148.13 — Kitty `t=s` shared memory: uncapped copy, SIGBUS, arbitrary unlink
+
+- **Source:** advisory GHSA-j533-jhh2-ff2x (low).
+- **Defect:** `read_kitty_shm_range` and `mmap_copy_range` map the whole object and copy
+  `read_len` with no cap (the file path has a 400 MiB cap); truncation between `fstat` and the
+  copy is a SIGBUS; `shm_unlink` runs on any readable object. The Windows path accepts a size
+  up to 4 GiB.
+- **Scope:** cap `read_len` at `MAX_KITTY_DATA_BYTES` on both platforms; read the range with
+  `pread` or map only the range, so a truncation is an error, not a signal; restrict the
+  unlink to the names the kitty convention produces, and record what that convention is.
+- **Deliverable:** tests for an oversize request, a truncation and a foreign name.
+- **Closes:** GHSA-j533-jhh2-ff2x, when the fix is released.
+
+#### 148.14 — Kitty `t=f` on Windows accepts UNC paths
+
+- **Source:** advisory GHSA-3g79-vfp3-q57g (medium). Not yet reproduced on Windows.
+- **Defect:** `Path::is_absolute` is true for a UNC path, and `fs::canonicalize` then contacts
+  the host, leaking an NTLMv2 challenge-response. The refused-prefix and identity checks cover
+  Unix only.
+- **Scope:** on Windows, reject `\\`, `\\?\UNC` and `\\.\` prefixes and require a local
+  drive-letter path, before any filesystem call.
+- **Deliverable:** a pure path-classification function with table tests that run on every
+  platform (so the Linux CI job covers it); `cargo xtask check-windows` is green.
+- **Closes:** GHSA-3g79-vfp3-q57g, when the fix is released.
+
+#### 148.15 — Kitty file/shm transmission has no consent gate and leaks through replies
+
+- **Source:** advisory GHSA-8prj-mhmf-xpjg (medium).
+- **Defect:** `t=f`, `t=t` and `t=s` read local files with no `[security]` switch. A load
+  failure replies `EBADF`, but a successful read replies `OK`, a size mismatch or a PNG decode
+  failure, so a remote party learns whether a path exists, its size and whether it is a PNG.
+- **Scope:**
+  - a `[security]` option for file and shm transmission, per the 148 open decision. Task 133
+    (Shared Consent Prompt) is not built, so `ask` is not available in this task;
+  - every post-read failure collapses into the same reply as a failed open;
+  - the gate applies before any filesystem access, not after.
+- **Deliverable:** with the option off, no read and a uniform reply; with it on, existing
+  behaviour minus the distinguishable replies; the option follows the full config checklist.
+- **Closes:** GHSA-8prj-mhmf-xpjg, when the fix is released.
+
+Group D — Policy for features terminal output can drive:
+
+These add `[security]` options, so they serialise on `freminal-common/src/config.rs`,
+`config_example.toml`, the Settings modal and the Nix module.
+
+#### 148.16 — OSC 52 clipboard write is ungated
+
+- **Source:** advisory GHSA-v2hw-gcg8-2rfr (low).
+- **Defect:** any pane, including a background tab, writes the clipboard from terminal output,
+  and the OSC 52 payload cap is 64 MiB. `SecurityConfig` only has `allow_clipboard_read`.
+- **Scope:** an `allow_clipboard_write` policy (per the open decision) and a cap near 1 MiB
+  for OSC 52; a write from a background pane is dropped under the default. The paste-guard
+  toast behaviour is unchanged.
+- **Deliverable:** tests for each policy value, an inactive pane, and an oversize payload.
+- **Closes:** GHSA-v2hw-gcg8-2rfr, when the fix is released.
+
+#### 148.17 — XTWINOPS window operations are ungated; resize multiplies unchecked
+
+- **Source:** advisory GHSA-67hw-cw29-r66f (low).
+- **Defect:** minimise, move, resize, maximise and fullscreen run from terminal output
+  (`freminal/src/gui/rendering.rs`); the resize path computes `input_width * font_width`
+  unchecked (debug panic, release wrap); resize targets are not clamped.
+- **Scope:**
+  - a `[security] window_ops` policy (per the open decision); report-only operations stay
+    available;
+  - clamp resize targets to the monitor size;
+  - checked or saturating arithmetic and `conv2` conversions
+    (`freminal-numeric-conversions`).
+- **Deliverable:** tests for each policy value and for overflowing inputs.
+- **Closes:** GHSA-67hw-cw29-r66f, when the fix is released.
+
+#### 148.18 — OSC 8 hyperlinks are opened with no scheme allow-list
+
+- **Source:** advisory GHSA-jhw2-xjg6-mwhq (medium).
+- **Defect:** `open::that` runs on any OSC 8 URI after a modifier-click or from the context
+  menu (`freminal/src/gui/terminal/widget.rs`). Auto-detected URLs are restricted to
+  http(s), file, ftp and mailto; OSC 8 is not.
+- **Scope:** an allow-list (http, https, mailto, and local `file` as decided), applied at the
+  click site so both entry points share it; reject non-URL strings and UNC paths; anything
+  else is shown but not opened without confirmation. Prefer one shared predicate with the
+  auto-detection rule.
+- **Deliverable:** table tests for allowed, rejected and UNC inputs, with the predicate in a
+  location both entry points call.
+- **Closes:** GHSA-jhw2-xjg6-mwhq, when the fix is released.
+
+Group E — Audit findings without an advisory:
+
+#### 148.19 — OSC 9 / OSC 777 notifications are not markup-escaped
+
+- **Source:** issue #560 (low; notifications are off by default).
+- **Scope:** `build_system_notification` (`freminal/src/gui/notifications.rs`) reuses
+  `escape_body_markup` (OSC 99 already does); the per-notification thread gets a bounded queue
+  or rate limit.
+- **Deliverable:** a test that markup in summary and body arrives escaped; a test that a burst
+  does not spawn unbounded threads.
+- **Closes:** #560.
+
+#### 148.20 — Bracketed-paste end marker is not stripped
+
+- **Source:** issue #561.
+- **Defect:** `freminal/src/gui/actions.rs` wraps the payload verbatim, so clipboard text
+  containing the end marker ends the paste early and the shell runs the remainder. The guard
+  only flags this by default; "Paste Anyway" or a disabled `control_chars` check bypasses it.
+- **Scope:** when bracketed paste is on, strip both markers from the payload, and C0 controls
+  other than TAB, CR and LF if that matches the other terminals (check, do not infer). The
+  S8C1T framing from 147.4 still wraps the stripped text.
+- **Deliverable:** a test that a payload containing the marker produces exactly one start and
+  one end marker.
+- **Depends on:** 147.4 if it has not yet landed, since both edit the wrapping code.
+- **Closes:** #561.
+
+#### 148.21 — Recordings are world-readable and contain keystrokes
+
+- **Source:** issue #563 (low; local and opt-in).
+- **Scope:** create the file with mode 0600 on Unix (Windows ACL behaviour is documented, not
+  changed); per the open decision, redact key events while echo is off, or document that
+  recordings contain typed passwords. `FREC_FORMAT.md` and the `--recording-path` help text
+  carry the warning either way.
+- **Deliverable:** a Unix test on the created file's mode.
+- **Closes:** #563.
+
+#### 148.22 — Layouts with `command` / `shell` / `env` run without a trust prompt
+
+- **Source:** issue #562 (informational, probably by design).
+- **Scope:** per the open decision. If "trusted input": document it in `LAYOUT_FORMAT.md` and
+  the user docs, with the reach (a hostile file in the layout library or a `--layout`
+  argument; terminal output cannot write these fields). If "confirm": this needs Task 133 and
+  is deferred to it, with the issue left open.
+- **Deliverable:** the decision recorded here, plus its docs.
+- **Closes:** #562, if documented; otherwise it stays open and routes to Task 133.
+
+Group F — Hygiene:
+
+#### 148.23 — Dead `CARGO_BUILD_FEATURES` in the dev shell
+
+- **Source:** issue #564.
+- **Scope:** delete the `CARGO_BUILD_FEATURES = "playback"` setting and its comment from
+  `mkFreminalShell` in `flake.nix`. No crate declares a `playback` feature (removed with
+  Task 59). `nixfmt`, `statix` and `deadnix` green.
+- **Stop condition:** per `flake-dev-shell-discipline`, a `flake.nix` edit means the
+  environment changes; stop and tell the maintainer to re-enter `nix develop`.
+- **Closes:** #564.
+
+#### 148.24 — Manifest hygiene
+
+- **Source:** issue #566.
+- **Scope:**
+  - drop the normal `vergen` dependency from `freminal-terminal-emulator/Cargo.toml` (only
+    `build.rs` uses it) and the `cargo-machete` ignore in the root `Cargo.toml`, if nothing
+    else needs them;
+  - resolve the nightly `package.homepage is redundant with package.repository` warning for
+    every crate: point `homepage` at a real page or drop it.
+- **Deliverable:** `cargo machete` green with the ignore removed;
+  `nix develop .#fuzz --command bash -c 'cd fuzz && cargo check'` prints no manifest warnings.
+- **Closes:** #566.
+
+#### 148.25 — Fuzz targets and corpus follow-up
+
+- **Scope:**
+  - confirm each `fuzz/regressions/<target>/` reproducer added by 148.1–148.8 replays under
+    `nix develop .#fuzz --command cargo xtask fuzz-replay`;
+  - rerun each affected target for at least five minutes against the fixed tree; any new
+    finding gets an issue and a numbered subtask here, not a silent fix;
+  - update the `fuzz-smoke` comment in `.github/workflows/ci.yml` (it lists open crashes);
+  - publish the corpus (`fuzz-corpus push`) only if the maintainer asks; that is a
+    state-changing remote operation;
+  - add libFuzzer dictionaries (`fuzz/dict/ansi.dict`, passed with `-dict=`) for
+    `ansi_parser` and `terminal_state`: C0/C1 controls, CSI/OSC/DCS/APC/ST introducers,
+    common parameters and private modes. xtask passes the dictionary when one exists for the
+    target. Measure coverage after 20 minutes with and without, and record both;
+  - expose a pure string-based config loader in `freminal-common` (for example
+    `Config::from_toml_str(&str) -> Result<Config, ConfigError>`, running `ConfigPartial`,
+    `apply_partial` and validation with no filesystem or environment access), with tests,
+    and point `config_toml` at it so the fuzz target covers the real loading path;
+  - retune `fuzz/nightly-plan.txt` from a week of nightly results: raise `sixel_parse` and
+    `frec_parse` once 148.2 and 148.8 land, and shorten anything that has plateaued.
+- **Deliverable:** the replay and the reruns are green; dictionary and retune measurements are
+  recorded in the status notes.
+
+#### 148.26 — Documentation
+
+- **Scope:**
+  - `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` for every behaviour change
+    (REP clamp, sixel caps, BS, wide-glyph wrap, XTWINOPS and OSC 52 policy, OSC 8 scheme
+    rule, OSC 1338, OSC 7, title stack depth, kitty file/shm gating), and both "Last updated"
+    headers;
+  - `config_example.toml` and `nix/home-manager-module.nix` for each new `[security]` option;
+  - `.github/SECURITY.md` only if a policy statement changes;
+  - `prettier` and `markdownlint` on the named files only.
+- **Depends on:** the behaviour subtasks above.
+
+#### 148.27 — Advisory follow-up (maintainer action)
+
+- **Scope:** when a release contains the fixes, update each published advisory's patched
+  version and request CVEs where warranted. These edit published external state, so they are
+  the maintainer's, not an agent's: list each advisory with its fixing subtask and commit,
+  then stop.
+- **Deliverable:** a table in the status notes mapping each advisory to its fix.
+
+### 148 Execution model
+
+- **Group A** (148.1–148.8) touches the handler, the buffer, `freminal-common` and
+  `recording.rs`. 148.1, 148.2 and 148.8 are file-disjoint and independent. 148.3, 148.4,
+  148.5 and 148.7 all edit `freminal-buffer` and run in order: 148.4, then 148.3, then 148.5,
+  then 148.7 (the broadest). 148.6 is `flatten.rs` and independent.
+- **Group B** (148.9–148.12) lives in the GUI and `interface.rs`. 148.9, 148.10 and 148.12 are
+  independent; 148.11 is the PTY writer boundary and runs alone.
+- **Group C** (148.13 → 148.14 → 148.15) runs in order (one file).
+- **Group D** (148.16, 148.17, 148.18) serialises on `config.rs` for the two config options
+  (148.16, then 148.17); 148.18 adds no option and is independent.
+- **Group E** (148.19–148.22) is independent per subtask, except that 148.20 waits for 147.4.
+- **Group F** (148.23, 148.24) is independent of everything.
+- 148.25, 148.26 and 148.27 run last.
+- Groups A, B and C are file-disjoint with each other and can run in parallel worktrees per
+  `parallel-work-isolation`. High-severity subtasks (148.1, 148.2, 148.3, 148.9) go first.
+- Every subtask goes through the orchestrator's full-diff review. The task ends with an
+  adversarial review, as for 130 and 131, because every subtask changes a trust boundary.
+
+### 148 Verification
+
+- `cargo xtask test`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, `cargo machete`, `cargo bench --no-run --all`,
+  `cargo xtask check-windows` (148.14 and 148.17 compile differently on Windows),
+  `cargo xtask lint-markdown`.
+- `nix develop .#fuzz --command cargo xtask fuzz-replay` is green with every new reproducer.
+- Benchmarks named in 148.1–148.7 and 148.11 stay within the 15% threshold, or improve.
+- Not covered by tests, and checked by the maintainer: the Windows UNC behaviour of 148.14 and
+  the Windows size cap of 148.13, because neither runs in CI.
+
+### 148 Status notes
 
 (none yet)
 

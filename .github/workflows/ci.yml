@@ -250,8 +250,9 @@ jobs:
   # `ci-success.needs`, and `continue-on-error` keeps a red result from showing
   # as a failed check. Short fuzzing runs are nondeterministic (the same
   # commit can pass or fail), and known open crashes exist in some targets
-  # (tracked in issues #556, #557, #558 and #559, and in a private security
-  # advisory), so a blocking gate would be both flaky and permanently red.
+  # (tracked in issues #556, #557, #558 and #559, in security advisory
+  # GHSA-w475-m9wf-775r, and in Task 148 of Documents/PLAN_VERSION_130.md),
+  # so a blocking gate would be both flaky and permanently red.
   # Findings surface through the step summary and the uploaded artifacts,
   # never by blocking a PR. The deterministic gate is `fuzz-replay`.
   fuzz-smoke:
