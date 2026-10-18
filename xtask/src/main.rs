@@ -247,6 +247,35 @@ enum Command {
     /// the next run, which refuses to start while it exists.
     #[command(visible_alias = "fcm")]
     FuzzCmin(fuzz::FuzzCminArgs),
+
+    /// Pull or push the working fuzz corpus via its private git repository
+    ///
+    /// The corpus root (`--corpus-root`, default `fuzz/corpus`) is the working
+    /// tree of a separate git repository (`--repo-url`, default
+    /// `https://github.com/fredsystems/freminal-fuzz-corpus.git`, branch
+    /// `main`), laid out as `<target>/<file>`. libFuzzer names files by the
+    /// SHA-1 of their content, so corpora from different machines merge
+    /// without conflicts.
+    ///
+    /// `pull` clones the repository into a missing or empty root, fast-forwards
+    /// (or rebases) an existing checkout, and adopts a pre-existing local
+    /// corpus: its files stay and are committed by the next `push`. A root
+    /// that is a checkout of another repository, or a non-empty directory
+    /// holding anything but target directories, is refused untouched.
+    ///
+    /// `push` pulls first, minimises every target's corpus (honouring
+    /// `--sandbox`), commits the result as `corpus: <host> <UTC time>` and
+    /// pushes `main`, rebasing and retrying up to three times when the remote
+    /// moved. Nothing is committed when nothing changed. A missing
+    /// `user.email` falls back to a `freminal-fuzz` identity for that one
+    /// commit; git configuration is never written.
+    ///
+    /// Authentication: with `FREMINAL_FUZZ_CORPUS_TOKEN` set (CI), remote git
+    /// commands use an inline credential helper that reads the token from the
+    /// environment (it never reaches disk or a command line) and never prompt.
+    /// Without it, your normal git credentials are used.
+    #[command(visible_alias = "fcr")]
+    FuzzCorpus(fuzz::FuzzCorpusArgs),
 }
 
 /// Linux package formats that [`package_local`] can produce.
@@ -293,6 +322,7 @@ impl Command {
             Self::FuzzSmoke(args) => fuzz::fuzz_smoke(&args),
             Self::FuzzReplay(args) => fuzz::fuzz_replay(&args),
             Self::FuzzCmin(args) => fuzz::fuzz_cmin(&args),
+            Self::FuzzCorpus(args) => fuzz::fuzz_corpus(&args),
         }
     }
 }
@@ -1240,6 +1270,44 @@ mod tests {
         assert!(Args::try_parse_from(["cargo xtask", "fcm"]).is_err());
         assert!(Args::try_parse_from(["cargo xtask", "fcm", "t", "--all"]).is_err());
         assert!(Args::try_parse_from(["cargo xtask", "fuzz", "t", "--time", "0"]).is_err());
+    }
+
+    #[test]
+    fn fuzz_corpus_parses_actions_alias_and_options() {
+        use crate::fuzz::{CorpusAction, DEFAULT_REPO_URL};
+        let args = Args::try_parse_from(["cargo xtask", "fuzz-corpus", "pull"]).unwrap();
+        let Command::FuzzCorpus(run) = args.command else {
+            panic!("expected the fuzz-corpus subcommand");
+        };
+        assert_eq!(run.action, CorpusAction::Pull);
+        assert_eq!(run.repo_url, DEFAULT_REPO_URL);
+        assert_eq!(run.env.sandbox, Sandbox::Bwrap);
+
+        let args = Args::try_parse_from([
+            "cargo xtask",
+            "fcr",
+            "push",
+            "--repo-url",
+            "git@github.com:o/r.git",
+            "--corpus-root",
+            "/data/corpus",
+            "--sandbox",
+            "none",
+        ])
+        .unwrap();
+        let Command::FuzzCorpus(run) = args.command else {
+            panic!("expected the fuzz-corpus subcommand");
+        };
+        assert_eq!(run.action, CorpusAction::Push);
+        assert_eq!(run.repo_url, "git@github.com:o/r.git");
+        assert_eq!(
+            run.env.corpus_root,
+            std::path::PathBuf::from("/data/corpus")
+        );
+        assert_eq!(run.env.sandbox, Sandbox::None);
+
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus", "sync"]).is_err());
     }
 
     #[test]

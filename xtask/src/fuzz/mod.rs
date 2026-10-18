@@ -26,11 +26,14 @@
 //! * [`args`] -- libFuzzer arguments for fuzz, replay and merge runs;
 //! * [`exit`] -- running a fuzz process and classifying how it ended;
 //! * [`artifacts`] -- finding artifacts and run summaries;
-//! * [`cmin`] -- corpus minimisation planning and the directory swap.
+//! * [`cmin`] -- corpus minimisation planning and the directory swap;
+//! * [`corpus_repo`] -- persisting the working corpus in a separate git
+//!   repository (`fuzz-corpus pull|push`).
 
 mod args;
 mod artifacts;
 mod cmin;
+mod corpus_repo;
 mod exit;
 mod sandbox;
 
@@ -48,7 +51,8 @@ use color_eyre::{
 };
 use duct::cmd;
 
-pub use self::sandbox::Sandbox;
+#[cfg(test)]
+pub use self::corpus_repo::{CorpusAction, DEFAULT_REPO_URL};
 use self::{
     args::{cmin_args, collect_replay_inputs, fuzz_args, replay_args, FuzzArgsPlan},
     artifacts::{finding_artifacts, findings_summary, new_findings},
@@ -59,6 +63,7 @@ use self::{
     exit::{run_fuzz_binary, FindingsLocation},
     sandbox::ensure_inputs_visible,
 };
+pub use self::{corpus_repo::FuzzCorpusArgs, sandbox::Sandbox};
 
 /// What a fuzz run does when libFuzzer finds a crash, OOM or timeout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -768,12 +773,26 @@ pub fn fuzz_cmin(args: &FuzzCminArgs) -> Result<()> {
             vec![target]
         }
     };
-    require_tools(args.env.sandbox)?;
     let session = Session::resolve(&ctx, &args.env);
+    cmin_targets(&ctx, &session, targets)
+}
+
+/// `cargo xtask fuzz-corpus <pull|push>`
+pub fn fuzz_corpus(args: &FuzzCorpusArgs) -> Result<()> {
+    corpus_repo::run(args)
+}
+
+/// Minimise the working corpus of each of `targets` (already validated).
+///
+/// With several targets, one that has no corpus is skipped; with exactly one,
+/// a missing corpus is an error. Prints a summary table and fails if any
+/// target failed.
+fn cmin_targets(ctx: &FuzzContext, session: &Session, targets: Vec<String>) -> Result<()> {
+    require_tools(session.sandbox)?;
     let corpus_root = session.prepare_corpus_root()?;
     let single = targets.len() == 1;
     for target in &targets {
-        build_targets(&ctx, Some(target))?;
+        build_targets(ctx, Some(target))?;
     }
     let mut results: Vec<(String, Outcome)> = Vec::new();
     for target in targets {
@@ -784,7 +803,7 @@ pub fn fuzz_cmin(args: &FuzzCminArgs) -> Result<()> {
             tracing::info!("skipping `{target}`: no working corpus");
             continue;
         }
-        let outcome = match cmin_one(&ctx, &session, &target) {
+        let outcome = match cmin_one(ctx, session, &target) {
             Ok(()) => Outcome::Passed,
             Err(err) => {
                 tracing::error!("`{target}` failed: {err:#}");
