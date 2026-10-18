@@ -209,23 +209,28 @@ mod tests {
         );
     }
 
+    /// An absolute path on every platform (`/repo/x` is relative on Windows,
+    /// which has no root without a drive or UNC prefix).
+    fn absolute(relative: &str) -> PathBuf {
+        std::env::temp_dir().join(relative)
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn sandboxed_argv_bwrap_errors_off_linux() {
-        let err = sandboxed_argv(Sandbox::Bwrap, Path::new("/repo/x"), &[], &[]).unwrap_err();
+        let err = sandboxed_argv(Sandbox::Bwrap, &absolute("repo/x"), &[], &[]).unwrap_err();
         assert!(err.to_string().contains("Linux-only"));
     }
 
     #[test]
     fn sandboxed_argv_none_is_binary_plus_args() {
-        let cmdline = sandboxed_argv(
-            Sandbox::None,
-            Path::new("/repo/x"),
-            &os(&["-runs=1"]),
-            &[PathBuf::from("/w")],
-        )
-        .unwrap();
-        assert_eq!(cmdline, os(&["/repo/x", "-runs=1"]));
+        let binary = absolute("repo/x");
+        let cmdline =
+            sandboxed_argv(Sandbox::None, &binary, &os(&["-runs=1"]), &[absolute("w")]).unwrap();
+        assert_eq!(
+            cmdline,
+            vec![binary.into_os_string(), std::ffi::OsString::from("-runs=1")]
+        );
     }
 
     #[test]
