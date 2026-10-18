@@ -8194,6 +8194,19 @@ Group F — Hygiene:
   fails on the old code (36 GB malloc) and replays clean. Benchmarks vs `main`:
   `bench_parse_plain_text/parser_push/4096` −3.5%, `buffer_insert_chunks/insert_chunks_1000/500`
   −2.0% (noise; REP is not on either path).
+- **148.2 (done):** sixel decoder caps (`freminal-common/src/buffer_states/sixel.rs`):
+  `MAX_SIXEL_DIMENSION` = 10000 per axis (kitty `MAX_IMAGE_DIMENSION`, `kitty/graphics.c:28`)
+  and `MAX_SIXEL_PIXELS` = 4096x4096 (64 MiB RGBA, a named constant because `freminal-common`
+  cannot see the image-store quota). Behaviour follows xterm-412 `graphics_sixel.c`: a raster
+  declaration over the cap is a data error and ignored (~624-631); data beyond the cap is
+  clipped, not rejected (~153). `!` repeats visit only on-canvas columns (O(width)); all size
+  arithmetic is checked; the decoder keeps an allocation separate from the logical extent and
+  grows geometrically, which also removed a quadratic re-copy (a 3.3 KB input took 17.9 s,
+  now 92 ms). Output is byte-identical to `main` (4000-input comparison against a test-only
+  copy of the old decoder, plus the palette-0-redefinition Paint case). Reproducers
+  `oversize-raster-declaration`, `ensure-size-overflow-slice-panic`, `huge-repeat-growth`,
+  `quadratic-growth` in `fuzz/regressions/sixel_parse/`; the old code fails replay. New
+  benchmark `bench_parse_sixel/400x300` (added first): 262.9 µs -> 213.9 µs (−18.4%).
 
 ---
 

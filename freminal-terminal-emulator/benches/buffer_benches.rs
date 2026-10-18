@@ -15,11 +15,13 @@
 //!   `build_snapshot()`), issue #405 Part C item 4
 //! - Sustained output at the default 10,000-row scrollback capacity
 //!   (`handle_incoming_data()` with every line feed evicting a row), Task 125.12
+//! - Sixel decoding (`parse_sixel()`) of a 400x300 image, Task 148.2
 
 // Benchmark harness, not production code: unwrap/expect on setup is acceptable.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use freminal_common::buffer_states::sixel::parse_sixel;
 use freminal_terminal_emulator::{
     ansi::FreminalAnsiParser, interface::TerminalEmulator, state::internal::TerminalState,
 };
@@ -332,6 +334,70 @@ fn bench_parse_kitty_apc_chunks(c: &mut Criterion) {
             },
             BatchSize::SmallInput,
         );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_parse_sixel — Sixel decoder on a realistic 400x300 image
+// ---------------------------------------------------------------
+
+/// Inner DCS content (`P1;P2;P3 q <data>`) for a deterministic 400x300 sixel
+/// image: raster attributes, 16 colour registers, and 50 bands each drawn with
+/// four colour passes mixing literal sixel characters and `!` repeats.
+fn sixel_400x300_payload() -> Vec<u8> {
+    let width = 400usize;
+    let height = 300usize;
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"0;0;0q");
+    out.extend_from_slice(format!("\"1;1;{width};{height}").as_bytes());
+    for idx in 0..16u32 {
+        let r = (idx * 6) % 101;
+        let g = (idx * 11) % 101;
+        let b = (idx * 17) % 101;
+        out.extend_from_slice(format!("#{idx};2;{r};{g};{b}").as_bytes());
+    }
+    for band in 0..(height / 6) {
+        for pass in 0..4usize {
+            let colour = (band + pass * 3) % 16;
+            out.extend_from_slice(format!("#{colour}").as_bytes());
+            let mut x = 0usize;
+            let mut step = 0usize;
+            while x < width {
+                // Deterministic pattern: alternate literal columns and repeats.
+                let ch =
+                    u8::try_from(0x3F + ((band * 7 + pass * 13 + step * 5) % 64)).unwrap_or(b'~');
+                if step.is_multiple_of(3) {
+                    let run = (5 + (step * 11 + band) % 24).min(width - x);
+                    out.extend_from_slice(format!("!{run}").as_bytes());
+                    out.push(ch);
+                    x += run;
+                } else {
+                    out.push(ch);
+                    x += 1;
+                }
+                step += 1;
+            }
+            out.push(b'$');
+        }
+        out.push(b'-');
+    }
+    out
+}
+
+fn bench_parse_sixel(c: &mut Criterion) {
+    let payload = sixel_400x300_payload();
+
+    let mut group = c.benchmark_group("bench_parse_sixel");
+    group.throughput(Throughput::Bytes(
+        u64::try_from(payload.len()).unwrap_or(u64::MAX),
+    ));
+
+    group.bench_function("400x300", |b| {
+        b.iter(|| {
+            std::hint::black_box(parse_sixel(std::hint::black_box(&payload)));
+        });
     });
 
     group.finish();
@@ -1037,6 +1103,7 @@ criterion_group!(
         bench_parse_sgr_indexed,
         bench_parse_osc9,
         bench_parse_kitty_apc_chunks,
+        bench_parse_sixel,
         bench_parse_cup_writes,
         bench_parse_bursty,
         bench_handle_incoming_data,
