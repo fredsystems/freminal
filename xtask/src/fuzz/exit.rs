@@ -175,6 +175,9 @@ fn run_streaming(program: &OsString, rest: &[OsString]) -> Result<ProcessEnd> {
             "ASAN_OPTIONS",
             asan_options(std::env::var_os("ASAN_OPTIONS").as_deref()),
         )
+        // The fuzz binary may run unsandboxed (CI) with network access; the
+        // corpus token is for the git credential helper only.
+        .env_remove(super::corpus_repo::TOKEN_ENV)
         .stderr_to_stdout()
         .unchecked()
         .reader()

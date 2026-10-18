@@ -376,8 +376,11 @@ fn build_targets(ctx: &FuzzContext, target: Option<&str>) -> Result<()> {
         args.join(" "),
         fuzz_dir.display()
     );
+    // The corpus token is for the git credential helper only; build scripts
+    // of every fuzz-crate dependency must not see it.
     cmd("cargo", args)
         .dir(&fuzz_dir)
+        .env_remove(corpus_repo::TOKEN_ENV)
         .run()
         .wrap_err("`cargo fuzz build` failed")?;
     Ok(())

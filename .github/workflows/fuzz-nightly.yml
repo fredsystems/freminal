@@ -138,7 +138,9 @@ jobs:
             esac
             planned=$((OVERRIDE * targets))
           else
-            planned="$(awk '!/^#/ && NF { s += $2 } END { print s + 0 }' fuzz/nightly-plan.txt)"
+            # Targets missing from the plan get 10 min in the fuzz step;
+            # count them here too, or a late run could overrun the window.
+            planned="$(awk -v targets="${targets}" '!/^#/ && NF { s += $2; n++ } END { m = targets - n; if (m < 0) m = 0; print s + m * 10 }' fuzz/nightly-plan.txt)"
           fi
           if [ "${EVENT}" != "schedule" ]; then
             echo "skip=false" >> "${GITHUB_OUTPUT}"

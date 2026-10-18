@@ -49,7 +49,7 @@ pub const DEFAULT_REPO_URL: &str = "https://github.com/fredsystems/freminal-fuzz
 const BRANCH: &str = "main";
 
 /// Environment variable holding the access token used in CI.
-const TOKEN_ENV: &str = "FREMINAL_FUZZ_CORPUS_TOKEN";
+pub(super) const TOKEN_ENV: &str = "FREMINAL_FUZZ_CORPUS_TOKEN";
 
 /// Most pushes attempted before giving up on a rejected push.
 const MAX_PUSH_ATTEMPTS: u32 = 3;
