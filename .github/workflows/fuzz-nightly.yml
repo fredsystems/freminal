@@ -39,11 +39,30 @@
 #     directory is wiped (for example when the NixOS runner unit restarts) the
 #     next job pays one cold build and nothing else is lost, because the
 #     corpus comes from the corpus repository, not from this machine.
+#
+# SCHEDULING. The runner shares fredhub with the NixOS fleet's self-hosted CI,
+# which burns every core. Observed load there (UTC; fredhub's own timers run
+# on America/Denver time):
+#   * 08:00-13:10 -- the automated update workflows (opencode, syncclipboard,
+#     apple fonts, weekly flake bump) open PRs that trigger fleet builds; their
+#     crons say 03:30-06:00 but GitHub starts them 4-8 h late;
+#   * 09:15-10:45 -- nix gc / optimise (03:15 / 03:45 local);
+#   * Mon 13:00-16:30 -- cve-scan, which has run for up to 7 h;
+#   * 15:00-21:00 and around 00:00 -- interactive PR / merge-queue builds.
+# The quiet window is about 01:00-08:00 UTC, and a run takes about 4 h, so it
+# starts at 01:07 (off the top of the hour, where GitHub's schedule delays are
+# worst) and must END by 07:30. Because the cron start cannot be trusted, the
+# "Fit into the quiet window" step enforces that end: a late scheduled run
+# shortens every target's time to fit and skips when less than 5 min per
+# target would remain. Manual dispatches are not limited. As a second layer,
+# the runner's systemd unit runs at the lowest CPU and I/O priority, so the
+# fleet builds win if anything still overlaps.
 name: Fuzz (nightly)
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    # 01:07 UTC = 19:07 MDT / 18:07 MST. See SCHEDULING above.
+    - cron: "7 1 * * *"
   workflow_dispatch:
     inputs:
       minutes_per_target:
@@ -89,6 +108,56 @@ jobs:
             exit 1
           fi
 
+      # Enforces the quiet window (see SCHEDULING). Outputs `skip` and the
+      # effective `minutes` per target for the steps below.
+      - name: Fit into the quiet window
+        id: window
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.minutes_per_target || '20' }}
+          WINDOW_END_UTC: "07:30"
+          # Pull + cold build + push (45) plus a 10 min reporting margin; the
+          # same allowance as the time budget check in the fuzz step.
+          OVERHEAD_MIN: "55"
+          MIN_PER_TARGET: "5"
+        run: |
+          set -euo pipefail
+          case "${REQUESTED}" in
+            '' | *[!0-9]* | 0*)
+              echo "::error::minutes_per_target must be a positive integer without leading zeros (got '${REQUESTED}')"
+              exit 1
+              ;;
+          esac
+          if [ "${EVENT}" != "schedule" ]; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            echo "minutes=${REQUESTED}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          targets="$(grep -c '^\[\[bin\]\]' fuzz/Cargo.toml)"
+          now="$(date -u +%s)"
+          end="$(date -u -d "today ${WINDOW_END_UTC}" +%s)"
+          available=$(((end - now) / 60 - OVERHEAD_MIN))
+          fit=0
+          if [ "${available}" -gt 0 ]; then
+            fit=$((available / targets))
+          fi
+          minutes="${REQUESTED}"
+          if [ "${fit}" -lt "${minutes}" ]; then
+            minutes="${fit}"
+          fi
+          if [ "${minutes}" -lt "${MIN_PER_TARGET}" ]; then
+            msg="Started at $(date -u +%H:%M) UTC: only ${fit} min per target fit before ${WINDOW_END_UTC} UTC (minimum ${MIN_PER_TARGET}); skipping so the run does not overlap the fleet's CI window."
+            echo "::notice::${msg}"
+            echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${minutes}" -lt "${REQUESTED}" ]; then
+            echo "::notice::started late ($(date -u +%H:%M) UTC): ${minutes} min per target instead of ${REQUESTED}, to finish by ${WINDOW_END_UTC} UTC"
+          fi
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+          echo "minutes=${minutes}" >> "${GITHUB_OUTPUT}"
+
       # The corpus lives in a temp directory: it is a checkout of the private
       # corpus repository, recreated by the pull step every run. Written to
       # GITHUB_ENV because the `runner` context is not available in a job-level
@@ -112,6 +181,7 @@ jobs:
       # keeps the checkout token out of `.git/config`).
       - name: Pull corpus
         id: pull
+        if: steps.window.outputs.skip != 'true'
         env:
           FREMINAL_FUZZ_CORPUS_TOKEN: ${{ secrets.PAT }}
         run: nix develop .#fuzz --command cargo xtask fuzz-corpus pull
@@ -141,8 +211,9 @@ jobs:
       # so the allowance is unchanged. Findings are additionally written after
       # each target, so even a run that is cut short leaves partial results.
       - name: Fuzz all targets
+        if: steps.window.outputs.skip != 'true'
         env:
-          MINUTES: ${{ inputs.minutes_per_target || '20' }}
+          MINUTES: ${{ steps.window.outputs.minutes }}
           JOBS: ${{ inputs.jobs || '8' }}
           FREMINAL_FUZZ_ARTIFACTS_DIR: ${{ runner.temp }}/fuzz-artifacts
         run: |
