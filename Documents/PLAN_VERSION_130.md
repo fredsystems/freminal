@@ -8207,6 +8207,14 @@ Group F — Hygiene:
   `oversize-raster-declaration`, `ensure-size-overflow-slice-panic`, `huge-repeat-growth`,
   `quadratic-growth` in `fuzz/regressions/sixel_parse/`; the old code fails replay. New
   benchmark `bench_parse_sixel/400x300` (added first): 262.9 µs -> 213.9 µs (−18.4%).
+- **148.4 (done):** BS from pending wrap in a one-column buffer now lands at column 0 instead
+  of computing `0 - 1` (`buffer/lines.rs`). Semantics per xterm-412 `cursor.c` `CursorBack`
+  (~147-169): with `do_wrap` set, reverse-wrap only consumes the pending wrap, otherwise the
+  column is decremented and clamped to the left margin; at width 1 both give column 0 with
+  no reverse wrap. Width >= 2 is unchanged. The same-file audit found one more underflow,
+  `self.height - 1` in `handle_lf` on a zero-height buffer, fixed with `saturating_sub`; all
+  other subtractions are guarded. Reproducer
+  `fuzz/regressions/terminal_state/bs-one-column-underflow` (the #557 bytes).
 
 ---
 

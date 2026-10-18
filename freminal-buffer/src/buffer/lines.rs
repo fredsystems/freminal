@@ -70,7 +70,18 @@ impl Buffer {
         // drift the cursor by one per wide glyph.  The cursor may legitimately
         // land on a continuation cell; the next write triggers wide-overwrite
         // cleanup at that position.
-        let new_x = effective_x - 1;
+        //
+        // `effective_x` is 0 only when `width == 1` and the cursor was in
+        // pending-wrap (`x == 1 == width`): `x == 0` returned above, and for
+        // `width >= 2` the clamp yields at least 1.  xterm's `CursorBack`
+        // (`cursor.c`) handles `do_wrap` by either consuming only the pending
+        // wrap (reverse-wrap enabled) or decrementing and clamping at the
+        // left margin (otherwise); in a one-column terminal both leave the
+        // cursor at column 0 with the wrap cleared, and neither reverse-wraps.
+        let Some(new_x) = effective_x.checked_sub(1) else {
+            self.cursor.pos.x = 0;
+            return;
+        };
 
         self.cursor.pos.x = new_x;
 
@@ -163,7 +174,9 @@ impl Buffer {
                 // --- DECSTBM applies ONLY when:
                 //     - region is not full screen
                 //     - not scrolled back (already ensured above)
-                if self.scroll_region_top == 0 && self.scroll_region_bottom == self.height - 1 {
+                if self.scroll_region_top == 0
+                    && self.scroll_region_bottom == self.height.saturating_sub(1)
+                {
                     //
                     // FAST PATH: FULL-SCREEN REGION
                     //

@@ -2359,6 +2359,62 @@ mod backspace_tests {
         buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 7);
     }
+
+    /// Regression (issue #557): BS from pending-wrap in a 1-column terminal
+    /// used to compute `0 - 1` (debug panic / release wrap to `usize::MAX`).
+    /// Matches xterm `CursorBack`: the pending wrap is cleared and the cursor
+    /// stays at column 0 whether or not reverse-wrap is enabled.
+    #[test]
+    fn backspace_from_pending_wrap_in_one_column_buffer_stays_at_column_zero() {
+        for (reverse_wrap, xt_rev_wrap2) in [
+            (ReverseWrapAround::DontWrap, XtRevWrap2::Disabled),
+            (ReverseWrapAround::WrapAround, XtRevWrap2::Disabled),
+            (ReverseWrapAround::WrapAround, XtRevWrap2::Enabled),
+            (ReverseWrapAround::DontWrap, XtRevWrap2::Enabled),
+        ] {
+            let mut buf = Buffer::new(1, 5);
+
+            // Reproducer shape from the fuzz regression: `J BS J BS`.
+            for _ in 0..2 {
+                buf.insert_text(&[TChar::from('J')]);
+                assert_eq!(
+                    buf.cursor.pos.x, 1,
+                    "writing into the only column enters pending-wrap"
+                );
+                let y_before = buf.cursor.pos.y;
+
+                buf.handle_backspace(reverse_wrap, xt_rev_wrap2);
+
+                assert_eq!(
+                    buf.cursor.pos.x, 0,
+                    "BS from pending-wrap must land at column 0 \
+                     (reverse_wrap={reverse_wrap:?}, xt_rev_wrap2={xt_rev_wrap2:?})"
+                );
+                assert_eq!(
+                    buf.cursor.pos.y, y_before,
+                    "BS from pending-wrap must not change the row"
+                );
+            }
+        }
+    }
+
+    /// A BS at column 0 of a 1-column buffer still follows the normal
+    /// column-0 rules (no move without reverse-wrap).
+    #[test]
+    fn backspace_at_column_zero_in_one_column_buffer_is_noop() {
+        let mut buf = Buffer::new(1, 5);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
+        assert_eq!(buf.cursor.pos.x, 0);
+        assert_eq!(buf.cursor.pos.y, 0);
+    }
+
+    /// `handle_lf` compared `scroll_region_bottom` against `height - 1`,
+    /// which underflows on a zero-height buffer.
+    #[test]
+    fn line_feed_in_zero_height_buffer_does_not_underflow() {
+        let mut buf = Buffer::new(1, 0);
+        buf.handle_lf();
+    }
 }
 
 #[cfg(test)]
