@@ -7952,10 +7952,15 @@ All three live in `terminal_handler/graphics_kitty.rs`, so they run in order.
   `read_len` with no cap (the file path has a 400 MiB cap); truncation between `fstat` and the
   copy is a SIGBUS; `shm_unlink` runs on any readable object. The Windows path accepts a size
   up to 4 GiB.
-- **Scope:** cap `read_len` at `MAX_KITTY_DATA_BYTES` on both platforms; read the range with
-  `pread` or map only the range, so a truncation is an error, not a signal; restrict the
-  unlink to the names the kitty convention produces, and record what that convention is.
-- **Deliverable:** tests for an oversize request, a truncation and a foreign name.
+- **Scope:** cap `read_len` at `MAX_KITTY_DATA_BYTES` on both platforms. On unix, replace the
+  `mmap` copy with `pread` on the shm fd (looping on partial reads, treating a short read or
+  EOF as an error): mapping only the requested range is NOT enough, because another process
+  can still truncate the object while it is mapped and touching the removed pages raises
+  SIGBUS (POSIX `mmap`). On Windows the `MapViewOfFile` path may stay: a section cannot shrink
+  while a view is mapped. Restrict the unlink to the names the kitty convention produces, and
+  record what that convention is.
+- **Deliverable:** tests for an oversize request, a truncation (the object shrinks between
+  `fstat` and the read: an error, never a signal) and a foreign name.
 - **Closes:** GHSA-j533-jhh2-ff2x, when the fix is released.
 
 #### 148.14 — Kitty `t=f` on Windows accepts UNC paths
