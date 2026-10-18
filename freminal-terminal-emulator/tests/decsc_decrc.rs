@@ -34,6 +34,8 @@ fn pos(handler: &TerminalHandler) -> (usize, usize) {
 }
 
 /// The cell at 0-based screen `(x, y)` of the active screen.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn cell_at(handler: &TerminalHandler, x: usize, y: usize) -> Cell {
     let rows = handler.buffer().visible_rows(0);
     let row = rows.get(y).expect("row exists");

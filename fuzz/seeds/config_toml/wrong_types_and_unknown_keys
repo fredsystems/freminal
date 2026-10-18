@@ -1,0 +1,8 @@
+version = "one"
+[font]
+size = "big"
+ligatures = 3
+[cursor]
+shape = "triangle"
+[nonexistent]
+x = 1

@@ -776,8 +776,6 @@ impl FreminalGui {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::FreminalGui;
 
     /// `atomic_write` creates the destination with the given contents.

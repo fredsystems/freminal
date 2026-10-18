@@ -816,7 +816,6 @@ const fn decode_line_width(byte: u8) -> Option<LineWidth> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::sync::Arc;
 

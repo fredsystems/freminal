@@ -27,8 +27,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row).
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -141,7 +139,7 @@ fn dec_special_del_passes_through() {
     // DEL is a control character and is typically ignored; 'X' and 'Y' remain.
     let row = h.screen_text()[0].clone();
     assert!(
-        row.starts_with("XY") || row.starts_with("X"),
+        row.starts_with("XY") || row.starts_with('X'),
         "DEL (0x7F) must not produce a line-drawing character; got: {row:?}"
     );
 }

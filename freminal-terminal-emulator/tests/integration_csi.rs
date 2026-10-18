@@ -35,7 +35,7 @@ fn csi_truecolor_and_reset() {
         "Trace missing truecolor spec: {trace}"
     );
     assert!(
-        trace.ends_with("m") || trace.contains("\x1b[0m"),
+        trace.ends_with('m') || trace.contains("\x1b[0m"),
         "Trace did not complete with reset"
     );
 }

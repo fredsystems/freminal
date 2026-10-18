@@ -3,10 +3,11 @@ name = "xtask"
 edition = "2021"
 publish = false
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 cargo_metadata.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 clap-cargo.workspace = true
 clap-verbosity-flag.workspace = true
 color-eyre.workspace = true
@@ -16,3 +17,6 @@ tempfile.workspace = true
 tracing.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

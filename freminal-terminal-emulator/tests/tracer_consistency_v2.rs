@@ -26,8 +26,7 @@ fn tracer_buffer_appends_and_clears_in_expected_pattern() {
     // It must NOT be cleared prematurely, but it should still contain the completed sequence.
     assert!(
         final_trace.contains("38;2;255;0;0m"),
-        "trace should retain the last completed sequence, got: {:?}",
-        final_trace
+        "trace should retain the last completed sequence, got: {final_trace:?}"
     );
 }
 

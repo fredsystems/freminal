@@ -124,7 +124,7 @@ fn save_restore_and_title_bar_text_variants() {
 
     // Title bar text should produce a variant with an empty string
     match WindowManipulation::try_from((24, 1, 0)).unwrap() {
-        WindowManipulation::SetTitleBarText(s) => assert!(s.is_empty()),
+        WindowManipulation::SetTitleBarText(s) => assert_eq!(s, ""),
         _ => panic!("Expected SetTitleBarText"),
     }
 }

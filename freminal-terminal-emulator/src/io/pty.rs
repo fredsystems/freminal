@@ -1098,7 +1098,6 @@ mod shell_integration_injection_tests {
 /// poll) flips `echo_off` when a child disables `ECHO` while keeping `ICANON`,
 /// and that resize still reaches the child after the re-architecture.
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod echo_off_event_driven_tests {
     use super::{PtySpawnConfig, PtyWrite, run_terminal};
     use crate::io::PtyRead;

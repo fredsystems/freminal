@@ -11,7 +11,7 @@
 use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::tchar::TChar;
 
-fn ascii(c: char) -> TChar {
+const fn ascii(c: char) -> TChar {
     TChar::Ascii(c as u8)
 }
 
@@ -127,7 +127,7 @@ fn scroll_region_full_screen_explicit() {
     }
 
     // Should have accumulated scrollback
-    assert!(buf.visible_rows(0).len() == 5);
+    assert_eq!(buf.visible_rows(0).len(), 5);
 }
 
 // ============================================================================
@@ -281,7 +281,7 @@ fn scroll_region_operations_blocked_when_scrolled_back() {
 
     // Generate scrollback by filling screen and scrolling
     for i in 0..10 {
-        let chars: Vec<TChar> = (0..(i % 9) + 1).map(|_| ascii('X')).collect();
+        let chars: Vec<TChar> = (0..=(i % 9)).map(|_| ascii('X')).collect();
         buf.insert_text(&chars);
         buf.handle_lf();
         buf.handle_cr();
@@ -312,7 +312,7 @@ fn lf_in_scroll_region_resets_scrollback_offset() {
 
     // Generate scrollback
     for i in 0..10 {
-        let chars: Vec<TChar> = (0..(i % 9) + 1).map(|_| ascii('X')).collect();
+        let chars: Vec<TChar> = (0..=(i % 9)).map(|_| ascii('X')).collect();
         buf.insert_text(&chars);
         buf.handle_lf();
         buf.handle_cr();
@@ -346,8 +346,8 @@ fn scroll_region_in_alternate_buffer() {
     buf.set_cursor_pos(Some(0), Some(0));
 
     // Tag alternate buffer rows
-    for i in 0..5 {
-        let chars: Vec<TChar> = vec![ascii((b'A' + i as u8) as char)];
+    for i in 0u8..5 {
+        let chars: Vec<TChar> = vec![ascii((b'A' + i) as char)];
         buf.insert_text(&chars);
         if i + 1 < 5 {
             buf.handle_lf();

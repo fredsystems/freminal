@@ -563,8 +563,6 @@ pub fn record_cursor_only(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::super::gl_facade::surface::GL_CALL_SURFACE;
     use super::{SyntheticFrame, record_frame};
 

@@ -3,7 +3,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use freminal_common::buffer_states::mode::Mode;
+use freminal_common::buffer_states::osc::AnsiOscType;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
+use freminal_common::sgr::SelectGraphicRendition;
 use freminal_common::{
     buffer_states::window_manipulation::WindowManipulation, cursor::CursorVisualStyle,
 };
@@ -43,7 +46,7 @@ fn display_basic_variants() {
     assert_eq!(TerminalOutput::Delete(5).to_string(), "Delete(5)");
     assert_eq!(TerminalOutput::Erase(1).to_string(), "Erase(1)");
     assert_eq!(
-        TerminalOutput::Sgr(Default::default()).to_string(),
+        TerminalOutput::Sgr(SelectGraphicRendition::default()).to_string(),
         "Sgr(NoOp)"
     );
     assert_eq!(
@@ -51,7 +54,7 @@ fn display_basic_variants() {
         "Data(Hi)"
     );
     assert_eq!(
-        TerminalOutput::Mode(Default::default()).to_string(),
+        TerminalOutput::Mode(Mode::default()).to_string(),
         "SetMode(NoOp)"
     );
     assert_eq!(
@@ -59,7 +62,7 @@ fn display_basic_variants() {
         "InsertSpaces(3)"
     );
     assert_eq!(
-        TerminalOutput::OscResponse(Default::default()).to_string(),
+        TerminalOutput::OscResponse(AnsiOscType::default()).to_string(),
         "OscResponse(NoOp)"
     );
     assert_eq!(TerminalOutput::Invalid.to_string(), "Invalid");
@@ -203,7 +206,7 @@ fn push_handles_escape_to_modes() {
     // Escape enters escape mode
     let out = parser.push(b"\x1b[");
     assert!(matches!(parser.inner, ParserInner::Csi(_)));
-    assert!(out.is_empty());
+    assert_eq!(out, Vec::<TerminalOutput>::new());
 }
 
 #[test]
@@ -323,7 +326,7 @@ fn trace_buffer_clears_after_state_reset() {
     parser.append_trace(b'X');
     parser.append_trace(b'Y');
     parser.clear_trace();
-    assert!(parser.current_trace_str().is_empty());
+    assert_eq!(parser.current_trace_str(), "");
 }
 
 proptest! {

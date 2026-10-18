@@ -258,3 +258,6 @@ gl-pixel = ["gl-recording", "freminal-windowing/gl-offscreen"]
 # `freminal_windowing::task_125::gpu_timing`). NOT enabled by default, and
 # independent of `frame-profiling`. See `Documents/PROFILING.md`.
 gpu-profiling = ["freminal-windowing/gpu-profiling"]
+
+[lints]
+workspace = true

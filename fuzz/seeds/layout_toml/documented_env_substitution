@@ -1,0 +1,3 @@
+[[windows.tabs.panes]]
+directory = "$1"
+env = { PROJECT_ROOT = "$1", AWS_PROFILE = "$ENV{AWS_PROFILE}" }

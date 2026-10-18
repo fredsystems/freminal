@@ -338,7 +338,6 @@ pub(super) fn click_target(outputs: &[ToastLayoutOutput], pos: egui::Pos2) -> Op
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::gui::renderer::ToastQuad;

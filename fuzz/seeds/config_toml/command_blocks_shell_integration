@@ -1,0 +1,13 @@
+[command_blocks]
+enabled = true
+show_duration = true
+duration_threshold_secs = 2.0
+gutter = "left"
+[shell_integration]
+set_term_program = true
+[close_guard]
+enabled = true
+unknown_blocks = false
+guard_app_quit = true
+[progress]
+enabled = true

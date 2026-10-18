@@ -35,7 +35,7 @@ fn csi_move_family_full_matrix() {
         "\x1b[5;10f",
     ] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }
 
@@ -56,7 +56,7 @@ fn csi_insert_delete_chars_and_lines() {
         "\x1b[P", "\x1b[3P", "\x1b[@", "\x1b[4@", "\x1b[2L", "\x1b[2M", "\x1b[3X",
     ] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }
 
@@ -72,7 +72,7 @@ fn csi_scroll_region_and_scroll() {
         "\x1b[4T",
     ] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }
 
@@ -81,7 +81,7 @@ fn csi_tab_stops() {
     // HTS (H), TBC (g) with params 0/3
     for seq in ["\x1bH", "\x1b[0g", "\x1b[3g"] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }
 
@@ -139,8 +139,8 @@ fn csi_sgr_big_matrix() {
 fn csi_error_paths_cover_invalid_finals_and_overflows() {
     // invalid final
     let p = feed("\x1b[12;24Z");
-    assert!(!p.trace_str().is_empty());
+    assert_ne!(p.trace_str(), "");
     // param overflow
     let p = feed("\x1b[9999999999999999999A");
-    assert!(!p.trace_str().is_empty());
+    assert_ne!(p.trace_str(), "");
 }

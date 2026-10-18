@@ -22,8 +22,6 @@
 //! All cursor positions in the helper API are **0-indexed** (`x` = column,
 //! `y` = row). CSI sequences use **1-indexed** row;col parameters.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use freminal_common::buffer_states::{
@@ -52,7 +50,7 @@ fn decstbm_scroll_stays_within_region() {
     let mut h = VtTestHelper::new_default();
     // Fill rows 0-5 with labelled content.
     for i in 0..6_u8 {
-        h.feed_str(&format!("Line {:02}\r\n", i));
+        h.feed_str(&format!("Line {i:02}\r\n"));
     }
     // Set scroll region to rows 3–5 (1-indexed) → y=2..=4 (0-indexed).
     h.feed(b"\x1b[3;5r");
@@ -124,7 +122,7 @@ fn decstbm_single_line_region() {
 fn decstbm_ri_inserts_at_top_of_region() {
     let mut h = VtTestHelper::new_default();
     for i in 0..5_u8 {
-        h.feed_str(&format!("Line {:02}\r\n", i));
+        h.feed_str(&format!("Line {i:02}\r\n"));
     }
     // Scroll region rows 2–4 (1-indexed) → y=1..=3 (0-indexed).
     h.feed(b"\x1b[2;4r");
@@ -305,7 +303,7 @@ fn decawm_on_wraps_long_line() {
 /// overflow does NOT overwrite the last cell.
 ///
 /// Specifically: the buffer's insert loop sets `final_col = 80` after placing
-/// all 80 `A`s (cols 0–79), which immediately triggers the NoAutoWrap clamp
+/// all 80 `A`s (cols 0–79), which immediately triggers the `NoAutoWrap` clamp
 /// back to col 79 on the next insertion attempt. The subsequent `ZZZZZ` input
 /// arrives with cursor already past `wrap_col`, so all five `Z`s are discarded
 /// before any cell is written.
@@ -353,7 +351,7 @@ fn sgr_bold_sets_font_weight_bold() {
     );
 }
 
-/// SGR 4 adds Underline to font_decorations.
+/// SGR 4 adds Underline to `font_decorations`.
 #[test]
 fn sgr_underline_adds_decoration() {
     let mut h = VtTestHelper::new_default();
@@ -368,7 +366,7 @@ fn sgr_underline_adds_decoration() {
     );
 }
 
-/// SGR 3 adds Italic to font_decorations.
+/// SGR 3 adds Italic to `font_decorations`.
 #[test]
 fn sgr_italic_adds_decoration() {
     let mut h = VtTestHelper::new_default();
@@ -383,7 +381,7 @@ fn sgr_italic_adds_decoration() {
     );
 }
 
-/// SGR 9 adds Strikethrough to font_decorations.
+/// SGR 9 adds Strikethrough to `font_decorations`.
 #[test]
 fn sgr_strikethrough_adds_decoration() {
     let mut h = VtTestHelper::new_default();
@@ -612,8 +610,7 @@ fn decrc_without_prior_decsc_is_safe() {
     let pos = h.cursor_pos();
     assert!(
         pos.x < h.width && pos.y < h.height,
-        "cursor position after DECRC without prior DECSC must be within bounds: {:?}",
-        pos
+        "cursor position after DECRC without prior DECSC must be within bounds: {pos:?}"
     );
 }
 
@@ -626,7 +623,7 @@ fn decstbm_decom_combined_text_lands_in_region() {
     let mut h = VtTestHelper::new_default();
     // Fill several rows so we can tell them apart.
     for i in 0..8_u8 {
-        h.feed_str(&format!("Row {:02}\r\n", i));
+        h.feed_str(&format!("Row {i:02}\r\n"));
     }
     // Restrict scroll region to rows 4–7 (1-indexed) → y=3..=6.
     h.feed(b"\x1b[4;7r");
@@ -972,8 +969,8 @@ fn tst_screen_decsc_decrc_five_by_four_block() {
     for cset in 0_u8..4 {
         for i in 0_u8..5 {
             // cup(10 + 2*cset, 12 + 12*i) — 1-indexed
-            let row = 10 + 2 * cset as u16;
-            let col = 12 + 12 * i as u16;
+            let row = 10 + 2 * u16::from(cset);
+            let col = 12 + 12 * u16::from(i);
             seq.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
 
             // sgr(attr[i])
@@ -997,8 +994,8 @@ fn tst_screen_decsc_decrc_five_by_four_block() {
             seq.extend_from_slice(b"\x1b7");
 
             // cup(cset+1, i+1) — 1-indexed
-            let top_row = cset as u16 + 1;
-            let top_col = i as u16 + 1;
+            let top_row = u16::from(cset) + 1;
+            let top_col = u16::from(i) + 1;
             seq.extend_from_slice(format!("\x1b[{top_row};{top_col}H").as_bytes());
 
             // sgr("") + scs_normal() + "A"

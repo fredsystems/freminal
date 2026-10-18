@@ -1690,7 +1690,6 @@ pub(crate) fn line_boundaries(visible_chars: &[TChar], screen_row: usize) -> (us
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};

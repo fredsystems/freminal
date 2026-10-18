@@ -148,7 +148,6 @@ pub(in crate::gui) fn maybe_send_immediate_motion_report(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use freminal_common::buffer_states::modes::mouse::MouseEncoding;

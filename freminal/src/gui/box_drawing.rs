@@ -845,7 +845,6 @@ fn value_to_usize(v: f32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn alpha_at(buf: &[u8], w: usize, x: usize, y: usize) -> u8 {

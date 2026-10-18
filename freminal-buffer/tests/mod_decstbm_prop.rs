@@ -7,7 +7,7 @@ use freminal_buffer::buffer::Buffer;
 use freminal_common::buffer_states::tchar::TChar;
 use proptest::proptest;
 
-fn c(ch: char) -> TChar {
+const fn c(ch: char) -> TChar {
     TChar::new_from_single_char(ch as u8)
 }
 

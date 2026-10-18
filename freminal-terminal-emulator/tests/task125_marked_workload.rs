@@ -37,6 +37,8 @@ fn script_format(name: &str) -> String {
 
 /// Expand a printf format the way bash's `printf` does for the subset the
 /// workload uses: `\NNN` octal escapes and a single `%d` per occurrence.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn expand_printf(format: &str, id: u64) -> Vec<u8> {
     let bytes = format.as_bytes();
     let mut out = Vec::new();

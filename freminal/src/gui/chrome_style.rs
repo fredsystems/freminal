@@ -395,7 +395,7 @@ fn f32_to_i8(v: f32) -> i8 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use freminal_common::gui_theme::StyleProfile;

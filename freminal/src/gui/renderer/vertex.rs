@@ -1947,7 +1947,6 @@ pub(super) fn extract_atlas_rect(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use freminal_common::buffer_states::cursor::CursorPos;
     use freminal_common::buffer_states::fonts::FontDecorationFlags;

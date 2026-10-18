@@ -529,7 +529,6 @@ impl super::FreminalGui {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use freminal_common::buffer_states::command_block::CommandBlock;

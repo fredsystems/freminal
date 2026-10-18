@@ -2956,7 +2956,6 @@ impl WindowPostRenderer {
 mod destroy_gl_tests;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{PaneBackground, compute_bg_uvs};
     use freminal_common::config::BackgroundImageMode;
@@ -3196,6 +3195,7 @@ mod tests {
 /// `--all-features`, and neither exists in a default build.
 #[cfg(all(test, feature = "frame-profiling", feature = "gl-recording"))]
 mod upload_byte_attribution_tests {
+    // Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this `cfg(all(test, ...))` gate.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{GlyphAtlas, ImageDrawEntry, InlineImage, PaneBackground, TerminalRenderer};

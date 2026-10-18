@@ -11,8 +11,6 @@
 //! - Alternate-screen scroll routing (ArrowUp/Down via `write`)
 //! - Mode accessors: `screen_inversion`, `should_repeat_keys`, `skip_draw_always`
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::{
     buffer_states::modes::{
@@ -180,7 +178,7 @@ fn test_write_closed_channel() {
 
 // ─── alternate-screen scroll routing ─────────────────────────────────────────
 
-/// In alternate-screen mode, writing ArrowUp must send an ArrowUp escape
+/// In alternate-screen mode, writing `ArrowUp` must send an `ArrowUp` escape
 /// sequence to the PTY (CSI A when DECCKM is off, the default).
 #[test]
 fn test_alternate_screen_write_arrow_up() {
@@ -210,7 +208,7 @@ fn test_alternate_screen_write_arrow_up() {
     );
 }
 
-/// In alternate-screen mode, writing ArrowDown must send an ArrowDown escape
+/// In alternate-screen mode, writing `ArrowDown` must send an `ArrowDown` escape
 /// sequence to the PTY (CSI B when DECCKM is off, the default).
 #[test]
 fn test_alternate_screen_write_arrow_down() {

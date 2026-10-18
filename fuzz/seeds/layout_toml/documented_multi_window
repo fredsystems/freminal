@@ -1,0 +1,82 @@
+# ~/.config/freminal/layouts/dev.toml
+
+[layout]
+name = "Development"
+description = "Standard dev workspace: editor, server, logs"
+
+# Variables — can be overridden from CLI: freminal --layout dev.toml ~/projects/myapp
+# $1, $2, etc. are positional args. Named vars use ${VAR_NAME}.
+[layout.variables]
+project_dir = "~/projects/default"  # default value, overridden by $1 if provided
+
+# --- Window definitions ---
+# Each [[windows]] entry defines a separate OS window.
+# A layout with no [[windows]] section uses a single default window.
+
+[[windows]]
+size = [1200, 800]          # width, height in pixels (optional)
+position = [100, 200]       # x, y in pixels (optional, ignored on Wayland)
+monitor = 0                 # preferred monitor index (optional, best-effort)
+
+  # --- Tab definitions within this window ---
+
+  [[windows.tabs]]
+  title = "Editor"
+  active = true  # this tab is focused on launch
+
+    # Pane tree for this tab. The tree is defined as a flat list of nodes.
+    # Each node has an "id" (local to this tab) and optionally a "parent" + "position".
+    # The root node has no parent.
+
+    [[windows.tabs.panes]]
+    id = "root"
+    split = "vertical"   # "vertical" (left/right) or "horizontal" (top/bottom)
+    ratio = 0.65
+
+    [[windows.tabs.panes]]
+    id = "editor"
+    parent = "root"
+    position = "first"   # "first" (left/top) or "second" (right/bottom)
+    directory = "${project_dir}"
+    command = "nvim ."
+    active = true         # this pane has focus within the tab
+
+    [[windows.tabs.panes]]
+    id = "sidebar"
+    parent = "root"
+    position = "second"
+    split = "horizontal"
+    ratio = 0.5
+
+    [[windows.tabs.panes]]
+    id = "terminal"
+    parent = "sidebar"
+    position = "first"
+    directory = "${project_dir}"
+
+    [[windows.tabs.panes]]
+    id = "git"
+    parent = "sidebar"
+    position = "second"
+    directory = "${project_dir}"
+    command = "lazygit"
+
+  [[windows.tabs]]
+  title = "Server"
+
+    [[windows.tabs.panes]]
+    id = "server"
+    directory = "${project_dir}"
+    command = "cargo watch -x run"
+
+[[windows]]
+size = [800, 600]
+position = [1350, 200]
+
+  [[windows.tabs]]
+  title = "Logs"
+
+    [[windows.tabs.panes]]
+    id = "logs"
+    directory = "/var/log"
+    command = "tail -f syslog"

@@ -21,10 +21,12 @@ fn tag() -> FormatTag {
 // ────────────────────────────────────────────────────────────
 //
 
-fn ascii(c: char) -> TChar {
+const fn ascii(c: char) -> TChar {
     TChar::Ascii(c as u8)
 }
 
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::unwrap_used)]
 fn emoji(s: &str) -> TChar {
     TChar::new_from_many_chars(s.as_bytes()).unwrap()
 }
@@ -47,7 +49,7 @@ fn insert_fits_entirely_in_row() {
             assert_eq!(final_col, 5);
             assert_eq!(row.characters().len(), 5);
         }
-        _ => panic!("expected Consumed"),
+        InsertResponse::Leftover { .. } => panic!("expected Consumed"),
     }
 }
 
@@ -63,7 +65,7 @@ fn insert_wide_character_that_fits() {
             assert_eq!(final_col, 2);
             assert_eq!(row.characters().len(), 2);
         }
-        _ => panic!("expected Consumed"),
+        InsertResponse::Leftover { .. } => panic!("expected Consumed"),
     }
 }
 
@@ -84,7 +86,7 @@ fn insert_wide_character_that_overflows() {
             assert_eq!(leftover_start, 0);
             assert_eq!(&text[leftover_start..], &text[..]);
         }
-        _ => panic!("expected Leftover"),
+        InsertResponse::Consumed(_) => panic!("expected Leftover"),
     }
 }
 
@@ -110,7 +112,7 @@ fn insert_overflows_and_returns_leftover() {
             assert_eq!(row.characters()[3], Cell::new(ascii('H'), tag()));
             assert_eq!(row.characters()[4], Cell::new(ascii('e'), tag()));
         }
-        _ => panic!("expected Leftover"),
+        InsertResponse::Consumed(_) => panic!("expected Leftover"),
     }
 }
 
@@ -173,7 +175,7 @@ fn insert_mixed_ascii_and_wide() {
 
     match result {
         InsertResponse::Consumed(final_col) => assert_eq!(final_col, 4),
-        _ => panic!(),
+        InsertResponse::Leftover { .. } => panic!(),
     }
 
     let chars = row.characters();
@@ -196,7 +198,7 @@ fn mixed_overflow_correct_terminal_semantics() {
             // Only 'B' did not fit; it is at index 2 of the input slice.
             assert_eq!(&text[leftover_start..], &[ascii('B')]);
         }
-        _ => panic!("expected leftover"),
+        InsertResponse::Consumed(_) => panic!("expected leftover"),
     }
 
     let chars = row.characters();
@@ -255,7 +257,7 @@ fn no_dangling_continuation_cells_after_insertion() {
 // ────────────────────────────────────────────────────────────
 //
 
-/// Build a FormatTag that has reverse-video on (non-default colors).
+/// Build a `FormatTag` that has reverse-video on (non-default colors).
 fn reverse_tag() -> FormatTag {
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
     FormatTag {

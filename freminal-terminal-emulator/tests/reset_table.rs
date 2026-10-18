@@ -143,6 +143,8 @@ fn ris_after_deccolm_restores_the_pre_deccolm_width() {
 /// The first three cells of row 0 after: IRM on, optionally a RIS, then
 /// writing "AB", homing and writing "X". Replace mode gives "XB", insert mode
 /// "XAB".
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn first_row_after_irm(reset: RisAfterIrm) -> String {
     let mut rig = Rig::new(80, 24);
     rig.feed(b"\x1b[4h");

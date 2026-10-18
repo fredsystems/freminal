@@ -25,21 +25,6 @@
 //! ```
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-#![deny(
-    clippy::pedantic,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all,
-    clippy::suspicious,
-    clippy::complexity,
-    clippy::perf,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
-#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
-#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
 
 #[macro_use]
 extern crate tracing;

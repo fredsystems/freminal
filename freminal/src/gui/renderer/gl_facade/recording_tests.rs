@@ -17,6 +17,7 @@
 //! for a real driver for the rest of Task 123 (123.7's headless driver and
 //! 123.8's workload assertions both depend on it).
 
+// Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this module's `cfg(all(test, ...))` gate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;

@@ -19,13 +19,26 @@ latest release; the fix will land there.
 
 ## Reporting a Vulnerability
 
-**Please do not report security vulnerabilities through public GitHub
-issues, discussions, or pull requests.**
+You may report a vulnerability either privately or publicly; both are
+accepted.
 
-Report vulnerabilities privately through GitHub's
-[private vulnerability reporting](https://github.com/fredsystems/freminal/security/advisories/new).
-This opens a private security advisory that only the maintainers can see and
-lets us collaborate on a fix and, if warranted, request a CVE.
+- **Private (preferred for anything that is not already public).** Use
+  GitHub's
+  [private vulnerability reporting](https://github.com/fredsystems/freminal/security/advisories/new).
+  This opens a private security advisory that only the maintainers can see.
+  It gives us time to fix the issue before details circulate, and lets us
+  collaborate with you on the fix and, if warranted, request a CVE.
+- **Public.** If you prefer, or if the issue is already public (for
+  example, it was found by the public fuzz targets or discussed elsewhere),
+  you may open a public GitHub issue or start a discussion.
+
+The maintainers may publish a security advisory **before** a fix ships when
+they judge that disclosure serves users better than waiting. A typical case
+is a finding that the public fuzz targets rediscover within seconds, where
+withholding details would not keep it confidential. In that case remediation
+is tracked openly, in the published advisory and in
+[`PLAN_VERSION_130.md`](../Documents/PLAN_VERSION_130.md), and the advisory
+is updated with the patched version once a release contains the fix.
 
 When reporting, please include as much of the following as you can:
 
@@ -44,7 +57,8 @@ As a guideline:
 - An initial **assessment** (accepted, needs more information, or declined,
   with reasoning) within **14 days**.
 - If accepted, we will work on a fix and coordinate a release and public
-  disclosure with you. We aim to publish a fix within **90 days** of
+  disclosure with you (or, for a report that is already public, track the
+  fix openly). We aim to publish a fix within **90 days** of
   acknowledgement; complex issues may take longer, and we will keep you
   updated on the advisory.
 - If declined, we will explain why (for example, the behaviour is intended,
@@ -66,8 +80,10 @@ In scope:
 
 Out of scope:
 
-- Vulnerabilities in third-party dependencies (report those upstream; we
-  track dependency advisories through Dependabot and will update on a fix).
+- Vulnerabilities in third-party dependencies (report those upstream).
+  Freminal checks its dependencies against the RustSec advisory database
+  with cargo-deny on every pull request and daily on `main`, and Renovate
+  proposes dependency updates.
 - Issues that require an attacker to already have arbitrary code execution
   or local shell access equivalent to the user running Freminal.
 - Denial of service caused by deliberately pathological input that a normal

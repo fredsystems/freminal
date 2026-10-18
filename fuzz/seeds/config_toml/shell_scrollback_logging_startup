@@ -1,0 +1,13 @@
+[shell]
+path = "/bin/zsh"
+[logging]
+level = "debug"
+[scrollback]
+limit = 10000
+[startup]
+layout = "dev"
+restore_last_session = true
+first_run_complete = false
+copy = "Ctrl+C"
+paste = "Ctrl+V"
+managed_by = "home-manager"

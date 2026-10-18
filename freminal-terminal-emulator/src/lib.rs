@@ -22,32 +22,6 @@
 //! - [`io::InputEvent`] — keyboard, resize, and focus events sent from the GUI
 //! - [`io::WindowCommand`] — viewport and report commands sent to the GUI
 
-#![deny(
-    clippy::pedantic,
-    clippy::cargo,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all,
-    clippy::suspicious,
-    clippy::complexity,
-    clippy::perf,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    // Task 70.H tripwires: explicit deny for the three cast lints that guard
-    // against silent truncation/sign-loss/wrap in numeric conversions. These
-    // are already part of `clippy::pedantic` above, but naming them directly
-    // documents the contract and survives any future reorganization of the
-    // pedantic group. All remaining `as` casts must be covered by a local
-    // `#[allow(...)]` with a justification comment per agents.md.
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
-#![allow(clippy::multiple_crate_versions)] // Allow multiple versions from transitive dependencies
-#![allow(clippy::cargo_common_metadata)] // Metadata is inherited from workspace
-#![allow(clippy::range_plus_one)]
-
 pub mod ansi;
 pub mod ansi_components;
 pub mod error;

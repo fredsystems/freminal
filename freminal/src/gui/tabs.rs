@@ -493,7 +493,6 @@ impl<'a> IntoIterator for &'a TabManager {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::gui::view_state::ViewState;

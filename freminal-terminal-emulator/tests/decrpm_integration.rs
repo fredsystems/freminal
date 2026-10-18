@@ -26,6 +26,8 @@ fn make_state() -> (TerminalState, Receiver<PtyWrite>) {
 
 /// Drain all pending `PtyWrite::Write` messages from the channel, concatenate
 /// the bytes, and return as a `String`.  Non-`Write` variants are ignored.
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::expect_used)]
 fn drain_pty_writes(rx: &Receiver<PtyWrite>) -> String {
     let mut buf = Vec::new();
     while let Ok(msg) = rx.try_recv() {
@@ -598,7 +600,11 @@ fn decrpm_lnm_after_reset_is_reset() {
 /// Text of the first visible row, trailing spaces trimmed.
 fn first_row_text(state: &TerminalState) -> String {
     let rows = state.handler.buffer().visible_rows(0);
-    let text: String = rows[0].characters().iter().map(|c| c.into_utf8()).collect();
+    let text: String = rows[0]
+        .characters()
+        .iter()
+        .map(freminal_buffer::cell::Cell::into_utf8)
+        .collect();
     text.trim_end().to_string()
 }
 

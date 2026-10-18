@@ -54,6 +54,6 @@ fn dec_mode_reports_regular_and_private() {
 fn device_attributes_and_xtversion() {
     for seq in ["\x1b[c", "\x1b[>c", "\x1b[>0q"] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }

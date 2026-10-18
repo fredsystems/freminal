@@ -11,10 +11,12 @@ use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::colors::TerminalColor;
 
-fn ascii(c: char) -> TChar {
+const fn ascii(c: char) -> TChar {
     TChar::Ascii(c as u8)
 }
 
+// Test helper; not a #[test] fn, so clippy.toml's allow-*-in-tests does not cover it.
+#[allow(clippy::unwrap_used)]
 fn emoji(s: &str) -> TChar {
     TChar::new_from_many_chars(s.as_bytes()).unwrap()
 }

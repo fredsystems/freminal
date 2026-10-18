@@ -13,7 +13,7 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 fn decckm_enable_disable() {
     let enable = push_seq("\x1b[?1h");
     let disable = push_seq("\x1b[?1l");
-    println!("DECCKM enable {:?} disable {:?}", enable, disable);
+    println!("DECCKM enable {enable:?} disable {disable:?}");
     assert!(
         enable
             .iter()

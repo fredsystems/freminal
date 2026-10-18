@@ -1,0 +1,498 @@
+# Long-running continuous fuzzing (issue 553).
+#
+# Runs every cargo-fuzz target in `fuzz/` for a fixed time budget on a
+# SELF-HOSTED runner and reports findings through a run summary, an artifact
+# and a single tracking issue. The working corpus is NOT kept on the runner: it
+# lives in the private repository fredsystems/freminal-fuzz-corpus. The job
+# pulls it before fuzzing (`cargo xtask fuzz-corpus pull`) and publishes the
+# grown, minimised corpus afterwards (`fuzz-corpus push`), so coverage
+# accumulates across runs and the runner's disk holds only build cache.
+# The tracking issue only receives findings it has not already been told
+# about: libFuzzer names an artifact `<kind>-<sha1 of the input>`, so the name
+# is content-addressed and a re-found crash has the same name every night.
+#
+# SECURITY: this workflow must NEVER be triggered by `pull_request` or
+# `pull_request_target`. The repository is public and the job runs on a
+# self-hosted runner, so any trigger that can execute fork-controlled code
+# would hand that code a machine on the maintainer's network. Only `schedule`
+# and `workflow_dispatch` (which requires write access) are allowed. This is
+# also what keeps the `PAT` secret (used only by the pull and push steps) out
+# of reach: secrets are never available to fork pull requests.
+#
+# RUNNER CONTRACT. The runner must:
+#   * carry the labels `self-hosted`, `Linux` and `freminal-fuzz`;
+#   * provide `nix` (flakes enabled) on PATH -- it is not installed here;
+#   * have enough memory: each target runs `jobs` (default 8) fork workers,
+#     and libFuzzer is started with `-rss_limit_mb=2048`, so the workers of
+#     one target can use up to 8 x 2 GiB. Plan for >= 16 GiB available to the
+#     runner, or lower the `jobs` input.
+# No persistent corpus directory is needed: the job points
+# FREMINAL_FUZZ_CORPUS_DIR at a directory under the runner's temp dir itself.
+#
+# Deliberately NOT used on the self-hosted runner:
+#   * DeterminateSystems/determinate-nix-action -- nix is already installed.
+#   * DeterminateSystems/magic-nix-cache-action -- several runners on one
+#     host would fight over the cache daemon's port.
+#   * Swatinem/rust-cache -- the runner should be registered non-ephemeral, so
+#     its work directory (with `target/` and `fuzz/target/`) survives between
+#     jobs and spares a cold build. That is only an optimisation: if the work
+#     directory is wiped (for example when the NixOS runner unit restarts) the
+#     next job pays one cold build and nothing else is lost, because the
+#     corpus comes from the corpus repository, not from this machine.
+#
+# SCHEDULING. The runner shares fredhub with the NixOS fleet's self-hosted CI,
+# which burns every core. Observed load there (UTC; fredhub's own timers run
+# on America/Denver time):
+#   * 08:00-13:10 -- the automated update workflows (opencode, syncclipboard,
+#     apple fonts, weekly flake bump) open PRs that trigger fleet builds; their
+#     crons say 03:30-06:00 but GitHub starts them 4-8 h late;
+#   * 09:15-10:45 -- nix gc / optimise (03:15 / 03:45 local);
+#   * Mon 13:00-16:30 -- cve-scan, which has run for up to 7 h;
+#   * 15:00-21:00 and around 00:00 -- interactive PR / merge-queue builds.
+# The quiet window is about 01:00-08:00 UTC, and a run takes about 4 h, so it
+# starts at 01:07 (off the top of the hour, where GitHub's schedule delays are
+# worst) and must END by 07:30. Because the cron start cannot be trusted, the
+# "Fit into the quiet window" step enforces that end: a late scheduled run
+# scales every target's time down proportionally and skips when less than a
+# quarter of the plan would fit. Manual dispatches are not limited.
+#
+# TIME PLAN. Minutes per target come from `fuzz/nightly-plan.txt` (weighted
+# by measured coverage growth: targets still finding new code get more time,
+# plateaued ones a short top-up). A manual dispatch may override it with one
+# uniform `minutes_per_target`. As a second layer,
+# the runner's systemd unit runs at the lowest CPU and I/O priority, so the
+# fleet builds win if anything still overlaps.
+name: Fuzz (nightly)
+
+on:
+  schedule:
+    # 01:07 UTC = 19:07 MDT / 18:07 MST. See SCHEDULING above.
+    - cron: "7 1 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes_per_target:
+        description: "Uniform minutes per target (empty: use fuzz/nightly-plan.txt)"
+        type: string
+        default: ""
+      jobs:
+        description: "Parallel fuzz workers per target"
+        type: string
+        default: "8"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz all targets
+    if: github.repository == 'fredsystems/freminal'
+    runs-on: [self-hosted, Linux, freminal-fuzz]
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # `persist-credentials: false`: the runner is non-ephemeral and the fuzz
+      # binaries run unsandboxed, so the token must not be left in `.git/config`
+      # where fuzzed code (or a later job) could read it. Later steps use
+      # GH_TOKEN from `env:` instead.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check runner contract
+        run: |
+          set -euo pipefail
+          if ! command -v nix > /dev/null; then
+            echo "::error::nix is not on PATH; the freminal-fuzz runner must provide it"
+            exit 1
+          fi
+
+      # Enforces the quiet window (see SCHEDULING). Outputs `skip` and
+      # `scale` (percent applied to every target's planned minutes).
+      - name: Fit into the quiet window
+        id: window
+        env:
+          EVENT: ${{ github.event_name }}
+          OVERRIDE: ${{ inputs.minutes_per_target }}
+          WINDOW_END_UTC: "07:30"
+          # Pull + cold build + push (45) plus a 10 min reporting margin; the
+          # same allowance as the time budget check in the fuzz step.
+          OVERHEAD_MIN: "55"
+          # Below a quarter of the plan a run is not worth the overlap risk.
+          MIN_SCALE: "25"
+        run: |
+          set -euo pipefail
+          targets="$(grep -c '^\[\[bin\]\]' fuzz/Cargo.toml)"
+          if [ -n "${OVERRIDE}" ]; then
+            case "${OVERRIDE}" in
+              *[!0-9]* | 0*)
+                echo "::error::minutes_per_target must be empty or a positive integer without leading zeros (got '${OVERRIDE}')"
+                exit 1
+                ;;
+            esac
+            planned=$((OVERRIDE * targets))
+          else
+            # Targets missing from the plan get 10 min in the fuzz step;
+            # count them here too, or a late run could overrun the window.
+            planned="$(awk -v targets="${targets}" '!/^#/ && NF { s += $2; n++ } END { m = targets - n; if (m < 0) m = 0; print s + m * 10 }' fuzz/nightly-plan.txt)"
+          fi
+          if [ "${EVENT}" != "schedule" ]; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            echo "scale=100" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          now="$(date -u +%s)"
+          end="$(date -u -d "today ${WINDOW_END_UTC}" +%s)"
+          available=$(((end - now) / 60 - OVERHEAD_MIN))
+          scale=100
+          if [ "${available}" -lt "${planned}" ]; then
+            scale=0
+            if [ "${available}" -gt 0 ]; then
+              scale=$((available * 100 / planned))
+            fi
+          fi
+          if [ "${scale}" -lt "${MIN_SCALE}" ]; then
+            msg="Started at $(date -u +%H:%M) UTC: only ${scale}% of the ${planned} min plan fits before ${WINDOW_END_UTC} UTC (minimum ${MIN_SCALE}%); skipping so the run does not overlap the fleet's CI window."
+            echo "::notice::${msg}"
+            echo "${msg}" >> "${GITHUB_STEP_SUMMARY}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${scale}" -lt 100 ]; then
+            echo "::notice::started late ($(date -u +%H:%M) UTC): running ${scale}% of the ${planned} min plan to finish by ${WINDOW_END_UTC} UTC"
+          fi
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+          echo "scale=${scale}" >> "${GITHUB_OUTPUT}"
+
+      # The corpus lives in a temp directory: it is a checkout of the private
+      # corpus repository, recreated by the pull step every run. Written to
+      # GITHUB_ENV because the `runner` context is not available in a job-level
+      # `env:`. Every later step (pull, fuzz, push) sees the same directory.
+      - name: Select corpus directory
+        run: |
+          set -euo pipefail
+          echo "FREMINAL_FUZZ_CORPUS_DIR=${RUNNER_TEMP}/fuzz-corpus" >> "${GITHUB_ENV}"
+
+      # Fetches the corpus from the private corpus repository. This step must
+      # succeed for the job to go on: there is deliberately no `if:` on the
+      # steps after it, so a failed pull stops the job before any fuzzing, and
+      # the push step below refuses to run (a run that started from an empty
+      # corpus by accident must not be published over the real one).
+      #
+      # Secrets are only available here because this workflow runs on
+      # `schedule` / `workflow_dispatch`, never `pull_request`. The token is
+      # given to this step only and reaches git through an inline credential
+      # helper that reads it from the environment: it is never put on a command
+      # line or written to disk (`persist-credentials: false` above likewise
+      # keeps the checkout token out of `.git/config`).
+      - name: Pull corpus
+        id: pull
+        if: steps.window.outputs.skip != 'true'
+        env:
+          FREMINAL_FUZZ_CORPUS_TOKEN: ${{ secrets.PAT }}
+        run: nix develop .#fuzz --command cargo xtask fuzz-corpus pull
+
+      # Inputs are passed through `env:` and validated here; they are never
+      # interpolated into the script text.
+      #
+      # `--sandbox none`: bubblewrap cannot create user namespaces under the
+      # runner's hardened systemd unit. That unit is the sandbox, and the
+      # trigger set above guarantees only maintainer-controlled code runs.
+      #
+      # `--on-crash keep-going` never stops on a finding, so a non-zero exit
+      # from `xtask fuzz` means infrastructure trouble (build failure, missing
+      # tool, ...). Those are recorded per target without aborting the loop
+      # and fail the job in the final step.
+      #
+      # TIME BUDGET. Every target gets its planned minutes (fuzz/nightly-plan.txt,
+      # or the uniform override), scaled by the window step, one after the
+      # other, all inside `timeout-minutes: 300`. A job killed by that timeout
+      # never reaches the steps that write findings or push the corpus, so the
+      # budget is checked BEFORE fuzzing starts and the job fails fast if it
+      # cannot fit: total minutes + 45 must be <= 290. The 290 is the 300 minute
+      # timeout less a 10 minute margin for the reporting steps; the 45 is the
+      # allowance for the work around the fuzzing that also runs inside the
+      # timeout: the pull (a small clone), the cold fuzz build, and the push
+      # step (`fuzz-corpus push` minimises every corpus, then commits and
+      # pushes). Findings are additionally written after each target, so even a
+      # run that is cut short leaves partial results.
+      - name: Fuzz all targets
+        if: steps.window.outputs.skip != 'true'
+        env:
+          OVERRIDE: ${{ inputs.minutes_per_target }}
+          SCALE: ${{ steps.window.outputs.scale }}
+          JOBS: ${{ inputs.jobs || '8' }}
+          FREMINAL_FUZZ_ARTIFACTS_DIR: ${{ runner.temp }}/fuzz-artifacts
+        run: |
+          set -euo pipefail
+
+          for var in SCALE JOBS; do
+            case "${!var}" in
+              '' | *[!0-9]* | 0*)
+                echo "::error::${var} must be a positive integer without leading zeros (got '${!var}')"
+                exit 1
+                ;;
+            esac
+            # Keeps the shell arithmetic below far from overflow.
+            value="${!var}"
+            if [ "${#value}" -gt 4 ]; then
+              echo "::error::${var} must have at most 4 digits (got '${value}')"
+              exit 1
+            fi
+          done
+
+          rm -rf "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
+          mkdir -p "${FREMINAL_FUZZ_ARTIFACTS_DIR}"
+          : > "${RUNNER_TEMP}/infra-failures.txt"
+          rm -f "${RUNNER_TEMP}/findings.md" "${RUNNER_TEMP}/findings-names.txt"
+
+          nix develop .#fuzz --command bash -e -c '
+            set -euo pipefail
+
+            list="$(cargo xtask fuzz-list)"
+            mapfile -t targets <<< "${list}"
+            if [ "${#targets[@]}" -eq 0 ] || [ -z "${targets[0]}" ]; then
+              echo "::error::cargo xtask fuzz-list returned no targets"
+              exit 1
+            fi
+
+            # Minutes per target: the uniform override, or the plan file
+            # (unknown names are an error: a stale plan must be noticed;
+            # targets missing from it get 10 min), scaled by the window.
+            declare -A plan=()
+            if [ -z "${OVERRIDE}" ]; then
+              while read -r name mins; do
+                case " ${targets[*]} " in
+                  *" ${name} "*) ;;
+                  *)
+                    echo "::error::fuzz/nightly-plan.txt names unknown target ${name}"
+                    exit 1
+                    ;;
+                esac
+                plan["${name}"]="${mins}"
+              done < <(awk "!/^#/ && NF { print \$1, \$2 }" fuzz/nightly-plan.txt)
+            fi
+            declare -A minutes=()
+            total=0
+            for t in "${targets[@]}"; do
+              if [ -n "${OVERRIDE}" ]; then
+                m="${OVERRIDE}"
+              elif [ -n "${plan[${t}]:-}" ]; then
+                m="${plan[${t}]}"
+              else
+                echo "::warning::${t} is not in fuzz/nightly-plan.txt; giving it 10 min"
+                m=10
+              fi
+              m=$((m * SCALE / 100))
+              if [ "${m}" -lt 1 ]; then
+                m=1
+              fi
+              minutes["${t}"]="${m}"
+              total=$((total + m))
+            done
+
+            limit=290
+            overhead=45
+            needed=$((total + overhead))
+            if [ "${needed}" -gt "${limit}" ]; then
+              echo "::error::${total} min of fuzzing + ${overhead} min overhead = ${needed} min exceeds the ${limit} min budget; lower the plan or the override"
+              exit 1
+            fi
+
+            names="${RUNNER_TEMP}/findings-names.txt"
+            : > "${names}"
+            {
+              echo "| target | findings |"
+              echo "| --- | --- |"
+            } > "${RUNNER_TEMP}/findings.md"
+
+            for t in "${targets[@]}"; do
+              echo "::group::fuzz ${t} (${minutes[${t}]} min)"
+              if ! cargo xtask fuzz "${t}" \
+                --time "$((minutes[${t}] * 60))" \
+                --on-crash keep-going \
+                --jobs "${JOBS}" \
+                --sandbox none; then
+                echo "::error::fuzz run for ${t} failed (infrastructure)"
+                echo "${t}" >> "${RUNNER_TEMP}/infra-failures.txt"
+              fi
+              echo "::endgroup::"
+
+              # Record this target now (not after the loop) so a timeout or a
+              # later failure still leaves its findings for the reporting
+              # steps. A finding is a file libFuzzer named after its kind;
+              # these are the same prefixes xtask counts.
+              n=0
+              dir="${FREMINAL_FUZZ_ARTIFACTS_DIR}/${t}"
+              if [ -d "${dir}" ]; then
+                while IFS= read -r name; do
+                  echo "${t}/${name}" >> "${names}"
+                  n=$((n + 1))
+                done < <(
+                  find "${dir}" -maxdepth 1 -type f \
+                    \( -name "crash-*" -o -name "oom-*" -o -name "timeout-*" \
+                    -o -name "leak-*" -o -name "slow-unit-*" \) \
+                    -printf "%f\n" | LC_ALL=C sort
+                )
+              fi
+              echo "| ${t} | ${n} |" >> "${RUNNER_TEMP}/findings.md"
+            done
+          '
+
+      # Publishes the grown corpus: pull again, minimise every target, commit,
+      # push (retrying with a rebase when another run pushed meanwhile).
+      # `always()` so progress is kept even if a target had an infrastructure
+      # failure or the fuzz step failed, but only after a successful pull: with
+      # no pull there is no trustworthy checkout, and `push` would refuse it
+      # anyway. A job killed by `timeout-minutes` never reaches this step, which
+      # is what the time budget check in the fuzz step guards against.
+      #
+      # `--sandbox none` for the same reason as the fuzz step (the runner's
+      # hardened unit is the sandbox; bubblewrap cannot create user namespaces
+      # there). The token is again given to this step only and reaches git
+      # through the inline credential helper, never argv or disk.
+      - name: Push corpus
+        if: always() && steps.pull.outcome == 'success'
+        env:
+          FREMINAL_FUZZ_CORPUS_TOKEN: ${{ secrets.PAT }}
+        run: nix develop .#fuzz --command cargo xtask fuzz-corpus push --sandbox none
+
+      - name: Publish findings summary
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/findings.md" ]; then
+            {
+              echo '### Fuzz (nightly) findings'
+              echo
+              cat "${RUNNER_TEMP}/findings.md"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-nightly-findings
+          path: |
+            ${{ runner.temp }}/fuzz-artifacts
+            ${{ runner.temp }}/findings.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Only findings the tracking issue has not been told about are reported.
+      # The artifacts dir is wiped at the start of every run and an open crash
+      # is found again every night, so without this the issue would get the
+      # same comment nightly. A finding is identified by its
+      # `<target>/<basename>` line (the basename is `crash-<sha1 of the input>`,
+      # so content-addressed); it counts as already reported when that whole
+      # line appears anywhere in the open issue's body or comments. The target
+      # is part of the key so one input that crashes two targets is reported
+      # for both. Every report therefore carries the full list of
+      # `<target>/<basename>` lines in a text block, which is what the next
+      # run dedupes against. If the issue is closed (or does not exist) a new
+      # one is created and everything is reported again.
+      #
+      # The listed names are capped at 200 so the body stays far below
+      # GitHub's size limit. Names omitted by the cap are not in the issue text
+      # and so are NOT deduped: the next run reports them (the first 200 of
+      # them) as new. That is acceptable -- the cap is a safety limit, a
+      # real run is expected to find a handful of names.
+      - name: Sync tracking issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_TITLE: "Fuzzing: findings from nightly run"
+        run: |
+          set -euo pipefail
+
+          names="${RUNNER_TEMP}/findings-names.txt"
+          if [ ! -s "${names}" ]; then
+            echo "No findings; nothing to sync."
+            exit 0
+          fi
+
+          number="$(
+            gh issue list --state open \
+              --search "in:title \"${ISSUE_TITLE}\"" \
+              --json number,title \
+              | jq -r --arg title "${ISSUE_TITLE}" \
+                '[.[] | select(.title == $title)] | first | .number // empty'
+          )"
+
+          # Everything the open tracking issue already says: body + comments.
+          known="${RUNNER_TEMP}/known-issue-text.txt"
+          : > "${known}"
+          if [ -n "${number}" ]; then
+            gh issue view "${number}" --json body,comments \
+              --jq '.body, (.comments[].body)' > "${known}"
+          fi
+
+          new="${RUNNER_TEMP}/findings-new.txt"
+          : > "${new}"
+          while IFS= read -r line; do
+            if ! grep -qF -e "${line}" "${known}"; then
+              echo "${line}" >> "${new}"
+            fi
+          done < "${names}"
+
+          total="$(wc -l < "${names}" | tr -d ' ')"
+          new_total="$(wc -l < "${new}" | tr -d ' ')"
+          if [ "${new_total}" -eq 0 ]; then
+            echo "no new findings since last report (${total} finding(s) already reported)"
+            exit 0
+          fi
+
+          max_listed=200
+          listed="${RUNNER_TEMP}/findings-new-listed.txt"
+          head -n "${max_listed}" "${new}" > "${listed}"
+          omitted=$((new_total - $(wc -l < "${listed}" | tr -d ' ')))
+
+          {
+            echo "The nightly fuzz run found ${new_total} new finding(s) (${total} finding file(s) in total this run)."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "| target | new findings | findings this run |"
+            echo "| --- | --- | --- |"
+            awk -F'|' 'NR > 2 { gsub(/ /, "", $2); gsub(/ /, "", $3); print $2, $3 }' \
+              "${RUNNER_TEMP}/findings.md" \
+              | while read -r t n; do
+                new_n="$(awk -F/ -v t="${t}" '$1 == t' "${new}" | wc -l | tr -d ' ')"
+                echo "| ${t} | ${new_n} | ${n} |"
+              done
+            echo
+            echo "New findings (\`<target>/<basename>\`; later runs skip names listed here):"
+            echo
+            echo '```text'
+            cat "${listed}"
+            echo '```'
+            if [ "${omitted}" -gt 0 ]; then
+              echo
+              echo "${omitted} more new finding(s) are not listed (the list is capped at ${max_listed}); they are not recorded here, so a later run will report them again."
+            fi
+            echo
+            echo "The finding inputs are attached to the run as the \`fuzz-nightly-findings\` artifact."
+          } > "${RUNNER_TEMP}/body.md"
+
+          if [ -z "${number}" ]; then
+            gh issue create \
+              --title "${ISSUE_TITLE}" \
+              --body-file "${RUNNER_TEMP}/body.md"
+          else
+            gh issue comment "${number}" --body-file "${RUNNER_TEMP}/body.md"
+          fi
+
+      - name: Fail on infrastructure failures
+        run: |
+          if [ -s "${RUNNER_TEMP}/infra-failures.txt" ]; then
+            echo "::error::infrastructure failures recorded for: $(tr '\n' ' ' < "${RUNNER_TEMP}/infra-failures.txt")"
+            exit 1
+          fi

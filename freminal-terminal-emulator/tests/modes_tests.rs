@@ -10,7 +10,7 @@ use freminal_common::buffer_states::{
 fn default_is_autowrap_enabled() {
     let mode = Decawm::default();
     assert_eq!(mode, Decawm::AutoWrap);
-    assert_eq!(format!("{}", mode), "Autowrap Mode (DECAWM) Enabled");
+    assert_eq!(format!("{mode}"), "Autowrap Mode (DECAWM) Enabled");
 }
 
 #[test]
@@ -47,12 +47,12 @@ fn display_and_debug_match_expected_strings() {
     let query = Decawm::Query;
 
     // Display
-    assert_eq!(format!("{}", no_auto), "Autowrap Mode (DECAWM) Disabled");
-    assert_eq!(format!("{}", auto), "Autowrap Mode (DECAWM) Enabled");
-    assert_eq!(format!("{}", query), "Autowrap Mode (DECAWM) Query");
+    assert_eq!(format!("{no_auto}"), "Autowrap Mode (DECAWM) Disabled");
+    assert_eq!(format!("{auto}"), "Autowrap Mode (DECAWM) Enabled");
+    assert_eq!(format!("{query}"), "Autowrap Mode (DECAWM) Query");
 
     // Debug should include variant names
-    let dbg = format!("{:?} {:?} {:?}", no_auto, auto, query);
+    let dbg = format!("{no_auto:?} {auto:?} {query:?}");
     assert!(dbg.contains("NoAutoWrap"));
     assert!(dbg.contains("AutoWrap"));
     assert!(dbg.contains("Query"));

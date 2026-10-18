@@ -20,14 +20,13 @@ fn test_cub_normal_and_default_param() {
     println!("Testing ESC[D (CUB)");
     let outputs = push_seq("\x1b[3D");
     for o in &outputs {
-        println!("variant: {:?}", o);
+        println!("variant: {o:?}");
     }
     assert!(
         outputs
             .iter()
             .any(|o| matches!(o, TerminalOutput::SetCursorPosRel { .. })),
-        "Expected SetCursorPosRel variant, got: {:?}",
-        outputs
+        "Expected SetCursorPosRel variant, got: {outputs:?}"
     );
 
     // Default param
@@ -46,14 +45,13 @@ fn test_cuu_normal_and_default_param() {
     println!("Testing ESC[A (CUU)");
     let outputs = push_seq("\x1b[4A");
     for o in &outputs {
-        println!("variant: {:?}", o);
+        println!("variant: {o:?}");
     }
     assert!(
         outputs
             .iter()
             .any(|o| matches!(o, TerminalOutput::SetCursorPosRel { .. })),
-        "Expected SetCursorPosRel variant, got: {:?}",
-        outputs
+        "Expected SetCursorPosRel variant, got: {outputs:?}"
     );
 
     // Default param
@@ -76,13 +74,12 @@ fn test_dch_valid_and_invalid() {
         outputs
             .iter()
             .any(|o| matches!(o, TerminalOutput::Delete { .. })),
-        "Expected Delete variant, got: {:?}",
-        outputs
+        "Expected Delete variant, got: {outputs:?}"
     );
 
     // Invalid param should not panic
     let outputs_invalid = push_seq("\x1b[xP");
-    println!("invalid param output: {:?}", outputs_invalid);
+    println!("invalid param output: {outputs_invalid:?}");
     assert!(
         !outputs_invalid.is_empty(),
         "Parser returned no output for invalid param"
@@ -103,7 +100,6 @@ fn test_overflow_and_empty_cases() {
     let outputs_empty = push_seq("\x1b[");
     assert!(
         outputs_empty.is_empty(),
-        "Parser produced output for incomplete sequence. Got: {:?}",
-        outputs_empty
+        "Parser produced output for incomplete sequence. Got: {outputs_empty:?}"
     );
 }

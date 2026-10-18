@@ -30,5 +30,5 @@ fn csi_invalid_sequence_sets_invalid_but_keeps_trace() {
     for &b in b"99;99;\x01X" {
         let _ = p.push(b);
     } // invalid intermediate/param byte
-    assert!(!p.trace_str().is_empty());
+    assert_ne!(p.trace_str(), "");
 }

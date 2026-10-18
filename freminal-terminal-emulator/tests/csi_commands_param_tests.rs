@@ -9,8 +9,6 @@
 //! Each parser is exercised with: empty params (default), explicit zero,
 //! an explicit value > 1, and an invalid non-numeric param.
 
-#![allow(clippy::unwrap_used)]
-
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_terminal_emulator::ansi::ParserOutcome;
 use freminal_terminal_emulator::ansi_components::csi_commands::cpl::ansi_parser_inner_csi_finished_cpl;

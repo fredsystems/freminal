@@ -233,7 +233,6 @@ pub fn format_command_duration(d: Duration) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

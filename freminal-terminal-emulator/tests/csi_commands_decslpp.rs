@@ -22,16 +22,12 @@ fn decslpp_valid_and_default() {
         "\x1b[t",   // no param → default
     ];
     for s in cases {
-        println!("DECSLPP valid case: {:?}", s);
+        println!("DECSLPP valid case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
-        assert!(
-            !outs.is_empty(),
-            "Expected output for valid DECSLPP {:?}",
-            s
-        );
+        assert!(!outs.is_empty(), "Expected output for valid DECSLPP {s:?}");
     }
 }
 
@@ -45,11 +41,10 @@ fn decslpp_overflow_and_malformed() {
     ];
     for s in bad {
         let outs = push_seq(s);
-        println!("DECSLPP malformed {:?} -> {:?}", s, outs);
+        println!("DECSLPP malformed {s:?} -> {outs:?}");
         assert!(
             std::panic::catch_unwind(|| push_seq(s)).is_ok(),
-            "Parser panicked for malformed {:?}",
-            s
+            "Parser panicked for malformed {s:?}"
         );
     }
 }
@@ -59,7 +54,7 @@ fn decslpp_recovery_after_malformed() {
     // ensure parser recovers and handles next sequence
     let seq = "\x1b[x t\x1b[24t";
     let outs = push_seq(seq);
-    println!("DECSLPP recovery outputs -> {:?}", outs);
+    println!("DECSLPP recovery outputs -> {outs:?}");
     assert!(
         outs.iter()
             .any(|o| matches!(o, TerminalOutput::Mode { .. })

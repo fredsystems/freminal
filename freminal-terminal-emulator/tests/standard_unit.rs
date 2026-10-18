@@ -29,7 +29,7 @@ fn standard_esc_starts_control_sequence() {
 
 /// Helper: build a `DcsParser` with the given sequence bytes already
 /// accumulated (simulating what the parser would accumulate after the main
-/// `FreminalAnsiParser` consumed the leading ESC and the DcsParser was
+/// `FreminalAnsiParser` consumed the leading ESC and the `DcsParser` was
 /// created with the `P` prefix byte).
 fn build_dcs_parser(sequence_bytes: &[u8]) -> DcsParser {
     let mut p = DcsParser::new();
@@ -191,8 +191,7 @@ fn full_parser_tmux_dcs_not_terminated_early() {
     assert!(
         seq.windows(inner_doubled_st.len())
             .any(|w| w == inner_doubled_st),
-        "DCS payload must contain the complete inner doubled ESC \\. Got: {:02x?}",
-        seq
+        "DCS payload must contain the complete inner doubled ESC \\. Got: {seq:02x?}"
     );
 }
 
@@ -230,8 +229,7 @@ fn full_parser_tmux_dcs_csi_inner_delivered_complete() {
     // Must contain the inner ESC ESC [ (doubled CSI introducer)
     assert!(
         seq.windows(3).any(|w| w == b"\x1b\x1b["),
-        "DCS payload must contain inner doubled ESC [. Got: {:02x?}",
-        seq
+        "DCS payload must contain inner doubled ESC [. Got: {seq:02x?}"
     );
 }
 
@@ -262,8 +260,7 @@ fn full_parser_normal_dcs_still_terminates_correctly() {
     // Should be "P$qm\x1b\"
     assert!(
         seq.starts_with(b"P$qm"),
-        "Normal DCS should contain $qm. Got: {:02x?}",
-        seq
+        "Normal DCS should contain $qm. Got: {seq:02x?}"
     );
 }
 
@@ -303,13 +300,11 @@ fn full_parser_tmux_dcs_back_to_back_doubled_esc() {
     // Must contain both inner doubled ESC sequences
     assert!(
         seq.windows(3).any(|w| w == b"\x1b\x1b["),
-        "Must contain inner doubled CSI. Got: {:02x?}",
-        seq
+        "Must contain inner doubled CSI. Got: {seq:02x?}"
     );
     assert!(
         seq.windows(3).any(|w| w == b"\x1b\x1b_"),
-        "Must contain inner doubled APC. Got: {:02x?}",
-        seq
+        "Must contain inner doubled APC. Got: {seq:02x?}"
     );
 }
 
@@ -342,8 +337,7 @@ fn full_parser_apc_basic() {
     // the content plus the trailing ST.
     assert!(
         seq.starts_with(b"_hello"),
-        "APC sequence should start with _hello. Got: {:02x?}",
-        seq
+        "APC sequence should start with _hello. Got: {seq:02x?}"
     );
 }
 
@@ -358,14 +352,13 @@ fn full_parser_apc_split_across_chunks() {
     );
 
     let result2 = parser.push(b"lo\x1b\\");
-    let apc_outputs: Vec<_> = result2
+    let apc_output_count = result2
         .iter()
         .filter(|o| matches!(o, TerminalOutput::ApplicationProgramCommand(_)))
-        .collect();
+        .count();
 
     assert_eq!(
-        apc_outputs.len(),
-        1,
+        apc_output_count, 1,
         "Expected exactly one APC output after second chunk"
     );
 }

@@ -1,0 +1,29 @@
+[notifications]
+enabled = false
+osc_9 = true
+osc_777 = true
+osc_99 = true
+on_command_finished = true
+command_finished_threshold_secs = 10.0
+routing_error = "both"
+routing_osc_text = "toast"
+routing_osc99 = "both"
+routing_command_finished = "system_when_unfocused"
+routing_clipboard_copy = "toast"
+routing_clipboard_remote = "toast"
+routing_layout = "toast"
+routing_recording = "toast"
+routing_paste_blocked = "toast"
+routing_config_reload = "toast"
+show_resize_overlay = true
+command_finished_template = "{command} finished in {duration} (exit {exit_code})"
+osc99_filters = ["app:^slack$", "type:^im\\.", "title:(?i)spam"]
+[security]
+allow_clipboard_read = false
+password_indicator = true
+[paste_guard]
+enabled = true
+multiline = true
+control_chars = true
+patterns = true
+pattern_list = [

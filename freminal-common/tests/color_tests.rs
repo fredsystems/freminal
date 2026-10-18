@@ -10,7 +10,7 @@ use std::fmt::Write;
 use std::str::FromStr;
 
 /// Shorthand for the default test theme.
-fn theme() -> &'static themes::ThemePalette {
+const fn theme() -> &'static themes::ThemePalette {
     &CATPPUCCIN_MOCHA
 }
 
@@ -447,10 +447,10 @@ proptest! {
     fn custom_color_display_roundtrip(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
         let color = TerminalColor::Custom(r, g, b);
         let text = color.to_string();
-        prop_assert!(text.starts_with("rgb(") && text.ends_with(")"));
+        prop_assert!(text.starts_with("rgb(") && text.ends_with(')'));
 
         let parts: Vec<u8> = text.trim_start_matches("rgb(")
-            .trim_end_matches(")")
+            .trim_end_matches(')')
             .split(',')
             .map(|p| p.trim().parse::<u8>().unwrap())
             .collect();

@@ -26,12 +26,12 @@ fn decrqm_private_and_regular_valid() {
     ];
 
     for s in cases {
-        println!("DECRQM case: {:?}", s);
+        println!("DECRQM case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
-        assert!(!outs.is_empty(), "DECRQM produced no output for {:?}", s);
+        assert!(!outs.is_empty(), "DECRQM produced no output for {s:?}");
         // If you emit a specific variant (e.g., TerminalOutput::ModeReport),
         // assert it here:
         // assert!(outs.iter().any(|o| matches!(o, TerminalOutput::ModeReport { .. })));
@@ -45,7 +45,7 @@ fn decrqm_malformed_graceful() {
 
     for s in bad {
         let outs = push_seq(s);
-        println!("DECRQM malformed {:?} -> {:?}", s, outs);
+        println!("DECRQM malformed {s:?} -> {outs:?}");
 
         // parser must not panic and should produce either an empty result
         // (truncated), an `Invalid` marker, or plain data.
@@ -55,9 +55,7 @@ fn decrqm_malformed_graceful() {
                     o,
                     TerminalOutput::Mode { .. } | TerminalOutput::Data(_) | TerminalOutput::Invalid
                 )),
-            "Unexpected output for malformed {:?}: {:?}",
-            s,
-            outs
+            "Unexpected output for malformed {s:?}: {outs:?}"
         );
     }
 }
@@ -97,12 +95,12 @@ fn decscusr_valid_range_and_default_and_invalid() {
     ];
 
     for s in cases {
-        println!("DECSCUSR case: {:?}", s);
+        println!("DECSCUSR case: {s:?}");
         let outs = push_seq(s);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
-        assert!(!outs.is_empty(), "DECSCUSR produced no output for {:?}", s);
+        assert!(!outs.is_empty(), "DECSCUSR produced no output for {s:?}");
         // If a dedicated variant exists (e.g., TerminalOutput::CursorStyle),
         // assert that here.
     }
@@ -111,11 +109,10 @@ fn decscusr_valid_range_and_default_and_invalid() {
     let bad = ["\x1b[x q", "\x1b[; q"];
     for s in bad {
         let outs = push_seq(s);
-        println!("DECSCUSR malformed {:?} -> {:?}", s, outs);
+        println!("DECSCUSR malformed {s:?} -> {outs:?}");
         assert!(
             !outs.is_empty(),
-            "Expected some invalid/error output for malformed {:?}",
-            s
+            "Expected some invalid/error output for malformed {s:?}"
         );
     }
 

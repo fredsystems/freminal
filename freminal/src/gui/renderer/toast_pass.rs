@@ -388,7 +388,6 @@ fn push_toast_quad(out: &mut Vec<f32>, q: &ToastQuad) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         SHADOW_MARGIN_PX, TOAST_VERTEX_FLOATS, ToastQuad, VERTS_PER_QUAD, build_toast_verts,

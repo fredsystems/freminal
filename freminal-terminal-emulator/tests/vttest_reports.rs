@@ -16,8 +16,6 @@
 //! - DA2 (secondary device attributes)
 //! - DECRQM for a selection of implemented DEC private modes
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -467,7 +465,7 @@ fn da3_response_is_valid_dcs_unit_id() {
     let hex_part = &inner[2..];
     assert_eq!(hex_part.len(), 8, "DA3 unit ID must be exactly 8 hex chars");
     assert!(
-        hex_part.iter().all(|b| b.is_ascii_hexdigit()),
+        hex_part.iter().all(u8::is_ascii_hexdigit),
         "DA3 unit ID must be 8 valid hex digits, got: {hex_part:?}"
     );
 }

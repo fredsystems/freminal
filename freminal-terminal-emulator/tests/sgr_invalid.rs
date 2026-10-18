@@ -67,8 +67,7 @@ fn sgr_incomplete_then_valid_parses_normally() {
     // The parser should not panic and should emit *something* (even if Invalid or Data)
     assert!(
         !outputs.is_empty(),
-        "parser produced no output after incomplete+valid; expected graceful handling, got {:?}",
-        outputs
+        "parser produced no output after incomplete+valid; expected graceful handling, got {outputs:?}"
     );
 }
 

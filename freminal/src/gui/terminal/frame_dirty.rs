@@ -1087,7 +1087,6 @@ pub(super) fn evaluate_frame_dirty_state(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod evaluate_frame_dirty_state_tests {
     //! Unit tests for [`evaluate_frame_dirty_state`] (Task 122.11), calling
     //! the real decision function rather than re-implementing its boolean

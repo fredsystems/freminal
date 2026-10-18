@@ -92,7 +92,8 @@ GUI Thread (eframe update() -- pure render, NO mutation)
 
 - **`xtask`**: build and CI orchestration. Not production code.
   `anyhow` / `color-eyre` are acceptable here. Subcommands: `ci`,
-  `build`, `check`, `lint`, `test`, `coverage`, `deny`, `machete`.
+  `build`, `check`, `check-windows`, `lint`, `test`, `coverage`, `deny`,
+  `machete`, `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
 
 ## Conventions tied to architecture
 

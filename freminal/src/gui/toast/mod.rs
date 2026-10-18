@@ -1292,7 +1292,6 @@ impl ToastStack {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::gui::toast::test_support::SETTLED_ANIM;

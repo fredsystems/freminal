@@ -76,7 +76,6 @@ const fn hex_val(b: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::buffer_states::{
         ftcs::{FtcsMarker, FtcsState, PromptKind},

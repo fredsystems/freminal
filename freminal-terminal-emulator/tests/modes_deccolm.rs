@@ -13,7 +13,7 @@ fn push_seq(seq: &str) -> Vec<TerminalOutput> {
 fn deccolm_enable_disable() {
     let enable = push_seq("\x1b[?3h");
     let disable = push_seq("\x1b[?3l");
-    println!("DECCOLM enable {:?} disable {:?}", enable, disable);
+    println!("DECCOLM enable {enable:?} disable {disable:?}");
     assert!(
         enable
             .iter()

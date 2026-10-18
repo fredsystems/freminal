@@ -274,7 +274,6 @@ impl PaneDamageRect {
 
 #[cfg(test)]
 mod cursor_damage_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::PaneDamageRect;
 
     // All expectations below include the 1px safety pad applied outward on

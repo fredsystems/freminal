@@ -258,7 +258,6 @@ fn sanitize_selection(selection: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{buffer_states::modes::s8c1t::S8c1t, pty_write::PtyWrite};
 

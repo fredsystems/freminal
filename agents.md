@@ -92,8 +92,9 @@ headlines:
 - Changes must not break the lock-free architecture.
 - Respect crate dependency boundaries.
 - **Panic-free production code**: `unwrap()` / `expect()` forbidden
-  outside `#[cfg(test)]` / `tests/`. Enforced by
-  `#![deny(clippy::unwrap_used, clippy::expect_used)]`.
+  outside `#[cfg(test)]` / `tests/`. Enforced by the workspace lints in
+  the root `Cargo.toml` (`[workspace.lints.clippy]`), which every
+  first-party crate inherits.
 - **Errors must be explicit, typed, and structured.** No `anyhow` in
   library crates (`freminal-common`, `freminal-buffer`,
   `freminal-terminal-emulator`); `anyhow` / `color-eyre` OK in
@@ -163,7 +164,8 @@ The full architecture invariants and what-not-to-leak rules live in the
   snapshot. All input flows through `Sender<InputEvent>`. `ViewState`
   is owned here, never shared.
 - **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
-  `check`, `lint`, `test`, `coverage`, `deny`, `machete`.
+  `check`, `check-windows`, `lint`, `test`, `coverage`, `deny`, `machete`,
+  `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
 
 ### Terminal mode representation
 
@@ -201,18 +203,25 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 
 ### Build & test commands
 
-| Command                                                    | Purpose                                                       |
-| ---------------------------------------------------------- | ------------------------------------------------------------- |
-| `cargo xtask ci`                                           | Full CI: lint + deny + machete + build + test + bench compile |
-| `cargo xtask test`                                         | Full test suite: nextest (lib/bin/integration) + doctests     |
-| `cargo nextest run --all`                                  | Quick test run while iterating (does NOT run doctests)        |
-| `cargo clippy --all-targets --all-features -- -D warnings` | Lint with strict warnings                                     |
-| `cargo machete`                                            | Detect unused dependencies                                    |
-| `cargo bench --all`                                        | Run all benchmarks (Criterion)                                |
-| `cargo bench --no-run --all`                               | Compile benchmarks without running                            |
-| `cargo xtask coverage`                                     | Generate coverage report (lcov)                               |
-| `cargo fmt --all -- --check`                               | Check formatting                                              |
-| `cargo xtask check-windows`                                | Clippy for windows-gnu (Windows cross-check; `default` shell) |
+| Command                                                        | Purpose                                                       |
+| -------------------------------------------------------------- | ------------------------------------------------------------- |
+| `cargo xtask ci`                                               | Full CI: lint + deny + machete + build + test + bench compile |
+| `cargo xtask test`                                             | Full test suite: nextest (lib/bin/integration) + doctests     |
+| `cargo nextest run --all`                                      | Quick test run while iterating (does NOT run doctests)        |
+| `cargo clippy --all-targets --all-features -- -D warnings`     | Lint with strict warnings                                     |
+| `cargo machete`                                                | Detect unused dependencies                                    |
+| `cargo bench --all`                                            | Run all benchmarks (Criterion)                                |
+| `cargo bench --no-run --all`                                   | Compile benchmarks without running                            |
+| `cargo xtask coverage`                                         | Generate coverage report (lcov)                               |
+| `cargo fmt --all -- --check`                                   | Check formatting                                              |
+| `cargo xtask check-windows`                                    | Clippy for windows-gnu (Windows cross-check; `default` shell) |
+| `cargo deny check`                                             | Advisories, licences, bans, sources (also a required CI job)  |
+| `nix develop .#fuzz --command cargo xtask fuzz-replay`         | Replay fuzz seeds + regressions (required CI gate)            |
+| `nix develop .#fuzz --command cargo xtask fuzz <t> --time 300` | Fuzz one target for 5 minutes (see `fuzz-list`)               |
+| `nix develop .#fuzz --command cargo xtask fuzz-corpus pull`    | Fetch the persistent fuzz corpus (`push` publishes it)        |
+
+Fuzzing procedures (targets, corpus policy, sandbox, triage) are in
+`fuzz/README.md`.
 
 ### Verification suite (mandatory before "done")
 

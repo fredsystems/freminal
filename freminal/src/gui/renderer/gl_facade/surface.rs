@@ -137,8 +137,6 @@ pub const UPLOAD_METHODS: [&str; 5] = [
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::{DRAW_CALL_METHODS, GL_CALL_SURFACE, STATE_CHANGE_METHODS, UPLOAD_METHODS};
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};

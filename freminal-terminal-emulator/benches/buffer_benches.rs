@@ -16,6 +16,9 @@
 //! - Sustained output at the default 10,000-row scrollback capacity
 //!   (`handle_incoming_data()` with every line feed evicting a row), Task 125.12
 
+// Benchmark harness, not production code: unwrap/expect on setup is acceptable.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use freminal_terminal_emulator::{
     ansi::FreminalAnsiParser, interface::TerminalEmulator, state::internal::TerminalState,
@@ -100,7 +103,9 @@ fn cup_writes_payload(width: usize, height: usize) -> Vec<u8> {
     for row in 1..=height {
         let esc = format!("\x1b[{row};1H");
         out.extend_from_slice(esc.as_bytes());
-        let line: Vec<u8> = (0..width).map(|i| b'a' + (i % 26) as u8).collect();
+        let line: Vec<u8> = (0..width)
+            .map(|i| b'a' + u8::try_from(i % 26).unwrap())
+            .collect();
         out.extend_from_slice(&line);
     }
     out
@@ -111,8 +116,8 @@ fn bursty_payload() -> Vec<Vec<u8>> {
     let mut chunks = Vec::new();
     // 10 small chunks
     for i in 0u8..10 {
-        let small: Vec<u8> = (0..((i % 7) + 3) as usize)
-            .map(|j| b'a' + ((i as usize + j) % 26) as u8)
+        let small: Vec<u8> = (0..usize::from((i % 7) + 3))
+            .map(|j| b'a' + u8::try_from((usize::from(i) + j) % 26).unwrap())
             .collect();
         chunks.push(small);
     }
@@ -299,7 +304,9 @@ const KITTY_APC_CHUNK_PAYLOAD: usize = 4096;
 fn kitty_apc_chunks_payload() -> Vec<u8> {
     let mut payload = Vec::with_capacity(KITTY_APC_CHUNK_COUNT * (KITTY_APC_CHUNK_PAYLOAD + 32));
     for i in 0..KITTY_APC_CHUNK_COUNT {
-        let more = if i + 1 == KITTY_APC_CHUNK_COUNT { 0 } else { 1 };
+        // `m=1` means more chunks follow; `m=0` marks the final chunk.
+        // (`i32::from(bool)` is the form clippy::bool_to_int_with_if requires.)
+        let more = i32::from(i + 1 != KITTY_APC_CHUNK_COUNT);
         payload.extend_from_slice(b"\x1b_Ga=t,f=100,i=1,m=");
         payload.extend_from_slice(more.to_string().as_bytes());
         payload.push(b';');
@@ -572,7 +579,7 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
     let mut payload = Vec::with_capacity(10_024 * 81);
     for row in 0..10_024 {
         for col in 0..80 {
-            payload.push(b'a' + ((row + col) % 26) as u8);
+            payload.push(b'a' + u8::try_from((row + col) % 26).unwrap());
         }
         payload.push(b'\n');
     }
@@ -730,7 +737,7 @@ fn bench_sustained_output_at_capacity(c: &mut Criterion) {
     let mut fill = Vec::with_capacity(FILL_LINES * 82);
     for row in 0..FILL_LINES {
         for col in 0..80 {
-            fill.push(b'a' + ((row + col) % 26) as u8);
+            fill.push(b'a' + u8::try_from((row + col) % 26).unwrap());
         }
         fill.extend_from_slice(b"\r\n");
     }
@@ -913,6 +920,8 @@ fn bench_alt_screen_transition_e2e(c: &mut Criterion) {
 // ---------------------------------------------------------------
 fn bench_scrollback_memory_realworld(c: &mut Criterion) {
     const LINES: usize = 5_000;
+    // Bytes fed per `handle_incoming_data` call below (~one PTY read burst).
+    const CHUNK_BYTES: usize = 4096;
 
     type CorpusGen = fn(usize) -> Vec<u8>;
     let corpora: &[(&str, CorpusGen)] = &[
@@ -934,7 +943,6 @@ fn bench_scrollback_memory_realworld(c: &mut Criterion) {
         // stale cache a 100k-line scrollback showed in the live app), giving
         // falsely optimistic numbers. ~4 KB per chunk approximates a PTY read
         // burst.
-        const CHUNK_BYTES: usize = 4096;
         let build = || {
             let mut emulator = TerminalEmulator::dummy_for_bench();
             emulator.internal.set_win_size(80, 24, 8, 16);

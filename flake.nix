@@ -241,6 +241,11 @@
               "typos.toml"
               "\\.bin$"
               "assets/"
+              # Fuzz inputs are exact byte sequences (CR/LF, NUL, trailing
+              # whitespace and binary FREC/CompactRow encodings are the point);
+              # text fixers must never rewrite them.
+              "^fuzz/seeds/"
+              "^fuzz/regressions/"
             ];
 
             # The shared base + rust modules, exactly as mkCheck would build
@@ -306,6 +311,14 @@
             let
               pkgs = import nixpkgs { inherit system; };
 
+              # nixpkgs with the rust-overlay applied, for the toolchains that
+              # are NOT the mkRustCheck/CI one (the Windows cross-check
+              # toolchain and the `fuzz` shell's nightly).
+              rustPkgs = import nixpkgs {
+                inherit system;
+                overlays = [ rust-overlay.overlays.default ];
+              };
+
               # ---------------------------------------------------------------
               # Windows cross-CHECK toolchain (dev-shell only; NEVER in `ci`).
               #
@@ -324,10 +337,6 @@
               # CI toolchain is untouched.
               windowsCheck =
                 let
-                  rustPkgs = import nixpkgs {
-                    inherit system;
-                    overlays = [ rust-overlay.overlays.default ];
-                  };
                   # A stable toolchain that also carries the windows-gnu target's
                   # std. Kept as its own toolchain (not shadowing the CI/default
                   # cargo) and only invoked explicitly via `xtask check-windows`.
@@ -547,6 +556,16 @@
                 __EGL_VENDOR_LIBRARY_FILENAMES = "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
               };
 
+              # Pinned nightly for the `fuzz` shell.  cargo-fuzz needs nightly
+              # for `-Zsanitizer=address` and libFuzzer instrumentation.  The
+              # date is pinned (never `latest`) so a `nix flake update` cannot
+              # silently move the fuzz toolchain; bumping it is a deliberate
+              # edit to this one binding.  The date must exist in the locked
+              # rust-overlay revision (manifests/nightly/<year>/<date>.nix);
+              # if it does not, evaluation fails with a missing-attribute error.
+              fuzzNightlyDate = "2026-09-28";
+              fuzzToolchain = rustPkgs.rust-bin.nightly.${fuzzNightlyDate}.default;
+
               # Shared shell builder.  `extraTools` and `extraEnv` are the only
               # axes on which the `default` and `ci` shells differ.
               mkFreminalShell =
@@ -597,6 +616,43 @@
               # shell, which would silently slow every unrelated check in `ci`
               # and cripple an interactively-run `freminal` from `default`.
               gl-pixel = mkFreminalShell glPixelTools glPixelEnv;
+
+              # Fuzzing shell (issue 553): cargo-fuzz plus a pinned-date nightly
+              # toolchain, and on Linux bubblewrap to sandbox fuzz runs.
+              #
+              # Separate from `default` and `ci` by maintainer decision: fuzzing
+              # tooling does not belong in the everyday shell, and a nightly
+              # compiler must never be what `cargo` resolves to there.
+              #
+              # Deliberately NOT built with `mkFreminalShell`.  That builder puts
+              # the stable toolchain from `extraDev` (the pre-commit module's
+              # devPackages) on PATH, and cargo-fuzz invokes whatever `cargo` is
+              # first on PATH, so nightly must be the ONLY cargo here.  Nightly
+              # is pinned by date (see `fuzzNightlyDate`) so fuzz builds are
+              # reproducible across `nix flake update`.
+              #
+              # bubblewrap: the end-to-end terminal-state fuzz target can drive
+              # kitty graphics `t=f` / `t=t` / `t=s` transmission, which reads
+              # arbitrary absolute paths and deletes kitty-marked temp files and
+              # shm segments.  Fuzz runs are therefore wrapped in `bwrap` with a
+              # private /tmp and /dev/shm.  bubblewrap is Linux-only.
+              #
+              # No C toolchain is added: mkShell's stdenv already provides the
+              # `cc` that libfuzzer-sys compiles libFuzzer with.  No `git` is
+              # added either: freminal-terminal-emulator/build.rs falls back to
+              # "unknown" when `git describe` fails.  `CARGO_BUILD_FEATURES` is
+              # not set: it is not a cargo setting, and no workspace crate
+              # declares a `playback` feature any more, so it is dead weight in
+              # the other shells too and is not carried over here.
+              fuzz = pkgs.mkShell {
+                buildInputs = [
+                  fuzzToolchain
+                  pkgs.cargo-fuzz
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                  pkgs.bubblewrap
+                ];
+              };
             };
         }) systems
       );

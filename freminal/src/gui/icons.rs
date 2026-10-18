@@ -196,7 +196,6 @@ pub fn standard_icon_glyph(name: &str) -> Option<ChromeIcon> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::gui::font_manager::bundled_regular_font_bytes;

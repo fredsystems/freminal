@@ -12,10 +12,10 @@ fn standard_invalid_and_control_bytes() {
     let mut p = StandardParser::default();
     // mix invalid and control bytes: the first (NUL) is not a valid
     // intermediate, so the parser goes invalid and retains nothing.
-    for &b in [0x00u8, 0xffu8, 0x1bu8, b'A', 0x9bu8].iter() {
+    for &b in &[0x00u8, 0xffu8, 0x1bu8, b'A', 0x9bu8] {
         let _ = p.push(b);
     }
-    assert!(p.trace_str().is_empty());
+    assert_eq!(p.trace_str(), "");
     // sanity: no panic
 }
 
@@ -25,7 +25,7 @@ fn standard_partial_escape_then_text() {
     // The real parser never forwards the leading ESC to the sub-parser, so
     // the partial escape is `(` (a charset intermediate) followed by text.
     let _ = p.push(b'(');
-    for &b in b"Hello".iter() {
+    for &b in b"Hello" {
         let _ = p.push(b);
     }
     assert!(p.trace_str().starts_with('('));

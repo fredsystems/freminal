@@ -1827,7 +1827,6 @@ struct CellMetrics {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Reference line-height factor for the layout tests: mirrors the runtime
@@ -1885,7 +1884,6 @@ mod tests {
     // actually needs the extra headroom.
 
     #[test]
-    #[allow(clippy::unwrap_used)]
     fn cell_height_includes_win_metrics() {
         use swash::{FontRef, TableProvider, tag_from_bytes};
 

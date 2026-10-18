@@ -2,6 +2,9 @@
 resolver = "3"
 members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator", "freminal-windowing", "portable-pty", "xtask"]
 default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator"]
+# `fuzz/` is a standalone cargo-fuzz crate (nightly + sanitizers, its own
+# `[workspace]` and `Cargo.lock`); keep it out of this workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.13.0-beta.1"
@@ -85,7 +88,6 @@ rustybuzz = "0.20.1"
 self_cell = "1.3.0"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_repr = "0.1.21"
 serial2 = "0.2.38"
 shared_library = "0.1.9"
 shell-words = "1.1.1"
@@ -124,6 +126,56 @@ zbus = { version = "5.19.0", default-features = false, features = ["async-io", "
 
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]
+
+# Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
+# does NOT: it is vendored from wezterm and stays out of the workspace lint
+# policy so it can track upstream without lint churn.
+[workspace.lints.clippy]
+# Lint groups. Priority -1 so the individual lints below can override them.
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+all = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+
+# Panic-free production code. Test code is exempted via `clippy.toml`
+# (`allow-unwrap-in-tests` / `allow-expect-in-tests`).
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Task 70.H tripwires: explicit deny for the three cast lints that guard
+# against silent truncation/sign-loss/wrap in numeric conversions. These
+# are already part of `clippy::pedantic` above, but naming them directly
+# documents the contract and survives any future reorganization of the
+# pedantic group. All remaining `as` casts must be covered by a local
+# `#[allow(...)]` with a justification comment per agents.md.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+
+# The duplicate versions are all transitive and not fixable by pinning our
+# direct dependencies (`cargo tree --workspace -d --target all -e normal,build`):
+#   - the exact-pinned egui 0.36 / winit 0.30 windowing stack: objc2 0.5/0.6
+#     and its siblings (block2, objc2-app-kit, objc2-foundation, objc2-ui-kit,
+#     objc2-core-foundation), smithay-client-toolkit 0.19/0.20, calloop
+#     0.13/0.14 and calloop-wayland-source, rustix 0.38/1 with linux-raw-sys,
+#     windows-sys 0.52-0.61 with windows-targets and the windows_* target
+#     crates, bitflags 1 (core-graphics), redox_syscall 0.4/0.5/0.9, jni-sys
+#     0.3/0.4 (ndk), downcast-rs 1 (wayland-backend);
+#   - thiserror 1 via conv2 and calloop;
+#   - getrandom 0.3 and r-efi 5/6 via ahash (egui);
+#   - miniz_oxide 0.8 via png / backtrace vs 0.9 via flate2;
+#   - syn 3 via the zbus / bon proc-macros.
+# Duplicate tracking lives in `deny.toml` (`[bans] multiple-versions = "warn"`);
+# `cargo deny check` lists them. Revisit when the windowing stack moves.
+multiple_crate_versions = "allow"
+
+# Metadata is inherited from the workspace.
+cargo_common_metadata = "allow"
 
 # Profiling profile: optimized like release but with full debuginfo and
 # without stripping, so `perf` / `cargo flamegraph` produce symbol-rich,

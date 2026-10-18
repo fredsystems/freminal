@@ -1104,3 +1104,185 @@ a test that agrees with you.
    issue #459 had deleted, and it stated precisely the hypothesis under
    investigation — a reader checking the docs would have taken a false
    confirmation of a refuted diagnosis (fixed as 124.C1).
+
+---
+
+## Workspace Lint Configuration (issue 552)
+
+### Where the lints live
+
+The clippy lint set is declared once, in `[workspace.lints.clippy]` in the root
+`Cargo.toml`, and inherited with `[lints] workspace = true` by every first-party
+crate: `freminal`, `freminal-buffer`, `freminal-common`,
+`freminal-terminal-emulator`, `freminal-windowing` and `xtask`. The crate-root
+`#![deny(...)]` blocks that used to repeat the set in every `lib.rs` / `main.rs`
+are gone. `xtask` previously lacked the `cargo`, `unwrap_used` and `expect_used`
+lints and now gets the full set. The vendored `portable-pty` crate stays opted
+out (it does not inherit workspace lints), because it is third-party code that
+we do not hold to our bar.
+
+### Why `[workspace.lints]` and not crate-root attributes
+
+Workspace lints are passed to every target of the crate (tests, integration
+tests, benches, `build.rs`). A crate-root `#![deny]` attribute only reaches the
+crate it is written in, so test and bench targets were silently held to a lower
+bar. Moving to the manifest tightened them, and the findings that surfaced in
+tests, benches and `build.rs` were fixed in the same change.
+
+### Test code and `unwrap` / `expect`
+
+`unwrap_used` and `expect_used` are denied for production code. `clippy.toml`
+sets `allow-unwrap-in-tests` and `allow-expect-in-tests`, which exempts
+`#[test]` functions and `#[cfg(test)]` code, matching the repository rule that
+`unwrap()` / `expect()` are forbidden outside tests. That exemption does not
+cover non-test helper functions inside integration-test files (`tests/`) or
+bench files (`benches/`), so those files carry a file-level `#![allow(...)]`
+with a comment saying why. Production code never does.
+
+### `multiple_crate_versions` is allowed, and where duplicates are tracked
+
+`clippy::multiple_crate_versions` (part of the `cargo` group) is explicitly
+allowed. Every duplicate crate version is **transitive** and cannot be fixed by
+changing one of our direct dependencies: they are dominated by the exact-pinned
+egui 0.36 / winit 0.30 windowing stack (objc2 0.5/0.6, smithay-client-toolkit
+0.19/0.20, calloop, rustix 0.38/1, windows-sys 0.52-0.61), plus `thiserror` 1
+via `conv2` and `getrandom` 0.3 via `ahash`. A lint that can only be satisfied
+by moving that stack would be permanently red or permanently suppressed.
+Duplicate tracking therefore moved to `deny.toml` (`[bans] multiple-versions =
+"warn"`), where `cargo deny check` lists them without failing the build.
+**Revisit when the windowing stack moves**: if the duplicates shrink
+substantially, tighten `deny.toml` to `deny` and drop the clippy allow.
+
+---
+
+## Security Tooling: Dependency Advisories and Fuzzing (issue 553)
+
+Procedures live in `fuzz/README.md`; this section records only the decisions
+and the reasons.
+
+### Dependency advisories: cargo-deny, not cargo-audit
+
+`cargo deny --locked check` runs on every pull request as the `deny` job and is
+part of the required `CI Success` gate, so a new advisory, banned crate,
+disallowed licence or unknown registry blocks the merge. Advisories also appear
+between PRs, so `security-audit.yml` runs `cargo deny --locked check
+advisories` daily against `main`. On failure it opens (or comments on) one
+tracking issue, "Security audit: cargo-deny advisories failing on main"; when a
+later run passes it comments and **closes that issue itself**, so there is at
+most one open issue and it reflects the current state.
+
+Every `ignore` entry in `deny.toml` must carry a reason that references a
+tracking issue, and is removed when the advisory is resolved. Each entry's
+reason names its issue (at the time of writing #530 for `rustybuzz` /
+`ttf-parser`, and #567 for the zbus 5 crates merged into zbus 6); `deny.toml`
+is the authoritative list.
+
+`cargo-audit` is deliberately **not** used. It reads the same RustSec advisory
+database as cargo-deny, so running both would report the same findings twice
+and add a second ignore list to keep in sync.
+
+### Fuzzing design
+
+- **Standalone crate, separate shell.** `fuzz/` is excluded from the workspace
+  and has its own `Cargo.lock`, because it needs a nightly compiler and
+  sanitizer flags that must never reach a normal build. Its toolchain is the
+  `fuzz` dev shell with a nightly pinned by date (`fuzzNightlyDate` in
+  `flake.nix`), so `nix flake update` cannot move it silently.
+- **Three kinds of input, kept apart.** `seeds/` is curated, small, committed
+  and never written by a run. `regressions/` holds minimized reproducers of
+  fixed bugs, committed with the fix. `corpus/` and `artifacts/` are local and
+  gitignored. Keeping them apart means the committed trees are deterministic
+  and a run can never rewrite them; seeds and regressions are also byte-exact,
+  so they are excluded from the pre-commit text fixers and marked `binary` in
+  `.gitattributes`.
+- **Three CI tiers.** `fuzz-replay` is **required**: it runs every seed and
+  regression file once, as an individual input (libFuzzer only names the
+  failing file in that mode), so a failure is a real regression
+  and never flaky. `fuzz-smoke` is **advisory** (`continue-on-error`): a short
+  time-boxed run is stochastic, and gating merges on a random search would make
+  CI flaky. `fuzz-nightly.yml` is the real fuzzing: it runs on a self-hosted
+  runner with `--on-crash keep-going` and a **persistent corpus** (pulled from
+  and pushed to the corpus repository, below), because coverage accumulates
+  over days and a fresh run starts from nothing otherwise. It is triggered only
+  by `schedule` and `workflow_dispatch`, never `pull_request`, since a
+  self-hosted runner on a public repository must not execute fork-controlled
+  code.
+- **The persistent corpus lives in a separate private git repository**
+  (`fredsystems/freminal-fuzz-corpus`, layout `<target>/<sha1>`), synced by
+  `cargo xtask fuzz-corpus pull|push`. Alternatives rejected:
+  - _In this repository:_ every clone and every CI checkout would fetch the
+    corpus and its ever-growing history, for data almost nobody needs.
+  - _Actions cache or artifacts:_ both are evicted or expire, which loses
+    exactly the accumulated coverage the corpus exists to keep.
+  - _The runner's disk:_ ties the corpus to one machine and one wipe of its
+    work directory. It now holds only build cache.
+
+  The corpus is small: after a 90 s run plus `fuzz-cmin`, `ansi_parser` held
+  3,286 files / 868 KB, `frec_parse` 3,284 files / 2.8 MB and `terminal_state`
+  3,262 files / 2.7 MB; individual files are hundreds of bytes to a few KB.
+  libFuzzer names a corpus file by the SHA-1 of its content, so names are
+  content-addressed: machines that find the same input add the same file and a
+  rebase never conflicts, which is what lets `push` simply rebase and retry.
+  The repository is **private** because corpus inputs sit close to the inputs
+  that crash the code, including crashes behind advisories that are still
+  open. Its history exists only to make concurrent pushes mergeable and may be
+  squashed whenever it grows. CI authenticates with the `PAT` repository
+  secret, handed to git through an inline credential helper so the token is
+  never on a command line or on disk.
+
+### Sandbox decision
+
+`terminal_state` can drive kitty graphics `t=f` / `t=t` / `t=s` transmission,
+which reads arbitrary paths and deletes kitty-marked files under `/tmp` and
+`/dev/shm`. Filtering that in the harness would mean fuzzing something other
+than the production code path, so the process is isolated instead: locally,
+`xtask` runs every fuzz binary under bubblewrap by default (read-only root,
+private `/tmp` and `/dev/shm`, no network). In CI, bubblewrap cannot create user
+namespaces on hosted runners or under the self-hosted runner's hardened systemd
+unit, so CI passes `--sandbox none` and relies on isolation that already exists:
+a disposable VM for hosted jobs, the hardened unit for the self-hosted runner
+(the nixpkgs `services.github-runners` defaults: `DynamicUser`, `PrivateTmp`,
+`PrivateDevices`, `ProtectSystem=strict`, `ProtectHome`; the runner itself is
+provisioned in the separate NixOS configuration repository).
+The runner's hardening was **deliberately not relaxed** to make bubblewrap work;
+weakening the host's isolation to enable a second layer would be a net loss.
+
+### Keep-going exit-code classification
+
+In libFuzzer fork mode the parent exits with the **last child's** exit code. A
+naive "non-zero means failure" check therefore misreports a completed keep-going
+run as broken whenever the final worker happened to hit a finding, and hides
+real infrastructure failures among the findings. `xtask` classifies the codes
+instead: 70 (timeout), 71 (out of memory) and 77 (crash) are findings (fatal in
+stop mode, a warning pointing at the artifacts in keep-going mode); 72
+(interrupt), death by signal and any other code are infrastructure failures in
+both modes. AddressSanitizer exits `1` by default, which collides with
+libFuzzer usage errors, so `ASAN_OPTIONS` gets `exitcode=77` appended and every
+sanitizer finding reports as a crash. The exit code is never the finding
+signal in keep-going mode, in either direction: after the time budget stops the
+workers, the last one usually exits `0` even when earlier ones found crashes, so
+`xtask` counts new artifact files and reports them, and the nightly workflow
+counts them too. A non-zero exit from a keep-going run means infrastructure
+trouble.
+
+### Miri: deferred
+
+Miri is **not** adopted for now. `freminal-buffer` and `freminal-common`, the
+crates whose logic is pure Rust, contain no `unsafe` in production code (the
+only `unsafe` in their `src` is `std::env::set_var` / `std::env::remove_var`
+in test modules), so Miri would have nothing to check there. The `unsafe` that
+remains is GL, mmap and other OS FFI, which Miri cannot execute. **Revisit if
+pure-Rust `unsafe` is introduced** (for example in a hot-path data structure).
+
+### AddressSanitizer is already covered
+
+cargo-fuzz builds fuzz targets with AddressSanitizer by default, so memory
+errors in any `unsafe` or FFI code **reachable from a fuzz target** are already
+detected. Code that no fuzz target reaches is not covered by this.
+
+### The fuzz crate's own dependencies
+
+`fuzz/` is outside the workspace, so the `deny` job and `security-audit.yml`
+do not see `fuzz/Cargo.lock`. That is accepted: the fuzz crate never ships, and
+its only direct dependencies beyond the workspace crates are `libfuzzer-sys`
+and `toml` (`arbitrary` is pulled in transitively by `libfuzzer-sys`).

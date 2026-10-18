@@ -1735,6 +1735,7 @@ mod tests {
     feature = "gpu-profiling"
 ))]
 mod phase_marker_tests {
+    // Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this `cfg(all(test, ...))` gate.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use egui::{Color32, LayerId, pos2, vec2};

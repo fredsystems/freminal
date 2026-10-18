@@ -1237,7 +1237,6 @@ fn build_tofu_glyphs(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use freminal_common::config::Config;
 
@@ -2506,8 +2505,6 @@ mod tests {
 /// `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
 #[cfg(test)]
 mod shaping_cache_hit_rate {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::{FormatTag, ShapingCache, ShapingCacheStats};
     use freminal_common::buffer_states::tchar::TChar;
     use freminal_common::config::Config;

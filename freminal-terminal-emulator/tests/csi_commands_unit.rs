@@ -48,7 +48,7 @@ fn csi_erase_commands() {
 fn csi_insert_delete_chars_lines() {
     for seq in ["\x1b[3P", "\x1b[4@", "\x1b[2L", "\x1b[2M", "\x1b[3X"] {
         let p = feed(seq);
-        assert!(!p.trace_str().is_empty());
+        assert_ne!(p.trace_str(), "");
     }
 }
 
@@ -70,5 +70,5 @@ fn csi_sgr_edge_cases() {
 #[test]
 fn csi_invalid_final_and_param_overflow() {
     let p = feed("\x1b[999999999999999999999Z"); // invalid final with huge param
-    assert!(!p.trace_str().is_empty());
+    assert_ne!(p.trace_str(), "");
 }

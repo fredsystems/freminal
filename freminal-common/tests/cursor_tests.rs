@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-#![allow(clippy::unwrap_used)]
-
 use freminal_common::buffer_states::cursor::{CursorPos, CursorState, ReverseVideo, StateColors};
 use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
 use freminal_common::buffer_states::line_wrap::LineWrap;

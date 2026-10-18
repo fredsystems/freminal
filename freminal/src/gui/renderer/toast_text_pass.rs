@@ -703,7 +703,6 @@ const fn pack_glyph_instance(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     #[allow(unused_imports)] // referenced in the `measure` tests below.
     use super::{

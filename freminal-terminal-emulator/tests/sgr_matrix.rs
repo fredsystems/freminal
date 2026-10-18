@@ -41,18 +41,12 @@ fn sgr_single_attributes() {
 
     for s in singles {
         let outs = push_seq(s);
-        println!("SGR single {:?} -> {:?}", s, outs);
-        assert!(
-            !outs.is_empty(),
-            "SGR single produced no output for {:?}",
-            s
-        );
+        println!("SGR single {s:?} -> {outs:?}");
+        assert!(!outs.is_empty(), "SGR single produced no output for {s:?}");
         // If your enum has TerminalOutput::Sgr { .. }, assert it:
         assert!(
             outs.iter().any(|o| matches!(o, TerminalOutput::Sgr { .. })),
-            "Expected Sgr variant for {:?}, got {:?}",
-            s,
-            outs
+            "Expected Sgr variant for {s:?}, got {outs:?}"
         );
     }
 }
@@ -70,12 +64,10 @@ fn sgr_combined_attributes() {
 
     for s in combos {
         let outs = push_seq(s);
-        println!("SGR combo {:?} -> {:?}", s, outs);
+        println!("SGR combo {s:?} -> {outs:?}");
         assert!(
             outs.iter().any(|o| matches!(o, TerminalOutput::Sgr { .. })),
-            "Expected Sgr variant for combo {:?}, got {:?}",
-            s,
-            outs
+            "Expected Sgr variant for combo {s:?}, got {outs:?}"
         );
     }
 }
@@ -91,12 +83,10 @@ fn sgr_256_color_fg_bg() {
     ];
     for s in cases {
         let outs = push_seq(s);
-        println!("SGR 256 {:?} -> {:?}", s, outs);
+        println!("SGR 256 {s:?} -> {outs:?}");
         assert!(
             outs.iter().any(|o| matches!(o, TerminalOutput::Sgr { .. })),
-            "Expected Sgr for 256-color {:?}, got {:?}",
-            s,
-            outs
+            "Expected Sgr for 256-color {s:?}, got {outs:?}"
         );
     }
 }
@@ -112,12 +102,10 @@ fn sgr_truecolor_fg_bg() {
     ];
     for s in cases {
         let outs = push_seq(s);
-        println!("SGR truecolor {:?} -> {:?}", s, outs);
+        println!("SGR truecolor {s:?} -> {outs:?}");
         assert!(
             outs.iter().any(|o| matches!(o, TerminalOutput::Sgr { .. })),
-            "Expected Sgr for truecolor {:?}, got {:?}",
-            s,
-            outs
+            "Expected Sgr for truecolor {s:?}, got {outs:?}"
         );
     }
 }
@@ -142,14 +130,14 @@ fn sgr_malformed_and_recovery() {
     ];
     for (s, expected) in bad {
         let outs = push_seq(s);
-        println!("SGR malformed {:?} -> {:?}", s, outs);
-        assert_eq!(outs, expected, "unexpected output for malformed {:?}", s);
+        println!("SGR malformed {s:?} -> {outs:?}");
+        assert_eq!(outs, expected, "unexpected output for malformed {s:?}");
     }
 
     // `ESC [ x y z m` is not an SGR (`x` is DECREQTPARM); it must still
     // produce some output rather than vanish.
     let garbage = push_seq("\x1b[xyzm");
-    println!("SGR garbage -> {:?}", garbage);
+    println!("SGR garbage -> {garbage:?}");
     assert!(
         !garbage.is_empty(),
         "Expected some output for garbage params"
@@ -157,7 +145,7 @@ fn sgr_malformed_and_recovery() {
 
     // Recovery: after malformed inputs, a valid chain should still parse fine.
     let rec = push_seq("\x1b[38;5m\x1b[1;4m\x1b[0m");
-    println!("SGR recovery -> {:?}", rec);
+    println!("SGR recovery -> {rec:?}");
     assert!(
         rec.iter().any(|o| matches!(o, TerminalOutput::Sgr { .. })),
         "Expected Sgr during recovery sequence"

@@ -3164,7 +3164,6 @@ fn show_theme_preview(ui: &mut Ui, theme: &themes::ThemePalette) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

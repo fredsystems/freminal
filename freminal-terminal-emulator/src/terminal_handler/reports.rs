@@ -94,7 +94,6 @@ impl TerminalHandler {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::terminal_handler::TerminalHandler;
     use freminal_common::pty_write::PtyWrite;

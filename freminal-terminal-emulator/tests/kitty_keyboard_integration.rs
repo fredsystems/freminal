@@ -9,8 +9,6 @@
 //! the bytes the PTY receives back, following the pattern in
 //! `terminal_state_tests.rs`.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
@@ -148,7 +146,7 @@ fn set_and_not_clears_bits() {
     assert_eq!(response, b"\x1b[?5u", "7 AND-NOT 2 = 5");
 }
 
-/// Pushing 257 times should not exceed MAX_STACK_DEPTH (256); query should
+/// Pushing 257 times should not exceed `MAX_STACK_DEPTH` (256); query should
 /// return the last pushed value.
 #[test]
 fn push_exceeds_max_depth_evicts_oldest() {

@@ -19,7 +19,7 @@ fn test_enable_disable_known_modes() {
     println!("Testing DECCOLM enable/disable");
     let enable_outputs = push_seq("\x1b[?3h");
     for o in &enable_outputs {
-        println!("enable variant: {:?}", o);
+        println!("enable variant: {o:?}");
     }
     assert!(
         enable_outputs
@@ -30,7 +30,7 @@ fn test_enable_disable_known_modes() {
 
     let disable_outputs = push_seq("\x1b[?3l");
     for o in &disable_outputs {
-        println!("disable variant: {:?}", o);
+        println!("disable variant: {o:?}");
     }
     assert!(
         disable_outputs
@@ -73,7 +73,7 @@ fn test_unknown_or_invalid_modes() {
     );
 
     let outputs_invalid = push_seq("\x1b[?x3l");
-    println!("invalid mode output: {:?}", outputs_invalid);
+    println!("invalid mode output: {outputs_invalid:?}");
     assert!(
         !outputs_invalid.is_empty(),
         "Expected non-empty output on malformed mode sequence"

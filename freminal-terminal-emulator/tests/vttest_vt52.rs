@@ -36,8 +36,6 @@
 //! emulating VT52 updates **only the column** — the row is silently ignored.
 //! vttest exercises this deliberately in the box-drawing loop.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;
@@ -77,7 +75,7 @@ const VT52_CUB: &[u8] = b"\x1bD";
 /// Build a `ESC Y <row+0x1F> <col+0x1F>` direct-cursor-address sequence.
 ///
 /// `row` and `col` are 1-indexed (as vttest uses them).
-fn vt52cup(row: u8, col: u8) -> [u8; 4] {
+const fn vt52cup(row: u8, col: u8) -> [u8; 4] {
     [b'\x1b', b'Y', row + 0x1F, col + 0x1F]
 }
 
@@ -690,6 +688,12 @@ fn vt52_exit_restores_ansi_mode() {
 ///
 /// The descriptive text at rows 10-13 is verified too.
 #[test]
+// Linear 1:1 replay of the vttest vt52.c box sequence with per-step
+// diagnostics; splitting it would obscure the correspondence to the
+// original script. Unlike `vttest_cursor`'s box test (whose independent
+// border / E-frame assertion groups are split into helpers), this is a
+// single ordered replay whose diagnostics depend on step order.
+#[allow(clippy::too_many_lines)]
 fn vt52_comprehensive_box_drawing() {
     let mut h = VtTestHelper::new_default();
     let max_lines: u8 = 24;
@@ -746,7 +750,7 @@ fn vt52_comprehensive_box_drawing() {
 
     // ── Step 8: Draw **Foobar at col 70 on rows 2-23 ──
     // vttest vt52.c lines 81-84
-    for i in 2u8..=max_lines - 1 {
+    for i in 2u8..max_lines {
         h.feed(&vt52cup(i, 70));
         h.feed(b"**Foobar");
     }
@@ -754,7 +758,7 @@ fn vt52_comprehensive_box_drawing() {
     // ── Step 9: Draw left side of box (bottom to top) ──
     // vttest vt52.c lines 88-93
     h.feed(&vt52cup(max_lines - 1, 10));
-    for _i in (2i16..=i16::from(max_lines) - 1).rev() {
+    for _i in (2i16..i16::from(max_lines)).rev() {
         h.feed(b"*");
         h.feed(b"\x08"); // BS
         h.feed(VT52_RI); // Reverse LineFeed
@@ -787,7 +791,7 @@ fn vt52_comprehensive_box_drawing() {
     // ── Step 12: Draw left "!" column ──
     // vttest vt52.c lines 120-125
     h.feed(&vt52cup(2, 11));
-    for _i in 2u8..=max_lines - 1 {
+    for _i in 2u8..max_lines {
         h.feed(b"!");
         h.feed(b"\x08"); // BS
         h.feed(VT52_CUD); // cursor down
@@ -796,7 +800,7 @@ fn vt52_comprehensive_box_drawing() {
     // ── Step 13: Draw right "!" column ──
     // vttest vt52.c lines 129-134
     h.feed(&vt52cup(max_lines - 1, 69));
-    for _i in (2i16..=i16::from(max_lines) - 1).rev() {
+    for _i in (2i16..i16::from(max_lines)).rev() {
         h.feed(b"!");
         h.feed(b"\x08"); // BS
         h.feed(VT52_CUU); // cursor up
@@ -806,7 +810,7 @@ fn vt52_comprehensive_box_drawing() {
     // vttest vt52.c lines 139-148
     h.feed(VT52_CUF); // cursor right
     h.feed(VT52_CUF); // cursor right
-    for i in 2u8..=max_lines - 1 {
+    for i in 2u8..max_lines {
         let adj = i % 3;
         if adj != 0 {
             h.feed(&vt52cup(i, min_cols + 1 + adj)); // OOB column
@@ -1017,13 +1021,13 @@ fn vt52_box_left_side_and_top_edge() {
     );
 
     // for (i = 70; i >= 10; i--): 61 iterations
-    for i in (10..=70).rev() {
+    for i in (10..=70_u8).rev() {
         h.feed(b"*"); // print '*'
         h.feed(VT52_CUB); // ESC D — cursor left
         if i % 2 != 0 {
             // odd i: vt52cup(max_lines + 3, i - 1) = vt52cup(27, i-1)
             // row 27 > 24 → out-of-bounds → only column updated
-            h.feed(&vt52cup(27, (i - 1) as u8));
+            h.feed(&vt52cup(27, i - 1));
         } else {
             // even i: vt52cub1() — cursor left again
             h.feed(VT52_CUB);
@@ -1042,10 +1046,7 @@ fn vt52_box_left_side_and_top_edge() {
     // Row 0 should have 61 stars from column 9 to column 69.
     let row0 = &screen[0];
     let star_count_row0 = row0.chars().filter(|&c| c == '*').count();
-    eprintln!(
-        "\nRow 0 star count: {star_count_row0}, row content: {:?}",
-        row0
-    );
+    eprintln!("\nRow 0 star count: {star_count_row0}, row content: {row0:?}");
 
     // The expected row 0 is: 9 spaces + 61 '*'s
     let expected_top = format!("{}{}", " ".repeat(9), "*".repeat(61));
@@ -1061,10 +1062,16 @@ fn vt52_box_left_side_and_top_edge() {
 /// Full vttest VT52 box-drawing test (vt52.c lines 50-148).
 ///
 /// This replicates the COMPLETE vttest VT52 box sequence including the
-/// "FooBar" fill, back-scroll test, `**Foobar` margin text, and the
+/// `"FooBar"` fill, back-scroll test, `**Foobar` margin text, and the
 /// complete 4-sided box drawing + `!` columns + margin cleanup.
 /// This ensures no setup-dependent state corruption causes incorrect rendering.
 #[test]
+// Linear 1:1 replay of the vttest vt52.c box sequence (lines 50-148);
+// splitting it would obscure the correspondence to the original script.
+// Unlike `vttest_cursor`'s box test (whose independent border / E-frame
+// assertion groups are split into helpers), this is a single ordered replay
+// whose diagnostics depend on step order.
+#[allow(clippy::too_many_lines)]
 fn vt52_box_full_sequence() {
     let mut h = VtTestHelper::new_default();
     let max_lines: u8 = 24;
@@ -1116,14 +1123,14 @@ fn vt52_box_full_sequence() {
     }
 
     // Draw "**Foobar" at column 70 on rows 2 through max_lines-1
-    for i in 2..=max_lines - 1 {
+    for i in 2..max_lines {
         h.feed(&vt52cup(i, 70));
         h.feed(b"**Foobar");
     }
 
     // === Left side of box (vt52.c lines 88-93) ===
     h.feed(&vt52cup(max_lines - 1, 10));
-    for _i in (2..=usize::from(max_lines) - 1).rev() {
+    for _i in (2..usize::from(max_lines)).rev() {
         h.feed(b"*");
         h.feed(b"\x08");
         h.feed(VT52_RI);
@@ -1151,7 +1158,7 @@ fn vt52_box_full_sequence() {
 
     // === Left ! column (vt52.c lines 120-125) ===
     h.feed(&vt52cup(2, 11));
-    for _i in 2..=usize::from(max_lines) - 1 {
+    for _i in 2..usize::from(max_lines) {
         h.feed(b"!");
         h.feed(b"\x08");
         h.feed(VT52_CUD);
@@ -1159,7 +1166,7 @@ fn vt52_box_full_sequence() {
 
     // === Right ! column (vt52.c lines 129-134) ===
     h.feed(&vt52cup(max_lines - 1, 69));
-    for _i in (2..=usize::from(max_lines) - 1).rev() {
+    for _i in (2..usize::from(max_lines)).rev() {
         h.feed(b"!");
         h.feed(b"\x08");
         h.feed(VT52_CUU);
@@ -1171,7 +1178,7 @@ fn vt52_box_full_sequence() {
     h.feed(VT52_CUF);
     h.feed(VT52_CUF);
     let min_cols: u8 = 80;
-    for i in 2..=max_lines - 1 {
+    for i in 2..max_lines {
         let adj = i % 3;
         if adj != 0 {
             h.feed(&vt52cup(i, min_cols + 1 + adj));

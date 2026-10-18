@@ -12,8 +12,6 @@
 //! - Reports clear diffs on mismatch.
 //! - Asserts cursor position.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use vttest_common::VtTestHelper;

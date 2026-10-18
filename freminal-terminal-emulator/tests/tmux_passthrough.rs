@@ -17,8 +17,6 @@
 //! Replies are never tmux-wrapped (tmux does not unwrap application-bound
 //! passthrough), so every reply asserted here is the bare reply.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_common::{
     buffer_states::{modes::decckm::Decckm, window_manipulation::WindowManipulation},
@@ -482,7 +480,7 @@ fn nested_tmux_depth_five_is_dropped() {
     let (mut state, rx) = make_state();
     state.handle_incoming_data(&tmux_nest(MARKER_CUP, 5));
     assert_eq!(cursor(&state), (0, 0), "a fifth level must have no effect");
-    assert!(replies(&rx).is_empty());
+    assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
 
     // The state is still healthy afterwards.
     state.handle_incoming_data(&tmux_nest(MARKER_CUP, 1));
@@ -733,6 +731,6 @@ fn malformed_tmux_payloads_have_no_effect() {
             before,
             "malformed payload {dcs:?} must not change the screen"
         );
-        assert!(replies(&rx).is_empty());
+        assert_eq!(replies(&rx), Vec::<Vec<u8>>::new());
     }
 }

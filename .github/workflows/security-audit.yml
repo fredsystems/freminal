@@ -1,0 +1,227 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Same toolchain as ci.yml's `deny` job: cargo-deny runs `cargo metadata`.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: "1.99.0"
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny
+
+      # cargo-deny writes its diagnostics as JSON lines on STDERR when run with
+      # `--format json`. The step classifies the outcome into `result`:
+      #   pass       -- exit 0.
+      #   advisories -- non-zero exit AND at least one error-severity diagnostic
+      #                 that is an advisory (it carries `fields.advisory`, or its
+      #                 `code` is vulnerability / unmaintained / unsound / yanked
+      #                 / notice). The sorted, unique advisory IDs go to
+      #                 `audit-ids.txt` and the human-readable output (a second,
+      #                 `--offline` run, so it sees the same database) to
+      #                 `audit.txt`.
+      #   error      -- anything else that exits non-zero: the tool itself
+      #                 failed (advisory DB fetch/network error, bad config,
+      #                 `cargo metadata` failure, ...). That says nothing about
+      #                 the advisories, so the tracking issue must not be touched.
+      # The step always exits 0; the last step fails the job on a non-pass
+      # result.
+      - name: Check advisories
+        id: audit
+        run: |
+          set +e
+          cargo deny --locked --format json check advisories \
+            > "${RUNNER_TEMP}/audit-stdout.json" 2> "${RUNNER_TEMP}/audit-stderr.jsonl"
+          status=$?
+          set -e
+
+          if [ "${status}" -eq 0 ]; then
+            echo "cargo-deny advisories check passed"
+            echo "result=pass" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # `fromjson?` skips any line that is not JSON.
+          jq -R -r '
+            fromjson?
+            | select(.type == "diagnostic")
+            | .fields
+            | select(.severity == "error")
+            | if .advisory then .advisory.id
+              elif ((.code // "") | IN("vulnerability", "unmaintained", "unsound", "yanked", "notice"))
+              then "\(.code):\(.labels[0].span // "unknown" | split(" ") | .[0:2] | join("@"))"
+              else empty end
+          ' "${RUNNER_TEMP}/audit-stderr.jsonl" > "${RUNNER_TEMP}/audit-ids.raw"
+          LC_ALL=C sort -u "${RUNNER_TEMP}/audit-ids.raw" > "${RUNNER_TEMP}/audit-ids.txt"
+
+          if [ ! -s "${RUNNER_TEMP}/audit-ids.txt" ]; then
+            echo "::error::cargo-deny failed (exit ${status}) without reporting an advisory: tool error, not an advisory finding"
+            cat "${RUNNER_TEMP}/audit-stderr.jsonl"
+            echo "result=error" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          set +e
+          cargo deny --locked --offline --color never check advisories \
+            > "${RUNNER_TEMP}/audit.txt" 2>&1
+          set -e
+          if [ ! -s "${RUNNER_TEMP}/audit.txt" ]; then
+            # Fall back to rendering the JSON diagnostics.
+            jq -R -r 'fromjson? | select(.type == "diagnostic") | .fields | "\(.severity): \(.message)"' \
+              "${RUNNER_TEMP}/audit-stderr.jsonl" > "${RUNNER_TEMP}/audit.txt"
+          fi
+          cat "${RUNNER_TEMP}/audit.txt"
+          echo "result=advisories" >> "${GITHUB_OUTPUT}"
+
+      # Only the scheduled / manual run ON MAIN may touch the tracking issue: a
+      # manual dispatch on another branch still runs the check (the result is
+      # in the log and fails the job) but must not report "failing on main".
+      #
+      # Comment policy for an existing issue. Every report contains one line
+      # `Advisory IDs: <sorted, space-separated ids>`. The LAST such line in the
+      # issue body and comments is the set last reported. A new comment is
+      # posted only if the current set differs from it, naming the IDs that were
+      # added and the ones no longer reported; an unchanged set stays silent. A
+      # missing marker line counts as an empty set, so the first run against an
+      # issue without one comments once. A tool error never reaches the issue.
+      - name: Sync tracking issue
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ steps.audit.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ISSUE_TITLE: "Security audit: cargo-deny advisories failing on main"
+        run: |
+          set -euo pipefail
+
+          if [ "${RESULT}" = "error" ]; then
+            echo "cargo-deny failed for a reason other than an advisory; leaving the tracking issue untouched"
+            exit 0
+          fi
+
+          number="$(
+            gh issue list --state open \
+              --search "in:title \"${ISSUE_TITLE}\"" \
+              --json number,title \
+              | jq -r --arg title "${ISSUE_TITLE}" \
+                '[.[] | select(.title == $title)] | first | .number // empty'
+          )"
+
+          if [ "${RESULT}" = "pass" ]; then
+            if [ -n "${number}" ]; then
+              gh issue comment "${number}" --body "Resolved as of run ${RUN_URL}"
+              gh issue close "${number}"
+            fi
+            exit 0
+          fi
+
+          # Anything other than pass / error / advisories means the check step
+          # did not record a result: never close or comment on the issue then.
+          if [ "${RESULT}" != "advisories" ]; then
+            echo "::error::unexpected audit result '${RESULT}'; leaving the tracking issue untouched"
+            exit 1
+          fi
+
+          current="${RUNNER_TEMP}/audit-ids.txt"
+          reported="${RUNNER_TEMP}/audit-ids-reported.txt"
+          added="${RUNNER_TEMP}/audit-ids-added.txt"
+          removed="${RUNNER_TEMP}/audit-ids-removed.txt"
+          : > "${reported}"
+
+          if [ -n "${number}" ]; then
+            gh issue view "${number}" --json body,comments \
+              --jq '.body, (.comments[].body)' > "${RUNNER_TEMP}/known-issue-text.txt"
+            last="$(tr -d '\r' < "${RUNNER_TEMP}/known-issue-text.txt" \
+              | grep '^Advisory IDs:' | tail -n 1 || true)"
+            printf '%s\n' "${last#Advisory IDs:}" | tr ' ' '\n' | sed '/^$/d' \
+              | LC_ALL=C sort -u > "${reported}"
+          fi
+
+          LC_ALL=C comm -13 "${reported}" "${current}" > "${added}"
+          LC_ALL=C comm -23 "${reported}" "${current}" > "${removed}"
+
+          if [ -n "${number}" ] && [ ! -s "${added}" ] && [ ! -s "${removed}" ]; then
+            echo "advisory set unchanged since the last report; not commenting"
+            exit 0
+          fi
+
+          # Space-separated contents of an ID list file, or `none` if empty.
+          join_ids() {
+            if [ -s "$1" ]; then
+              tr '\n' ' ' < "$1" | sed 's/ $//'
+            else
+              printf 'none'
+            fi
+          }
+
+          limit=60000
+          head -c "${limit}" "${RUNNER_TEMP}/audit.txt" > "${RUNNER_TEMP}/audit-body.txt"
+          if [ "$(wc -c < "${RUNNER_TEMP}/audit.txt")" -gt "${limit}" ]; then
+            printf '\n... output truncated; see the run log\n' >> "${RUNNER_TEMP}/audit-body.txt"
+          fi
+
+          {
+            printf '%s\n' "\`cargo deny --locked check advisories\` failed on \`main\`."
+            printf '\n'
+            printf '%s\n' "Run: ${RUN_URL}"
+            printf '\n'
+            printf 'Advisory IDs: %s\n' "$(join_ids "${current}")"
+            if [ -n "${number}" ]; then
+              printf '\n'
+              printf 'Newly reported: %s\n' "$(join_ids "${added}")"
+              printf 'No longer reported: %s\n' "$(join_ids "${removed}")"
+            fi
+            printf '\n'
+            printf '%s\n' '````text'
+            cat "${RUNNER_TEMP}/audit-body.txt"
+            printf '%s\n' '````'
+          } > "${RUNNER_TEMP}/body.md"
+
+          if [ -z "${number}" ]; then
+            gh issue create \
+              --title "${ISSUE_TITLE}" \
+              --body-file "${RUNNER_TEMP}/body.md"
+          else
+            gh issue comment "${number}" --body-file "${RUNNER_TEMP}/body.md"
+          fi
+
+      - name: Fail if audit failed
+        env:
+          RESULT: ${{ steps.audit.outputs.result }}
+        run: |
+          case "${RESULT}" in
+            pass) ;;
+            advisories)
+              echo "cargo-deny advisories check found advisories"
+              exit 1
+              ;;
+            *)
+              echo "cargo-deny failed without reporting an advisory (result: '${RESULT}')"
+              exit 1
+              ;;
+          esac

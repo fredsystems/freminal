@@ -8,7 +8,7 @@
 //! - ESC[c (DA1)
 //! - ESC[>c (DA2, implicit param 0)
 //! - ESC[>0c / ESC[>1c (DA2, explicit param)
-//! - ESC[>0q (XTerm style version report)
+//! - ESC[>0q (`XTerm` style version report)
 //!   and malformed cases with recovery.
 
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -50,18 +50,16 @@ fn report_xtversion_and_device_attributes() {
     ];
 
     for (seq, desc, expected) in cases {
-        println!("Testing {:?}: {}", seq, desc);
+        println!("Testing {seq:?}: {desc}");
         let outs = push_seq(seq);
         for o in &outs {
-            println!("variant: {:?}", o);
+            println!("variant: {o:?}");
         }
 
         // Parser should never panic
         assert!(
             std::panic::catch_unwind(|| push_seq(seq)).is_ok(),
-            "Parser panicked for {} ({:?})",
-            desc,
-            seq
+            "Parser panicked for {desc} ({seq:?})"
         );
 
         // Expect exactly one of our known variants
@@ -81,10 +79,7 @@ fn report_xtversion_and_device_attributes() {
                 ) if a == b => true,
                 _ => false,
             }),
-            "Expected {:?} for {}, got {:?}",
-            expected,
-            desc,
-            outs
+            "Expected {expected:?} for {desc}, got {outs:?}"
         );
     }
 }
@@ -99,24 +94,21 @@ fn report_xtversion_malformed_and_recovery() {
 
     for s in bad {
         let outs = push_seq(s);
-        println!("XTVersion malformed {:?} -> {:?}", s, outs);
+        println!("XTVersion malformed {s:?} -> {outs:?}");
         assert!(
             std::panic::catch_unwind(|| push_seq(s)).is_ok(),
-            "Parser panicked for malformed {:?}",
-            s
+            "Parser panicked for malformed {s:?}"
         );
         // Parser may emit Invalid or nothing
         assert!(
             outs.is_empty() || outs.iter().any(|o| matches!(o, TerminalOutput::Invalid)),
-            "Expected graceful handling for malformed {:?}, got {:?}",
-            s,
-            outs
+            "Expected graceful handling for malformed {s:?}, got {outs:?}"
         );
     }
 
     // Recovery check
     let rec = push_seq("\x1b[>x\x1b[>c\x1b[>0q");
-    println!("XTVersion recovery -> {:?}", rec);
+    println!("XTVersion recovery -> {rec:?}");
     // Parser should return to stable output; expect at least one valid variant
     assert!(
         rec.iter().any(|o| matches!(
@@ -124,7 +116,6 @@ fn report_xtversion_malformed_and_recovery() {
             TerminalOutput::RequestSecondaryDeviceAttributes { .. }
                 | TerminalOutput::RequestDeviceNameAndVersion
         )),
-        "Expected valid DA2 or DeviceNameAndVersion output after recovery, got {:?}",
-        rec
+        "Expected valid DA2 or DeviceNameAndVersion output after recovery, got {rec:?}"
     );
 }

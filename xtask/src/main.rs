@@ -12,13 +12,7 @@
 //! This crate is **not** production code. `anyhow`/`color-eyre` are
 //! acceptable here.
 
-#![deny(
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::style,
-    clippy::correctness,
-    clippy::all
-)]
+mod fuzz;
 
 use std::{fmt::Debug, fs, io, process::Output, vec};
 
@@ -202,6 +196,86 @@ enum Command {
         #[arg(value_enum)]
         formats: Vec<LocalPackageFormat>,
     },
+
+    /// List the cargo-fuzz targets of the `fuzz/` crate
+    ///
+    /// Read from `fuzz/Cargo.toml`; works on stable (no fuzz shell needed).
+    #[command(visible_alias = "fl")]
+    FuzzList,
+
+    /// Fuzz one target (needs `nix develop .#fuzz`)
+    ///
+    /// Builds the target, then runs it under bubblewrap by default: the
+    /// `terminal_state` target can drive kitty file/shm transmission that
+    /// reads arbitrary paths and deletes kitty-marked files in /tmp and
+    /// /dev/shm. Pass `--sandbox none` only in disposable environments (CI).
+    /// Curated seeds in `fuzz/seeds/<target>` are read-only; new inputs go to
+    /// the working corpus and crashes to the artifacts directory.
+    #[command(visible_alias = "fz")]
+    Fuzz(fuzz::FuzzRunArgs),
+
+    /// Fuzz every target briefly, stopping each at its first finding
+    ///
+    /// Continues through all targets, prints a summary table, and exits
+    /// non-zero if any target failed.
+    #[command(visible_alias = "fs")]
+    FuzzSmoke(fuzz::FuzzSmokeArgs),
+
+    /// Replay seeds and regression inputs through every target (CI gate)
+    ///
+    /// First lints and unit-tests the `fuzz/` crate itself (`cargo fmt
+    /// --check`, `cargo clippy -D warnings`, `cargo test --lib`), the same
+    /// checks CI runs. Then runs every file under `fuzz/seeds/<target>` and
+    /// `fuzz/regressions/<target>` once, as an individual input, in sorted
+    /// order. No fuzzing happens and no seeds, regressions, corpus or artifacts
+    /// are written (building the targets writes only `fuzz/target`). Exits
+    /// non-zero if any input crashes, naming the input that did.
+    #[command(visible_alias = "fr")]
+    FuzzReplay(fuzz::FuzzReplayArgs),
+
+    /// Minimise a working corpus with libFuzzer merge
+    ///
+    /// Merges `<corpus-root>/<target>` into `<target>.cmin`, then replaces the
+    /// original with it. Takes a target name or `--all`.
+    ///
+    /// The swap parks the original as `<target>.old` and deletes it once the
+    /// merged corpus is installed. If a run is interrupted in between, the
+    /// next one restores `<target>.old` automatically when the corpus is
+    /// missing; if both exist it stops and deletes nothing, so keep the one
+    /// you want and remove the other. If only deleting `.old` fails, the
+    /// minimised corpus is already installed: delete `.old` by hand before
+    /// the next run, which refuses to start while it exists.
+    #[command(visible_alias = "fcm")]
+    FuzzCmin(fuzz::FuzzCminArgs),
+
+    /// Pull or push the working fuzz corpus via its private git repository
+    ///
+    /// The corpus root (`--corpus-root`, default `fuzz/corpus`) is the working
+    /// tree of a separate git repository (`--repo-url`, default
+    /// `https://github.com/fredsystems/freminal-fuzz-corpus.git`, branch
+    /// `main`), laid out as `<target>/<file>`. libFuzzer names files by the
+    /// SHA-1 of their content, so corpora from different machines merge
+    /// without conflicts.
+    ///
+    /// `pull` clones the repository into a missing or empty root, fast-forwards
+    /// (or rebases) an existing checkout, and adopts a pre-existing local
+    /// corpus: its files stay and are committed by the next `push`. A root
+    /// that is a checkout of another repository, or a non-empty directory
+    /// holding anything but target directories, is refused untouched.
+    ///
+    /// `push` pulls first, minimises every target's corpus (honouring
+    /// `--sandbox`), commits the result as `corpus: <host> <UTC time>` and
+    /// pushes `main`, rebasing and retrying up to three times when the remote
+    /// moved. Nothing is committed when nothing changed. A missing
+    /// `user.email` falls back to a `freminal-fuzz` identity for that one
+    /// commit; git configuration is never written.
+    ///
+    /// Authentication: with `FREMINAL_FUZZ_CORPUS_TOKEN` set (CI), remote git
+    /// commands use an inline credential helper that reads the token from the
+    /// environment (it never reaches disk or a command line) and never prompt.
+    /// Without it, your normal git credentials are used.
+    #[command(visible_alias = "fcr")]
+    FuzzCorpus(fuzz::FuzzCorpusArgs),
 }
 
 /// Linux package formats that [`package_local`] can produce.
@@ -243,6 +317,12 @@ impl Command {
             Self::Precommit => precommit(),
             Self::BumpVersion { version } => bump_version(&version),
             Self::PackageLocal { formats } => package_local(&formats),
+            Self::FuzzList => fuzz::fuzz_list(),
+            Self::Fuzz(args) => fuzz::fuzz(&args),
+            Self::FuzzSmoke(args) => fuzz::fuzz_smoke(&args),
+            Self::FuzzReplay(args) => fuzz::fuzz_replay(&args),
+            Self::FuzzCmin(args) => fuzz::fuzz_cmin(&args),
+            Self::FuzzCorpus(args) => fuzz::fuzz_corpus(&args),
         }
     }
 }
@@ -300,16 +380,16 @@ fn build() -> Result<()> {
 /// is a genuine fail-on-warning gate. This is what catches platform-specific
 /// warnings (e.g. `dead_code` for a function whose only non-test caller is
 /// behind `#[cfg(...)]` on another OS) that a warning-permissive `cargo
-/// check` would emit but not fail on. Mirrors [`lint_clippy`]'s flags.
+/// check` would emit but not fail on.
+///
+/// Lints [`LINT_PACKAGE_SCOPE`], the same packages as [`lint_clippy`], so the
+/// per-OS matrix also covers `freminal-windowing` (the crate with the most
+/// platform-specific code) and `xtask`, neither of which is a default member.
 fn check() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
-        "--all-targets",
-        "--all-features",
-        "--",
-        "-D",
-        "warnings",
-    ])
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    run_cargo(args)
 }
 
 /// Verify the workspace compiles on the MSRV toolchain.
@@ -325,11 +405,31 @@ fn check() -> Result<()> {
 ///
 /// The caller selects the toolchain (CI: `dtolnay/rust-toolchain` pinned to
 /// the `rust-version` in the workspace `Cargo.toml`).
+///
+/// Deliberately left on the workspace `default-members` rather than
+/// [`LINT_PACKAGE_SCOPE`]: this is a build check of the crates that ship on
+/// the MSRV, and `freminal` (a default member) depends on `freminal-windowing`,
+/// so that crate is compiled here as part of the shipped binary. `xtask` is
+/// build tooling that never ships and is not held to the MSRV.
 fn check_msrv() -> Result<()> {
     run_cargo(vec!["check", "--all-targets", "--all-features"])
 }
 
+/// The package selection of every lint and test gate ([`check`],
+/// [`lint_clippy`], [`fix_clippy`], [`check_windows`], [`test_libs`],
+/// [`test_docs`] and [`test_default_features`]): the whole workspace except
+/// the vendored `portable-pty`.
+///
+/// The workspace's `default-members` leave out `freminal-windowing` and
+/// `xtask`, so a bare `cargo clippy` / `cargo test` never covered them.
+/// `portable-pty` is a vendored third-party crate with its own lint and test
+/// baseline and stays excluded.
+const LINT_PACKAGE_SCOPE: [&str; 3] = ["--workspace", "--exclude", "portable-pty"];
+
 /// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
+///
+/// Lints [`LINT_PACKAGE_SCOPE`], so `freminal-windowing` (the crate with the
+/// most `#[cfg(windows)]` code) and `xtask` are covered too.
 ///
 /// Cross-checks the Windows-only `#[cfg(windows)]` code paths (portable-pty's
 /// `ConPTY` backend, the kitty shared-memory tests, etc.) from a Linux dev host,
@@ -349,8 +449,9 @@ fn check_msrv() -> Result<()> {
 /// (which points at the *outer* `cargo xtask` binary) so the chosen cargo
 /// dispatches its own matching `rustc`.
 fn check_windows() -> Result<()> {
-    let args = vec![
-        "clippy",
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend([
         "--target",
         "x86_64-pc-windows-gnu",
         "--all-targets",
@@ -358,7 +459,7 @@ fn check_windows() -> Result<()> {
         "--",
         "-D",
         "warnings",
-    ];
+    ]);
 
     match std::env::var("FREMINAL_WINDOWS_CARGO") {
         Ok(cargo) if !cargo.is_empty() => {
@@ -427,22 +528,21 @@ fn lint() -> Result<()> {
     Ok(())
 }
 
-/// Run clippy on the project
+/// Run clippy on the project: every workspace package except the vendored
+/// `portable-pty` ([`LINT_PACKAGE_SCOPE`]), warnings denied.
 fn lint_clippy() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
-        "--all-targets",
-        "--all-features",
-        "--",
-        "-D",
-        "warnings",
-    ])
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--all-targets", "--all-features", "--", "-D", "warnings"]);
+    run_cargo(args)
 }
 
-/// Fix clippy warnings in the project
+/// Fix clippy warnings in the project, over the same [`LINT_PACKAGE_SCOPE`]
+/// as [`lint_clippy`].
 fn fix_clippy() -> Result<()> {
-    run_cargo(vec![
-        "clippy",
+    let mut args = vec!["clippy"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend([
         "--all-targets",
         "--all-features",
         "--fix",
@@ -451,7 +551,8 @@ fn fix_clippy() -> Result<()> {
         "--",
         "-D",
         "warnings",
-    ])
+    ]);
+    run_cargo(args)
 }
 
 /// Check that docs build without errors using flags for docs.rs
@@ -522,12 +623,21 @@ fn test() -> Result<()> {
     Ok(())
 }
 
-/// Run doc tests for the workspace's default packages
+/// Run doc tests for [`LINT_PACKAGE_SCOPE`] (every workspace package except
+/// the vendored `portable-pty`)
 fn test_docs() -> Result<()> {
-    run_cargo(vec!["test", "--doc", "--all-features"])
+    let mut args = vec!["test"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--doc", "--all-features"]);
+    run_cargo(args)
 }
 
-/// Run lib tests for the workspace's default packages
+/// Run lib tests for [`LINT_PACKAGE_SCOPE`] (every workspace package except
+/// the vendored `portable-pty`)
+///
+/// The scope is not the workspace's `default-members`: those leave out
+/// `freminal-windowing` and `xtask`, whose tests would then never run in any
+/// gate.
 ///
 /// Runs under `cargo-nextest` (configured in `.config/nextest.toml`), which
 /// executes each test in its own process scheduled across every core and
@@ -543,15 +653,10 @@ fn test_docs() -> Result<()> {
 /// especially in the pre-commit hook.  Benchmark compilation is verified
 /// separately by `bench_compile()`.
 fn test_libs() -> Result<()> {
-    run_cargo(vec![
-        "nextest",
-        "run",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-        "--all-features",
-    ])
+    let mut args = vec!["nextest", "run"];
+    args.extend(LINT_PACKAGE_SCOPE);
+    args.extend(["--lib", "--bins", "--tests", "--examples", "--all-features"]);
+    run_cargo(args)
 }
 
 /// Compile all benchmarks without running them.
@@ -569,22 +674,27 @@ fn bench_compile() -> Result<()> {
 /// It catches `#[cfg(feature = "…")]` gating errors where code behind an
 /// optional feature flag accidentally leaks into or breaks the default build.
 /// For example, the `playback` feature gates recording/playback code; this
-/// step ensures the workspace compiles and tests pass without it.
+/// step ensures the workspace compiles and tests pass without it. Covers the
+/// same [`LINT_PACKAGE_SCOPE`] as the all-features passes.
 fn test_default_features() -> Result<()> {
     tracing::info!("running default-features pass (no optional features)");
     // Unset CARGO_BUILD_FEATURES so the Nix devshell's "playback" default
     // doesn't leak into this pass — we need to verify the code compiles and
     // passes tests with NO optional features enabled.
-    run_cargo_no_features(vec!["clippy", "--all-targets", "--", "-D", "warnings"])?;
-    run_cargo_no_features(vec![
-        "nextest",
-        "run",
-        "--lib",
-        "--bins",
-        "--tests",
-        "--examples",
-    ])?;
-    run_cargo_no_features(vec!["test", "--doc"])?;
+    let mut clippy = vec!["clippy"];
+    clippy.extend(LINT_PACKAGE_SCOPE);
+    clippy.extend(["--all-targets", "--", "-D", "warnings"]);
+    run_cargo_no_features(clippy)?;
+
+    let mut nextest = vec!["nextest", "run"];
+    nextest.extend(LINT_PACKAGE_SCOPE);
+    nextest.extend(["--lib", "--bins", "--tests", "--examples"]);
+    run_cargo_no_features(nextest)?;
+
+    let mut doc = vec!["test"];
+    doc.extend(LINT_PACKAGE_SCOPE);
+    doc.push("--doc");
+    run_cargo_no_features(doc)?;
     Ok(())
 }
 
@@ -894,7 +1004,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(_path: &std::path::Path) -> bool {
+const fn is_executable(_path: &std::path::Path) -> bool {
     true
 }
 
@@ -1032,8 +1142,12 @@ fn set_executable(path: &str) -> Result<()> {
     Ok(())
 }
 
+// The signature must match the `#[cfg(unix)]` variant above, whose chmod can
+// fail, so the shared call site (`set_executable(&appimage)?`) compiles on
+// every platform. Without the `Result` the call site would need its own cfg.
 #[cfg(not(unix))]
-fn set_executable(_path: &str) -> Result<()> {
+#[allow(clippy::unnecessary_wraps)]
+const fn set_executable(_path: &str) -> Result<()> {
     Ok(())
 }
 
@@ -1101,7 +1215,100 @@ impl ExpressionExt for duct::Expression {
 
 #[cfg(test)]
 mod tests {
-    use super::rpm_version;
+    use super::{rpm_version, Args, Command};
+    use crate::fuzz::{CrashPolicy, Sandbox};
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        // Catches duplicate subcommand aliases and malformed arg definitions.
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn fuzz_defaults_are_sandboxed_and_stop_on_crash() {
+        let args = Args::try_parse_from(["cargo xtask", "fuzz", "osc99_parse"]).unwrap();
+        let Command::Fuzz(run) = args.command else {
+            panic!("expected the fuzz subcommand");
+        };
+        assert_eq!(run.target, "osc99_parse");
+        assert_eq!(run.time, 300);
+        assert_eq!(run.env.sandbox, Sandbox::Bwrap);
+        assert_eq!(run.on_crash, CrashPolicy::Stop);
+        assert_eq!(run.jobs, 1);
+    }
+
+    #[test]
+    fn fuzz_aliases_and_flags_parse() {
+        let args = Args::try_parse_from([
+            "cargo xtask",
+            "fz",
+            "ansi_parser",
+            "--time",
+            "10",
+            "--sandbox",
+            "none",
+            "--on-crash",
+            "keep-going",
+            "--jobs",
+            "4",
+        ])
+        .unwrap();
+        let Command::Fuzz(run) = args.command else {
+            panic!("expected the fuzz subcommand");
+        };
+        assert_eq!(run.env.sandbox, Sandbox::None);
+        assert_eq!(run.on_crash, CrashPolicy::KeepGoing);
+        assert_eq!(run.jobs, 4);
+        for alias in ["fl", "fs", "fr"] {
+            assert!(
+                Args::try_parse_from(["cargo xtask", alias]).is_ok(),
+                "{alias}"
+            );
+        }
+        assert!(Args::try_parse_from(["cargo xtask", "fcm", "--all"]).is_ok());
+        assert!(Args::try_parse_from(["cargo xtask", "fcm"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fcm", "t", "--all"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz", "t", "--time", "0"]).is_err());
+    }
+
+    #[test]
+    fn fuzz_corpus_parses_actions_alias_and_options() {
+        use crate::fuzz::{CorpusAction, DEFAULT_REPO_URL};
+        let args = Args::try_parse_from(["cargo xtask", "fuzz-corpus", "pull"]).unwrap();
+        let Command::FuzzCorpus(run) = args.command else {
+            panic!("expected the fuzz-corpus subcommand");
+        };
+        assert_eq!(run.action, CorpusAction::Pull);
+        assert_eq!(run.repo_url, DEFAULT_REPO_URL);
+        assert_eq!(run.env.sandbox, Sandbox::Bwrap);
+
+        let args = Args::try_parse_from([
+            "cargo xtask",
+            "fcr",
+            "push",
+            "--repo-url",
+            "git@github.com:o/r.git",
+            "--corpus-root",
+            "/data/corpus",
+            "--sandbox",
+            "none",
+        ])
+        .unwrap();
+        let Command::FuzzCorpus(run) = args.command else {
+            panic!("expected the fuzz-corpus subcommand");
+        };
+        assert_eq!(run.action, CorpusAction::Push);
+        assert_eq!(run.repo_url, "git@github.com:o/r.git");
+        assert_eq!(
+            run.env.corpus_root,
+            std::path::PathBuf::from("/data/corpus")
+        );
+        assert_eq!(run.env.sandbox, Sandbox::None);
+
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus"]).is_err());
+        assert!(Args::try_parse_from(["cargo xtask", "fuzz-corpus", "sync"]).is_err());
+    }
 
     #[test]
     fn release_version_is_unchanged() {

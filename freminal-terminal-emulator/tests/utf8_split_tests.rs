@@ -13,8 +13,6 @@
 //! Each test constructs its own `TerminalState` — tests are hermetic and
 //! order-independent.
 
-#![allow(clippy::unwrap_used)]
-
 use crossbeam_channel::unbounded;
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
@@ -36,7 +34,7 @@ fn make_state() -> (TerminalState, crossbeam_channel::Receiver<PtyWrite>) {
 /// and every cell.  Trailing whitespace on each row is stripped; rows are joined
 /// with a single space so that multi-row content can be matched with a simple
 /// `contains()`.
-fn visible_text(state: &mut TerminalState) -> String {
+fn visible_text(state: &TerminalState) -> String {
     let rows = state.handler.buffer().rows();
     let mut parts: Vec<String> = Vec::new();
     for row in rows {
@@ -64,7 +62,7 @@ fn test_pure_ascii_no_leftover() {
         state.leftover_data.is_none(),
         "pure ASCII must leave no leftover"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains("hello world"),
         "buffer must contain 'hello world', got: {text:?}"
@@ -84,7 +82,7 @@ fn test_complete_2byte_no_leftover() {
         state.leftover_data.is_none(),
         "complete 2-byte sequence must leave no leftover"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(text.contains('é'), "buffer must contain 'é', got: {text:?}");
 }
 
@@ -110,7 +108,7 @@ fn test_2byte_split_first_byte() {
         state.leftover_data.is_none(),
         "leftover must be cleared after completing the sequence"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('é'),
         "buffer must contain 'é' after reassembly, got: {text:?}"
@@ -138,7 +136,7 @@ fn test_3byte_split_after_first() {
         state.leftover_data.is_none(),
         "leftover must be cleared after completing the 3-byte sequence"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('€'),
         "buffer must contain '€' after reassembly, got: {text:?}"
@@ -166,7 +164,7 @@ fn test_3byte_split_after_second() {
         state.leftover_data.is_none(),
         "leftover must be cleared after the final byte"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('€'),
         "buffer must contain '€' after reassembly, got: {text:?}"
@@ -194,7 +192,7 @@ fn test_4byte_split_after_first() {
         state.leftover_data.is_none(),
         "leftover must be cleared after completing the 4-byte sequence"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('😀'),
         "buffer must contain '😀' after reassembly, got: {text:?}"
@@ -222,7 +220,7 @@ fn test_4byte_split_after_second() {
         state.leftover_data.is_none(),
         "leftover must be cleared after completing the 4-byte sequence"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('😀'),
         "buffer must contain '😀' after reassembly, got: {text:?}"
@@ -250,7 +248,7 @@ fn test_4byte_split_after_third() {
         state.leftover_data.is_none(),
         "leftover must be cleared after the final byte"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('😀'),
         "buffer must contain '😀' after reassembly, got: {text:?}"
@@ -288,7 +286,7 @@ fn test_4byte_one_byte_at_a_time() {
         "after byte 4/4 leftover must be None (sequence complete)"
     );
 
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('😀'),
         "buffer must contain '😀' after one-byte-at-a-time delivery, got: {text:?}"
@@ -314,7 +312,7 @@ fn test_mixed_ascii_plus_split() {
     );
 
     // "hello" must already be visible.
-    let text_after_first = visible_text(&mut state);
+    let text_after_first = visible_text(&state);
     assert!(
         text_after_first.contains("hello"),
         "buffer must contain 'hello' after first feed, got: {text_after_first:?}"
@@ -330,7 +328,7 @@ fn test_mixed_ascii_plus_split() {
         "leftover must be cleared after completing 'é'"
     );
 
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('é'),
         "buffer must contain 'é' after second feed, got: {text:?}"
@@ -354,7 +352,7 @@ fn test_complete_multibyte_no_split() {
         state.leftover_data.is_none(),
         "complete UTF-8 string must leave no leftover"
     );
-    let text = visible_text(&mut state);
+    let text = visible_text(&state);
     assert!(
         text.contains('h') && text.contains('é') && text.contains("llo"),
         "buffer must contain 'héllo', got: {text:?}"
@@ -368,7 +366,7 @@ fn test_empty_input() {
     let (mut state, _rx) = make_state();
 
     // Record a baseline of the visible content (empty terminal).
-    let before = visible_text(&mut state);
+    let before = visible_text(&state);
 
     state.handle_incoming_data(b"");
 
@@ -377,6 +375,6 @@ fn test_empty_input() {
         "empty input must leave no leftover"
     );
 
-    let after = visible_text(&mut state);
+    let after = visible_text(&state);
     assert_eq!(before, after, "empty input must not change buffer contents");
 }

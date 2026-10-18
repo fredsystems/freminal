@@ -19,7 +19,7 @@ freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
 - No `anyhow` in library crates
 - All public APIs must have tests
 - Changes must preserve the lock-free architecture
-- Enforced: `#![deny(clippy::unwrap_used, clippy::expect_used)]`
+- Enforced via `[workspace.lints.clippy]` in the root `Cargo.toml`
 - Testing is mandatory for all new features, bug fixes, and refactors
 - Changes to rendering, PTY, or buffer code require before/after benchmarks
 - If no benchmark exists for changed code, create one

@@ -279,7 +279,6 @@ pub(super) fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use freminal_common::{
         buffer_states::{

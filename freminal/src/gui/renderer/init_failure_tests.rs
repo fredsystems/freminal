@@ -16,6 +16,7 @@
 //! each of those calls in turn. Adding a pass or an object to a renderer
 //! therefore extends the coverage with no change here.
 
+// Clippy's allow-*-in-tests only recognises a bare `#[cfg(test)]`, not this module's `cfg(all(test, ...))` gate.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::errors::GpuInitError;

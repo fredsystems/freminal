@@ -16,8 +16,6 @@
 //! `url = Some(Arc<Url>)`.  OSC 8 hyperlinks always take precedence: a base
 //! tag that already carries `url.is_some()` is never overridden.
 
-#![allow(clippy::unwrap_used)]
-
 mod vttest_common;
 
 use freminal_common::buffer_states::fonts::FontWeight;

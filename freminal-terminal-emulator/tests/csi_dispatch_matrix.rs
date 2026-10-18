@@ -62,7 +62,7 @@ struct Route {
     expected: Vec<TerminalOutput>,
 }
 
-fn route(
+const fn route(
     prefix: Option<u8>,
     intermediates: &'static [u8],
     final_byte: u8,
@@ -78,21 +78,22 @@ fn route(
     }
 }
 
-fn rel(x: Option<i32>, y: Option<i32>) -> TerminalOutput {
+const fn rel(x: Option<i32>, y: Option<i32>) -> TerminalOutput {
     TerminalOutput::SetCursorPosRel { x, y }
 }
 
-fn pos(x: Option<usize>, y: Option<usize>) -> TerminalOutput {
+const fn pos(x: Option<usize>, y: Option<usize>) -> TerminalOutput {
     TerminalOutput::SetCursorPos { x, y }
 }
 
-/// The routed table, in three groups. Counts are `3` wherever a handler maps
+/// The routed table, in four groups. Counts are `3` wherever a handler maps
 /// `0`/`1` to its default of `1`, so a handler that ignored its parameter would
 /// be caught.
 fn routes() -> Vec<Route> {
     let mut all = cursor_and_edit_routes();
     all.extend(mode_and_report_routes());
-    all.extend(prefixed_and_intermediate_routes());
+    all.extend(intermediate_routes());
+    all.extend(private_prefix_routes());
     all
 }
 
@@ -236,8 +237,8 @@ fn mode_and_report_routes() -> Vec<Route> {
     ]
 }
 
-/// Keys with an intermediate (3) and keys with a private-marker prefix (12).
-fn prefixed_and_intermediate_routes() -> Vec<Route> {
+/// Keys with an intermediate byte and no private-marker prefix (3 keys).
+fn intermediate_routes() -> Vec<Route> {
     vec![
         route(
             None,
@@ -256,6 +257,12 @@ fn prefixed_and_intermediate_routes() -> Vec<Route> {
                 CursorVisualStyle::VerticalLineCursorBlink,
             )],
         ),
+    ]
+}
+
+/// Keys with a private-marker prefix (`?`, `>`, `<`, `=`) (12 keys).
+fn private_prefix_routes() -> Vec<Route> {
+    vec![
         // `?` prefix.
         route(
             Some(b'?'),

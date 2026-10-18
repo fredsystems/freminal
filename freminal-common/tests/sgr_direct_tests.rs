@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-#![allow(clippy::unwrap_used)]
-
 use freminal_common::colors::TerminalColor;
 use freminal_common::sgr::SelectGraphicRendition as Sgr;
 

@@ -60,8 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .filter(|o| o.status.success())
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_owned())
-                .unwrap_or_else(|| "unknown".to_owned())
+                .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned())
         });
     println!("cargo:rustc-env=VERGEN_GIT_DESCRIBE={git_describe}");
 
@@ -177,10 +176,8 @@ fn rebuild_terminfo() -> Result<(), Box<dyn std::error::Error>> {
     // Only update the committed copy when the content actually changed.  This
     // prevents every build from dirtying the git working tree.
     let new_bytes = std::fs::read(&tar_staging)?;
-    let update_needed = match std::fs::read(&tar_dst) {
-        Ok(existing) => existing != new_bytes,
-        Err(_) => true, // file missing or unreadable — always write
-    };
+    // A missing or unreadable committed copy always needs writing.
+    let update_needed = std::fs::read(&tar_dst).map_or(true, |existing| existing != new_bytes);
 
     if update_needed {
         std::fs::copy(&tar_staging, &tar_dst)?;

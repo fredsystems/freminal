@@ -16,7 +16,7 @@ fn dec_private_mode_enable_disable() {
         for &b in seq.strip_prefix("\x1b[").unwrap_or(seq).as_bytes() {
             let _ = p.push(b);
         }
-        assert!(p.trace_str().contains("?"));
+        assert!(p.trace_str().contains('?'));
     }
 }
 
