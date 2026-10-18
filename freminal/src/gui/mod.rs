@@ -23,6 +23,7 @@ pub mod colors;
 pub mod folding;
 pub mod font_manager;
 pub mod fonts;
+pub mod history_file_reader;
 pub mod mouse;
 pub mod panes;
 pub mod pty;

@@ -8233,6 +8233,26 @@ Group F — Hygiene:
   −1.6%, `buffer_resize/shrink_height` +0.3%, `grow_height` −0.4%. A +20-27% delta on the
   two height benches against the session-start `main` baseline is environmental: reverting
   every buffer change since `main` gives the same numbers.
+- **148.9 (done):** new `freminal/src/gui/history_file_reader.rs`: `read_history_file` opens
+  with `O_NONBLOCK` (a FIFO never blocks) and, for the OSC 1338 path, `O_NOFOLLOW`
+  (`SymlinkPolicy::Refuse`); `fstat` on the opened handle must be a regular file; reads are
+  capped at `MAX_HISTORY_FILE_BYTES` (8 MiB), taking the newest tail from a line boundary.
+  `load_from_path` (OSC 1338) now always applies the basename allow-list, whatever the
+  shell; the list gains `.zhistory` (prezto default) and `.histfile` (zsh-newuser-install
+  default). The environment-derived path (trusted) uses the same reader with
+  `SymlinkPolicy::Follow`. User-visible consequence: an OSC-reported `HISTFILE` with any
+  other basename, or a symlinked one, is no longer loaded over OSC; the environment path
+  still is. Windows UNC paths on this path are 148.C1.
+
+### 148 Cleanup entries
+
+- **148.C1 — OSC 1338 `HISTFILE` on Windows accepts UNC paths.** Surfaced in review of 148.9.
+  The bounded reader opens whatever path the shell reports; on Windows a `\\host\share\...`
+  path with an allow-listed basename still makes the OS contact the host (the same NTLM
+  leak as GHSA-3g79-vfp3-q57g for kitty `t=f`). Scope: once 148.14 lands its pure
+  path-classification function, apply it to the OSC 1338 path before any filesystem call.
+  Verification: a table test on the classification at the OSC entry point;
+  `cargo xtask check-windows`. Schedule: with or right after 148.14.
 
 ---
 

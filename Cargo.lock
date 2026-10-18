@@ -1571,6 +1571,7 @@ dependencies = [
  "freminal-windowing",
  "glow",
  "image",
+ "libc",
  "notify-rust",
  "open",
  "regex",
