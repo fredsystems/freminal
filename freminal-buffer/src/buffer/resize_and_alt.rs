@@ -139,6 +139,10 @@ impl Buffer {
         self.width = new_width;
         self.height = new_height;
 
+        if width_changed {
+            self.revalidate_left_right_margins(old_width);
+        }
+
         // Preserve existing tab stops across width changes:
         // - Wider: extend with defaults (every 8th column) for new columns only.
         // - Narrower: truncate to the new width.
@@ -1053,6 +1057,37 @@ impl Buffer {
             // A mark taken on a popped row would then name that unrelated new
             // row, so forget every mark at or past the next number to issue.
             self.prune_marks_from(self.rows.next_number());
+        }
+    }
+
+    /// Bring the DECSLRM left/right margins in line with a new `self.width`.
+    ///
+    /// Called from [`Self::set_size`] after `self.width` has been updated;
+    /// `old_width` is the width the margins were last valid for. Mirrors the
+    /// top/bottom handling in `set_size`:
+    ///
+    /// - margins that spanned the whole old width keep spanning the whole new
+    ///   width (this is the default state, and is what DECLRMM-off leaves);
+    /// - margins that no longer fit (`right >= width` or `left >= right`) are
+    ///   reset to the full width;
+    /// - any other margin pair is kept.
+    ///
+    /// Without this, a narrowing resize left `scroll_region_right` at the old
+    /// right edge, so text written under DECLRMM wrapped at a column past the
+    /// buffer width and parked the cursor beyond it, and a later CBT sliced
+    /// the tab-stop table out of range (GHSA-8f32-mj37-fw6v).
+    ///
+    /// xterm's `ScreenResize` (screen.c, "adjust scrolling region") calls
+    /// `resetMargins`, and `set_lr_margins` (charproc.c) clamps both margins
+    /// to `max_col`; this keeps freminal's existing preserve-a-valid-partial-
+    /// region behaviour for the cases where the result is still in range.
+    const fn revalidate_left_right_margins(&mut self, old_width: usize) {
+        let was_full_width =
+            self.scroll_region_left == 0 && self.scroll_region_right == old_width.saturating_sub(1);
+        let no_longer_fits = self.scroll_region_right >= self.width
+            || self.scroll_region_left >= self.scroll_region_right;
+        if was_full_width || no_longer_fits {
+            self.reset_scroll_region_left_right();
         }
     }
 

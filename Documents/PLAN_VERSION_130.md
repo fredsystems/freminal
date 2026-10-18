@@ -8215,6 +8215,24 @@ Group F — Hygiene:
   `self.height - 1` in `handle_lf` on a zero-height buffer, fixed with `saturating_sub`; all
   other subtractions are guarded. Reproducer
   `fuzz/regressions/terminal_state/bs-one-column-underflow` (the #557 bytes).
+- **148.3 (done):** one producer found. `Buffer::set_size` never revalidated the DECSLRM
+  left/right margins, so after a narrowing resize `scroll_region_right` kept the old right
+  edge; text written under DECLRMM wrapped past the buffer width and parked the cursor there,
+  and a later CBT sliced the tab-stop table out of range. New
+  `revalidate_left_right_margins` (`buffer/resize_and_alt.rs`): full-width margins follow the
+  new width, margins that no longer fit reset to full width, a still-valid partial pair is
+  kept (mirrors the existing top/bottom handling; xterm-412 `ScreenResize` resets margins
+  unconditionally via `resetMargins`, and `set_lr_margins` clamps to `max_col`). This also
+  fixes a widening resize leaving default margins at the old width. Defence in depth:
+  `tab_backward` clamps the start column to the tab table and slices with `get`. Minimised
+  46-byte reproducer `fuzz/regressions/terminal_state/cbt-stale-column-ghsa-8f32`; the
+  3062-byte advisory input also replays clean. Two sandboxed 10-minute `terminal_state` runs
+  on the fixed tree found no further column producers; their other findings (flatten oracle,
+  alternate row count, cursor row, parked alternate store) are 148.6 / 148.7 material.
+  Benchmarks (A/B on the same tree): `bench_cursor_ops` −0.2%, `bench_move_cursor_relative`
+  −1.6%, `buffer_resize/shrink_height` +0.3%, `grow_height` −0.4%. A +20-27% delta on the
+  two height benches against the session-start `main` baseline is environmental: reverting
+  every buffer change since `main` gives the same numbers.
 
 ---
 
