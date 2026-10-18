@@ -1172,9 +1172,10 @@ later run passes it comments and **closes that issue itself**, so there is at
 most one open issue and it reflects the current state.
 
 Every `ignore` entry in `deny.toml` must carry a reason that references a
-tracking issue, and is removed when the advisory is resolved. The current
-ignores (RUSTSEC-2026-0206 `rustybuzz`, RUSTSEC-2026-0192 `ttf-parser`) are
-tracked in #530.
+tracking issue, and is removed when the advisory is resolved. Each entry's
+reason names its issue (at the time of writing #530 for `rustybuzz` /
+`ttf-parser`, and #567 for the zbus 5 crates merged into zbus 6); `deny.toml`
+is the authoritative list.
 
 `cargo-audit` is deliberately **not** used. It reads the same RustSec advisory
 database as cargo-deny, so running both would report the same findings twice
