@@ -785,7 +785,9 @@ fn read_kitty_shm_range(
 /// first `ftruncate` and rejects every later one (`pshm_truncate` in
 /// `bsd/kern/posix_shm.c` returns `EINVAL` once the object is defined), so the
 /// object cannot shrink under the mapping. The size is re-read from the open
-/// descriptor here, so the mapped range is always inside the object.
+/// descriptor here, so the mapped range is always inside the object. XNU
+/// reports that size rounded up to whole pages, so a read without `S=` may
+/// include trailing zero padding, as it did before Task 148 and as in kitty.
 #[cfg(target_os = "macos")]
 fn read_kitty_shm_range(
     file: &std::fs::File,
