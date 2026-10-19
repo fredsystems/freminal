@@ -69,6 +69,13 @@ impl Buffer {
     /// used to panic (GHSA-8f32-mj37-fw6v). A clamped start behaves as
     /// "from the right margin": the previous stop is found at or before the
     /// last column.
+    ///
+    /// `count` is attacker-controlled, but the loop always makes progress or
+    /// ends: every iteration either breaks at column 0 or moves `col` to a
+    /// strictly smaller column (`rposition` over `..col` yields an index
+    /// below `col`) or to 0 when no earlier stop exists, after which the next
+    /// iteration breaks. It therefore runs at most `width + 1` times
+    /// whatever `count` is.
     pub fn tab_backward(&mut self, count: usize) {
         let mut col = self.cursor.pos.x.min(self.tab_stops.len());
         for _ in 0..count {
@@ -89,9 +96,23 @@ impl Buffer {
     ///
     /// If there are fewer than `count` tab stops remaining, moves to the
     /// rightmost column.  CHT never wraps to the next line.
+    ///
+    /// `count` comes straight from the escape sequence and can be as large
+    /// as `usize::MAX`, so the loop must not run `count` times
+    /// unconditionally. [`Buffer::advance_to_next_tab_stop`] is a pure
+    /// function of the cursor column, the tab-stop table and the width, and
+    /// its only effect is to move the cursor column: once a step leaves the
+    /// column unchanged, every further step would too, so the loop stops
+    /// there. Each productive step strictly increases the column (or, for a
+    /// stale column past the table, drops it to the last column once), so the
+    /// loop runs at most `width + 1` times.
     pub fn tab_forward(&mut self, count: usize) {
         for _ in 0..count {
+            let before = self.cursor.pos.x;
             self.advance_to_next_tab_stop();
+            if self.cursor.pos.x == before {
+                break;
+            }
         }
     }
 }
@@ -163,5 +184,61 @@ mod tests {
         let mut buf = stranded(99);
         buf.advance_to_next_tab_stop();
         assert_eq!(buf.cursor.pos.x, 27);
+    }
+
+    /// Run `tab_forward(count)` from column 0 on an 80-column buffer
+    /// (stops at 8, 16, ... 72) and return the resulting column.
+    fn forward_from_origin(count: usize) -> usize {
+        let mut buf = Buffer::new(80, 5);
+        buf.tab_forward(count);
+        buf.cursor.pos.x
+    }
+
+    #[test]
+    fn tab_forward_usize_max_lands_on_the_last_column() {
+        // Hangs on the unfixed loop (CHT with a huge Ps, Task 148.C2).
+        assert_eq!(forward_from_origin(usize::MAX), 79);
+        assert_eq!(forward_from_origin(usize::MAX), forward_from_origin(100));
+    }
+
+    #[test]
+    fn tab_forward_small_counts_walk_the_stops() {
+        // 9 stops lie ahead of column 0: 8, 16, ..., 72.
+        assert_eq!(forward_from_origin(0), 0);
+        assert_eq!(forward_from_origin(1), 8);
+        assert_eq!(forward_from_origin(2), 16);
+        assert_eq!(forward_from_origin(9), 72);
+        // One more than the number of stops: the right margin.
+        assert_eq!(forward_from_origin(10), 79);
+        assert_eq!(forward_from_origin(11), 79);
+    }
+
+    #[test]
+    fn tab_forward_without_stops_goes_to_the_last_column() {
+        let mut buf = Buffer::new(80, 5);
+        buf.clear_all_tab_stops();
+        buf.tab_forward(usize::MAX);
+        assert_eq!(buf.cursor.pos.x, 79);
+    }
+
+    #[test]
+    fn tab_forward_huge_count_from_stale_column_lands_in_bounds() {
+        let mut buf = stranded(99);
+        buf.tab_forward(usize::MAX);
+        assert_eq!(buf.cursor.pos.x, 27);
+    }
+
+    #[test]
+    fn tab_backward_usize_max_goes_home() {
+        let mut buf = Buffer::new(80, 5);
+        buf.cursor.pos.x = 79;
+        buf.tab_backward(usize::MAX);
+        assert_eq!(buf.cursor.pos.x, 0);
+        // No earlier stop at all: straight to column 0.
+        let mut buf = Buffer::new(80, 5);
+        buf.clear_all_tab_stops();
+        buf.cursor.pos.x = 40;
+        buf.tab_backward(usize::MAX);
+        assert_eq!(buf.cursor.pos.x, 0);
     }
 }

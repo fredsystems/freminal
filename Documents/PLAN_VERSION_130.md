@@ -8292,6 +8292,11 @@ Group F — Hygiene:
   `count` to the number of stops); check `tab_backward` and any other count-driven loop in
   `buffer/tabs.rs`. Verification: a test with `usize::MAX`; the minimised timeout as a
   `terminal_state` regression. Schedule: before 148.25's fuzz reruns.
+  **Done:** `tab_forward` stops once a step leaves the column unchanged
+  (`advance_to_next_tab_stop` only writes the cursor column, so later steps would be no-ops);
+  `tab_backward` already runs at most `width + 1` times; no count-driven loop in the
+  handler. The original timeout was `CSI 42222222222 I`; it now runs in 0.03 s. Reproducer
+  `cht-huge-count-hang` (hand-crafted, `usize::MAX` count).
 - **148.C3 — Wrap / LF below the bottom margin on the primary screen's last row scrolls.**
   Surfaced by 148.7. xterm-412 clamps there (`xtermIndex` -> `CursorDown` to `max_row`);
   freminal's primary buffer pushes a row. No invariant breaks, so this is a behaviour
