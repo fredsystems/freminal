@@ -480,3 +480,49 @@ fn wrap_pushing_a_new_row_lands_on_a_single_width_row() {
     let last = buf.rows().len() - 1;
     assert_eq!(glyph_at(&buf, last, 0), wide());
 }
+
+// ── Shape 6: PRE-WRAP checks the landing row too (148.C8 follow-up) ─────
+//
+// The cursor is already in pending-wrap when the text arrives, so the wrap
+// happens before anything is written, not after a row filled. The same rule
+// holds: a glyph that no landing-row span can hold must not drag the wrap
+// along. Here the glyph fits the 3-column row it starts on but not the
+// one-column DECDWL row 1 it would land on. Nothing is written, so the only
+// trace a spurious wrap leaves is on the reused landing row's metadata
+// (`reuse_row_as_softwrap` turns it into a soft-wrap continuation).
+
+#[test]
+fn pre_wrap_onto_an_existing_double_width_row_is_not_taken() {
+    let mut buf = dwl_next_row();
+    buf.insert_text(&[narrow('a'), narrow('b'), narrow('c')]);
+    let cursor = buf.cursor().pos;
+    assert_eq!(cursor.x, 3, "sanity: the cursor is in pending-wrap");
+    assert_eq!(cursor.y, 0);
+    let rows = buf.rows().len();
+    let origin = buf.rows()[1].origin;
+    let join = buf.rows()[1].join;
+
+    buf.insert_text(&[wide()]);
+
+    assert_eq!(buf.rows().len(), rows, "no row may be pushed or scrolled");
+    assert_eq!(buf.cursor().pos, cursor, "the cursor must not move");
+    assert_eq!(
+        buf.rows()[1].origin,
+        origin,
+        "the landing row must not be turned into a soft-wrap continuation"
+    );
+    assert_eq!(buf.rows()[1].join, join);
+}
+
+#[test]
+fn pre_wrap_onto_a_double_width_row_still_wraps_what_fits() {
+    // A narrow glyph after the unplaceable one fits the one-column DECDWL
+    // span, so the wrap is taken and the wide glyph alone is dropped.
+    let mut buf = dwl_next_row();
+    buf.insert_text(&[narrow('a'), narrow('b'), narrow('c')]);
+
+    buf.insert_text(&[wide(), narrow('d')]);
+
+    assert_eq!(glyph_at(&buf, 1, 0), narrow('d'));
+    assert_eq!(buf.cursor().pos.y, 1);
+}

@@ -252,6 +252,26 @@ mod tests {
 
     const HOST: Option<&str> = Some("myhost.example.org");
 
+    /// A per-platform OSC 7 sample: `(uri, expected_cwd)` for a directory
+    /// `sub` below the sample root, reported by the `localhost` host.
+    ///
+    /// The native path style decides what a local directory looks like in a
+    /// `file://` URI, so handler-level tests that run through the native
+    /// parser cannot hard-code a POSIX path.
+    fn sample_osc7(sub: &str) -> (String, String) {
+        if cfg!(windows) {
+            (
+                format!("file://localhost/C:/Users/user{sub}"),
+                format!("C:/Users/user{sub}"),
+            )
+        } else {
+            (
+                format!("file://localhost/home/user{sub}"),
+                format!("/home/user{sub}"),
+            )
+        }
+    }
+
     #[test]
     fn parse_osc7_uri_table() {
         let cases: &[(&str, Option<&str>, Result<&str, Osc7Rejection>)] = &[
@@ -339,11 +359,17 @@ mod tests {
         ];
         for (uri, host, expected) in cases {
             assert_eq!(
-                parse_osc7_uri(uri, *host),
+                parse_osc7_uri_styled(uri, *host, Osc7PathStyle::Posix),
                 expected.map(str::to_owned),
                 "uri={uri:?} host={host:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_osc7_uri_uses_the_native_path_style() {
+        let (uri, expected) = sample_osc7("/project");
+        assert_eq!(parse_osc7_uri(&uri, None), Ok(expected));
     }
 
     #[test]
@@ -472,10 +498,9 @@ mod tests {
     #[test]
     fn handle_osc_foreign_host_clears_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        assert_eq!(handler.current_working_directory(), Some(expected.as_str()));
         handler.handle_osc(&AnsiOscType::RemoteHost(
             "file://definitely-not-this-host.invalid/home/attacker".to_string(),
         ));
@@ -485,45 +510,45 @@ mod tests {
     #[test]
     fn handle_osc_nul_in_path_clears_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user%00/evil".to_string(),
-        ));
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        let (bad_uri, _) = sample_osc7("%00/evil");
+        handler.handle_osc(&AnsiOscType::RemoteHost(bad_uri));
         assert_eq!(handler.current_working_directory(), None);
     }
 
     #[test]
     fn handle_osc_remote_host_sets_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        assert_eq!(handler.current_working_directory(), Some(expected.as_str()));
     }
 
     #[test]
     fn handle_osc_remote_host_updates_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user/a".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user/a"));
+        let (uri_a, expected_a) = sample_osc7("/a");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri_a));
+        assert_eq!(
+            handler.current_working_directory(),
+            Some(expected_a.as_str())
+        );
 
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user/b".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user/b"));
+        let (uri_b, expected_b) = sample_osc7("/b");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri_b));
+        assert_eq!(
+            handler.current_working_directory(),
+            Some(expected_b.as_str())
+        );
     }
 
     #[test]
     fn handle_osc_remote_host_invalid_uri_clears_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
         // First set a valid CWD
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         assert!(handler.current_working_directory().is_some());
 
         // Now send an invalid URI — CWD should be cleared (set to None)
@@ -536,9 +561,8 @@ mod tests {
         // The OSC 7 working directory describes the process, not the screen
         // (maintainer decision, Task 131 reset table), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         let before = handler.current_working_directory().map(str::to_owned);
         assert!(before.is_some());
 
@@ -808,13 +832,14 @@ mod tests {
     #[test]
     fn prompt_start_captures_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost("file:///home/user".to_string()));
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
             fid: "test".to_owned(),
         }));
         assert_eq!(
             handler.buffer().command_blocks()[0].cwd.as_deref(),
-            Some("/home/user")
+            Some(expected.as_str())
         );
     }
 

@@ -8553,6 +8553,17 @@ Group F — Hygiene:
 
   The remaining review items are below.
 
+- **Cleanup review (2026-10-19):** one CODE-REVIEW pass over the 148.C3/C4/C8/C9/C10/C11/C12
+  commits. C3 and C12 match xterm; the C9 counters and the C11 respawn were judged sound.
+  Fixed as RC1–RC10:
+  - **RC1:** OSC 7 tests now use a per-platform URI (`sample_osc7`), or run the pure tables
+    with `Osc7PathStyle::Posix`, so Windows CI passes after 148.C10.
+  - **RC4:** a stalled wrap resumes from the end of the filled row again.
+  - **RC5:** PRE-WRAP uses the same landing-row check as the Leftover wrap, sharing a new
+    `take_wrap` helper. Two tests fail on the old code.
+  - **RC10a:** a debug `eprintln!` is removed.
+  - **RC2, RC3, RC6–RC9:** see their own entries below.
+
 ### 148 Cleanup entries
 
 - **148.C1 — OSC 1338 `HISTFILE` on Windows accepts UNC paths.** Surfaced in review of 148.9.

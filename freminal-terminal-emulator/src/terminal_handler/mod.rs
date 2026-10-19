@@ -4664,10 +4664,14 @@ mod tests {
     #[test]
     fn osc_remote_host_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+        // A local directory looks different in a `file://` URI per platform.
+        let (uri, expected) = if cfg!(windows) {
+            ("file://localhost/C:/Users/user", "C:/Users/user")
+        } else {
+            ("file://localhost/home/user", "/home/user")
+        };
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri.to_string()));
+        assert_eq!(handler.current_working_directory(), Some(expected));
     }
 
     #[test]

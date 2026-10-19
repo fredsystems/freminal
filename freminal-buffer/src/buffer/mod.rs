@@ -614,8 +614,8 @@ fn skip_unplaceable_glyphs(text: &[TChar], start: usize, fresh_span: usize) -> u
         .map_or_else(|| text.len().max(start), |(index, _)| index)
 }
 
-/// What [`Buffer::wrap_after_leftover`] did.
-enum LeftoverWrap {
+/// What [`Buffer::wrap_if_placeable`] did.
+enum WrapOutcome {
     /// No remaining glyph fits the landing row: nothing was wrapped and the
     /// text is treated as ended.
     NothingPlaceable,
@@ -998,19 +998,21 @@ impl Buffer {
                     return; // nothing left to insert
                 }
 
-                // Scroll-region-aware wrap: advance to the next row,
-                // preserving scrollback on full-screen primary buffers.
-                let Some(new_row_idx) =
-                    self.wrap_unless_stalled(row_idx, wrap_start_col, start, &mut last_wrap_start)
-                else {
-                    // The previous wrap placed nothing, so this one would not
-                    // either. Drop the head glyph instead of wrapping again.
-                    start += 1;
-                    last_wrap_start = None;
-                    continue;
+                // Wrap unless nothing remaining is placeable on the landing
+                // row (R7); the wrap changes the row, so the span and the
+                // placeable glyphs are recomputed on the next iteration.
+                let Some((next_row, next_col)) = self.take_wrap(
+                    text,
+                    (&mut start, &mut last_wrap_start),
+                    (row_idx, wrap_start_col),
+                    (base_wrap_col, base_wrap_start_col),
+                    col,
+                ) else {
+                    return;
                 };
-                row_idx = new_row_idx;
-                col = wrap_start_col;
+                row_idx = next_row;
+                col = next_col;
+                continue;
             }
 
             // Ensure the target row exists (see `push_missing_insert_row`).
@@ -1081,63 +1083,85 @@ impl Buffer {
 
                     // Scroll-region-aware wrap: same logic as PRE-WRAP, unless
                     // nothing remaining is placeable on the landing row (R7).
-                    let wrapped = self.wrap_after_leftover(
+                    // A stalled wrap carries on from where this row ended.
+                    let Some((next_row, next_col)) = self.take_wrap(
                         text,
-                        start,
+                        (&mut start, &mut last_wrap_start),
                         (row_idx, wrap_start_col),
                         (base_wrap_col, base_wrap_start_col),
-                        &mut last_wrap_start,
-                    );
-                    let new_row_idx = match wrapped {
-                        LeftoverWrap::NothingPlaceable => {
-                            let _ = self.enforce_scrollback_limit(0);
-                            return;
-                        }
-                        LeftoverWrap::Stalled => {
-                            // A wrap already happened with nothing placed
-                            // since: the head glyph does not fit even a fresh
-                            // row. Drop it and carry on from where this row
-                            // ended.
-                            start += 1;
-                            last_wrap_start = None;
-                            continue;
-                        }
-                        LeftoverWrap::Landed(new_row_idx) => new_row_idx,
+                        final_col,
+                    ) else {
+                        return;
                     };
-                    row_idx = new_row_idx;
-                    // `col` is the wrap start column; next iteration writes there.
-                    col = wrap_start_col;
+                    row_idx = next_row;
+                    col = next_col;
                 }
             }
         }
     }
 
-    /// The wrap step of `insert_text` after a row filled with text left over.
+    /// Apply one wrap decision from [`Self::wrap_if_placeable`] for
+    /// `insert_text`, returning the `(row_idx, col)` to continue from, or
+    /// `None` when `insert_text` must return.
+    ///
+    /// - `NothingPlaceable`: nothing remaining fits the landing row, so the
+    ///   rest is discarded without wrapping (the scrollback limit is still
+    ///   enforced) and `None` is returned.
+    /// - `Stalled`: the previous wrap placed nothing, so the head glyph is
+    ///   dropped and writing continues at `stall_col` on the same row.
+    /// - `Landed`: continue at the wrap start column of the new row.
+    ///
+    /// `progress` is `insert_text`'s `(start, last_wrap_start)`.
+    fn take_wrap(
+        &mut self,
+        text: &[TChar],
+        progress: (&mut usize, &mut Option<usize>),
+        row: (usize, usize),
+        base: (usize, usize),
+        stall_col: usize,
+    ) -> Option<(usize, usize)> {
+        let (start, last_wrap_start) = progress;
+        match self.wrap_if_placeable(text, *start, row, base, last_wrap_start) {
+            WrapOutcome::NothingPlaceable => {
+                let _ = self.enforce_scrollback_limit(0);
+                None
+            }
+            WrapOutcome::Stalled => {
+                *start += 1;
+                *last_wrap_start = None;
+                Some((row.0, stall_col))
+            }
+            WrapOutcome::Landed(new_row_idx) => Some((new_row_idx, row.1)),
+        }
+    }
+
+    /// The wrap step of `insert_text`, both after a row filled with text left
+    /// over and for a PRE-WRAP (cursor already at the wrap column).
     ///
     /// Declines to wrap when no remaining glyph fits the row the wrap would
     /// land on (see [`Self::landing_row_span_for_wrap`]); otherwise wraps via
     /// [`Self::wrap_unless_stalled`]. `row` is `(row_idx, wrap_start_col)` of
     /// the row that just filled and `base` the margin-derived
     /// `(base_wrap_col, base_wrap_start_col)`.
-    fn wrap_after_leftover(
+    fn wrap_if_placeable(
         &mut self,
         text: &[TChar],
         start: usize,
         row: (usize, usize),
         base: (usize, usize),
         last_wrap_start: &mut Option<usize>,
-    ) -> LeftoverWrap {
+    ) -> WrapOutcome {
         let (row_idx, wrap_start_col) = row;
         let (base_wrap_col, base_wrap_start_col) = base;
+        if self.nothing_placeable_on_landing_row(text, start, row_idx, base) {
+            return WrapOutcome::NothingPlaceable;
+        }
         let landing_span =
             self.landing_row_span_for_wrap(row_idx, base_wrap_col, base_wrap_start_col);
-        if skip_unplaceable_glyphs(text, start, landing_span) >= text.len() {
-            return LeftoverWrap::NothingPlaceable;
-        }
         let Some(landed) =
             self.wrap_unless_stalled(row_idx, wrap_start_col, start, last_wrap_start)
         else {
-            return LeftoverWrap::Stalled;
+            return WrapOutcome::Stalled;
         };
         // The prediction must be the span `insert_text` computes for the row
         // the wrap really landed on.
@@ -1146,7 +1170,26 @@ impl Buffer {
             self.row_fresh_span(landed, base_wrap_col, base_wrap_start_col),
             "landing_row_span_for_wrap diverged from advance_row_for_wrap"
         );
-        LeftoverWrap::Landed(landed)
+        WrapOutcome::Landed(landed)
+    }
+
+    /// Whether no glyph of `text[start..]` fits the row a soft-wrap from
+    /// `row_idx` would land on, so wrapping would only add a spurious row.
+    ///
+    /// Shared by both wrap sites of `insert_text` (PRE-WRAP and after a row
+    /// filled with text left over). `base` is the margin-derived
+    /// `(base_wrap_col, base_wrap_start_col)`.
+    fn nothing_placeable_on_landing_row(
+        &self,
+        text: &[TChar],
+        start: usize,
+        row_idx: usize,
+        base: (usize, usize),
+    ) -> bool {
+        let (base_wrap_col, base_wrap_start_col) = base;
+        let landing_span =
+            self.landing_row_span_for_wrap(row_idx, base_wrap_col, base_wrap_start_col);
+        skip_unplaceable_glyphs(text, start, landing_span) >= text.len()
     }
 
     /// The usable span of the row a soft-wrap from `row_idx` would land on.
@@ -10389,11 +10432,6 @@ mod wrap_landing_tests {
         let predicted = buf.landing_row_span_for_wrap(row_idx, WIDTH, 0);
         let landed = buf.advance_row_for_wrap(row_idx, 0);
         let actual = buf.row_fresh_span(landed, WIDTH, 0);
-        eprintln!(
-            "DBG {row_idx} {landed} {} {:?}",
-            buf.rows.len(),
-            buf.rows.iter().map(|r| r.line_width).collect::<Vec<_>>()
-        );
         assert_eq!(predicted, actual, "prediction diverged from the real wrap");
         actual
     }
