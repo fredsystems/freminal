@@ -8476,6 +8476,31 @@ Group F — Hygiene:
   policies are deliberate, not gaps. CHT has no limits discussion, so it was skipped.
   `config_example.toml` and the Nix module were updated in their subtasks (148.15–148.17).
   `.github/SECURITY.md` makes no statement Task 148 falsifies, so it is unchanged.
+- **148.27 (table ready; the rest is the maintainer's):** each published advisory and its fix
+  on `task-148/security-remediation`. The hashes are branch commits; re-map them if the PR is
+  squash- or rebase-merged. Once a release ships, the maintainer sets each advisory's patched
+  version and requests CVEs where warranted. No agent edits advisories.
+
+  | Advisory            | Severity | Fix    | Branch commit |
+  | ------------------- | -------- | ------ | ------------- |
+  | GHSA-2746-x3cj-58c7 | high     | 148.1  | `a1647497`    |
+  | GHSA-w475-m9wf-775r | medium   | 148.2  | `68bc89b8`    |
+  | GHSA-8f32-mj37-fw6v | high     | 148.3  | `ac8ee7a5`    |
+  | GHSA-4whv-2cx6-772h | high     | 148.9  | `48880c72`    |
+  | GHSA-jh4m-7w5g-j4qg | medium   | 148.10 | `c3f421ee`    |
+  | GHSA-6cxq-f7hx-92v2 | low      | 148.11 | `bf950f58`    |
+  | GHSA-8836-pm5j-jcp4 | low      | 148.12 | `37b46a8e`    |
+  | GHSA-j533-jhh2-ff2x | low      | 148.13 | `9ff54e8b`    |
+  | GHSA-3g79-vfp3-q57g | medium   | 148.14 | `b9a2388b`    |
+  | GHSA-8prj-mhmf-xpjg | medium   | 148.15 | `ae490c87`    |
+  | GHSA-v2hw-gcg8-2rfr | low      | 148.16 | `9d828944`    |
+  | GHSA-67hw-cw29-r66f | low      | 148.17 | `58b202eb`    |
+  | GHSA-jhw2-xjg6-mwhq | medium   | 148.18 | `32a09934`    |
+
+  Issues closed by the merge: #556 (148.8), #557 (148.4), #558 (148.5), #559 (148.6), #560
+  (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
+  (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
+  still need a maintainer run on Windows.
 
 ### 148 Cleanup entries
 
