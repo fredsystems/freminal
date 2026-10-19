@@ -8436,6 +8436,12 @@ Group F — Hygiene:
   `config_example.toml`. The doc's stale auto-save section was corrected while there
   (`last_session.toml`, not `_last_session.toml`; `restore_last_session` defaults to
   `true`). #562 closes.
+- **148.24 (done):** `vergen` is now only a build-dependency of `freminal-terminal-emulator`
+  (its `build.rs` is the sole user). `freminal-buffer` had an unused `vergen`
+  build-dependency and no `build.rs`, so it was dropped. The workspace cargo-machete ignore
+  for `vergen` is gone and `cargo machete` is clean without it. `homepage` (identical to
+  `repository`; nothing reads `CARGO_PKG_HOMEPAGE`) is removed from `[workspace.package]` and
+  every member. The fuzz `cargo check` prints no manifest warnings.
 
 ### 148 Cleanup entries
 

@@ -398,7 +398,6 @@ dependencies = [
  "freminal-common",
  "lz4_flex",
  "regex",
- "vergen",
 ]
 
 [[package]]

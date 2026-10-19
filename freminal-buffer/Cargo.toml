@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 description.workspace = true
 documentation.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme.workspace = true
 license.workspace = true
@@ -30,10 +29,6 @@ bench_fixtures = []
 criterion.workspace = true
 proptest.workspace = true
 test-log.workspace = true
-
-
-[build-dependencies]
-vergen.workspace = true
 
 [[bench]]
 name = "buffer_memory_bench"

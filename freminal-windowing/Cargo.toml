@@ -6,7 +6,6 @@ rust-version.workspace = true
 description = "Windowing layer for Freminal: winit + glutin + egui integration"
 documentation.workspace = true
 readme.workspace = true
-homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 
