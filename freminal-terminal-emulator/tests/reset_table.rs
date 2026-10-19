@@ -52,7 +52,7 @@ impl Rig {
             .into_iter()
             .filter_map(|msg| match msg {
                 PtyWrite::Write(bytes) => Some(bytes),
-                PtyWrite::Resize(_) => None,
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => None,
             })
             .flatten()
             .collect()

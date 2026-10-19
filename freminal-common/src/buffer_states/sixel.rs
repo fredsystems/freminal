@@ -719,6 +719,10 @@ impl SixelDecoder {
 
         self.crop_to_logical();
         self.trim_to_declared();
+        // `truncate` keeps the over-allocated capacity (up to the 64 MiB pixel
+        // cap); the image store charges only `pixels.len()` against its quota,
+        // so release the spare capacity before the buffer is stored.
+        self.pixels.shrink_to_fit();
         debug_assert!(self.invariant_holds());
 
         Some(SixelImage {
@@ -1695,6 +1699,21 @@ mod tests {
     /// the pixel-cap boundary used to trim the width capacity to exactly the
     /// logical width, so every further column reallocated and copied the
     /// whole canvas (about 4000 copies of 35-50 MB from ~5 KB of input).
+    /// The stored buffer holds no spare capacity: the image store charges
+    /// `pixels.len()`, so over-allocated capacity (the decoder allocates at
+    /// least 64x64 and grows geometrically) would escape its quota.
+    #[test]
+    fn test_sixel_finished_pixels_have_no_spare_capacity() {
+        for data in [&b"q~"[..], b"q\"1;1;3;2~~~", b"q#0;2;100;0;0!300~-!5~"] {
+            let image = parse_sixel(data).expect("image");
+            assert_eq!(
+                image.pixels.capacity(),
+                image.pixels.len(),
+                "spare capacity for {data:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_sixel_pixel_cap_boundary_growth_reallocates_logarithmically() {
         let mut data = b"~-".repeat(342);

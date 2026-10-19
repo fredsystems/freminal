@@ -4470,7 +4470,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4505,7 +4507,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4537,7 +4541,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4557,7 +4563,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("OK"), "Expected OK response, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -5175,7 +5183,9 @@ mod tests {
                 );
                 assert!(!s.contains("ENOTSUP"), "f=24 should NOT be unsupported");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -5658,7 +5668,9 @@ mod tests {
     fn recv_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
         match rx.try_recv().expect("expected a PTY response") {
             PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8 response"),
-            resize @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {resize:?}"),
+            resize @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+                panic!("expected PtyWrite::Write, got {resize:?}")
+            }
         }
     }
 
@@ -9604,7 +9616,9 @@ mod tests {
                         "expected ENOENT for {action:?}, got: {s}"
                     );
                 }
-                PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                    panic!("Expected PtyWrite::Write")
+                }
             }
         }
 
@@ -9625,7 +9639,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10051,7 +10067,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("i=481") && s.contains("OK"), "got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10281,7 +10299,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10312,7 +10332,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11171,7 +11193,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "Expected ENOENT error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11237,7 +11261,9 @@ mod tests {
                     "Expected error response, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11272,7 +11298,9 @@ mod tests {
                     "Expected EINVAL error for missing height, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11308,7 +11336,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11343,7 +11373,9 @@ mod tests {
                     "Expected EINVAL size mismatch error, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11931,7 +11963,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12140,7 +12174,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12239,7 +12275,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "expected EINVAL, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12267,7 +12305,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12290,7 +12330,9 @@ mod tests {
                     .expect("response should contain i=<id>");
                 id_part.parse().expect("id should be numeric")
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12326,7 +12368,9 @@ mod tests {
                     .expect("response should contain i=<id>");
                 id_part.parse::<u64>().expect("id should be numeric")
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         };
 
         assert_eq!(
@@ -12387,7 +12431,9 @@ mod tests {
                     "expected the resolved id echoed, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12413,7 +12459,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -12467,7 +12515,9 @@ mod tests {
                     "put by number should target the newest image, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 

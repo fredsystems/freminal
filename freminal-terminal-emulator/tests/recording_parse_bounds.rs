@@ -164,13 +164,17 @@ fn seek_index_entries_may_fill_the_space_up_to_the_footer_exactly() {
 }
 
 #[test]
-fn seek_index_offset_that_overflows_when_advanced_is_rejected() {
+fn seek_index_offset_past_end_of_file_is_rejected_by_the_event_loop() {
+    // The event loop runs until `seek_index_offset`, so a huge offset makes it
+    // read the seek index and footer as an event header; the footer's 0xFF..
+    // bytes become the payload length. (The `checked_add` guard in
+    // `parse_seek_index` is defence in depth, unreachable through this API.)
     for offset in [u64::MAX, u64::MAX - 7, u64::MAX - 8] {
         let mut frame = Frame::valid();
         frame.declared_seek_offset = Some(offset);
-        assert!(
-            parse_recording_from_bytes(&frame.build()).is_err(),
-            "seek_index_offset {offset:#x} must be rejected"
+        assert_invalid_format(
+            parse_recording_from_bytes(&frame.build()),
+            "truncated event payload",
         );
     }
 }

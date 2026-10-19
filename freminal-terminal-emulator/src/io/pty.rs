@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
+use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use freminal_common::{
@@ -232,6 +233,11 @@ pub struct ReplyQueue {
     pub rx: Receiver<PtyWrite>,
     /// Reply bytes queued on `rx` and not yet written.
     pub queued_bytes: Arc<AtomicUsize>,
+    /// Latest-value slot for a pending DECCOLM resize, shared with the handler.
+    /// The handler stores the requested size here and queues a
+    /// `PtyWrite::ApplyPendingResize` marker only when the slot was empty; the
+    /// writer takes the slot when it applies a marker (see [`apply_and_release`]).
+    pub pending_resize: Arc<ArcSwapOption<FreminalTerminalSize>>,
 }
 
 /// Release the bytes of a reply the writer has finished with from the shared
@@ -338,13 +344,23 @@ enum WriteSource {
 /// Apply `msg`, then, if it came from the reply channel, release its bytes
 /// from the shared queued-bytes counter.  The release follows the write so the
 /// bytes stay counted while the message is still held by the writer.
+///
+/// A `PtyWrite::ApplyPendingResize` marker is resolved here: the pending-resize
+/// slot is taken, and its size, if any, is applied as a `PtyWrite::Resize`.  An
+/// empty slot (the size was already applied by an earlier marker) is a no-op.
 fn apply_and_release(
     replies: &ReplyQueue,
     source: WriteSource,
     msg: &PtyWrite,
     apply: &mut impl FnMut(&PtyWrite),
 ) {
-    apply(msg);
+    if matches!(msg, PtyWrite::ApplyPendingResize) {
+        if let Some(size) = replies.pending_resize.swap(None) {
+            apply(&PtyWrite::Resize(FreminalTerminalSize::clone(&size)));
+        }
+    } else {
+        apply(msg);
+    }
     if source == WriteSource::Reply {
         release_reply_bytes(&replies.queued_bytes, msg);
     }
@@ -360,7 +376,9 @@ fn process_pty_write(
         PtyWrite::Write(data) if let Err(e) = writer.write_all(data) => {
             error!("Failed to write to pty: {e}");
         }
-        PtyWrite::Write(_) => {}
+        // `ApplyPendingResize` is resolved into a `Resize` by
+        // `apply_and_release` before this runs, so there is nothing to do.
+        PtyWrite::Write(_) | PtyWrite::ApplyPendingResize => {}
         PtyWrite::Resize(size) => {
             let size: PtySize = match pty_size_from_terminal_size(size) {
                 Ok(size) => size,
@@ -1299,6 +1317,7 @@ mod echo_off_event_driven_tests {
             ReplyQueue {
                 rx: reply_rx,
                 queued_bytes: Arc::new(AtomicUsize::new(0)),
+                pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             },
             send_tx,
             spawn_cfg,
@@ -1344,6 +1363,7 @@ mod echo_off_event_driven_tests {
             ReplyQueue {
                 rx: reply_rx,
                 queued_bytes: Arc::new(AtomicUsize::new(0)),
+                pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             },
             send_tx,
             spawn_cfg,
@@ -1392,6 +1412,7 @@ mod echo_off_event_driven_tests {
             ReplyQueue {
                 rx: reply_rx,
                 queued_bytes: Arc::new(AtomicUsize::new(0)),
+                pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
             },
             send_tx,
             spawn_cfg,
@@ -1455,6 +1476,7 @@ mod writer_loop_tests {
         match msg {
             PtyWrite::Write(bytes) => bytes.clone(),
             PtyWrite::Resize(_) => b"<resize>".to_vec(),
+            PtyWrite::ApplyPendingResize => b"<marker>".to_vec(),
         }
     }
 
@@ -1480,6 +1502,7 @@ mod writer_loop_tests {
         let loop_replies = ReplyQueue {
             rx: reply_rx.clone(),
             queued_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
         };
         let writer = std::thread::spawn(move || {
             let mut first = true;
@@ -1541,6 +1564,54 @@ mod writer_loop_tests {
         assert!(written[2..].iter().all(|w| w == b"\x1b[flood"));
     }
 
+    /// A `PtyWrite::ApplyPendingResize` marker applies the latest size in the
+    /// pending-resize slot, and a second marker with the slot already taken is
+    /// a no-op.
+    #[test]
+    fn pending_resize_marker_applies_latest_size_once() {
+        use freminal_common::pty_write::FreminalTerminalSize;
+
+        let (user_tx, user_rx) = unbounded::<PtyWrite>();
+        let (_reply_tx, reply_rx) = bounded::<PtyWrite>(REPLY_QUEUE_CAPACITY);
+        let (applied_tx, applied_rx) = unbounded::<usize>();
+        let pending_resize = Arc::new(arc_swap::ArcSwapOption::const_empty());
+
+        // Two requests land before the writer runs; the second replaces the
+        // first, and two markers are queued (the most the handler can queue).
+        for width in [80_usize, 132] {
+            pending_resize.store(Some(Arc::new(FreminalTerminalSize {
+                width,
+                height: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            })));
+        }
+        user_tx
+            .send(PtyWrite::ApplyPendingResize)
+            .expect("marker 1");
+        user_tx
+            .send(PtyWrite::ApplyPendingResize)
+            .expect("marker 2");
+        drop(user_tx);
+
+        let replies = ReplyQueue {
+            rx: reply_rx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_resize: Arc::clone(&pending_resize),
+        };
+        // The loop returns once the user channel is drained and disconnected.
+        run_writer_loop(&user_rx, &replies, |msg| match msg {
+            PtyWrite::Resize(size) => applied_tx.send(size.width).expect("record resize"),
+            PtyWrite::Write(_) | PtyWrite::ApplyPendingResize => {
+                panic!("only a resolved Resize may reach the sink")
+            }
+        });
+
+        let applied: Vec<usize> = applied_rx.try_iter().collect();
+        assert_eq!(applied, vec![132], "latest size applied exactly once");
+        assert!(pending_resize.load().is_none(), "the slot was taken");
+    }
+
     /// A disconnected reply channel must neither end the loop nor make it spin;
     /// user writes still flow, and the loop still ends on user disconnect.
     #[test]
@@ -1553,6 +1624,7 @@ mod writer_loop_tests {
         let replies = ReplyQueue {
             rx: reply_rx,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
         };
         let writer = std::thread::spawn(move || {
             run_writer_loop(&user_rx, &replies, |msg| {
@@ -1583,6 +1655,7 @@ mod writer_loop_tests {
         let replies = ReplyQueue {
             rx: reply_rx,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
+            pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
         };
         let writer = std::thread::spawn(move || {
             run_writer_loop(&user_rx, &replies, |msg| {
@@ -1627,6 +1700,7 @@ mod writer_loop_tests {
         let replies = ReplyQueue {
             rx: reply_rx,
             queued_bytes: Arc::clone(&queued_bytes),
+            pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
         };
         let writer = std::thread::spawn(move || {
             run_writer_loop(&user_rx, &replies, |msg| {
@@ -1679,6 +1753,7 @@ mod writer_loop_tests {
         let replies = ReplyQueue {
             rx: reply_rx,
             queued_bytes: Arc::clone(&queued_bytes),
+            pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
         };
         let writer = std::thread::spawn(move || {
             let mut first = true;

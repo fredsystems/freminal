@@ -162,7 +162,8 @@ impl TerminalHandler {
         }
     }
 
-    /// Number of terminal replies dropped because the PTY reply queue was full.
+    /// Number of terminal replies dropped because the PTY reply queue was full
+    /// or queuing them would exceed the reply byte budget.
     ///
     /// Diagnostic only; it never decreases.
     #[must_use]

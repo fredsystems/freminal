@@ -60,7 +60,9 @@ fn drain(rx: &crossbeam_channel::Receiver<PtyWrite>) {
 fn unwrap_write(msg: PtyWrite) -> Vec<u8> {
     match msg {
         PtyWrite::Write(bytes) => bytes,
-        PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got PtyWrite::Resize"),
+        PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+            panic!("expected PtyWrite::Write, got a resize")
+        }
     }
 }
 
@@ -725,7 +727,7 @@ fn collect_writes(rx: &crossbeam_channel::Receiver<PtyWrite>) -> Vec<Vec<u8>> {
     rx.try_iter()
         .filter_map(|msg| match msg {
             PtyWrite::Write(bytes) => Some(bytes),
-            PtyWrite::Resize(_) => None,
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => None,
         })
         .collect()
 }

@@ -26,4 +26,10 @@ pub enum PtyWrite {
     Write(Vec<u8>),
     /// Resize the PTY to the given dimensions.
     Resize(FreminalTerminalSize),
+    /// Marker: the emulator has a column-mode (DECCOLM) resize waiting in the
+    /// shared pending-resize slot.  The PTY writer takes the slot's current
+    /// value and applies it; if the slot is already empty the marker is a
+    /// no-op.  This coalesces repeated DECCOLM toggles to the latest size so
+    /// the unbounded user channel cannot grow with them.
+    ApplyPendingResize,
 }

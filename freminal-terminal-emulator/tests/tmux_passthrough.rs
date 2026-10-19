@@ -43,7 +43,9 @@ fn replies(rx: &Receiver<PtyWrite>) -> Vec<Vec<u8>> {
     while let Ok(msg) = rx.try_recv() {
         match msg {
             PtyWrite::Write(bytes) => out.push(bytes),
-            PtyWrite::Resize(_) => panic!("unexpected PtyWrite::Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("unexpected resize message")
+            }
         }
     }
     out

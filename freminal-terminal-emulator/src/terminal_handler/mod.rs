@@ -7,6 +7,7 @@ use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
 use crate::io::SearchCorpus;
 use crate::snapshot::BufferExtent;
+use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use cursor_ops::SavedDecscState;
@@ -59,7 +60,7 @@ use freminal_common::{
     colors::{ColorPalette, DynamicColorSlot, ResolvedColors, TerminalColor},
     cursor::CursorVisualStyle,
     host_capabilities::{HostCapabilities, Osc99Support},
-    pty_write::PtyWrite,
+    pty_write::{FreminalTerminalSize, PtyWrite},
     themes::ThemePalette,
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
@@ -261,8 +262,9 @@ pub struct TerminalHandler {
     saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
-    /// Replies dropped because `write_tx` was bounded and full
-    /// (GHSA-6cxq-f7hx-92v2).  Diagnostic counter; atomic so replies can be
+    /// Replies dropped because `write_tx` was bounded and full, or because
+    /// queuing them would exceed the reply byte budget (`reply_budget`)
+    /// (GHSA-6cxq-f7hx-92v2, 148.C9).  Diagnostic counter; atomic so replies can be
     /// counted from the `&self` write helpers.
     dropped_replies: AtomicU64,
     /// Bytes of replies currently queued on `write_tx` and not yet written by
@@ -277,6 +279,13 @@ pub struct TerminalHandler {
     /// so a full reply queue can never block or drop a resize; when unset,
     /// such commands fall back to `write_tx`.
     control_tx: Option<Sender<PtyWrite>>,
+    /// Latest-value slot for a pending DECCOLM resize, shared with the PTY
+    /// writer.  When set, `send_pty_resize` stores the size here and queues a
+    /// `PtyWrite::ApplyPendingResize` marker only if the slot was empty, so
+    /// repeated `CSI ?3h` / `?3l` against a child that is not reading its tty
+    /// cannot grow the unbounded control channel.  `None` (headless, tests)
+    /// sends `PtyWrite::Resize` directly.
+    pending_resize: Option<Arc<ArcSwapOption<FreminalTerminalSize>>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
     /// Finished OSC 133 command blocks queued for the GUI to drain via
@@ -506,6 +515,7 @@ impl TerminalHandler {
             dropped_replies: AtomicU64::new(0),
             reply_budget: None,
             control_tx: None,
+            pending_resize: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
             last_graphic_char: None,
@@ -1125,6 +1135,13 @@ impl TerminalHandler {
     /// (GHSA-6cxq-f7hx-92v2).
     pub fn set_control_tx(&mut self, tx: Sender<PtyWrite>) {
         self.control_tx = Some(tx);
+    }
+
+    /// Share the pending column-mode resize slot with the PTY writer thread.
+    /// With it set, DECCOLM resizes are coalesced to the latest size (see
+    /// `send_pty_resize`).
+    pub fn set_pending_resize(&mut self, slot: Arc<ArcSwapOption<FreminalTerminalSize>>) {
+        self.pending_resize = Some(slot);
     }
 
     /// Drain and return all inner payloads queued by tmux DCS passthrough.
@@ -3344,7 +3361,9 @@ mod tests {
     fn recv_pty_string(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
         match rx.try_recv().expect("expected a PtyWrite") {
             PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8"),
-            other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+            other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+                panic!("expected PtyWrite::Write, got {other:?}")
+            }
         }
     }
 

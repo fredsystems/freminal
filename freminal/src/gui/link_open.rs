@@ -33,13 +33,74 @@ use tracing::{debug, error, warn};
 /// (`desktop`, `command`, `tool`, `app`, `lnk`, `url`, `appimage`), Windows
 /// executables and scripts (`exe`, `com`, `bat`, `cmd`, `scr`, `pif`, `msi`,
 /// `msc`, `cpl`, `ps1`, `psm1`, `vbs`, `vbe`, `js`, `jse`, `wsf`, `wsh`,
-/// `hta`), `jar`, and unix shell / installer types (`sh`, `bash`, `zsh`,
-/// `fish`, `csh`, `run`, `bin`). A `file:` link to one of these is refused
+/// `hta`), `jar`, unix shell / installer types (`sh`, `bash`, `zsh`,
+/// `fish`, `csh`, `run`, `bin`), macOS formats that run a command or redirect
+/// on open (`terminal`, `fileloc`, `inetloc`, `webloc`, `workflow`, `scpt`,
+/// `applescript`, `pkg`, `mpkg`), and Windows registry, shell, installer and
+/// handler formats (`reg`, `scf`, `inf`, `msp`, `application`, `appref-ms`,
+/// `settingcontent-ms`, `library-ms`, `search-ms`, `diagcab`, `ps1xml`,
+/// `psd1`, `vb`, `ws`, `xbap`). A `file:` link to one of these is refused
 /// because the platform opener may execute it instead of displaying it.
 const LAUNCHER_EXTENSIONS: &[&str] = &[
-    "desktop", "command", "tool", "app", "exe", "com", "bat", "cmd", "scr", "pif", "msi", "msc",
-    "lnk", "url", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "cpl", "jar",
-    "appimage", "sh", "bash", "zsh", "fish", "csh", "run", "bin",
+    "desktop",
+    "command",
+    "tool",
+    "app",
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "scr",
+    "pif",
+    "msi",
+    "msc",
+    "lnk",
+    "url",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "cpl",
+    "jar",
+    "appimage",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "csh",
+    "run",
+    "bin",
+    // macOS: run or redirect on open.
+    "terminal",
+    "fileloc",
+    "inetloc",
+    "webloc",
+    "workflow",
+    "scpt",
+    "applescript",
+    "pkg",
+    "mpkg",
+    // Windows: registry, shell, installer and handler formats.
+    "reg",
+    "scf",
+    "inf",
+    "msp",
+    "application",
+    "appref-ms",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+    "diagcab",
+    "ps1xml",
+    "psd1",
+    "vb",
+    "ws",
+    "xbap",
 ];
 
 /// Outcome of [`classify_link`].
@@ -331,18 +392,18 @@ const fn local_file_is_executable(_target: &str) -> bool {
 /// at `debug`) and otherwise ignored. The opener runs on its own thread so a
 /// slow handler cannot stall the GUI.
 pub fn open_link(target: String) {
-    if let LinkOpenDecision::Refused(reason) = decide_open(&target) {
-        warn!("Refusing to open hyperlink: {reason:?}");
-        debug!(
-            "Refused hyperlink target: {}",
-            escape_sequence_for_log_bounded(target.as_bytes())
-        );
+    // The pure checks run here; the `stat` in `decide_open` runs on the worker
+    // thread, so a link on a hung network mount cannot stall the GUI.
+    if refuse_logged(&target, classify_link(&target)) {
         return;
     }
 
     if let Err(e) = std::thread::Builder::new()
         .name("freminal-open-url".to_string())
         .spawn(move || {
+            if refuse_logged(&target, decide_open(&target)) {
+                return;
+            }
             if let Err(e) = open::that(&target) {
                 error!("Failed to open hyperlink: {e}");
                 debug!(
@@ -354,6 +415,20 @@ pub fn open_link(target: String) {
     {
         error!("Failed to spawn URL-open thread: {e}");
     }
+}
+
+/// Log a refusal (reason at warn, a bounded escaped target at debug) and
+/// return whether `decision` refused `target`.
+fn refuse_logged(target: &str, decision: LinkOpenDecision) -> bool {
+    let LinkOpenDecision::Refused(reason) = decision else {
+        return false;
+    };
+    warn!("Refusing to open hyperlink: {reason:?}");
+    debug!(
+        "Refused hyperlink target: {}",
+        escape_sequence_for_log_bounded(target.as_bytes())
+    );
+    true
 }
 
 #[cfg(test)]

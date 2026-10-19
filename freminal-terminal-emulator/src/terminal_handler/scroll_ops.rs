@@ -8,6 +8,8 @@
 //! Covers scroll up/down, DECSTBM/DECSLRM margins, IND/RI/NEL, LF/BS/TAB,
 //! alternate screen entry/exit, scroll-back offset helpers, and terminal resize.
 
+use std::sync::Arc;
+
 use conv2::ValueFrom;
 use freminal_common::{
     buffer_states::{
@@ -298,20 +300,46 @@ impl TerminalHandler {
 
     /// Notify the PTY of a column-mode resize (DECCOLM).
     ///
-    /// Sends a `PtyWrite::Resize` with the new width and the current height.
-    /// Pixel dimensions are set to 0 — the PTY thread will use the character
+    /// Pixel dimensions are set to 0 -- the PTY thread will use the character
     /// dimensions to compute the actual pixel size.
+    ///
+    /// With a shared pending-resize slot the size is coalesced to the latest
+    /// value: the slot is overwritten and a `PtyWrite::ApplyPendingResize`
+    /// marker is queued only if the slot was empty.  Without a slot (headless,
+    /// tests) a `PtyWrite::Resize` is sent directly.
+    ///
+    /// Why the control channel stays bounded: the slot is emptied only by the
+    /// writer, and only *after* it has dequeued a marker, while a marker is
+    /// queued only by the handler that finds the slot empty.  So while a
+    /// marker is queued the slot is non-empty and no second marker is sent;
+    /// the next one can only be queued after the writer has dequeued the
+    /// first.  At most one marker is queued, and one more may be in flight in
+    /// the writer.  The applied size is always the latest: a store that lands
+    /// before the writer's `swap(None)` is applied by that very swap, and one
+    /// that lands after finds the slot empty and queues a fresh marker.
     pub(super) fn send_pty_resize(&self, new_width: usize) {
         let height = self.buffer.terminal_height();
+        let size = FreminalTerminalSize {
+            width: new_width,
+            height,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         // Not a reply: prefer the unbounded control channel so a full reply
         // queue cannot stall the PTY thread on this blocking send.
-        if let Some(tx) = self.control_tx.as_ref().or(self.write_tx.as_ref()) {
-            let size = FreminalTerminalSize {
-                width: new_width,
-                height,
-                pixel_width: 0,
-                pixel_height: 0,
-            };
+        let Some(tx) = self.control_tx.as_ref().or(self.write_tx.as_ref()) else {
+            return;
+        };
+        if let Some(slot) = &self.pending_resize {
+            let had_pending = slot.swap(Some(Arc::new(size))).is_some();
+            if !had_pending {
+                send_or_log!(
+                    tx,
+                    PtyWrite::ApplyPendingResize,
+                    "Failed to send pending-resize marker"
+                );
+            }
+        } else {
             send_or_log!(tx, PtyWrite::Resize(size), "Failed to send PTY resize");
         }
     }

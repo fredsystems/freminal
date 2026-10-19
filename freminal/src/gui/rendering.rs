@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -79,12 +80,45 @@ fn apply_chrome_visuals(
     });
 }
 
+/// Maximum number of messages that may already be queued on a pane's input
+/// channel for [`send_gui_reply`] to add another reply.
+const MAX_QUEUED_GUI_REPLIES: usize = 1024;
+
+/// Warn on the first dropped GUI reply and on every this-many-th after it.
+const DROP_WARN_EVERY: u32 = 1024;
+
+/// GUI replies dropped because the input channel was backed up.  Diagnostic
+/// only; shared by all panes.
+static DROPPED_GUI_REPLIES: AtomicU64 = AtomicU64::new(0);
+
 /// Send a structured GUI reply to the pane's PTY thread.
 ///
 /// Used by `handle_window_manipulation` to answer Report* and OSC 52 queries.
 /// The PTY thread serialises the reply and frames it according to the
 /// application's S8C1T mode, so the GUI never formats escape-sequence bytes.
+///
+/// The per-pane input channel is unbounded and the report budget slot is
+/// released before the PTY thread has consumed the reply, so sustained report
+/// traffic while that thread is busy would otherwise grow the channel without
+/// limit.  A reply is therefore dropped when the channel already holds
+/// [`MAX_QUEUED_GUI_REPLIES`] or more messages.  The channel length counts
+/// keystrokes too, so a reply is dropped only behind a large backlog of any
+/// kind; keystrokes themselves never go through this function and are never
+/// dropped.
 fn send_gui_reply(reply_tx: &Sender<InputEvent>, reply: GuiReply) {
+    if reply_tx.len() >= MAX_QUEUED_GUI_REPLIES {
+        let dropped = DROPPED_GUI_REPLIES.fetch_add(1, Ordering::Relaxed);
+        if dropped.is_multiple_of(u64::from(DROP_WARN_EVERY)) {
+            warn!(
+                "Dropping GUI reply: {MAX_QUEUED_GUI_REPLIES} or more messages are already \
+                 queued for the PTY thread ({} dropped so far)",
+                dropped + 1
+            );
+        } else {
+            debug!("Dropping GUI reply: PTY input queue is full");
+        }
+        return;
+    }
     send_or_log!(
         reply_tx,
         InputEvent::Reply(reply),
@@ -2082,5 +2116,37 @@ mod window_manipulation_reply_tests {
             clamp_move_target(1.0e9, 1.0e9, fallback),
             egui::Pos2::new(FALLBACK_MONITOR_EXTENT - 1.0, FALLBACK_MONITOR_EXTENT - 1.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod gui_reply_backlog_tests {
+    use super::{MAX_QUEUED_GUI_REPLIES, send_gui_reply};
+    use crossbeam_channel::unbounded;
+    use freminal_terminal_emulator::io::{GuiReply, InputEvent};
+
+    /// With nobody draining the channel, replies stop being queued once it
+    /// holds `MAX_QUEUED_GUI_REPLIES` messages; it resumes after a drain.
+    #[test]
+    fn replies_are_dropped_behind_a_full_input_queue() {
+        let (tx, rx) = unbounded::<InputEvent>();
+
+        for _ in 0..(MAX_QUEUED_GUI_REPLIES + 500) {
+            send_gui_reply(&tx, GuiReply::WindowTitle(String::from("t")));
+        }
+        assert_eq!(tx.len(), MAX_QUEUED_GUI_REPLIES);
+
+        // Keystrokes do not go through `send_gui_reply` and are never dropped.
+        tx.send(InputEvent::Key(vec![b'a'])).expect("send key");
+        assert_eq!(tx.len(), MAX_QUEUED_GUI_REPLIES + 1);
+
+        // Still over the limit: a further reply is refused.
+        send_gui_reply(&tx, GuiReply::WindowTitle(String::from("t")));
+        assert_eq!(tx.len(), MAX_QUEUED_GUI_REPLIES + 1);
+
+        // Once the PTY thread drains the channel, replies flow again.
+        while rx.try_recv().is_ok() {}
+        send_gui_reply(&tx, GuiReply::WindowTitle(String::from("t")));
+        assert_eq!(tx.len(), 1);
     }
 }

@@ -449,6 +449,45 @@ pub(crate) const MAX_OUTSTANDING_REPORTS: usize = 256;
 /// logged at warn level.
 pub(crate) const MAX_OUTSTANDING_VIEWPORT_COMMANDS: usize = 4096;
 
+/// Most payload bytes that Viewport-class window commands may hold in flight for
+/// one pane.
+///
+/// [`MAX_OUTSTANDING_VIEWPORT_COMMANDS`] counts messages, and a message can be
+/// a clipboard write or notification of up to the parser's payload limit
+/// (about 1 MiB), so the message cap alone would let a stalled GUI hold
+/// gigabytes.  This bounds the sum of [`payload_bytes`] over the commands
+/// queued, of either class (OSC 99 reports carry icons).  A single command larger than the cap is admitted only into an empty
+/// byte budget, the same exception the reply budget makes, so one legitimate
+/// large clipboard write is never refused outright.
+pub(crate) const MAX_OUTSTANDING_VIEWPORT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Heap payload size, in bytes, that a window manipulation holds while queued.
+///
+/// Counts the variable-length strings of the variants an application controls
+/// the size of: OSC 52 clipboard writes (selection and content), OSC 9 / 777
+/// notifications (title and body) and title-bar text.  Every other variant is
+/// fixed-size and counts as 0.
+pub(crate) fn payload_bytes(manipulation: &WindowManipulation) -> usize {
+    match manipulation {
+        WindowManipulation::SetClipboard(selection, content) => {
+            selection.len().saturating_add(content.len())
+        }
+        WindowManipulation::Notification { title, body, .. } => title
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(body.len()),
+        WindowManipulation::SetTitleBarText(text) => text.len(),
+        // OSC 99 carries an icon (up to the OSC cap) plus title and body.
+        WindowManipulation::Notification99(data) => data
+            .title
+            .len()
+            .saturating_add(data.body.as_ref().map_or(0, String::len))
+            .saturating_add(data.icon_data.as_ref().map_or(0, Vec::len)),
+        WindowManipulation::Osc99CacheIcon { key, data } => key.len().saturating_add(data.len()),
+        _ => 0,
+    }
+}
+
 /// Outcome of asking whether another window command may be queued for the GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandAdmission {
@@ -488,9 +527,12 @@ impl CommandClass {
     }
 }
 
-/// The two per-pane counters bounding the `window_cmd_rx` backlog: one for
-/// Report-class commands ([`MAX_OUTSTANDING_REPORTS`]) and one for
-/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]).
+/// The per-pane counters bounding the `window_cmd_rx` backlog.
+///
+/// One counter covers Report-class commands ([`MAX_OUTSTANDING_REPORTS`]), one
+/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]) and one the
+/// payload bytes those commands hold, of either class
+/// ([`MAX_OUTSTANDING_VIEWPORT_BYTES`]; OSC 99 reports carry icons).
 ///
 /// Shared between the PTY consumer thread, the only caller of
 /// [`admit`](Self::admit) and the only incrementer, and the GUI, which only
@@ -500,6 +542,7 @@ impl CommandClass {
 pub struct WindowCommandBudget {
     pub(crate) reports: Arc<AtomicUsize>,
     pub(crate) viewport: Arc<AtomicUsize>,
+    pub(crate) viewport_bytes: Arc<AtomicUsize>,
 }
 
 impl WindowCommandBudget {
@@ -510,40 +553,78 @@ impl WindowCommandBudget {
         }
     }
 
+    /// Bytes `command` counts against [`MAX_OUTSTANDING_VIEWPORT_BYTES`]: its
+    /// [`payload_bytes`], for either class (an OSC 99 report can carry an
+    /// icon).
+    fn counted_bytes(command: &WindowCommand) -> usize {
+        match command {
+            WindowCommand::Viewport(manipulation) | WindowCommand::Report(manipulation) => {
+                payload_bytes(manipulation)
+            }
+        }
+    }
+
     /// Admit one more outstanding command of `command`'s class, or refuse it at
     /// the cap.
     ///
+    /// A command of either class is also refused when its payload would take the bytes
+    /// in flight past [`MAX_OUTSTANDING_VIEWPORT_BYTES`], unless the byte budget
+    /// is empty (so a single oversized command still gets through).
+    ///
     /// Admission counts the command, so the caller sends it when this returns
     /// [`CommandAdmission::Admitted`] and drops it otherwise.  The GUI only
-    /// decrements, so the load below can only be stale in the cautious
-    /// direction.
+    /// decrements, so the loads below can only be stale in the cautious
+    /// direction, and the PTY thread, the only incrementer, makes the check and
+    /// the increment without interleaving with another admission.
     pub(crate) fn admit(&self, command: &WindowCommand) -> CommandAdmission {
         let class = CommandClass::of(command);
         let outstanding = self.counter(class);
         if outstanding.load(Ordering::Relaxed) >= class.cap() {
             return CommandAdmission::Dropped;
         }
+        let bytes = Self::counted_bytes(command);
+        if bytes > 0 {
+            let queued = self.viewport_bytes.load(Ordering::Relaxed);
+            if queued > 0 && queued.saturating_add(bytes) > MAX_OUTSTANDING_VIEWPORT_BYTES {
+                return CommandAdmission::Dropped;
+            }
+            self.viewport_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         // Counted before the send, so the GUI cannot release it before it is added.
         outstanding.fetch_add(1, Ordering::Relaxed);
         CommandAdmission::Admitted
     }
 
-    /// Release one outstanding command of `command`'s class; the GUI calls this
-    /// once per command it drains.  Saturates at zero so a mismatch can never
-    /// wrap a counter.
+    /// Release one outstanding command of `command`'s class and its payload
+    /// bytes; the GUI calls this once per command it drains.  Saturates at zero
+    /// so a mismatch can never wrap a counter.
     pub(crate) fn release(&self, command: &WindowCommand) {
-        // The closure always returns `Some`, so the update cannot fail.
+        // The closures always return `Some`, so the updates cannot fail.
         let _ = self.counter(CommandClass::of(command)).try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |n| Some(n.saturating_sub(1)),
         );
+        let bytes = Self::counted_bytes(command);
+        if bytes > 0 {
+            let _ = self
+                .viewport_bytes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(bytes))
+                });
+        }
     }
 
     /// Commands of `class` currently counted as outstanding.
     #[cfg(test)]
     fn outstanding(&self, class: CommandClass) -> usize {
         self.counter(class).load(Ordering::Relaxed)
+    }
+
+    /// Viewport payload bytes currently counted as outstanding.
+    #[cfg(test)]
+    fn outstanding_bytes(&self) -> usize {
+        self.viewport_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -1932,6 +2013,7 @@ mod tests {
         loop {
             match write_rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(PtyWrite::Resize(size)) => saw.push(ChildSaw::Resize(size.width)),
+                Ok(PtyWrite::ApplyPendingResize) => {}
                 Ok(PtyWrite::Write(bytes)) => saw.push(ChildSaw::Write(bytes)),
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -2160,6 +2242,144 @@ mod tests {
             0,
             "never underflows"
         );
+    }
+
+    fn clipboard_command(content_len: usize) -> WindowCommand {
+        WindowCommand::Viewport(WindowManipulation::SetClipboard(
+            String::new(),
+            "x".repeat(content_len),
+        ))
+    }
+
+    #[test]
+    fn payload_bytes_counts_the_variable_length_strings() {
+        use freminal_common::buffer_states::osc::OscNotifySource;
+        use freminal_common::buffer_states::window_manipulation::NotificationKind;
+
+        assert_eq!(
+            payload_bytes(&WindowManipulation::SetClipboard(
+                "c".to_owned(),
+                "abcd".to_owned()
+            )),
+            5
+        );
+        assert_eq!(
+            payload_bytes(&WindowManipulation::SetTitleBarText("title".to_owned())),
+            5
+        );
+        for (title, expected) in [(Some("ti".to_owned()), 5), (None, 3)] {
+            assert_eq!(
+                payload_bytes(&WindowManipulation::Notification {
+                    kind: NotificationKind::OscText,
+                    source: OscNotifySource::Osc9,
+                    title,
+                    body: "bod".to_owned(),
+                }),
+                expected
+            );
+        }
+        assert_eq!(payload_bytes(&WindowManipulation::Bell), 0);
+        assert_eq!(payload_bytes(&WindowManipulation::ReportTitle), 0);
+        assert_eq!(
+            payload_bytes(&WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![0; 10],
+            }),
+            11
+        );
+    }
+
+    /// OSC 99 icon priming is Report-class but carries image bytes, so it is
+    /// bounded by the byte budget, not only the message cap.
+    #[test]
+    fn report_payload_bytes_count_against_the_byte_budget() {
+        let budget = WindowCommandBudget::default();
+        let icon = || {
+            WindowCommand::Report(WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![0; 1024 * 1024],
+            })
+        };
+        let admitted = (0..100)
+            .filter(|_| budget.admit(&icon()) == CommandAdmission::Admitted)
+            .count();
+        assert!(admitted <= 16, "admitted {admitted} 1 MiB icons");
+        budget.release(&icon());
+        assert_eq!(budget.admit(&icon()), CommandAdmission::Admitted);
+    }
+
+    #[test]
+    fn viewport_bytes_are_capped_and_release_restores_the_budget() {
+        const MIB: usize = 1024 * 1024;
+        let budget = WindowCommandBudget::default();
+
+        let admitted = (0..100)
+            .filter(|_| budget.admit(&clipboard_command(MIB)) == CommandAdmission::Admitted)
+            .count();
+        assert_eq!(admitted, MAX_OUTSTANDING_VIEWPORT_BYTES / MIB);
+        assert_eq!(budget.outstanding_bytes(), MAX_OUTSTANDING_VIEWPORT_BYTES);
+        assert_eq!(budget.outstanding(CommandClass::Viewport), admitted);
+
+        // Small commands that would not fit are refused too ...
+        assert_eq!(
+            budget.admit(&clipboard_command(1)),
+            CommandAdmission::Dropped
+        );
+        // ... but a command with no payload is not.
+        assert_eq!(
+            budget.admit(&WindowCommand::Viewport(WindowManipulation::Bell)),
+            CommandAdmission::Admitted
+        );
+
+        for _ in 0..admitted {
+            budget.release(&clipboard_command(MIB));
+        }
+        assert_eq!(budget.outstanding_bytes(), 0);
+        assert_eq!(
+            budget.admit(&clipboard_command(MIB)),
+            CommandAdmission::Admitted,
+            "released bytes are reusable"
+        );
+    }
+
+    #[test]
+    fn an_oversized_command_is_admitted_only_into_an_empty_byte_budget() {
+        let big = clipboard_command(MAX_OUTSTANDING_VIEWPORT_BYTES + 1);
+
+        let budget = WindowCommandBudget::default();
+        assert_eq!(budget.admit(&big), CommandAdmission::Admitted);
+        assert_eq!(
+            budget.admit(&clipboard_command(1)),
+            CommandAdmission::Dropped
+        );
+        assert_eq!(budget.admit(&big), CommandAdmission::Dropped);
+        budget.release(&big);
+        assert_eq!(budget.outstanding_bytes(), 0);
+
+        let busy = WindowCommandBudget::default();
+        assert_eq!(
+            busy.admit(&clipboard_command(1)),
+            CommandAdmission::Admitted
+        );
+        assert_eq!(
+            busy.admit(&big),
+            CommandAdmission::Dropped,
+            "an oversized command is refused while any bytes are in flight"
+        );
+    }
+
+    #[test]
+    fn byte_release_saturates_at_zero_and_ignores_reports() {
+        let budget = WindowCommandBudget::default();
+        budget.release(&clipboard_command(100));
+        assert_eq!(budget.outstanding_bytes(), 0, "never underflows");
+
+        assert_eq!(
+            budget.admit(&clipboard_command(10)),
+            CommandAdmission::Admitted
+        );
+        budget.release(&report_command());
+        assert_eq!(budget.outstanding_bytes(), 10, "a Report holds no bytes");
     }
 
     #[test]

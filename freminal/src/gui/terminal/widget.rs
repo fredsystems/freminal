@@ -4949,7 +4949,15 @@ impl FreminalTerminalWidget {
                     )
                     .show(|ui| {
                         ui.label(&url_text);
-                        ui.weak(if cfg!(target_os = "macos") {
+                        // Same pure rule the context menu uses to disable
+                        // "Open URL", so both entry points agree.
+                        let openable = matches!(
+                            crate::gui::link_open::classify_link(&url_text),
+                            crate::gui::link_open::LinkOpenDecision::Open
+                        );
+                        ui.weak(if !openable {
+                            "Opening this link is blocked by policy"
+                        } else if cfg!(target_os = "macos") {
                             "Cmd+click to open"
                         } else {
                             "Ctrl+click to open"

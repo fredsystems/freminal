@@ -101,10 +101,51 @@ fn deccolm_resize_bypasses_a_full_reply_queue() {
         .try_iter()
         .find_map(|w| match w {
             PtyWrite::Resize(size) => Some(size.width),
-            PtyWrite::Write(_) => None,
+            PtyWrite::Write(_) | PtyWrite::ApplyPendingResize => None,
         })
         .expect("DECCOLM must send a PtyWrite::Resize on the control channel");
     assert_eq!(resize, 132);
+}
+
+/// Repeated DECCOLM toggles against a child that never reads its tty must not
+/// grow the unbounded control channel: with the shared pending-resize slot the
+/// resizes coalesce to the latest size and at most two markers are queued.
+#[test]
+fn deccolm_toggle_flood_is_coalesced_to_the_latest_size() {
+    use arc_swap::ArcSwapOption;
+    use freminal_common::pty_write::PtyWrite;
+
+    let (reply_tx, _reply_rx) = bounded(REPLY_QUEUE_CAPACITY);
+    let (control_tx, control_rx) = unbounded();
+    let slot = Arc::new(ArcSwapOption::const_empty());
+    let mut state = TerminalState::new(reply_tx, None);
+    state.handler.set_control_tx(control_tx);
+    state.handler.set_pending_resize(Arc::clone(&slot));
+
+    state.handle_incoming_data(b"\x1b[?40h");
+    for _ in 0..FLOOD {
+        state.handle_incoming_data(b"\x1b[?3h\x1b[?3l");
+    }
+    // Finish on a 132-column request so the last width is distinguishable.
+    state.handle_incoming_data(b"\x1b[?3h");
+
+    let queued: Vec<PtyWrite> = control_rx.try_iter().collect();
+    assert!(
+        queued.len() <= 2,
+        "expected at most two queued markers, got {}",
+        queued.len()
+    );
+    assert!(
+        queued
+            .iter()
+            .all(|msg| matches!(msg, PtyWrite::ApplyPendingResize)),
+        "with a pending-resize slot no direct Resize may be queued"
+    );
+    let pending = slot.load_full().expect("the latest resize is pending");
+    assert_eq!(
+        pending.width, 132,
+        "the slot holds the last requested width"
+    );
 }
 
 /// A clipboard reply whose framed length is about `payload_len` bytes.
@@ -188,7 +229,8 @@ fn byte_budget_is_refunded_when_the_message_queue_is_full() {
         .try_iter()
         .map(|w| match w {
             freminal_common::pty_write::PtyWrite::Write(data) => data.len(),
-            freminal_common::pty_write::PtyWrite::Resize(_) => 0,
+            freminal_common::pty_write::PtyWrite::Resize(_)
+            | freminal_common::pty_write::PtyWrite::ApplyPendingResize => 0,
         })
         .sum();
     assert_eq!(queued.load(Ordering::Relaxed), total);

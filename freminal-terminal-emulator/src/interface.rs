@@ -409,6 +409,10 @@ impl TerminalEmulator {
         // Bytes queued on `reply_tx` and not yet written; shared by the handler
         // (adds) and the PTY writer thread (subtracts) -- see 148.C9.
         let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+        // Latest-value slot for DECCOLM resizes, shared by the handler (stores)
+        // and the PTY writer thread (takes), so repeated column-mode toggles
+        // cannot grow the unbounded `write_tx` channel.
+        let pending_resize = Arc::new(arc_swap::ArcSwapOption::const_empty());
         let (pty_tx, pty_rx) = unbounded();
 
         // Derive the command tuple from the positional `command` arg.
@@ -437,6 +441,7 @@ impl TerminalEmulator {
             ReplyQueue {
                 rx: reply_rx,
                 queued_bytes: Arc::clone(&queued_reply_bytes),
+                pending_resize: Arc::clone(&pending_resize),
             },
             pty_tx,
             PtySpawnConfig {
@@ -464,6 +469,7 @@ impl TerminalEmulator {
         internal.write_tx = write_tx.clone();
         internal.handler.set_control_tx(write_tx.clone());
         internal.handler.set_reply_budget(queued_reply_bytes);
+        internal.handler.set_pending_resize(pending_resize);
 
         let ret = Self {
             internal,

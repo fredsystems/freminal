@@ -1204,7 +1204,9 @@ fn cursor_report_sends_correct_position() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1230,7 +1232,9 @@ fn da1_sends_response() {
         .expect("RequestDeviceAttributes must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1260,7 +1264,9 @@ fn xtversion_response_starts_with_xterm_prefix() {
         .expect("RequestDeviceNameAndVersion must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
 
@@ -1343,7 +1349,9 @@ fn report_character_size_in_pixels_is_synchronous() {
         .expect("ReportCharacterSizeInPixels must produce a PTY response");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -1377,7 +1385,9 @@ fn report_terminal_size_in_characters_is_synchronous() {
         .expect("ReportTerminalSizeInCharacters must produce a PTY response");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2515,7 +2525,9 @@ fn test_dsr_ps5_device_status_report() {
         .expect("DeviceStatusReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2545,7 +2557,9 @@ fn test_dsr_ps6_cursor_position_report() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -2569,7 +2583,9 @@ fn test_dsr_ps6_cursor_at_origin() {
         .expect("CursorReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(response, "\x1b[1;1R", "Cursor at origin should report 1;1");
@@ -2590,7 +2606,9 @@ fn test_dsr_996_color_theme_report() {
         .expect("ColorThemeReport must send a message to the channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -3937,7 +3955,9 @@ fn query_handler_mode(handler: &mut TerminalHandler, mode_output: TerminalOutput
         .expect("Mode query must produce a DECRPM response on the PTY channel");
     let bytes = match msg {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     String::from_utf8(bytes).expect("DECRPM response must be valid UTF-8")
 }
@@ -4595,7 +4615,9 @@ fn cursor_report_with_scrollback_reports_screen_row() {
     }
     let bytes = match last_msg.expect("CursorReport must send a message") {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -4637,7 +4659,9 @@ fn cursor_report_with_decom_reports_region_relative_row() {
     }
     let bytes = match last_msg.expect("CursorReport must send a message") {
         PtyWrite::Write(b) => b,
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     };
     let response = String::from_utf8(bytes).expect("response must be valid UTF-8");
     assert_eq!(
@@ -5311,7 +5335,9 @@ fn handler_application_escape_key_query_when_false() {
                 "query when false should report mode 2 (reset)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5339,7 +5365,9 @@ fn handler_application_escape_key_query_when_true() {
                 "query when true should report mode 1 (set)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5374,7 +5402,9 @@ fn handler_in_band_resize_mode_dec_set() {
                 "DECSET ?2048 must be reported as mode 1 (set)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5412,7 +5442,9 @@ fn handler_in_band_resize_mode_dec_rst() {
                 "DECRST ?2048 must be reported as mode 2 (reset)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5435,7 +5467,9 @@ fn handler_in_band_resize_mode_query_when_level_zero() {
                 "query when level=0 should report mode 2 (reset)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5466,7 +5500,9 @@ fn handler_in_band_resize_mode_query_when_level_nonzero() {
                 "query when in-band resize is enabled should report mode 1 (set)"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 }
 
@@ -5501,7 +5537,9 @@ fn handler_csi_set_then_dec_mode_reset_interaction() {
             let s = String::from_utf8(bytes).expect("valid UTF-8");
             assert_eq!(s, "\x1b[?2048;1$y", "in-band resize must be set (mode 1)");
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 
     // Reset via DECRST ?2048.
@@ -5524,7 +5562,9 @@ fn handler_csi_set_then_dec_mode_reset_interaction() {
                 "in-band resize must be reset (mode 2) after DECRST"
             );
         }
-        other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+        other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+            panic!("expected PtyWrite::Write, got {other:?}")
+        }
     }
 
     // The CSI modifyOtherKeys level is independent — it must still be 0.

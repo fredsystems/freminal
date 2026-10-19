@@ -8334,7 +8334,8 @@ Group F — Hygiene:
   harness exists, so the save path is covered through the shared helper's tests.
 - **148.11 (done):** the PTY writer thread now reads two crossbeam channels: the existing
   unbounded one for user input (keystrokes, paste, resize, the GUI's `pty_write_tx`), and a new
-  `bounded(REPLY_QUEUE_CAPACITY = 256)` one for terminal-generated replies.
+  `bounded(REPLY_QUEUE_CAPACITY)` one for terminal-generated replies (256 here; raised to
+  1024 by review fix R5, and given a 4 MiB byte budget by 148.C9).
   `run_writer_loop` (`io/pty.rs`) uses `select_biased!` with user input first, so keystrokes
   no longer queue behind replies. A reply and a keystroke pending at the same moment can now be
   written in either order, user first. No locks; the GUI is unchanged. The handler sends
@@ -8344,7 +8345,7 @@ Group F — Hygiene:
   channel. XTGETTCAP answers at most `MAX_XTGETTCAP_NAMES` = 64 names per request and never
   echoes a name longer than 128 hex characters (freminal policy; xterm-412 answers every
   name). `new_headless` keeps one unbounded channel for the fuzz harness. Tests: 10,000 DA1
-  queries with no reader leave exactly 256 queued; a keystroke sent while the writer is blocked
+  queries with no reader leave exactly `REPLY_QUEUE_CAPACITY` queued; a keystroke sent while the writer is blocked
   is written before every queued reply; a DECCOLM resize gets through a full reply queue.
   `bench_handle_incoming_data`: −0.5%.
 - **148.13 (done):** `shm_read_bounds` now enforces `MAX_KITTY_DATA_BYTES` on both platforms
@@ -8467,12 +8468,12 @@ Group F — Hygiene:
     `ansi_parser` and `terminal_state` (not for replay or cmin).
   - **Dictionary coverage:** 20-minute runs from the seeds only, `-fork=4`, with and without:
 
-    | Target | Dictionary | cov | ft | corpus |
-    | --- | --- | --- | --- | --- |
-    | `terminal_state` | with | 15356 | 72015 | 8892 |
-    | `terminal_state` | without | 14576 | 65561 | 7470 |
-    | `ansi_parser` | with | 4668 | 26402 | 6449 |
-    | `ansi_parser` | without | 4725 | 27181 | 6707 |
+    | Target           | Dictionary | cov   | ft    | corpus |
+    | ---------------- | ---------- | ----- | ----- | ------ |
+    | `terminal_state` | with       | 15356 | 72015 | 8892   |
+    | `terminal_state` | without    | 14576 | 65561 | 7470   |
+    | `ansi_parser`    | with       | 4668  | 26402 | 6449   |
+    | `ansi_parser`    | without    | 4725  | 27181 | 6707   |
 
     That is +5.4% cov and +9.9% ft for `terminal_state`; `ansi_parser` is −1.2% / −2.9% (one run
     each, so within likely noise; the seeds probably already carry most tokens). The mapping
@@ -8575,6 +8576,27 @@ Group F — Hygiene:
   - **RC10b:** nit fixes (comment wrap, log wording, test classification).
   - **RC7, RC9:** doc fixes: the A14 wording, and the LF/IND/NEL and DECSLRM coverage rows for
     148.C3 and 148.C12.
+
+- **PR #572 review (2026-10-19):** CI and the CodeRabbit / Copilot comments.
+  - **RD1 (CI):** macOS shared-memory objects reject `read`/`pread` (`ESPIPE`), so 148.13
+    broke `t=s` on macOS. macOS now reads through `mmap`, which is safe there because XNU fixes
+    an object's size at its first `ftruncate` (`pshm_truncate`); the other unix platforms keep
+    `pread`. A 148.15 edit had replaced the Windows `t=s` round-trip test's success check with
+    a refusal check; restored.
+  - **RD2:**
+    - **Resize coalescing:** DECCOLM resizes coalesce through a latest-value slot
+      (`PtyWrite::ApplyPendingResize`), so at most one marker is ever queued.
+    - **GUI replies:** dropped once the pane's input queue already holds 1024 messages
+      (keystrokes are never dropped).
+    - **Window commands:** the budget also bounds payload bytes (16 MiB, both classes; OSC 99
+      icons count).
+    - **Sixel:** the stored pixels release spare capacity, which the image-store quota did not
+      charge.
+    - **Links:** the `file:` exec-bit `stat` moved to the opener thread; `LAUNCHER_EXTENSIONS`
+      gains macOS and Windows run-on-open formats; the Ctrl/Cmd-click tooltip says when a link
+      is blocked.
+    - **Docs and tests:** `dropped_replies` docs, a misnamed `.frec` test, the 148.11 capacity
+      numbers and the dictionary table.
 
 ### 148 Cleanup entries
 
