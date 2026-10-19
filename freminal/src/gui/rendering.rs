@@ -24,6 +24,7 @@ use crate::gui::notifications::{NotificationRequest, Osc99Control};
 use crate::gui::osc99::{
     Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneContext, Osc99Request,
 };
+use crate::gui::title_stack::TitleStack;
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
 /// spacing for the initial / window-creation style setup.
@@ -246,7 +247,7 @@ pub(super) fn handle_window_manipulation(
     font_width: usize,
     font_height: usize,
     window_width: egui::Rect,
-    title_stack: &mut Vec<String>,
+    title_stack: &mut TitleStack,
     tab_title: &mut String,
     bell_active: &mut bool,
     bell_since: &mut Option<Instant>,
@@ -694,6 +695,7 @@ mod window_manipulation_reply_tests {
         PaneVisibility, TabActivity, WindowMinimized, ZoomOcclusion,
     };
     use crate::gui::panes::PaneIdGenerator;
+    use crate::gui::title_stack::{MAX_TITLE_STACK_DEPTH, TitleStack};
     use freminal_windowing::WindowId;
     use std::sync::{Arc, Weak};
 
@@ -797,7 +799,7 @@ mod window_manipulation_reply_tests {
             is_only_pane: true,
             osc99,
         };
-        let mut title_stack = Vec::new();
+        let mut title_stack = TitleStack::new();
         let mut tab_title = String::new();
         let mut bell_active = false;
         let mut bell_since = None;
@@ -842,6 +844,133 @@ mod window_manipulation_reply_tests {
             osc99: osc99_requests,
             pane_handle: reply_tx,
         }
+    }
+
+    /// Whether the pane under test is the fully-active pane or a background one.
+    #[derive(Clone, Copy)]
+    enum PaneRole {
+        Active,
+        Background,
+    }
+
+    /// Run one frame of `commands` through `handle_window_manipulation` for a
+    /// pane of the given `role`, mutating the caller's `title_stack` and
+    /// `tab_title` so state persists across frames.
+    fn run_title_frame(
+        commands: Vec<WindowManipulation>,
+        role: PaneRole,
+        title_stack: &mut TitleStack,
+        tab_title: &mut String,
+    ) {
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (reply_tx, _reply_rx): (_, Receiver<InputEvent>) = unbounded();
+        let reply_tx = Arc::new(reply_tx);
+        for cmd in commands {
+            if let Err(e) = window_cmd_tx.send(WindowCommand::Viewport(cmd)) {
+                panic!("send window command: {e}");
+            }
+        }
+        let flags = WindowManipFlags {
+            allow_clipboard_read: false,
+            is_active: matches!(role, PaneRole::Active),
+            window_focused: true,
+            is_only_pane: true,
+            osc99: test_osc99_context(),
+        };
+        let mut bell_active = false;
+        let mut bell_since = None;
+        let mut notifications = Vec::new();
+        let mut osc99_requests = Vec::new();
+        let mut osc52_events = Vec::new();
+
+        let ctx = egui::Context::default();
+        // No painter here: defuse the `TexturesDelta` drop-bomb (A2 in
+        // EGUI_UPGRADE_ASSUMPTIONS.md).
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            handle_window_manipulation(
+                ui,
+                &window_cmd_rx,
+                &reply_tx,
+                8,
+                16,
+                ui.max_rect(),
+                title_stack,
+                tab_title,
+                &mut bell_active,
+                &mut bell_since,
+                BellMode::None,
+                &flags,
+                &mut notifications,
+                &mut osc99_requests,
+                &mut osc52_events,
+            );
+        });
+        full_output.textures_delta.clear();
+    }
+
+    #[test]
+    fn background_pane_title_stack_is_bounded_and_restores_newest_first() {
+        let mut title_stack = TitleStack::new();
+        let mut tab_title = String::new();
+        // A background pane saves its own tab title; vary it per push so the
+        // eviction order is observable.
+        let mut commands = Vec::new();
+        for i in 0..5000 {
+            commands.push(WindowManipulation::SetTitleBarText(format!("t{i}")));
+            commands.push(WindowManipulation::SaveWindowTitleToStack);
+        }
+        run_title_frame(
+            commands,
+            PaneRole::Background,
+            &mut title_stack,
+            &mut tab_title,
+        );
+        assert_eq!(title_stack.len(), MAX_TITLE_STACK_DEPTH);
+
+        for i in (4990..5000).rev() {
+            run_title_frame(
+                vec![WindowManipulation::RestoreWindowTitleFromStack],
+                PaneRole::Background,
+                &mut title_stack,
+                &mut tab_title,
+            );
+            assert_eq!(tab_title, format!("t{i}"));
+        }
+        assert!(title_stack.is_empty());
+        run_title_frame(
+            vec![WindowManipulation::RestoreWindowTitleFromStack],
+            PaneRole::Background,
+            &mut title_stack,
+            &mut tab_title,
+        );
+        assert_eq!(tab_title, "", "an empty stack clears the title");
+    }
+
+    #[test]
+    fn active_pane_title_stack_is_bounded_and_restores_newest_first() {
+        let mut title_stack = TitleStack::new();
+        let mut tab_title = String::new();
+        // The active pane saves the viewport title, which cannot change within
+        // a frame; seed 10 distinct, observable entries first via the
+        // pre-populated stack, then overflow it.
+        for i in 0..MAX_TITLE_STACK_DEPTH {
+            title_stack.push(format!("old{i}"));
+        }
+        let commands = vec![WindowManipulation::SaveWindowTitleToStack; 5000];
+        run_title_frame(commands, PaneRole::Active, &mut title_stack, &mut tab_title);
+        assert_eq!(title_stack.len(), MAX_TITLE_STACK_DEPTH);
+
+        // Every pre-seeded entry was evicted by the newer saves.
+        for _ in 0..MAX_TITLE_STACK_DEPTH {
+            run_title_frame(
+                vec![WindowManipulation::RestoreWindowTitleFromStack],
+                PaneRole::Active,
+                &mut title_stack,
+                &mut tab_title,
+            );
+            assert_eq!(tab_title, "Freminal");
+        }
+        assert!(title_stack.is_empty());
     }
 
     /// The replies and OSC 52 toast events from one frame.

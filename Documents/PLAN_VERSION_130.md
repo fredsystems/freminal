@@ -8304,6 +8304,14 @@ Group F — Hygiene:
   array/map preallocation; a test pins it. Reproducers `seek-index-huge-entry-count` and
   `seek-index-capacity-overflow` in `fuzz/regressions/frec_parse/`. A 300 s `frec_parse` run
   (26M execs) and all 36,388 historical artifacts are clean.
+- **148.10 (done):** new `freminal/src/gui/title_stack.rs` `TitleStack`, depth 10, a push onto
+  a full stack drops the oldest entry: xterm-412 `ptyx.h` `MAX_SAVED_TITLES 10` with
+  `misc.c` `xtermPushTitle`'s ring, and kitty `window.py` `deque(maxlen=10)`. It replaces the
+  `Vec<String>` on every pane, active or background. OSC 0/1/2 titles are truncated at parse
+  time to `MAX_TITLE_BYTES` = 4096 at a UTF-8 boundary (`ansi_components/osc.rs`). This is a
+  freminal resource cap; neither xterm nor kitty bounds titles below its OSC buffer. Tests:
+  5000 pushes stay at depth 10 for an active and a background pane; a 1 MiB title becomes
+  4096 bytes.
 
 ### 148 Cleanup entries
 

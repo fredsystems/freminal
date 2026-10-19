@@ -45,6 +45,17 @@ pub const MAX_OSC_BYTES: usize = 1024 * 1024;
 /// iTerm2 image protocol, which kitty does not.
 pub const MAX_OSC_LARGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum length of a window or icon title (OSC 0 / 1 / 2), in bytes.
+///
+/// No reference terminal bounds title length below its OSC buffer, but a title
+/// is displayed in a title bar or tab and 4096 bytes is a resource cap far
+/// beyond anything displayable. It bounds the memory a single title (and every
+/// copy of it: tab title, title stack, viewport command) can occupy, instead of
+/// the 1 MiB [`MAX_OSC_BYTES`] allows. A longer title is truncated at a UTF-8
+/// character boundary, not dropped. This is a Freminal policy (Task 148.10,
+/// GHSA-jh4m-7w5g-j4qg).
+pub const MAX_TITLE_BYTES: usize = 4096;
+
 /// Which byte cap applies to the OSC sequence being accumulated.
 #[derive(Eq, PartialEq, Debug, Clone, Copy)]
 enum OscLimit {
@@ -429,6 +440,19 @@ fn push_osc_text(
     ParserOutcome::Finished
 }
 
+/// Handle OSC 0 / 1 / 2 (title) from the raw body, truncating the text to
+/// [`MAX_TITLE_BYTES`] at a UTF-8 character boundary.
+fn push_osc_title(raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome {
+    if let Some(text) = osc_text_remainder(raw_params) {
+        let end = text.floor_char_boundary(MAX_TITLE_BYTES);
+        let text = text.get(..end).unwrap_or(text);
+        output.push(TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(
+            text.to_owned(),
+        )));
+    }
+    ParserOutcome::Finished
+}
+
 /// Handle OSC 8 (hyperlink) from the raw body.
 ///
 /// The body after the OSC number is `params ; URI`; see
@@ -510,9 +534,7 @@ fn dispatch_osc_target(
             handle_osc_reset_dynamic_color(reset_code, output);
             ParserOutcome::Finished
         }
-        OscTarget::TitleBar | OscTarget::IconName => {
-            push_osc_text(raw_params, output, AnsiOscType::SetTitleBar)
-        }
+        OscTarget::TitleBar | OscTarget::IconName => push_osc_title(raw_params, output),
         OscTarget::Ftcs => {
             handle_osc_ftcs(raw_params, output);
             ParserOutcome::Finished
@@ -645,7 +667,10 @@ fn split_params_into_semicolon_delimited_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::{AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES, OscLimit};
+    use super::{
+        AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES, MAX_TITLE_BYTES,
+        OscLimit,
+    };
     use crate::ansi::{FreminalAnsiParser, ParserOutcome};
     use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
@@ -1555,7 +1580,8 @@ mod tests {
             let TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(title)) = &output[0] else {
                 panic!("expected a title, got {:?}", output[0]);
             };
-            assert_eq!(title.len(), MAX_OSC_BYTES - 2);
+            // Dispatched, then truncated to the title cap (Task 148.10).
+            assert_eq!(title.len(), MAX_TITLE_BYTES);
         }
     }
 
@@ -1590,8 +1616,71 @@ mod tests {
         else {
             panic!("a MAX body must be dispatched, got {output:?}");
         };
-        assert_eq!(title.len(), MAX_OSC_BYTES - 2);
-        assert!(title.ends_with('\u{1b}'));
+        // Dispatched (not dropped), then truncated to the title cap.
+        assert_eq!(title.len(), MAX_TITLE_BYTES);
+    }
+
+    /// Feed `OSC 2 ; <title> BEL` and return the single resulting title.
+    fn feed_title(title: &str) -> String {
+        let payload = format!("2;{title}\x07");
+        let output = feed_osc(payload.as_bytes());
+        let [TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(t))] = output.as_slice() else {
+            panic!("expected a single SetTitleBar, got {output:?}");
+        };
+        t.clone()
+    }
+
+    #[test]
+    fn one_mebibyte_title_is_truncated_to_the_title_cap() {
+        let title = "a".repeat(MAX_OSC_BYTES - 2);
+        let result = feed_title(&title);
+        assert_eq!(result.len(), MAX_TITLE_BYTES);
+        assert!(result.bytes().all(|b| b == b'a'));
+    }
+
+    #[test]
+    fn short_title_is_unchanged() {
+        assert_eq!(feed_title("hello"), "hello");
+        let at_cap = "b".repeat(MAX_TITLE_BYTES);
+        assert_eq!(feed_title(&at_cap), at_cap);
+    }
+
+    #[test]
+    fn icon_name_title_is_truncated_too() {
+        let payload = format!("1;{}\x07", "i".repeat(MAX_TITLE_BYTES + 100));
+        let output = feed_osc(payload.as_bytes());
+        let [TerminalOutput::OscResponse(AnsiOscType::SetTitleBar(t))] = output.as_slice() else {
+            panic!("expected a single SetTitleBar, got {output:?}");
+        };
+        assert_eq!(t.len(), MAX_TITLE_BYTES);
+    }
+
+    #[test]
+    fn title_truncation_respects_utf8_char_boundaries() {
+        // 2-byte (4096 is a multiple of 2: lands exactly on a boundary) and
+        // 3-byte (4096 = 3 * 1365 + 1: the cap falls mid-character) chars.
+        for (ch, width) in [("é", 2_usize), ("中", 3_usize)] {
+            let title = ch.repeat(MAX_OSC_BYTES / width - 2);
+            let result = feed_title(&title);
+            assert!(result.len() <= MAX_TITLE_BYTES, "{ch}: {}", result.len());
+            assert!(
+                result.len() > MAX_TITLE_BYTES - width,
+                "{ch}: truncated more than one character"
+            );
+            assert_eq!(result.len() % width, 0, "{ch}: split a character");
+            assert!(result.chars().all(|c| c.to_string() == ch));
+        }
+    }
+
+    #[test]
+    fn remote_host_text_is_not_truncated() {
+        let host = "h".repeat(MAX_TITLE_BYTES * 2);
+        let payload = format!("7;{host}\x07");
+        let output = feed_osc(payload.as_bytes());
+        let [TerminalOutput::OscResponse(AnsiOscType::RemoteHost(h))] = output.as_slice() else {
+            panic!("expected a single RemoteHost, got {output:?}");
+        };
+        assert_eq!(h.len(), MAX_TITLE_BYTES * 2);
     }
 
     #[test]

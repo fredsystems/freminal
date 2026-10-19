@@ -34,6 +34,7 @@ pub mod shaping;
 pub mod shell_history;
 pub mod tabs;
 pub mod terminal;
+pub mod title_stack;
 pub mod view_state;
 
 mod actions;

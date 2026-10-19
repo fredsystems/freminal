@@ -35,6 +35,7 @@ use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use super::pty::CommandFinishedEvent;
 use super::terminal::PaneRenderCache;
 use super::terminal::RenderState;
+use super::title_stack::TitleStack;
 use super::view_state::ViewState;
 
 /// Maximum number of completed command blocks retained per pane.
@@ -191,7 +192,7 @@ pub struct Pane {
     /// `RestoreWindowTitleFromStack` (CSI 22/23 t). Each pane maintains its
     /// own stack so that background shells pushing/popping titles do not
     /// interfere with the active pane.
-    pub title_stack: Vec<String>,
+    pub title_stack: TitleStack,
 
     /// Per-pane GUI view state (scroll offset, selection, blink, mouse).
     pub view_state: ViewState,
@@ -332,7 +333,7 @@ impl Pane {
             title,
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: super::view_state::ViewState::new(),
             echo_off: channels.echo_off,
             child_pid: channels.child_pid,
@@ -1763,7 +1764,7 @@ mod tests {
             title: title.to_owned(),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
             child_pid: None,
@@ -1799,7 +1800,7 @@ mod tests {
         assert_eq!(pane.id, PaneId(5));
         assert_eq!(pane.title, "my pane");
         assert!(!pane.bell_active);
-        assert_eq!(pane.title_stack, [] as [String; 0]);
+        assert!(pane.title_stack.is_empty());
         assert_eq!(pane.view_state.scroll_offset, 0);
         assert!(!pane.echo_off.load(std::sync::atomic::Ordering::Relaxed));
     }

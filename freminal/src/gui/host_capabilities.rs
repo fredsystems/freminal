@@ -462,6 +462,7 @@ mod tests {
     use crate::gui::osc99::Osc99DaemonCapabilities;
     use crate::gui::panes::{Pane, PaneId};
     use crate::gui::tabs::{Tab, TabId};
+    use crate::gui::title_stack::TitleStack;
     use crate::gui::view_state::ViewState;
     use arc_swap::ArcSwap;
     use crossbeam_channel::Receiver;
@@ -1253,7 +1254,7 @@ mod tests {
             title: format!("pane-{pane_id}"),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
             child_pid: None,
