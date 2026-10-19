@@ -56,11 +56,9 @@ impl FreminalGui {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_id();
 
-        let pane_cwd = win
-            .tabs
-            .active_tab()
-            .active_pane()
-            .and_then(|p| p.arc_swap.load().cwd.clone());
+        let pane_cwd = win.tabs.active_tab().active_pane().and_then(|p| {
+            super::platform::resolve_spawn_cwd(p.arc_swap.load().cwd.as_deref(), p.child_pid)
+        });
         let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
 
         match pty::spawn_pty_tab(
@@ -192,11 +190,9 @@ impl FreminalGui {
             .next_id();
 
         // Read CWD from the focused pane so the new split inherits it.
-        let pane_cwd = win
-            .tabs
-            .active_tab()
-            .active_pane()
-            .and_then(|p| p.arc_swap.load().cwd.clone());
+        let pane_cwd = win.tabs.active_tab().active_pane().and_then(|p| {
+            super::platform::resolve_spawn_cwd(p.arc_swap.load().cwd.as_deref(), p.child_pid)
+        });
         let cwd_path = pane_cwd.as_deref().map(std::path::Path::new);
 
         // Spawn the new PTY before touching `win.tabs` so there is no borrow conflict.

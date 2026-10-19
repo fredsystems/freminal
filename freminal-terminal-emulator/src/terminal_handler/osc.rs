@@ -109,18 +109,28 @@ impl TerminalHandler {
 
             // Remote host / CWD: OSC 7 ; file://hostname/path ST
             AnsiOscType::RemoteHost(value) => {
-                self.current_working_directory = shell_integration::parse_osc7_uri(value);
-                if self.current_working_directory.is_none() {
-                    tracing::warn!("OSC 7: failed to parse URI");
-                    tracing::debug!(
-                        "OSC 7: failed to parse URI: {}",
-                        lossy_sequence_for_log_bounded(value.as_bytes())
-                    );
-                } else if let Some(cwd) = &self.current_working_directory {
-                    tracing::debug!(
-                        "OSC 7: CWD set to {:?}",
-                        lossy_sequence_for_log_bounded(cwd.as_bytes())
-                    );
+                // OSC 7 is unauthenticated, so the URI is validated before
+                // it is trusted. A rejected URI clears the stored cwd so the
+                // GUI falls back to the shell process's real directory.
+                match shell_integration::parse_osc7_uri(value, shell_integration::local_hostname())
+                {
+                    Ok(cwd) => {
+                        tracing::debug!(
+                            "OSC 7: CWD set to {:?}",
+                            lossy_sequence_for_log_bounded(cwd.as_bytes())
+                        );
+                        self.current_working_directory = Some(cwd);
+                    }
+                    Err(reason) => {
+                        self.current_working_directory = None;
+                        // `reason` is a static, payload-free description, so
+                        // it is safe at warn; the raw URI stays at debug.
+                        tracing::warn!("OSC 7: URI rejected: {reason}");
+                        tracing::debug!(
+                            "OSC 7: URI rejected ({reason}): {}",
+                            lossy_sequence_for_log_bounded(value.as_bytes())
+                        );
+                    }
                 }
             }
             AnsiOscType::ShellInfoHistFile(path) => {

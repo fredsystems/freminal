@@ -8312,6 +8312,16 @@ Group F — Hygiene:
   freminal resource cap; neither xterm nor kitty bounds titles below its OSC buffer. Tests:
   5000 pushes stay at depth 10 for an active and a background pane; a 1 MiB title becomes
   4096 bytes.
+- **148.12 (done):** `parse_osc7_uri` now returns `Result<String, Osc7Rejection>`. The host must
+  be empty, `localhost`, or the local hostname (`gethostname` / `COMPUTERNAME`, computed once),
+  compared ASCII case-insensitively, with a short-name (first DNS label) match either way for
+  macOS shells (RFC 8089 §2-3, RFC 4343). The decoded path must be valid UTF-8, absolute and
+  free of control characters (so `%00` is rejected). A rejected URI clears the stored cwd. New
+  `platform::resolve_spawn_cwd` trusts the OSC 7 path only if `is_dir()` holds, otherwise falls
+  back to `read_cwd(child_pid)`; new tabs, splits and layout/session saving all use it, so a
+  saved session never holds a rejected or nonexistent OSC 7 path. The suspected
+  `percent_decode` off-by-one was not real; a trailing `%XX` test pins it. No layout-save
+  harness exists, so the save path is covered through the shared helper's tests.
 
 ### 148 Cleanup entries
 

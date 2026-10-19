@@ -9,6 +9,9 @@
 //!   "system beep" API on each supported platform.
 //! * [`read_cwd`] — resolves the current working directory of a running
 //!   process by PID, used when serialising layouts and recording snapshots.
+//! * [`resolve_spawn_cwd`] — picks the directory a new tab, split or saved
+//!   layout pane should use, trusting the shell-reported OSC 7 path only when
+//!   it names an existing directory.
 //!
 //! Both functions are best-effort: if the platform has no supported path,
 //! they silently no-op (beep) or return `None` (cwd) and emit a trace log.
@@ -134,5 +137,86 @@ pub fn read_cwd(pid: u32) -> Option<String> {
         let _ = pid;
         tracing::trace!("read_cwd: no implementation for this platform");
         None
+    }
+}
+
+/// Resolve the working directory for a new tab / split / saved layout pane.
+///
+/// `osc7_cwd` is the directory the shell reported via OSC 7. OSC 7 is
+/// unauthenticated — any program writing to the terminal can emit it — so it
+/// is used only when [`std::path::Path::is_dir`] confirms it names an existing
+/// directory. Otherwise (absent, nonexistent, or not a directory) the result
+/// falls back to [`read_cwd`] on `child_pid`, the OS's own answer for the
+/// shell process. Returns `None` when neither source yields a directory.
+///
+/// This performs filesystem / process-inspection syscalls, so call it only in
+/// response to user actions (new tab, split, layout save), never per frame.
+pub fn resolve_spawn_cwd(osc7_cwd: Option<&str>, child_pid: Option<u32>) -> Option<String> {
+    if let Some(cwd) = osc7_cwd {
+        if std::path::Path::new(cwd).is_dir() {
+            return Some(cwd.to_owned());
+        }
+        tracing::debug!("resolve_spawn_cwd: OSC 7 cwd is not an existing directory; ignoring");
+    }
+    read_cwd(child_pid?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_osc7_dir_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        assert_eq!(
+            resolve_spawn_cwd(Some(&path), None).as_deref(),
+            Some(path.as_str())
+        );
+    }
+
+    #[test]
+    fn existing_osc7_dir_wins_over_process_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        assert_eq!(
+            resolve_spawn_cwd(Some(&path), Some(std::process::id())).as_deref(),
+            Some(path.as_str())
+        );
+    }
+
+    #[test]
+    fn none_and_none_is_none() {
+        assert_eq!(resolve_spawn_cwd(None, None), None);
+    }
+
+    #[test]
+    fn nonexistent_osc7_without_pid_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(resolve_spawn_cwd(missing.to_str(), None), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nonexistent_osc7_falls_back_to_process_cwd() {
+        let pid = std::process::id();
+        let expected = read_cwd(pid);
+        assert!(expected.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(resolve_spawn_cwd(missing.to_str(), Some(pid)), expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_osc7_path_falls_back_to_process_cwd() {
+        let pid = std::process::id();
+        let expected = read_cwd(pid);
+        assert!(expected.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(resolve_spawn_cwd(file.to_str(), Some(pid)), expected);
     }
 }
