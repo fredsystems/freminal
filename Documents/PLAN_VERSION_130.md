@@ -8573,7 +8573,8 @@ Group F — Hygiene:
     deferred refresh is retried on a later frame (`DeferredRefresh`), so a drag that ends
     inside the interval still updates.
   - **RC10b:** nit fixes (comment wrap, log wording, test classification).
-  - **RC7, RC9:** see the next commit.
+  - **RC7, RC9:** doc fixes: the A14 wording, and the LF/IND/NEL and DECSLRM coverage rows for
+    148.C3 and 148.C12.
 
 ### 148 Cleanup entries
 
@@ -8631,7 +8632,8 @@ Group F — Hygiene:
   `RawInput::viewports[id].monitor_size` after `take_egui_input`. Only that field is written;
   the full `update_viewport_info` is deliberately not called, since it would change title,
   rect and focus inputs the app relies on. `EGUI_UPGRADE_ASSUMPTIONS.md` A13 gains a note
-  (scale-factor divisor); A14 is pinned by a test. The 16384 px fallback now applies only
+  (scale-factor divisor); A14 (`RawInput::focused`) is untouched because only
+  `monitor_size` is written, and a test pins that the other `ViewportInfo` fields stay unset. The 16384 px fallback now applies only
   when no monitor is reported.
 - **148.C5 — `cargo xtask lint-markdown` fails on `main`.** Surfaced while verifying 148.21.
   Pre-existing MD060 / MD033 errors in `PLAN_122_ORCHESTRATION_EXTRACTION.md` and
@@ -8664,7 +8666,7 @@ Group F — Hygiene:
   row is possible in three branches: the next existing row (`reuse_row_as_softwrap` keeps
   `line_width`), staying on the last row below the margin (148.C3), and a DECLRMM
   column-confined scroll on the primary screen. Pushed and freshly blanked rows are always
-  single-width. A `debug_assert` in the new `wrap_after_leftover`, plus nine per-branch unit
+  single-width. A `debug_assert` in the new `wrap_after_leftover`, plus eleven per-branch unit
   tests, keep the prediction in sync with the real wrap; `wrap_unless_stalled` stays as the
   backstop. Benchmarks (A/B): `softwrap_heavy` +1.1%, `buffer_insert_large_line` −0.8%,
   `buffer_insert_chunks` −1.8%. Surfaced 148.C12.
