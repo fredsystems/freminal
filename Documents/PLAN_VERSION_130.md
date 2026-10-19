@@ -55,7 +55,7 @@ enriched stubs again and get re-decomposed at activation.
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned  | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned  | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned  | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Planned  | None (148.20 waits for 147.4)      |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | In progress | None (148.20 landed before 147.4) |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned  | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned  | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned  | 135                                |
@@ -7083,6 +7083,9 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 
 #### 147.4 — Generated CSI / SS3 introducers honour S8C1T
 
+- **Note (148.20, 2026-10-19):** 148.20 landed first by maintainer decision. The paste
+  wrapper is now `wrap_bracketed_paste` in `freminal/src/gui/actions.rs`, which strips
+  embedded markers before framing; 147.4 rebases its S8C1T framing onto that helper.
 - **Source:** 130 adversarial review finding 8; GAPS "8-bit C1 Control Gap".
 - **Design (resolved):** a rewrite of the encoded bytes is not safe, because Alt+`[` and
   Alt+`O` legitimately send `ESC [` and `ESC O`. Instead, each construction site emits its
