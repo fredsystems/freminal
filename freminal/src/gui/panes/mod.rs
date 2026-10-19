@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicBool;
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
@@ -32,7 +32,7 @@ use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
-use super::pty::CommandFinishedEvent;
+use super::pty::{CommandFinishedEvent, WindowCommandBudget};
 use super::terminal::PaneRenderCache;
 use super::terminal::RenderState;
 use super::title_stack::TitleStack;
@@ -132,7 +132,7 @@ pub struct Pane {
     ///
     /// Unbounded on purpose: it carries keystrokes, which must never be
     /// dropped.  The replies the GUI sends on it are bounded at the source
-    /// instead, by the per-pane `outstanding_reports` cap (148.C9).
+    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Strong handle to a clone of [`Self::input_tx`], existing purely so
@@ -210,11 +210,12 @@ pub struct Pane {
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
 
-    /// Report-class window commands sent by the PTY thread and not yet drained
-    /// by the GUI (148.C9).  The GUI releases one per Report command it drains
+    /// Counters for window commands sent by the PTY thread and not yet drained
+    /// by the GUI (148.C9, 148.RC2).  The GUI releases one per command it drains
     /// in [`crate::gui::rendering::handle_window_manipulation`]; the PTY thread
-    /// stops queueing Reports at `MAX_OUTSTANDING_REPORTS`.
-    pub outstanding_reports: Arc<AtomicUsize>,
+    /// stops queueing a class at its cap (`MAX_OUTSTANDING_REPORTS`,
+    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS`).
+    pub window_cmd_budget: WindowCommandBudget,
 
     /// Per-pane GPU resources (renderer, glyph atlas, vertex buffers).
     ///
@@ -346,7 +347,7 @@ impl Pane {
             title_stack: TitleStack::new(),
             view_state: super::view_state::ViewState::new(),
             echo_off: channels.echo_off,
-            outstanding_reports: channels.outstanding_reports,
+            window_cmd_budget: channels.window_cmd_budget,
             child_pid: channels.child_pid,
             render_state: super::terminal::new_render_state(window_post),
             render_cache: PaneRenderCache::new(),
@@ -1778,7 +1779,7 @@ mod tests {
             title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
-            outstanding_reports: Arc::new(AtomicUsize::new(0)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
@@ -1857,7 +1858,7 @@ mod tests {
             pty_dead_rx,
             command_event_rx,
             echo_off: Arc::new(AtomicBool::new(false)),
-            outstanding_reports: Arc::new(AtomicUsize::new(0)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             history_seed: crate::gui::shell_history::new_seeded_history(),
             shell_program: None,

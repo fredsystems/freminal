@@ -12,20 +12,21 @@
 //! * [`resolve_spawn_cwd`] — picks the directory a new tab, split or saved
 //!   layout pane should use, trusting the shell-reported OSC 7 path only when
 //!   it names an existing directory.
-//!
 //! * [`check_spawn_directory`] — validates a directory taken from a saved
 //!   layout before a pane is spawned in it.
 //!
 //! The filesystem-touching helpers run on a short-lived helper thread bounded
 //! by [`SPAWN_CWD_DEADLINE`] (see [`with_deadline`]) so a hung network mount
-//! cannot stall the GUI thread.
+//! cannot stall the GUI thread.  At most [`MAX_STUCK_PROBES`] such threads
+//! may be stuck at once; beyond that the helpers fall back at once.
 //!
-//! The beep and cwd functions are best-effort: if the platform has no supported path,
-//! they silently no-op (beep) or return `None` (cwd) and emit a trace log.
-//! See subtasks 71.14 (bell) and 71.16 (CWD) in
+//! The beep and cwd functions are best-effort: if the platform has no
+//! supported path, they silently no-op (beep) or return `None` (cwd) and emit
+//! a trace log.  See subtasks 71.14 (bell) and 71.16 (CWD) in
 //! `Documents/PLAN_VERSION_080.md`.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 /// Best-effort audible alert using the platform's native system-beep API.
@@ -157,6 +158,45 @@ pub fn read_cwd(pid: u32) -> Option<String> {
 /// autofs trigger would otherwise block `is_dir` (and the GUI) indefinitely.
 pub const SPAWN_CWD_DEADLINE: Duration = Duration::from_millis(250);
 
+/// Most helper threads that may be stuck on a blocked filesystem call at once
+/// (148.RC3).
+///
+/// A hung mount makes every [`with_deadline`] call block the GUI for the full
+/// deadline and leak a thread until the syscall returns.  Once this many probes
+/// are still running after their callers gave up, further calls return
+/// [`DeadlineResult::Skipped`] immediately instead of spawning or waiting, so
+/// the stall and the leak are both bounded.
+pub const MAX_STUCK_PROBES: usize = 4;
+
+/// Helper threads still running after their caller timed out; see
+/// [`MAX_STUCK_PROBES`].
+static STUCK_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+/// The helper thread is still running and its caller is still waiting.
+const PROBE_RUNNING: u8 = 0;
+/// The caller timed out and counted the helper in the stuck count.
+const PROBE_ABANDONED: u8 = 1;
+/// The helper has exited.
+const PROBE_FINISHED: u8 = 2;
+
+/// Dropped when a helper thread ends (normally, by panic, or because it could
+/// not be started), marking its probe finished and, if the caller had already
+/// abandoned it, taking it back out of the stuck count.
+struct ProbeGuard {
+    state: Arc<AtomicU8>,
+    stuck: &'static AtomicUsize,
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        // The caller increments `stuck` *before* it publishes `ABANDONED`, so
+        // this decrement can never run ahead of the increment it undoes.
+        if self.state.swap(PROBE_FINISHED, Ordering::AcqRel) == PROBE_ABANDONED {
+            self.stuck.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Outcome of [`with_deadline`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeadlineResult<T> {
@@ -164,6 +204,9 @@ pub enum DeadlineResult<T> {
     Done(T),
     /// The closure did not finish in time. Its thread keeps running.
     TimedOut,
+    /// [`MAX_STUCK_PROBES`] helper threads are already stuck, so the closure was
+    /// not run and the caller did not wait.
+    Skipped,
     /// The helper thread could not be started, or it died (panicked) before
     /// producing a result.
     Unavailable,
@@ -174,18 +217,39 @@ pub enum DeadlineResult<T> {
 /// On [`DeadlineResult::TimedOut`] the helper thread is **not** cancelled
 /// (std threads cannot be): it finishes on its own whenever the blocked
 /// syscall returns, and its result is discarded. A thread stuck on a hung
-/// mount is therefore leaked until that syscall returns, which is acceptable
-/// for the user-triggered actions that call this. If the thread cannot be
-/// spawned the closure is deliberately *not* run inline, since that would
-/// reintroduce the stall; the caller gets [`DeadlineResult::Unavailable`].
+/// mount is therefore leaked until that syscall returns; the number of such
+/// threads is capped at [`MAX_STUCK_PROBES`], after which this returns
+/// [`DeadlineResult::Skipped`] without spawning or waiting. If the thread
+/// cannot be spawned the closure is deliberately *not* run inline, since that
+/// would reintroduce the stall; the caller gets [`DeadlineResult::Unavailable`].
 pub fn with_deadline<T: Send + 'static>(
     deadline: Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> DeadlineResult<T> {
+    with_deadline_counting(&STUCK_PROBES, deadline, f)
+}
+
+/// [`with_deadline`] over an explicit stuck-probe counter, so tests can drive
+/// the cap without touching the process-wide one.
+fn with_deadline_counting<T: Send + 'static>(
+    stuck: &'static AtomicUsize,
+    deadline: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> DeadlineResult<T> {
+    if stuck.load(Ordering::Relaxed) >= MAX_STUCK_PROBES {
+        return DeadlineResult::Skipped;
+    }
     let (tx, rx) = mpsc::sync_channel(1);
+    let state = Arc::new(AtomicU8::new(PROBE_RUNNING));
+    let guard = ProbeGuard {
+        state: Arc::clone(&state),
+        stuck,
+    };
     let spawned = std::thread::Builder::new()
         .name("spawn-cwd-probe".to_owned())
         .spawn(move || {
+            // Dropped after the send below, also on panic.
+            let _guard = guard;
             // The receiver is gone if the caller already timed out; the
             // result is intentionally discarded then.
             let _ = tx.send(f());
@@ -196,7 +260,28 @@ pub fn with_deadline<T: Send + 'static>(
     }
     match rx.recv_timeout(deadline) {
         Ok(v) => DeadlineResult::Done(v),
-        Err(mpsc::RecvTimeoutError::Timeout) => DeadlineResult::TimedOut,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Count the helper first, then try to publish `ABANDONED`: the
+            // helper only decrements once it sees `ABANDONED`, so the count
+            // cannot drift.  If the helper finished in the meantime, undo the
+            // speculative count and take its result.
+            stuck.fetch_add(1, Ordering::Relaxed);
+            if state
+                .compare_exchange(
+                    PROBE_RUNNING,
+                    PROBE_ABANDONED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                DeadlineResult::TimedOut
+            } else {
+                stuck.fetch_sub(1, Ordering::Relaxed);
+                rx.try_recv()
+                    .map_or(DeadlineResult::Unavailable, DeadlineResult::Done)
+            }
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => DeadlineResult::Unavailable,
     }
 }
@@ -211,7 +296,8 @@ pub fn with_deadline<T: Send + 'static>(
 /// shell process. Returns `None` when neither source yields a directory.
 ///
 /// The probing runs under [`SPAWN_CWD_DEADLINE`]; if it does not finish in
-/// time the result is `None` (the new pane starts in the default directory)
+/// time (or earlier probes are still stuck, see [`MAX_STUCK_PROBES`]) the
+/// result is `None` (the new pane starts in the default directory)
 /// and a warning without the path is logged.
 ///
 /// Call it only in response to user actions (new tab, split, layout save),
@@ -226,6 +312,13 @@ pub fn resolve_spawn_cwd(osc7_cwd: Option<&str>, child_pid: Option<u32>) -> Opti
             tracing::warn!(
                 "resolve_spawn_cwd: directory check exceeded {} ms; using the default directory",
                 SPAWN_CWD_DEADLINE.as_millis()
+            );
+            None
+        }
+        DeadlineResult::Skipped => {
+            tracing::debug!(
+                "resolve_spawn_cwd: earlier directory checks are still stuck; \
+                 using the default directory"
             );
             None
         }
@@ -256,7 +349,8 @@ pub enum SpawnDirectoryRejection {
     /// The path does not name an existing directory.
     #[error("directory does not exist or is not a directory")]
     NotADirectory,
-    /// The existence check did not finish within [`SPAWN_CWD_DEADLINE`].
+    /// The existence check did not finish within [`SPAWN_CWD_DEADLINE`], or was
+    /// not attempted because earlier checks are still stuck.
     #[error("directory could not be checked in time")]
     Unchecked,
 }
@@ -283,7 +377,7 @@ pub fn check_spawn_directory(dir: &str) -> Result<(), SpawnDirectoryRejection> {
     }) {
         DeadlineResult::Done(true) => Ok(()),
         DeadlineResult::Done(false) => Err(SpawnDirectoryRejection::NotADirectory),
-        DeadlineResult::TimedOut | DeadlineResult::Unavailable => {
+        DeadlineResult::TimedOut | DeadlineResult::Skipped | DeadlineResult::Unavailable => {
             Err(SpawnDirectoryRejection::Unchecked)
         }
     }
@@ -358,17 +452,105 @@ mod tests {
 
     #[test]
     fn with_deadline_blocked_closure_times_out_then_thread_exits() {
+        static STUCK: AtomicUsize = AtomicUsize::new(0);
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let (exited_tx, exited_rx) = mpsc::channel::<()>();
-        let result = with_deadline(Duration::from_millis(20), move || {
+        let result = with_deadline_counting(&STUCK, Duration::from_millis(20), move || {
             // Blocks until the test releases it, so it cannot finish in time.
             let _ = release_rx.recv();
             let _ = exited_tx.send(());
         });
         assert_eq!(result, DeadlineResult::TimedOut);
+        assert_eq!(STUCK.load(Ordering::Relaxed), 1);
         // Release the helper thread and wait for it to finish: nothing leaks.
         release_tx.send(()).unwrap();
         exited_rx.recv().unwrap();
+        wait_for_stuck_count(&STUCK, 0);
+    }
+
+    /// Wait (bounded) for a helper thread's guard to drop and update `stuck`.
+    fn wait_for_stuck_count(stuck: &AtomicUsize, expected: usize) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(30);
+        while stuck.load(Ordering::Relaxed) != expected {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "stuck count did not reach {expected}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn with_deadline_skips_once_the_stuck_probe_cap_is_reached() {
+        static STUCK: AtomicUsize = AtomicUsize::new(0);
+        let mut release_txs = Vec::new();
+        let (exited_tx, exited_rx) = mpsc::channel::<()>();
+
+        // Fill the cap with probes that block until released.
+        for stuck_so_far in 1..=MAX_STUCK_PROBES {
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            release_txs.push(release_tx);
+            let exited_tx = exited_tx.clone();
+            let result = with_deadline_counting(&STUCK, Duration::from_millis(10), move || {
+                let _ = release_rx.recv();
+                let _ = exited_tx.send(());
+            });
+            assert_eq!(result, DeadlineResult::TimedOut);
+            assert_eq!(STUCK.load(Ordering::Relaxed), stuck_so_far);
+        }
+
+        // At the cap: returned at once, and the closure never runs.
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_in_probe = Arc::clone(&ran);
+        let started = std::time::Instant::now();
+        let result = with_deadline_counting(&STUCK, Duration::from_secs(30), move || {
+            ran_in_probe.store(true, Ordering::Relaxed);
+        });
+        assert_eq!(result, DeadlineResult::Skipped);
+        assert!(started.elapsed() < Duration::from_secs(5), "did not wait");
+        assert!(!ran.load(Ordering::Relaxed));
+        assert_eq!(STUCK.load(Ordering::Relaxed), MAX_STUCK_PROBES);
+
+        // Release every blocked probe; the count drains back to zero and the
+        // helper works again.
+        for release_tx in &release_txs {
+            release_tx.send(()).unwrap();
+        }
+        for _ in 0..MAX_STUCK_PROBES {
+            exited_rx.recv().unwrap();
+        }
+        wait_for_stuck_count(&STUCK, 0);
+        assert_eq!(
+            with_deadline_counting(&STUCK, Duration::from_secs(30), || 1_u8),
+            DeadlineResult::Done(1)
+        );
+    }
+
+    #[test]
+    fn a_probe_that_panics_after_its_caller_gave_up_still_leaves_the_stuck_count() {
+        static STUCK: AtomicUsize = AtomicUsize::new(0);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let result: DeadlineResult<()> =
+            with_deadline_counting(&STUCK, Duration::from_millis(10), move || {
+                let _ = release_rx.recv();
+                panic!("intentional test panic after the caller timed out");
+            });
+        assert_eq!(result, DeadlineResult::TimedOut);
+        assert_eq!(STUCK.load(Ordering::Relaxed), 1);
+        release_tx.send(()).unwrap();
+        wait_for_stuck_count(&STUCK, 0);
+    }
+
+    #[test]
+    fn probes_that_finish_in_time_are_never_counted_as_stuck() {
+        static STUCK: AtomicUsize = AtomicUsize::new(0);
+        for n in 0..16_u32 {
+            assert_eq!(
+                with_deadline_counting(&STUCK, Duration::from_secs(30), move || n),
+                DeadlineResult::Done(n)
+            );
+        }
+        assert_eq!(STUCK.load(Ordering::Relaxed), 0);
     }
 
     #[test]

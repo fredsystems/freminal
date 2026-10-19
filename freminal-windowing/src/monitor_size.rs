@@ -31,23 +31,95 @@
 //!
 //! # Refresh policy
 //!
-//! Querying the monitor is a windowing-system round trip, so the result is
-//! cached per window ([`MonitorSize`]) and refreshed only when it can have
-//! changed: at window creation and on winit `Moved`, `Resized` and
-//! `ScaleFactorChanged` for that window. It is never queried per frame; the
-//! cached value is injected into each frame's `RawInput` by
+//! Querying the monitor is a windowing-system round trip (on X11, several),
+//! so the result is cached per window ([`MonitorSize`]) and refreshed only
+//! when it can have changed: at window creation and on winit `Moved`,
+//! `Resized` and `ScaleFactorChanged` for that window (plus one retry of a
+//! debounced refresh, below). It is never queried every frame; the cached value is injected into each frame's `RawInput` by
 //! [`MonitorSize::inject`].
+//!
+//! `Moved` and `Resized` fire for every pixel of a drag, so they are debounced
+//! (148.RC6): they refresh only when the cache is empty or at least
+//! [`MONITOR_REFRESH_INTERVAL`] old ([`decide_refresh`]).  `ScaleFactorChanged`
+//! always refreshes.  A deferred refresh is remembered
+//! ([`DeferredRefresh::Pending`]) and retried on the next frame after the
+//! interval has passed, so a drag that ends inside the interval still picks
+//! up the new monitor; the per-frame check compares timestamps only and
+//! queries the monitor at most once per owed refresh.
 //!
 //! `None` (compositors that cannot report a monitor, e.g. some Wayland
 //! setups) is a valid, expected value and is injected as-is.
 
+use std::time::{Duration, Instant};
+
 use winit::dpi::{PhysicalSize, validate_scale_factor};
 use winit::window::Window;
+
+/// Least time between two refreshes triggered by `Moved` / `Resized`.
+pub const MONITOR_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The window event asking for a monitor-size refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshCause {
+    /// `Moved` or `Resized`: fires for every pixel of a drag, so debounced.
+    Geometry,
+    /// `ScaleFactorChanged`: rare, and the cached logical size is wrong until
+    /// it is refreshed, so never debounced.
+    ScaleFactor,
+}
+
+/// Whether a refresh should query the monitor now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorRefresh {
+    /// Query the monitor.
+    Now,
+    /// Keep the cached value.
+    Defer,
+}
+
+/// Pure debounce decision for a monitor-size refresh (148.RC6).
+///
+/// `cached` is the currently cached size and `since_last_refresh` how long ago
+/// it was queried (`None` if never).  A [`RefreshCause::ScaleFactor`] always
+/// refreshes; a [`RefreshCause::Geometry`] refreshes when nothing is cached, or
+/// the cache was never stamped, or it is at least [`MONITOR_REFRESH_INTERVAL`]
+/// old.
+pub fn decide_refresh(
+    cause: RefreshCause,
+    cached: Option<egui::Vec2>,
+    since_last_refresh: Option<Duration>,
+) -> MonitorRefresh {
+    match (cause, cached, since_last_refresh) {
+        (RefreshCause::ScaleFactor, _, _) | (RefreshCause::Geometry, None, _) => {
+            MonitorRefresh::Now
+        }
+        (RefreshCause::Geometry, Some(_), Some(elapsed)) if elapsed < MONITOR_REFRESH_INTERVAL => {
+            MonitorRefresh::Defer
+        }
+        (RefreshCause::Geometry, Some(_), _) => MonitorRefresh::Now,
+    }
+}
+
+/// Whether a debounced geometry refresh is still owed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeferredRefresh {
+    /// No refresh is owed.
+    #[default]
+    Clear,
+    /// A `Moved` / `Resized` refresh was deferred; it is retried on a later
+    /// frame once [`MONITOR_REFRESH_INTERVAL`] has passed, so a drag that ends
+    /// inside the interval still picks up the new monitor.
+    Pending,
+}
 
 /// A window's monitor size in egui logical points, or `None` when unknown.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MonitorSize {
     logical: Option<egui::Vec2>,
+    /// When the monitor was last queried; `None` for a value never queried.
+    queried_at: Option<Instant>,
+    /// Whether a deferred geometry refresh is owed.
+    deferred: DeferredRefresh,
 }
 
 impl MonitorSize {
@@ -62,6 +134,8 @@ impl MonitorSize {
         let logical = size.to_logical::<f32>(scale_factor);
         Self {
             logical: Some(egui::vec2(logical.width, logical.height)),
+            queried_at: None,
+            deferred: DeferredRefresh::Clear,
         }
     }
 
@@ -70,11 +144,41 @@ impl MonitorSize {
     /// `scale_factor` is passed in rather than read from the window so the
     /// `ScaleFactorChanged` handler can supply the event's new value.
     pub(crate) fn query(window: &Window, scale_factor: f64) -> Self {
-        window
+        let queried_at = Some(Instant::now());
+        let measured = window
             .current_monitor()
             .map_or_else(Self::default, |monitor| {
                 Self::from_physical(monitor.size(), scale_factor)
-            })
+            });
+        Self {
+            queried_at,
+            ..measured
+        }
+    }
+
+    /// Whether `cause` should re-query the monitor at `now` (see
+    /// [`decide_refresh`]).
+    pub(crate) fn refresh_for(self, cause: RefreshCause, now: Instant) -> MonitorRefresh {
+        decide_refresh(
+            cause,
+            self.logical,
+            self.queried_at.map(|at| now.saturating_duration_since(at)),
+        )
+    }
+
+    /// Record that a geometry refresh was deferred.
+    pub(crate) const fn mark_deferred(&mut self) {
+        self.deferred = DeferredRefresh::Pending;
+    }
+
+    /// Whether an owed (deferred) refresh is due at `now`: only when one is
+    /// pending and [`MONITOR_REFRESH_INTERVAL`] has passed since the last
+    /// query. Cheap enough to check every frame (no monitor query).
+    pub(crate) fn deferred_due(self, now: Instant) -> MonitorRefresh {
+        match self.deferred {
+            DeferredRefresh::Clear => MonitorRefresh::Defer,
+            DeferredRefresh::Pending => self.refresh_for(RefreshCause::Geometry, now),
+        }
     }
 
     /// Write the cached size into the current viewport's `ViewportInfo`.
@@ -99,6 +203,105 @@ impl MonitorSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SIZE: Option<egui::Vec2> = Some(egui::vec2(1920.0, 1080.0));
+
+    #[test]
+    fn scale_factor_changes_always_refresh() {
+        for since in [None, Some(Duration::ZERO), Some(MONITOR_REFRESH_INTERVAL)] {
+            assert_eq!(
+                decide_refresh(RefreshCause::ScaleFactor, SIZE, since),
+                MonitorRefresh::Now
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_events_inside_the_interval_are_deferred() {
+        for since in [
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_millis(249),
+        ] {
+            assert_eq!(
+                decide_refresh(RefreshCause::Geometry, SIZE, Some(since)),
+                MonitorRefresh::Defer,
+                "{since:?} after the last refresh"
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_events_at_or_past_the_interval_refresh() {
+        for since in [MONITOR_REFRESH_INTERVAL, Duration::from_secs(60)] {
+            assert_eq!(
+                decide_refresh(RefreshCause::Geometry, SIZE, Some(since)),
+                MonitorRefresh::Now
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_events_refresh_when_nothing_is_cached_however_recent() {
+        assert_eq!(
+            decide_refresh(RefreshCause::Geometry, None, Some(Duration::ZERO)),
+            MonitorRefresh::Now
+        );
+        assert_eq!(
+            decide_refresh(RefreshCause::Geometry, None, None),
+            MonitorRefresh::Now
+        );
+    }
+
+    #[test]
+    fn geometry_events_refresh_a_value_that_was_never_queried() {
+        assert_eq!(
+            decide_refresh(RefreshCause::Geometry, SIZE, None),
+            MonitorRefresh::Now
+        );
+    }
+
+    #[test]
+    fn refresh_for_measures_elapsed_time_from_the_query_stamp() {
+        let then = Instant::now();
+        let cached = MonitorSize {
+            logical: SIZE,
+            queried_at: Some(then),
+            deferred: DeferredRefresh::Clear,
+        };
+        assert_eq!(
+            cached.refresh_for(RefreshCause::Geometry, then + Duration::from_millis(10)),
+            MonitorRefresh::Defer
+        );
+        assert_eq!(
+            cached.refresh_for(RefreshCause::Geometry, then + MONITOR_REFRESH_INTERVAL),
+            MonitorRefresh::Now
+        );
+        // A `now` before the stamp (clock skew between callers) is zero elapsed.
+        assert_eq!(
+            cached.refresh_for(RefreshCause::Geometry, then),
+            MonitorRefresh::Defer
+        );
+        assert_eq!(
+            MonitorSize::default().refresh_for(RefreshCause::Geometry, then),
+            MonitorRefresh::Now
+        );
+    }
+
+    #[test]
+    fn deferred_refresh_is_due_only_when_pending_and_past_the_interval() {
+        let now = Instant::now();
+        let mut size = MonitorSize {
+            logical: Some(egui::vec2(1920.0, 1080.0)),
+            queried_at: Some(now),
+            deferred: DeferredRefresh::Clear,
+        };
+        let later = now + MONITOR_REFRESH_INTERVAL;
+        assert_eq!(size.deferred_due(later), MonitorRefresh::Defer);
+        size.mark_deferred();
+        assert_eq!(size.deferred_due(now), MonitorRefresh::Defer);
+        assert_eq!(size.deferred_due(later), MonitorRefresh::Now);
+    }
 
     #[test]
     fn physical_size_is_divided_by_scale_factor() {

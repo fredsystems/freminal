@@ -8562,7 +8562,18 @@ Group F — Hygiene:
   - **RC5:** PRE-WRAP uses the same landing-row check as the Leftover wrap, sharing a new
     `take_wrap` helper. Two tests fail on the old code.
   - **RC10a:** a debug `eprintln!` is removed.
-  - **RC2, RC3, RC6–RC9:** see their own entries below.
+  - **RC2:** Viewport-class window commands are capped too (`MAX_OUTSTANDING_VIEWPORT_COMMANDS`
+    = 4096 per pane, `WindowCommandBudget`). Under a flood against a stalled GUI, intermediate
+    titles, clipboard writes and notifications past the cap are dropped (documented).
+  - **RC8:** the first drop of either class warns and names the class.
+  - **RC3:** at most `MAX_STUCK_PROBES` (4) directory-probe threads may remain stuck after
+    their deadline. Past that, `with_deadline` returns `Skipped` at once without spawning or
+    waiting, so a hung mount costs at most four 250 ms stalls and four threads.
+  - **RC6:** monitor-size refreshes on `Moved` / `Resized` are debounced to 250 ms. A
+    deferred refresh is retried on a later frame (`DeferredRefresh`), so a drag that ends
+    inside the interval still updates.
+  - **RC10b:** nit fixes (comment wrap, log wording, test classification).
+  - **RC7, RC9:** see the next commit.
 
 ### 148 Cleanup entries
 

@@ -1014,6 +1014,7 @@ fn wrap_bracketed_paste(
 mod tests {
     use super::*;
     use crate::gui::panes::{Pane, PaneId};
+    use crate::gui::pty::WindowCommandBudget;
     use crate::gui::tabs::{Tab, TabId};
     use crate::gui::title_stack::TitleStack;
     use crate::gui::view_state::ViewState;
@@ -1021,10 +1022,7 @@ mod tests {
     use crossbeam_channel::Receiver;
     use freminal_terminal_emulator::io::SearchCorpus;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize},
-    };
+    use std::sync::{Arc, atomic::AtomicBool};
 
     /// Build a `Tab` whose active pane's `input_rx` is returned to the caller
     /// so emitted `InputEvent`s can be observed.
@@ -1060,7 +1058,7 @@ mod tests {
             title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
-            outstanding_reports: Arc::new(AtomicUsize::new(0)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),

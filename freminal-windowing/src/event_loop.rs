@@ -19,6 +19,7 @@ use winit::window::{Window, WindowAttributes};
 use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
+use crate::monitor_size::RefreshCause;
 use crate::{
     App, FrameSignals, GlContextState, PointerButton, PointerButtonAction, PointerButtonEvent,
     PointerMotionEvent, PointerMotionPositions, PointerPresenceLoss, RawKeyEvent, RawKeyMods,
@@ -1034,7 +1035,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 }
                 // A resize can carry the window to another monitor.
                 if let Some(state) = self.windows.get_mut(&winit_id) {
-                    state.egui.refresh_monitor_size(&state.window, scale);
+                    state
+                        .egui
+                        .refresh_monitor_size(&state.window, scale, RefreshCause::Geometry);
                 }
                 // Track geometry in logical pixels (matches WindowConfig).
                 let logical: winit::dpi::LogicalSize<f64> = size.to_logical(scale);
@@ -1052,7 +1055,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     .map_or(1.0, |s| s.window.scale_factor());
                 // Moving the window can change which monitor it is on.
                 if let Some(state) = self.windows.get_mut(&winit_id) {
-                    state.egui.refresh_monitor_size(&state.window, scale);
+                    state
+                        .egui
+                        .refresh_monitor_size(&state.window, scale, RefreshCause::Geometry);
                 }
                 let logical: winit::dpi::LogicalPosition<f64> = pos.to_logical(scale);
                 let mut geom = self.geometry.borrow_mut();
@@ -1066,7 +1071,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 // Use the event's new factor: `window.scale_factor()` may not
                 // have caught up on every platform when this is delivered.
                 if let Some(state) = self.windows.get_mut(&winit_id) {
-                    state.egui.refresh_monitor_size(&state.window, scale_factor);
+                    state.egui.refresh_monitor_size(
+                        &state.window,
+                        scale_factor,
+                        RefreshCause::ScaleFactor,
+                    );
                 }
             }
             WindowEvent::RedrawRequested => {

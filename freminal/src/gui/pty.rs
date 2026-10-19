@@ -333,7 +333,7 @@ pub struct TabChannels {
     ///
     /// Unbounded on purpose: it carries keystrokes, which must never be
     /// dropped.  The replies the GUI sends on it are bounded at the source
-    /// instead, by the per-pane `outstanding_reports` cap (148.C9).
+    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Sender for raw bytes to the PTY, for layout startup-command injection
@@ -381,16 +381,16 @@ pub struct TabChannels {
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
 
-    /// Report-class [`WindowCommand`]s the PTY thread has sent on
-    /// `window_cmd_rx` that the GUI has not drained yet (148.C9).
+    /// Per-pane budget for [`WindowCommand`]s the PTY thread has sent on
+    /// `window_cmd_rx` that the GUI has not drained yet (148.C9, 148.RC2).
     ///
-    /// The PTY thread admits a Report only while this is below
-    /// [`MAX_OUTSTANDING_REPORTS`] (see [`admit_report`]); the GUI releases one
-    /// per Report it drains (see [`release_report`]).  It bounds the
+    /// The PTY thread admits a command only while its class is below its cap
+    /// (see [`WindowCommandBudget::admit`]); the GUI releases one per command
+    /// it drains (see [`WindowCommandBudget::release`]).  It bounds the
     /// `window_cmd_rx` backlog, and so the replies the GUI can send back on
     /// `input_tx`, while the GUI is not draining (for example a minimised
     /// window that is not redrawing).
-    pub outstanding_reports: Arc<AtomicUsize>,
+    pub window_cmd_budget: WindowCommandBudget,
 
     /// OS process ID of the PTY child shell.
     ///
@@ -429,59 +429,143 @@ pub struct TabChannels {
 ///
 /// `input_tx`, which carries the answers back to the PTY thread, stays
 /// unbounded on purpose: it also carries keystrokes, which must never be
-/// dropped.  Its reply traffic is bounded by this cap instead.  Viewport
-/// commands are not capped: they produce no reply, and the only text they carry
-/// (a title) is already size-limited at the parser.
+/// dropped.  Its reply traffic is bounded by this cap instead.
 pub(crate) const MAX_OUTSTANDING_REPORTS: usize = 256;
 
-/// Outcome of asking whether another Report command may be queued for the GUI.
+/// Most Viewport-class window commands that may be outstanding for one pane
+/// (148.RC2).
+///
+/// Viewport commands produce no reply, but they are not small: they include
+/// OSC 52 clipboard writes (`SetClipboard`, up to the parser's payload limit),
+/// OSC 9 / OSC 777 notifications and window titles, so a GUI that is not
+/// draining (a minimised window that is not redrawing) would otherwise let the
+/// channel grow without bound.  The cap is far above anything a legitimate
+/// application queues between two frames.
+///
+/// Trade-off: under a flood against a stalled GUI, commands beyond the cap are
+/// dropped, including intermediate title updates (`SetTitleBarText`), clipboard
+/// writes and notifications.  The newest commands are the ones lost, so a title
+/// set during the flood may never show; the first command to be refused is
+/// logged at warn level.
+pub(crate) const MAX_OUTSTANDING_VIEWPORT_COMMANDS: usize = 4096;
+
+/// Outcome of asking whether another window command may be queued for the GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReportAdmission {
+pub(crate) enum CommandAdmission {
     /// The command was counted and should be sent.
     Admitted,
-    /// The pane is at [`MAX_OUTSTANDING_REPORTS`]; the command must be dropped.
+    /// The command's class is at its cap; the command must be dropped.
     Dropped,
 }
 
-/// Admit one more outstanding Report command, or refuse it at the cap.
-///
-/// Admission counts the command, so the caller sends it when this returns
-/// [`ReportAdmission::Admitted`] and drops it otherwise.  The PTY consumer
-/// thread is the only caller and the only incrementer, and the GUI only
-/// decrements, so the load below can only be stale in the cautious direction.
-pub(crate) fn admit_report(outstanding: &AtomicUsize) -> ReportAdmission {
-    if outstanding.load(Ordering::Relaxed) >= MAX_OUTSTANDING_REPORTS {
-        return ReportAdmission::Dropped;
+/// Which budget a [`WindowCommand`] is counted against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandClass {
+    Report,
+    Viewport,
+}
+
+impl CommandClass {
+    const fn of(command: &WindowCommand) -> Self {
+        match command {
+            WindowCommand::Report(_) => Self::Report,
+            WindowCommand::Viewport(_) => Self::Viewport,
+        }
     }
-    // Counted before the send, so the GUI cannot release it before it is added.
-    outstanding.fetch_add(1, Ordering::Relaxed);
-    ReportAdmission::Admitted
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Report => "report",
+            Self::Viewport => "viewport",
+        }
+    }
+
+    const fn cap(self) -> usize {
+        match self {
+            Self::Report => MAX_OUTSTANDING_REPORTS,
+            Self::Viewport => MAX_OUTSTANDING_VIEWPORT_COMMANDS,
+        }
+    }
 }
 
-/// Release one outstanding Report command; the GUI calls this once per Report
-/// it drains.  Saturates at zero so a mismatch can never wrap the counter.
-pub(crate) fn release_report(outstanding: &AtomicUsize) {
-    // The closure always returns `Some`, so the update cannot fail.
-    let _ = outstanding.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-        Some(n.saturating_sub(1))
-    });
+/// The two per-pane counters bounding the `window_cmd_rx` backlog: one for
+/// Report-class commands ([`MAX_OUTSTANDING_REPORTS`]) and one for
+/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]).
+///
+/// Shared between the PTY consumer thread, the only caller of
+/// [`admit`](Self::admit) and the only incrementer, and the GUI, which only
+/// [`release`](Self::release)s.  Plain atomics: no lock is involved.  Cloning
+/// shares the same counters.
+#[derive(Debug, Clone, Default)]
+pub struct WindowCommandBudget {
+    pub(crate) reports: Arc<AtomicUsize>,
+    pub(crate) viewport: Arc<AtomicUsize>,
 }
 
-/// A dropped-report warning is logged for the first drop and then once per this
-/// many drops; the rest are logged at debug level.
-const DROPPED_REPORT_WARN_INTERVAL: u64 = 1024;
+impl WindowCommandBudget {
+    const fn counter(&self, class: CommandClass) -> &Arc<AtomicUsize> {
+        match class {
+            CommandClass::Report => &self.reports,
+            CommandClass::Viewport => &self.viewport,
+        }
+    }
 
-/// Count a Report command dropped at the cap and log it, rate-limited so a
-/// flood cannot also flood the log.
-fn note_dropped_report(dropped: &AtomicU64, command: &WindowManipulation) {
+    /// Admit one more outstanding command of `command`'s class, or refuse it at
+    /// the cap.
+    ///
+    /// Admission counts the command, so the caller sends it when this returns
+    /// [`CommandAdmission::Admitted`] and drops it otherwise.  The GUI only
+    /// decrements, so the load below can only be stale in the cautious
+    /// direction.
+    pub(crate) fn admit(&self, command: &WindowCommand) -> CommandAdmission {
+        let class = CommandClass::of(command);
+        let outstanding = self.counter(class);
+        if outstanding.load(Ordering::Relaxed) >= class.cap() {
+            return CommandAdmission::Dropped;
+        }
+        // Counted before the send, so the GUI cannot release it before it is added.
+        outstanding.fetch_add(1, Ordering::Relaxed);
+        CommandAdmission::Admitted
+    }
+
+    /// Release one outstanding command of `command`'s class; the GUI calls this
+    /// once per command it drains.  Saturates at zero so a mismatch can never
+    /// wrap a counter.
+    pub(crate) fn release(&self, command: &WindowCommand) {
+        // The closure always returns `Some`, so the update cannot fail.
+        let _ = self.counter(CommandClass::of(command)).try_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+
+    /// Commands of `class` currently counted as outstanding.
+    #[cfg(test)]
+    fn outstanding(&self, class: CommandClass) -> usize {
+        self.counter(class).load(Ordering::Relaxed)
+    }
+}
+
+/// A dropped-command warning is logged for the first drop of each class and
+/// then once per this many drops; the rest are logged at debug level.
+const DROPPED_COMMAND_WARN_INTERVAL: u64 = 1024;
+
+/// Count a window command dropped at its cap and log it, rate-limited so a
+/// flood cannot also flood the log.  `dropped` is the running total for the
+/// command's class.  The command itself is not logged: Viewport commands can
+/// carry large payloads.
+fn note_dropped_command(dropped: &AtomicU64, class: CommandClass) {
     let total = dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    if total == 1 || total.is_multiple_of(DROPPED_REPORT_WARN_INTERVAL) {
+    let label = class.label();
+    let cap = class.cap();
+    if total == 1 || total.is_multiple_of(DROPPED_COMMAND_WARN_INTERVAL) {
         tracing::warn!(
-            "{MAX_OUTSTANDING_REPORTS} report requests already awaiting the GUI; \
-             dropped report requests so far: {total}"
+            "{cap} {label} window commands already awaiting the GUI; \
+             dropped {label} commands so far: {total}"
         );
     } else {
-        tracing::debug!("report request dropped at the outstanding cap (#{total}): {command:?}");
+        tracing::debug!("{label} window command dropped at the outstanding cap (#{total})");
     }
 }
 
@@ -614,10 +698,10 @@ pub fn spawn_pty_tab(
     let child_pid = terminal.child_pid();
 
     // `input_tx` is unbounded because it carries keystrokes, which must never
-    // be dropped; the GUI's replies on it are bounded by `outstanding_reports`.
+    // be dropped; the GUI's replies on it are bounded by `window_cmd_budget`.
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
-    let outstanding_reports = Arc::new(AtomicUsize::new(0));
+    let window_cmd_budget = WindowCommandBudget::default();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
     let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
@@ -680,7 +764,7 @@ pub fn spawn_pty_tab(
         command_event_tx,
         reader_shutdown,
         Arc::clone(&echo_off),
-        Arc::clone(&outstanding_reports),
+        window_cmd_budget.clone(),
     );
 
     Ok(TabChannels {
@@ -692,7 +776,7 @@ pub fn spawn_pty_tab(
         search_buffer_rx,
         pty_dead_rx,
         echo_off,
-        outstanding_reports,
+        window_cmd_budget,
         child_pid,
         command_event_rx,
         history_seed,
@@ -729,7 +813,7 @@ fn spawn_pty_consumer_thread(
     command_event_tx: Sender<CommandFinishedEvent>,
     reader_shutdown: Arc<AtomicBool>,
     echo_off: Arc<AtomicBool>,
-    outstanding_reports: Arc<AtomicUsize>,
+    window_cmd_budget: WindowCommandBudget,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -821,9 +905,10 @@ fn spawn_pty_consumer_thread(
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
-            // Report-class window commands dropped at `MAX_OUTSTANDING_REPORTS`
-            // (148.C9); only used to rate-limit the warning.
+            // Window commands dropped at their class cap (148.C9, 148.RC2); only
+            // used to rate-limit the warning, one total per class.
             let dropped_reports = AtomicU64::new(0);
+            let dropped_viewport = AtomicU64::new(0);
 
             // Helper closure: drain window commands and command-finished
             // events, publish snapshot, request repaint.
@@ -869,16 +954,22 @@ fn spawn_pty_consumer_thread(
                             }
                             _ => WindowCommand::Viewport(cmd),
                         };
-                    // Report requests are capped (148.C9): each one makes the GUI
-                    // answer through `input_tx`, so a GUI that is not draining
-                    // must not let them pile up.  Viewport commands are not
-                    // replies and pass through.  Admission counts the command;
-                    // if the send then fails the pane is gone and the count
-                    // no longer matters.
-                    if let WindowCommand::Report(report) = &wc
-                        && admit_report(&outstanding_reports) == ReportAdmission::Dropped
-                    {
-                        note_dropped_report(&dropped_reports, report);
+                    // Both classes are capped.  Reports (148.C9) because each one
+                    // makes the GUI answer through `input_tx`; Viewport commands
+                    // (148.RC2) because they can carry large payloads (clipboard
+                    // writes, notifications) and a GUI that is not draining must
+                    // not let them pile up.  Admission counts the command; if the
+                    // send then fails the pane is gone and the count no longer
+                    // matters.
+                    if window_cmd_budget.admit(&wc) == CommandAdmission::Dropped {
+                        match CommandClass::of(&wc) {
+                            CommandClass::Report => {
+                                note_dropped_command(&dropped_reports, CommandClass::Report);
+                            }
+                            CommandClass::Viewport => {
+                                note_dropped_command(&dropped_viewport, CommandClass::Viewport);
+                            }
+                        }
                         continue;
                     }
                     send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
@@ -1832,7 +1923,7 @@ mod tests {
             command_event_tx,
             Arc::new(AtomicBool::new(false)),
             echo_off,
-            Arc::new(AtomicUsize::new(0)),
+            WindowCommandBudget::default(),
         );
 
         // The emulator owns every sender of `write_rx`, so the channel
@@ -1983,41 +2074,111 @@ mod tests {
         }
     }
 
+    fn report_command() -> WindowCommand {
+        WindowCommand::Report(WindowManipulation::ReportTitle)
+    }
+
+    fn viewport_command() -> WindowCommand {
+        WindowCommand::Viewport(WindowManipulation::SetTitleBarText("t".to_owned()))
+    }
+
     #[test]
-    fn admit_report_counts_up_to_the_cap_then_drops() {
-        let outstanding = AtomicUsize::new(0);
-        for admitted in 1..=MAX_OUTSTANDING_REPORTS {
-            assert_eq!(admit_report(&outstanding), ReportAdmission::Admitted);
-            assert_eq!(outstanding.load(Ordering::Relaxed), admitted);
+    fn admit_counts_each_class_up_to_its_cap_then_drops() {
+        for (class, command, cap) in [
+            (
+                CommandClass::Report,
+                report_command(),
+                MAX_OUTSTANDING_REPORTS,
+            ),
+            (
+                CommandClass::Viewport,
+                viewport_command(),
+                MAX_OUTSTANDING_VIEWPORT_COMMANDS,
+            ),
+        ] {
+            let budget = WindowCommandBudget::default();
+            for admitted in 1..=cap {
+                assert_eq!(budget.admit(&command), CommandAdmission::Admitted);
+                assert_eq!(budget.outstanding(class), admitted);
+            }
+            assert_eq!(budget.admit(&command), CommandAdmission::Dropped);
+            assert_eq!(
+                budget.outstanding(class),
+                cap,
+                "a dropped {} command is not counted",
+                class.label()
+            );
         }
-        assert_eq!(admit_report(&outstanding), ReportAdmission::Dropped);
+    }
+
+    #[test]
+    fn the_two_classes_are_budgeted_independently() {
+        let budget = WindowCommandBudget::default();
+        for _ in 0..MAX_OUTSTANDING_REPORTS {
+            assert_eq!(budget.admit(&report_command()), CommandAdmission::Admitted);
+        }
+        assert_eq!(budget.admit(&report_command()), CommandAdmission::Dropped);
         assert_eq!(
-            outstanding.load(Ordering::Relaxed),
-            MAX_OUTSTANDING_REPORTS,
-            "a dropped report is not counted"
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted,
+            "a full report budget does not refuse viewport commands"
+        );
+        assert_eq!(budget.outstanding(CommandClass::Viewport), 1);
+    }
+
+    #[test]
+    fn release_frees_a_slot_of_its_own_class_and_saturates_at_zero() {
+        let budget = WindowCommandBudget::default();
+        for _ in 0..MAX_OUTSTANDING_VIEWPORT_COMMANDS {
+            assert_eq!(
+                budget.admit(&viewport_command()),
+                CommandAdmission::Admitted
+            );
+        }
+        assert_eq!(budget.admit(&viewport_command()), CommandAdmission::Dropped);
+
+        // Releasing a Report frees nothing in the viewport budget.
+        budget.release(&report_command());
+        assert_eq!(budget.admit(&viewport_command()), CommandAdmission::Dropped);
+
+        budget.release(&viewport_command());
+        assert_eq!(
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted
+        );
+
+        let empty = WindowCommandBudget::default();
+        empty.release(&report_command());
+        empty.release(&viewport_command());
+        assert_eq!(
+            empty.outstanding(CommandClass::Report),
+            0,
+            "never underflows"
+        );
+        assert_eq!(
+            empty.outstanding(CommandClass::Viewport),
+            0,
+            "never underflows"
         );
     }
 
     #[test]
-    fn release_report_frees_a_slot_and_saturates_at_zero() {
-        let outstanding = AtomicUsize::new(MAX_OUTSTANDING_REPORTS);
-        assert_eq!(admit_report(&outstanding), ReportAdmission::Dropped);
-        release_report(&outstanding);
-        assert_eq!(admit_report(&outstanding), ReportAdmission::Admitted);
-
-        let empty = AtomicUsize::new(0);
-        release_report(&empty);
-        assert_eq!(empty.load(Ordering::Relaxed), 0, "never underflows");
+    fn a_cloned_budget_shares_its_counters() {
+        let budget = WindowCommandBudget::default();
+        let shared = budget.clone();
+        assert_eq!(
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted
+        );
+        assert_eq!(shared.outstanding(CommandClass::Viewport), 1);
+        shared.release(&viewport_command());
+        assert_eq!(budget.outstanding(CommandClass::Viewport), 0);
     }
 
-    /// With no GUI draining `window_cmd_rx`, a flood of report requests leaves
-    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued (148.C9).
-    /// Viewport commands in the same stream are not capped.
-    #[test]
-    fn consumer_thread_caps_outstanding_reports_while_the_gui_is_not_draining() {
-        const FLOOD: usize = 1000;
-        const VIEWPORT: usize = 5;
-
+    /// Feed `bytes` to a headless consumer thread whose GUI never drains
+    /// `window_cmd_rx`, then return how many Report and Viewport commands were
+    /// queued, plus the budget the thread counted them in.
+    fn flood_undrained_consumer(mut bytes: Vec<u8>) -> (usize, usize, WindowCommandBudget) {
         let (terminal, write_rx) = TerminalEmulator::new_headless(None);
         let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
         let (input_tx, input_rx) = unbounded::<InputEvent>();
@@ -2026,7 +2187,7 @@ mod tests {
         let (search_buffer_tx, _search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
         let (pty_dead_tx, _pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
         let (command_event_tx, _command_event_rx) = unbounded::<CommandFinishedEvent>();
-        let outstanding = Arc::new(AtomicUsize::new(0));
+        let budget = WindowCommandBudget::default();
 
         spawn_pty_consumer_thread(
             terminal,
@@ -2044,13 +2205,9 @@ mod tests {
             command_event_tx,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-            Arc::clone(&outstanding),
+            budget.clone(),
         );
 
-        // `CSI 14 t` is a Report; `CSI 2 t`-style title stack pushes
-        // (`CSI 22 ; 0 t`) are Viewport commands.
-        let mut bytes = b"\x1b[14t".repeat(FLOOD);
-        bytes.extend(b"\x1b[22;0t".repeat(VIEWPORT));
         // DA1 is answered on the PTY thread itself, after everything above in
         // the same FIFO, so its reply proves the flood was fully processed.
         bytes.extend_from_slice(b"\x1b[c");
@@ -2083,9 +2240,47 @@ mod tests {
             }
         }
         drop(pty_read_tx);
+        (reports, viewport, budget)
+    }
+
+    /// With no GUI draining `window_cmd_rx`, a flood of report requests leaves
+    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued (148.C9).
+    /// A few Viewport commands in the same stream are all admitted.
+    #[test]
+    fn consumer_thread_caps_outstanding_reports_while_the_gui_is_not_draining() {
+        const FLOOD: usize = 1000;
+        const VIEWPORT: usize = 5;
+
+        // `CSI 14 t` is a Report; `CSI 22 ; 0 t` (title stack push) is Viewport.
+        let mut bytes = b"\x1b[14t".repeat(FLOOD);
+        bytes.extend(b"\x1b[22;0t".repeat(VIEWPORT));
+        let (reports, viewport, budget) = flood_undrained_consumer(bytes);
 
         assert_eq!(reports, MAX_OUTSTANDING_REPORTS);
-        assert_eq!(viewport, VIEWPORT, "viewport commands are never capped");
-        assert_eq!(outstanding.load(Ordering::Relaxed), MAX_OUTSTANDING_REPORTS);
+        assert_eq!(viewport, VIEWPORT, "viewport commands below the cap pass");
+        assert_eq!(
+            budget.outstanding(CommandClass::Report),
+            MAX_OUTSTANDING_REPORTS
+        );
+        assert_eq!(budget.outstanding(CommandClass::Viewport), VIEWPORT);
+    }
+
+    /// With no GUI draining `window_cmd_rx`, a flood of OSC 52 clipboard writes
+    /// (Viewport class, large payloads) leaves exactly
+    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS` Viewport commands queued (148.RC2).
+    #[test]
+    fn consumer_thread_caps_outstanding_viewport_commands_while_the_gui_is_not_draining() {
+        const FLOOD: usize = 5000;
+
+        // `aGk=` is base64 for "hi".
+        let bytes = b"\x1b]52;c;aGk=\x07".repeat(FLOOD);
+        let (reports, viewport, budget) = flood_undrained_consumer(bytes);
+
+        assert_eq!(reports, 0);
+        assert_eq!(viewport, MAX_OUTSTANDING_VIEWPORT_COMMANDS);
+        assert_eq!(
+            budget.outstanding(CommandClass::Viewport),
+            MAX_OUTSTANDING_VIEWPORT_COMMANDS
+        );
     }
 }

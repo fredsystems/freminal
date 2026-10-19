@@ -6,6 +6,7 @@
 //! egui integration: input translation and rendering via `egui-winit` and `egui_glow`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use conv2::ConvUtil;
 #[cfg(feature = "frame-profiling")]
@@ -27,7 +28,7 @@ use crate::gpu_profiling::{
     detect_from_glow,
 };
 use crate::modifier_tracker::ModifierTracker;
-use crate::monitor_size::MonitorSize;
+use crate::monitor_size::{MonitorRefresh, MonitorSize, RefreshCause};
 
 /// Output from a single egui frame.
 pub struct FrameOutput {
@@ -57,8 +58,8 @@ pub struct EguiState {
     modifier_tracker: ModifierTracker,
     /// Cached size of the monitor this window is on, injected into every
     /// frame's `RawInput` because `egui-winit` does not populate it (cleanup
-    /// 148.C4). Refreshed on window creation and on `Moved` / `Resized` /
-    /// `ScaleFactorChanged`, never per frame — see [`MonitorSize`].
+    /// 148.C4). Refreshed on window creation and on `Moved` / `Resized`
+    /// (debounced) / `ScaleFactorChanged`, never per frame — see [`MonitorSize`].
     monitor_size: MonitorSize,
     /// Task 121 frame-profiling harness (feature-gated): per-window
     /// accumulated phase timings, flushed as a `tracing::debug!` line every
@@ -481,18 +482,33 @@ impl EguiState {
     /// injected afterwards (see [`crate::monitor_size`]).
     pub(crate) fn take_egui_input(&mut self, window: &Window) -> egui::RawInput {
         let mut raw_input = self.winit_state.take_egui_input(window);
+        // Retry a geometry refresh that was debounced during a drag (no monitor
+        // query unless one is owed and the interval has passed).
+        if self.monitor_size.deferred_due(Instant::now()) == MonitorRefresh::Now {
+            self.monitor_size = MonitorSize::query(window, window.scale_factor());
+        }
         self.monitor_size.inject(&mut raw_input);
         raw_input
     }
 
-    /// Re-query the monitor size for this window.
+    /// Re-query the monitor size for this window, unless `cause` is debounced
+    /// away (148.RC6; see [`crate::monitor_size::decide_refresh`]).
     ///
     /// Called at the events that can change it (`Moved`, `Resized`,
     /// `ScaleFactorChanged`), never per frame. `scale_factor` is the
     /// window's current scale factor; the `ScaleFactorChanged` handler passes
     /// the event's new value.
-    pub(crate) fn refresh_monitor_size(&mut self, window: &Window, scale_factor: f64) {
-        self.monitor_size = MonitorSize::query(window, scale_factor);
+    pub(crate) fn refresh_monitor_size(
+        &mut self,
+        window: &Window,
+        scale_factor: f64,
+        cause: RefreshCause,
+    ) {
+        if self.monitor_size.refresh_for(cause, Instant::now()) == MonitorRefresh::Now {
+            self.monitor_size = MonitorSize::query(window, scale_factor);
+        } else {
+            self.monitor_size.mark_deferred();
+        }
     }
 
     /// Task 121 pointer-motion repaint-gate spike: record that a

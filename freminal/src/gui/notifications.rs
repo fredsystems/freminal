@@ -389,7 +389,9 @@ impl NotificationRouter {
             EnqueueOutcome::Enqueued => {}
             EnqueueOutcome::DroppedFull => log_dropped_notification(),
             EnqueueOutcome::WorkerGone => {
-                tracing::warn!("desktop notification worker has exited; notification dropped");
+                tracing::warn!(
+                    "desktop notification worker could not be (re)started; notification dropped"
+                );
             }
             EnqueueOutcome::RespawnSuppressed => {
                 tracing::debug!(

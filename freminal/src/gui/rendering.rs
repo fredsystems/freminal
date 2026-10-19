@@ -4,7 +4,6 @@
 // https://opensource.org/licenses/MIT.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -25,7 +24,7 @@ use crate::gui::notifications::{NotificationRequest, Osc99Control};
 use crate::gui::osc99::{
     Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneContext, Osc99Request,
 };
-use crate::gui::pty::release_report;
+use crate::gui::pty::WindowCommandBudget;
 use crate::gui::title_stack::TitleStack;
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
@@ -381,9 +380,9 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 /// 1. **Non-blocking drain** — `window_cmd_rx.try_recv()` is called in a
 ///    loop until the channel is empty.  All commands queued by the PTY
 ///    consumer thread since the last frame are processed before rendering.
-///    Each drained `Report` is also released from the pane's
-///    `outstanding_reports` count, the cap on how many may be queued while
-///    the GUI is not draining (148.C9).
+///    Each drained command is also released from the pane's
+///    `window_cmd_budget` (its Report or Viewport count), the cap on how many
+///    may be queued while the GUI is not draining (148.C9, 148.RC2).
 ///
 /// 2. **Variant routing** — both `Viewport` and `Report` commands carry
 ///    the same inner `WindowManipulation` value; the outer tag is not used
@@ -433,7 +432,7 @@ pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option
 pub(super) fn handle_window_manipulation(
     ui: &egui::Ui,
     window_cmd_rx: &Receiver<WindowCommand>,
-    outstanding_reports: &AtomicUsize,
+    window_cmd_budget: &WindowCommandBudget,
     reply_tx: &Arc<Sender<InputEvent>>,
     font_width: usize,
     font_height: usize,
@@ -456,11 +455,10 @@ pub(super) fn handle_window_manipulation(
     // Drain all pending WindowCommands for this frame.
     while let Ok(wc) = window_cmd_rx.try_recv() {
         // Every command drained from the channel passes this point before any
-        // `continue` or arm below, so each Report is released exactly once,
-        // including ones the policy checks go on to refuse (148.C9).
-        if matches!(wc, WindowCommand::Report(_)) {
-            release_report(outstanding_reports);
-        }
+        // `continue` or arm below, so each one is released exactly once from its
+        // class's count, including ones the policy checks go on to refuse
+        // (148.C9, 148.RC2).
+        window_cmd_budget.release(&wc);
         let window_event = match wc {
             WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
         };
@@ -920,9 +918,10 @@ mod window_manipulation_reply_tests {
         PaneVisibility, TabActivity, WindowMinimized, ZoomOcclusion,
     };
     use crate::gui::panes::PaneIdGenerator;
+    use crate::gui::pty::WindowCommandBudget;
     use crate::gui::title_stack::{MAX_TITLE_STACK_DEPTH, TitleStack};
     use freminal_windowing::WindowId;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Weak};
 
     use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -1042,7 +1041,7 @@ mod window_manipulation_reply_tests {
             handle_window_manipulation(
                 ui,
                 &window_cmd_rx,
-                &AtomicUsize::new(0),
+                &WindowCommandBudget::default(),
                 &reply_tx,
                 8,
                 16,
@@ -1121,7 +1120,7 @@ mod window_manipulation_reply_tests {
             handle_window_manipulation(
                 ui,
                 &window_cmd_rx,
-                &AtomicUsize::new(0),
+                &WindowCommandBudget::default(),
                 &reply_tx,
                 8,
                 16,
@@ -1178,7 +1177,7 @@ mod window_manipulation_reply_tests {
             handle_window_manipulation(
                 ui,
                 &window_cmd_rx,
-                &AtomicUsize::new(0),
+                &WindowCommandBudget::default(),
                 &reply_tx,
                 8,
                 16,
@@ -1208,27 +1207,33 @@ mod window_manipulation_reply_tests {
         (osc52_events, copied)
     }
 
-    /// Each drained Report releases exactly one outstanding-report slot (148.C9),
-    /// whatever becomes of it afterwards (answered, refused by the window-ops
-    /// policy, or ignored); a Viewport command releases none.
+    /// Each drained command releases exactly one slot from its own class's
+    /// outstanding count (148.C9, 148.RC2), whatever becomes of it afterwards
+    /// (answered, refused by the window-ops policy, or ignored).
+    ///
+    /// The commands carry the classification production gives them:
+    /// `post_event` in `pty.rs` makes `MinimizeWindow`, `SetTitleBarText` and
+    /// `SetClipboard` Viewport commands; only the report queries are Reports.
     #[test]
-    fn draining_releases_one_outstanding_slot_per_report_only() {
+    fn draining_releases_one_slot_per_command_from_its_own_class() {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
         let (reply_tx, _reply_rx): (_, Receiver<InputEvent>) = unbounded();
         let reply_tx = Arc::new(reply_tx);
         for command in [
             WindowCommand::Report(WindowManipulation::ReportWindowState),
-            // Refused by `WindowOpsPolicy::Refused`: still a drained Report.
-            WindowCommand::Report(WindowManipulation::MinimizeWindow),
+            // Refused by `WindowOpsPolicy::Refused`: still a drained command.
+            WindowCommand::Viewport(WindowManipulation::MinimizeWindow),
             WindowCommand::Viewport(WindowManipulation::SetTitleBarText("t".to_owned())),
-            WindowCommand::Report(WindowManipulation::SetClipboard(
+            WindowCommand::Viewport(WindowManipulation::SetClipboard(
                 "c".to_owned(),
                 "x".to_owned(),
             )),
         ] {
             window_cmd_tx.send(command).expect("send window command");
         }
-        let outstanding = AtomicUsize::new(5);
+        let budget = WindowCommandBudget::default();
+        budget.reports.store(5, Ordering::Relaxed);
+        budget.viewport.store(5, Ordering::Relaxed);
         let flags = WindowManipFlags {
             allow_clipboard_read: false,
             clipboard_write: ClipboardWritePolicy::Off,
@@ -1251,7 +1256,7 @@ mod window_manipulation_reply_tests {
             handle_window_manipulation(
                 ui,
                 &window_cmd_rx,
-                &outstanding,
+                &budget,
                 &reply_tx,
                 8,
                 16,
@@ -1270,9 +1275,14 @@ mod window_manipulation_reply_tests {
         full_output.textures_delta.clear();
 
         assert_eq!(
-            outstanding.load(Ordering::Relaxed),
+            budget.reports.load(Ordering::Relaxed),
+            4,
+            "one Report drained out of five outstanding"
+        );
+        assert_eq!(
+            budget.viewport.load(Ordering::Relaxed),
             2,
-            "three Reports drained out of five outstanding; the Viewport command released none"
+            "three Viewport commands drained out of five outstanding"
         );
         assert!(window_cmd_rx.is_empty());
     }
@@ -1794,7 +1804,7 @@ mod window_manipulation_reply_tests {
             handle_window_manipulation(
                 ui,
                 &window_cmd_rx,
-                &AtomicUsize::new(0),
+                &WindowCommandBudget::default(),
                 &reply_tx,
                 8,
                 16,
