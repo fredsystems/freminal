@@ -140,11 +140,19 @@ const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
 /// replies to the PTY writer thread.
 ///
 /// Each message is a single reply (one DA1 answer, one XTGETTCAP name, ...).
-/// With the XTGETTCAP caps (`MAX_XTGETTCAP_NAMES`, `MAX_XTGETTCAP_NAME_HEX_LEN`)
-/// each reply is small, so the bytes queued behind a child that does not read
-/// its tty stay bounded. Replies arriving while the queue is full are dropped.
-/// User input does not use this queue.
-pub const REPLY_QUEUE_CAPACITY: usize = 256;
+/// The bound is on the **number of messages**, not on bytes. Most replies are
+/// small (with the XTGETTCAP caps, `MAX_XTGETTCAP_NAMES` and
+/// `MAX_XTGETTCAP_NAME_HEX_LEN`, each is bounded), but some are not: an OSC 52
+/// query reply carries the clipboard contents (only when
+/// `allow_clipboard_read` is on), and a reply routed back from the GUI can be
+/// larger than a DA answer. The queue's memory is therefore bounded by this
+/// capacity times the largest reply, not by a small constant.
+///
+/// The capacity is generous because a legitimate client can have hundreds of
+/// replies outstanding at once (for example many kitty graphics transmissions
+/// sent with `q=0`, each answered). Replies arriving while the queue is full
+/// are dropped. User input does not use this queue.
+pub const REPLY_QUEUE_CAPACITY: usize = 1024;
 
 /// Change signal carried forward across snapshots the GUI will not render.
 ///

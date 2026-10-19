@@ -8516,6 +8516,22 @@ Group F — Hygiene:
   re-enter `nix develop`; the variable had no effect on any tool, so later verification in
   the old shell remains valid.
 
+- **Adversarial review (2026-10-19):** one CODE-REVIEW pass over the whole branch diff; the
+  fixes are commits `148.R*`.
+  - **R1:** the sixel quadratic at the pixel cap (a 148.2 note covers it).
+  - **R2:** kitty `a=q` now answers the uniform `EBADF` for a refused file-backed medium,
+    instead of claiming support.
+  - **R5:** `REPLY_QUEUE_CAPACITY` is raised to 1024, and the docs now say the bound is in
+    messages, not bytes. An OSC 52 query reply carries the clipboard when reads are allowed.
+  - **R8:** `FREC_FORMAT.md` and `--recording-path` now state the redaction limits: raw-mode
+    prompts are not detected, Windows is never redacted, and timing is kept.
+  - **R9a:** OSC 7 no longer accepts a host whose first label equals the local name
+    (`myhost.attacker.example`).
+  - **R12:** `t=s` reads grow in 1 MiB chunks instead of zero-filling the full request.
+  - **R14d:** the shm tests clean up through a drop guard.
+
+  The remaining review items are below.
+
 ### 148 Cleanup entries
 
 - **148.C1 — OSC 1338 `HISTFILE` on Windows accepts UNC paths.** Surfaced in review of 148.9.

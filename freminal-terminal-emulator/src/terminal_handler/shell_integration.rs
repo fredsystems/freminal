@@ -84,10 +84,16 @@ fn first_label(host: &str) -> &str {
 ///
 /// RFC 8089 §2 and §3: the host of a file URI is either empty or the string
 /// `localhost` for the local machine, and any other host names a different
-/// machine. Host names compare ASCII case-insensitively (RFC 4343). macOS
-/// shells commonly report the short name (`mac`) while the OS hostname is
-/// fully qualified (`mac.local`) or vice versa, so a match on the first DNS
-/// label in either direction is also accepted.
+/// machine. Host names compare ASCII case-insensitively (RFC 4343).
+///
+/// A shell commonly reports the short name (`mac`) while the OS hostname is
+/// fully qualified (`mac.local`), so a reported host equal to the first DNS
+/// label of the local name is also accepted. The reverse is **not**: a
+/// reported FQDN whose first label equals the local name (`myhost.attacker.example`
+/// against a local `myhost`) names a different machine and is rejected, so a
+/// remote party cannot claim to be this host by choosing a suffix. The price
+/// is that a shell reporting a FQDN while `gethostname` returns the short name
+/// is rejected too, and the pane falls back to the process's working directory.
 fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
     if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -95,9 +101,7 @@ fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
     let Some(local) = local_hostname.filter(|l| !l.is_empty()) else {
         return false;
     };
-    host.eq_ignore_ascii_case(local)
-        || host.eq_ignore_ascii_case(first_label(local))
-        || first_label(host).eq_ignore_ascii_case(local)
+    host.eq_ignore_ascii_case(local) || host.eq_ignore_ascii_case(first_label(local))
 }
 
 /// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
@@ -105,7 +109,7 @@ fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
 ///
 /// The host must designate this machine: empty, `localhost`
 /// (RFC 8089 §2/§3), or `local_hostname` (RFC 4343 case-insensitive match,
-/// including a first-DNS-label match; see [`host_is_local`]). When
+/// including the local name's own first DNS label; see [`host_is_local`]). When
 /// `local_hostname` is `None` only the empty host and `localhost` are
 /// accepted. Any other host yields [`Osc7Rejection::ForeignHost`].
 ///
@@ -209,8 +213,20 @@ mod tests {
                 HOST,
                 Ok("/home/user/projects"),
             ),
-            // Reported FQDN whose first label is the local (short) name.
-            ("file://mac.local/tmp", Some("mac"), Ok("/tmp")),
+            // A reported FQDN whose first label is the local (short) name is a
+            // different machine as far as we can tell, so it is rejected.
+            (
+                "file://mac.local/tmp",
+                Some("mac"),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            (
+                "file://myhost.attacker.example/tmp",
+                Some("myhost"),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            // The local FQDN itself still matches.
+            ("file://mac.local/tmp", Some("mac.local"), Ok("/tmp")),
             ("file://other/tmp", HOST, Err(Osc7Rejection::ForeignHost)),
             ("file://x/tmp", HOST, Err(Osc7Rejection::ForeignHost)),
             ("file://myhost/tmp", None, Err(Osc7Rejection::ForeignHost)),

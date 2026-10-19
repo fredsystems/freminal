@@ -715,6 +715,10 @@ impl KittyShmError {
     }
 }
 
+/// The most a `t=s` read grows its buffer by before reading again.
+#[cfg(unix)]
+const KITTY_SHM_READ_CHUNK: usize = 1024 * 1024;
+
 /// Read `read_len` bytes at `offset` from the shared-memory object `file`
 /// with positioned reads.
 ///
@@ -736,21 +740,33 @@ fn read_kitty_shm_range(
     use std::os::unix::fs::FileExt as _;
 
     let len = usize::value_from(read_len).map_err(|_| ShmBoundsError::TooLarge)?;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(len)
-        .map_err(|_| ShmBoundsError::TooLarge)?;
-    buf.resize(len, 0);
 
-    let mut done: usize = 0;
-    while done < len {
-        let at = offset
-            .checked_add(u64::value_from(done).map_err(|_| ShmBoundsError::OutOfBounds)?)
-            .ok_or(ShmBoundsError::OutOfBounds)?;
-        match file.read_at(&mut buf[done..], at) {
-            Ok(0) => return Err(KittyShmError::Truncated),
-            Ok(n) => done += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(KittyShmError::Read(e)),
+    // Grow the buffer a chunk at a time, as bytes are actually read, rather
+    // than zero-filling the whole (up to 400 MiB) request before the first
+    // read: an object that is shorter than its stale `fstat` length, or one
+    // truncated mid-read, then costs at most one chunk beyond what it really
+    // held before it is reported as `Truncated`.
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < len {
+        let start = buf.len();
+        let chunk = (len - start).min(KITTY_SHM_READ_CHUNK);
+        buf.try_reserve(chunk)
+            .map_err(|_| ShmBoundsError::TooLarge)?;
+        buf.resize(start + chunk, 0);
+
+        let mut done: usize = 0;
+        while done < chunk {
+            let at = offset
+                .checked_add(
+                    u64::value_from(start + done).map_err(|_| ShmBoundsError::OutOfBounds)?,
+                )
+                .ok_or(ShmBoundsError::OutOfBounds)?;
+            match file.read_at(&mut buf[start + done..start + chunk], at) {
+                Ok(0) => return Err(KittyShmError::Truncated),
+                Ok(n) => done += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(KittyShmError::Read(e)),
+            }
         }
     }
     Ok(buf)
@@ -871,7 +887,10 @@ impl TerminalHandler {
     /// Handle `a=q` — query whether the terminal supports the Kitty graphics protocol.
     ///
     /// Responds with OK for formats 24 (RGB), 32 (RGBA), and 100 (PNG).
-    /// Other formats get an error response.
+    /// Other formats get an error response. A file-backed medium (`t=f`,
+    /// `t=t`, `t=s`) while file transmission is refused gets the uniform
+    /// [`KITTY_FILE_ERROR_RESPONSE`] instead, matching what the transmission
+    /// itself would answer.
     fn handle_kitty_query(&self, cmd: &KittyGraphicsCommand) {
         let image_id = cmd.control.image_id.unwrap_or(0);
         let quiet = cmd.control.quiet;
@@ -885,6 +904,27 @@ impl TerminalHandler {
                     | freminal_common::buffer_states::kitty_graphics::KittyFormat::Png
             )
         });
+
+        // The query must agree with the consent gate in
+        // `resolve_kitty_transmission`: a medium that would be refused is
+        // answered with the same uniform file error, never with OK, so a
+        // client cannot be told a transmission works that then fails (and
+        // cannot tell "disabled" from "unreadable").
+        if medium_reads_host(kitty_medium(&cmd.control))
+            && self.host_capabilities.kitty_file_transmission == KittyFileTransmission::Refused
+        {
+            tracing::debug!(
+                "Kitty graphics: refusing {:?} query: \
+                 [security] allow_kitty_file_transfer is off",
+                kitty_medium(&cmd.control)
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id, None),
+                quiet,
+                KITTY_FILE_ERROR_RESPONSE,
+            );
+            return;
+        }
 
         // quiet=1 suppresses OK responses; quiet=2 suppresses all responses.
         if quiet >= 2 || (quiet >= 1 && supported) {
@@ -4032,14 +4072,14 @@ mod tests {
         FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
         verify_opened_kitty_file,
     };
+    #[cfg(unix)]
+    use super::{
+        KITTY_SHM_READ_CHUNK, KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision,
+        read_kitty_shm_object, read_kitty_shm_range, shm_unlink_decision,
+    };
     use super::{
         KittyFileError, ShmBoundsError, is_refused_kitty_path, kitty_path_allowed_on_windows,
         read_capped, shm_read_bounds,
-    };
-    #[cfg(unix)]
-    use super::{
-        KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision, read_kitty_shm_object,
-        read_kitty_shm_range, shm_unlink_decision,
     };
     use freminal_common::{
         buffer_states::{
@@ -7505,7 +7545,7 @@ mod tests {
     #[cfg(unix)]
     fn refused_t_s_does_not_read_or_unlink_an_existing_object() {
         use nix::fcntl::OFlag;
-        use nix::sys::mman::{shm_open, shm_unlink};
+        use nix::sys::mman::shm_open;
         use nix::sys::stat::Mode;
 
         let (mut handler, rx) = kitty_handler();
@@ -7513,6 +7553,7 @@ mod tests {
 
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let name = create_test_shm_object(&pixels);
+        let _cleanup = ShmGuard(name.clone());
         handler.handle_kitty_graphics(KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::TransmitAndDisplay),
@@ -7528,7 +7569,6 @@ mod tests {
         });
         let reply = sole_reply(&rx);
         let still_there = shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_ok();
-        let _ = shm_unlink(name.as_str());
 
         assert_eq!(reply, reference);
         assert!(handler.buffer().image_store().get(7).is_none());
@@ -7559,6 +7599,72 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(handler.buffer().image_store().get(9).is_none());
         assert!(sole_reply(&rx).contains(KITTY_FILE_ERROR_RESPONSE));
+    }
+
+    /// Send `a=q i=31 q=quiet` with transmission medium `medium`.
+    fn query_with_medium(handler: &mut TerminalHandler, medium: KittyTransmission, quiet: u8) {
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(medium),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(31),
+                quiet,
+                ..KittyControlData::default()
+            },
+            payload: b"/nonexistent".to_vec(),
+        });
+    }
+
+    #[test]
+    fn query_for_a_refused_medium_gets_the_uniform_file_error() {
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+        ] {
+            let (mut handler, rx) = kitty_handler();
+            query_with_medium(&mut handler, medium, 0);
+            let reply = sole_reply(&rx);
+            assert!(
+                reply.contains(KITTY_FILE_ERROR_RESPONSE),
+                "{medium:?}: {reply:?}"
+            );
+            assert!(!reply.contains(";OK"), "{medium:?}: {reply:?}");
+        }
+    }
+
+    #[test]
+    fn query_for_a_refused_medium_honours_quiet() {
+        let (mut handler, rx) = kitty_handler();
+        // q=1 only suppresses OK, so the error is still sent.
+        query_with_medium(&mut handler, KittyTransmission::File, 1);
+        assert!(sole_reply(&rx).contains(KITTY_FILE_ERROR_RESPONSE));
+        // q=2 suppresses everything.
+        query_with_medium(&mut handler, KittyTransmission::File, 2);
+        let leftover = drain_pty_text(&rx);
+        assert_eq!(leftover, Vec::<String>::new(), "q=2 must send nothing");
+    }
+
+    #[test]
+    fn query_for_an_allowed_or_direct_medium_still_answers_ok() {
+        let (mut refusing, rx) = kitty_handler();
+        query_with_medium(&mut refusing, KittyTransmission::Direct, 0);
+        assert!(sole_reply(&rx).contains(";OK"));
+
+        let (mut allowing, rx) = kitty_handler_allowing_files();
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+            KittyTransmission::Direct,
+        ] {
+            query_with_medium(&mut allowing, medium, 0);
+            let reply = sole_reply(&rx);
+            assert!(reply.contains(";OK"), "{medium:?}: {reply:?}");
+        }
     }
 
     #[test]
@@ -8299,6 +8405,20 @@ mod tests {
         (name, std::fs::File::from(fd))
     }
 
+    /// Unlinks a POSIX shm object when dropped, ignoring errors, so a test
+    /// whose assertion fails before its cleanup does not leak the object into
+    /// `/dev/shm`. Objects the code under test already unlinked are fine: the
+    /// failed `shm_unlink` is ignored.
+    #[cfg(unix)]
+    struct ShmGuard(String);
+
+    #[cfg(unix)]
+    impl Drop for ShmGuard {
+        fn drop(&mut self) {
+            let _ = nix::sys::mman::shm_unlink(self.0.as_str());
+        }
+    }
+
     /// Create a POSIX shm object of `data.len()` bytes containing `data`,
     /// returning its unique name. Test-only helper for the `t=s` round-trip
     /// tests below.
@@ -8411,6 +8531,7 @@ mod tests {
 
         let over_cap = u64::try_from(MAX_KITTY_DATA_BYTES).unwrap() + 1;
         let (name, _creator) = create_test_shm_sized(over_cap);
+        let _cleanup = ShmGuard(name.clone());
 
         let (mut handler, rx) = kitty_handler_allowing_files();
         let cmd = KittyGraphicsCommand {
@@ -8447,12 +8568,13 @@ mod tests {
     #[cfg(unix)]
     fn kitty_shared_memory_truncated_after_size_is_an_error_not_sigbus() {
         use nix::fcntl::OFlag;
-        use nix::sys::mman::{shm_open, shm_unlink};
+        use nix::sys::mman::shm_open;
         use nix::sys::stat::Mode;
         use std::os::unix::fs::MetadataExt as _;
 
         let data = vec![0xABu8; 3 * 4096];
         let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
         let reader = std::fs::File::from(
             shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).expect("open reader"),
         );
@@ -8478,8 +8600,40 @@ mod tests {
             read_kitty_shm_range(&reader, 0, 100).expect("range within the new length"),
             vec![0xABu8; 100]
         );
+    }
 
-        shm_unlink(name.as_str()).expect("cleanup");
+    /// A read spanning several internal chunks returns the exact bytes, at an
+    /// offset that is not chunk-aligned, and an object that ends inside a
+    /// later chunk is reported as truncated.
+    #[test]
+    #[cfg(unix)]
+    fn kitty_shared_memory_read_spans_chunks() {
+        let total = KITTY_SHM_READ_CHUNK * 2 + 12_345;
+        let data: Vec<u8> = (0..total).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
+        let reader = std::fs::File::from(
+            nix::sys::mman::shm_open(
+                name.as_str(),
+                nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+            .expect("open reader"),
+        );
+
+        let offset = 777usize;
+        let read_len = total - offset;
+        let got = read_kitty_shm_range(
+            &reader,
+            u64::try_from(offset).unwrap(),
+            u64::try_from(read_len).unwrap(),
+        )
+        .expect("multi-chunk read");
+        assert_eq!(got, data[offset..]);
+
+        // Asking for more than the object holds fails in a later chunk.
+        let result = read_kitty_shm_range(&reader, 0, u64::try_from(total + 1).unwrap());
+        assert!(matches!(result, Err(KittyShmError::Truncated)));
     }
 
     #[test]
@@ -8495,6 +8649,7 @@ mod tests {
         // 2x1 RGBA image: red pixel, green pixel.
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let name = create_test_shm_object(&pixels);
+        let _cleanup = ShmGuard(name.clone());
 
         let (mut handler, rx) = kitty_handler_allowing_files();
 
@@ -8561,6 +8716,7 @@ mod tests {
         object.extend_from_slice(&pixel);
 
         let name = create_test_shm_object(&object);
+        let _cleanup = ShmGuard(name.clone());
 
         let (mut handler, _rx) = kitty_handler_allowing_files();
 

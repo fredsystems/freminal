@@ -47,9 +47,14 @@ pub struct Args {
     /// When specified, all PTY I/O, keyboard/mouse input, and topology events
     /// are recorded to the given file. The file is finalized on clean exit.
     ///
-    /// WARNING: a recording contains everything typed (except while terminal
-    /// echo is off, e.g. at a password prompt) and all program output. The
-    /// file is created owner-only (mode 0600) on Unix.
+    /// WARNING: a recording contains everything typed and all program
+    /// output. Typed input is redacted only while the terminal reports echo
+    /// off with canonical mode on (`!ECHO && ICANON`, e.g. sudo or ssh
+    /// password prompts); raw-mode prompts (e.g. pinentry-curses, or
+    /// readline-based prompts that mute themselves) are not detected, and
+    /// redaction is Unix-only (Windows recordings are never redacted).
+    /// Redacted events keep their timing, which reveals password length and
+    /// inter-key timing. The file is created owner-only (mode 0600) on Unix.
     #[arg(long = "recording-path")]
     pub recording_path: Option<PathBuf>,
 

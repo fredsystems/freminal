@@ -223,16 +223,19 @@ const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFai
 ///
 /// Two channels feed the writer (GHSA-6cxq-f7hx-92v2).  `user_rx` is unbounded
 /// and carries keystrokes, paste, raw bytes and `PtyWrite::Resize`.  `reply_rx`
-/// is bounded (`REPLY_QUEUE_CAPACITY`) and carries only terminal-generated
-/// replies, so a child that stops reading its tty cannot make a flood of
-/// queries grow memory without bound; the handler drops replies that do not
-/// fit.
+/// is bounded (`REPLY_QUEUE_CAPACITY` messages, not bytes) and carries only
+/// terminal-generated replies, so a child that stops reading its tty cannot
+/// make a flood of queries grow memory without bound; the handler drops
+/// replies that do not fit.
 ///
 /// The user channel is always preferred: a pending keystroke is written before
 /// any pending reply.  A reply and a keystroke that are both pending at the
 /// same moment can therefore be written in either order (user first).  That is
 /// acceptable because a reply answers a query independently of typed input; the
-/// application has no way to rely on the relative order of the two.
+/// application has no way to rely on the relative order of the two.  The same
+/// holds for `PtyWrite::Resize`, which travels on the user channel: a resize
+/// can be applied before replies that were queued earlier, so a reply may be
+/// written after the PTY already has its new size.
 ///
 /// Both channels are drained in one batch after each wake-up.  The loop ends
 /// when the user channel disconnects (the emulator and the GUI dropped every

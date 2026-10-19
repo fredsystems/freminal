@@ -217,6 +217,22 @@ programs printed, so the file is treated as sensitive.
   An empty payload is valid in the format; no format version change is
   involved.
 
+  The redaction has limits, so do not treat a recording as free of typed
+  secrets:
+
+  - **Only a specific terminal state is detected.** "Echo is off" means the
+    PTY's termios has `ECHO` cleared while `ICANON` is still set, sampled
+    after each burst of PTY output. Prompts that read in raw mode
+    (`ICANON` cleared) are not detected, for example `pinentry-curses` and
+    readline-based prompts that mute their own echo. Line editors such as zsh
+    ZLE and bash readline also run with `ICANON` cleared, which is why they
+    are deliberately not treated as password prompts.
+  - **Unix only.** Windows (ConPTY) has no termios API, so echo is never
+    reported off and Windows recordings are never redacted.
+  - **Timing is kept.** A redacted event still has its timestamp, so the
+    recording reveals the length of a typed password and its inter-key
+    timing.
+
 - **Output is recorded in full.** `PtyOutput` is never redacted, so anything a
   program prints (tokens, secrets echoed by a command, and so on) appears in
   the recording.

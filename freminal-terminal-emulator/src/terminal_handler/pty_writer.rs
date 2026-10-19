@@ -85,9 +85,13 @@ impl TerminalHandler {
     /// Write raw bytes back to the PTY.  Silently drops if no channel is set.
     ///
     /// The send never blocks.  In the real PTY path the sender is bounded
-    /// (`REPLY_QUEUE_CAPACITY`), so a child that stops reading its tty cannot
-    /// make a flood of queries (`ESC [ c` repeated, long XTGETTCAP lists) queue
-    /// replies without bound (GHSA-6cxq-f7hx-92v2).  When the queue is full the
+    /// (`REPLY_QUEUE_CAPACITY` **messages**), so a child that stops reading its
+    /// tty cannot make a flood of queries (`ESC [ c` repeated, long XTGETTCAP
+    /// lists) queue replies without bound (GHSA-6cxq-f7hx-92v2).  The bound is
+    /// in messages, not bytes: most replies are small, but an OSC 52 query
+    /// reply carries the clipboard (only when `allow_clipboard_read` is on) and
+    /// a GUI-originated reply can be larger, so queued bytes are bounded by the
+    /// capacity times the largest reply.  When the queue is full the
     /// reply is dropped and counted in [`Self::dropped_replies`]: a child that
     /// is not reading cannot use the answer anyway, and a child that is will
     /// simply see an unanswered query, as it would on a lost packet.  Unbounded
