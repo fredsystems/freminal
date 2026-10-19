@@ -235,3 +235,50 @@ fn byte_budget_is_refunded_when_the_message_queue_is_full() {
         .sum();
     assert_eq!(queued.load(Ordering::Relaxed), total);
 }
+
+/// PR #572 review: a DECCOLM resize and a GUI resize interleaved while the
+/// writer is behind must leave the PTY at the emulator's final width. With
+/// DECCOLM resizes coalesced through the slot but GUI resizes sent directly,
+/// an early marker could apply a later DECCOLM size after a newer GUI resize
+/// had been queued behind it. All runtime resizes now share the slot.
+#[test]
+fn deccolm_and_gui_resizes_stay_ordered_through_the_slot() {
+    use arc_swap::ArcSwapOption;
+    use freminal_common::pty_write::PtyWrite;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+
+    for gui_width in [100usize, 60] {
+        let (mut emulator, rx) = TerminalEmulator::new_headless(None);
+        let slot = Arc::new(ArcSwapOption::const_empty());
+        emulator
+            .internal
+            .handler
+            .set_pending_resize(Arc::clone(&slot));
+        emulator.set_win_size(80, 24, 8, 16).expect("initial size");
+        emulator.handle_incoming_data(b"\x1b[?40h");
+
+        // Nothing drains the writer between these three steps.
+        emulator.handle_incoming_data(b"\x1b[?3h");
+        emulator.handle_resize_event(gui_width, 24, 8, 16);
+        emulator.handle_incoming_data(b"\x1b[?3l");
+
+        // Replay the queue as the writer would.
+        let mut applied = None;
+        for msg in rx.try_iter() {
+            match msg {
+                PtyWrite::Resize(size) => applied = Some(size.width),
+                PtyWrite::ApplyPendingResize => {
+                    if let Some(size) = slot.swap(None) {
+                        applied = Some(size.width);
+                    }
+                }
+                PtyWrite::Write(_) => {}
+            }
+        }
+        assert_eq!(
+            applied,
+            Some(emulator.internal.handler.buffer().terminal_width()),
+            "PTY width must match the emulator after DECCOLM / GUI {gui_width} / DECCOLM"
+        );
+    }
+}

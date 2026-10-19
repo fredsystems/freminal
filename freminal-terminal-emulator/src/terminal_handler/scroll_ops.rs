@@ -330,19 +330,45 @@ impl TerminalHandler {
         let Some(tx) = self.control_tx.as_ref().or(self.write_tx.as_ref()) else {
             return;
         };
-        if let Some(slot) = &self.pending_resize {
-            let had_pending = slot.swap(Some(Arc::new(size))).is_some();
-            if !had_pending {
-                send_or_log!(
-                    tx,
-                    PtyWrite::ApplyPendingResize,
-                    "Failed to send pending-resize marker"
-                );
+        match self.route_pty_resize(size) {
+            PtyResizeSend::NothingToSend => {}
+            PtyResizeSend::Message(msg) => {
+                send_or_log!(tx, msg, "Failed to send PTY resize");
             }
-        } else {
-            send_or_log!(tx, PtyWrite::Resize(size), "Failed to send PTY resize");
         }
     }
+
+    /// Route a PTY resize through the pending-resize slot, when there is one.
+    ///
+    /// Every runtime resize must take this path, the DECCOLM resize and the
+    /// GUI's window resizes alike (`TerminalEmulator::set_win_size` and
+    /// `handle_resize_event`). With the slot, only the latest size survives and
+    /// at most one `ApplyPendingResize` marker is queued, so a marker can never
+    /// apply an older size after a newer one: whichever size was stored last
+    /// is the one the writer applies. Mixing slot markers with direct
+    /// `PtyWrite::Resize` messages would reorder them (PR #572 review).
+    /// Without a slot (headless, tests) the resize is sent directly.
+    pub fn route_pty_resize(&self, size: FreminalTerminalSize) -> PtyResizeSend {
+        let Some(slot) = &self.pending_resize else {
+            return PtyResizeSend::Message(PtyWrite::Resize(size));
+        };
+        if slot.swap(Some(Arc::new(size))).is_some() {
+            // A marker is already queued; it will pick up this newer size.
+            PtyResizeSend::NothingToSend
+        } else {
+            PtyResizeSend::Message(PtyWrite::ApplyPendingResize)
+        }
+    }
+}
+
+/// What, if anything, to send to the PTY writer for a resize (see
+/// [`TerminalHandler::route_pty_resize`]).
+#[derive(Debug)]
+pub enum PtyResizeSend {
+    /// A marker is already queued and will apply the newly stored size.
+    NothingToSend,
+    /// Send this message (the resize itself, or an `ApplyPendingResize`).
+    Message(PtyWrite),
 }
 
 #[cfg(test)]

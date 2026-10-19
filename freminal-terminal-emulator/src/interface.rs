@@ -55,6 +55,7 @@ use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig, ReplyQueue};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
+use crate::terminal_handler::PtyResizeSend;
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::buffer::CommandBlocksGeneration;
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
@@ -592,14 +593,22 @@ impl TerminalEmulator {
 
         if old_width != width_chars || old_height != height_chars {
             // TIOCGWINSZ expects total window pixel dimensions, not per-cell.
-            self.write_tx
-                .send(PtyWrite::Resize(FreminalTerminalSize {
-                    width: width_chars,
-                    height: height_chars,
-                    pixel_width: font_pixel_width.saturating_mul(width_chars),
-                    pixel_height: font_pixel_height.saturating_mul(height_chars),
-                }))
-                .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))?;
+            // Routed through the pending-resize slot so it stays ordered with
+            // DECCOLM resizes (see `route_pty_resize`).
+            if let PtyResizeSend::Message(msg) =
+                self.internal
+                    .handler
+                    .route_pty_resize(FreminalTerminalSize {
+                        width: width_chars,
+                        height: height_chars,
+                        pixel_width: font_pixel_width.saturating_mul(width_chars),
+                        pixel_height: font_pixel_height.saturating_mul(height_chars),
+                    })
+            {
+                self.write_tx
+                    .send(msg)
+                    .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -634,16 +643,20 @@ impl TerminalEmulator {
         // (ws_xpixel, ws_ypixel), not per-cell sizes.  Applications like nvim
         // compute cell size as ws_xpixel/ws_col, so passing per-cell values here
         // would give them a near-zero cell width.
-        send_or_log!(
-            self.write_tx,
-            PtyWrite::Resize(FreminalTerminalSize {
-                width: width_chars,
-                height: height_chars,
-                pixel_width: font_pixel_width.saturating_mul(width_chars),
-                pixel_height: font_pixel_height.saturating_mul(height_chars),
-            }),
-            "Failed to send resize to PTY"
-        );
+        // Routed through the pending-resize slot so it stays ordered with
+        // DECCOLM resizes (see `route_pty_resize`).
+        if let PtyResizeSend::Message(msg) =
+            self.internal
+                .handler
+                .route_pty_resize(FreminalTerminalSize {
+                    width: width_chars,
+                    height: height_chars,
+                    pixel_width: font_pixel_width.saturating_mul(width_chars),
+                    pixel_height: font_pixel_height.saturating_mul(height_chars),
+                })
+        {
+            send_or_log!(self.write_tx, msg, "Failed to send resize to PTY");
+        }
     }
 
     /// Update the GUI-requested scroll offset.

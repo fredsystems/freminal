@@ -8597,6 +8597,13 @@ Group F — Hygiene:
       is blocked.
     - **Docs and tests:** `dropped_replies` docs, a misnamed `.frec` test, the 148.11 capacity
       numbers and the dictionary table.
+  - **RD4:** the coalesced DECCOLM resize could reorder against the GUI's direct resizes (a
+    marker queued before a GUI resize applied a later DECCOLM size, leaving the PTY and the
+    emulator at different widths). All runtime resizes (`set_win_size`, `handle_resize_event`,
+    DECCOLM) now go through `TerminalHandler::route_pty_resize` and the same latest-value
+    slot, so the last size stored is the one applied. CodeRabbit's suggestion (clear the slot
+    before a direct resize) still lets an earlier marker pick up a later DECCOLM size, so it was
+    not used. A regression test fails on the previous code.
 
 ### 148 Cleanup entries
 

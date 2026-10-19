@@ -97,6 +97,7 @@ mod reports;
 mod reset;
 mod screen_scoped;
 mod scroll_ops;
+pub use scroll_ops::PtyResizeSend;
 mod sgr;
 mod shell_integration;
 mod window_ops;
