@@ -2310,8 +2310,8 @@ impl SettingsModal {
              the window through escape sequences (xterm's allowWindowOps). \
              Anything writing to the terminal, including a remote host over \
              ssh, can then rearrange your window. Resize and move targets \
-             are clamped to the monitor size when the windowing layer \
-             reports it, otherwise to a fixed 16384 px extent. Window size, \
+             are clamped to the monitor size, or to a fixed 16384 px \
+             extent when the monitor is unknown. Window size, \
              position and title queries are unaffected. Leave off unless a tool you use needs it.",
         )
         .clickable();

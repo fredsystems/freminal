@@ -8399,8 +8399,8 @@ Group F — Hygiene:
   stay available. When allowed, CSI 8 uses `saturating_mul` and conv2. Resize targets are
   clamped to [1, monitor] and move targets to [0, monitor); the parameters are `usize`, so
   only the upper bound can overflow. When `monitor_size` is unknown, the bound is
-  `FALLBACK_MONITOR_EXTENT` (16384 logical px). `freminal-windowing` never populates
-  `monitor_size`, so today the fallback is what bounds the window (148.C4).
+  `FALLBACK_MONITOR_EXTENT` (16384 logical px); 148.C4 made `freminal-windowing`
+  populate `monitor_size`.
 - **148.18 (done):** new `freminal/src/gui/link_open.rs`. `classify_link` decides and
   `open_link` opens; both entry points use it (Ctrl/Cmd-click, and the context menu, whose
   "Open URL" entry is now disabled for a refused target). Allowed: `http`/`https`/`ftp` with
@@ -8602,6 +8602,15 @@ Group F — Hygiene:
   `current_monitor()` in the windowing crate. Changing egui viewport state falls under
   `freminal-egui-upgrade` / `EGUI_UPGRADE_ASSUMPTIONS.md`, so walk that checklist. Not
   scheduled in Task 148 (the default is off).
+  **Done (2026-10-19):** new `freminal-windowing/src/monitor_size.rs` caches each window's
+  monitor size in logical points (`current_monitor()`, converted as egui-winit 0.36.2
+  `update_viewport_info` does), refreshed at creation and on `Resized`, `Moved` and
+  `ScaleFactorChanged`, never per frame. It is injected into
+  `RawInput::viewports[id].monitor_size` after `take_egui_input`. Only that field is written;
+  the full `update_viewport_info` is deliberately not called, since it would change title,
+  rect and focus inputs the app relies on. `EGUI_UPGRADE_ASSUMPTIONS.md` A13 gains a note
+  (scale-factor divisor); A14 is pinned by a test. The 16384 px fallback now applies only
+  when no monitor is reported.
 - **148.C5 — `cargo xtask lint-markdown` fails on `main`.** Surfaced while verifying 148.21.
   Pre-existing MD060 / MD033 errors in `PLAN_122_ORCHESTRATION_EXTRACTION.md` and
   `PLAN_VERSION_090.md` fail the whole-repo markdown lint, which "148 Verification" lists.

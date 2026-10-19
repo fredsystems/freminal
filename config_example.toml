@@ -318,8 +318,7 @@ limit = 10000
 # When true, any program writing to the terminal -- including a remote host
 # over ssh, or untrusted `cat` output -- can move, resize, minimize or
 # full-screen your window. Resize and move targets are clamped to the monitor
-# size when the windowing layer reports it, otherwise to a fixed 16384 px
-# extent (see cleanup 148.C4). Report-only queries (window size, position and
+# size, or to a fixed 16384 px extent when the monitor is unknown. Report-only queries (window size, position and
 # state, title) and title push/pop are unaffected.
 # allow_window_ops = false
 

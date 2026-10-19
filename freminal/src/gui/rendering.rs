@@ -229,14 +229,18 @@ const fn is_mutating_window_op(op: &WindowManipulation) -> bool {
 }
 
 /// Extent, in logical pixels per axis, assumed for the monitor when the
-/// windowing layer has not reported its size.  Large enough never to get in
-/// the way of a real display, small enough that a hostile resize or move
-/// request cannot ask the window system for an absurd geometry.
+/// windowing layer cannot report its size.  `freminal-windowing` normally
+/// reports it (it fills `ViewportInfo::monitor_size` from the window's
+/// current monitor), so this applies only when no monitor is available, e.g.
+/// on some Wayland compositors.  Large enough never to get in the way of a
+/// real display, small enough that a hostile resize or move request cannot
+/// ask the window system for an absurd geometry.
 const FALLBACK_MONITOR_EXTENT: f32 = 16_384.0;
 
 /// The per-axis bound used to clamp resize and move targets: the reported
-/// monitor size, or [`FALLBACK_MONITOR_EXTENT`] when it is unknown or not a
-/// usable size (non-finite, or under one pixel on an axis).
+/// monitor size, or [`FALLBACK_MONITOR_EXTENT`] when it is unknown (the
+/// windowing layer could not report a monitor) or not a usable size
+/// (non-finite, or under one pixel on an axis).
 fn monitor_bounds(monitor_size: Option<Vec2>) -> Vec2 {
     let axis = |extent: f32| {
         if extent.is_finite() && extent >= 1.0 {

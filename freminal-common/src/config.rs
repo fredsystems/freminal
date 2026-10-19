@@ -642,8 +642,8 @@ pub struct SecurityConfig {
     /// When `true`, any program writing to the terminal -- including a remote
     /// host over `ssh` or untrusted `cat` output -- can move, resize,
     /// minimize or full-screen the window (targets are clamped to the
-    /// monitor size when the windowing layer reports it, otherwise to a
-    /// fixed 16384 px extent; see cleanup 148.C4).  Report-only queries (window size, position and state,
+    /// monitor size, or to a fixed 16384 px extent when the monitor is
+    /// unknown).  Report-only queries (window size, position and state,
     /// title) and title push/pop are unaffected.
     pub allow_window_ops: bool,
 
