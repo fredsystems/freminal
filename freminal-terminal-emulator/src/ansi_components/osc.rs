@@ -13,7 +13,7 @@ use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType, OscTarget, 
 use freminal_common::buffer_states::pointer_shape::PointerShape;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
-use super::osc_clipboard::handle_osc_clipboard;
+use super::osc_clipboard::{MAX_OSC52_WRITE_BYTES, handle_osc_clipboard};
 use super::osc_colors::{
     handle_osc_dynamic_colors, handle_osc_palette_color, handle_osc_reset_dynamic_color,
     handle_osc_reset_palette,
@@ -36,14 +36,35 @@ use super::osc_shell_info::handle_osc_shell_info;
 /// payloads.
 pub const MAX_OSC_BYTES: usize = 1024 * 1024;
 
-/// Maximum size of an OSC sequence whose number is 52 (clipboard) or 1337
-/// (iTerm2 inline images and files), in bytes. Counted exactly like
+/// Maximum size of an OSC sequence whose number is 1337 (iTerm2 inline images
+/// and files), in bytes. Counted exactly like [`MAX_OSC_BYTES`].
+///
+/// A single inline image is legitimately far larger than 1 MiB. This is far
+/// above kitty's 256 KiB cap because Freminal implements the iTerm2 image
+/// protocol, which kitty does not. OSC 52 (clipboard) no longer uses this cap;
+/// see [`MAX_OSC_CLIPBOARD_BYTES`].
+pub const MAX_OSC_LARGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Slack, in bytes, added to the base64 size of [`MAX_OSC52_WRITE_BYTES`] to
+/// form [`MAX_OSC_CLIPBOARD_BYTES`]. It covers the `52;` introducer, the
+/// selection parameter (`c`, `p`, `s`, `0`..`7`, or a short combination) and the
+/// `;` before the payload.
+const OSC_CLIPBOARD_HEADER_ALLOWANCE: usize = 256;
+
+/// Maximum size of an OSC 52 (clipboard) sequence, in bytes. Counted exactly like
 /// [`MAX_OSC_BYTES`].
 ///
-/// A single clipboard payload or inline image is legitimately far larger than
-/// 1 MiB. This is far above kitty's 256 KiB cap because Freminal implements the
-/// iTerm2 image protocol, which kitty does not.
-pub const MAX_OSC_LARGE_BYTES: usize = 64 * 1024 * 1024;
+/// This is the padded base64 size of [`MAX_OSC52_WRITE_BYTES`]
+/// (`4 * ceil(n / 3)`) plus [`OSC_CLIPBOARD_HEADER_ALLOWANCE`], so the largest
+/// permitted clipboard write is still accumulated, but a hostile multi-megabyte
+/// sequence is discarded without being buffered (Task 148.16, GHSA-v2hw-gcg8-2rfr).
+/// A sequence over this cap is dropped whole, like any over-limit OSC. The
+/// arithmetic saturates rather than wraps, so it cannot overflow in a `const`
+/// context.
+pub const MAX_OSC_CLIPBOARD_BYTES: usize = MAX_OSC52_WRITE_BYTES
+    .div_ceil(3)
+    .saturating_mul(4)
+    .saturating_add(OSC_CLIPBOARD_HEADER_ALLOWANCE);
 
 /// Maximum length of a window or icon title (OSC 0 / 1 / 2), in bytes.
 ///
@@ -61,7 +82,9 @@ pub const MAX_TITLE_BYTES: usize = 4096;
 enum OscLimit {
     /// [`MAX_OSC_BYTES`].
     Default,
-    /// [`MAX_OSC_LARGE_BYTES`]: the OSC number is 52 or 1337.
+    /// [`MAX_OSC_CLIPBOARD_BYTES`]: the OSC number is 52.
+    Clipboard,
+    /// [`MAX_OSC_LARGE_BYTES`]: the OSC number is 1337.
     Large,
 }
 
@@ -69,6 +92,7 @@ impl OscLimit {
     const fn max_bytes(self) -> usize {
         match self {
             Self::Default => MAX_OSC_BYTES,
+            Self::Clipboard => MAX_OSC_CLIPBOARD_BYTES,
             Self::Large => MAX_OSC_LARGE_BYTES,
         }
     }
@@ -82,7 +106,8 @@ impl OscLimit {
         // dispatched as OSC 52 / 1337 under the default cap (`052`, `+52`).
         let number = params.split(|b| *b == b';').next().unwrap_or_default();
         match parse_param_as::<AnsiOscToken>(number) {
-            Ok(Some(AnsiOscToken::OscValue(52 | 1337))) => Self::Large,
+            Ok(Some(AnsiOscToken::OscValue(52))) => Self::Clipboard,
+            Ok(Some(AnsiOscToken::OscValue(1337))) => Self::Large,
             _ => Self::Default,
         }
     }
@@ -260,8 +285,8 @@ impl AnsiOscParser {
     /// Called only once the accumulated body is longer than the current cap and
     /// is not terminated. A trailing ESC may still be the start of the
     /// terminator, so it is not counted. If the rest is still over the cap, the
-    /// body's OSC number picks the cap (52 and 1337 get the large one) and, if
-    /// it is still exceeded, the buffer is dropped.
+    /// body's OSC number picks the cap (52 the clipboard one, 1337 the large
+    /// one) and, if it is still exceeded, the buffer is dropped.
     fn overflow_if_over_cap(&mut self) {
         let last = self.params.last().copied().unwrap_or_default();
         let uncounted = usize::from(last == 0x1b);
@@ -668,10 +693,11 @@ fn split_params_into_semicolon_delimited_tokens(
 #[cfg(test)]
 mod tests {
     use super::{
-        AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_LARGE_BYTES, MAX_TITLE_BYTES,
-        OscLimit,
+        AnsiOscParser, AnsiOscParserState, MAX_OSC_BYTES, MAX_OSC_CLIPBOARD_BYTES,
+        MAX_OSC_LARGE_BYTES, MAX_TITLE_BYTES, OscLimit,
     };
     use crate::ansi::{FreminalAnsiParser, ParserOutcome};
+    use crate::ansi_components::osc_clipboard::MAX_OSC52_WRITE_BYTES;
     use freminal_common::buffer_states::ftcs::FtcsMarker;
     use freminal_common::buffer_states::osc::{AnsiOscType, UrlResponse};
     use freminal_common::buffer_states::osc_color::{
@@ -1684,22 +1710,27 @@ mod tests {
     }
 
     #[test]
-    fn large_cap_body_ending_in_esc_terminated_by_bel_is_dropped_only_over_the_cap() {
-        // The held-ESC rule also applies under the large cap (OSC 52 / 1337).
+    fn raised_cap_body_ending_in_esc_terminated_by_bel_is_dropped_only_over_the_cap() {
+        // The held-ESC rule also applies under the raised caps (OSC 52 / 1337).
         // Pre-filled so the test does not push 64 MiB byte by byte.
-        let mut at_cap = parser_with_body(body_of_len(b"52;c;", MAX_OSC_LARGE_BYTES - 1));
-        at_cap.limit = OscLimit::Large;
-        assert_eq!(at_cap.push(0x1b), ParserOutcome::Continue);
-        assert_eq!(at_cap.push(0x07), ParserOutcome::Finished);
-        assert_eq!(at_cap.state, AnsiOscParserState::Finished);
-        assert_eq!(at_cap.params.len(), MAX_OSC_LARGE_BYTES);
+        for (prefix, limit, cap) in [
+            (&b"52;c;"[..], OscLimit::Clipboard, MAX_OSC_CLIPBOARD_BYTES),
+            (&b"1337;File=x:"[..], OscLimit::Large, MAX_OSC_LARGE_BYTES),
+        ] {
+            let mut at_cap = parser_with_body(body_of_len(prefix, cap - 1));
+            at_cap.limit = limit;
+            assert_eq!(at_cap.push(0x1b), ParserOutcome::Continue);
+            assert_eq!(at_cap.push(0x07), ParserOutcome::Finished);
+            assert_eq!(at_cap.state, AnsiOscParserState::Finished);
+            assert_eq!(at_cap.params.len(), cap);
 
-        let mut over = parser_with_body(body_of_len(b"52;c;", MAX_OSC_LARGE_BYTES));
-        over.limit = OscLimit::Large;
-        assert_eq!(over.push(0x1b), ParserOutcome::Continue);
-        assert_eq!(over.push(0x07), ParserOutcome::Finished);
-        assert_eq!(over.state, AnsiOscParserState::OverflowFinished);
-        assert_eq!(over.params.capacity(), 0);
+            let mut over = parser_with_body(body_of_len(prefix, cap));
+            over.limit = limit;
+            assert_eq!(over.push(0x1b), ParserOutcome::Continue);
+            assert_eq!(over.push(0x07), ParserOutcome::Finished);
+            assert_eq!(over.state, AnsiOscParserState::OverflowFinished);
+            assert_eq!(over.params.capacity(), 0);
+        }
     }
 
     #[test]
@@ -1776,44 +1807,119 @@ mod tests {
 
     #[test]
     fn osc_52_over_the_default_cap_is_dispatched() {
-        // 2 MiB of base64 'A' (a multiple of four) after `52;c;`.
+        // 1.2 MB of base64 'A' (a multiple of four) after `52;c;`: over the
+        // default OSC cap, under the clipboard cap, decoding to 900 000 bytes.
         let mut payload = b"52;c;".to_vec();
-        payload.resize(5 + 2 * 1024 * 1024, b'A');
+        payload.resize(5 + 1_200_000, b'A');
         payload.push(0x07);
         let (output, outcome) = feed_osc_with_outcome(&payload);
         assert_eq!(outcome, ParserOutcome::Finished);
         assert_eq!(output.len(), 1);
         assert!(
-            !matches!(output[0], TerminalOutput::Invalid),
+            matches!(
+                output[0],
+                TerminalOutput::OscResponse(AnsiOscType::SetClipboard(..))
+            ),
             "{:?}",
             output[0]
         );
     }
 
     #[test]
-    fn large_cap_exactly_at_cap_is_dispatched_and_one_over_is_dropped() {
-        for prefix in [&b"52;c;"[..], &b"1337;File=inline=1:"[..]] {
-            // At the cap: BEL completes it.
-            let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES - 1));
-            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
-            assert_eq!(parser.state, AnsiOscParserState::Params, "{prefix:?}");
-            assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
-            assert_eq!(parser.push(0x07), ParserOutcome::Finished);
-            assert_eq!(parser.state, AnsiOscParserState::Finished, "{prefix:?}");
-            assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
-
-            // One byte over: dropped, and ST ends it with no output.
-            let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES));
-            assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
-            assert!(
-                matches!(parser.state, AnsiOscParserState::Overflow { .. }),
-                "{prefix:?}"
-            );
-            assert_eq!(parser.params.capacity(), 0);
-            assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
-            assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
-            assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+    fn osc_52_clipboard_cap_is_the_base64_size_of_the_write_cap_plus_allowance() {
+        // 4 * ceil(1 MiB / 3) = 1_398_104, plus the 256-byte header allowance.
+        assert_eq!(MAX_OSC_CLIPBOARD_BYTES, 1_398_104 + 256);
+        const {
+            assert!(MAX_OSC_CLIPBOARD_BYTES > MAX_OSC_BYTES);
+            assert!(MAX_OSC_CLIPBOARD_BYTES < MAX_OSC_LARGE_BYTES);
         }
+        // The largest permitted write, encoded, fits under the cap with room
+        // for the introducer.
+        assert!(
+            freminal_common::base64::encode(&vec![0_u8; MAX_OSC52_WRITE_BYTES]).len() + 5
+                <= MAX_OSC_CLIPBOARD_BYTES
+        );
+    }
+
+    #[test]
+    fn osc_52_over_the_clipboard_cap_is_discarded_without_buffering_it() {
+        // An OSC 52 far over the clipboard cap (the old 64 MiB cap is no longer
+        // reachable) is not accumulated: the buffer is released as soon as the
+        // body passes the clipboard cap, stays released for the rest of the
+        // body, and the sequence emits nothing.
+        let mut parser = AnsiOscParser::new();
+        let mut output = Vec::new();
+        let mut max_buffered = 0_usize;
+        let mut push = |b: u8| {
+            let outcome = parser.ansiparser_inner_osc(b, &mut output);
+            max_buffered = max_buffered.max(parser.params.len());
+            outcome
+        };
+        for &b in b"52;c;" {
+            assert_eq!(push(b), ParserOutcome::Continue);
+        }
+        for _ in 0..(4 * MAX_OSC_CLIPBOARD_BYTES) {
+            assert_eq!(push(b'A'), ParserOutcome::Continue);
+        }
+        assert_eq!(push(0x07), ParserOutcome::Finished);
+        assert!(
+            max_buffered <= MAX_OSC_CLIPBOARD_BYTES + 1,
+            "buffered {max_buffered} bytes"
+        );
+        assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+        assert_eq!(parser.params.capacity(), 0);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc_52_body_exactly_at_the_clipboard_cap_is_dispatched_and_one_over_is_dropped() {
+        let mut parser = parser_with_body(body_of_len(b"52;c;", MAX_OSC_CLIPBOARD_BYTES - 1));
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        assert_eq!(parser.state, AnsiOscParserState::Params);
+        assert_eq!(parser.params.len(), MAX_OSC_CLIPBOARD_BYTES);
+        assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::Finished);
+
+        let mut parser = parser_with_body(body_of_len(b"52;c;", MAX_OSC_CLIPBOARD_BYTES));
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+        assert_eq!(parser.params.capacity(), 0);
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
+    }
+
+    #[test]
+    fn osc_1337_keeps_the_large_cap() {
+        // 1337 is still accumulated well past the clipboard cap.
+        let mut parser = AnsiOscParser::new();
+        for &b in &body_of_len(b"1337;File=inline=1:", MAX_OSC_CLIPBOARD_BYTES + 1024) {
+            assert_eq!(parser.push(b), ParserOutcome::Continue);
+        }
+        assert_eq!(parser.state, AnsiOscParserState::Params);
+        assert_eq!(parser.params.len(), MAX_OSC_CLIPBOARD_BYTES + 1024);
+    }
+
+    #[test]
+    fn large_cap_exactly_at_cap_is_dispatched_and_one_over_is_dropped() {
+        let prefix = b"1337;File=inline=1:";
+        // At the cap: BEL completes it.
+        let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES - 1));
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        assert_eq!(parser.state, AnsiOscParserState::Params);
+        assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
+        assert_eq!(parser.push(0x07), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::Finished);
+        assert_eq!(parser.params.len(), MAX_OSC_LARGE_BYTES);
+
+        // One byte over: dropped, and ST ends it with no output.
+        let mut parser = parser_with_body(body_of_len(prefix, MAX_OSC_LARGE_BYTES));
+        assert_eq!(parser.push(b'x'), ParserOutcome::Continue);
+        assert!(matches!(parser.state, AnsiOscParserState::Overflow { .. }));
+        assert_eq!(parser.params.capacity(), 0);
+        assert_eq!(parser.push(0x1b), ParserOutcome::Continue);
+        assert_eq!(parser.push(b'\\'), ParserOutcome::Finished);
+        assert_eq!(parser.state, AnsiOscParserState::OverflowFinished);
     }
 
     #[test]
@@ -1972,16 +2078,11 @@ mod tests {
     }
 
     #[test]
-    fn osc_limit_large_for_numerically_equal_osc_numbers() {
-        for body in [
-            &b"52;c;x"[..],
-            b"052;c;x",
-            b"0052",
-            b"1337;File=x",
-            b"01337;File=x",
-            b"+52;c;x",
-            b"+1337;File=x",
-        ] {
+    fn osc_limit_for_numerically_equal_osc_numbers() {
+        for body in [&b"52;c;x"[..], b"052;c;x", b"0052", b"+52;c;x"] {
+            assert_eq!(OscLimit::for_body(body), OscLimit::Clipboard, "{body:?}");
+        }
+        for body in [&b"1337;File=x"[..], b"01337;File=x", b"+1337;File=x"] {
             assert_eq!(OscLimit::for_body(body), OscLimit::Large, "{body:?}");
         }
     }

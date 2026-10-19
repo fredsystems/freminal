@@ -574,6 +574,27 @@ impl Default for BellConfig {
 //  Security
 // ------------------------------------------------------------------------------------------------
 
+/// Which panes may write the system clipboard through OSC 52.
+///
+/// An OSC 52 write replaces the user's clipboard, so any program able to print
+/// to a terminal -- including one in a background tab -- can overwrite it with
+/// something the user will later paste into a shell. The default restricts
+/// writes to the pane the user is looking at (Task 148.16, GHSA-v2hw-gcg8-2rfr).
+/// Independent of this policy, a write whose decoded payload exceeds 1 MiB is
+/// dropped by the emulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardWritePolicy {
+    /// Honour OSC 52 writes only from the active pane of the focused window.
+    /// Writes from any other pane are dropped.  Default.
+    #[default]
+    ActivePane,
+    /// Honour OSC 52 writes from every pane, including background tabs.
+    All,
+    /// Never honour OSC 52 writes.
+    Off,
+}
+
 /// Security-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -585,6 +606,16 @@ pub struct SecurityConfig {
     /// base64-encoded.  This is a potential security risk if untrusted
     /// programs run inside the terminal.
     pub allow_clipboard_read: bool,
+
+    /// Which panes may write the system clipboard via OSC 52.
+    ///
+    /// - `"active_pane"` -- only the active pane of the focused window
+    ///   (default)
+    /// - `"all"` -- every pane, including background tabs
+    /// - `"off"` -- never
+    ///
+    /// A write whose decoded payload exceeds 1 MiB is always dropped.
+    pub allow_clipboard_write: ClipboardWritePolicy,
 
     /// Allow applications to make the terminal read local files and shared
     /// memory objects via the kitty graphics protocol (`t=f`, `t=t`, `t=s`).
@@ -609,6 +640,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_clipboard_read: false,
+            allow_clipboard_write: ClipboardWritePolicy::default(),
             allow_kitty_file_transfer: false,
             password_indicator: true,
         }
@@ -3616,6 +3648,7 @@ mode = "none"
         original.tab_title.policy = TabTitlePolicy::OscWins;
         original.bell.mode = BellMode::None;
         original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.security.allow_clipboard_write = ClipboardWritePolicy::Off;
         original.security.allow_kitty_file_transfer =
             !Config::default().security.allow_kitty_file_transfer;
         original.paste_guard.patterns = !Config::default().paste_guard.patterns;
@@ -3686,6 +3719,11 @@ mode = "none"
         assert_eq!(
             loaded.security.allow_clipboard_read, original.security.allow_clipboard_read,
             "security section dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_clipboard_write,
+            ClipboardWritePolicy::Off,
+            "security.allow_clipboard_write dropped"
         );
         assert_eq!(
             loaded.security.allow_kitty_file_transfer, original.security.allow_kitty_file_transfer,
@@ -4039,6 +4077,85 @@ allow_clipboard_read = true
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_clipboard_write_defaults_to_active_pane() {
+        assert_eq!(
+            ClipboardWritePolicy::default(),
+            ClipboardWritePolicy::ActivePane
+        );
+        assert_eq!(
+            SecurityConfig::default().allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane,
+            "OSC 52 writes must default to the active pane only (GHSA-v2hw-gcg8-2rfr)"
+        );
+        assert_eq!(
+            Config::default().security.allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane
+        );
+    }
+
+    #[test]
+    fn security_config_clipboard_write_toml_values_roundtrip() {
+        for (policy, text) in [
+            (ClipboardWritePolicy::ActivePane, "active_pane"),
+            (ClipboardWritePolicy::All, "all"),
+            (ClipboardWritePolicy::Off, "off"),
+        ] {
+            let mut cfg = Config::default();
+            cfg.security.allow_clipboard_write = policy;
+
+            let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+            assert!(
+                toml_str.contains(&format!("allow_clipboard_write = \"{text}\"")),
+                "{toml_str}"
+            );
+            let deserialized: Config =
+                toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+            assert_eq!(deserialized.security.allow_clipboard_write, policy);
+
+            // Through the real load path: partial deserialize + merge.
+            let partial: ConfigPartial =
+                toml::from_str(&format!("[security]\nallow_clipboard_write = \"{text}\"\n"))
+                    .expect("valid TOML");
+            let mut merged = Config::default();
+            merged.apply_partial(partial);
+            assert_eq!(merged.security.allow_clipboard_write, policy);
+        }
+    }
+
+    #[test]
+    fn security_config_clipboard_write_omitted_keeps_default() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert_eq!(
+            security.allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane
+        );
+    }
+
+    #[test]
+    fn security_config_clipboard_write_invalid_value_is_a_parse_error() {
+        // Consistent with the other config enums: an unknown value is rejected,
+        // not silently replaced by the default.
+        for toml_str in [
+            "[security]\nallow_clipboard_write = \"everywhere\"\n",
+            "[security]\nallow_clipboard_write = \"ActivePane\"\n",
+            "[security]\nallow_clipboard_write = true\n",
+        ] {
+            assert!(toml::from_str::<Config>(toml_str).is_err(), "{toml_str}");
+            assert!(
+                toml::from_str::<ConfigPartial>(toml_str).is_err(),
+                "{toml_str}"
+            );
+        }
     }
 
     #[test]

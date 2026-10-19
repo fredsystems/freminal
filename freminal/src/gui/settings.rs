@@ -2207,6 +2207,45 @@ impl SettingsModal {
 
         ui.add_space(12.0);
 
+        ui.label("Allow Clipboard Write (OSC 52):");
+        ui.add_space(2.0);
+        ComboBox::from_id_salt("security_clipboard_write")
+            .selected_text(clipboard_write_policy_label(
+                self.draft.security.allow_clipboard_write,
+            ))
+            .show_ui(ui, |ui| {
+                for policy in [
+                    config::ClipboardWritePolicy::ActivePane,
+                    config::ClipboardWritePolicy::All,
+                    config::ClipboardWritePolicy::Off,
+                ] {
+                    ui.selectable_value(
+                        &mut self.draft.security.allow_clipboard_write,
+                        policy,
+                        clipboard_write_policy_label(policy),
+                    )
+                    .clickable();
+                }
+            })
+            .response
+            .on_hover_text(
+                "Which panes may replace the system clipboard through OSC 52. \
+                 \"Active pane only\" ignores writes from background tabs and \
+                 unfocused splits; \"All panes\" lets any pane write, so a \
+                 program in a background tab can silently overwrite what you \
+                 will next paste; \"Never\" disables OSC 52 writes. Writes \
+                 larger than 1 MiB are always dropped.",
+            )
+            .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "A program that can replace your clipboard can plant a command \
+             you will later paste into a shell.",
+        );
+
+        ui.add_space(12.0);
+
         ui.checkbox(
             &mut self.draft.security.allow_kitty_file_transfer,
             "Allow Kitty File Transfer (t=f, t=t, t=s)",
@@ -3132,6 +3171,14 @@ const fn notification_routing_label(routing: config::NotificationRouting) -> &'s
     }
 }
 
+const fn clipboard_write_policy_label(policy: config::ClipboardWritePolicy) -> &'static str {
+    match policy {
+        config::ClipboardWritePolicy::ActivePane => "Active pane only",
+        config::ClipboardWritePolicy::All => "All panes",
+        config::ClipboardWritePolicy::Off => "Never",
+    }
+}
+
 const fn freminal_toast_routing_label(routing: config::FreminalToastRouting) -> &'static str {
     match routing {
         config::FreminalToastRouting::Toast => "Toast",
@@ -3479,6 +3526,22 @@ mod tests {
         assert_eq!(
             notification_routing_label(config::NotificationRouting::Disabled),
             "Disabled"
+        );
+    }
+
+    #[test]
+    fn clipboard_write_policy_label_covers_every_variant() {
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::ActivePane),
+            "Active pane only"
+        );
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::All),
+            "All panes"
+        );
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::Off),
+            "Never"
         );
     }
 

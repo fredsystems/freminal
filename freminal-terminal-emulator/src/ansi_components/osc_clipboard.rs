@@ -7,6 +7,14 @@ use crate::ansi_components::tracer::escape_sequence_for_log_bounded;
 use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType};
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
+/// Maximum decoded size, in bytes, of an OSC 52 clipboard write.
+///
+/// A set whose decoded payload is larger is dropped with no `SetClipboard`
+/// emitted (Task 148.16, GHSA-v2hw-gcg8-2rfr). The parser's accumulation cap for
+/// OSC 52 is derived from this value; see
+/// [`MAX_OSC_CLIPBOARD_BYTES`](crate::ansi_components::osc::MAX_OSC_CLIPBOARD_BYTES).
+pub const MAX_OSC52_WRITE_BYTES: usize = 1024 * 1024;
+
 /// Handle OSC 52 clipboard set/query.
 ///
 /// `params[0]` = `OscValue(52)`, `params[1]` = selection string, `params[2]` = base64 or `?`.
@@ -28,6 +36,12 @@ pub(super) fn handle_osc_clipboard(
         }
         Some(Some(AnsiOscToken::String(data))) => {
             match freminal_common::base64::decode(data.as_bytes()) {
+                Ok(decoded_bytes) if decoded_bytes.len() > MAX_OSC52_WRITE_BYTES => {
+                    tracing::debug!(
+                        "OSC 52: clipboard write dropped: {} decoded bytes exceeds the {MAX_OSC52_WRITE_BYTES}-byte cap",
+                        decoded_bytes.len()
+                    );
+                }
                 Ok(decoded_bytes) => {
                     let content = String::from_utf8_lossy(&decoded_bytes).into_owned();
                     output.push(TerminalOutput::OscResponse(AnsiOscType::SetClipboard(
@@ -56,6 +70,7 @@ pub(super) fn handle_osc_clipboard(
 #[cfg(test)]
 mod tests {
     use super::super::osc::AnsiOscParser;
+    use super::MAX_OSC52_WRITE_BYTES;
     use crate::log_capture::{capture, warnings};
     use freminal_common::buffer_states::osc::AnsiOscType;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
@@ -172,5 +187,44 @@ mod tests {
             }
             other => panic!("Expected QueryClipboard, got: {other:?}"),
         }
+    }
+
+    fn feed_set_of_len(decoded_len: usize) -> Vec<TerminalOutput> {
+        let b64 = freminal_common::base64::encode(&vec![b'a'; decoded_len]);
+        let mut payload = format!("52;c;{b64}").into_bytes();
+        payload.push(0x07);
+        feed_osc(&payload)
+    }
+
+    #[test]
+    fn osc52_set_of_exactly_the_write_cap_is_emitted() {
+        let output = feed_set_of_len(MAX_OSC52_WRITE_BYTES);
+        let [TerminalOutput::OscResponse(AnsiOscType::SetClipboard(sel, content))] =
+            output.as_slice()
+        else {
+            panic!(
+                "expected a single SetClipboard, got {} outputs",
+                output.len()
+            );
+        };
+        assert_eq!(sel, "c");
+        assert_eq!(content.len(), MAX_OSC52_WRITE_BYTES);
+    }
+
+    #[test]
+    fn osc52_set_one_byte_over_the_write_cap_is_dropped() {
+        let output = feed_set_of_len(MAX_OSC52_WRITE_BYTES + 1);
+        assert_eq!(output, []);
+    }
+
+    #[test]
+    fn osc52_query_is_unaffected_by_the_write_cap() {
+        // A query carries no payload; it must still be reported.
+        let output = feed_osc(b"52;c;?\x07");
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            &output[0],
+            TerminalOutput::OscResponse(AnsiOscType::QueryClipboard(_))
+        ));
     }
 }

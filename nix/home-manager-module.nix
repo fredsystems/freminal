@@ -119,6 +119,7 @@ let
       securitySection = lib.filterAttrs (_: v: v != null) {
         inherit (s.security)
           allow_clipboard_read
+          allow_clipboard_write
           allow_kitty_file_transfer
           ;
       };
@@ -661,6 +662,25 @@ in
             Allow applications to read the system clipboard via OSC 52 query.
             When true, OSC 52 queries return the clipboard contents base64-encoded.
             Null uses the default (false).
+          '';
+        };
+
+        allow_clipboard_write = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "active_pane"
+              "all"
+              "off"
+            ]
+          );
+          default = null;
+          description = ''
+            Which panes may write the system clipboard via OSC 52.
+            "active_pane" honours writes only from the active pane of the
+            focused window; "all" honours writes from every pane, including
+            background tabs; "off" never honours writes. A write whose decoded
+            payload exceeds 1 MiB is always dropped.
+            Null uses the default ("active_pane").
           '';
         };
 

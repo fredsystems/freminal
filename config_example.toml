@@ -287,6 +287,17 @@ limit = 10000
 # run inside the terminal.
 # allow_clipboard_read = false
 
+# Which panes may write the system clipboard via OSC 52.
+#   "active_pane" -- only the active pane of the focused window; writes from
+#                    background tabs and unfocused splits are dropped (default)
+#   "all"         -- every pane, including background tabs. Any program in any
+#                    tab can then silently replace what you will next paste.
+#   "off"         -- never honour OSC 52 writes
+# A write whose decoded payload exceeds 1 MiB is always dropped, whatever this
+# is set to.
+# Default: "active_pane".
+# allow_clipboard_write = "active_pane"
+
 # Allow applications to make the terminal read local files and shared memory
 # objects via the kitty graphics protocol (t=f, t=t and t=s transmission).
 # Default: false (such transmissions are refused with the same reply as an

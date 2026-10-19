@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::config::BellMode;
+use freminal_common::config::{BellMode, ClipboardWritePolicy};
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
@@ -135,6 +135,8 @@ pub(super) fn read_clipboard_base64() -> String {
 pub(super) struct WindowManipFlags {
     /// Whether clipboard read requests are allowed by policy.
     pub allow_clipboard_read: bool,
+    /// Which panes may write the system clipboard via OSC 52.
+    pub clipboard_write: ClipboardWritePolicy,
     /// Whether this pane is the fully-active pane (active tab + active pane).
     pub is_active: bool,
     /// Whether the window currently has OS focus.
@@ -144,6 +146,18 @@ pub(super) struct WindowManipFlags {
     /// Where this pane's OSC 99 requests come from and the pane's state this
     /// frame, stamped onto every collected OSC 99 request.
     pub osc99: Osc99PaneContext,
+}
+
+/// Whether an OSC 52 clipboard write from a pane is honoured under `policy`.
+///
+/// `pane_is_active` is whether the pane is the fully-active one (active tab and
+/// active pane). Only [`ClipboardWritePolicy::ActivePane`] consults it.
+const fn clipboard_write_permitted(policy: ClipboardWritePolicy, pane_is_active: bool) -> bool {
+    match policy {
+        ClipboardWritePolicy::All => true,
+        ClipboardWritePolicy::ActivePane => pane_is_active,
+        ClipboardWritePolicy::Off => false,
+    }
 }
 
 /// An OSC 52 clipboard event observed during a frame's window-manipulation
@@ -543,11 +557,22 @@ pub(super) fn handle_window_manipulation(
             | WindowManipulation::RaiseWindowToTopOfStackingOrder => (),
 
             // OSC 52 clipboard set: copy decoded text to the system clipboard.
+            // Gated by [security] allow_clipboard_write: a dropped write emits
+            // no toast and leaves the clipboard untouched (GHSA-v2hw-gcg8-2rfr).
             WindowManipulation::SetClipboard(_sel, content) => {
-                osc52_events.push(Osc52ToastEvent::Wrote {
-                    bytes: content.len(),
-                });
-                ui.ctx().copy_text(content);
+                if clipboard_write_permitted(flags.clipboard_write, flags.is_active) {
+                    osc52_events.push(Osc52ToastEvent::Wrote {
+                        bytes: content.len(),
+                    });
+                    ui.ctx().copy_text(content);
+                } else {
+                    tracing::debug!(
+                        "OSC 52 clipboard write ({} bytes) dropped by policy {:?} (pane active: {})",
+                        content.len(),
+                        flags.clipboard_write,
+                        flags.is_active
+                    );
+                }
             }
 
             // OSC 52 clipboard query: read the system clipboard when the
@@ -687,7 +712,9 @@ mod osc52_toast_text_tests {
 
 #[cfg(test)]
 mod window_manipulation_reply_tests {
-    use super::{Osc52ToastEvent, WindowManipFlags, handle_window_manipulation};
+    use super::{
+        Osc52ToastEvent, WindowManipFlags, clipboard_write_permitted, handle_window_manipulation,
+    };
     use crate::gui::frame_drain::WindowFocus;
     use crate::gui::osc99::{
         Osc99ControlRequest, Osc99DisplayRequest, Osc99IconCache, Osc99IconPrime, Osc99Origin,
@@ -705,7 +732,7 @@ mod window_manipulation_reply_tests {
         Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-    use freminal_common::config::BellMode;
+    use freminal_common::config::{BellMode, ClipboardWritePolicy};
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
     /// Everything [`handle_window_manipulation`] produced for one frame, plus
@@ -794,6 +821,7 @@ mod window_manipulation_reply_tests {
 
         let flags = WindowManipFlags {
             allow_clipboard_read: false,
+            clipboard_write: ClipboardWritePolicy::default(),
             is_active: true,
             window_focused: true,
             is_only_pane: true,
@@ -872,6 +900,7 @@ mod window_manipulation_reply_tests {
         }
         let flags = WindowManipFlags {
             allow_clipboard_read: false,
+            clipboard_write: ClipboardWritePolicy::default(),
             is_active: matches!(role, PaneRole::Active),
             window_focused: true,
             is_only_pane: true,
@@ -906,6 +935,132 @@ mod window_manipulation_reply_tests {
             );
         });
         full_output.textures_delta.clear();
+    }
+
+    /// Run one frame in which a pane of `role`, under `policy`, receives an
+    /// OSC 52 set of `content`. Returns the toast events and every string egui
+    /// was asked to copy to the system clipboard.
+    fn run_set_clipboard_frame(
+        policy: ClipboardWritePolicy,
+        role: PaneRole,
+        content: &str,
+    ) -> (Vec<Osc52ToastEvent>, Vec<String>) {
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (reply_tx, _reply_rx): (_, Receiver<InputEvent>) = unbounded();
+        let reply_tx = Arc::new(reply_tx);
+        let command = WindowManipulation::SetClipboard("c".to_owned(), content.to_owned());
+        if let Err(e) = window_cmd_tx.send(WindowCommand::Report(command)) {
+            panic!("send window command: {e}");
+        }
+        let flags = WindowManipFlags {
+            allow_clipboard_read: false,
+            clipboard_write: policy,
+            is_active: matches!(role, PaneRole::Active),
+            window_focused: true,
+            is_only_pane: true,
+            osc99: test_osc99_context(),
+        };
+        let mut title_stack = TitleStack::new();
+        let mut tab_title = String::new();
+        let mut bell_active = false;
+        let mut bell_since = None;
+        let mut notifications = Vec::new();
+        let mut osc99_requests = Vec::new();
+        let mut osc52_events = Vec::new();
+
+        let ctx = egui::Context::default();
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            handle_window_manipulation(
+                ui,
+                &window_cmd_rx,
+                &reply_tx,
+                8,
+                16,
+                ui.max_rect(),
+                &mut title_stack,
+                &mut tab_title,
+                &mut bell_active,
+                &mut bell_since,
+                BellMode::None,
+                &flags,
+                &mut notifications,
+                &mut osc99_requests,
+                &mut osc52_events,
+            );
+        });
+        full_output.textures_delta.clear();
+
+        let copied = full_output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        (osc52_events, copied)
+    }
+
+    #[test]
+    fn osc52_write_follows_the_clipboard_write_policy_for_every_pane_role() {
+        use ClipboardWritePolicy::{ActivePane, All, Off};
+        use PaneRole::{Active, Background};
+
+        for (policy, role, expect_write) in [
+            (ActivePane, Active, true),
+            (ActivePane, Background, false),
+            (All, Active, true),
+            (All, Background, true),
+            (Off, Active, false),
+            (Off, Background, false),
+        ] {
+            let (events, copied) = run_set_clipboard_frame(policy, role, "payload");
+            if expect_write {
+                assert_eq!(copied, ["payload"], "{policy:?} {}", role_name(role));
+                assert!(
+                    matches!(events.as_slice(), [Osc52ToastEvent::Wrote { bytes: 7 }]),
+                    "{policy:?} {}: {events:?}",
+                    role_name(role)
+                );
+            } else {
+                assert!(
+                    copied.is_empty(),
+                    "{policy:?} {}: clipboard written",
+                    role_name(role)
+                );
+                assert!(
+                    events.is_empty(),
+                    "{policy:?} {}: toast for a dropped write: {events:?}",
+                    role_name(role)
+                );
+            }
+        }
+    }
+
+    const fn role_name(role: PaneRole) -> &'static str {
+        match role {
+            PaneRole::Active => "active pane",
+            PaneRole::Background => "background pane",
+        }
+    }
+
+    #[test]
+    fn clipboard_write_permitted_truth_table() {
+        for (policy, pane_is_active, expected) in [
+            (ClipboardWritePolicy::ActivePane, true, true),
+            (ClipboardWritePolicy::ActivePane, false, false),
+            (ClipboardWritePolicy::All, true, true),
+            (ClipboardWritePolicy::All, false, true),
+            (ClipboardWritePolicy::Off, true, false),
+            (ClipboardWritePolicy::Off, false, false),
+        ] {
+            assert_eq!(
+                clipboard_write_permitted(policy, pane_is_active),
+                expected,
+                "{policy:?} active={pane_is_active}"
+            );
+        }
     }
 
     #[test]

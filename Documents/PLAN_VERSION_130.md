@@ -8371,6 +8371,16 @@ Group F — Hygiene:
   bounds, too large, truncated, size mismatch, PNG or zlib failure, missing or zero
   dimensions, `a=f` rect overflow) maps to the same reply in one place
   (`send_kitty_medium_error`); `t=d` keeps its detailed errors.
+- **148.16 (done):** maintainer decision (2026-10-19): **active pane only, 1 MiB**. New
+  `[security] allow_clipboard_write = "active_pane" | "all" | "off"` (`ClipboardWritePolicy`),
+  with the full config wiring (Settings combo box, `config_example.toml`, Nix enum option,
+  tests). `handle_window_manipulation` writes only when `clipboard_write_permitted(policy,
+  is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
+  shows no toast and is logged at debug with the byte count only. The decoded OSC 52 write
+  cap is `MAX_OSC52_WRITE_BYTES` = 1 MiB (`osc_clipboard.rs`), and the parser gives OSC 52
+  its own accumulation limit, `MAX_OSC_CLIPBOARD_BYTES` (the base64 size of the cap plus 256
+  bytes, about 1.33 MiB). An over-limit OSC 52 is discarded as before but no longer buffers
+  64 MiB; OSC 1337 keeps `MAX_OSC_LARGE_BYTES`. Query handling is unchanged.
 
 ### 148 Cleanup entries
 

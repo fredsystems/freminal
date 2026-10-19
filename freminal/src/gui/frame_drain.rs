@@ -508,6 +508,7 @@ pub(super) fn drain_window_manipulation_commands(
                     config.bell.mode,
                     &rendering::WindowManipFlags {
                         allow_clipboard_read: config.security.allow_clipboard_read,
+                        clipboard_write: config.security.allow_clipboard_write,
                         is_active: is_fully_active,
                         window_focused: window_focus.is_focused(),
                         is_only_pane,
