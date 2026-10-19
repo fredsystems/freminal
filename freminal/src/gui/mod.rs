@@ -53,6 +53,7 @@ mod hot_reload;
 mod hover_cursor;
 pub(crate) mod icons;
 mod layout_ops;
+mod link_open;
 mod menu;
 mod notifications;
 mod osc99;

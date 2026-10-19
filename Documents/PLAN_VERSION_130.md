@@ -8391,6 +8391,17 @@ Group F — Hygiene:
   only the upper bound can overflow. When `monitor_size` is unknown, the bound is
   `FALLBACK_MONITOR_EXTENT` (16384 logical px). `freminal-windowing` never populates
   `monitor_size`, so today the fallback is what bounds the window (148.C4).
+- **148.18 (done):** new `freminal/src/gui/link_open.rs`. `classify_link` decides and
+  `open_link` opens; both entry points use it (Ctrl/Cmd-click, and the context menu, whose
+  "Open URL" entry is now disabled for a refused target). Allowed: `http`/`https`/`ftp` with
+  `//`, `mailto`, and local `file` (empty or `localhost` authority, absolute path, no UNC
+  form, backslash, `%5C`, or leading `/%2F`). This is the same scheme set auto-detection
+  produces, so one rule covers OSC 8 and detected URLs. The scheme syntax follows RFC 3986
+  §3.1; a one-letter scheme is treated as a drive letter. Everything else (`ms-msdt:`,
+  `search-ms:`, `smb:`, bare paths, `\\host\share`) is refused with a warn naming only the
+  reason. There is no confirmation dialog: confirming other schemes waits for Task 133, and
+  refusing is the strict subset. Residual: a local `file:` link to a launcher (`.desktop`,
+  `.command`) is still handed to the OS opener, as the plan's "local file" allows.
 
 ### 148 Cleanup entries
 
