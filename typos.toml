@@ -61,3 +61,5 @@ scrolll = "scrolll"         # Linux evdev `LED_SCROLLL` (sic, doubled L)
 hthe = "hthe"               # `\x1b[H` (CUP) immediately followed by "the" in test input
 anothers = "anothers"       # possessive inside a snake_case test name
 unparseable = "unparseable" # accepted variant spelling of "unparsable"
+rin = "rin"                 # terminfo `rin` (reverse index) capability name
+gam = "gam"                 # CSS Color 4 `gam_sRGB` transfer function name

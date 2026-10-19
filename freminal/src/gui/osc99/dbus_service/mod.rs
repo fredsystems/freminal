@@ -957,7 +957,7 @@ mod tests {
     use crate::gui::osc99::Osc99DaemonSupport;
 
     #[test]
-    fn system_actions_map_to_the_registrys_activations() {
+    fn system_actions_map_to_the_registry_activations() {
         assert_eq!(
             Osc99SystemAction::Default.to_leg_activation(),
             Osc99LegActivation::Body
