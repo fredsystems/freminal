@@ -8650,6 +8650,8 @@ Group F — Hygiene:
   `sixel_parse` and `frec_parse` (unblocked by 148.2 and 148.8), shorten plateaued targets,
   and revisit the `ansi_parser` dictionary mapping (148.25 measured −1.2% cov in one run).
   Schedule: after a week of nightly runs on main with Task 148 merged.
+  **Blocked (2026-10-19):** the only cleanup entry not done in this PR. It needs a week of
+  nightly fuzz results from `main` with these fixes merged, which cannot exist yet.
 - **148.C7 — `cargo xtask ci` lint fails on `main` (typos).** Surfaced while verifying 148.23.
   `typos` flagged the terminfo reverse-index capability name (10 times in this document), `gam_sRGB` in
   `wide_gamut.rs`, and a test name with a misspelt `registry` in `osc99/dbus_service/mod.rs`; the

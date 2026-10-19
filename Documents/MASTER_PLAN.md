@@ -835,7 +835,7 @@ Update this section as tasks complete:
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
-| 148  | 2026-10-19 |            | 148.1-148.27, C1/C2/C5/C7, review R1-R7; branch task-148/security-remediation      |
+| 148  | 2026-10-19 |            | 148.1-148.27, C1-C12 except C6, reviews R1-R7/RC1-RC10; task-148 branch            |
 
 ---
 
