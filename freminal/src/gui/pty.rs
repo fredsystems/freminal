@@ -10,7 +10,7 @@
 //! GUI-side channel endpoints as a [`TabChannels`].
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -330,6 +330,10 @@ pub struct TabChannels {
     pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
 
     /// Sender for input events (key, resize, focus) to the PTY thread.
+    ///
+    /// Unbounded on purpose: it carries keystrokes, which must never be
+    /// dropped.  The replies the GUI sends on it are bounded at the source
+    /// instead, by the per-pane `outstanding_reports` cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Sender for raw bytes to the PTY, for layout startup-command injection
@@ -377,6 +381,17 @@ pub struct TabChannels {
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
 
+    /// Report-class [`WindowCommand`]s the PTY thread has sent on
+    /// `window_cmd_rx` that the GUI has not drained yet (148.C9).
+    ///
+    /// The PTY thread admits a Report only while this is below
+    /// [`MAX_OUTSTANDING_REPORTS`] (see [`admit_report`]); the GUI releases one
+    /// per Report it drains (see [`release_report`]).  It bounds the
+    /// `window_cmd_rx` backlog, and so the replies the GUI can send back on
+    /// `input_tx`, while the GUI is not draining (for example a minimised
+    /// window that is not redrawing).
+    pub outstanding_reports: Arc<AtomicUsize>,
+
     /// OS process ID of the PTY child shell.
     ///
     /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
@@ -401,6 +416,73 @@ pub struct TabChannels {
     /// the right parser is selected.  `None` when a positional `command`
     /// was specified or when no shell could be resolved.
     pub shell_program: Option<std::path::PathBuf>,
+}
+
+/// Most Report-class window commands that may be outstanding (sent by the PTY
+/// thread, not yet drained by the GUI) for one pane (148.C9).
+///
+/// A report request (`CSI 14 t`, an OSC 52 query, an OSC 99 display, ...) is
+/// answered by the GUI, so each one costs a queue entry now and a reply later.
+/// The cap is generous: a legitimate application has a handful in flight.
+/// Beyond it the request is dropped, and the application sees an unanswered
+/// query, exactly as it does when the terminal drops a reply.
+///
+/// `input_tx`, which carries the answers back to the PTY thread, stays
+/// unbounded on purpose: it also carries keystrokes, which must never be
+/// dropped.  Its reply traffic is bounded by this cap instead.  Viewport
+/// commands are not capped: they produce no reply, and the only text they carry
+/// (a title) is already size-limited at the parser.
+pub(crate) const MAX_OUTSTANDING_REPORTS: usize = 256;
+
+/// Outcome of asking whether another Report command may be queued for the GUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReportAdmission {
+    /// The command was counted and should be sent.
+    Admitted,
+    /// The pane is at [`MAX_OUTSTANDING_REPORTS`]; the command must be dropped.
+    Dropped,
+}
+
+/// Admit one more outstanding Report command, or refuse it at the cap.
+///
+/// Admission counts the command, so the caller sends it when this returns
+/// [`ReportAdmission::Admitted`] and drops it otherwise.  The PTY consumer
+/// thread is the only caller and the only incrementer, and the GUI only
+/// decrements, so the load below can only be stale in the cautious direction.
+pub(crate) fn admit_report(outstanding: &AtomicUsize) -> ReportAdmission {
+    if outstanding.load(Ordering::Relaxed) >= MAX_OUTSTANDING_REPORTS {
+        return ReportAdmission::Dropped;
+    }
+    // Counted before the send, so the GUI cannot release it before it is added.
+    outstanding.fetch_add(1, Ordering::Relaxed);
+    ReportAdmission::Admitted
+}
+
+/// Release one outstanding Report command; the GUI calls this once per Report
+/// it drains.  Saturates at zero so a mismatch can never wrap the counter.
+pub(crate) fn release_report(outstanding: &AtomicUsize) {
+    // The closure always returns `Some`, so the update cannot fail.
+    let _ = outstanding.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(1))
+    });
+}
+
+/// A dropped-report warning is logged for the first drop and then once per this
+/// many drops; the rest are logged at debug level.
+const DROPPED_REPORT_WARN_INTERVAL: u64 = 1024;
+
+/// Count a Report command dropped at the cap and log it, rate-limited so a
+/// flood cannot also flood the log.
+fn note_dropped_report(dropped: &AtomicU64, command: &WindowManipulation) {
+    let total = dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    if total == 1 || total.is_multiple_of(DROPPED_REPORT_WARN_INTERVAL) {
+        tracing::warn!(
+            "{MAX_OUTSTANDING_REPORTS} report requests already awaiting the GUI; \
+             dropped report requests so far: {total}"
+        );
+    } else {
+        tracing::debug!("report request dropped at the outstanding cap (#{total}): {command:?}");
+    }
 }
 
 /// Already-resolved config values applied once, immediately after a new
@@ -531,8 +613,11 @@ pub fn spawn_pty_tab(
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let child_pid = terminal.child_pid();
 
+    // `input_tx` is unbounded because it carries keystrokes, which must never
+    // be dropped; the GUI's replies on it are bounded by `outstanding_reports`.
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+    let outstanding_reports = Arc::new(AtomicUsize::new(0));
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
     let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
@@ -595,6 +680,7 @@ pub fn spawn_pty_tab(
         command_event_tx,
         reader_shutdown,
         Arc::clone(&echo_off),
+        Arc::clone(&outstanding_reports),
     );
 
     Ok(TabChannels {
@@ -606,6 +692,7 @@ pub fn spawn_pty_tab(
         search_buffer_rx,
         pty_dead_rx,
         echo_off,
+        outstanding_reports,
         child_pid,
         command_event_rx,
         history_seed,
@@ -642,6 +729,7 @@ fn spawn_pty_consumer_thread(
     command_event_tx: Sender<CommandFinishedEvent>,
     reader_shutdown: Arc<AtomicBool>,
     echo_off: Arc<AtomicBool>,
+    outstanding_reports: Arc<AtomicUsize>,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -733,6 +821,10 @@ fn spawn_pty_consumer_thread(
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
+            // Report-class window commands dropped at `MAX_OUTSTANDING_REPORTS`
+            // (148.C9); only used to rate-limit the warning.
+            let dropped_reports = AtomicU64::new(0);
+
             // Helper closure: drain window commands and command-finished
             // events, publish snapshot, request repaint.
             // `request_repaint` gates ONLY the GUI wake-up request (issue #459):
@@ -777,6 +869,18 @@ fn spawn_pty_consumer_thread(
                             }
                             _ => WindowCommand::Viewport(cmd),
                         };
+                    // Report requests are capped (148.C9): each one makes the GUI
+                    // answer through `input_tx`, so a GUI that is not draining
+                    // must not let them pile up.  Viewport commands are not
+                    // replies and pass through.  Admission counts the command;
+                    // if the send then fails the pane is gone and the count
+                    // no longer matters.
+                    if let WindowCommand::Report(report) = &wc
+                        && admit_report(&outstanding_reports) == ReportAdmission::Dropped
+                    {
+                        note_dropped_report(&dropped_reports, report);
+                        continue;
+                    }
                     send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
                 }
 
@@ -1728,6 +1832,7 @@ mod tests {
             command_event_tx,
             Arc::new(AtomicBool::new(false)),
             echo_off,
+            Arc::new(AtomicUsize::new(0)),
         );
 
         // The emulator owns every sender of `write_rx`, so the channel
@@ -1876,5 +1981,111 @@ mod tests {
                 .collect();
             assert_eq!(inputs, vec![(7, expected_recorded)], "echo_off={echo_off}");
         }
+    }
+
+    #[test]
+    fn admit_report_counts_up_to_the_cap_then_drops() {
+        let outstanding = AtomicUsize::new(0);
+        for admitted in 1..=MAX_OUTSTANDING_REPORTS {
+            assert_eq!(admit_report(&outstanding), ReportAdmission::Admitted);
+            assert_eq!(outstanding.load(Ordering::Relaxed), admitted);
+        }
+        assert_eq!(admit_report(&outstanding), ReportAdmission::Dropped);
+        assert_eq!(
+            outstanding.load(Ordering::Relaxed),
+            MAX_OUTSTANDING_REPORTS,
+            "a dropped report is not counted"
+        );
+    }
+
+    #[test]
+    fn release_report_frees_a_slot_and_saturates_at_zero() {
+        let outstanding = AtomicUsize::new(MAX_OUTSTANDING_REPORTS);
+        assert_eq!(admit_report(&outstanding), ReportAdmission::Dropped);
+        release_report(&outstanding);
+        assert_eq!(admit_report(&outstanding), ReportAdmission::Admitted);
+
+        let empty = AtomicUsize::new(0);
+        release_report(&empty);
+        assert_eq!(empty.load(Ordering::Relaxed), 0, "never underflows");
+    }
+
+    /// With no GUI draining `window_cmd_rx`, a flood of report requests leaves
+    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued (148.C9).
+    /// Viewport commands in the same stream are not capped.
+    #[test]
+    fn consumer_thread_caps_outstanding_reports_while_the_gui_is_not_draining() {
+        const FLOOD: usize = 1000;
+        const VIEWPORT: usize = 5;
+
+        let (terminal, write_rx) = TerminalEmulator::new_headless(None);
+        let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
+        let (input_tx, input_rx) = unbounded::<InputEvent>();
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (clipboard_tx, _clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+        let (search_buffer_tx, _search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (pty_dead_tx, _pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+        let (command_event_tx, _command_event_rx) = unbounded::<CommandFinishedEvent>();
+        let outstanding = Arc::new(AtomicUsize::new(0));
+
+        spawn_pty_consumer_thread(
+            terminal,
+            pty_read_rx,
+            input_rx,
+            window_cmd_tx,
+            clipboard_tx,
+            search_buffer_tx,
+            None,
+            Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
+            Arc::new(OnceLock::new()),
+            pty_dead_tx,
+            freminal_terminal_emulator::recording::empty_recording_swap(),
+            7,
+            command_event_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&outstanding),
+        );
+
+        // `CSI 14 t` is a Report; `CSI 2 t`-style title stack pushes
+        // (`CSI 22 ; 0 t`) are Viewport commands.
+        let mut bytes = b"\x1b[14t".repeat(FLOOD);
+        bytes.extend(b"\x1b[22;0t".repeat(VIEWPORT));
+        // DA1 is answered on the PTY thread itself, after everything above in
+        // the same FIFO, so its reply proves the flood was fully processed.
+        bytes.extend_from_slice(b"\x1b[c");
+        let read_amount = bytes.len();
+        pty_read_tx
+            .send(PtyRead {
+                buf: bytes,
+                read_amount,
+            })
+            .unwrap();
+        let reply = write_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("DA1 reply once the flood was processed");
+        assert!(matches!(reply, PtyWrite::Write(_)));
+
+        // Closing the input channel ends the consumer thread, which drops its
+        // `window_cmd_tx`: the receiver then disconnects only after every
+        // `post_event` has run, so the drain below sees the whole stream.
+        drop(input_tx);
+        let mut reports = 0;
+        let mut viewport = 0;
+        loop {
+            match window_cmd_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(WindowCommand::Report(_)) => reports += 1,
+                Ok(WindowCommand::Viewport(_)) => viewport += 1,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    panic!("consumer thread did not exit after the input channel closed")
+                }
+            }
+        }
+        drop(pty_read_tx);
+
+        assert_eq!(reports, MAX_OUTSTANDING_REPORTS);
+        assert_eq!(viewport, VIEWPORT, "viewport commands are never capped");
+        assert_eq!(outstanding.load(Ordering::Relaxed), MAX_OUTSTANDING_REPORTS);
     }
 }

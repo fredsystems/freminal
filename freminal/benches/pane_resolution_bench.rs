@@ -84,7 +84,7 @@
 //! makes — so no GL context is required.
 
 use std::hint::black_box;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -154,6 +154,7 @@ fn make_bench_pane(id: PaneId) -> Pane {
         pty_dead_rx,
         command_event_rx,
         echo_off: Arc::new(AtomicBool::new(false)),
+        outstanding_reports: Arc::new(AtomicUsize::new(0)),
         child_pid: None,
         history_seed: new_seeded_history(),
         shell_program: None,

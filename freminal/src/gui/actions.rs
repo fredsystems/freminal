@@ -1021,7 +1021,10 @@ mod tests {
     use crossbeam_channel::Receiver;
     use freminal_terminal_emulator::io::SearchCorpus;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    };
 
     /// Build a `Tab` whose active pane's `input_rx` is returned to the caller
     /// so emitted `InputEvent`s can be observed.
@@ -1057,6 +1060,7 @@ mod tests {
             title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            outstanding_reports: Arc::new(AtomicUsize::new(0)),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),

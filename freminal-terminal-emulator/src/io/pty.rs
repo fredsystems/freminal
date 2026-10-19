@@ -3,6 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
 use super::{PtyRead, PtyWrite};
@@ -218,15 +220,46 @@ const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFai
     }
 }
 
+/// The receiving end of the bounded terminal-reply queue, with the byte counter
+/// it shares with the handler that fills it (148.C9).
+///
+/// `queued_bytes` is the number of reply bytes sent on the channel and not yet
+/// written to the PTY.  The handler adds to it when it queues a reply and drops
+/// replies past `MAX_QUEUED_REPLY_BYTES`; the writer thread subtracts when it
+/// has written one (see [`run_writer_loop`]).
+pub struct ReplyQueue {
+    /// Receives terminal-generated replies.
+    pub rx: Receiver<PtyWrite>,
+    /// Reply bytes queued on `rx` and not yet written.
+    pub queued_bytes: Arc<AtomicUsize>,
+}
+
+/// Release the bytes of a reply the writer has finished with from the shared
+/// queued-bytes counter, saturating at zero so a mismatch can never wrap it.
+///
+/// Only `PtyWrite::Write` carries counted bytes; any other message is ignored.
+fn release_reply_bytes(queued_bytes: &AtomicUsize, msg: &PtyWrite) {
+    let PtyWrite::Write(data) = msg else {
+        return;
+    };
+    let len = data.len();
+    // The closure always returns `Some`, so the update cannot fail.
+    let _ = queued_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+        Some(queued.saturating_sub(len))
+    });
+}
+
 /// Drive the PTY writer thread: apply every message from the user channel and
 /// the reply channel, in batches, until the user channel disconnects.
 ///
 /// Two channels feed the writer (GHSA-6cxq-f7hx-92v2).  `user_rx` is unbounded
-/// and carries keystrokes, paste, raw bytes and `PtyWrite::Resize`.  `reply_rx`
-/// is bounded (`REPLY_QUEUE_CAPACITY` messages, not bytes) and carries only
-/// terminal-generated replies, so a child that stops reading its tty cannot
-/// make a flood of queries grow memory without bound; the handler drops
-/// replies that do not fit.
+/// and carries keystrokes, paste, raw bytes and `PtyWrite::Resize`.  `replies.rx`
+/// is bounded (`REPLY_QUEUE_CAPACITY` messages and `MAX_QUEUED_REPLY_BYTES`
+/// bytes) and carries only terminal-generated replies, so a child that stops
+/// reading its tty cannot make a flood of queries grow memory without bound;
+/// the handler drops replies that do not fit.  After applying a message from
+/// the reply channel the loop releases its bytes from `replies.queued_bytes`
+/// (messages from the user channel never touch the counter).
 ///
 /// The user channel is always preferred: a pending keystroke is written before
 /// any pending reply.  A reply and a keystroke that are both pending at the
@@ -244,15 +277,16 @@ const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFai
 /// with the user channel only, without spinning.
 fn run_writer_loop(
     user_rx: &Receiver<PtyWrite>,
-    reply_rx: &Receiver<PtyWrite>,
+    replies: &ReplyQueue,
     mut apply: impl FnMut(&PtyWrite),
 ) {
+    let reply_rx = &replies.rx;
     let mut replies_open = true;
     loop {
-        let first = if replies_open {
+        let (first, source) = if replies_open {
             crossbeam_channel::select_biased! {
                 recv(user_rx) -> msg => match msg {
-                    Ok(msg) => msg,
+                    Ok(msg) => (msg, WriteSource::User),
                     Err(_) => return,
                 },
                 recv(reply_rx) -> msg => {
@@ -260,27 +294,27 @@ fn run_writer_loop(
                         replies_open = false;
                         continue;
                     };
-                    msg
+                    (msg, WriteSource::Reply)
                 },
             }
         } else {
             match user_rx.recv() {
-                Ok(msg) => msg,
+                Ok(msg) => (msg, WriteSource::User),
                 Err(_) => return,
             }
         };
-        apply(&first);
+        apply_and_release(replies, source, &first, &mut apply);
 
         // Drain whatever else is queued in one batch, user channel first.
         loop {
             if let Ok(more) = user_rx.try_recv() {
-                apply(&more);
+                apply_and_release(replies, WriteSource::User, &more, &mut apply);
                 continue;
             }
             if replies_open {
                 match reply_rx.try_recv() {
                     Ok(more) => {
-                        apply(&more);
+                        apply_and_release(replies, WriteSource::Reply, &more, &mut apply);
                         continue;
                     }
                     Err(TryRecvError::Disconnected) => replies_open = false,
@@ -289,6 +323,30 @@ fn run_writer_loop(
             }
             break;
         }
+    }
+}
+
+/// Which channel the writer loop received a message from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteSource {
+    /// The unbounded user channel: keystrokes, paste, raw bytes, resizes.
+    User,
+    /// The bounded reply channel: terminal-generated replies.
+    Reply,
+}
+
+/// Apply `msg`, then, if it came from the reply channel, release its bytes
+/// from the shared queued-bytes counter.  The release follows the write so the
+/// bytes stay counted while the message is still held by the writer.
+fn apply_and_release(
+    replies: &ReplyQueue,
+    source: WriteSource,
+    msg: &PtyWrite,
+    apply: &mut impl FnMut(&PtyWrite),
+) {
+    apply(msg);
+    if source == WriteSource::Reply {
+        release_reply_bytes(&replies.queued_bytes, msg);
     }
 }
 
@@ -478,7 +536,7 @@ fn inject_shell_integration_env(
 #[allow(clippy::too_many_lines)]
 pub fn run_terminal(
     write_rx: Receiver<PtyWrite>,
-    reply_rx: Receiver<PtyWrite>,
+    replies: ReplyQueue,
     send_tx: Sender<PtyRead>,
     spawn_cfg: PtySpawnConfig<'_>,
     termcaps: Option<&Path>,
@@ -826,7 +884,7 @@ pub fn run_terminal(
                 // an idle pane reach a true 0% CPU floor. Resize (`PtyWrite::Resize`)
                 // stays on this thread because it owns `pair.master`, keeping
                 // resize latency unaffected.
-                run_writer_loop(&write_rx, &reply_rx, |msg| {
+                run_writer_loop(&write_rx, &replies, |msg| {
                     process_pty_write(&mut writer, &*pair.master, msg);
                 });
             })
@@ -848,7 +906,7 @@ impl FreminalPtyInputOutput {
     /// Will return an error if the terminal cannot be created.
     pub fn new(
         write_rx: Receiver<PtyWrite>,
-        reply_rx: Receiver<PtyWrite>,
+        replies: ReplyQueue,
         send_tx: Sender<PtyRead>,
         spawn_cfg: PtySpawnConfig<'_>,
         initial_size: &FreminalTerminalSize,
@@ -867,7 +925,7 @@ impl FreminalPtyInputOutput {
 
         let result = run_terminal(
             write_rx,
-            reply_rx,
+            replies,
             send_tx,
             spawn_cfg,
             termcaps.as_ref().map(TempDir::path),
@@ -1171,9 +1229,11 @@ mod shell_integration_injection_tests {
 /// and that resize still reaches the child after the re-architecture.
 #[cfg(all(test, unix))]
 mod echo_off_event_driven_tests {
-    use super::{PtySpawnConfig, PtyWrite, run_terminal};
+    use super::{PtySpawnConfig, PtyWrite, ReplyQueue, run_terminal};
     use crate::io::PtyRead;
     use freminal_common::pty_write::FreminalTerminalSize;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -1236,7 +1296,10 @@ mod echo_off_event_driven_tests {
 
         let result = run_terminal(
             write_rx,
-            reply_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+            },
             send_tx,
             spawn_cfg,
             None,
@@ -1278,7 +1341,10 @@ mod echo_off_event_driven_tests {
 
         let result = run_terminal(
             write_rx,
-            reply_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+            },
             send_tx,
             spawn_cfg,
             None,
@@ -1323,7 +1389,10 @@ mod echo_off_event_driven_tests {
         // the whole test; the writer/reader threads must stay alive.
         let _result = run_terminal(
             write_rx,
-            reply_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+            },
             send_tx,
             spawn_cfg,
             None,
@@ -1375,10 +1444,12 @@ mod echo_off_event_driven_tests {
 /// sink, and the tests gate that closure with channels, never with sleeps.
 #[cfg(test)]
 mod writer_loop_tests {
-    use super::{PtyWrite, run_writer_loop};
-    use crate::interface::REPLY_QUEUE_CAPACITY;
+    use super::{PtyWrite, ReplyQueue, run_writer_loop};
+    use crate::interface::{MAX_QUEUED_REPLY_BYTES, REPLY_QUEUE_CAPACITY};
     use crate::terminal_handler::TerminalHandler;
     use crossbeam_channel::{bounded, unbounded};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn payload(msg: &PtyWrite) -> Vec<u8> {
         match msg {
@@ -1406,10 +1477,13 @@ mod writer_loop_tests {
         // The first reply is what the writer picks up and blocks on.
         handler.write_csi_response("first");
 
-        let loop_reply_rx = reply_rx.clone();
+        let loop_replies = ReplyQueue {
+            rx: reply_rx.clone(),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
         let writer = std::thread::spawn(move || {
             let mut first = true;
-            run_writer_loop(&user_rx, &loop_reply_rx, |msg| {
+            run_writer_loop(&user_rx, &loop_replies, |msg| {
                 if first {
                     first = false;
                     started_tx.send(()).expect("signal blocked sink");
@@ -1476,8 +1550,12 @@ mod writer_loop_tests {
         let (written_tx, written_rx) = unbounded::<Vec<u8>>();
 
         drop(reply_tx);
+        let replies = ReplyQueue {
+            rx: reply_rx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
         let writer = std::thread::spawn(move || {
-            run_writer_loop(&user_rx, &reply_rx, |msg| {
+            run_writer_loop(&user_rx, &replies, |msg| {
                 written_tx.send(payload(msg)).expect("record write");
             });
         });
@@ -1502,8 +1580,12 @@ mod writer_loop_tests {
         let (reply_tx, reply_rx) = bounded::<PtyWrite>(REPLY_QUEUE_CAPACITY);
         let (written_tx, written_rx) = unbounded::<Vec<u8>>();
 
+        let replies = ReplyQueue {
+            rx: reply_rx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
         let writer = std::thread::spawn(move || {
-            run_writer_loop(&user_rx, &reply_rx, |msg| {
+            run_writer_loop(&user_rx, &replies, |msg| {
                 written_tx.send(payload(msg)).expect("record write");
             });
         });
@@ -1517,5 +1599,119 @@ mod writer_loop_tests {
         writer
             .join()
             .expect("loop ends when the user channel closes");
+    }
+
+    /// The writer releases a reply's bytes from the shared counter after it has
+    /// written the reply, and a user-channel message never touches the counter.
+    #[test]
+    fn writer_releases_reply_bytes_and_ignores_user_messages() {
+        let (user_tx, user_rx) = unbounded::<PtyWrite>();
+        let (reply_tx, reply_rx) = bounded::<PtyWrite>(REPLY_QUEUE_CAPACITY);
+        let (written_tx, written_rx) = unbounded::<Vec<u8>>();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+
+        // Queue three replies, accounting for them as the handler would.
+        for reply in [&b"aaaa"[..], &b"bb"[..], &b"cccccc"[..]] {
+            queued_bytes.fetch_add(reply.len(), Ordering::Relaxed);
+            reply_tx
+                .send(PtyWrite::Write(reply.to_vec()))
+                .expect("send reply");
+        }
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 12);
+
+        // A user message of unrelated size must leave the counter alone.
+        user_tx
+            .send(PtyWrite::Write(vec![b'u'; 100]))
+            .expect("send user input");
+
+        let replies = ReplyQueue {
+            rx: reply_rx,
+            queued_bytes: Arc::clone(&queued_bytes),
+        };
+        let writer = std::thread::spawn(move || {
+            run_writer_loop(&user_rx, &replies, |msg| {
+                written_tx.send(payload(msg)).expect("record write");
+            });
+        });
+
+        // Four writes: the user message and the three replies.
+        for _ in 0..4 {
+            written_rx.recv().expect("write recorded");
+        }
+        drop(user_tx);
+        writer
+            .join()
+            .expect("writer loop exits when user channel closes");
+
+        assert_eq!(
+            queued_bytes.load(Ordering::Relaxed),
+            0,
+            "every reply byte released; the user message's 100 bytes untouched"
+        );
+    }
+
+    /// A release larger than the counter (a mismatch) saturates at zero
+    /// instead of wrapping around to a huge value.
+    #[test]
+    fn release_saturates_at_zero() {
+        let queued_bytes = AtomicUsize::new(3);
+        super::release_reply_bytes(&queued_bytes, &PtyWrite::Write(vec![0; 10]));
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
+        super::release_reply_bytes(&queued_bytes, &PtyWrite::Write(vec![0; 10]));
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    /// End to end with the handler: while the writer is blocked, the handler's
+    /// byte budget refuses a reply past the budget; once the writer finishes,
+    /// the counter is back to zero and replies are accepted again.
+    #[test]
+    fn handler_budget_and_writer_release_round_trip() {
+        let (user_tx, user_rx) = unbounded::<PtyWrite>();
+        let (reply_tx, reply_rx) = bounded::<PtyWrite>(REPLY_QUEUE_CAPACITY);
+        let (started_tx, started_rx) = unbounded::<()>();
+        let (release_tx, release_rx) = unbounded::<()>();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_write_tx(reply_tx);
+        handler.set_reply_budget(Arc::clone(&queued_bytes));
+
+        let replies = ReplyQueue {
+            rx: reply_rx,
+            queued_bytes: Arc::clone(&queued_bytes),
+        };
+        let writer = std::thread::spawn(move || {
+            let mut first = true;
+            run_writer_loop(&user_rx, &replies, |_msg| {
+                if first {
+                    first = false;
+                    started_tx.send(()).expect("signal blocked sink");
+                    release_rx.recv().expect("release the sink");
+                }
+            });
+        });
+
+        // The writer takes the first reply and blocks on it; its bytes stay
+        // counted while it is held.
+        handler.write_csi_response("first");
+        started_rx.recv().expect("writer picked up the first reply");
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 7);
+
+        // Fill the budget with one big reply, then be refused another.
+        let big = "x".repeat(MAX_QUEUED_REPLY_BYTES - 7 - 2);
+        handler.write_csi_response(&big);
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), MAX_QUEUED_REPLY_BYTES);
+        handler.write_csi_response("refused");
+        assert_eq!(handler.dropped_replies(), 1);
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), MAX_QUEUED_REPLY_BYTES);
+
+        release_tx.send(()).expect("release");
+        // Dropping the user sender ends the loop once both queues are drained.
+        drop(user_tx);
+        writer.join().expect("writer loop exits");
+
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
+        handler.write_csi_response("accepted again");
+        assert_eq!(handler.dropped_replies(), 1);
     }
 }

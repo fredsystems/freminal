@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
@@ -129,6 +129,10 @@ pub struct Pane {
     pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
 
     /// Channel sender for input events (key, resize, focus) to this pane's PTY thread.
+    ///
+    /// Unbounded on purpose: it carries keystrokes, which must never be
+    /// dropped.  The replies the GUI sends on it are bounded at the source
+    /// instead, by the per-pane `outstanding_reports` cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Strong handle to a clone of [`Self::input_tx`], existing purely so
@@ -205,6 +209,12 @@ pub struct Pane {
     /// only published on PTY output — if the shell is idle waiting for a
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
+
+    /// Report-class window commands sent by the PTY thread and not yet drained
+    /// by the GUI (148.C9).  The GUI releases one per Report command it drains
+    /// in [`crate::gui::rendering::handle_window_manipulation`]; the PTY thread
+    /// stops queueing Reports at `MAX_OUTSTANDING_REPORTS`.
+    pub outstanding_reports: Arc<AtomicUsize>,
 
     /// Per-pane GPU resources (renderer, glyph atlas, vertex buffers).
     ///
@@ -336,6 +346,7 @@ impl Pane {
             title_stack: TitleStack::new(),
             view_state: super::view_state::ViewState::new(),
             echo_off: channels.echo_off,
+            outstanding_reports: channels.outstanding_reports,
             child_pid: channels.child_pid,
             render_state: super::terminal::new_render_state(window_post),
             render_cache: PaneRenderCache::new(),
@@ -1767,6 +1778,7 @@ mod tests {
             title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            outstanding_reports: Arc::new(AtomicUsize::new(0)),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
@@ -1845,6 +1857,7 @@ mod tests {
             pty_dead_rx,
             command_event_rx,
             echo_off: Arc::new(AtomicBool::new(false)),
+            outstanding_reports: Arc::new(AtomicUsize::new(0)),
             child_pid: None,
             history_seed: crate::gui::shell_history::new_seeded_history(),
             shell_program: None,

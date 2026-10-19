@@ -9,9 +9,23 @@
 //! The real PTY path gives the handler a bounded sender
 //! (`REPLY_QUEUE_CAPACITY`); these tests bind a `TerminalState` to such a
 //! sender with nobody reading the other end, then flood it with queries.
+//!
+//! The queue is also bounded in bytes (`MAX_QUEUED_REPLY_BYTES`, 148.C9): the
+//! byte-budget tests drive large clipboard replies through
+//! `TerminalHandler::write_gui_reply` with a shared queued-bytes counter that
+//! stands in for the writer thread.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use crossbeam_channel::{bounded, unbounded};
-use freminal_terminal_emulator::{interface::REPLY_QUEUE_CAPACITY, state::internal::TerminalState};
+use freminal_terminal_emulator::{
+    interface::{MAX_QUEUED_REPLY_BYTES, REPLY_QUEUE_CAPACITY},
+    io::GuiReply,
+    state::internal::TerminalState,
+};
 
 const FLOOD: usize = 10_000;
 
@@ -91,4 +105,91 @@ fn deccolm_resize_bypasses_a_full_reply_queue() {
         })
         .expect("DECCOLM must send a PtyWrite::Resize on the control channel");
     assert_eq!(resize, 132);
+}
+
+/// A clipboard reply whose framed length is about `payload_len` bytes.
+fn clipboard_reply(payload_len: usize) -> GuiReply {
+    GuiReply::Clipboard {
+        selection: "c".to_owned(),
+        base64_payload: "A".repeat(payload_len),
+    }
+}
+
+const THREE_MIB: usize = 3 * 1024 * 1024;
+
+/// Two 3 MiB replies exceed the 4 MiB budget: the first is accepted, the second
+/// dropped; after the writer releases the first, a new reply is accepted.
+#[test]
+fn byte_budget_drops_a_reply_past_the_budget_until_the_writer_releases() {
+    let (tx, rx) = bounded(REPLY_QUEUE_CAPACITY);
+    let queued = Arc::new(AtomicUsize::new(0));
+    let mut state = TerminalState::new(tx, None);
+    state.handler.set_reply_budget(Arc::clone(&queued));
+
+    state.handler.write_gui_reply(&clipboard_reply(THREE_MIB));
+    assert_eq!(rx.len(), 1);
+    let first_len = queued.load(Ordering::Relaxed);
+    assert!(first_len > THREE_MIB, "the counter holds the framed length");
+
+    state.handler.write_gui_reply(&clipboard_reply(THREE_MIB));
+    assert_eq!(rx.len(), 1, "the second 3 MiB reply must be dropped");
+    assert_eq!(state.handler.dropped_replies(), 1);
+    assert_eq!(
+        queued.load(Ordering::Relaxed),
+        first_len,
+        "a dropped reply must not be counted"
+    );
+
+    // Stand in for the writer: take the queued reply and release its bytes.
+    let _ = rx.try_recv().expect("first reply queued");
+    queued.fetch_sub(first_len, Ordering::Relaxed);
+
+    state.handler.write_gui_reply(&clipboard_reply(THREE_MIB));
+    assert_eq!(rx.len(), 1, "accepted again once the bytes were released");
+    assert_eq!(state.handler.dropped_replies(), 1);
+}
+
+/// One reply larger than the whole budget is still accepted into an empty
+/// queue, so a large legitimate clipboard answer is not made impossible.
+#[test]
+fn byte_budget_admits_a_single_oversized_reply_into_an_empty_queue() {
+    let (tx, rx) = bounded(REPLY_QUEUE_CAPACITY);
+    let queued = Arc::new(AtomicUsize::new(0));
+    let mut state = TerminalState::new(tx, None);
+    state.handler.set_reply_budget(Arc::clone(&queued));
+
+    state
+        .handler
+        .write_gui_reply(&clipboard_reply(2 * THREE_MIB));
+    assert_eq!(rx.len(), 1);
+    assert!(queued.load(Ordering::Relaxed) > MAX_QUEUED_REPLY_BYTES);
+    assert_eq!(state.handler.dropped_replies(), 0);
+
+    // With that reply still queued, even a tiny one is over budget.
+    state.handler.write_gui_reply(&clipboard_reply(1));
+    assert_eq!(rx.len(), 1);
+    assert_eq!(state.handler.dropped_replies(), 1);
+}
+
+/// A reply refused by a full message queue gives its bytes back, so the
+/// counter cannot drift upward and starve later replies.
+#[test]
+fn byte_budget_is_refunded_when_the_message_queue_is_full() {
+    let (tx, rx) = bounded(REPLY_QUEUE_CAPACITY);
+    let queued = Arc::new(AtomicUsize::new(0));
+    let mut state = TerminalState::new(tx, None);
+    state.handler.set_reply_budget(Arc::clone(&queued));
+
+    state.handle_incoming_data(&b"\x1b[c".repeat(REPLY_QUEUE_CAPACITY + 10));
+    assert_eq!(rx.len(), REPLY_QUEUE_CAPACITY);
+
+    // Every queued reply is counted; the ten refused ones are not.
+    let total: usize = rx
+        .try_iter()
+        .map(|w| match w {
+            freminal_common::pty_write::PtyWrite::Write(data) => data.len(),
+            freminal_common::pty_write::PtyWrite::Resize(_) => 0,
+        })
+        .sum();
+    assert_eq!(queued.load(Ordering::Relaxed), total);
 }

@@ -8653,6 +8653,21 @@ Group F — Hygiene:
   unbounded, so a non-draining GUI still amplifies. Scope: a byte budget (an atomic counter
   shared by handler and writer, no locks) and bounds on the two GUI channels, per
   `freminal-architecture`. Not scheduled in Task 148.
+  **Done (2026-10-19):** atomics only, no new channels or locks.
+  - **Byte budget:** `MAX_QUEUED_REPLY_BYTES` (4 MiB) is tracked in an `Arc<AtomicUsize>`
+    shared by the handler and the writer (`ReplyQueue`). A reply that would exceed it is
+    dropped unless the queue is empty, so one large legitimate clipboard reply still fits.
+    The handler adds before `try_send` and refunds on failure; the writer subtracts after
+    writing a reply.
+  - **Report cap:** `MAX_OUTSTANDING_REPORTS` (256) per pane counts Report-class window
+    commands sent to the GUI but not yet handled. `post_event` drops a report at the cap (the
+    query goes unanswered, as with a dropped reply), and `handle_window_manipulation`
+    releases one slot per drained Report before any branch, so refused ones release too.
+  - **`input_tx`:** stays unbounded and documented: it carries keystrokes, and GUI replies on
+    it are now bounded by the report cap.
+  - **Tests:** 1000 `CSI 14 t` with no GUI draining leave exactly 256 reports; two 3 MiB
+    replies, the second dropped; budget refunds and writer release.
+  - **Benchmark:** `bench_handle_incoming_data` −2.7%.
 - **148.C10 — OSC 7 / spawn-cwd follow-ups.** Review finding R9.
   - `resolve_spawn_cwd` runs `is_dir()` (and `read_cwd`, which uses `sysinfo` on macOS and
     Windows) on the GUI thread at new-tab or split time. An attacker-chosen path on a hung

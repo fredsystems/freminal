@@ -70,7 +70,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Instant;
 
 use freminal_buffer::buffer::Buffer;
@@ -265,6 +265,13 @@ pub struct TerminalHandler {
     /// (GHSA-6cxq-f7hx-92v2).  Diagnostic counter; atomic so replies can be
     /// counted from the `&self` write helpers.
     dropped_replies: AtomicU64,
+    /// Bytes of replies currently queued on `write_tx` and not yet written by
+    /// the PTY writer thread, shared with that thread (148.C9).  The handler
+    /// adds a reply's length when it queues it and the writer subtracts it
+    /// once written; a reply that would push the total past
+    /// `MAX_QUEUED_REPLY_BYTES` is dropped.  `None` (headless, tests) means
+    /// no byte budget.
+    reply_budget: Option<Arc<AtomicUsize>>,
     /// Optional channel for PTY commands that are not replies (the DECCOLM
     /// `PtyWrite::Resize`).  When set it is the unbounded user-input channel,
     /// so a full reply queue can never block or drop a resize; when unset,
@@ -497,6 +504,7 @@ impl TerminalHandler {
             saved_decsc: ScreenScoped::default(),
             write_tx: None,
             dropped_replies: AtomicU64::new(0),
+            reply_budget: None,
             control_tx: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
@@ -1103,6 +1111,12 @@ impl TerminalHandler {
     /// will be sent through this channel rather than silently discarded.
     pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
+    }
+
+    /// Share the queued-reply byte counter with the PTY writer thread, which
+    /// turns on the byte budget for replies sent through `write_tx` (148.C9).
+    pub fn set_reply_budget(&mut self, queued_bytes: Arc<AtomicUsize>) {
+        self.reply_budget = Some(queued_bytes);
     }
 
     /// Set the channel for PTY commands that are not replies (currently the

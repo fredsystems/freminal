@@ -497,6 +497,7 @@ pub(super) fn drain_window_manipulation_commands(
                 let shell_set = rendering::handle_window_manipulation(
                     ui,
                     &pane.window_cmd_rx,
+                    &pane.outstanding_reports,
                     &pane.reply_tx,
                     font_width,
                     font_height,
@@ -558,7 +559,7 @@ mod tests {
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_windowing::WindowId;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::time::{Duration, SystemTime};
 
     // ── WindowFocus / DeadPaneOutcome (Task 122.7) ───────────────────────
@@ -635,6 +636,7 @@ mod tests {
             title_stack: TitleStack::new(),
             view_state: crate::gui::view_state::ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            outstanding_reports: Arc::new(AtomicUsize::new(0)),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
