@@ -8512,6 +8512,11 @@ Group F — Hygiene:
   `PLAN_VERSION_090.md` fail the whole-repo markdown lint, which "148 Verification" lists.
   Files touched by Task 148 are linted individually and pass. Scope: fix those two documents
   (formatting only). Schedule: with 148.26.
+  **Done:** formatting-only fixes in those two files and in `DECOUPLING_FRAMEWORK.md`,
+  `PLAN_121_PERF_REMEDIATION.md`, `FUTURE_PLANS.md` (an MD033 disable around a real
+  `<details>` block) and the `freminal-module-cohesion` skill; every tracked `.md` lints clean.
+  A local `cargo xtask lint-markdown` can still fail on git-ignored `.direnv/` and
+  `.opencode/node_modules/`, which CI does not have.
 - **148.C6 — Retune `fuzz/nightly-plan.txt` from a week of nightly results.** Deferred from
   148.25 with maintainer agreement (2026-10-19): it needs a week of nightly data. Raise
   `sixel_parse` and `frec_parse` (unblocked by 148.2 and 148.8), shorten plateaued targets,

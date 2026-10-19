@@ -37,12 +37,12 @@ that happened to need it.
 
 Four different questions, asked in this order:
 
-| Question                             | Skill                           |
-| ------------------------------------ | ------------------------------- |
-| Does this logic belong here at all?  | `freminal-extend-or-extract`    |
-| Which file, given that it does?      | **this skill** + `module-cohesion` |
-| What type should the state be?       | `freminal-state-representation` |
-| Which crate, and which direction?    | `freminal-architecture`         |
+| Question                            | Skill                              |
+| ----------------------------------- | ---------------------------------- |
+| Does this logic belong here at all? | `freminal-extend-or-extract`       |
+| Which file, given that it does?     | **this skill** + `module-cohesion` |
+| What type should the state be?      | `freminal-state-representation`    |
+| Which crate, and which direction?   | `freminal-architecture`            |
 
 ## When to stop and ask
 
