@@ -12,6 +12,7 @@
 //! Directory layout (all relative to the workspace root unless overridden):
 //!
 //! * `fuzz/seeds/<target>/`       -- curated seeds, committed, **never written**.
+//! * `fuzz/dict/*.dict`           -- libFuzzer dictionaries, committed, never written.
 //! * `fuzz/regressions/<target>/` -- crash reproducers, committed, never written.
 //! * `fuzz/corpus/<target>/`      -- working corpus, gitignored.
 //! * `fuzz/artifacts/<target>/`   -- crash artifacts, gitignored.
@@ -24,6 +25,7 @@
 //!
 //! * [`sandbox`] -- process isolation and the bubblewrap command line;
 //! * [`args`] -- libFuzzer arguments for fuzz, replay and merge runs;
+//! * [`dictionary`] -- which target uses which `fuzz/dict/*.dict` file;
 //! * [`exit`] -- running a fuzz process and classifying how it ended;
 //! * [`artifacts`] -- finding artifacts and run summaries;
 //! * [`cmin`] -- corpus minimisation planning and the directory swap;
@@ -34,6 +36,7 @@ mod args;
 mod artifacts;
 mod cmin;
 mod corpus_repo;
+mod dictionary;
 mod exit;
 mod sandbox;
 
@@ -60,6 +63,7 @@ use self::{
         cmin_preflight, count_files, decide_cmin_swap, plan_cmin, remove_dir_if_exists, swap_cmin,
         CminPreflight, DirPresence, SwapDecision,
     },
+    dictionary::dictionary_for_target,
     exit::{run_fuzz_binary, FindingsLocation},
     sandbox::ensure_inputs_visible,
 };
@@ -467,7 +471,10 @@ fn fuzz_one(ctx: &FuzzContext, session: &Session, request: &FuzzRequest<'_>) -> 
         seeds.display()
     );
     let binary = ctx.binary(target)?;
-    ensure_inputs_visible(session.sandbox, &[&binary, &seeds])?;
+    let dictionary = dictionary_for_target(&ctx.root, target);
+    let mut visible: Vec<&Path> = vec![&binary, &seeds];
+    visible.extend(dictionary.as_deref());
+    ensure_inputs_visible(session.sandbox, &visible)?;
     let args = fuzz_args(&FuzzArgsPlan {
         corpus: &corpus,
         seeds: &seeds,
@@ -475,12 +482,19 @@ fn fuzz_one(ctx: &FuzzContext, session: &Session, request: &FuzzRequest<'_>) -> 
         time_secs: request.time_secs,
         policy: request.policy,
         jobs: request.jobs,
+        dictionary: dictionary.as_deref(),
     });
     let before = match request.policy {
         CrashPolicy::Stop => None,
         CrashPolicy::KeepGoing => Some(finding_artifacts(&artifacts)?),
     };
-    tracing::info!("fuzzing `{target}` for {}s", request.time_secs);
+    let with_dictionary = dictionary.as_deref().map_or_else(String::new, |dict| {
+        format!(" with dictionary {}", dict.display())
+    });
+    tracing::info!(
+        "fuzzing `{target}` for {}s{with_dictionary}",
+        request.time_secs
+    );
     let result = run_fuzz_binary(
         session.sandbox,
         request.policy,

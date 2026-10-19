@@ -8442,6 +8442,33 @@ Group F — Hygiene:
   for `vergen` is gone and `cargo machete` is clean without it. `homepage` (identical to
   `repository`; nothing reads `CARGO_PKG_HOMEPAGE`) is removed from `[workspace.package]` and
   every member. The fuzz `cargo check` prints no manifest warnings.
+- **148.25 (done, retune deferred to 148.C6):** all reproducers from 148.1–148.8 and 148.C2
+  replay clean under `fuzz-replay`.
+  - **Reruns:** each affected target ran 330 s with 8 jobs, keep-going, sandboxed, on the fixed
+    tree. Execs: `terminal_state` 0.85M, `sixel_parse` 3.5M, `frec_parse` 198M,
+    `ansi_parser` 17.9M, `config_toml` 67.5M, `kitty_graphics_parse` 545M. None found a crash,
+    OOM or timeout. Earlier 10-minute `terminal_state` runs during 148.3, 148.6 and 148.7
+    surfaced the findings fixed there and 148.C2.
+  - **Config loader:** new `Config::from_toml_str` (`ConfigPartial` + `apply_partial` +
+    `validate`, no filesystem or environment; parse errors are `ConfigError::ParseStr`). The
+    `config_toml` target now fuzzes it, and the fuzz crate's unused `toml` dependency is gone.
+  - **Dictionary:** `fuzz/dict/ansi.dict` (93 tokens: C0/C1, introducers, common CSI/OSC/DCS/APC
+    forms, sixel and UTF-8 tokens). xtask's `dictionary_for_target` passes `-dict=` for
+    `ansi_parser` and `terminal_state` (not for replay or cmin).
+  - **Dictionary coverage:** 20-minute runs from the seeds only, `-fork=4`, with and without:
+
+    | Target | Dictionary | cov | ft | corpus |
+    | --- | --- | --- | --- | --- |
+    | `terminal_state` | with | 15356 | 72015 | 8892 |
+    | `terminal_state` | without | 14576 | 65561 | 7470 |
+    | `ansi_parser` | with | 4668 | 26402 | 6449 |
+    | `ansi_parser` | without | 4725 | 27181 | 6707 |
+
+    That is +5.4% cov and +9.9% ft for `terminal_state`; `ansi_parser` is −1.2% / −2.9% (one run
+    each, so within likely noise; the seeds probably already carry most tokens). The mapping
+    keeps both targets for now; 148.C6 revisits it with nightly data.
+  - **CI comment:** the `fuzz-smoke` comment in `ci.yml` no longer lists the fixed crashes.
+  - **Corpus:** not published (maintainer-only).
 
 ### 148 Cleanup entries
 
@@ -8485,6 +8512,11 @@ Group F — Hygiene:
   `PLAN_VERSION_090.md` fail the whole-repo markdown lint, which "148 Verification" lists.
   Files touched by Task 148 are linted individually and pass. Scope: fix those two documents
   (formatting only). Schedule: with 148.26.
+- **148.C6 — Retune `fuzz/nightly-plan.txt` from a week of nightly results.** Deferred from
+  148.25 with maintainer agreement (2026-10-19): it needs a week of nightly data. Raise
+  `sixel_parse` and `frec_parse` (unblocked by 148.2 and 148.8), shorten plateaued targets,
+  and revisit the `ansi_parser` dictionary mapping (148.25 measured −1.2% cov in one run).
+  Schedule: after a week of nightly runs on main with Task 148 merged.
 
 ---
 

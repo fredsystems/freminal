@@ -253,10 +253,11 @@ jobs:
   # Time-boxed fuzzing of every target. ADVISORY: deliberately not listed in
   # `ci-success.needs`, and `continue-on-error` keeps a red result from showing
   # as a failed check. Short fuzzing runs are nondeterministic (the same
-  # commit can pass or fail), and known open crashes exist in some targets
-  # (tracked in issues #556, #557, #558 and #559, in security advisory
-  # GHSA-w475-m9wf-775r, and in Task 148 of Documents/PLAN_VERSION_130.md),
-  # so a blocking gate would be both flaky and permanently red.
+  # commit can pass or fail, because libFuzzer explores differently on every
+  # run and a new finding can appear on any commit), so a blocking gate would
+  # be flaky. New findings are tracked as GitHub issues, and a fixed finding's
+  # reproducer joins `fuzz/regressions/`, where the deterministic `fuzz-replay`
+  # gate guards it.
   # Findings surface through the step summary and the uploaded artifacts,
   # never by blocking a PR. The deterministic gate is `fuzz-replay`.
   fuzz-smoke:
