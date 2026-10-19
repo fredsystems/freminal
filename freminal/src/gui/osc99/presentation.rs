@@ -16,13 +16,10 @@ use std::hash::{DefaultHasher, Hasher};
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 
 use super::icon_decode::decode_icon_rgba;
+pub use super::markup::escape_body_markup;
 
 /// How many decoded icons [`Osc99DecodedIconCache`] keeps.
 const DECODED_ICON_CACHE_ENTRIES: usize = 8;
-
-/// Zero width non-joiner, inserted after the characters kitty escapes in a
-/// body for daemons that interpret markup.
-const ZERO_WIDTH_NON_JOINER: char = '\u{200c}';
 
 /// What the icon scan and the `.desktop` scan know about the system.
 pub trait Osc99IconLookup {
@@ -241,21 +238,6 @@ pub fn category_hint(types: &[String]) -> Option<&str> {
         .iter()
         .map(String::as_str)
         .find(|category| !category.is_empty())
-}
-
-/// Escape `body` for a daemon that interprets markup, as kitty does: a zero
-/// width non-joiner after every `<` and `&` keeps them from forming a tag or
-/// an entity without visibly changing the text.
-#[must_use]
-pub fn escape_body_markup(body: &str) -> String {
-    let mut escaped = String::with_capacity(body.len());
-    for c in body.chars() {
-        escaped.push(c);
-        if c == '<' || c == '&' {
-            escaped.push(ZERO_WIDTH_NON_JOINER);
-        }
-    }
-    escaped
 }
 
 #[cfg(test)]
@@ -501,17 +483,6 @@ mod tests {
             category_hint(&names(&["", "email.arrived", "im"])),
             Some("email.arrived")
         );
-    }
-
-    #[test]
-    fn markup_escaping_inserts_a_joiner_only_after_angle_and_ampersand() {
-        assert_eq!(
-            escape_body_markup("a<b>&amp; c"),
-            "a<\u{200c}b>&\u{200c}amp; c"
-        );
-        assert_eq!(escape_body_markup("plain text > 3"), "plain text > 3");
-        assert_eq!(escape_body_markup(""), "");
-        assert_eq!(escape_body_markup("<<"), "<\u{200c}<\u{200c}");
     }
 
     // ── the decoded-icon cache ──────────────────────────────────────────

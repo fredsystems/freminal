@@ -80,6 +80,8 @@ pub(super) struct FuzzArgsPlan<'a> {
     pub(super) policy: CrashPolicy,
     /// Fork-mode workers (used only for [`CrashPolicy::KeepGoing`]).
     pub(super) jobs: u32,
+    /// libFuzzer dictionary (`-dict=`), when the target has one.
+    pub(super) dictionary: Option<&'a Path>,
 }
 
 /// libFuzzer arguments for a normal fuzzing run.
@@ -92,6 +94,11 @@ pub(super) fn fuzz_args(plan: &FuzzArgsPlan<'_>) -> Vec<OsString> {
         OsString::from(format!("-max_len={FUZZ_MAX_LEN}")),
     ];
     args.extend(limit_args());
+    if let Some(dictionary) = plan.dictionary {
+        let mut arg = OsString::from("-dict=");
+        arg.push(dictionary);
+        args.push(arg);
+    }
     match plan.policy {
         CrashPolicy::Stop => {}
         CrashPolicy::KeepGoing => {
@@ -181,6 +188,7 @@ mod tests {
             time_secs: 10,
             policy: CrashPolicy::Stop,
             jobs: 4,
+            dictionary: None,
         });
         assert_eq!(
             args,
@@ -208,6 +216,7 @@ mod tests {
             time_secs: 60,
             policy: CrashPolicy::KeepGoing,
             jobs: 3,
+            dictionary: None,
         });
         assert_eq!(args[0], OsString::from("/c/t"));
         assert_eq!(args[1], OsString::from("/s/t"));
@@ -304,6 +313,7 @@ mod tests {
             time_secs: 1,
             policy: CrashPolicy::Stop,
             jobs: 1,
+            dictionary: None,
         });
         let keep = fuzz_args(&FuzzArgsPlan {
             corpus: Path::new("/c"),
@@ -312,12 +322,48 @@ mod tests {
             time_secs: 1,
             policy: CrashPolicy::KeepGoing,
             jobs: 2,
+            dictionary: None,
         });
         for args in [&stop, &keep] {
             assert!(args.contains(&OsString::from("-max_len=65536")));
         }
         let cmin = cmin_args(Path::new("/f"), Path::new("/c"), Path::new("/a"));
         assert!(!cmin.iter().any(|a| a.to_string_lossy().contains("max_len")));
+    }
+
+    #[test]
+    fn dictionary_adds_dict_arg_after_limits_in_both_policies() {
+        for (policy, jobs) in [(CrashPolicy::Stop, 1), (CrashPolicy::KeepGoing, 3)] {
+            let plan = |dictionary| FuzzArgsPlan {
+                corpus: Path::new("/c/t"),
+                seeds: Path::new("/s/t"),
+                artifacts: Path::new("/a/t"),
+                time_secs: 10,
+                policy,
+                jobs,
+                dictionary,
+            };
+            let without = fuzz_args(&plan(None));
+            let with = fuzz_args(&plan(Some(Path::new("/repo/fuzz/dict/ansi.dict"))));
+            assert!(!without
+                .iter()
+                .any(|a| a.to_string_lossy().starts_with("-dict")));
+            // Identical apart from the one inserted argument, right after the
+            // fixed arguments (`-error_exitcode` is the last of them).
+            let mut expected = without.clone();
+            expected.insert(10, OsString::from("-dict=/repo/fuzz/dict/ansi.dict"));
+            assert_eq!(with, expected);
+            assert_eq!(with[9], OsString::from("-error_exitcode=77"));
+        }
+    }
+
+    #[test]
+    fn replay_and_cmin_never_carry_a_dictionary() {
+        let replay = replay_args(&[PathBuf::from("/s/t/a")]);
+        let cmin = cmin_args(Path::new("/f"), Path::new("/c"), Path::new("/a"));
+        for args in [&replay, &cmin] {
+            assert!(!args.iter().any(|a| a.to_string_lossy().contains("dict")));
+        }
     }
 
     #[test]

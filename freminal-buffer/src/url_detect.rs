@@ -94,12 +94,19 @@ fn build_url_regex() -> Regex {
     })
 }
 
-/// The scheme literals matched by [`URL_REGEX`] (kept in sync with
-/// `build_url_regex`'s `PATTERN` by hand — there is no single source of
-/// truth here since the regex alternation and this list serve different
-/// purposes: the regex needs the full literals, `row_tail_could_be_wrapped_scheme`
-/// needs partial prefixes of them).
-const SCHEMES: &[&[u8]] = &[b"https://", b"http://", b"ftp://", b"file://", b"mailto:"];
+/// The scheme literals matched by [`URL_REGEX`].
+///
+/// Kept in sync with `build_url_regex`'s `PATTERN` by hand (a unit test
+/// checks every entry is detected): the regex alternation and this list serve
+/// different purposes, since the regex needs the full literals and
+/// `row_tail_could_be_wrapped_scheme` needs partial prefixes of them.
+///
+/// Public so the GUI's link allow-list (`freminal/src/gui/link_open.rs`) can
+/// assert that every scheme auto-detection produces is also openable; a
+/// scheme added here without a matching allow-list entry then fails a test
+/// instead of silently producing links that refuse to open.
+pub const AUTO_DETECT_SCHEMES: &[&[u8]] =
+    &[b"https://", b"http://", b"ftp://", b"file://", b"mailto:"];
 
 /// Shortest partial-scheme-prefix length considered a signal that a soft
 /// wrap might have split a URL's *scheme* across the row boundary.
@@ -128,7 +135,7 @@ const MIN_PARTIAL_SCHEME_LEN: usize = 3;
 /// trade-off in how short a partial prefix is recognized.
 #[must_use]
 pub fn row_tail_could_be_wrapped_scheme(bytes: &[u8]) -> bool {
-    SCHEMES.iter().any(|scheme| {
+    AUTO_DETECT_SCHEMES.iter().any(|scheme| {
         (MIN_PARTIAL_SCHEME_LEN..scheme.len()).any(|len| bytes.ends_with(&scheme[..len]))
     })
 }
@@ -211,6 +218,25 @@ mod tests {
             .into_iter()
             .map(|m| &s[m.byte_start..m.byte_end])
             .collect()
+    }
+
+    #[test]
+    fn auto_detect_schemes_match_the_regex() {
+        // `AUTO_DETECT_SCHEMES` is hand-synced with the regex alternation; a
+        // scheme listed but not detected (or vice versa) fails here.
+        for scheme in AUTO_DETECT_SCHEMES {
+            let mut text = scheme.to_vec();
+            text.extend_from_slice(b"x");
+            let matches = find_urls_bytes(&text);
+            assert_eq!(
+                matches.len(),
+                1,
+                "{} is not detected",
+                String::from_utf8_lossy(scheme)
+            );
+            assert_eq!(matches[0].byte_start, 0);
+            assert_eq!(matches[0].byte_end, text.len());
+        }
     }
 
     #[test]

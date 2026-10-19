@@ -43,6 +43,7 @@ pub mod gl_context_offscreen;
 #[cfg(all(target_os = "linux", feature = "gl-offscreen"))]
 pub mod frame_paint_harness;
 mod modifier_tracker;
+mod monitor_size;
 
 pub use error::Error;
 pub use event_loop::run;

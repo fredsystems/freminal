@@ -269,6 +269,8 @@ Task 58 in `PLAN_VERSION_050.md` implements built-in terminal multiplexing with 
 tree, directional navigation, resize, zoom, and all the functionality described below. See
 Task 58 for the full design.
 
+<!-- markdownlint-disable MD033 -->
+
 <details>
 <summary>Original description (for reference)</summary>
 
@@ -289,6 +291,8 @@ from iTerm2, WezTerm, or Windows Terminal.
 **Primary files:** `freminal/src/gui/mod.rs`, new `freminal/src/gui/panes.rs`
 
 </details>
+
+<!-- markdownlint-enable MD033 -->
 
 ---
 

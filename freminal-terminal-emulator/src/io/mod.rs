@@ -6,7 +6,7 @@
 pub mod gui_reply;
 pub use gui_reply::{GuiReply, Osc99CloseTracking, WindowStateReport};
 pub mod pty;
-pub use pty::{FreminalPtyInputOutput, PtySpawnConfig};
+pub use pty::{FreminalPtyInputOutput, PtySpawnConfig, ReplyQueue};
 
 // Re-export the shared PTY I/O types from freminal-common so that all crates
 // can use the same definitions without creating a circular dependency.

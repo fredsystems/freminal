@@ -495,6 +495,8 @@ impl<'a> IntoIterator for &'a TabManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::pty::WindowCommandBudget;
+    use crate::gui::title_stack::TitleStack;
     use crate::gui::view_state::ViewState;
     use arc_swap::ArcSwap;
     use freminal_terminal_emulator::io::SearchCorpus;
@@ -534,9 +536,10 @@ mod tests {
             title: title.to_owned(),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),

@@ -386,6 +386,13 @@ this by setting `Options::zoom_with_keyboard = false` and never calling
   window) = window.scale_factor() * ctx.zoom_factor()`; egui zoom is driven
   only by `egui::gui_zoom::zoom_with_keyboard` (gated on the option) or an
   explicit `set_zoom_factor`.
+- **Second consumer (cleanup 148.C4):**
+  `freminal-windowing/src/monitor_size.rs` converts the monitor's physical size
+  to the logical `ViewportInfo::monitor_size` by dividing by
+  `window.scale_factor()`, mirroring egui-winit's `update_viewport_info`
+  (which divides by `pixels_per_point`). It rests on the same zoom-is-off
+  equality; if zoom is ever enabled, derive that divisor from
+  `ctx.pixels_per_point()` too.
 - **Symptom if broken:** if egui zoom is ever enabled, the pointer gate divides
   by the wrong factor and silently misclassifies chrome as terminal — pointer
   interaction with chrome (menu/tab/border) stops forcing FULL, so chrome can

@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use conv2::ValueFrom;
 use freminal_common::buffer_states::buffer_type::BufferType;
 use freminal_common::buffer_states::kitty_graphics::{
-    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId,
+    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, KittyTransmission,
     format_kitty_response_body,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
@@ -34,6 +34,8 @@ use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
     SubCellOffset, next_image_id, next_placement_instance_id,
 };
+
+use freminal_common::host_capabilities::KittyFileTransmission;
 
 use super::RealPlacement;
 use super::TerminalHandler;
@@ -110,11 +112,50 @@ const KITTY_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
     max_total_bytes: MAX_KITTY_DATA_BYTES,
 };
 
-/// The single error response sent for every file-transmission failure.
+/// The single error response sent for every failure of a file-backed
+/// transmission (`t=f`, `t=t`, `t=s`).
 ///
-/// Deliberately uniform so the response does not reveal whether a path
-/// exists, is readable, or is a special file.
+/// Deliberately uniform so the response does not reveal whether a path or
+/// shared-memory object exists, is readable, how large it is, or whether it
+/// holds a valid image. It is also the reply when file-backed transmission is
+/// refused by configuration, so a client cannot tell "disabled" from
+/// "unreadable" (GHSA-8prj-mhmf-xpjg).
 const KITTY_FILE_ERROR_RESPONSE: &str = "EBADF:Failed to read image file";
+
+/// Whether `medium` makes the terminal read a host file or shared-memory
+/// object chosen by the sender (`t=f`, `t=t`, `t=s`), as opposed to carrying
+/// the image inline (`t=d`).
+///
+/// No wildcard: a new medium must be classified here.
+const fn medium_reads_host(medium: KittyTransmission) -> bool {
+    match medium {
+        KittyTransmission::Direct => false,
+        KittyTransmission::File | KittyTransmission::TempFile | KittyTransmission::SharedMemory => {
+            true
+        }
+    }
+}
+
+/// The reply to send for a failure to turn a `medium` transmission into an
+/// image.
+///
+/// For a host-reading medium every failure collapses to
+/// [`KITTY_FILE_ERROR_RESPONSE`], whatever the detailed `reply` is: the
+/// distinction between "missing", "wrong size", "not a PNG" and so on would let
+/// a remote party probe the host's files. Direct transmission keeps its
+/// detailed `reply`. The detailed reason belongs in the debug log.
+const fn medium_error_reply(medium: KittyTransmission, reply: &'static str) -> &'static str {
+    if medium_reads_host(medium) {
+        KITTY_FILE_ERROR_RESPONSE
+    } else {
+        reply
+    }
+}
+
+/// The transmission medium `control` selects (`t=`, default direct).
+fn kitty_medium(control: &KittyControlData) -> KittyTransmission {
+    control.transmission.unwrap_or(KittyTransmission::Direct)
+}
 
 /// Substring a `t=t` file's path must contain before freminal will delete it.
 const KITTY_TEMP_FILE_MARKER: &str = "tty-graphics-protocol";
@@ -130,6 +171,11 @@ enum KittyFileError {
     NotUtf8,
     #[error("path is not absolute")]
     NotAbsolute,
+    /// The path is not a drive-letter absolute path (UNC, device, verbatim,
+    /// or drive-relative), so resolving it could contact a remote host.
+    #[cfg(windows)]
+    #[error("path is not a local drive-letter path")]
+    NotLocalPath,
     #[error("failed to canonicalise path: {0}")]
     Canonicalize(std::io::Error),
     #[error("path is under a refused prefix (/proc, /sys, /dev)")]
@@ -296,12 +342,31 @@ fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, KittyFil
     }
 }
 
+/// Whether `path_str` may be passed to the filesystem on Windows.
+///
+/// Only drive-letter absolute paths are allowed. A UNC or verbatim path
+/// makes Windows open an SMB connection to the named host as soon as it is
+/// resolved (even by `canonicalize`), leaking an `NTLMv2` challenge-response
+/// (GHSA-3g79-vfp3-q57g), so this must be checked before any filesystem
+/// call. Pure string logic, so it is testable on every platform; production
+/// code calls it only under `cfg(windows)`.
+#[cfg(any(windows, test))]
+fn kitty_path_allowed_on_windows(path_str: &str) -> bool {
+    freminal_common::windows_path::classify_windows_path(path_str).is_local_absolute()
+}
+
 /// Validate, open and read the file named by a `t=f` / `t=t` payload.
 ///
 /// The result carries the canonical path and (on unix) the identity of the
 /// opened object, so a `t=t` deletion targets exactly what was read.
 fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
     let path_str = std::str::from_utf8(payload).map_err(|_| KittyFileError::NotUtf8)?;
+    // Before ANY filesystem call: `is_absolute` is true for a UNC path and
+    // `canonicalize` would contact its host.
+    #[cfg(windows)]
+    if !kitty_path_allowed_on_windows(path_str) {
+        return Err(KittyFileError::NotLocalPath);
+    }
     let path = std::path::Path::new(path_str);
     if !path.is_absolute() {
         return Err(KittyFileError::NotAbsolute);
@@ -519,97 +584,275 @@ fn shm_name_is_safe(name: &str) -> bool {
     !stripped.contains('/')
 }
 
+/// Why a `t=s` shared-memory read range was refused by [`shm_read_bounds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum ShmBoundsError {
+    /// The range does not fit within the object (or `offset + length`
+    /// overflowed `u64`).
+    #[error("shared memory read out of bounds")]
+    OutOfBounds,
+    /// The requested length exceeds [`MAX_KITTY_DATA_BYTES`].
+    #[error("shared memory read exceeds the {MAX_KITTY_DATA_BYTES}-byte limit")]
+    TooLarge,
+}
+
+impl ShmBoundsError {
+    /// The error response sent to the client for this refusal.
+    const fn reply(self) -> &'static str {
+        match self {
+            Self::OutOfBounds => "EINVAL:shared memory read out of bounds",
+            Self::TooLarge => "EFBIG:shared memory read exceeds the size limit",
+        }
+    }
+}
+
 /// Compute the `(offset, length)` byte range to read from a shared-memory
 /// object of `object_len` bytes, given the resolved `O=` byte offset and
 /// (optional) `S=` byte count.
 ///
-/// Returns `None` if the resulting range doesn't fit within the object
-/// (including on `u64` overflow while adding offset and length).
+/// Fails with [`ShmBoundsError::TooLarge`] if the length to read exceeds
+/// [`MAX_KITTY_DATA_BYTES`] (the same cap `t=f` / `t=t` files and chunked
+/// transfers obey), whether it came from `S=` or from the object's own
+/// length. This is checked before the bounds comparison so that no caller
+/// ever maps or allocates for an oversize request. Fails with
+/// [`ShmBoundsError::OutOfBounds`] if the range doesn't fit within the
+/// object (including on `u64` overflow while adding offset and length).
 ///
 /// This is pure arithmetic with no platform-specific API, so it is shared
 /// by both the POSIX and Windows `read_kitty_shared_memory`
 /// implementations. The Windows path has no equivalent to POSIX `fstat`
 /// (a Windows file-mapping handle doesn't expose its own size), so it
-/// passes `u64::MAX` as `object_len` — this still gets the checked
-/// `offset + read_len` overflow protection, just without a real upper
-/// bound; the real bound is enforced by `MapViewOfFile` failing if the
-/// mapping is smaller than requested.
-fn shm_read_bounds(object_len: u64, offset: u64, data_size: Option<u32>) -> Option<(u64, u64)> {
-    let read_len = data_size.map_or_else(|| object_len.saturating_sub(offset), u64::from);
-    let end = offset.checked_add(read_len)?;
-    (end <= object_len).then_some((offset, read_len))
-}
-
-/// Read `read_len` bytes at `offset` from a POSIX shared-memory object of
-/// `object_len` bytes, backed by `fd`.
-///
-/// Returns an empty vector without mapping anything if either length is
-/// zero (`mmap` requires a non-zero length).
-#[cfg(unix)]
-fn read_kitty_shm_range(
-    fd: &std::os::fd::OwnedFd,
+/// passes `u64::MAX` as `object_len` — this still gets the cap and the
+/// checked `offset + read_len` overflow protection, just without a real
+/// upper bound; the real bound is enforced by `MapViewOfFile` failing if
+/// the mapping is smaller than requested.
+fn shm_read_bounds(
     object_len: u64,
     offset: u64,
-    read_len: u64,
-) -> nix::Result<Vec<u8>> {
-    if object_len == 0 || read_len == 0 {
-        return Ok(Vec::new());
+    data_size: Option<u32>,
+) -> Result<(u64, u64), ShmBoundsError> {
+    let read_len = data_size.map_or_else(|| object_len.saturating_sub(offset), u64::from);
+    let cap = u64::value_from(MAX_KITTY_DATA_BYTES).unwrap_or(u64::MAX);
+    if read_len > cap {
+        return Err(ShmBoundsError::TooLarge);
     }
-
-    let map_len = std::num::NonZeroUsize::new(usize::value_from(object_len).unwrap_or(usize::MAX))
-        .unwrap_or(std::num::NonZeroUsize::MAX);
-    let offset_us = usize::value_from(offset).unwrap_or(0);
-    let read_len_us = usize::value_from(read_len).unwrap_or(0);
-
-    // SAFETY: `fd` references a shm object whose size (`object_len` ==
-    // `map_len`) was just confirmed via `fstat` by the caller, and
-    // `shm_read_bounds` has already verified `offset_us + read_len_us <=
-    // object_len`.
-    unsafe { mmap_copy_range(fd, map_len, offset_us, read_len_us) }
+    let end = offset
+        .checked_add(read_len)
+        .ok_or(ShmBoundsError::OutOfBounds)?;
+    if end <= object_len {
+        Ok((offset, read_len))
+    } else {
+        Err(ShmBoundsError::OutOfBounds)
+    }
 }
 
-/// Map `map_len` bytes of `fd` read-only, copy `read_len` bytes starting at
-/// `offset` out of the mapping, then unmap.
-///
-/// # Safety
-///
-/// `fd` must reference an object with at least `map_len` readable bytes,
-/// and `offset + read_len` must be `<= map_len.get()`.
+/// Whether freminal may `shm_unlink` a `t=s` object after reading it.
 #[cfg(unix)]
-unsafe fn mmap_copy_range(
-    fd: &std::os::fd::OwnedFd,
-    map_len: std::num::NonZeroUsize,
-    offset: usize,
-    read_len: usize,
-) -> nix::Result<Vec<u8>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShmUnlinkDecision {
+    /// The object belongs to this process's effective user: unlink it.
+    Unlink,
+    /// The object belongs to a different user: leave it alone.
+    SkipForeignOwner,
+    /// The owner could not be determined (`fstat` failed): leave it alone.
+    SkipUnknownOwner,
+}
+
+/// Decide whether a `t=s` object may be unlinked after it was read.
+///
+/// kitty's `graphics.c` unlinks every shared-memory object it successfully
+/// opened, whatever its name — there is no naming convention for `t=s`
+/// (the `tty-graphics-protocol` substring rule applies only to `t=t`
+/// temporary files). The relevant comment in the `load_image_data_from_file`
+/// caller reads: "Client created temporary files and shared memory objects
+/// that were successfully opened are removed even when loading fails".
+///
+/// freminal keeps that behaviour but adds an ownership check, because the
+/// name is sender-supplied: an application could otherwise make the
+/// terminal destroy another user's (or a system service's) shared-memory
+/// object that the terminal merely has read permission on. The object is
+/// unlinked only when its owner (`fstat` `st_uid` of the opened
+/// descriptor) is the terminal's effective uid. The read itself is not
+/// affected by this decision.
+///
+/// `shm_unlink` takes a name, not a descriptor, so a swap of the name
+/// between the open and the unlink cannot be excluded entirely; the check
+/// narrows the window to objects the terminal's own user owns.
+#[cfg(unix)]
+const fn shm_unlink_decision(owner_uid: Option<u32>, euid: u32) -> ShmUnlinkDecision {
+    match owner_uid {
+        Some(uid) if uid == euid => ShmUnlinkDecision::Unlink,
+        Some(_) => ShmUnlinkDecision::SkipForeignOwner,
+        None => ShmUnlinkDecision::SkipUnknownOwner,
+    }
+}
+
+/// Why reading the contents of a POSIX `t=s` shared-memory object failed.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+enum KittyShmError {
+    #[error("shared memory object has an invalid size")]
+    InvalidSize,
+    #[error(transparent)]
+    Bounds(#[from] ShmBoundsError),
+    #[error("failed to read shared memory object: {0}")]
+    Read(std::io::Error),
+    /// The object ended before the requested range did, i.e. it was
+    /// truncated between the `fstat` that sized the read and the read itself.
+    #[error("shared memory object was truncated during the read")]
+    Truncated,
+}
+
+#[cfg(unix)]
+impl KittyShmError {
+    /// The error response sent to the client for this failure.
+    const fn reply(&self) -> &'static str {
+        match self {
+            Self::InvalidSize => "EINVAL:invalid shared memory object size",
+            Self::Bounds(bounds) => bounds.reply(),
+            Self::Read(_) | Self::Truncated => "EIO:failed to read shared memory object",
+        }
+    }
+}
+
+/// The most a `t=s` read grows its buffer by before reading again.
+#[cfg(all(unix, not(target_os = "macos")))]
+const KITTY_SHM_READ_CHUNK: usize = 1024 * 1024;
+
+/// Read `read_len` bytes at `offset` from the shared-memory object `file`
+/// with positioned reads.
+///
+/// `offset` / `read_len` come from [`shm_read_bounds`] over an object
+/// length that was observed earlier and may be stale. This deliberately does
+/// not `mmap` the object: per POSIX `mmap`, referencing a page of a mapping
+/// beyond the end of the underlying object (here: one a hostile client
+/// truncated with `ftruncate` after our `fstat`) raises `SIGBUS`, which
+/// kills the terminal, and mapping only the requested range is not enough
+/// because the range itself can be truncated away. `pread` instead returns
+/// a short count (or zero at end of object), which is reported as
+/// [`KittyShmError::Truncated`].
+///
+/// macOS has its own implementation below: XNU shared-memory objects do not
+/// support `read` / `pread` at all (`ESPIPE`).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_kitty_shm_range(
+    file: &std::fs::File,
+    offset: u64,
+    read_len: u64,
+) -> Result<Vec<u8>, KittyShmError> {
+    use std::os::unix::fs::FileExt as _;
+
+    let len = usize::value_from(read_len).map_err(|_| ShmBoundsError::TooLarge)?;
+
+    // Grow the buffer a chunk at a time, as bytes are actually read, rather
+    // than zero-filling the whole (up to 400 MiB) request before the first
+    // read: an object that is shorter than its stale `fstat` length, or one
+    // truncated mid-read, then costs at most one chunk beyond what it really
+    // held before it is reported as `Truncated`.
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < len {
+        let start = buf.len();
+        let chunk = (len - start).min(KITTY_SHM_READ_CHUNK);
+        buf.try_reserve(chunk)
+            .map_err(|_| ShmBoundsError::TooLarge)?;
+        buf.resize(start + chunk, 0);
+
+        let mut done: usize = 0;
+        while done < chunk {
+            let at = offset
+                .checked_add(
+                    u64::value_from(start + done).map_err(|_| ShmBoundsError::OutOfBounds)?,
+                )
+                .ok_or(ShmBoundsError::OutOfBounds)?;
+            match file.read_at(&mut buf[start + done..start + chunk], at) {
+                Ok(0) => return Err(KittyShmError::Truncated),
+                Ok(n) => done += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(KittyShmError::Read(e)),
+            }
+        }
+    }
+    Ok(buf)
+}
+
+/// Read `read_len` bytes at `offset` from the shared-memory object `file`
+/// (macOS).
+///
+/// XNU POSIX shared-memory objects support neither `read` nor `pread`
+/// (they fail with `ESPIPE`), so the only way to read one is `mmap`, which is
+/// what kitty itself does. The SIGBUS hazard that rules `mmap` out on other
+/// systems does not exist here: XNU fixes a shared-memory object's size at its
+/// first `ftruncate` and rejects every later one (`pshm_truncate` in
+/// `bsd/kern/posix_shm.c` returns `EINVAL` once the object is defined), so the
+/// object cannot shrink under the mapping. The size is re-read from the open
+/// descriptor here, so the mapped range is always inside the object. XNU
+/// reports that size rounded up to whole pages, so a read without `S=` may
+/// include trailing zero padding, as it did before Task 148 and as in kitty.
+#[cfg(target_os = "macos")]
+fn read_kitty_shm_range(
+    file: &std::fs::File,
+    offset: u64,
+    read_len: u64,
+) -> Result<Vec<u8>, KittyShmError> {
     use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap};
 
-    // SAFETY: forwarded from this function's safety contract — `fd` covers
-    // at least `map_len` bytes. The mapping is read-only and is unmapped
-    // below before returning; no pointer derived from it escapes.
+    let object_len = file.metadata().map_err(KittyShmError::Read)?.len();
+    let end = offset
+        .checked_add(read_len)
+        .ok_or(ShmBoundsError::OutOfBounds)?;
+    if end > object_len {
+        return Err(KittyShmError::Truncated);
+    }
+    let len = usize::value_from(read_len).map_err(|_| ShmBoundsError::TooLarge)?;
+    let Some(map_len) = usize::value_from(end)
+        .ok()
+        .and_then(std::num::NonZeroUsize::new)
+    else {
+        return Ok(Vec::new());
+    };
+    let start = usize::value_from(offset).map_err(|_| ShmBoundsError::OutOfBounds)?;
+
+    // SAFETY: `file` is an open shared-memory object of `object_len` bytes,
+    // and `map_len` (= offset + read_len) <= `object_len` was checked above.
+    // XNU never lets the object shrink after its size is set (see the doc
+    // comment), so every mapped page stays backed. The mapping is read-only,
+    // nothing derived from it outlives this function, and it is unmapped
+    // below.
     let ptr = unsafe {
         mmap(
             None,
             map_len,
             ProtFlags::PROT_READ,
             MapFlags::MAP_SHARED,
-            fd,
+            file,
             0,
         )
-    }?;
+    }
+    .map_err(|e| KittyShmError::Read(std::io::Error::from(e)))?;
 
-    // SAFETY: `ptr` is valid for `map_len.get()` bytes (the mmap length
-    // above); the caller's contract guarantees `offset + read_len <=
-    // map_len.get()`.
-    let bytes =
-        unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>().add(offset), read_len) };
-    let copied = bytes.to_vec();
+    // SAFETY: `ptr` is valid for `map_len` bytes and `start + len ==
+    // map_len`.
+    let copied =
+        unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>().add(start), len) }.to_vec();
 
-    // SAFETY: `ptr`/`map_len` are exactly the values returned by the
-    // matching `mmap` call above.
-    unsafe { munmap(ptr, map_len.get()) }?;
-
+    // SAFETY: `ptr` / `map_len` are exactly what `mmap` returned above.
+    if let Err(e) = unsafe { munmap(ptr, map_len.get()) } {
+        tracing::warn!("Kitty graphics: failed to unmap shared memory object: {e}");
+    }
     Ok(copied)
+}
+
+/// Size the read of an opened shared-memory object from `meta` and read it.
+#[cfg(unix)]
+fn read_kitty_shm_object(
+    file: &std::fs::File,
+    object_len: Option<u64>,
+    offset: u64,
+    data_size: Option<u32>,
+) -> Result<Vec<u8>, KittyShmError> {
+    let object_len = object_len.ok_or(KittyShmError::InvalidSize)?;
+    let (offset, read_len) = shm_read_bounds(object_len, offset, data_size)?;
+    read_kitty_shm_range(file, offset, read_len)
 }
 
 /// Whether `control` could belong to a continuation chunk of a chunked
@@ -714,7 +957,10 @@ impl TerminalHandler {
     /// Handle `a=q` — query whether the terminal supports the Kitty graphics protocol.
     ///
     /// Responds with OK for formats 24 (RGB), 32 (RGBA), and 100 (PNG).
-    /// Other formats get an error response.
+    /// Other formats get an error response. A file-backed medium (`t=f`,
+    /// `t=t`, `t=s`) while file transmission is refused gets the uniform
+    /// [`KITTY_FILE_ERROR_RESPONSE`] instead, matching what the transmission
+    /// itself would answer.
     fn handle_kitty_query(&self, cmd: &KittyGraphicsCommand) {
         let image_id = cmd.control.image_id.unwrap_or(0);
         let quiet = cmd.control.quiet;
@@ -728,6 +974,27 @@ impl TerminalHandler {
                     | freminal_common::buffer_states::kitty_graphics::KittyFormat::Png
             )
         });
+
+        // The query must agree with the consent gate in
+        // `resolve_kitty_transmission`: a medium that would be refused is
+        // answered with the same uniform file error, never with OK, so a
+        // client cannot be told a transmission works that then fails (and
+        // cannot tell "disabled" from "unreadable").
+        if medium_reads_host(kitty_medium(&cmd.control))
+            && self.host_capabilities.kitty_file_transmission == KittyFileTransmission::Refused
+        {
+            tracing::debug!(
+                "Kitty graphics: refusing {:?} query: \
+                 [security] allow_kitty_file_transfer is off",
+                kitty_medium(&cmd.control)
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id, None),
+                quiet,
+                KITTY_FILE_ERROR_RESPONSE,
+            );
+            return;
+        }
 
         // quiet=1 suppresses OK responses; quiet=2 suppresses all responses.
         if quiet >= 2 || (quiet >= 1 && supported) {
@@ -1361,7 +1628,8 @@ impl TerminalHandler {
                         "Kitty RGBA: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
@@ -1381,7 +1649,8 @@ impl TerminalHandler {
                         "Kitty RGB: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
@@ -1404,7 +1673,8 @@ impl TerminalHandler {
                     let w = rgba_img.width();
                     let h = rgba_img.height();
                     if w == 0 || h == 0 {
-                        self.send_kitty_error(
+                        self.send_kitty_medium_error(
+                            kitty_medium(&cmd.control),
                             kitty_id_no_number(image_id_hint, placement_id),
                             quiet,
                             "EINVAL:decoded image has zero dimensions",
@@ -1416,7 +1686,8 @@ impl TerminalHandler {
                 Err(e) => {
                     tracing::warn!("Kitty PNG decode failed");
                     tracing::debug!("Kitty PNG decode failed: {e}");
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:PNG decode failed",
@@ -1456,7 +1727,8 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: zlib decompression failed");
                 tracing::debug!("Kitty graphics: zlib decompression failed: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    kitty_medium(&cmd.control),
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:zlib decompression failed",
@@ -1481,14 +1753,28 @@ impl TerminalHandler {
         placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<Vec<u8>> {
-        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
-
         let payload = cmd.payload.as_slice();
-        match cmd
-            .control
-            .transmission
-            .unwrap_or(KittyTransmission::Direct)
+        let medium = kitty_medium(&cmd.control);
+
+        // The consent gate: before any file or shared-memory access, and
+        // before anything is removed. Refusal replies exactly as a failed open
+        // does, so "disabled" is indistinguishable from "unreadable".
+        if medium_reads_host(medium)
+            && self.host_capabilities.kitty_file_transmission == KittyFileTransmission::Refused
         {
+            tracing::debug!(
+                "Kitty graphics: refusing {medium:?} transmission: \
+                 [security] allow_kitty_file_transfer is off"
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                KITTY_FILE_ERROR_RESPONSE,
+            );
+            return None;
+        }
+
+        match medium {
             KittyTransmission::Direct => Some(payload.to_vec()),
             KittyTransmission::File => {
                 self.read_kitty_file(payload, image_id_hint, placement_id, quiet, false)
@@ -1576,8 +1862,12 @@ impl TerminalHandler {
     /// The payload bytes are the UTF-8 POSIX shared-memory object name
     /// (e.g. `/kitty-shm-1234`). `data_size`/`data_offset` (the `S=`/`O=`
     /// control keys) select the byte range to read; if `data_size` is
-    /// absent, the whole object (from `data_offset`) is read. Per the kitty
-    /// spec, the object is unlinked after reading regardless of outcome.
+    /// absent, the whole object (from `data_offset`) is read. At most
+    /// [`MAX_KITTY_DATA_BYTES`] are read; a larger request is refused with
+    /// `EFBIG`. The contents are read with positioned reads, never `mmap`
+    /// (see [`read_kitty_shm_range`]). Like kitty, the object is unlinked
+    /// after reading regardless of outcome, but only when it is owned by
+    /// this process's effective user (see [`shm_unlink_decision`]).
     ///
     /// Security: POSIX shm names are `/name` — a single leading slash and
     /// no other slashes. Names containing a NUL byte, `..`, or an embedded
@@ -1597,13 +1887,16 @@ impl TerminalHandler {
     ) -> Option<Vec<u8>> {
         use nix::fcntl::OFlag;
         use nix::sys::mman::{shm_open, shm_unlink};
-        use nix::sys::stat::{Mode, fstat};
+        use nix::sys::stat::Mode;
+        use nix::unistd::geteuid;
+        use std::os::unix::fs::MetadataExt;
 
         let name = match std::str::from_utf8(payload) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory name is not valid UTF-8: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:invalid shared memory object name",
@@ -1615,7 +1908,8 @@ impl TerminalHandler {
         if !shm_name_is_safe(name) {
             tracing::warn!("Kitty graphics: refusing shared memory object name");
             log_shm_name("refusing shared memory object name", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EPERM:refused shared memory object name",
@@ -1628,7 +1922,8 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory object not found: {e}");
                 log_shm_name("shared memory object not found", name);
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "ENOENT:shared memory object not found",
@@ -1637,57 +1932,43 @@ impl TerminalHandler {
             }
         };
 
-        let Some(object_len) = fstat(&fd)
-            .ok()
-            .and_then(|stat| u64::value_from(stat.st_size).ok())
-        else {
-            tracing::warn!("Kitty graphics: shared memory object has an invalid size");
-            log_shm_name("shared memory object has an invalid size", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:invalid shared memory object size",
-            );
-            let _ = shm_unlink(name);
-            return None;
-        };
+        let file = std::fs::File::from(fd);
+        let meta = file.metadata().ok();
+        let decision = shm_unlink_decision(meta.as_ref().map(MetadataExt::uid), geteuid().as_raw());
+        let object_len = meta.as_ref().map(MetadataExt::size);
 
         let offset = u64::from(data_offset.unwrap_or(0));
-        let Some((offset, read_len)) = shm_read_bounds(object_len, offset, data_size) else {
-            tracing::warn!(
-                "Kitty graphics: shared memory read out of bounds (offset={offset}, object_len={object_len})"
-            );
-            log_shm_name("shared memory read out of bounds", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:shared memory read out of bounds",
-            );
-            let _ = shm_unlink(name);
-            return None;
-        };
-
-        let result = read_kitty_shm_range(&fd, object_len, offset, read_len).map_or_else(
-            |e| {
-                tracing::warn!("Kitty graphics: failed to map shared memory object: {e}");
-                log_shm_name("failed to map shared memory object", name);
-                self.send_kitty_error(
+        let result = match read_kitty_shm_object(&file, object_len, offset, data_size) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!("Kitty graphics: failed to read shared memory object: {e}");
+                log_shm_name("failed to read shared memory object", name);
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
-                    "EIO:failed to map shared memory object",
+                    e.reply(),
                 );
                 None
-            },
-            Some,
-        );
+            }
+        };
 
-        // Per the kitty spec, the shm object must be unlinked after reading
-        // regardless of outcome — the sender is not expected to unlink it.
+        // kitty unlinks every shared-memory object it opened, regardless of
+        // outcome (see `shm_unlink_decision` for the citation); freminal
+        // does the same but only for objects its own effective user owns.
         // A failure here is logged but does not fail an otherwise-successful
         // read (the data has already been copied out).
-        if let Err(e) = shm_unlink(name) {
-            tracing::warn!("Kitty graphics: failed to unlink shared memory object: {e}");
-            log_shm_name("failed to unlink shared memory object", name);
+        match decision {
+            ShmUnlinkDecision::Unlink => {
+                if let Err(e) = shm_unlink(name) {
+                    tracing::warn!("Kitty graphics: failed to unlink shared memory object: {e}");
+                    log_shm_name("failed to unlink shared memory object", name);
+                }
+            }
+            ShmUnlinkDecision::SkipForeignOwner | ShmUnlinkDecision::SkipUnknownOwner => {
+                tracing::debug!("Kitty graphics: not unlinking shared memory object: {decision:?}");
+                log_shm_name("not unlinking shared memory object", name);
+            }
         }
 
         result
@@ -1734,7 +2015,8 @@ impl TerminalHandler {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory name is not valid UTF-8: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:invalid shared memory object name",
@@ -1746,7 +2028,8 @@ impl TerminalHandler {
         if !shm_name_is_safe(name) {
             tracing::warn!("Kitty graphics: refusing shared memory object name");
             log_shm_name("refusing shared memory object name", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EPERM:refused shared memory object name",
@@ -1765,7 +2048,8 @@ impl TerminalHandler {
                 "shared memory read on Windows requires an explicit S= size",
                 name,
             );
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:shared memory read requires S= on Windows",
@@ -1774,17 +2058,21 @@ impl TerminalHandler {
         };
 
         let offset = u64::from(data_offset.unwrap_or(0));
-        let Some((offset, read_len)) = shm_read_bounds(u64::MAX, offset, Some(data_size)) else {
-            tracing::warn!(
-                "Kitty graphics: shared memory read range overflows (offset={offset}, data_size={data_size})"
-            );
-            log_shm_name("shared memory read range overflows", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:shared memory read out of bounds",
-            );
-            return None;
+        let (offset, read_len) = match shm_read_bounds(u64::MAX, offset, Some(data_size)) {
+            Ok(range) => range,
+            Err(e) => {
+                tracing::warn!(
+                    "Kitty graphics: shared memory read refused: {e} (offset={offset}, data_size={data_size})"
+                );
+                log_shm_name("shared memory read refused", name);
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
+                    kitty_id_no_number(image_id_hint, placement_id),
+                    quiet,
+                    e.reply(),
+                );
+                return None;
+            }
         };
 
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1795,7 +2083,8 @@ impl TerminalHandler {
         if handle.is_null() {
             tracing::warn!("Kitty graphics: shared memory object not found");
             log_shm_name("shared memory object not found", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "ENOENT:shared memory object not found",
@@ -1818,7 +2107,8 @@ impl TerminalHandler {
         if base.is_null() {
             tracing::warn!("Kitty graphics: failed to map shared memory object");
             log_shm_name("failed to map shared memory object", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EIO:failed to map shared memory object",
@@ -1861,7 +2151,8 @@ impl TerminalHandler {
         quiet: u8,
     ) -> Option<(u32, u32)> {
         let Some(w) = cmd.control.src_width else {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing width (s)",
@@ -1869,7 +2160,8 @@ impl TerminalHandler {
             return None;
         };
         let Some(h) = cmd.control.src_height else {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing height (v)",
@@ -1895,7 +2187,8 @@ impl TerminalHandler {
         quiet: u8,
     ) {
         if img_width_px == 0 || img_height_px == 0 {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(control),
                 kitty_id_no_number(image_id_hint, control.placement_id),
                 quiet,
                 "EINVAL:zero dimension",
@@ -2679,6 +2972,65 @@ impl TerminalHandler {
         }
     }
 
+    /// Composite the decoded `a=f` rectangle `rect` (pixels, width, height)
+    /// onto its base canvas, giving the frame's new pixels.
+    ///
+    /// Sends the error and returns `None` if the base frame is missing or the
+    /// rectangle does not fit. The rectangle error goes through
+    /// [`Self::send_kitty_medium_error`], so for a file-backed medium it cannot
+    /// reveal the dimensions of the file.
+    fn compose_kitty_frame_canvas(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        stored_image: &InlineImage,
+        rect: &(Vec<u8>, u32, u32),
+    ) -> Option<Vec<u8>> {
+        let (rect_pixels, rect_w, rect_h) = rect;
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+
+        // Destination origin within the frame (`x`/`y`, default 0).
+        let dest_x = cmd.control.src_x.unwrap_or(0);
+        let dest_y = cmd.control.src_y.unwrap_or(0);
+
+        let canvas_w = stored_image.width_px;
+        let canvas_h = stored_image.height_px;
+
+        let mut canvas = self.resolve_frame_base_canvas(
+            cmd,
+            stored_image,
+            canvas_w,
+            canvas_h,
+            image_id_hint,
+            placement_id,
+            quiet,
+        )?;
+
+        // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
+        let overwrite = cmd.control.cell_x_offset.unwrap_or(0) != 0;
+        if let Err(msg) = composite_rect(
+            &mut canvas,
+            canvas_w,
+            canvas_h,
+            rect_pixels,
+            *rect_w,
+            *rect_h,
+            dest_x,
+            dest_y,
+            overwrite,
+        ) {
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                msg,
+            );
+            return None;
+        }
+        Some(canvas)
+    }
+
     /// Handle `a=f` — transmit an animation frame.
     ///
     /// The transmitted rectangle (`x`/`y`/`s`/`v`) is composited onto a base
@@ -2720,47 +3072,15 @@ impl TerminalHandler {
             return;
         }
 
-        let Some((rect_pixels, rect_w, rect_h)) =
+        let Some(rect) =
             self.decode_kitty_frame_rect(cmd, &stored_image, image_id_hint, placement_id, quiet)
         else {
             return; // Error already sent by decode_kitty_payload.
         };
 
-        // Destination origin within the frame (`x`/`y`, default 0).
-        let dest_x = cmd.control.src_x.unwrap_or(0);
-        let dest_y = cmd.control.src_y.unwrap_or(0);
-
-        let canvas_w = stored_image.width_px;
-        let canvas_h = stored_image.height_px;
-
-        let Some(mut canvas) = self.resolve_frame_base_canvas(
-            cmd,
-            &stored_image,
-            canvas_w,
-            canvas_h,
-            image_id_hint,
-            placement_id,
-            quiet,
-        ) else {
-            return; // Error already sent by resolve_frame_base_canvas.
+        let Some(canvas) = self.compose_kitty_frame_canvas(cmd, &stored_image, &rect) else {
+            return; // Error already sent by compose_kitty_frame_canvas.
         };
-
-        // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
-        let overwrite = cmd.control.cell_x_offset.unwrap_or(0) != 0;
-        if let Err(msg) = composite_rect(
-            &mut canvas,
-            canvas_w,
-            canvas_h,
-            &rect_pixels,
-            rect_w,
-            rect_h,
-            dest_x,
-            dest_y,
-            overwrite,
-        ) {
-            self.send_kitty_error(kitty_id_no_number(image_id_hint, placement_id), quiet, msg);
-            return;
-        }
 
         // Gap-to-next-frame (`z=`).
         let gap_ms = resolve_gap_ms(cmd.control.z_index);
@@ -3029,6 +3349,27 @@ impl TerminalHandler {
             );
             self.write_apc_response(&response);
         }
+    }
+
+    /// Send the failure reply for a transmission over `medium`, respecting
+    /// quiet mode.
+    ///
+    /// The one place that makes file-backed media (`t=f`, `t=t`, `t=s`)
+    /// answer every failure with [`KITTY_FILE_ERROR_RESPONSE`]; see
+    /// [`medium_error_reply`]. `message` is the detailed reason a direct
+    /// transmission would get, and is logged for the others.
+    fn send_kitty_medium_error(
+        &self,
+        medium: KittyTransmission,
+        id: KittyResponseId,
+        quiet: u8,
+        message: &'static str,
+    ) {
+        let reply = medium_error_reply(medium, message);
+        if reply != message {
+            tracing::debug!("Kitty graphics: {medium:?} failure reported uniformly: {message}");
+        }
+        self.send_kitty_error(id, quiet, reply);
     }
 
     /// Send a Kitty graphics error response, respecting quiet mode.
@@ -3794,12 +4135,78 @@ fn extract_rect(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::load_kitty_file;
+
+    /// The property the macOS `mmap` reader relies on: XNU rejects a second
+    /// `ftruncate` of a shared-memory object, so it can never shrink under a
+    /// mapping (the SIGBUS race the other platforms avoid with `pread`).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_shm_object_size_is_fixed_after_the_first_truncate() {
+        let (name, file) = create_test_shm_sized(3 * 4096);
+        let _cleanup = ShmGuard(name);
+        // XNU reports the size rounded up to the page size, so compare against
+        // what it reported before the attempt, not the requested length.
+        let before = file.metadata().expect("fstat").len();
+        assert!(before >= 3 * 4096);
+        assert!(
+            file.set_len(100).is_err(),
+            "XNU must refuse to shrink a sized shm object"
+        );
+        assert_eq!(file.metadata().expect("fstat").len(), before);
+    }
+
+    /// macOS: ranges inside the object read exactly; a range past its end is
+    /// `Truncated`, never a mapping beyond the object.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_shm_range_reads_and_bounds() {
+        let data: Vec<u8> = (0..10_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
+        let reader = std::fs::File::from(
+            nix::sys::mman::shm_open(
+                name.as_str(),
+                nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+            .expect("open reader"),
+        );
+        let got = read_kitty_shm_range(&reader, 777, 5000).expect("range read");
+        assert_eq!(got, data[777..5777]);
+        // XNU rounds the object up to whole pages (bytes past the data but
+        // inside the last page read as zeros, never SIGBUS); a range past the
+        // reported, page-rounded size is refused without mapping it.
+        let object_len = reader.metadata().expect("fstat").len();
+        assert!(matches!(
+            read_kitty_shm_range(&reader, 0, object_len + 1),
+            Err(KittyShmError::Truncated)
+        ));
+        assert_eq!(
+            read_kitty_shm_range(&reader, 0, 0).expect("empty"),
+            Vec::<u8>::new()
+        );
+    }
+
     #[cfg(unix)]
     use super::{
         FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
         verify_opened_kitty_file,
     };
-    use super::{KittyFileError, is_refused_kitty_path, read_capped};
+    #[cfg(all(unix, not(target_os = "macos")))]
+    use super::{KITTY_SHM_READ_CHUNK, read_kitty_shm_object};
+    use super::{
+        KittyFileError, ShmBoundsError, is_refused_kitty_path, kitty_path_allowed_on_windows,
+        read_capped, shm_read_bounds,
+    };
+    #[cfg(unix)]
+    use super::{
+        KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision, read_kitty_shm_range,
+        shm_unlink_decision,
+    };
     use freminal_common::{
         buffer_states::{
             format_tag::FormatTag,
@@ -3820,9 +4227,12 @@ mod tests {
     use super::super::{
         AltScreenAction, AltScreenMode, KittyImageState, KittyTransfer, TerminalHandler,
     };
+    use super::{KITTY_FILE_ERROR_RESPONSE, medium_error_reply};
     use freminal_common::buffer_states::buffer_type::BufferType;
     use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
+    use freminal_common::buffer_states::kitty_graphics::{KittyFormat, KittyTransmission};
     use freminal_common::buffer_states::row_number::RowNumber;
+    use freminal_common::host_capabilities::{HostCapabilities, KittyFileTransmission};
 
     // ------------------------------------------------------------------
     // Kitty graphics direct transfer tests
@@ -3834,6 +4244,19 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Like [`kitty_handler`], with file-backed transmission (`t=f`, `t=t`,
+    /// `t=s`) enabled, as `[security] allow_kitty_file_transfer = true` does.
+    /// Tests that exercise reading must start from this one; the default
+    /// handler refuses those media.
+    fn kitty_handler_allowing_files() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let (mut handler, rx) = kitty_handler();
+        handler.set_host_capabilities(HostCapabilities {
+            kitty_file_transmission: KittyFileTransmission::Allowed,
+            ..HostCapabilities::default()
+        });
         (handler, rx)
     }
 
@@ -4057,7 +4480,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4092,7 +4517,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4124,7 +4551,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4144,7 +4573,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("OK"), "Expected OK response, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -4762,7 +5193,9 @@ mod tests {
                 );
                 assert!(!s.contains("ENOTSUP"), "f=24 should NOT be unsupported");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -5245,7 +5678,9 @@ mod tests {
     fn recv_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
         match rx.try_recv().expect("expected a PTY response") {
             PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8 response"),
-            resize @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {resize:?}"),
+            resize @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+                panic!("expected PtyWrite::Write, got {resize:?}")
+            }
         }
     }
 
@@ -6987,7 +7422,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         // Write a minimal valid 1x1 red PNG to a temp file.
         let dir = std::env::temp_dir();
@@ -7099,11 +7534,428 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Consent gate and uniform replies (GHSA-8prj-mhmf-xpjg)
+    // -----------------------------------------------------------------------
+
+    /// Drain `rx`, require exactly one PTY reply, and return it.
+    fn sole_reply(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        let mut replies = drain_pty_text(rx);
+        assert_eq!(replies.len(), 1, "expected exactly one reply: {replies:?}");
+        replies.pop().unwrap_or_default()
+    }
+
+    /// Write `bytes` to a uniquely-named file in `temp_dir()` whose name
+    /// carries `prefix`, returning its path. The caller removes it.
+    fn write_unique_bytes(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::io::Write as _;
+
+        let mut file = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempfile_in(std::env::temp_dir())
+            .expect("failed to create temp file");
+        file.write_all(bytes).expect("failed to write temp file");
+        let (_, path) = file.keep().expect("failed to persist temp file");
+        path
+    }
+
+    /// The reply a transmission of a path that does not exist gets, as the
+    /// reference every other failure and every refusal must equal.
+    fn missing_file_reply(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+    ) -> String {
+        let missing = std::env::temp_dir().join("freminal_kitty_no_such_file.png");
+        transmit_kitty_file(
+            handler,
+            KittyTransmission::File,
+            7,
+            missing.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(rx);
+        assert!(
+            reply.contains(KITTY_FILE_ERROR_RESPONSE),
+            "unexpected reply for a missing file: {reply:?}"
+        );
+        reply
+    }
+
+    /// Transmit `path` as image 7 over `t=f` with `control`'s other keys, and
+    /// return the sole reply.
+    fn send_file_with(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+        control: &KittyControlData,
+        path: &std::path::Path,
+    ) -> String {
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(7),
+                ..control.clone()
+            },
+            payload: path.to_str().expect("utf-8").as_bytes().to_vec(),
+        });
+        sole_reply(rx)
+    }
+
+    #[test]
+    fn medium_error_reply_is_uniform_for_every_host_reading_medium() {
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+        ] {
+            for detail in [
+                "EINVAL:payload size mismatch",
+                "EINVAL:PNG decode failed",
+                "ENOENT:shared memory object not found",
+                "EFBIG:shared memory read exceeds the size limit",
+            ] {
+                assert_eq!(
+                    medium_error_reply(medium, detail),
+                    KITTY_FILE_ERROR_RESPONSE
+                );
+            }
+        }
+        // Direct transmission keeps its detailed replies.
+        assert_eq!(
+            medium_error_reply(KittyTransmission::Direct, "EINVAL:PNG decode failed"),
+            "EINVAL:PNG decode failed"
+        );
+    }
+
+    #[test]
+    fn kitty_file_transmission_is_refused_by_default() {
+        assert_eq!(
+            TerminalHandler::new(80, 24)
+                .host_capabilities()
+                .kitty_file_transmission,
+            KittyFileTransmission::Refused
+        );
+    }
+
+    #[test]
+    fn refused_t_f_does_not_read_an_existing_png_and_replies_as_a_failed_open() {
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let path = write_unique_png("freminal_gate_f_");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::File,
+            7,
+            path.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(&rx);
+        let still_there = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reply, reference, "refusal must look like a failed open");
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(still_there);
+    }
+
+    #[test]
+    fn refused_t_t_does_not_read_or_delete_a_marked_temp_file() {
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let path = write_unique_png("tty-graphics-protocol-gate-");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::TempFile,
+            7,
+            path.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(&rx);
+        let survived = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reply, reference);
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(survived, "a refused t=t must not delete the file");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refused_t_s_does_not_read_or_unlink_an_existing_object() {
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::shm_open;
+        use nix::sys::stat::Mode;
+
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let name = create_test_shm_object(&pixels);
+        let _cleanup = ShmGuard(name.clone());
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(2),
+                src_height: Some(1),
+                data_size: Some(u32::try_from(pixels.len()).expect("fits")),
+                image_id: Some(7),
+                ..KittyControlData::default()
+            },
+            payload: name.clone().into_bytes(),
+        });
+        let reply = sole_reply(&rx);
+        let still_there = shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_ok();
+
+        assert_eq!(reply, reference);
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(still_there, "a refused t=s must not unlink the object");
+    }
+
+    #[test]
+    fn the_gate_follows_live_capability_changes() {
+        let (mut handler, rx) = kitty_handler();
+        let path = write_unique_png("freminal_gate_live_");
+        let payload = path.to_str().expect("utf-8").as_bytes().to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 7, payload.clone());
+        let refused = sole_reply(&rx);
+        assert!(refused.contains(KITTY_FILE_ERROR_RESPONSE));
+        assert!(handler.buffer().image_store().get(7).is_none());
+
+        handler.set_host_capabilities(HostCapabilities {
+            kitty_file_transmission: KittyFileTransmission::Allowed,
+            ..HostCapabilities::default()
+        });
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 8, payload.clone());
+        assert!(handler.buffer().image_store().get(8).is_some());
+        drain_pty_text(&rx);
+
+        handler.set_host_capabilities(HostCapabilities::default());
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 9, payload);
+        let _ = std::fs::remove_file(&path);
+        assert!(handler.buffer().image_store().get(9).is_none());
+        assert!(sole_reply(&rx).contains(KITTY_FILE_ERROR_RESPONSE));
+    }
+
+    /// Send `a=q i=31 q=quiet` with transmission medium `medium`.
+    fn query_with_medium(handler: &mut TerminalHandler, medium: KittyTransmission, quiet: u8) {
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Query),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(medium),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(31),
+                quiet,
+                ..KittyControlData::default()
+            },
+            payload: b"/nonexistent".to_vec(),
+        });
+    }
+
+    #[test]
+    fn query_for_a_refused_medium_gets_the_uniform_file_error() {
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+        ] {
+            let (mut handler, rx) = kitty_handler();
+            query_with_medium(&mut handler, medium, 0);
+            let reply = sole_reply(&rx);
+            assert!(
+                reply.contains(KITTY_FILE_ERROR_RESPONSE),
+                "{medium:?}: {reply:?}"
+            );
+            assert!(!reply.contains(";OK"), "{medium:?}: {reply:?}");
+        }
+    }
+
+    #[test]
+    fn query_for_a_refused_medium_honours_quiet() {
+        let (mut handler, rx) = kitty_handler();
+        // q=1 only suppresses OK, so the error is still sent.
+        query_with_medium(&mut handler, KittyTransmission::File, 1);
+        assert!(sole_reply(&rx).contains(KITTY_FILE_ERROR_RESPONSE));
+        // q=2 suppresses everything.
+        query_with_medium(&mut handler, KittyTransmission::File, 2);
+        let leftover = drain_pty_text(&rx);
+        assert_eq!(leftover, Vec::<String>::new(), "q=2 must send nothing");
+    }
+
+    #[test]
+    fn query_for_an_allowed_or_direct_medium_still_answers_ok() {
+        let (mut refusing, rx) = kitty_handler();
+        query_with_medium(&mut refusing, KittyTransmission::Direct, 0);
+        assert!(sole_reply(&rx).contains(";OK"));
+
+        let (mut allowing, rx) = kitty_handler_allowing_files();
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+            KittyTransmission::Direct,
+        ] {
+            query_with_medium(&mut allowing, medium, 0);
+            let reply = sole_reply(&rx);
+            assert!(reply.contains(";OK"), "{medium:?}: {reply:?}");
+        }
+    }
+
+    #[test]
+    fn refusal_honours_quiet_like_a_failed_open() {
+        let (mut handler, rx) = kitty_handler();
+        let path = write_unique_png("freminal_gate_quiet_");
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(7),
+                quiet: 2,
+                ..KittyControlData::default()
+            },
+            payload: path.to_str().expect("utf-8").as_bytes().to_vec(),
+        });
+        let _ = std::fs::remove_file(&path);
+        assert!(drain_pty_text(&rx).is_empty(), "q=2 suppresses errors");
+    }
+
+    #[test]
+    fn allowed_file_failures_after_the_read_all_reply_identically() {
+        use freminal_common::buffer_states::kitty_graphics::KittyCompression;
+
+        let (mut handler, rx) = kitty_handler_allowing_files();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        // Sanity: the medium really is enabled, so the failures below happen
+        // after the read rather than at the gate.
+        let valid = write_unique_png("freminal_gate_valid_");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::File,
+            8,
+            valid.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let _ = std::fs::remove_file(&valid);
+        assert!(handler.buffer().image_store().get(8).is_some());
+        drain_pty_text(&rx);
+
+        let wrong_size = write_unique_bytes("freminal_gate_size_", &[0_u8; 4]);
+        let not_a_png = write_unique_bytes("freminal_gate_png_", b"definitely not a PNG");
+        let not_zlib = write_unique_bytes("freminal_gate_zlib_", b"definitely not zlib");
+        let empty = write_unique_bytes("freminal_gate_empty_", &[]);
+
+        // The file holds 4 bytes; a 2x2 RGBA image needs 16.
+        let size_mismatch = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        let png_failure = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Png),
+                ..KittyControlData::default()
+            },
+            &not_a_png,
+        );
+        let rgb_mismatch = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgb),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        // A readable file with no dimensions given: still the same reply, so
+        // the absence of an error about `s=` cannot confirm the read worked.
+        let missing_dimensions = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        let zlib_failure = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                compression: Some(KittyCompression::Zlib),
+                src_width: Some(1),
+                src_height: Some(1),
+                ..KittyControlData::default()
+            },
+            &not_zlib,
+        );
+        // A zero-sized RGBA image from an empty file.
+        let zero_dimension = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(0),
+                src_height: Some(0),
+                ..KittyControlData::default()
+            },
+            &empty,
+        );
+
+        for path in [&wrong_size, &not_a_png, &not_zlib, &empty] {
+            let _ = std::fs::remove_file(path);
+        }
+
+        assert!(reference.contains(KITTY_FILE_ERROR_RESPONSE));
+        for (what, reply) in [
+            ("RGBA size mismatch", size_mismatch),
+            ("PNG decode failure", png_failure),
+            ("RGB size mismatch", rgb_mismatch),
+            ("missing dimensions", missing_dimensions),
+            ("zlib failure", zlib_failure),
+            ("zero dimension", zero_dimension),
+        ] {
+            assert_eq!(reply, reference, "{what}");
+        }
+        assert!(handler.buffer().image_store().get(7).is_none());
+    }
+
+    #[test]
+    fn direct_transmission_keeps_its_detailed_failure_replies() {
+        // The gate and the uniform reply are for host-reading media only.
+        let (mut handler, rx) = kitty_handler();
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                image_id: Some(7),
+                ..KittyControlData::default()
+            },
+            payload: b"definitely not a PNG".to_vec(),
+        });
+        assert!(sole_reply(&rx).contains("EINVAL:PNG decode failed"));
+    }
+
     #[test]
     fn kitty_temp_file_transmission_reads_and_deletes() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let path = write_unique_png("tty-graphics-protocol-");
         let payload = path
@@ -7129,7 +7981,7 @@ mod tests {
     fn kitty_temp_file_without_marker_is_read_but_not_deleted() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let path = write_unique_png("freminal_unmarked_");
         let payload = path
@@ -7153,7 +8005,7 @@ mod tests {
     fn kitty_temp_file_symlink_reads_target_and_spares_unmarked_target() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         // The target has no marker; only the symlink's name does. The path
         // is canonicalised first, so the read follows the link and the
@@ -7204,6 +8056,37 @@ mod tests {
         assert!(
             matches!(result, Err(KittyFileError::Open(_))),
             "O_NOFOLLOW must refuse a symlink as the final component"
+        );
+    }
+
+    #[test]
+    fn kitty_windows_guard_allows_only_local_drive_paths() {
+        for allowed in [r"C:\img\x.png", "c:/img/x.png"] {
+            assert!(kitty_path_allowed_on_windows(allowed), "{allowed:?}");
+        }
+        for refused in [
+            r"\\host\share\x.png",
+            "//host/share/x.png",
+            r"\\?\C:\x.png",
+            r"\\?\UNC\host\share\x.png",
+            r"\\.\pipe\x",
+            "C:x.png",
+            "C:",
+            r"\x.png",
+            "x.png",
+            "",
+        ] {
+            assert!(!kitty_path_allowed_on_windows(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_refuses_unc_path_before_touching_the_filesystem() {
+        let result = load_kitty_file(b"\\\\host\\share\\x.png");
+        assert!(
+            matches!(result, Err(KittyFileError::NotLocalPath)),
+            "a UNC path must be refused without resolving it"
         );
     }
 
@@ -7296,7 +8179,7 @@ mod tests {
     fn kitty_file_directory_path_refused() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
         let dir = tempfile::tempdir().expect("tempdir");
         let payload = dir.path().to_str().expect("utf-8").as_bytes().to_vec();
 
@@ -7310,7 +8193,7 @@ mod tests {
     fn kitty_file_fifo_refused_without_blocking() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
         let dir = tempfile::tempdir().expect("tempdir");
         let fifo = dir.path().join("fifo");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
@@ -7326,7 +8209,7 @@ mod tests {
     fn kitty_file_proc_path_refused() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         transmit_kitty_file(
             &mut handler,
@@ -7371,7 +8254,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // Build a platform-appropriate *absolute* path that does not exist.
         // A hardcoded `/tmp/...` string is not absolute on Windows (no drive
@@ -7406,112 +8289,9 @@ mod tests {
         );
 
         // An error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EBADF:Failed to read image file") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EBADF error response for missing file"
-        );
-    }
-
-    #[test]
-    fn kitty_file_transmission_relative_path_rejected() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Png),
-                transmission: Some(KittyTransmission::File),
-                image_id: Some(996),
-                ..KittyControlData::default()
-            },
-            payload: b"../../../etc/passwd".to_vec(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        // Should NOT be in the store.
-        assert!(
-            handler.buffer().image_store().get(996).is_none(),
-            "No image should be stored for a relative path"
-        );
-
-        // The uniform EBADF error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EBADF:Failed to read image file") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EBADF error response for relative path"
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn kitty_shared_memory_nonexistent_object_returns_enoent_windows() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        // A safe, well-formed name that does not correspond to any existing
-        // mapping — the point is that opening it fails. Kept short so it is
-        // consistent with the POSIX path and the shared naming helper.
-        let name = unique_shm_name();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Rgba),
-                transmission: Some(KittyTransmission::SharedMemory),
-                src_width: Some(1),
-                src_height: Some(1),
-                data_size: Some(4),
-                image_id: Some(995),
-                ..KittyControlData::default()
-            },
-            payload: name.into_bytes(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        assert!(
-            handler.buffer().image_store().get(995).is_none(),
-            "No image should be stored for a nonexistent shared memory object"
-        );
-
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("ENOENT") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an ENOENT error response for a nonexistent shared memory object"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed ENOENT reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 995);
     }
 
     #[test]
@@ -7521,7 +8301,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // No `S=` (`data_size`) supplied — Windows has no equivalent to
         // POSIX `fstat` to learn the object's size, so this must be
@@ -7546,19 +8326,9 @@ mod tests {
             "No image should be stored when S= is missing on Windows"
         );
 
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EINVAL") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EINVAL error response when S= is missing on Windows"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed EINVAL reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 995);
     }
 
     #[test]
@@ -7569,7 +8339,7 @@ mod tests {
         };
 
         for bad_name in ["/foo/bar", "/../etc/passwd"] {
-            let (mut handler, rx) = kitty_handler();
+            let (mut handler, rx) = kitty_handler_allowing_files();
 
             let cmd = KittyGraphicsCommand {
                 control: KittyControlData {
@@ -7592,19 +8362,9 @@ mod tests {
                 "No image should be stored for unsafe shared memory name {bad_name:?}"
             );
 
-            let mut found_error = false;
-            while let Ok(msg) = rx.try_recv() {
-                if let PtyWrite::Write(bytes) = msg {
-                    let text = String::from_utf8_lossy(&bytes);
-                    if text.contains("EPERM") {
-                        found_error = true;
-                    }
-                }
-            }
-            assert!(
-                found_error,
-                "Expected an EPERM error response for unsafe shared memory name {bad_name:?}"
-            );
+            // Every failure of a file-backed medium replies identically; the
+            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            assert_file_refused(&handler, &rx, 995);
         }
     }
 
@@ -7682,7 +8442,7 @@ mod tests {
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let (name, creator_handle) = create_test_shm_object_windows(&pixels);
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -7718,71 +8478,11 @@ mod tests {
         assert_eq!(stored.width_px, 2);
         assert_eq!(stored.height_px, 1);
 
-        // No error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if !text.contains("OK") {
-                    found_error = true;
-                }
-            }
-        }
+        // Only the success reply may have been sent.
+        let responses = drain_pty_text(&rx);
         assert!(
-            !found_error,
-            "Expected no error response for a valid t=s transmission on Windows"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn kitty_shared_memory_nonexistent_object_returns_enoent() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        // A safe, well-formed name that does not correspond to any existing
-        // object — the point is that `shm_open` fails with `ENOENT`. The name
-        // must fit macOS's 31-char shm limit, or the error would be
-        // `ENAMETOOLONG` instead. `unique_shm_name` never creates the object.
-        let name = unique_shm_name();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Rgba),
-                transmission: Some(KittyTransmission::SharedMemory),
-                src_width: Some(1),
-                src_height: Some(1),
-                image_id: Some(995),
-                ..KittyControlData::default()
-            },
-            payload: name.into_bytes(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        // Should NOT be in the store.
-        assert!(
-            handler.buffer().image_store().get(995).is_none(),
-            "No image should be stored for a nonexistent shared memory object"
-        );
-
-        // An ENOENT error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("ENOENT") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an ENOENT error response for a nonexistent shared memory object"
+            responses.iter().all(|r| r.contains(";OK")),
+            "expected only an OK reply for a valid t=s transmission on Windows, got {responses:?}"
         );
     }
 
@@ -7794,7 +8494,7 @@ mod tests {
         };
 
         for bad_name in ["/foo/bar", "/../etc/passwd", "/proc/self/mem"] {
-            let (mut handler, rx) = kitty_handler();
+            let (mut handler, rx) = kitty_handler_allowing_files();
 
             let cmd = KittyGraphicsCommand {
                 control: KittyControlData {
@@ -7816,29 +8516,19 @@ mod tests {
                 "No image should be stored for unsafe shared memory name {bad_name:?}"
             );
 
-            let mut found_error = false;
-            while let Ok(msg) = rx.try_recv() {
-                if let PtyWrite::Write(bytes) = msg {
-                    let text = String::from_utf8_lossy(&bytes);
-                    if text.contains("EPERM") {
-                        found_error = true;
-                    }
-                }
-            }
-            assert!(
-                found_error,
-                "Expected an EPERM error response for unsafe shared memory name {bad_name:?}"
-            );
+            // Every failure of a file-backed medium replies identically; the
+            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            assert_file_refused(&handler, &rx, 995);
         }
     }
 
-    /// Create a POSIX shm object of `data.len()` bytes containing `data`,
-    /// returning its unique name. Test-only helper for the `t=s` round-trip
-    /// tests below.
+    /// Create a POSIX shm object of `len` bytes (sparse: nothing is
+    /// written), returning its unique name and the creating (read-write)
+    /// descriptor.
     #[cfg(unix)]
-    fn create_test_shm_object(data: &[u8]) -> String {
+    fn create_test_shm_sized(len: u64) -> (String, std::fs::File) {
         use nix::fcntl::OFlag;
-        use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open};
+        use nix::sys::mman::shm_open;
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
 
@@ -7850,37 +8540,268 @@ mod tests {
         )
         .expect("shm_open (create) should succeed in test");
 
-        let len = i64::try_from(data.len()).expect("test data length fits in i64");
+        let len = i64::try_from(len).expect("test length fits in i64");
         ftruncate(&fd, len).expect("ftruncate should succeed in test");
+        (name, std::fs::File::from(fd))
+    }
 
-        if !data.is_empty() {
-            let map_len =
-                std::num::NonZeroUsize::new(data.len()).expect("test data must be non-empty here");
-            // SAFETY: `fd` was just sized to `data.len()` bytes via
-            // `ftruncate`; the mapping is read-write and unmapped
-            // immediately after the copy, before this function returns.
-            let ptr = unsafe {
-                mmap(
-                    None,
-                    map_len,
-                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    MapFlags::MAP_SHARED,
-                    &fd,
-                    0,
-                )
-            }
-            .expect("mmap should succeed in test");
-            // SAFETY: `ptr` is valid for `data.len()` writable bytes (the
-            // mmap length above matches `data.len()` exactly).
-            unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
-            }
-            // SAFETY: `ptr`/`map_len` are exactly the values returned by
-            // the matching `mmap` call above.
-            unsafe { munmap(ptr, map_len.get()) }.expect("munmap should succeed in test");
+    /// Unlinks a POSIX shm object when dropped, ignoring errors, so a test
+    /// whose assertion fails before its cleanup does not leak the object into
+    /// `/dev/shm`. Objects the code under test already unlinked are fine: the
+    /// failed `shm_unlink` is ignored.
+    #[cfg(unix)]
+    struct ShmGuard(String);
+
+    #[cfg(unix)]
+    impl Drop for ShmGuard {
+        fn drop(&mut self) {
+            let _ = nix::sys::mman::shm_unlink(self.0.as_str());
         }
+    }
 
+    /// Create a POSIX shm object of `data.len()` bytes containing `data`,
+    /// returning its unique name. Test-only helper for the `t=s` round-trip
+    /// tests below.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn create_test_shm_object(data: &[u8]) -> String {
+        use std::os::unix::fs::FileExt as _;
+
+        let (name, file) = create_test_shm_sized(u64::try_from(data.len()).expect("fits in u64"));
+        file.write_all_at(data, 0)
+            .expect("writing the test shm object should succeed");
         name
+    }
+
+    /// macOS variant: XNU shared-memory objects cannot be written with
+    /// `write` / `pwrite`, only through a mapping.
+    #[cfg(target_os = "macos")]
+    fn create_test_shm_object(data: &[u8]) -> String {
+        use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap};
+
+        let (name, file) = create_test_shm_sized(u64::try_from(data.len()).expect("fits in u64"));
+        let Some(len) = std::num::NonZeroUsize::new(data.len()) else {
+            return name;
+        };
+        // SAFETY: the object was just sized to `data.len()` bytes; the
+        // writable mapping covers exactly that and is unmapped below.
+        unsafe {
+            let ptr = mmap(
+                None,
+                len,
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_SHARED,
+                &file,
+                0,
+            )
+            .expect("mapping the test shm object should succeed");
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
+            munmap(ptr, len.get()).expect("unmapping the test shm object should succeed");
+        }
+        name
+    }
+
+    #[test]
+    fn shm_read_bounds_table() {
+        const CAP: u64 = 400 * 1024 * 1024;
+
+        // Within the cap, S= given.
+        assert_eq!(shm_read_bounds(100, 10, Some(20)), Ok((10, 20)));
+        // Without S=: read to the end of the object from the offset.
+        assert_eq!(shm_read_bounds(100, 10, None), Ok((10, 90)));
+        // Empty read at the very end is in bounds.
+        assert_eq!(shm_read_bounds(100, 100, None), Ok((100, 0)));
+        // Exactly at the cap, via S= and via the object length.
+        assert_eq!(
+            shm_read_bounds(CAP, 0, Some(u32::try_from(CAP).unwrap())),
+            Ok((0, CAP))
+        );
+        assert_eq!(shm_read_bounds(CAP, 0, None), Ok((0, CAP)));
+        // Offset leaves exactly the cap remaining in a larger object.
+        assert_eq!(shm_read_bounds(CAP + 7, 7, None), Ok((7, CAP)));
+        // One past the cap via S=, even though the object is large enough.
+        assert_eq!(
+            shm_read_bounds(CAP + 1, 0, Some(u32::try_from(CAP + 1).unwrap())),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // One past the cap via the object length, no S=.
+        assert_eq!(
+            shm_read_bounds(CAP + 1, 0, None),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // The cap is applied before the bounds check: an oversize S= on a
+        // small object is TooLarge, never out of bounds.
+        assert_eq!(
+            shm_read_bounds(10, 0, Some(u32::MAX)),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // The Windows shape (object_len == u64::MAX): S= above the cap.
+        assert_eq!(
+            shm_read_bounds(u64::MAX, 0, Some(u32::MAX)),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // ... and below the cap.
+        assert_eq!(shm_read_bounds(u64::MAX, 5, Some(16)), Ok((5, 16)));
+        // Range past the end of the object.
+        assert_eq!(
+            shm_read_bounds(100, 90, Some(11)),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+        assert_eq!(
+            shm_read_bounds(100, 101, None),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+        // offset + length overflows u64.
+        assert_eq!(
+            shm_read_bounds(u64::MAX, u64::MAX, Some(1)),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shm_unlink_decision_table() {
+        assert_eq!(
+            shm_unlink_decision(Some(1000), 1000),
+            ShmUnlinkDecision::Unlink
+        );
+        assert_eq!(shm_unlink_decision(Some(0), 0), ShmUnlinkDecision::Unlink);
+        assert_eq!(
+            shm_unlink_decision(Some(0), 1000),
+            ShmUnlinkDecision::SkipForeignOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(Some(1001), 1000),
+            ShmUnlinkDecision::SkipForeignOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(None, 1000),
+            ShmUnlinkDecision::SkipUnknownOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(None, 0),
+            ShmUnlinkDecision::SkipUnknownOwner
+        );
+    }
+
+    /// An object one byte over the cap is refused before anything is read or
+    /// allocated (it is sparse, so even a wrongly-attempted read would be
+    /// observable only as a 400 MiB allocation), and is still unlinked
+    /// because the test process owns it.
+    #[test]
+    #[cfg(unix)]
+    fn kitty_shared_memory_oversize_object_rejected_with_efbig() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::shm_open;
+        use nix::sys::stat::Mode;
+
+        let over_cap = u64::try_from(MAX_KITTY_DATA_BYTES).unwrap() + 1;
+        let (name, _creator) = create_test_shm_sized(over_cap);
+        let _cleanup = ShmGuard(name.clone());
+
+        let (mut handler, rx) = kitty_handler_allowing_files();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(996),
+                ..KittyControlData::default()
+            },
+            payload: name.clone().into_bytes(),
+        };
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(handler.buffer().image_store().get(996).is_none());
+
+        // Every failure of a file-backed medium replies identically; the
+        // detailed EFBIG reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 996);
+
+        assert!(
+            shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_err(),
+            "an own-uid object is unlinked even when the read is refused"
+        );
+    }
+
+    /// The shrink-after-`fstat` race, made deterministic: the read range is
+    /// derived from a stale (pre-truncation) object length, then the object
+    /// is truncated, then the read runs. The previous `mmap` implementation
+    /// raised SIGBUS here; the positioned read reports an error instead.
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn kitty_shared_memory_truncated_after_size_is_an_error_not_sigbus() {
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::shm_open;
+        use nix::sys::stat::Mode;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let data = vec![0xABu8; 3 * 4096];
+        let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
+        let reader = std::fs::File::from(
+            shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).expect("open reader"),
+        );
+        let stale_len = reader.metadata().expect("fstat").size();
+        assert_eq!(stale_len, u64::try_from(data.len()).unwrap());
+
+        // The sender shrinks the object after we sized the read.
+        let creator = std::fs::File::from(
+            shm_open(name.as_str(), OFlag::O_RDWR, Mode::empty()).expect("open writer"),
+        );
+        creator.set_len(100).expect("truncate");
+
+        let result = read_kitty_shm_object(&reader, Some(stale_len), 0, None);
+        assert!(
+            matches!(result, Err(KittyShmError::Truncated)),
+            "expected Truncated, got {result:?}"
+        );
+        let result = read_kitty_shm_range(&reader, 4096, 4096);
+        assert!(matches!(result, Err(KittyShmError::Truncated)));
+
+        // A range that still fits after the shrink reads fine.
+        assert_eq!(
+            read_kitty_shm_range(&reader, 0, 100).expect("range within the new length"),
+            vec![0xABu8; 100]
+        );
+    }
+
+    /// A read spanning several internal chunks returns the exact bytes, at an
+    /// offset that is not chunk-aligned, and an object that ends inside a
+    /// later chunk is reported as truncated.
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn kitty_shared_memory_read_spans_chunks() {
+        let total = KITTY_SHM_READ_CHUNK * 2 + 12_345;
+        let data: Vec<u8> = (0..total).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
+        let reader = std::fs::File::from(
+            nix::sys::mman::shm_open(
+                name.as_str(),
+                nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+            .expect("open reader"),
+        );
+
+        let offset = 777usize;
+        let read_len = total - offset;
+        let got = read_kitty_shm_range(
+            &reader,
+            u64::try_from(offset).unwrap(),
+            u64::try_from(read_len).unwrap(),
+        )
+        .expect("multi-chunk read");
+        assert_eq!(got, data[offset..]);
+
+        // Asking for more than the object holds fails in a later chunk.
+        let result = read_kitty_shm_range(&reader, 0, u64::try_from(total + 1).unwrap());
+        assert!(matches!(result, Err(KittyShmError::Truncated)));
     }
 
     #[test]
@@ -7896,8 +8817,9 @@ mod tests {
         // 2x1 RGBA image: red pixel, green pixel.
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let name = create_test_shm_object(&pixels);
+        let _cleanup = ShmGuard(name.clone());
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -7962,8 +8884,9 @@ mod tests {
         object.extend_from_slice(&pixel);
 
         let name = create_test_shm_object(&object);
+        let _cleanup = ShmGuard(name.clone());
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -8267,7 +9190,7 @@ mod tests {
         use crate::log_capture::{capture, warnings};
         use freminal_common::buffer_states::kitty_graphics::{KittyFormat, KittyTransmission};
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
         let name = format!("/freminal-test-SECRETNAME-{}", std::process::id());
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -8300,7 +9223,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // Invalid UTF-8 bytes.
         let cmd = KittyGraphicsCommand {
@@ -8703,7 +9626,9 @@ mod tests {
                         "expected ENOENT for {action:?}, got: {s}"
                     );
                 }
-                PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                    panic!("Expected PtyWrite::Write")
+                }
             }
         }
 
@@ -8724,7 +9649,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -9150,7 +10077,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("i=481") && s.contains("OK"), "got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -9380,7 +10309,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -9411,7 +10342,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "Expected EINVAL error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10270,7 +11203,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "Expected ENOENT error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10336,7 +11271,9 @@ mod tests {
                     "Expected error response, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10371,7 +11308,9 @@ mod tests {
                     "Expected EINVAL error for missing height, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10407,7 +11346,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENODATA"), "Expected ENODATA error, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -10442,7 +11383,9 @@ mod tests {
                     "Expected EINVAL size mismatch error, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11030,7 +11973,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11239,7 +12184,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11338,7 +12285,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("EINVAL"), "expected EINVAL, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11366,7 +12315,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11389,7 +12340,9 @@ mod tests {
                     .expect("response should contain i=<id>");
                 id_part.parse().expect("id should be numeric")
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11425,7 +12378,9 @@ mod tests {
                     .expect("response should contain i=<id>");
                 id_part.parse::<u64>().expect("id should be numeric")
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         };
 
         assert_eq!(
@@ -11486,7 +12441,9 @@ mod tests {
                     "expected the resolved id echoed, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11512,7 +12469,9 @@ mod tests {
                 let s = String::from_utf8_lossy(&bytes);
                 assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 
@@ -11566,7 +12525,9 @@ mod tests {
                     "put by number should target the newest image, got: {s}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {
+                panic!("Expected PtyWrite::Write")
+            }
         }
     }
 

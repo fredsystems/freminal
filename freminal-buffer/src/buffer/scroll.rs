@@ -354,6 +354,14 @@ impl Buffer {
         }
     }
 
+    /// Whether DECLRMM is enabled with left/right margins narrower than the
+    /// screen, so a scroll must be confined to columns rather than shift whole
+    /// rows (xterm `xtermScroll`: `scroll_full_line` is false).
+    pub(in crate::buffer) fn declrmm_margins_are_partial(&self) -> bool {
+        self.declrmm_enabled == Declrmm::Enabled
+            && !(self.scroll_region_left == 0 && self.scroll_region_right + 1 >= self.width)
+    }
+
     /// Scroll the DECSTBM region up by one line during an autowrap at the
     /// bottom margin.  Handles both Primary (with scrollback) and Alternate
     /// (fixed grid) buffer types.
@@ -364,7 +372,19 @@ impl Buffer {
             }
             BufferType::Alternate => {
                 if self.scroll_region_top < self.scroll_region_bottom {
-                    self.scroll_slice_up(self.scroll_region_top, self.scroll_region_bottom);
+                    // xterm `xtermScroll` (util.c): `scroll_full_line` is
+                    // `left == 0 && right == max_col`; otherwise
+                    // `scrollInMargins` confines the scroll to the DECSLRM
+                    // margins. This applies to both screens (WrapLine ->
+                    // xtermIndex -> xtermScroll), matching the primary path.
+                    if self.declrmm_margins_are_partial() {
+                        self.scroll_slice_up_confined(
+                            self.scroll_region_top,
+                            self.scroll_region_bottom,
+                        );
+                    } else {
+                        self.scroll_slice_up(self.scroll_region_top, self.scroll_region_bottom);
+                    }
                 }
             }
         }

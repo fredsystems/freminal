@@ -12,7 +12,6 @@ freminal-buffer = { path = "../freminal-buffer" }
 freminal-common = { path = "../freminal-common" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 libfuzzer-sys = "0.4.13"
-toml = "1.1.6"
 
 # Keep this crate out of the root workspace: it needs a nightly toolchain and
 # sanitizer flags that must never leak into the normal build. The root

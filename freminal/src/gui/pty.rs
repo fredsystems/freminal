@@ -10,7 +10,7 @@
 //! GUI-side channel endpoints as a [`TabChannels`].
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -24,7 +24,9 @@ use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, PtyRead, SearchCorpus, WindowCommand};
-use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
+use freminal_terminal_emulator::recording::{
+    EventPayload, PtyEchoState, RecordingSwap, redact_input_for_echo,
+};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 use freminal_windowing::{RepaintProxy, WindowId};
@@ -328,6 +330,10 @@ pub struct TabChannels {
     pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
 
     /// Sender for input events (key, resize, focus) to the PTY thread.
+    ///
+    /// Unbounded on purpose: it carries keystrokes, which must never be
+    /// dropped.  The replies the GUI sends on it are bounded at the source
+    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Sender for raw bytes to the PTY, for layout startup-command injection
@@ -375,6 +381,17 @@ pub struct TabChannels {
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
 
+    /// Per-pane budget for [`WindowCommand`]s the PTY thread has sent on
+    /// `window_cmd_rx` that the GUI has not drained yet (148.C9, 148.RC2).
+    ///
+    /// The PTY thread admits a command only while its class is below its cap
+    /// (see [`WindowCommandBudget::admit`]); the GUI releases one per command
+    /// it drains (see [`WindowCommandBudget::release`]).  It bounds the
+    /// `window_cmd_rx` backlog, and so the replies the GUI can send back on
+    /// `input_tx`, while the GUI is not draining (for example a minimised
+    /// window that is not redrawing).
+    pub window_cmd_budget: WindowCommandBudget,
+
     /// OS process ID of the PTY child shell.
     ///
     /// Used for CWD discovery via [`crate::gui::platform::read_cwd`] when
@@ -399,6 +416,238 @@ pub struct TabChannels {
     /// the right parser is selected.  `None` when a positional `command`
     /// was specified or when no shell could be resolved.
     pub shell_program: Option<std::path::PathBuf>,
+}
+
+/// Most Report-class window commands that may be outstanding (sent by the PTY
+/// thread, not yet drained by the GUI) for one pane (148.C9).
+///
+/// A report request (`CSI 14 t`, an OSC 52 query, an OSC 99 display, ...) is
+/// answered by the GUI, so each one costs a queue entry now and a reply later.
+/// The cap is generous: a legitimate application has a handful in flight.
+/// Beyond it the request is dropped, and the application sees an unanswered
+/// query, exactly as it does when the terminal drops a reply.
+///
+/// `input_tx`, which carries the answers back to the PTY thread, stays
+/// unbounded on purpose: it also carries keystrokes, which must never be
+/// dropped.  Its reply traffic is bounded by this cap instead.
+pub(crate) const MAX_OUTSTANDING_REPORTS: usize = 256;
+
+/// Most Viewport-class window commands that may be outstanding for one pane
+/// (148.RC2).
+///
+/// Viewport commands produce no reply, but they are not small: they include
+/// OSC 52 clipboard writes (`SetClipboard`, up to the parser's payload limit),
+/// OSC 9 / OSC 777 notifications and window titles, so a GUI that is not
+/// draining (a minimised window that is not redrawing) would otherwise let the
+/// channel grow without bound.  The cap is far above anything a legitimate
+/// application queues between two frames.
+///
+/// Trade-off: under a flood against a stalled GUI, commands beyond the cap are
+/// dropped, including intermediate title updates (`SetTitleBarText`), clipboard
+/// writes and notifications.  The newest commands are the ones lost, so a title
+/// set during the flood may never show; the first command to be refused is
+/// logged at warn level.
+pub(crate) const MAX_OUTSTANDING_VIEWPORT_COMMANDS: usize = 4096;
+
+/// Most payload bytes that Viewport-class window commands may hold in flight for
+/// one pane.
+///
+/// [`MAX_OUTSTANDING_VIEWPORT_COMMANDS`] counts messages, and a message can be
+/// a clipboard write or notification of up to the parser's payload limit
+/// (about 1 MiB), so the message cap alone would let a stalled GUI hold
+/// gigabytes.  This bounds the sum of [`payload_bytes`] over the commands
+/// queued, of either class (OSC 99 reports carry icons).  A single command larger than the cap is admitted only into an empty
+/// byte budget, the same exception the reply budget makes, so one legitimate
+/// large clipboard write is never refused outright.
+pub(crate) const MAX_OUTSTANDING_VIEWPORT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Heap payload size, in bytes, that a window manipulation holds while queued.
+///
+/// Counts the variable-length strings of the variants an application controls
+/// the size of: OSC 52 clipboard writes (selection and content), OSC 9 / 777
+/// notifications (title and body) and title-bar text.  Every other variant is
+/// fixed-size and counts as 0.
+pub(crate) fn payload_bytes(manipulation: &WindowManipulation) -> usize {
+    match manipulation {
+        WindowManipulation::SetClipboard(selection, content) => {
+            selection.len().saturating_add(content.len())
+        }
+        WindowManipulation::Notification { title, body, .. } => title
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(body.len()),
+        WindowManipulation::SetTitleBarText(text) => text.len(),
+        // OSC 99 carries an icon (up to the OSC cap) plus title and body.
+        WindowManipulation::Notification99(data) => data
+            .title
+            .len()
+            .saturating_add(data.body.as_ref().map_or(0, String::len))
+            .saturating_add(data.icon_data.as_ref().map_or(0, Vec::len)),
+        WindowManipulation::Osc99CacheIcon { key, data } => key.len().saturating_add(data.len()),
+        _ => 0,
+    }
+}
+
+/// Outcome of asking whether another window command may be queued for the GUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandAdmission {
+    /// The command was counted and should be sent.
+    Admitted,
+    /// The command's class is at its cap; the command must be dropped.
+    Dropped,
+}
+
+/// Which budget a [`WindowCommand`] is counted against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandClass {
+    Report,
+    Viewport,
+}
+
+impl CommandClass {
+    const fn of(command: &WindowCommand) -> Self {
+        match command {
+            WindowCommand::Report(_) => Self::Report,
+            WindowCommand::Viewport(_) => Self::Viewport,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Report => "report",
+            Self::Viewport => "viewport",
+        }
+    }
+
+    const fn cap(self) -> usize {
+        match self {
+            Self::Report => MAX_OUTSTANDING_REPORTS,
+            Self::Viewport => MAX_OUTSTANDING_VIEWPORT_COMMANDS,
+        }
+    }
+}
+
+/// The per-pane counters bounding the `window_cmd_rx` backlog.
+///
+/// One counter covers Report-class commands ([`MAX_OUTSTANDING_REPORTS`]), one
+/// Viewport-class commands ([`MAX_OUTSTANDING_VIEWPORT_COMMANDS`]) and one the
+/// payload bytes those commands hold, of either class
+/// ([`MAX_OUTSTANDING_VIEWPORT_BYTES`]; OSC 99 reports carry icons).
+///
+/// Shared between the PTY consumer thread, the only caller of
+/// [`admit`](Self::admit) and the only incrementer, and the GUI, which only
+/// [`release`](Self::release)s.  Plain atomics: no lock is involved.  Cloning
+/// shares the same counters.
+#[derive(Debug, Clone, Default)]
+pub struct WindowCommandBudget {
+    pub(crate) reports: Arc<AtomicUsize>,
+    pub(crate) viewport: Arc<AtomicUsize>,
+    pub(crate) viewport_bytes: Arc<AtomicUsize>,
+}
+
+impl WindowCommandBudget {
+    const fn counter(&self, class: CommandClass) -> &Arc<AtomicUsize> {
+        match class {
+            CommandClass::Report => &self.reports,
+            CommandClass::Viewport => &self.viewport,
+        }
+    }
+
+    /// Bytes `command` counts against [`MAX_OUTSTANDING_VIEWPORT_BYTES`]: its
+    /// [`payload_bytes`], for either class (an OSC 99 report can carry an
+    /// icon).
+    fn counted_bytes(command: &WindowCommand) -> usize {
+        match command {
+            WindowCommand::Viewport(manipulation) | WindowCommand::Report(manipulation) => {
+                payload_bytes(manipulation)
+            }
+        }
+    }
+
+    /// Admit one more outstanding command of `command`'s class, or refuse it at
+    /// the cap.
+    ///
+    /// A command of either class is also refused when its payload would take the bytes
+    /// in flight past [`MAX_OUTSTANDING_VIEWPORT_BYTES`], unless the byte budget
+    /// is empty (so a single oversized command still gets through).
+    ///
+    /// Admission counts the command, so the caller sends it when this returns
+    /// [`CommandAdmission::Admitted`] and drops it otherwise.  The GUI only
+    /// decrements, so the loads below can only be stale in the cautious
+    /// direction, and the PTY thread, the only incrementer, makes the check and
+    /// the increment without interleaving with another admission.
+    pub(crate) fn admit(&self, command: &WindowCommand) -> CommandAdmission {
+        let class = CommandClass::of(command);
+        let outstanding = self.counter(class);
+        if outstanding.load(Ordering::Relaxed) >= class.cap() {
+            return CommandAdmission::Dropped;
+        }
+        let bytes = Self::counted_bytes(command);
+        if bytes > 0 {
+            let queued = self.viewport_bytes.load(Ordering::Relaxed);
+            if queued > 0 && queued.saturating_add(bytes) > MAX_OUTSTANDING_VIEWPORT_BYTES {
+                return CommandAdmission::Dropped;
+            }
+            self.viewport_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+        // Counted before the send, so the GUI cannot release it before it is added.
+        outstanding.fetch_add(1, Ordering::Relaxed);
+        CommandAdmission::Admitted
+    }
+
+    /// Release one outstanding command of `command`'s class and its payload
+    /// bytes; the GUI calls this once per command it drains.  Saturates at zero
+    /// so a mismatch can never wrap a counter.
+    pub(crate) fn release(&self, command: &WindowCommand) {
+        // The closures always return `Some`, so the updates cannot fail.
+        let _ = self.counter(CommandClass::of(command)).try_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |n| Some(n.saturating_sub(1)),
+        );
+        let bytes = Self::counted_bytes(command);
+        if bytes > 0 {
+            let _ = self
+                .viewport_bytes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some(n.saturating_sub(bytes))
+                });
+        }
+    }
+
+    /// Commands of `class` currently counted as outstanding.
+    #[cfg(test)]
+    fn outstanding(&self, class: CommandClass) -> usize {
+        self.counter(class).load(Ordering::Relaxed)
+    }
+
+    /// Viewport payload bytes currently counted as outstanding.
+    #[cfg(test)]
+    fn outstanding_bytes(&self) -> usize {
+        self.viewport_bytes.load(Ordering::Relaxed)
+    }
+}
+
+/// A dropped-command warning is logged for the first drop of each class and
+/// then once per this many drops; the rest are logged at debug level.
+const DROPPED_COMMAND_WARN_INTERVAL: u64 = 1024;
+
+/// Count a window command dropped at its cap and log it, rate-limited so a
+/// flood cannot also flood the log.  `dropped` is the running total for the
+/// command's class.  The command itself is not logged: Viewport commands can
+/// carry large payloads.
+fn note_dropped_command(dropped: &AtomicU64, class: CommandClass) {
+    let total = dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let label = class.label();
+    let cap = class.cap();
+    if total == 1 || total.is_multiple_of(DROPPED_COMMAND_WARN_INTERVAL) {
+        tracing::warn!(
+            "{cap} {label} window commands already awaiting the GUI; \
+             dropped {label} commands so far: {total}"
+        );
+    } else {
+        tracing::debug!("{label} window command dropped at the outstanding cap (#{total})");
+    }
 }
 
 /// Already-resolved config values applied once, immediately after a new
@@ -529,8 +778,11 @@ pub fn spawn_pty_tab(
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let child_pid = terminal.child_pid();
 
+    // `input_tx` is unbounded because it carries keystrokes, which must never
+    // be dropped; the GUI's replies on it are bounded by `window_cmd_budget`.
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+    let window_cmd_budget = WindowCommandBudget::default();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
     let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
@@ -592,6 +844,8 @@ pub fn spawn_pty_tab(
         tab_cfg.recording_pane_id,
         command_event_tx,
         reader_shutdown,
+        Arc::clone(&echo_off),
+        window_cmd_budget.clone(),
     );
 
     Ok(TabChannels {
@@ -603,6 +857,7 @@ pub fn spawn_pty_tab(
         search_buffer_rx,
         pty_dead_rx,
         echo_off,
+        window_cmd_budget,
         child_pid,
         command_event_rx,
         history_seed,
@@ -638,6 +893,8 @@ fn spawn_pty_consumer_thread(
     recording_pane_id: u32,
     command_event_tx: Sender<CommandFinishedEvent>,
     reader_shutdown: Arc<AtomicBool>,
+    echo_off: Arc<AtomicBool>,
+    window_cmd_budget: WindowCommandBudget,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -729,6 +986,11 @@ fn spawn_pty_consumer_thread(
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
 
+            // Window commands dropped at their class cap (148.C9, 148.RC2); only
+            // used to rate-limit the warning, one total per class.
+            let dropped_reports = AtomicU64::new(0);
+            let dropped_viewport = AtomicU64::new(0);
+
             // Helper closure: drain window commands and command-finished
             // events, publish snapshot, request repaint.
             // `request_repaint` gates ONLY the GUI wake-up request (issue #459):
@@ -773,6 +1035,24 @@ fn spawn_pty_consumer_thread(
                             }
                             _ => WindowCommand::Viewport(cmd),
                         };
+                    // Both classes are capped.  Reports (148.C9) because each one
+                    // makes the GUI answer through `input_tx`; Viewport commands
+                    // (148.RC2) because they can carry large payloads (clipboard
+                    // writes, notifications) and a GUI that is not draining must
+                    // not let them pile up.  Admission counts the command; if the
+                    // send then fails the pane is gone and the count no longer
+                    // matters.
+                    if window_cmd_budget.admit(&wc) == CommandAdmission::Dropped {
+                        match CommandClass::of(&wc) {
+                            CommandClass::Report => {
+                                note_dropped_command(&dropped_reports, CommandClass::Report);
+                            }
+                            CommandClass::Viewport => {
+                                note_dropped_command(&dropped_viewport, CommandClass::Viewport);
+                            }
+                        }
+                        continue;
+                    }
                     send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
                 }
 
@@ -843,10 +1123,15 @@ fn spawn_pty_consumer_thread(
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
                             if let Some(rec) = recording_swap.load_full() {
-                                rec.emit(EventPayload::PtyInput {
-                                    pane_id: recording_pane_id,
-                                    data: bytes,
-                                });
+                                // Redacted while the pane's echo is off: these
+                                // bytes are a typed password (issue #563).
+                                rec.emit(redact_input_for_echo(
+                                    EventPayload::PtyInput {
+                                        pane_id: recording_pane_id,
+                                        data: bytes,
+                                    },
+                                    PtyEchoState::from_echo_off_flag(&echo_off),
+                                ));
                             }
                         }
                         InputEvent::FocusChange(focused) => {
@@ -1439,6 +1724,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         };
 
         apply_initial_state(
@@ -1678,6 +1964,16 @@ mod tests {
     /// close the channel, and return what the child saw once the thread has
     /// exited.
     fn run_consumer_over(events: Vec<InputEvent>, recording_swap: RecordingSwap) -> Vec<ChildSaw> {
+        run_consumer_over_with_echo(events, recording_swap, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// As [`run_consumer_over`], with the pane's shared echo-off flag supplied
+    /// by the caller (the real one is set by the PTY reader thread).
+    fn run_consumer_over_with_echo(
+        events: Vec<InputEvent>,
+        recording_swap: RecordingSwap,
+        echo_off: Arc<AtomicBool>,
+    ) -> Vec<ChildSaw> {
         let (terminal, write_rx) = TerminalEmulator::new_headless(None);
         let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
         let (input_tx, input_rx) = unbounded::<InputEvent>();
@@ -1707,6 +2003,8 @@ mod tests {
             7,
             command_event_tx,
             Arc::new(AtomicBool::new(false)),
+            echo_off,
+            WindowCommandBudget::default(),
         );
 
         // The emulator owns every sender of `write_rx`, so the channel
@@ -1715,6 +2013,7 @@ mod tests {
         loop {
             match write_rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(PtyWrite::Resize(size)) => saw.push(ChildSaw::Resize(size.width)),
+                Ok(PtyWrite::ApplyPendingResize) => {}
                 Ok(PtyWrite::Write(bytes)) => saw.push(ChildSaw::Write(bytes)),
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -1809,5 +2108,399 @@ mod tests {
             })
             .collect();
         assert_eq!(resizes, vec![(7, 72, 22)]);
+    }
+
+    /// Issue #563: `PtyInput` is recorded verbatim while echoing and with its
+    /// content blanked while the pane's echo is off; the child still receives
+    /// the real bytes in both cases.
+    #[test]
+    fn consumer_thread_redacts_recorded_pty_input_only_while_echo_is_off() {
+        use freminal_terminal_emulator::recording::{
+            RecordingMetadata, TopologySnapshot, parse_recording, start_recording,
+        };
+
+        for (echo_off, expected_recorded) in [(false, b"secret".to_vec()), (true, Vec::new())] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("input.frec");
+            let metadata = RecordingMetadata {
+                freminal_version: "test".to_string(),
+                created_at: 0,
+                term: "xterm-256color".to_string(),
+                initial_topology: TopologySnapshot { windows: vec![] },
+                scrollback_limit: 10_000,
+            };
+            let (handle, mut join) = start_recording(&path, metadata, 64).unwrap();
+            let swap = freminal_terminal_emulator::recording::empty_recording_swap();
+            swap.store(Some(Arc::new(handle)));
+
+            let saw = run_consumer_over_with_echo(
+                vec![InputEvent::Key(b"secret".to_vec())],
+                Arc::clone(&swap),
+                Arc::new(AtomicBool::new(echo_off)),
+            );
+            assert_eq!(saw, vec![ChildSaw::Write(b"secret".to_vec())]);
+
+            swap.store(None);
+            join.join();
+
+            let inputs: Vec<_> = parse_recording(&path)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter_map(|e| match e.payload {
+                    EventPayload::PtyInput { pane_id, data } => Some((pane_id, data)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inputs, vec![(7, expected_recorded)], "echo_off={echo_off}");
+        }
+    }
+
+    fn report_command() -> WindowCommand {
+        WindowCommand::Report(WindowManipulation::ReportTitle)
+    }
+
+    fn viewport_command() -> WindowCommand {
+        WindowCommand::Viewport(WindowManipulation::SetTitleBarText("t".to_owned()))
+    }
+
+    #[test]
+    fn admit_counts_each_class_up_to_its_cap_then_drops() {
+        for (class, command, cap) in [
+            (
+                CommandClass::Report,
+                report_command(),
+                MAX_OUTSTANDING_REPORTS,
+            ),
+            (
+                CommandClass::Viewport,
+                viewport_command(),
+                MAX_OUTSTANDING_VIEWPORT_COMMANDS,
+            ),
+        ] {
+            let budget = WindowCommandBudget::default();
+            for admitted in 1..=cap {
+                assert_eq!(budget.admit(&command), CommandAdmission::Admitted);
+                assert_eq!(budget.outstanding(class), admitted);
+            }
+            assert_eq!(budget.admit(&command), CommandAdmission::Dropped);
+            assert_eq!(
+                budget.outstanding(class),
+                cap,
+                "a dropped {} command is not counted",
+                class.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_classes_are_budgeted_independently() {
+        let budget = WindowCommandBudget::default();
+        for _ in 0..MAX_OUTSTANDING_REPORTS {
+            assert_eq!(budget.admit(&report_command()), CommandAdmission::Admitted);
+        }
+        assert_eq!(budget.admit(&report_command()), CommandAdmission::Dropped);
+        assert_eq!(
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted,
+            "a full report budget does not refuse viewport commands"
+        );
+        assert_eq!(budget.outstanding(CommandClass::Viewport), 1);
+    }
+
+    #[test]
+    fn release_frees_a_slot_of_its_own_class_and_saturates_at_zero() {
+        let budget = WindowCommandBudget::default();
+        for _ in 0..MAX_OUTSTANDING_VIEWPORT_COMMANDS {
+            assert_eq!(
+                budget.admit(&viewport_command()),
+                CommandAdmission::Admitted
+            );
+        }
+        assert_eq!(budget.admit(&viewport_command()), CommandAdmission::Dropped);
+
+        // Releasing a Report frees nothing in the viewport budget.
+        budget.release(&report_command());
+        assert_eq!(budget.admit(&viewport_command()), CommandAdmission::Dropped);
+
+        budget.release(&viewport_command());
+        assert_eq!(
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted
+        );
+
+        let empty = WindowCommandBudget::default();
+        empty.release(&report_command());
+        empty.release(&viewport_command());
+        assert_eq!(
+            empty.outstanding(CommandClass::Report),
+            0,
+            "never underflows"
+        );
+        assert_eq!(
+            empty.outstanding(CommandClass::Viewport),
+            0,
+            "never underflows"
+        );
+    }
+
+    fn clipboard_command(content_len: usize) -> WindowCommand {
+        WindowCommand::Viewport(WindowManipulation::SetClipboard(
+            String::new(),
+            "x".repeat(content_len),
+        ))
+    }
+
+    #[test]
+    fn payload_bytes_counts_the_variable_length_strings() {
+        use freminal_common::buffer_states::osc::OscNotifySource;
+        use freminal_common::buffer_states::window_manipulation::NotificationKind;
+
+        assert_eq!(
+            payload_bytes(&WindowManipulation::SetClipboard(
+                "c".to_owned(),
+                "abcd".to_owned()
+            )),
+            5
+        );
+        assert_eq!(
+            payload_bytes(&WindowManipulation::SetTitleBarText("title".to_owned())),
+            5
+        );
+        for (title, expected) in [(Some("ti".to_owned()), 5), (None, 3)] {
+            assert_eq!(
+                payload_bytes(&WindowManipulation::Notification {
+                    kind: NotificationKind::OscText,
+                    source: OscNotifySource::Osc9,
+                    title,
+                    body: "bod".to_owned(),
+                }),
+                expected
+            );
+        }
+        assert_eq!(payload_bytes(&WindowManipulation::Bell), 0);
+        assert_eq!(payload_bytes(&WindowManipulation::ReportTitle), 0);
+        assert_eq!(
+            payload_bytes(&WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![0; 10],
+            }),
+            11
+        );
+    }
+
+    /// OSC 99 icon priming is Report-class but carries image bytes, so it is
+    /// bounded by the byte budget, not only the message cap.
+    #[test]
+    fn report_payload_bytes_count_against_the_byte_budget() {
+        let budget = WindowCommandBudget::default();
+        let icon = || {
+            WindowCommand::Report(WindowManipulation::Osc99CacheIcon {
+                key: "k".to_owned(),
+                data: vec![0; 1024 * 1024],
+            })
+        };
+        let admitted = (0..100)
+            .filter(|_| budget.admit(&icon()) == CommandAdmission::Admitted)
+            .count();
+        assert!(admitted <= 16, "admitted {admitted} 1 MiB icons");
+        budget.release(&icon());
+        assert_eq!(budget.admit(&icon()), CommandAdmission::Admitted);
+    }
+
+    #[test]
+    fn viewport_bytes_are_capped_and_release_restores_the_budget() {
+        const MIB: usize = 1024 * 1024;
+        let budget = WindowCommandBudget::default();
+
+        let admitted = (0..100)
+            .filter(|_| budget.admit(&clipboard_command(MIB)) == CommandAdmission::Admitted)
+            .count();
+        assert_eq!(admitted, MAX_OUTSTANDING_VIEWPORT_BYTES / MIB);
+        assert_eq!(budget.outstanding_bytes(), MAX_OUTSTANDING_VIEWPORT_BYTES);
+        assert_eq!(budget.outstanding(CommandClass::Viewport), admitted);
+
+        // Small commands that would not fit are refused too ...
+        assert_eq!(
+            budget.admit(&clipboard_command(1)),
+            CommandAdmission::Dropped
+        );
+        // ... but a command with no payload is not.
+        assert_eq!(
+            budget.admit(&WindowCommand::Viewport(WindowManipulation::Bell)),
+            CommandAdmission::Admitted
+        );
+
+        for _ in 0..admitted {
+            budget.release(&clipboard_command(MIB));
+        }
+        assert_eq!(budget.outstanding_bytes(), 0);
+        assert_eq!(
+            budget.admit(&clipboard_command(MIB)),
+            CommandAdmission::Admitted,
+            "released bytes are reusable"
+        );
+    }
+
+    #[test]
+    fn an_oversized_command_is_admitted_only_into_an_empty_byte_budget() {
+        let big = clipboard_command(MAX_OUTSTANDING_VIEWPORT_BYTES + 1);
+
+        let budget = WindowCommandBudget::default();
+        assert_eq!(budget.admit(&big), CommandAdmission::Admitted);
+        assert_eq!(
+            budget.admit(&clipboard_command(1)),
+            CommandAdmission::Dropped
+        );
+        assert_eq!(budget.admit(&big), CommandAdmission::Dropped);
+        budget.release(&big);
+        assert_eq!(budget.outstanding_bytes(), 0);
+
+        let busy = WindowCommandBudget::default();
+        assert_eq!(
+            busy.admit(&clipboard_command(1)),
+            CommandAdmission::Admitted
+        );
+        assert_eq!(
+            busy.admit(&big),
+            CommandAdmission::Dropped,
+            "an oversized command is refused while any bytes are in flight"
+        );
+    }
+
+    #[test]
+    fn byte_release_saturates_at_zero_and_ignores_reports() {
+        let budget = WindowCommandBudget::default();
+        budget.release(&clipboard_command(100));
+        assert_eq!(budget.outstanding_bytes(), 0, "never underflows");
+
+        assert_eq!(
+            budget.admit(&clipboard_command(10)),
+            CommandAdmission::Admitted
+        );
+        budget.release(&report_command());
+        assert_eq!(budget.outstanding_bytes(), 10, "a Report holds no bytes");
+    }
+
+    #[test]
+    fn a_cloned_budget_shares_its_counters() {
+        let budget = WindowCommandBudget::default();
+        let shared = budget.clone();
+        assert_eq!(
+            budget.admit(&viewport_command()),
+            CommandAdmission::Admitted
+        );
+        assert_eq!(shared.outstanding(CommandClass::Viewport), 1);
+        shared.release(&viewport_command());
+        assert_eq!(budget.outstanding(CommandClass::Viewport), 0);
+    }
+
+    /// Feed `bytes` to a headless consumer thread whose GUI never drains
+    /// `window_cmd_rx`, then return how many Report and Viewport commands were
+    /// queued, plus the budget the thread counted them in.
+    fn flood_undrained_consumer(mut bytes: Vec<u8>) -> (usize, usize, WindowCommandBudget) {
+        let (terminal, write_rx) = TerminalEmulator::new_headless(None);
+        let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
+        let (input_tx, input_rx) = unbounded::<InputEvent>();
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (clipboard_tx, _clipboard_rx) = crossbeam_channel::bounded::<String>(1);
+        let (search_buffer_tx, _search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
+        let (pty_dead_tx, _pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
+        let (command_event_tx, _command_event_rx) = unbounded::<CommandFinishedEvent>();
+        let budget = WindowCommandBudget::default();
+
+        spawn_pty_consumer_thread(
+            terminal,
+            pty_read_rx,
+            input_rx,
+            window_cmd_tx,
+            clipboard_tx,
+            search_buffer_tx,
+            None,
+            Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty())),
+            Arc::new(OnceLock::new()),
+            pty_dead_tx,
+            freminal_terminal_emulator::recording::empty_recording_swap(),
+            7,
+            command_event_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            budget.clone(),
+        );
+
+        // DA1 is answered on the PTY thread itself, after everything above in
+        // the same FIFO, so its reply proves the flood was fully processed.
+        bytes.extend_from_slice(b"\x1b[c");
+        let read_amount = bytes.len();
+        pty_read_tx
+            .send(PtyRead {
+                buf: bytes,
+                read_amount,
+            })
+            .unwrap();
+        let reply = write_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("DA1 reply once the flood was processed");
+        assert!(matches!(reply, PtyWrite::Write(_)));
+
+        // Closing the input channel ends the consumer thread, which drops its
+        // `window_cmd_tx`: the receiver then disconnects only after every
+        // `post_event` has run, so the drain below sees the whole stream.
+        drop(input_tx);
+        let mut reports = 0;
+        let mut viewport = 0;
+        loop {
+            match window_cmd_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(WindowCommand::Report(_)) => reports += 1,
+                Ok(WindowCommand::Viewport(_)) => viewport += 1,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    panic!("consumer thread did not exit after the input channel closed")
+                }
+            }
+        }
+        drop(pty_read_tx);
+        (reports, viewport, budget)
+    }
+
+    /// With no GUI draining `window_cmd_rx`, a flood of report requests leaves
+    /// exactly `MAX_OUTSTANDING_REPORTS` Report commands queued (148.C9).
+    /// A few Viewport commands in the same stream are all admitted.
+    #[test]
+    fn consumer_thread_caps_outstanding_reports_while_the_gui_is_not_draining() {
+        const FLOOD: usize = 1000;
+        const VIEWPORT: usize = 5;
+
+        // `CSI 14 t` is a Report; `CSI 22 ; 0 t` (title stack push) is Viewport.
+        let mut bytes = b"\x1b[14t".repeat(FLOOD);
+        bytes.extend(b"\x1b[22;0t".repeat(VIEWPORT));
+        let (reports, viewport, budget) = flood_undrained_consumer(bytes);
+
+        assert_eq!(reports, MAX_OUTSTANDING_REPORTS);
+        assert_eq!(viewport, VIEWPORT, "viewport commands below the cap pass");
+        assert_eq!(
+            budget.outstanding(CommandClass::Report),
+            MAX_OUTSTANDING_REPORTS
+        );
+        assert_eq!(budget.outstanding(CommandClass::Viewport), VIEWPORT);
+    }
+
+    /// With no GUI draining `window_cmd_rx`, a flood of OSC 52 clipboard writes
+    /// (Viewport class, large payloads) leaves exactly
+    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS` Viewport commands queued (148.RC2).
+    #[test]
+    fn consumer_thread_caps_outstanding_viewport_commands_while_the_gui_is_not_draining() {
+        const FLOOD: usize = 5000;
+
+        // `aGk=` is base64 for "hi".
+        let bytes = b"\x1b]52;c;aGk=\x07".repeat(FLOOD);
+        let (reports, viewport, budget) = flood_undrained_consumer(bytes);
+
+        assert_eq!(reports, 0);
+        assert_eq!(viewport, MAX_OUTSTANDING_VIEWPORT_COMMANDS);
+        assert_eq!(
+            budget.outstanding(CommandClass::Viewport),
+            MAX_OUTSTANDING_VIEWPORT_COMMANDS
+        );
     }
 }

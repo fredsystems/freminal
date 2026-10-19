@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
 /// Cached flat representation of the visible window stored between snapshots.
@@ -50,10 +51,11 @@ pub use crate::input::{
 use conv2::ValueFrom;
 
 use crate::error::InterfaceError;
-use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig};
+use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig, ReplyQueue};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
+use crate::terminal_handler::PtyResizeSend;
 use crossbeam_channel::{Receiver, unbounded};
 use freminal_buffer::buffer::CommandBlocksGeneration;
 use freminal_buffer::image_store::{ImagePlacement, InlineImage};
@@ -135,6 +137,35 @@ pub fn split_format_data_for_scrollback(
 /// NOTE: Timeout implementation lives in `TerminalEmulator::apply_sync_updates_timeout`.
 /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for spec references.
 const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
+
+/// Capacity, in messages, of the bounded queue that carries terminal-generated
+/// replies to the PTY writer thread.
+///
+/// Each message is a single reply (one DA1 answer, one XTGETTCAP name, ...).
+/// This bound is on the **number of messages**; the queue is additionally
+/// bounded in bytes by [`MAX_QUEUED_REPLY_BYTES`]. Most replies are small
+/// (with the XTGETTCAP caps, `MAX_XTGETTCAP_NAMES` and
+/// `MAX_XTGETTCAP_NAME_HEX_LEN`, each is bounded), but some are not: an OSC 52
+/// query reply carries the clipboard contents (only when
+/// `allow_clipboard_read` is on), and a reply routed back from the GUI can be
+/// larger than a DA answer. A message bound alone would therefore allow this
+/// capacity times the largest reply, which is why the byte budget exists
+/// (148.C9).
+///
+/// The capacity is generous because a legitimate client can have hundreds of
+/// replies outstanding at once (for example many kitty graphics transmissions
+/// sent with `q=0`, each answered). Replies arriving while the queue is full
+/// are dropped. User input does not use this queue.
+pub const REPLY_QUEUE_CAPACITY: usize = 1024;
+
+/// Budget, in bytes, for the replies queued on the bounded reply channel and
+/// not yet written to the PTY.
+///
+/// The handler drops a reply that would push the queued total past this, unless
+/// the queue is empty: a single reply larger than the budget (a big clipboard
+/// answer) is still sent when nothing else is waiting. This is the byte-side
+/// companion of [`REPLY_QUEUE_CAPACITY`], which bounds messages only.
+pub const MAX_QUEUED_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Change signal carried forward across snapshots the GUI will not render.
 ///
@@ -320,6 +351,11 @@ impl TerminalEmulator {
     /// `handle_incoming_data`.
     ///
     /// Used by playback mode, tests, and benchmarks.
+    ///
+    /// Keeps a single **unbounded** channel for both user input and replies
+    /// (unlike [`Self::new`], which bounds replies with
+    /// [`REPLY_QUEUE_CAPACITY`]): the caller drains the returned receiver, and
+    /// the fuzz harness relies on seeing every reply.
     #[must_use]
     pub fn new_headless(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
         use crossbeam_channel::unbounded;
@@ -365,7 +401,19 @@ impl TerminalEmulator {
         pane_id: u32,
         set_term_program: bool,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
+        // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
+        // `write_tx`, unbounded, carries user input; `reply_tx`, bounded,
+        // carries terminal-generated replies, so output made of queries cannot
+        // grow memory without bound when the child does not read its tty.
         let (write_tx, read_rx) = unbounded();
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(REPLY_QUEUE_CAPACITY);
+        // Bytes queued on `reply_tx` and not yet written; shared by the handler
+        // (adds) and the PTY writer thread (subtracts) -- see 148.C9.
+        let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+        // Latest-value slot for DECCOLM resizes, shared by the handler (stores)
+        // and the PTY writer thread (takes), so repeated column-mode toggles
+        // cannot grow the unbounded `write_tx` channel.
+        let pending_resize = Arc::new(arc_swap::ArcSwapOption::const_empty());
         let (pty_tx, pty_rx) = unbounded();
 
         // Derive the command tuple from the positional `command` arg.
@@ -391,6 +439,11 @@ impl TerminalEmulator {
 
         let io = FreminalPtyInputOutput::new(
             read_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::clone(&queued_reply_bytes),
+                pending_resize: Arc::clone(&pending_resize),
+            },
             pty_tx,
             PtySpawnConfig {
                 command,
@@ -409,8 +462,18 @@ impl TerminalEmulator {
             "Failed to send resize to pty"
         );
 
+        // The handler answers queries through the bounded `reply_tx`.  The
+        // state's own `write_tx` carries user input (`TerminalState::write`,
+        // focus events), so it stays on the unbounded user channel: a full
+        // reply queue must never block or drop a keystroke.
+        let mut internal = TerminalState::new(reply_tx, scrollback_limit);
+        internal.write_tx = write_tx.clone();
+        internal.handler.set_control_tx(write_tx.clone());
+        internal.handler.set_reply_budget(queued_reply_bytes);
+        internal.handler.set_pending_resize(pending_resize);
+
         let ret = Self {
-            internal: TerminalState::new(write_tx.clone(), scrollback_limit),
+            internal,
             pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,
@@ -530,14 +593,22 @@ impl TerminalEmulator {
 
         if old_width != width_chars || old_height != height_chars {
             // TIOCGWINSZ expects total window pixel dimensions, not per-cell.
-            self.write_tx
-                .send(PtyWrite::Resize(FreminalTerminalSize {
-                    width: width_chars,
-                    height: height_chars,
-                    pixel_width: font_pixel_width.saturating_mul(width_chars),
-                    pixel_height: font_pixel_height.saturating_mul(height_chars),
-                }))
-                .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))?;
+            // Routed through the pending-resize slot so it stays ordered with
+            // DECCOLM resizes (see `route_pty_resize`).
+            if let PtyResizeSend::Message(msg) =
+                self.internal
+                    .handler
+                    .route_pty_resize(FreminalTerminalSize {
+                        width: width_chars,
+                        height: height_chars,
+                        pixel_width: font_pixel_width.saturating_mul(width_chars),
+                        pixel_height: font_pixel_height.saturating_mul(height_chars),
+                    })
+            {
+                self.write_tx
+                    .send(msg)
+                    .map_err(|e| InterfaceError::PtySendFailed(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -572,16 +643,20 @@ impl TerminalEmulator {
         // (ws_xpixel, ws_ypixel), not per-cell sizes.  Applications like nvim
         // compute cell size as ws_xpixel/ws_col, so passing per-cell values here
         // would give them a near-zero cell width.
-        send_or_log!(
-            self.write_tx,
-            PtyWrite::Resize(FreminalTerminalSize {
-                width: width_chars,
-                height: height_chars,
-                pixel_width: font_pixel_width.saturating_mul(width_chars),
-                pixel_height: font_pixel_height.saturating_mul(height_chars),
-            }),
-            "Failed to send resize to PTY"
-        );
+        // Routed through the pending-resize slot so it stays ordered with
+        // DECCOLM resizes (see `route_pty_resize`).
+        if let PtyResizeSend::Message(msg) =
+            self.internal
+                .handler
+                .route_pty_resize(FreminalTerminalSize {
+                    width: width_chars,
+                    height: height_chars,
+                    pixel_width: font_pixel_width.saturating_mul(width_chars),
+                    pixel_height: font_pixel_height.saturating_mul(height_chars),
+                })
+        {
+            send_or_log!(self.write_tx, msg, "Failed to send resize to PTY");
+        }
     }
 
     /// Update the GUI-requested scroll offset.

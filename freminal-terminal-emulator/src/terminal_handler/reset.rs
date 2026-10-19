@@ -114,6 +114,10 @@ impl TerminalHandler {
             character_replace,
             saved_decsc,
             write_tx: _,               // transport: survives both
+            dropped_replies: _,        // diagnostic counter: survives both
+            reply_budget: _,           // transport: survives both
+            control_tx: _,             // transport: survives both
+            pending_resize: _,         // transport: survives both
             window_commands: _,        // already-emitted events in transit: survives both
             pending_command_events: _, // already-emitted events in transit: survives both
             last_graphic_char,

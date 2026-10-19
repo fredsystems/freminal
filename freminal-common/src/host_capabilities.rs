@@ -25,6 +25,26 @@
 pub struct HostCapabilities {
     /// What the host can do for kitty desktop notifications (OSC 99).
     pub osc99: Osc99Support,
+    /// Whether the kitty graphics protocol may read local files and shared
+    /// memory on the application's behalf (`t=f`, `t=t`, `t=s`).
+    pub kitty_file_transmission: KittyFileTransmission,
+}
+
+/// Whether the kitty graphics protocol's file-backed transmission media
+/// (`t=f` file, `t=t` temporary file, `t=s` shared memory) may touch the host.
+///
+/// These media make the terminal read a path or object name chosen by
+/// whatever is writing to the terminal, including a remote party (`ssh`,
+/// `cat` of untrusted output). The default is [`Self::Refused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KittyFileTransmission {
+    /// File-backed transmission is refused: no file or shared-memory object
+    /// is opened, read or removed, and the application receives the same
+    /// failure reply as for an unreadable file.
+    #[default]
+    Refused,
+    /// File-backed transmission is honoured.
+    Allowed,
 }
 
 /// Whether the host honours OSC 99 (kitty desktop notifications) at all, and
@@ -155,5 +175,9 @@ mod tests {
     #[test]
     fn default_is_unsupported() {
         assert_eq!(HostCapabilities::default().osc99, Osc99Support::Unsupported);
+        assert_eq!(
+            HostCapabilities::default().kitty_file_transmission,
+            KittyFileTransmission::Refused
+        );
     }
 }

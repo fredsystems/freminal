@@ -574,9 +574,34 @@ impl Default for BellConfig {
 //  Security
 // ------------------------------------------------------------------------------------------------
 
+/// Which panes may write the system clipboard through OSC 52.
+///
+/// An OSC 52 write replaces the user's clipboard, so any program able to print
+/// to a terminal -- including one in a background tab -- can overwrite it with
+/// something the user will later paste into a shell. The default restricts
+/// writes to the pane the user is looking at (Task 148.16, GHSA-v2hw-gcg8-2rfr).
+/// Independent of this policy, a write whose decoded payload exceeds 1 MiB is
+/// dropped by the emulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardWritePolicy {
+    /// Honour OSC 52 writes only from the active pane of the focused window.
+    /// Writes from any other pane are dropped.  Default.
+    #[default]
+    ActivePane,
+    /// Honour OSC 52 writes from every pane, including background tabs.
+    All,
+    /// Never honour OSC 52 writes.
+    Off,
+}
+
 /// Security-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+// Independent TOML toggles (clipboard read, kitty file transfer, window
+// operations, password indicator), each mapping directly to a documented
+// `[security]` key; collapsing them into an enum would distort the schema.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SecurityConfig {
     /// Allow applications to read the system clipboard via OSC 52 query.
     ///
@@ -585,6 +610,42 @@ pub struct SecurityConfig {
     /// base64-encoded.  This is a potential security risk if untrusted
     /// programs run inside the terminal.
     pub allow_clipboard_read: bool,
+
+    /// Which panes may write the system clipboard via OSC 52.
+    ///
+    /// - `"active_pane"` -- only the active pane of the focused window
+    ///   (default)
+    /// - `"all"` -- every pane, including background tabs
+    /// - `"off"` -- never
+    ///
+    /// A write whose decoded payload exceeds 1 MiB is always dropped.
+    pub allow_clipboard_write: ClipboardWritePolicy,
+
+    /// Allow applications to make the terminal read local files and shared
+    /// memory objects via the kitty graphics protocol (`t=f`, `t=t`, `t=s`).
+    ///
+    /// Default: `false` (such transmissions are refused with the same reply as
+    /// an unreadable file, and nothing is opened, read or deleted).
+    /// When `true`, any program writing to the terminal -- including a remote
+    /// host over `ssh` or untrusted `cat` output -- can make the terminal read
+    /// (and, for `t=t` temporary files and `t=s` shared memory, remove) a path
+    /// of its choosing, and can probe the reply to learn whether it succeeded.
+    /// Direct transmission (`t=d`) is unaffected.
+    pub allow_kitty_file_transfer: bool,
+
+    /// Allow applications to change the window through XTWINOPS escape
+    /// sequences (`CSI Ps ; Ps ; Ps t`): de-iconify (1), minimize (2), move
+    /// (3), resize in pixels (4) or characters (8), maximize/restore (9) and
+    /// full-screen (10).  Equivalent to xterm's `allowWindowOps` resource.
+    ///
+    /// Default: `false` (such requests are dropped).
+    /// When `true`, any program writing to the terminal -- including a remote
+    /// host over `ssh` or untrusted `cat` output -- can move, resize,
+    /// minimize or full-screen the window (targets are clamped to the
+    /// monitor size, or to a fixed 16384 px extent when the monitor is
+    /// unknown).  Report-only queries (window size, position and state,
+    /// title) and title push/pop are unaffected.
+    pub allow_window_ops: bool,
 
     /// Show a lock icon in the tab bar when the foreground process disables
     /// terminal echo (e.g. password prompts from `sudo`, `ssh`, `passwd`).
@@ -597,6 +658,9 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_clipboard_read: false,
+            allow_clipboard_write: ClipboardWritePolicy::default(),
+            allow_kitty_file_transfer: false,
+            allow_window_ops: false,
             password_indicator: true,
         }
     }
@@ -1645,6 +1709,26 @@ struct ConfigPartial {
 }
 
 impl Config {
+    /// Build a validated [`Config`] from TOML text, layered over
+    /// [`Config::default`].
+    ///
+    /// This is the same pipeline the file loader runs for a single config
+    /// file (parse into the partial config, apply it over the defaults, then
+    /// validate), minus all filesystem and environment access, so it is
+    /// deterministic and suitable for tests and fuzzing.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::ParseStr`] if `contents` is not valid TOML for
+    /// the config schema, or [`ConfigError::Validation`] if the resulting
+    /// configuration is out of range.
+    pub fn from_toml_str(contents: &str) -> Result<Self, ConfigError> {
+        let partial = parse_partial(contents).map_err(|source| ConfigError::ParseStr { source })?;
+        let mut cfg = Self::default();
+        cfg.apply_partial(partial);
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     fn apply_partial(&mut self, partial: ConfigPartial) {
         if let Some(v) = partial.version {
             self.version = v;
@@ -1884,6 +1968,12 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
+    #[error("TOML parse error: {source}")]
+    ParseStr {
+        #[source]
+        source: toml::de::Error,
+    },
+
     #[error("Invalid configuration: {0}")]
     Validation(String),
 
@@ -2087,10 +2177,17 @@ fn load_partial(path: &Path, warnings: &mut Vec<String>) -> Result<ConfigPartial
 
     collect_deprecated_key_warnings(path, &contents, warnings);
 
-    toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+    parse_partial(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Parse TOML text into a [`ConfigPartial`]. Shared by the file loader
+/// ([`load_partial`]) and the string loader ([`Config::from_toml_str`]) so the
+/// two cannot drift apart.
+fn parse_partial(contents: &str) -> Result<ConfigPartial, toml::de::Error> {
+    toml::from_str(contents)
 }
 
 /// Append a human-readable warning for any deprecated config keys present in
@@ -3603,6 +3700,10 @@ mode = "none"
         original.tab_title.policy = TabTitlePolicy::OscWins;
         original.bell.mode = BellMode::None;
         original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.security.allow_clipboard_write = ClipboardWritePolicy::Off;
+        original.security.allow_kitty_file_transfer =
+            !Config::default().security.allow_kitty_file_transfer;
+        original.security.allow_window_ops = !Config::default().security.allow_window_ops;
         original.paste_guard.patterns = !Config::default().paste_guard.patterns;
         original.close_guard.unknown_blocks = !Config::default().close_guard.unknown_blocks;
         original.shell_integration.set_term_program =
@@ -3671,6 +3772,19 @@ mode = "none"
         assert_eq!(
             loaded.security.allow_clipboard_read, original.security.allow_clipboard_read,
             "security section dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_clipboard_write,
+            ClipboardWritePolicy::Off,
+            "security.allow_clipboard_write dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_kitty_file_transfer, original.security.allow_kitty_file_transfer,
+            "security.allow_kitty_file_transfer dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_window_ops, original.security.allow_window_ops,
+            "security.allow_window_ops dropped"
         );
         assert_eq!(
             loaded.paste_guard.patterns, original.paste_guard.patterns,
@@ -3970,6 +4084,185 @@ mode = "both"
             !cfg.allow_clipboard_read,
             "clipboard read should default to false for security"
         );
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_defaults_to_false() {
+        assert!(
+            !SecurityConfig::default().allow_kitty_file_transfer,
+            "kitty file transfer must be off by default (GHSA-8prj-mhmf-xpjg)"
+        );
+        assert!(!Config::default().security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_apply_partial() {
+        let mut cfg = Config::default();
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_kitty_file_transfer = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.security.allow_kitty_file_transfer);
+        // An unrelated key in the same section keeps its default.
+        assert!(!cfg.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_omitted_stays_false() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert!(!security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.security.allow_kitty_file_transfer = true;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        assert!(toml_str.contains("allow_kitty_file_transfer = true"));
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_window_ops_defaults_to_false() {
+        assert!(
+            !SecurityConfig::default().allow_window_ops,
+            "XTWINOPS window operations must be off by default (GHSA-67hw-cw29-r66f)"
+        );
+        assert!(!Config::default().security.allow_window_ops);
+    }
+
+    #[test]
+    fn security_config_window_ops_apply_partial() {
+        let mut cfg = Config::default();
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_window_ops = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.security.allow_window_ops);
+        // An unrelated key in the same section keeps its default.
+        assert!(!cfg.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_window_ops_omitted_stays_false() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert!(!security.allow_window_ops);
+    }
+
+    #[test]
+    fn security_config_window_ops_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.security.allow_window_ops = true;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        assert!(toml_str.contains("allow_window_ops = true"));
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.security.allow_window_ops);
+    }
+
+    #[test]
+    fn security_config_clipboard_write_defaults_to_active_pane() {
+        assert_eq!(
+            ClipboardWritePolicy::default(),
+            ClipboardWritePolicy::ActivePane
+        );
+        assert_eq!(
+            SecurityConfig::default().allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane,
+            "OSC 52 writes must default to the active pane only (GHSA-v2hw-gcg8-2rfr)"
+        );
+        assert_eq!(
+            Config::default().security.allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane
+        );
+    }
+
+    #[test]
+    fn security_config_clipboard_write_toml_values_roundtrip() {
+        for (policy, text) in [
+            (ClipboardWritePolicy::ActivePane, "active_pane"),
+            (ClipboardWritePolicy::All, "all"),
+            (ClipboardWritePolicy::Off, "off"),
+        ] {
+            let mut cfg = Config::default();
+            cfg.security.allow_clipboard_write = policy;
+
+            let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+            assert!(
+                toml_str.contains(&format!("allow_clipboard_write = \"{text}\"")),
+                "{toml_str}"
+            );
+            let deserialized: Config =
+                toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+            assert_eq!(deserialized.security.allow_clipboard_write, policy);
+
+            // Through the real load path: partial deserialize + merge.
+            let partial: ConfigPartial =
+                toml::from_str(&format!("[security]\nallow_clipboard_write = \"{text}\"\n"))
+                    .expect("valid TOML");
+            let mut merged = Config::default();
+            merged.apply_partial(partial);
+            assert_eq!(merged.security.allow_clipboard_write, policy);
+        }
+    }
+
+    #[test]
+    fn security_config_clipboard_write_omitted_keeps_default() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert_eq!(
+            security.allow_clipboard_write,
+            ClipboardWritePolicy::ActivePane
+        );
+    }
+
+    #[test]
+    fn security_config_clipboard_write_invalid_value_is_a_parse_error() {
+        // Consistent with the other config enums: an unknown value is rejected,
+        // not silently replaced by the default.
+        for toml_str in [
+            "[security]\nallow_clipboard_write = \"everywhere\"\n",
+            "[security]\nallow_clipboard_write = \"ActivePane\"\n",
+            "[security]\nallow_clipboard_write = true\n",
+        ] {
+            assert!(toml::from_str::<Config>(toml_str).is_err(), "{toml_str}");
+            assert!(
+                toml::from_str::<ConfigPartial>(toml_str).is_err(),
+                "{toml_str}"
+            );
+        }
     }
 
     #[test]
@@ -4638,6 +4931,64 @@ path = "/tmp/my.frag"
 
         let loaded = load_config(Some(&path)).expect("load_config should succeed");
         assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn from_toml_str_empty_is_default() {
+        let cfg = Config::from_toml_str("").expect("empty config should load");
+        assert_eq!(
+            serialize_config_for_diff(&cfg),
+            serialize_config_for_diff(&Config::default())
+        );
+    }
+
+    #[test]
+    fn from_toml_str_applies_partial_over_defaults() {
+        let cfg = Config::from_toml_str("[font]\nsize = 14.0\n").expect("partial should load");
+        assert!((cfg.font.size - 14.0).abs() < f32::EPSILON);
+
+        // Everything else is untouched: restoring the one field yields the default.
+        let mut expected = Config::default();
+        expected.font.size = 14.0;
+        assert_eq!(
+            serialize_config_for_diff(&cfg),
+            serialize_config_for_diff(&expected)
+        );
+    }
+
+    #[test]
+    fn from_toml_str_rejects_value_only_validate_catches() {
+        // 1000.0 parses fine as an f32; only `validate` rejects it.
+        let err = Config::from_toml_str("[font]\nsize = 1000.0\n")
+            .expect_err("out-of-range font size must be rejected");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_toml_str_reports_malformed_toml_as_parse_str() {
+        let err = Config::from_toml_str("[font\nsize = ").expect_err("malformed TOML must fail");
+        assert!(
+            matches!(err, ConfigError::ParseStr { .. }),
+            "expected ParseStr, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_toml_str_matches_file_loader_for_config_example() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../config_example.toml");
+        let contents = fs::read_to_string(&path).expect("read config_example.toml");
+
+        let from_str = Config::from_toml_str(&contents).expect("from_toml_str should succeed");
+        let (from_file, _warnings) =
+            load_config_with_warnings(Some(&path)).expect("file loader should succeed");
+
+        assert_eq!(
+            serialize_config_for_diff(&from_str),
+            serialize_config_for_diff(&from_file)
+        );
     }
 
     #[test]

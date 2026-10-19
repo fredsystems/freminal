@@ -95,7 +95,7 @@ use freminal::gui::panes::{
     ActiveSubtree, Pane, PaneId, PaneIdGenerator, PaneTree, SplitBorder, SplitDirection,
     active_highlight_segment, pane_at_pos,
 };
-use freminal::gui::pty::{CommandFinishedEvent, TabChannels};
+use freminal::gui::pty::{CommandFinishedEvent, TabChannels, WindowCommandBudget};
 use freminal::gui::renderer::WindowPostRenderer;
 use freminal::gui::shell_history::new_seeded_history;
 use freminal_common::geometry::{Rect, point};
@@ -154,6 +154,7 @@ fn make_bench_pane(id: PaneId) -> Pane {
         pty_dead_rx,
         command_event_rx,
         echo_off: Arc::new(AtomicBool::new(false)),
+        window_cmd_budget: WindowCommandBudget::default(),
         child_pid: None,
         history_seed: new_seeded_history(),
         shell_program: None,

@@ -32,9 +32,10 @@ use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
-use super::pty::CommandFinishedEvent;
+use super::pty::{CommandFinishedEvent, WindowCommandBudget};
 use super::terminal::PaneRenderCache;
 use super::terminal::RenderState;
+use super::title_stack::TitleStack;
 use super::view_state::ViewState;
 
 /// Maximum number of completed command blocks retained per pane.
@@ -128,6 +129,10 @@ pub struct Pane {
     pub arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
 
     /// Channel sender for input events (key, resize, focus) to this pane's PTY thread.
+    ///
+    /// Unbounded on purpose: it carries keystrokes, which must never be
+    /// dropped.  The replies the GUI sends on it are bounded at the source
+    /// instead, by the per-pane `window_cmd_budget` report cap (148.C9).
     pub input_tx: Sender<InputEvent>,
 
     /// Strong handle to a clone of [`Self::input_tx`], existing purely so
@@ -191,7 +196,7 @@ pub struct Pane {
     /// `RestoreWindowTitleFromStack` (CSI 22/23 t). Each pane maintains its
     /// own stack so that background shells pushing/popping titles do not
     /// interfere with the active pane.
-    pub title_stack: Vec<String>,
+    pub title_stack: TitleStack,
 
     /// Per-pane GUI view state (scroll offset, selection, blink, mouse).
     pub view_state: ViewState,
@@ -204,6 +209,13 @@ pub struct Pane {
     /// only published on PTY output — if the shell is idle waiting for a
     /// password, the snapshot would be stale.
     pub echo_off: Arc<AtomicBool>,
+
+    /// Counters for window commands sent by the PTY thread and not yet drained
+    /// by the GUI (148.C9, 148.RC2).  The GUI releases one per command it drains
+    /// in [`crate::gui::rendering::handle_window_manipulation`]; the PTY thread
+    /// stops queueing a class at its cap (`MAX_OUTSTANDING_REPORTS`,
+    /// `MAX_OUTSTANDING_VIEWPORT_COMMANDS`).
+    pub window_cmd_budget: WindowCommandBudget,
 
     /// Per-pane GPU resources (renderer, glyph atlas, vertex buffers).
     ///
@@ -332,9 +344,10 @@ impl Pane {
             title,
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: super::view_state::ViewState::new(),
             echo_off: channels.echo_off,
+            window_cmd_budget: channels.window_cmd_budget,
             child_pid: channels.child_pid,
             render_state: super::terminal::new_render_state(window_post),
             render_cache: PaneRenderCache::new(),
@@ -1763,9 +1776,10 @@ mod tests {
             title: title.to_owned(),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
@@ -1799,7 +1813,7 @@ mod tests {
         assert_eq!(pane.id, PaneId(5));
         assert_eq!(pane.title, "my pane");
         assert!(!pane.bell_active);
-        assert_eq!(pane.title_stack, [] as [String; 0]);
+        assert!(pane.title_stack.is_empty());
         assert_eq!(pane.view_state.scroll_offset, 0);
         assert!(!pane.echo_off.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -1844,6 +1858,7 @@ mod tests {
             pty_dead_rx,
             command_event_rx,
             echo_off: Arc::new(AtomicBool::new(false)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             history_seed: crate::gui::shell_history::new_seeded_history(),
             shell_program: None,

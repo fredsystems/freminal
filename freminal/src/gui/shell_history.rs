@@ -71,6 +71,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tracing::{debug, trace, warn};
 
+use super::history_file_reader::{HistoryReadError, SymlinkPolicy, read_history_file};
+
 /// Maximum number of history entries loaded into the seed per pane.
 ///
 /// Chosen to comfortably cover typical `$HISTSIZE` / `$SAVEHIST` defaults
@@ -411,9 +413,12 @@ pub fn load_for_program(program: &Path, get_env: &dyn Fn(&str) -> Option<String>
         }
         ShellKind::Other => "n/a",
     };
-    let bytes = match std::fs::read(&path) {
+    // The path comes from the user's own environment, so it is trusted:
+    // symlinked dotfiles are followed.  The read is still size-capped and
+    // limited to regular files.
+    let bytes = match read_history_file(&path, SymlinkPolicy::Follow) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(HistoryReadError::NotFound) => {
             trace!(
                 "shell_history: {kind:?} no history file at {path:?} \
                  (source={path_source}); first-time shell?"
@@ -496,13 +501,12 @@ pub fn spawn_loader<S: ::std::hash::BuildHasher + Send + 'static>(
 /// `path` and publishes the result into `slot` under [`SEED_SEQ_OSC`].
 ///
 /// Used when the shell-integration scripts report `HISTFILE` via
-/// `OSC 1338`.  Skips environment-based resolution; uses
-/// [`detect_shell_kind`] on `program` solely to pick the correct parser.
-/// If the program's basename is unrecognised, the loader still attempts
-/// to parse `path` using a best-guess parser based on the file name
-/// (`.bash_history` => bash, `.zsh_history` => zsh, `fish_history` =>
-/// fish, otherwise treated as bash plain format which is the most
-/// lenient).
+/// `OSC 1338`.  Skips environment-based resolution.  The path is untrusted
+/// (it arrives in terminal output), so it is only read when its basename is
+/// a known history file name (`.bash_history`, `.zsh_history`, `.zhistory`,
+/// `.histfile`, `fish_history`, ...), and never through a symlink; see
+/// [`load_from_path`].  [`detect_shell_kind`] on `program` picks the parser
+/// when the shell is bash, zsh or fish, otherwise the basename does.
 ///
 /// Sequence-tagged CAS guarantees an `spawn_loader_with_path` publication
 /// always wins over a concurrent [`spawn_loader`] publication on the same
@@ -517,30 +521,52 @@ pub fn spawn_loader_with_path(program: PathBuf, path: PathBuf, slot: SharedSeede
     }
 }
 
-/// Load shell history from an explicit `path`, picking the parser by
-/// shell program first and falling back to the path's basename when the
-/// program is unrecognised.  Always returns at most [`HISTORY_SEED_CAP`]
-/// entries.
+/// Load shell history from an explicit `path` reported over `OSC 1338`,
+/// returning at most [`HISTORY_SEED_CAP`] entries.
+///
+/// The path comes from terminal output and is therefore untrusted.  Four
+/// defences apply, in order:
+///
+/// 0. The path must be absolute.  A relative path would resolve against
+///    whatever the GUI process's working directory happens to be, not the
+///    shell's, so it is skipped without being touched.
+/// 1. The path's basename must be on the history-file allow-list
+///    ([`parser_kind_from_path`]) **regardless of the pane's shell**;
+///    otherwise nothing is read.  Without this, an application could name
+///    any readable file and have its lines offered as commands.
+/// 2. The parser is the shell's own kind when the program is bash, zsh or
+///    fish, and the basename's kind otherwise.
+/// 3. The read goes through [`read_history_file`] with
+///    [`SymlinkPolicy::Refuse`]: bounded, regular files only, and no
+///    symlink in the final component.
 fn load_from_path(program: &Path, path: &Path) -> Vec<String> {
-    let kind = match detect_shell_kind(program) {
-        ShellKind::Other => parser_kind_from_path(path),
-        k => k,
-    };
-    if matches!(kind, ShellKind::Other) {
+    if !path.is_absolute() {
         trace!(
-            "shell_history: OSC-driven load could not infer parser kind \
-             (program={program:?}, path={path:?}); skipping"
+            "shell_history: OSC-driven load: {path:?} is not an absolute path \
+             (program={program:?}); skipping"
         );
         return Vec::new();
     }
-    let bytes = match std::fs::read(path) {
+    let path_kind = parser_kind_from_path(path);
+    if matches!(path_kind, ShellKind::Other) {
+        trace!(
+            "shell_history: OSC-driven load: basename of {path:?} is not a known \
+             history file name (program={program:?}); skipping"
+        );
+        return Vec::new();
+    }
+    let kind = match detect_shell_kind(program) {
+        ShellKind::Other => path_kind,
+        k => k,
+    };
+    let bytes = match read_history_file(path, SymlinkPolicy::Refuse) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(HistoryReadError::NotFound) => {
             trace!("shell_history: OSC-driven load: no file at {path:?} ({kind:?})");
             return Vec::new();
         }
         Err(e) => {
-            warn!("shell_history: OSC-driven load: failed to read {path:?} ({kind:?}): {e}");
+            warn!("shell_history: OSC-driven load: refused to read {path:?} ({kind:?}): {e}");
             return Vec::new();
         }
     };
@@ -573,17 +599,21 @@ fn load_from_path(program: &Path, path: &Path) -> Vec<String> {
     entries
 }
 
-/// Best-guess parser kind from a history-file basename, used when the
-/// shell program is unrecognised.  Conservative: unknown basenames yield
-/// `Other`, which suppresses the load entirely rather than parsing as
-/// the wrong format.
+/// Parser kind for an `OSC 1338`-reported history path, chosen by its
+/// basename.  This is the allow-list of file names freminal will read on a
+/// terminal-supplied path; unknown basenames yield `Other`, which suppresses
+/// the load entirely.
 fn parser_kind_from_path(path: &Path) -> ShellKind {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return ShellKind::Other;
     };
     match name {
         ".bash_history" | "bash_history" => ShellKind::Bash,
-        ".zsh_history" | "zsh_history" => ShellKind::Zsh,
+        // `.zhistory`: prezto's default `HISTFILE`
+        // (`${ZDOTDIR:-$HOME}/.zhistory`).
+        // `.histfile`: zsh's own `zsh-newuser-install` default `HISTFILE`
+        // (`~/.histfile`).
+        ".zsh_history" | "zsh_history" | ".zhistory" | ".histfile" => ShellKind::Zsh,
         "fish_history" => ShellKind::Fish,
         _ => ShellKind::Other,
     }
@@ -1119,7 +1149,7 @@ mod tests {
     #[test]
     fn spawn_loader_with_path_uses_explicit_path_and_publishes_at_seq_osc() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let hist = tmp.path().join("custom.bash_history");
+        let hist = tmp.path().join(".bash_history");
         std::fs::write(&hist, "from-osc-only\n").expect("write");
         let slot: SharedSeededHistory = new_seeded_history();
         spawn_loader_with_path(PathBuf::from("/bin/bash"), hist, Arc::clone(&slot));
@@ -1136,7 +1166,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let env_hist = tmp.path().join(".bash_history");
         std::fs::write(&env_hist, "env-entry\n").expect("write");
-        let osc_hist = tmp.path().join("osc.bash_history");
+        let osc_dir = tmp.path().join("osc");
+        std::fs::create_dir(&osc_dir).expect("mkdir");
+        let osc_hist = osc_dir.join(".bash_history");
         std::fs::write(&osc_hist, "osc-entry\n").expect("write");
         let slot: SharedSeededHistory = new_seeded_history();
 
@@ -1201,6 +1233,14 @@ mod tests {
             parser_kind_from_path(Path::new("/x/fish_history")),
             ShellKind::Fish
         );
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/.zhistory")),
+            ShellKind::Zsh
+        );
+        assert_eq!(
+            parser_kind_from_path(Path::new("/x/.histfile")),
+            ShellKind::Zsh
+        );
     }
 
     #[test]
@@ -1223,6 +1263,154 @@ mod tests {
         spawn_loader_with_path(PathBuf::from("/bin/sh"), hist, Arc::clone(&slot));
         let loaded = wait_for_seed(&slot, SEED_SEQ_OSC);
         assert_eq!(loaded.entries.as_ref(), &vec!["ls".to_owned()]);
+    }
+
+    // ---------- load_from_path hardening (Task 148.9) ----------
+
+    #[test]
+    fn osc_load_normal_zsh_history_still_loads() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join(".zsh_history");
+        std::fs::write(&hist, ": 1700000000:0;ls\necho hi\n").expect("write");
+        let v = load_from_path(Path::new("/bin/zsh"), &hist);
+        assert_eq!(v, vec!["ls", "echo hi"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_load_refuses_a_relative_path() {
+        use std::path::Component;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join(".zsh_history");
+        std::fs::write(&hist, ": 1700000000:0;ls\n").expect("write");
+        // Control: the absolute path loads.
+        assert_eq!(load_from_path(Path::new("/bin/zsh"), &hist), vec!["ls"]);
+
+        // The same file named relative to the process's working directory
+        // (`../../tmp/...`), so it would be read if relativity were allowed.
+        let cwd = std::env::current_dir().expect("cwd");
+        let mut relative = PathBuf::new();
+        for _ in cwd
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+        {
+            relative.push("..");
+        }
+        relative.push(hist.strip_prefix("/").unwrap_or(&hist));
+        assert!(relative.is_relative());
+        assert!(
+            relative.is_file(),
+            "test setup: {relative:?} must resolve to the history file"
+        );
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), &relative),
+            [] as [String; 0]
+        );
+        // A bare file name is relative too.
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), Path::new(".zsh_history")),
+            [] as [String; 0]
+        );
+    }
+
+    #[test]
+    fn osc_load_accepts_zhistory_and_histfile_for_zsh() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        for name in [".zhistory", ".histfile"] {
+            let hist = tmp.path().join(name);
+            std::fs::write(&hist, ": 1700000000:0;from-osc\n").expect("write");
+            let v = load_from_path(Path::new("/bin/zsh"), &hist);
+            assert_eq!(v, vec!["from-osc"], "{name} must load");
+        }
+    }
+
+    #[test]
+    fn osc_load_refuses_non_history_basename_even_for_a_known_shell() {
+        // A readable file that is not a history file (an SSH key, say) must
+        // not become palette entries just because the pane runs zsh.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let secret = tmp.path().join("id_ed25519");
+        std::fs::write(&secret, "not-a-history-file\nsecret material\n").expect("write");
+        for program in ["/bin/zsh", "/bin/bash", "/usr/bin/fish", "/bin/sh"] {
+            assert_eq!(
+                load_from_path(Path::new(program), &secret),
+                [] as [String; 0],
+                "program {program}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_load_dev_zero_yields_nothing() {
+        // Basename `zero` is not allow-listed, so this is refused before any
+        // read; the unbounded-allocation trigger from the advisory.
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), Path::new("/dev/zero")),
+            [] as [String; 0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_load_fifo_with_allowed_basename_yields_nothing_without_hanging() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let fifo = tmp.path().join(".zsh_history");
+        // mkfifo is part of coreutils on every supported unix; a missing or
+        // failing one must fail this test loudly rather than skip it.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be installed (coreutils) to test FIFO handling");
+        assert!(status.success(), "mkfifo {fifo:?} failed: {status}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_from_path(Path::new("/bin/zsh"), &fifo));
+        });
+        let v = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("OSC load of a FIFO must not block");
+        assert_eq!(v, [] as [String; 0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_load_refuses_symlink_with_allowed_basename() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("id_ed25519");
+        std::fs::write(&target, "secret line\n").expect("write");
+        let link = tmp.path().join(".zsh_history");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), &link),
+            [] as [String; 0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_load_follows_symlinked_history_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let target = tmp.path().join("real_history");
+        std::fs::write(&target, "ls\n").expect("write");
+        let link = tmp.path().join(".bash_history");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let e = env(&[("HOME", tmp.path().to_str().expect("utf8"))]);
+        assert_eq!(
+            load_for_program(Path::new("/bin/bash"), &lookup(&e)),
+            ["ls"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_load_of_dev_zero_histfile_yields_nothing() {
+        let e = env(&[("HISTFILE", "/dev/zero")]);
+        assert_eq!(
+            load_for_program(Path::new("/bin/zsh"), &lookup(&e)),
+            [] as [String; 0]
+        );
     }
 
     // ---------- classify_osc_reload ----------

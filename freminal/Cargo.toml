@@ -6,7 +6,6 @@ rust-version.workspace = true
 description.workspace = true
 documentation.workspace = true
 readme.workspace = true
-homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 keywords.workspace = true
@@ -192,6 +191,12 @@ tempfile.workspace = true
 # built-in `/proc/<pid>/cwd` readlink path and does not need sysinfo.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 sysinfo.workspace = true
+
+# Task 148.9: `O_NONBLOCK` / `O_NOFOLLOW` flag constants for the bounded
+# history-file reader (`gui::history_file_reader`), passed through std's safe
+# `OpenOptionsExt::custom_flags`.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Windows OSC 99 untracked leg (Task 138.C15): the toast is built directly so
 # its image is an `appLogoOverride`. Same version `notify-rust` already pulls

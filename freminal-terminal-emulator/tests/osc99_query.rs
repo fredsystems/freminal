@@ -27,9 +27,9 @@ use crossbeam_channel::Receiver;
 use freminal_common::buffer_states::osc99_notification::Osc99ControlKind;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::host_capabilities::{
-    HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
-    Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
-    Osc99Support, Osc99UrgencySupport,
+    HostCapabilities, KittyFileTransmission, Osc99ActivationReport, Osc99AutoExpiry,
+    Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport,
+    Osc99IconSupport, Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
 };
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::state::internal::TerminalState;
@@ -60,6 +60,7 @@ const fn toast_like() -> Osc99Features {
 const fn caps(features: Osc99Features) -> HostCapabilities {
     HostCapabilities {
         osc99: Osc99Support::Supported(features),
+        kitty_file_transmission: KittyFileTransmission::Refused,
     }
 }
 

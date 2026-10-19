@@ -2868,6 +2868,9 @@ impl freminal_windowing::App for FreminalGui {
                         // Saturating `u64 -> u32` for recording: pane IDs are
                         // monotonic from 0 and never approach u32::MAX.
                         pane_id: u32::try_from(pane_id.raw()).unwrap_or(u32::MAX),
+                        // Raw flag (not gated on `password_indicator`): input
+                        // is redacted from the recording while echo is off.
+                        echo_off: &pane.echo_off,
                     }
                 });
 

@@ -117,7 +117,12 @@ let
       };
 
       securitySection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.security) allow_clipboard_read;
+        inherit (s.security)
+          allow_clipboard_read
+          allow_clipboard_write
+          allow_kitty_file_transfer
+          allow_window_ops
+          ;
       };
 
       pasteGuardSection = lib.filterAttrs (_: v: v != null) {
@@ -657,6 +662,57 @@ in
           description = ''
             Allow applications to read the system clipboard via OSC 52 query.
             When true, OSC 52 queries return the clipboard contents base64-encoded.
+            Null uses the default (false).
+          '';
+        };
+
+        allow_clipboard_write = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "active_pane"
+              "all"
+              "off"
+            ]
+          );
+          default = null;
+          description = ''
+            Which panes may write the system clipboard via OSC 52.
+            "active_pane" honours writes only from the active pane of the
+            focused window; "all" honours writes from every pane, including
+            background tabs; "off" never honours writes. A write whose decoded
+            payload exceeds 1 MiB is always dropped.
+            Null uses the default ("active_pane").
+          '';
+        };
+
+        allow_kitty_file_transfer = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Allow applications to make the terminal read local files and shared
+            memory objects via the kitty graphics protocol (t=f, t=t, t=s).
+            When true, any program writing to the terminal, including a remote
+            host over ssh, can make the terminal read (and for t=t and t=s,
+            remove) a path of its choosing and probe the reply to learn whether
+            it succeeded. Direct transmission (t=d) is unaffected.
+            Null uses the default (false).
+          '';
+        };
+
+        allow_window_ops = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Allow applications to change the window through XTWINOPS escape
+            sequences: minimize, de-iconify, move, resize (pixels or
+            characters), maximize/restore and full-screen. Equivalent to
+            xterm's allowWindowOps. When true, any program writing to the
+            terminal, including a remote host over ssh, can move, resize or
+            full-screen your window. Resize and move targets are clamped to
+            the monitor size, or to a fixed 16384 px extent when the monitor
+            is unknown. Report-only
+            queries (window size, position, state, title) and title push/pop
+            are unaffected.
             Null uses the default (false).
           '';
         };

@@ -938,17 +938,75 @@ impl super::FreminalGui {
     /// Wrap `payload` for bracketed paste (when `pane` has it enabled) and
     /// send it to `pane`'s PTY. Shared by the active-pane and targeted paths.
     fn send_paste_to_pane_ref(pane: &super::panes::Pane, payload: String) {
-        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
-
         let snap = pane.arc_swap.load();
-        let wrapped = if snap.bracketed_paste == RlBracket::Enabled {
-            format!("\x1b[200~{payload}\x1b[201~")
-        } else {
-            payload
-        };
+        let wrapped = wrap_bracketed_paste(payload, &snap.bracketed_paste);
         if let Err(e) = pane.input_tx.send(InputEvent::Key(wrapped.into_bytes())) {
             error!("Paste: failed to send paste to PTY: {e}");
         }
+    }
+}
+
+/// Bracketed-paste start and end markers, in their 7-bit (`ESC [`) and 8-bit
+/// (U+009B, the C1 CSI) introducer forms.
+const BRACKETED_PASTE_MARKERS: [&str; 4] = ["\x1b[200~", "\x1b[201~", "\u{9b}200~", "\u{9b}201~"];
+
+/// Remove every bracketed-paste marker from `payload`.
+///
+/// Without this, clipboard text containing `ESC [ 201 ~` terminates the
+/// bracket early and the receiving shell executes the remainder as typed
+/// input (issue #561).
+///
+/// Both the start (`200~`) and end (`201~`) markers are removed, each in its
+/// 7-bit (`ESC [`) and 8-bit (U+009B) introducer form. Removal repeats until
+/// no marker remains, because a single pass is not enough: removing the inner
+/// marker from `ESC[20ESC[201~1~` reassembles a new one.
+///
+/// Precedent: kitty's `sanitize_for_bracketed_paste` (`kitty/utils.py`)
+/// removes the end marker and its 8-bit form repeatedly until none remains,
+/// and only when bracketed paste is on. xterm-412 instead replaces BS, DEL,
+/// ENQ, EOT, ESC, NUL and the stty special characters with spaces by default
+/// (`disallowedPasteControls`), regardless of bracketed paste. The two
+/// disagree on C0 stripping, so freminal follows kitty and leaves other
+/// control characters alone (the paste guard already flags them).
+///
+/// Stripping the start marker as well is freminal's own choice, extending
+/// kitty: a nested start marker confuses some readline versions.
+#[must_use]
+fn sanitize_bracketed_paste(payload: &str) -> String {
+    // One linear pass: append each character, and whenever the output now
+    // ends with a marker, drop it. Because removal happens on the output
+    // buffer, a marker reassembled from the pieces around a removed one
+    // (`ESC[20` + `ESC[201~` + `1~`) is caught as soon as its last character
+    // arrives -- the same fixpoint kitty reaches by repeated substitution,
+    // without its quadratic worst case on a hostile clipboard.
+    let mut out = String::with_capacity(payload.len());
+    for c in payload.chars() {
+        out.push(c);
+        if c == '~'
+            && let Some(marker) = BRACKETED_PASTE_MARKERS.iter().find(|m| out.ends_with(*m))
+        {
+            out.truncate(out.len() - marker.len());
+        }
+    }
+    out
+}
+
+/// Produce the bytes (as text) to send to the PTY for a paste of `payload`.
+///
+/// When bracketed paste is [`RlBracket::Enabled`] the payload is sanitised
+/// with [`sanitize_bracketed_paste`] and wrapped in `ESC [ 200 ~` ...
+/// `ESC [ 201 ~`. Otherwise it is returned verbatim.
+#[must_use]
+fn wrap_bracketed_paste(
+    payload: String,
+    mode: &freminal_common::buffer_states::modes::rl_bracket::RlBracket,
+) -> String {
+    use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+
+    if *mode == RlBracket::Enabled {
+        format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(&payload))
+    } else {
+        payload
     }
 }
 
@@ -956,7 +1014,9 @@ impl super::FreminalGui {
 mod tests {
     use super::*;
     use crate::gui::panes::{Pane, PaneId};
+    use crate::gui::pty::WindowCommandBudget;
     use crate::gui::tabs::{Tab, TabId};
+    use crate::gui::title_stack::TitleStack;
     use crate::gui::view_state::ViewState;
     use arc_swap::ArcSwap;
     use crossbeam_channel::Receiver;
@@ -995,9 +1055,10 @@ mod tests {
             title: format!("pane-{pane_id}"),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
@@ -1142,5 +1203,61 @@ mod tests {
             rx.try_recv().is_err(),
             "exactly one focus event should be sent"
         );
+    }
+
+    // ── Bracketed-paste sanitisation (Task 148.20, issue #561) ─────────
+
+    #[test]
+    fn wrap_bracketed_paste_strips_embedded_end_marker() {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        let wrapped = wrap_bracketed_paste("\x1b[201~rm -rf ~\n".to_owned(), &RlBracket::Enabled);
+        assert_eq!(wrapped, "\x1b[200~rm -rf ~\n\x1b[201~");
+        assert_eq!(wrapped.matches("\x1b[200~").count(), 1);
+        assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
+        assert!(wrapped.starts_with("\x1b[200~"));
+        assert!(wrapped.ends_with("\x1b[201~"));
+    }
+
+    #[test]
+    fn sanitize_bracketed_paste_is_linear_on_deeply_nested_markers() {
+        // `ESC[20` * n, `ESC[201~`, `1~` * n: every removal reassembles the
+        // next marker. A fixpoint loop over `str::replace` is quadratic here.
+        let n = 200_000;
+        let payload = format!("{}\x1b[201~{}", "\x1b[20".repeat(n), "1~".repeat(n));
+        assert_eq!(sanitize_bracketed_paste(&payload), "");
+    }
+
+    #[test]
+    fn sanitize_bracketed_paste_removes_reassembling_marker() {
+        assert_eq!(sanitize_bracketed_paste("\x1b[20\x1b[201~1~"), "");
+        assert_eq!(sanitize_bracketed_paste("a\x1b[20\x1b[200~0~b"), "ab");
+    }
+
+    #[test]
+    fn sanitize_bracketed_paste_removes_8bit_markers() {
+        assert_eq!(sanitize_bracketed_paste("a\u{9b}201~b"), "ab");
+        assert_eq!(sanitize_bracketed_paste("a\u{9b}200~b"), "ab");
+        assert_eq!(sanitize_bracketed_paste("\u{9b}20\u{9b}201~1~"), "");
+    }
+
+    #[test]
+    fn sanitize_bracketed_paste_removes_start_marker() {
+        assert_eq!(sanitize_bracketed_paste("a\x1b[200~b"), "ab");
+    }
+
+    #[test]
+    fn sanitize_bracketed_paste_keeps_benign_text_and_other_escapes() {
+        for s in ["hello world\n", "\x1b[31mred\x1b[0m", "\x1b[2004~", ""] {
+            assert_eq!(sanitize_bracketed_paste(s), s);
+        }
+    }
+
+    #[test]
+    fn wrap_bracketed_paste_disabled_is_verbatim() {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+        let payload = "\x1b[201~rm -rf ~\n";
+        for mode in [RlBracket::Disabled, RlBracket::Query] {
+            assert_eq!(wrap_bracketed_paste(payload.to_owned(), &mode), payload);
+        }
     }
 }

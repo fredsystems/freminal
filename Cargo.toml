@@ -13,7 +13,6 @@ rust-version = "1.96.0"
 description = "A terminal emulator written in Rust"
 documentation = "https://github.com/fredsystems/freminal/README.md"
 readme = "README.md"
-homepage = "https://github.com/fredsystems/freminal"
 repository = "https://github.com/fredsystems/freminal"
 license = "MIT"
 keywords = ["emulator", "terminal", "terminal-emulator", "tty", "vt100"]
@@ -123,9 +122,6 @@ winreg = "0.56.0"
 # a single zbus copy. Listed with `default-features = false` so the choice is
 # explicit and a future default (for example `tokio`) cannot slip in.
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
-
-[workspace.metadata.cargo-machete]
-ignored = ["vergen"]
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint
