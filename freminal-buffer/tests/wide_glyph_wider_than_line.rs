@@ -348,3 +348,135 @@ fn double_width_span_one_bottom_row_discard_after_full_row_does_not_wrap() {
     };
     assert_discard_after_full_row_leaves_no_wrap(make(), make());
 }
+
+// ── Shape 5: the landing row decides the span (148.C8) ──────────────────
+//
+// A wide glyph that is a leftover on a full row. A normal row would hold it,
+// but the row the wrap lands on is DECDWL (span `3 / 2 == 1` on a 3-column
+// buffer), so it can never be placed there. The wrap must not happen at all:
+// the cursor and row count must be those of writing the prefix alone.
+
+fn assert_wide_after_prefix_changes_nothing(
+    mut with_wide: Buffer,
+    mut reference: Buffer,
+    prefix: &[TChar],
+) {
+    reference.insert_text(prefix);
+    let mut text = prefix.to_vec();
+    text.push(wide());
+    with_wide.insert_text(&text);
+
+    assert_eq!(
+        with_wide.rows().len(),
+        reference.rows().len(),
+        "an unplaceable glyph must not push or scroll a row"
+    );
+    assert_eq!(
+        with_wide.cursor().pos,
+        reference.cursor().pos,
+        "an unplaceable glyph must not advance the cursor"
+    );
+    for row in 0..reference.rows().len() {
+        for col in 0..reference.terminal_width() {
+            assert_eq!(
+                glyph_at(&with_wide, row, col),
+                glyph_at(&reference, row, col),
+                "row {row} col {col}"
+            );
+        }
+    }
+}
+
+/// A 3-wide primary buffer whose row 1 is DECDWL, cursor at the start of row 0.
+fn dwl_next_row() -> Buffer {
+    let mut buf = Buffer::new(3, 4);
+    buf.set_cursor_pos(Some(0), Some(1));
+    buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf
+}
+
+#[test]
+fn wrap_onto_an_existing_double_width_row_is_not_taken() {
+    // `reuse_row_as_softwrap` keeps the row's `line_width`, so row 1 stays
+    // DECDWL when the wrap reuses it.
+    assert_wide_after_prefix_changes_nothing(
+        dwl_next_row(),
+        dwl_next_row(),
+        &[narrow('a'), narrow('b')],
+    );
+}
+
+#[test]
+fn wrap_onto_an_existing_double_width_row_still_wraps_what_fits() {
+    // A narrow glyph fits the one-column DECDWL span, so the wrap is taken.
+    let mut buf = dwl_next_row();
+    buf.insert_text(&[narrow('a'), narrow('b'), wide(), narrow('c')]);
+
+    assert_eq!(glyph_at(&buf, 1, 0), narrow('c'));
+    assert_eq!(buf.cursor().pos.y, 1);
+}
+
+/// A 3x3 alternate screen whose last row (the cursor's) is DECDWL, with the
+/// scroll region `[top1, bottom1]` (1-based).
+fn alt_last_row_dwl(top1: usize, bottom1: usize) -> Buffer {
+    let mut buf = Buffer::new(3, 3);
+    buf.switch_to_alternate();
+    buf.set_scroll_region(top1, bottom1);
+    buf.set_cursor_pos(Some(0), Some(2));
+    buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    buf.set_cursor_pos(Some(0), Some(2));
+    buf
+}
+
+#[test]
+fn stay_on_last_row_below_margin_double_width_row_is_not_wrapped() {
+    // Cursor below the bottom margin on the last screen row: a wrap stays on
+    // this DECDWL row, so the glyph (span 1) can never be placed.
+    assert_wide_after_prefix_changes_nothing(
+        alt_last_row_dwl(1, 2),
+        alt_last_row_dwl(1, 2),
+        &[narrow('a')],
+    );
+}
+
+#[test]
+fn primary_declrmm_column_scroll_keeps_the_double_width_row() {
+    // On the primary screen DECLRMM confines the wrap-scroll to columns, so
+    // the landing row keeps its DECDWL `line_width` (margin span 3, halved to
+    // 1).
+    let make = || {
+        let mut buf = Buffer::new(3, 3);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_scroll_region(1, 2);
+        buf.set_cursor_pos(Some(0), Some(1));
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        buf
+    };
+    assert_wide_after_prefix_changes_nothing(make(), make(), &[narrow('a')]);
+}
+
+#[test]
+fn whole_row_scroll_lands_on_a_blank_single_width_row() {
+    // At the region bottom with a whole-row scroll the landing row is freshly
+    // blanked and single-width, so the glyph that does not fit the DECDWL row
+    // is placed there.
+    let mut buf = alt_last_row_dwl(1, 3);
+    buf.insert_text(&[narrow('a'), wide()]);
+
+    assert_eq!(glyph_at(&buf, 2, 0), wide());
+    assert_eq!(buf.cursor().pos.y, 2);
+    assert_eq!(buf.cursor().pos.x, 2);
+}
+
+#[test]
+fn wrap_pushing_a_new_row_lands_on_a_single_width_row() {
+    // Full-screen primary at the bottom: a pushed row is single-width.
+    let mut buf = Buffer::new(3, 2);
+    buf.set_cursor_pos(Some(0), Some(1));
+    buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    buf.insert_text(&[narrow('a'), wide()]);
+
+    let last = buf.rows().len() - 1;
+    assert_eq!(glyph_at(&buf, last, 0), wide());
+}

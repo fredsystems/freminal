@@ -8628,6 +8628,15 @@ Group F — Hygiene:
   can still land and place nothing, leaving one spurious blank line. It is reachable only
   with DECDWL and a glyph wider than the half span. Scope: compute the landing row's span
   before wrapping. Not scheduled in Task 148.
+  **Done (2026-10-19):** `landing_row_span_for_wrap` predicts, without mutating, the row
+  `advance_row_for_wrap` would land on and returns its span (DECDWL-halved). A narrow landing
+  row is possible in three branches: the next existing row (`reuse_row_as_softwrap` keeps
+  `line_width`), staying on the last row below the margin (148.C3), and a DECLRMM
+  column-confined scroll on the primary screen. Pushed and freshly blanked rows are always
+  single-width. A `debug_assert` in the new `wrap_after_leftover`, plus nine per-branch unit
+  tests, keep the prediction in sync with the real wrap; `wrap_unless_stalled` stays as the
+  backstop. Benchmarks (A/B): `softwrap_heavy` +1.1%, `buffer_insert_large_line` −0.8%,
+  `buffer_insert_chunks` −1.8%. Surfaced 148.C12.
 - **148.C9 — Reply bound is per message, and GUI-side queues stay unbounded.** Review finding
   R5. `REPLY_QUEUE_CAPACITY` (1024) bounds messages, not bytes: with
   `allow_clipboard_read = true`, OSC 52 query replies carry the clipboard. Upstream of it,
@@ -8650,6 +8659,12 @@ Group F — Hygiene:
   notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
   respawn on `WorkerGone`, which needs an atomically swappable sender (`ArcSwap`), not a
   `OnceLock`. Not scheduled in Task 148.
+- **148.C12 — Auto-wrap at the region bottom on the alternate screen ignores DECLRMM.**
+  Surfaced by 148.C8. `scroll_region_up_for_wrap` scrolls whole rows on the alternate screen
+  (`scroll_slice_up`), even with left/right margins set. The primary screen and SU use the
+  column-confined `scroll_slice_up_confined`. xterm-412 `WrapLine` -> `xtermIndex` ->
+  `xtermScroll` scrolls only inside the margins in left/right mode. Scope: use the confined
+  scroll on the alternate screen when DECLRMM is on.
 
 ---
 
