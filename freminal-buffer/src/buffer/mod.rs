@@ -1192,11 +1192,14 @@ impl Buffer {
             if at_region_bottom && self.kind == BufferType::Primary && is_full_screen_region {
                 false
             } else if at_region_bottom {
-                // The alternate screen's wrap-scroll (`scroll_region_up_for_wrap`)
-                // always shifts whole rows; only the primary screen confines
-                // it to the DECLRMM columns.
-                let confined_to_columns =
-                    self.kind == BufferType::Primary && self.declrmm_enabled == Declrmm::Enabled;
+                // The wrap-scroll (`scroll_region_up_for_wrap`) is confined to
+                // the DECLRMM columns on the primary screen, and on the
+                // alternate screen when the margins are narrower than the
+                // screen (xterm `xtermScroll`); otherwise it shifts whole rows.
+                let confined_to_columns = match self.kind {
+                    BufferType::Primary => self.declrmm_enabled == Declrmm::Enabled,
+                    BufferType::Alternate => self.declrmm_margins_are_partial(),
+                };
                 let scrolls_whole_row =
                     !confined_to_columns && self.scroll_region_top < self.scroll_region_bottom;
                 !scrolls_whole_row && self.row_is_double_width(row_idx)
@@ -10437,14 +10440,28 @@ mod wrap_landing_tests {
     }
 
     #[test]
-    fn alternate_declrmm_still_scrolls_whole_rows() {
-        // The alternate screen's wrap-scroll ignores DECLRMM, so the landing
-        // row is blanked (single-width) even with the mode on.
+    fn alternate_declrmm_full_width_margins_scroll_whole_rows() {
+        // DECLRMM on but the margins span the screen: xterm's
+        // `scroll_full_line` holds, so the landing row is blanked
+        // (single-width).
         let mut buf = alt_buffer();
         buf.set_declrmm(Declrmm::Enabled);
         buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
         make_cursor_row_double_width(&mut buf);
         assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn alternate_declrmm_partial_margins_keep_the_cursor_row_width() {
+        // 148.C12: with narrower margins the alternate screen's wrap-scroll is
+        // column-confined (as on the primary), so the cursor's own row, with
+        // its own `line_width`, is the landing row.
+        let mut buf = alt_buffer();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(1, 4);
+        buf.set_cursor_pos(Some(1), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
     }
 
     #[test]

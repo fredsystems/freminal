@@ -8665,6 +8665,10 @@ Group F — Hygiene:
   column-confined `scroll_slice_up_confined`. xterm-412 `WrapLine` -> `xtermIndex` ->
   `xtermScroll` scrolls only inside the margins in left/right mode. Scope: use the confined
   scroll on the alternate screen when DECLRMM is on.
+  **Done (2026-10-19):** with DECLRMM on and partial margins, the alternate screen uses
+  `scroll_slice_up_confined`; full-width margins or DECLRMM off still scroll whole rows.
+  `landing_row_span_for_wrap` predicts the cursor's own row in that case. Tests: buffer and
+  full-pipeline margin-confinement tests (both fail on the old code) and both pins.
 
 ---
 
