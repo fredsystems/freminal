@@ -716,7 +716,7 @@ impl KittyShmError {
 }
 
 /// The most a `t=s` read grows its buffer by before reading again.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const KITTY_SHM_READ_CHUNK: usize = 1024 * 1024;
 
 /// Read `read_len` bytes at `offset` from the shared-memory object `file`
@@ -731,7 +731,10 @@ const KITTY_SHM_READ_CHUNK: usize = 1024 * 1024;
 /// because the range itself can be truncated away. `pread` instead returns
 /// a short count (or zero at end of object), which is reported as
 /// [`KittyShmError::Truncated`].
-#[cfg(unix)]
+///
+/// macOS has its own implementation below: XNU shared-memory objects do not
+/// support `read` / `pread` at all (`ESPIPE`).
+#[cfg(all(unix, not(target_os = "macos")))]
 fn read_kitty_shm_range(
     file: &std::fs::File,
     offset: u64,
@@ -770,6 +773,71 @@ fn read_kitty_shm_range(
         }
     }
     Ok(buf)
+}
+
+/// Read `read_len` bytes at `offset` from the shared-memory object `file`
+/// (macOS).
+///
+/// XNU POSIX shared-memory objects support neither `read` nor `pread`
+/// (they fail with `ESPIPE`), so the only way to read one is `mmap`, which is
+/// what kitty itself does. The SIGBUS hazard that rules `mmap` out on other
+/// systems does not exist here: XNU fixes a shared-memory object's size at its
+/// first `ftruncate` and rejects every later one (`pshm_truncate` in
+/// `bsd/kern/posix_shm.c` returns `EINVAL` once the object is defined), so the
+/// object cannot shrink under the mapping. The size is re-read from the open
+/// descriptor here, so the mapped range is always inside the object.
+#[cfg(target_os = "macos")]
+fn read_kitty_shm_range(
+    file: &std::fs::File,
+    offset: u64,
+    read_len: u64,
+) -> Result<Vec<u8>, KittyShmError> {
+    use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap};
+
+    let object_len = file.metadata().map_err(KittyShmError::Read)?.len();
+    let end = offset
+        .checked_add(read_len)
+        .ok_or(ShmBoundsError::OutOfBounds)?;
+    if end > object_len {
+        return Err(KittyShmError::Truncated);
+    }
+    let len = usize::value_from(read_len).map_err(|_| ShmBoundsError::TooLarge)?;
+    let Some(map_len) = usize::value_from(end)
+        .ok()
+        .and_then(std::num::NonZeroUsize::new)
+    else {
+        return Ok(Vec::new());
+    };
+    let start = usize::value_from(offset).map_err(|_| ShmBoundsError::OutOfBounds)?;
+
+    // SAFETY: `file` is an open shared-memory object of `object_len` bytes,
+    // and `map_len` (= offset + read_len) <= `object_len` was checked above.
+    // XNU never lets the object shrink after its size is set (see the doc
+    // comment), so every mapped page stays backed. The mapping is read-only,
+    // nothing derived from it outlives this function, and it is unmapped
+    // below.
+    let ptr = unsafe {
+        mmap(
+            None,
+            map_len,
+            ProtFlags::PROT_READ,
+            MapFlags::MAP_SHARED,
+            file,
+            0,
+        )
+    }
+    .map_err(|e| KittyShmError::Read(std::io::Error::from(e)))?;
+
+    // SAFETY: `ptr` is valid for `map_len` bytes and `start + len ==
+    // map_len`.
+    let copied =
+        unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>().add(start), len) }.to_vec();
+
+    // SAFETY: `ptr` / `map_len` are exactly what `mmap` returned above.
+    if let Err(e) = unsafe { munmap(ptr, map_len.get()) } {
+        tracing::warn!("Kitty graphics: failed to unmap shared memory object: {e}");
+    }
+    Ok(copied)
 }
 
 /// Size the read of an opened shared-memory object from `meta` and read it.
@@ -4067,19 +4135,67 @@ fn extract_rect(
 mod tests {
     #[cfg(windows)]
     use super::load_kitty_file;
+
+    /// The property the macOS `mmap` reader relies on: XNU rejects a second
+    /// `ftruncate` of a shared-memory object, so it can never shrink under a
+    /// mapping (the SIGBUS race the other platforms avoid with `pread`).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_shm_object_size_is_fixed_after_the_first_truncate() {
+        let (name, file) = create_test_shm_sized(3 * 4096);
+        let _cleanup = ShmGuard(name);
+        assert!(
+            file.set_len(100).is_err(),
+            "XNU must refuse to shrink a sized shm object"
+        );
+        assert_eq!(file.metadata().expect("fstat").len(), 3 * 4096);
+    }
+
+    /// macOS: ranges inside the object read exactly; a range past its end is
+    /// `Truncated`, never a mapping beyond the object.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_shm_range_reads_and_bounds() {
+        let data: Vec<u8> = (0..10_000u32)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let name = create_test_shm_object(&data);
+        let _cleanup = ShmGuard(name.clone());
+        let reader = std::fs::File::from(
+            nix::sys::mman::shm_open(
+                name.as_str(),
+                nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+            .expect("open reader"),
+        );
+        let got = read_kitty_shm_range(&reader, 777, 5000).expect("range read");
+        assert_eq!(got, data[777..5777]);
+        assert!(matches!(
+            read_kitty_shm_range(&reader, 0, 10_001),
+            Err(KittyShmError::Truncated)
+        ));
+        assert_eq!(
+            read_kitty_shm_range(&reader, 0, 0).expect("empty"),
+            Vec::<u8>::new()
+        );
+    }
+
     #[cfg(unix)]
     use super::{
         FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
         verify_opened_kitty_file,
     };
-    #[cfg(unix)]
-    use super::{
-        KITTY_SHM_READ_CHUNK, KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision,
-        read_kitty_shm_object, read_kitty_shm_range, shm_unlink_decision,
-    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    use super::{KITTY_SHM_READ_CHUNK, read_kitty_shm_object};
     use super::{
         KittyFileError, ShmBoundsError, is_refused_kitty_path, kitty_path_allowed_on_windows,
         read_capped, shm_read_bounds,
+    };
+    #[cfg(unix)]
+    use super::{
+        KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision, read_kitty_shm_range,
+        shm_unlink_decision,
     };
     use freminal_common::{
         buffer_states::{
@@ -8340,10 +8456,12 @@ mod tests {
         assert_eq!(stored.width_px, 2);
         assert_eq!(stored.height_px, 1);
 
-        // No error response should have been sent.
-        // Every failure of a file-backed medium replies identically; the
-        // detailed ENOENT reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
-        assert_file_refused(&handler, &rx, 995);
+        // Only the success reply may have been sent.
+        let responses = drain_pty_text(&rx);
+        assert!(
+            responses.iter().all(|r| r.contains(";OK")),
+            "expected only an OK reply for a valid t=s transmission on Windows, got {responses:?}"
+        );
     }
 
     #[test]
@@ -8422,13 +8540,41 @@ mod tests {
     /// Create a POSIX shm object of `data.len()` bytes containing `data`,
     /// returning its unique name. Test-only helper for the `t=s` round-trip
     /// tests below.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn create_test_shm_object(data: &[u8]) -> String {
         use std::os::unix::fs::FileExt as _;
 
         let (name, file) = create_test_shm_sized(u64::try_from(data.len()).expect("fits in u64"));
         file.write_all_at(data, 0)
             .expect("writing the test shm object should succeed");
+        name
+    }
+
+    /// macOS variant: XNU shared-memory objects cannot be written with
+    /// `write` / `pwrite`, only through a mapping.
+    #[cfg(target_os = "macos")]
+    fn create_test_shm_object(data: &[u8]) -> String {
+        use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap};
+
+        let (name, file) = create_test_shm_sized(u64::try_from(data.len()).expect("fits in u64"));
+        let Some(len) = std::num::NonZeroUsize::new(data.len()) else {
+            return name;
+        };
+        // SAFETY: the object was just sized to `data.len()` bytes; the
+        // writable mapping covers exactly that and is unmapped below.
+        unsafe {
+            let ptr = mmap(
+                None,
+                len,
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_SHARED,
+                &file,
+                0,
+            )
+            .expect("mapping the test shm object should succeed");
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
+            munmap(ptr, len.get()).expect("unmapping the test shm object should succeed");
+        }
         name
     }
 
@@ -8565,7 +8711,7 @@ mod tests {
     /// is truncated, then the read runs. The previous `mmap` implementation
     /// raised SIGBUS here; the positioned read reports an error instead.
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn kitty_shared_memory_truncated_after_size_is_an_error_not_sigbus() {
         use nix::fcntl::OFlag;
         use nix::sys::mman::shm_open;
@@ -8606,7 +8752,7 @@ mod tests {
     /// offset that is not chunk-aligned, and an object that ends inside a
     /// later chunk is reported as truncated.
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn kitty_shared_memory_read_spans_chunks() {
         let total = KITTY_SHM_READ_CHUNK * 2 + 12_345;
         let data: Vec<u8> = (0..total).map(|i| u8::try_from(i % 251).unwrap()).collect();
