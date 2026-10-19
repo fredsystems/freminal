@@ -8349,6 +8349,16 @@ Group F — Hygiene:
   `st_uid` equals our effective uid (`shm_unlink_decision`); a failed `fstat` no longer
   unlinks. Tests: cap table (every platform), a sparse cap+1 object, a deterministic
   shrink-after-size read returning `Truncated`, and the owner-decision table.
+- **148.14 (done, with 148.C1):** new pure `freminal-common/src/windows_path.rs`.
+  `classify_windows_path` returns a `WindowsPathKind` (`LocalDrive`, `Unc`, `DeviceOrVerbatim`,
+  `DriveRelative`, `Relative`); it treats `\` and `/` alike and is table-tested on every
+  platform. On Windows, `load_kitty_file` (`t=f` / `t=t`) and `read_history_file` (OSC 1338
+  and the env HISTFILE path) refuse anything but a `X:\` local-drive path before any
+  filesystem call, so no SMB connection (and no NTLM challenge-response) is attempted. The
+  kitty reply stays the uniform `EBADF`. A drive letter mapped to a network share cannot be
+  detected from the string and is out of scope. The Windows-only tests compile and pass
+  `check-windows` clippy, but nothing runs them on Windows (maintainer check per
+  "148 Verification").
 
 ### 148 Cleanup entries
 
@@ -8359,6 +8369,7 @@ Group F — Hygiene:
   path-classification function, apply it to the OSC 1338 path before any filesystem call.
   Verification: a table test on the classification at the OSC entry point;
   `cargo xtask check-windows`. Schedule: with or right after 148.14.
+  **Done** in the 148.14 commit.
 - **148.C2 — CHT (`CSI Ps I`) loops `Ps` times with no progress check.** Surfaced by the
   148.7 fuzz run (a 3241-byte `terminal_state` timeout; top frames `Buffer::tab_forward` from
   `process_output_in_batch`). `tab_forward` calls `advance_to_next_tab_stop` `count` times

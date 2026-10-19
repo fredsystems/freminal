@@ -21,7 +21,10 @@
 //! - at most [`MAX_HISTORY_FILE_BYTES`] bytes are ever read, taken from the
 //!   end of the file, because the newest history entries are the ones used;
 //! - a symlink in the final path component can be refused outright
-//!   ([`SymlinkPolicy::Refuse`]) for untrusted paths.
+//!   ([`SymlinkPolicy::Refuse`]) for untrusted paths;
+//! - on Windows, only drive-letter absolute paths are opened: a UNC or
+//!   device path would make Windows contact a remote host (leaking an `NTLMv2`
+//!   challenge-response, GHSA-3g79-vfp3-q57g) before any check could run.
 //!
 //! Deciding *whether a path is a plausible history file at all* (the
 //! basename allow-list) is the caller's concern and lives in
@@ -66,6 +69,11 @@ pub enum HistoryReadError {
     /// The final path component is a symlink and the policy refuses those.
     #[error("history path is a symlink and symlinks are refused")]
     SymlinkRefused,
+    /// The path is not a drive-letter absolute path (UNC, device, verbatim,
+    /// or drive-relative); opening it could contact a remote host.
+    #[cfg(windows)]
+    #[error("history path is not a local drive-letter path")]
+    NotLocalPath,
     /// Any other I/O failure.
     #[error("I/O error reading history file: {0}")]
     Io(#[source] std::io::Error),
@@ -158,11 +166,19 @@ fn open_history_file(path: &Path, symlinks: SymlinkPolicy) -> Result<File, Histo
 /// [`HistoryReadError::NotRegularFile`] if it is not a regular file,
 /// [`HistoryReadError::SymlinkRefused`] if `symlinks` is
 /// [`SymlinkPolicy::Refuse`] and the final component is a symlink, and
-/// [`HistoryReadError::Io`] for any other I/O failure.
+/// [`HistoryReadError::Io`] for any other I/O failure.  On Windows,
+/// [`HistoryReadError::NotLocalPath`] is returned, before the filesystem is
+/// touched, for any path that is not drive-letter absolute.
 pub fn read_history_file(
     path: &Path,
     symlinks: SymlinkPolicy,
 ) -> Result<Vec<u8>, HistoryReadError> {
+    #[cfg(windows)]
+    if !path.to_str().is_some_and(|p| {
+        freminal_common::windows_path::classify_windows_path(p).is_local_absolute()
+    }) {
+        return Err(HistoryReadError::NotLocalPath);
+    }
     let mut file = open_history_file(path, symlinks)?;
     // Type-check the opened handle, not the path: no TOCTOU window.
     let meta = file.metadata().map_err(HistoryReadError::Io)?;
@@ -320,6 +336,25 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_and_device_paths_are_refused_before_opening() {
+        for p in [
+            r"\\host\share\.bash_history",
+            r"\\?\UNC\host\share\.bash_history",
+            r"\\.\pipe\x",
+            "relative_history",
+        ] {
+            for policy in [SymlinkPolicy::Follow, SymlinkPolicy::Refuse] {
+                let err = read_history_file(Path::new(p), policy).expect_err("must fail");
+                assert!(
+                    matches!(err, HistoryReadError::NotLocalPath),
+                    "{p:?}: got {err:?}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

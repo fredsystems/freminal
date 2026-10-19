@@ -130,6 +130,11 @@ enum KittyFileError {
     NotUtf8,
     #[error("path is not absolute")]
     NotAbsolute,
+    /// The path is not a drive-letter absolute path (UNC, device, verbatim,
+    /// or drive-relative), so resolving it could contact a remote host.
+    #[cfg(windows)]
+    #[error("path is not a local drive-letter path")]
+    NotLocalPath,
     #[error("failed to canonicalise path: {0}")]
     Canonicalize(std::io::Error),
     #[error("path is under a refused prefix (/proc, /sys, /dev)")]
@@ -296,12 +301,31 @@ fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, KittyFil
     }
 }
 
+/// Whether `path_str` may be passed to the filesystem on Windows.
+///
+/// Only drive-letter absolute paths are allowed. A UNC or verbatim path
+/// makes Windows open an SMB connection to the named host as soon as it is
+/// resolved (even by `canonicalize`), leaking an `NTLMv2` challenge-response
+/// (GHSA-3g79-vfp3-q57g), so this must be checked before any filesystem
+/// call. Pure string logic, so it is testable on every platform; production
+/// code calls it only under `cfg(windows)`.
+#[cfg(any(windows, test))]
+fn kitty_path_allowed_on_windows(path_str: &str) -> bool {
+    freminal_common::windows_path::classify_windows_path(path_str).is_local_absolute()
+}
+
 /// Validate, open and read the file named by a `t=f` / `t=t` payload.
 ///
 /// The result carries the canonical path and (on unix) the identity of the
 /// opened object, so a `t=t` deletion targets exactly what was read.
 fn load_kitty_file(payload: &[u8]) -> Result<LoadedKittyFile, KittyFileError> {
     let path_str = std::str::from_utf8(payload).map_err(|_| KittyFileError::NotUtf8)?;
+    // Before ANY filesystem call: `is_absolute` is true for a UNC path and
+    // `canonicalize` would contact its host.
+    #[cfg(windows)]
+    if !kitty_path_allowed_on_windows(path_str) {
+        return Err(KittyFileError::NotLocalPath);
+    }
     let path = std::path::Path::new(path_str);
     if !path.is_absolute() {
         return Err(KittyFileError::NotAbsolute);
@@ -3880,13 +3904,16 @@ fn extract_rect(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::load_kitty_file;
     #[cfg(unix)]
     use super::{
         FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
         verify_opened_kitty_file,
     };
     use super::{
-        KittyFileError, ShmBoundsError, is_refused_kitty_path, read_capped, shm_read_bounds,
+        KittyFileError, ShmBoundsError, is_refused_kitty_path, kitty_path_allowed_on_windows,
+        read_capped, shm_read_bounds,
     };
     #[cfg(unix)]
     use super::{
@@ -7297,6 +7324,37 @@ mod tests {
         assert!(
             matches!(result, Err(KittyFileError::Open(_))),
             "O_NOFOLLOW must refuse a symlink as the final component"
+        );
+    }
+
+    #[test]
+    fn kitty_windows_guard_allows_only_local_drive_paths() {
+        for allowed in [r"C:\img\x.png", "c:/img/x.png"] {
+            assert!(kitty_path_allowed_on_windows(allowed), "{allowed:?}");
+        }
+        for refused in [
+            r"\\host\share\x.png",
+            "//host/share/x.png",
+            r"\\?\C:\x.png",
+            r"\\?\UNC\host\share\x.png",
+            r"\\.\pipe\x",
+            "C:x.png",
+            "C:",
+            r"\x.png",
+            "x.png",
+            "",
+        ] {
+            assert!(!kitty_path_allowed_on_windows(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_load_refuses_unc_path_before_touching_the_filesystem() {
+        let result = load_kitty_file(b"\\\\host\\share\\x.png");
+        assert!(
+            matches!(result, Err(KittyFileError::NotLocalPath)),
+            "a UNC path must be refused without resolving it"
         );
     }
 
