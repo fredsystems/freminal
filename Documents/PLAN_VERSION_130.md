@@ -8274,6 +8274,25 @@ Group F — Hygiene:
   `buffer_resize/*` −6.1% to +0.6%, `bench_alternate_screen_switch` and
   `bench_alt_screen_transition_e2e` not significant (one +95% outlier on
   `leave_alt_to_primary` did not repeat on two reruns: −0.03%, −1.8%).
+- **148.6 (done):** the incremental path was wrong; the full merge is correct. Both causes are
+  in wrapped auto-URL refinement in `refresh_row_cache_and_refine_wrapped_urls`
+  (`buffer/flatten.rs`), not OSC 8 itself: (1) a clean wrapped-URL group below the first
+  rebuilt row was skipped for redetection, so the tail re-merge fell back to its
+  wrap-truncated per-row URLs; (2) a rebuilt soft-wrap continuation row (or a row a
+  previous URL ran into) invalidated the refinement of rows before it, which the copied
+  prefix kept. Fix: the first rebuilt row becomes a merge floor, pulled back to the start of
+  the logical-line group when refinement can reach across it; a group is skipped only when it
+  ends at or before the floor. Common case unchanged (floor = first rebuilt row, pinned by a
+  test). The oracle stays; a 100-seed x 250-step property test in
+  `freminal-terminal-emulator/tests/flatten_incremental_oracle.rs` compares both paths
+  explicitly, so it also holds in release test builds. Reproducers
+  `flatten-incremental-clean-wrapped-url-group-below-rebuilt-row` (minimised from #559) and
+  `flatten-incremental-stale-url-before-rebuilt-continuation-row`. All 124 divergence
+  artifacts from the 148.7 run pass; a 669 s run on the fixed tree found nothing in any
+  class. Benchmarks (A/B): `build_snapshot_80x24_partial_dirty` −2.0% / −3.2% / −5.4% over
+  three runs (wide intervals, not significant), `build_snapshot_80x24_clean` −7.9%,
+  `bench_visible_flatten` +1.5%, `bench_flatten_url_heavy` 0.0%,
+  `bench_flatten_wrapped_url_heavy` +1.6% (n.s.).
 
 ### 148 Cleanup entries
 

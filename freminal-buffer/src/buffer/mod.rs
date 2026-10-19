@@ -198,9 +198,11 @@ pub struct Buffer {
     ///    different rows, front eviction that moves the window onto
     ///    different rows (every line feed at scrollback capacity), or a
     ///    detection toggle all change `fp` and force a full merge.
-    /// 2. **`first_rebuilt_row`** (recomputed on every call): any row in the
-    ///    window that is `dirty` or has a `None` cache entry. Catches
-    ///    ordinary per-row edits.
+    /// 2. **The merge floor** (recomputed on every call): the first row in
+    ///    the window that is `dirty` or has a `None` cache entry, pulled back
+    ///    to the start of its logical line when a wrapped-URL refinement can
+    ///    reach across it (see `refresh_row_cache_and_refine_wrapped_urls`).
+    ///    Catches ordinary per-row edits.
     /// 3. **Explicit `self.merge_cache = None`**, at sites where (1) and (2)
     ///    cannot observe that cached content is stale:
     ///    - **Wholesale row-cache replacement** — the new content's
@@ -215,7 +217,7 @@ pub struct Buffer {
     ///      its cached representation, only its index changes) without
     ///      marking the moved rows dirty and without renumbering anything:
     ///      the rows keep their numbers while the content under those
-    ///      numbers rotates, so *neither* `fp` *nor* `first_rebuilt_row`
+    ///      numbers rotates, so *neither* `fp` *nor* the merge floor
     ///      observes it. Each contains its own `self.merge_cache = None;` at
     ///      the point where the rotation happens; that line is
     ///      load-bearing, **not** a redundant leftover safe to delete —
