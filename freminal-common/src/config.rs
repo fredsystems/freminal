@@ -1708,6 +1708,26 @@ struct ConfigPartial {
 }
 
 impl Config {
+    /// Build a validated [`Config`] from TOML text, layered over
+    /// [`Config::default`].
+    ///
+    /// This is the same pipeline the file loader runs for a single config
+    /// file (parse into the partial config, apply it over the defaults, then
+    /// validate), minus all filesystem and environment access, so it is
+    /// deterministic and suitable for tests and fuzzing.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::ParseStr`] if `contents` is not valid TOML for
+    /// the config schema, or [`ConfigError::Validation`] if the resulting
+    /// configuration is out of range.
+    pub fn from_toml_str(contents: &str) -> Result<Self, ConfigError> {
+        let partial = parse_partial(contents).map_err(|source| ConfigError::ParseStr { source })?;
+        let mut cfg = Self::default();
+        cfg.apply_partial(partial);
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     fn apply_partial(&mut self, partial: ConfigPartial) {
         if let Some(v) = partial.version {
             self.version = v;
@@ -1947,6 +1967,12 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
+    #[error("TOML parse error: {source}")]
+    ParseStr {
+        #[source]
+        source: toml::de::Error,
+    },
+
     #[error("Invalid configuration: {0}")]
     Validation(String),
 
@@ -2150,10 +2176,17 @@ fn load_partial(path: &Path, warnings: &mut Vec<String>) -> Result<ConfigPartial
 
     collect_deprecated_key_warnings(path, &contents, warnings);
 
-    toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+    parse_partial(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Parse TOML text into a [`ConfigPartial`]. Shared by the file loader
+/// ([`load_partial`]) and the string loader ([`Config::from_toml_str`]) so the
+/// two cannot drift apart.
+fn parse_partial(contents: &str) -> Result<ConfigPartial, toml::de::Error> {
+    toml::from_str(contents)
 }
 
 /// Append a human-readable warning for any deprecated config keys present in
@@ -4897,6 +4930,64 @@ path = "/tmp/my.frag"
 
         let loaded = load_config(Some(&path)).expect("load_config should succeed");
         assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn from_toml_str_empty_is_default() {
+        let cfg = Config::from_toml_str("").expect("empty config should load");
+        assert_eq!(
+            serialize_config_for_diff(&cfg),
+            serialize_config_for_diff(&Config::default())
+        );
+    }
+
+    #[test]
+    fn from_toml_str_applies_partial_over_defaults() {
+        let cfg = Config::from_toml_str("[font]\nsize = 14.0\n").expect("partial should load");
+        assert!((cfg.font.size - 14.0).abs() < f32::EPSILON);
+
+        // Everything else is untouched: restoring the one field yields the default.
+        let mut expected = Config::default();
+        expected.font.size = 14.0;
+        assert_eq!(
+            serialize_config_for_diff(&cfg),
+            serialize_config_for_diff(&expected)
+        );
+    }
+
+    #[test]
+    fn from_toml_str_rejects_value_only_validate_catches() {
+        // 1000.0 parses fine as an f32; only `validate` rejects it.
+        let err = Config::from_toml_str("[font]\nsize = 1000.0\n")
+            .expect_err("out-of-range font size must be rejected");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "expected Validation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_toml_str_reports_malformed_toml_as_parse_str() {
+        let err = Config::from_toml_str("[font\nsize = ").expect_err("malformed TOML must fail");
+        assert!(
+            matches!(err, ConfigError::ParseStr { .. }),
+            "expected ParseStr, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_toml_str_matches_file_loader_for_config_example() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../config_example.toml");
+        let contents = fs::read_to_string(&path).expect("read config_example.toml");
+
+        let from_str = Config::from_toml_str(&contents).expect("from_toml_str should succeed");
+        let (from_file, _warnings) =
+            load_config_with_warnings(Some(&path)).expect("file loader should succeed");
+
+        assert_eq!(
+            serialize_config_for_diff(&from_str),
+            serialize_config_for_diff(&from_file)
+        );
     }
 
     #[test]

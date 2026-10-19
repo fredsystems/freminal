@@ -424,7 +424,6 @@ dependencies = [
  "freminal-common",
  "freminal-terminal-emulator",
  "libfuzzer-sys",
- "toml",
 ]
 
 [[package]]
