@@ -8668,6 +8668,12 @@ Group F — Hygiene:
   notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
   respawn on `WorkerGone`, which needs an atomically swappable sender (`ArcSwap`), not a
   `OnceLock`. Not scheduled in Task 148.
+  **Done (2026-10-19):** the worker sender lives in a static `ArcSwapOption`. On
+  `WorkerGone` (or empty) `enqueue_with_respawn` spawns a fresh worker, installs it with
+  `compare_and_swap` (a racing winner's queue is used instead), and retries the enqueue once.
+  Respawns are rate-limited to one per 5 s (`claim_respawn`, an atomic timestamp), so a
+  panicking worker cannot become a thread per notification. No locks. Generic over the spawn
+  closure and tested without the OS call.
 - **148.C12 — Auto-wrap at the region bottom on the alternate screen ignores DECLRMM.**
   Surfaced by 148.C8. `scroll_region_up_for_wrap` scrolls whole rows on the alternate screen
   (`scroll_slice_up`), even with left/right margins set. The primary screen and SU use the

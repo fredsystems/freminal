@@ -24,8 +24,9 @@
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use crossbeam_channel::{Sender, TrySendError};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
@@ -379,14 +380,22 @@ impl NotificationRouter {
             return;
         }
         let notification = Self::build_system_notification(req);
-        let Some(queue) = system_notification_queue() else {
-            return;
-        };
-        match enqueue_bounded(queue, notification) {
+        match enqueue_with_respawn(
+            &NOTIFY_WORKER,
+            notification,
+            claim_notify_worker_respawn,
+            spawn_notify_worker,
+        ) {
             EnqueueOutcome::Enqueued => {}
             EnqueueOutcome::DroppedFull => log_dropped_notification(),
             EnqueueOutcome::WorkerGone => {
                 tracing::warn!("desktop notification worker has exited; notification dropped");
+            }
+            EnqueueOutcome::RespawnSuppressed => {
+                tracing::debug!(
+                    "desktop notification worker exited and was restarted recently; \
+                     notification dropped"
+                );
             }
         }
     }
@@ -493,19 +502,135 @@ enum EnqueueOutcome {
     Enqueued,
     /// The queue was full; the item was dropped.
     DroppedFull,
-    /// The worker has exited; the item was dropped.
+    /// The worker has exited and could not be replaced; the item was dropped.
     WorkerGone,
+    /// The worker has exited, and a replacement was started too recently to
+    /// start another (see [`NOTIFY_WORKER_RESPAWN_MIN_INTERVAL`]); the item
+    /// was dropped.
+    RespawnSuppressed,
 }
 
-/// Hand `item` to a bounded queue without ever blocking or spawning.
+/// Hand `item` to a bounded queue without ever blocking or spawning; a
+/// disconnected queue hands the item back as `Err` so the caller can retry it
+/// on a replacement worker.
 ///
 /// This is the whole queueing policy of the desktop-notification path, kept
 /// separate from the OS call so it is testable without one.
-fn enqueue_bounded<T>(queue: &Sender<T>, item: T) -> EnqueueOutcome {
+fn enqueue_bounded<T>(queue: &Sender<T>, item: T) -> Result<EnqueueOutcome, T> {
     match queue.try_send(item) {
-        Ok(()) => EnqueueOutcome::Enqueued,
-        Err(TrySendError::Full(_)) => EnqueueOutcome::DroppedFull,
-        Err(TrySendError::Disconnected(_)) => EnqueueOutcome::WorkerGone,
+        Ok(()) => Ok(EnqueueOutcome::Enqueued),
+        Err(TrySendError::Full(_)) => Ok(EnqueueOutcome::DroppedFull),
+        Err(TrySendError::Disconnected(item)) => Err(item),
+    }
+}
+
+/// The minimum time between two starts of the notification worker. A worker
+/// that panics on every notification must not turn into a thread spawned per
+/// notification.
+const NOTIFY_WORKER_RESPAWN_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Whether a dead (or absent) notification worker may be started again now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RespawnDecision {
+    /// Enough time has passed since the last start (or there was none).
+    Respawn,
+    /// The last start was too recent.
+    TooSoon,
+}
+
+/// Decide whether a worker may be started, given the time since the previous
+/// start (`None` if there has never been one).
+fn respawn_decision(since_last_spawn: Option<Duration>) -> RespawnDecision {
+    match since_last_spawn {
+        Some(elapsed) if elapsed < NOTIFY_WORKER_RESPAWN_MIN_INTERVAL => RespawnDecision::TooSoon,
+        Some(_) | None => RespawnDecision::Respawn,
+    }
+}
+
+/// Sentinel for "the worker has never been started".
+const NEVER_SPAWNED: u64 = u64::MAX;
+
+/// Atomically claim the right to start a worker at `now_ms` (milliseconds
+/// since process start), recording it in `last_spawn_ms` when granted. Of
+/// several concurrent callers, at most one is granted.
+fn claim_respawn(last_spawn_ms: &AtomicU64, now_ms: u64) -> RespawnDecision {
+    let last = last_spawn_ms.load(Ordering::Acquire);
+    let since_last =
+        (last != NEVER_SPAWNED).then(|| Duration::from_millis(now_ms.saturating_sub(last)));
+    match respawn_decision(since_last) {
+        RespawnDecision::TooSoon => RespawnDecision::TooSoon,
+        RespawnDecision::Respawn => {
+            match last_spawn_ms.compare_exchange(
+                last,
+                // `NEVER_SPAWNED` is reserved; clamp so a start is never
+                // mistaken for "never" (unreachable in practice: ~584M years).
+                now_ms.min(NEVER_SPAWNED - 1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => RespawnDecision::Respawn,
+                Err(_) => RespawnDecision::TooSoon,
+            }
+        }
+    }
+}
+
+/// [`claim_respawn`] against the process-wide start record and clock.
+fn claim_notify_worker_respawn() -> RespawnDecision {
+    static START: OnceLock<Instant> = OnceLock::new();
+    static LAST_SPAWN_MS: AtomicU64 = AtomicU64::new(NEVER_SPAWNED);
+    let now_ms = u64::try_from(START.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(NEVER_SPAWNED - 1);
+    claim_respawn(&LAST_SPAWN_MS, now_ms)
+}
+
+/// Enqueue `item` on the worker in `slot`, replacing the worker if it has
+/// exited (or was never started).
+///
+/// `may_respawn` is consulted only when a replacement is needed; it is the
+/// rate limit. `spawn` starts a fresh worker and returns its queue. The
+/// replacement is installed with a compare-and-swap: if another caller
+/// installed one first, theirs is used and ours is dropped (its worker exits
+/// when the sender does). The enqueue is retried once on the new queue.
+fn enqueue_with_respawn<T>(
+    slot: &ArcSwapOption<Sender<T>>,
+    item: T,
+    may_respawn: impl FnOnce() -> RespawnDecision,
+    spawn: impl FnOnce() -> Option<Sender<T>>,
+) -> EnqueueOutcome {
+    let current = slot.load_full();
+    let item = match &current {
+        Some(queue) => match enqueue_bounded(queue, item) {
+            Ok(outcome) => return outcome,
+            Err(item) => item,
+        },
+        None => item,
+    };
+
+    if may_respawn() == RespawnDecision::TooSoon {
+        return EnqueueOutcome::RespawnSuppressed;
+    }
+    let Some(fresh) = spawn().map(std::sync::Arc::new) else {
+        return EnqueueOutcome::WorkerGone;
+    };
+    let previous = slot.compare_and_swap(&current, Some(std::sync::Arc::clone(&fresh)));
+    let installed = match &*previous {
+        // Our swap lost: use the winner's queue and drop `fresh`.
+        winner if !same_queue(winner.as_ref(), current.as_ref()) => winner.clone().unwrap_or(fresh),
+        _ => fresh,
+    };
+    match enqueue_bounded(&installed, item) {
+        Ok(outcome) => outcome,
+        Err(_item) => EnqueueOutcome::WorkerGone,
+    }
+}
+
+/// Whether two optional queue handles are the same allocation.
+fn same_queue<T>(a: Option<&std::sync::Arc<T>>, b: Option<&std::sync::Arc<T>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -523,46 +648,47 @@ fn log_dropped_notification() {
     }
 }
 
-/// The queue feeding the one long-lived `freminal-notify` worker, started on
-/// first use. `None` if the worker thread could not be spawned.
-fn system_notification_queue() -> Option<&'static Sender<notify_rust::Notification>> {
-    static QUEUE: OnceLock<Option<Sender<notify_rust::Notification>>> = OnceLock::new();
-    QUEUE
-        .get_or_init(|| {
-            let (tx, rx) =
-                crossbeam_channel::bounded::<notify_rust::Notification>(SYSTEM_NOTIFICATION_QUEUE);
-            let spawned = std::thread::Builder::new()
-                .name("freminal-notify".to_owned())
-                .spawn(move || {
-                    for notification in rx {
-                        // The Linux/BSD `image-data` icon is attached here,
-                        // not on the GUI thread: the first call decodes the
-                        // embedded PNG (~1 MiB RGBA), which must never block
-                        // the frame loop. `build_system_notification` stays a
-                        // pure, icon-less builder so it remains unit-testable
-                        // without the decode. The `mut` rebind is scoped to
-                        // this cfg so it isn't an unused-mut on
-                        // macOS/Windows, where `image_data` does not exist.
-                        #[cfg(all(unix, not(target_os = "macos")))]
-                        let mut notification = notification;
-                        #[cfg(all(unix, not(target_os = "macos")))]
-                        if let Some(image) = freminal_icon_image() {
-                            notification.image_data(image.clone());
-                        }
-                        if let Err(e) = notification.show() {
-                            tracing::warn!("failed to show desktop notification: {e}");
-                        }
-                    }
-                });
-            match spawned {
-                Ok(_) => Some(tx),
-                Err(e) => {
-                    tracing::warn!("failed to spawn notification thread: {e}");
-                    None
+/// The queue feeding the one long-lived `freminal-notify` worker. Empty until
+/// first use, and replaced (rate-limited) if the worker exits; see
+/// [`enqueue_with_respawn`].
+static NOTIFY_WORKER: ArcSwapOption<Sender<notify_rust::Notification>> =
+    ArcSwapOption::const_empty();
+
+/// Start a `freminal-notify` worker and return its bounded queue. `None` if
+/// the worker thread could not be spawned.
+fn spawn_notify_worker() -> Option<Sender<notify_rust::Notification>> {
+    let (tx, rx) =
+        crossbeam_channel::bounded::<notify_rust::Notification>(SYSTEM_NOTIFICATION_QUEUE);
+    let spawned = std::thread::Builder::new()
+        .name("freminal-notify".to_owned())
+        .spawn(move || {
+            for notification in rx {
+                // The Linux/BSD `image-data` icon is attached here,
+                // not on the GUI thread: the first call decodes the
+                // embedded PNG (~1 MiB RGBA), which must never block
+                // the frame loop. `build_system_notification` stays a
+                // pure, icon-less builder so it remains unit-testable
+                // without the decode. The `mut` rebind is scoped to
+                // this cfg so it isn't an unused-mut on
+                // macOS/Windows, where `image_data` does not exist.
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let mut notification = notification;
+                #[cfg(all(unix, not(target_os = "macos")))]
+                if let Some(image) = freminal_icon_image() {
+                    notification.image_data(image.clone());
+                }
+                if let Err(e) = notification.show() {
+                    tracing::warn!("failed to show desktop notification: {e}");
                 }
             }
-        })
-        .as_ref()
+        });
+    match spawned {
+        Ok(_) => Some(tx),
+        Err(e) => {
+            tracing::warn!("failed to spawn notification thread: {e}");
+            None
+        }
+    }
 }
 
 /// The bundled freminal application icon as a notify-rust [`Image`], decoded
@@ -1074,9 +1200,11 @@ mod tests {
         let mut dropped = 0_usize;
         for i in 0..1000_u32 {
             match enqueue_bounded(&tx, i) {
-                EnqueueOutcome::Enqueued => enqueued += 1,
-                EnqueueOutcome::DroppedFull => dropped += 1,
-                EnqueueOutcome::WorkerGone => unreachable!("receiver is alive"),
+                Ok(EnqueueOutcome::Enqueued) => enqueued += 1,
+                Ok(EnqueueOutcome::DroppedFull) => dropped += 1,
+                Ok(EnqueueOutcome::WorkerGone | EnqueueOutcome::RespawnSuppressed) | Err(_) => {
+                    unreachable!("receiver is alive")
+                }
             }
         }
         assert_eq!(enqueued, SYSTEM_NOTIFICATION_QUEUE);
@@ -1087,7 +1215,135 @@ mod tests {
     fn enqueue_bounded_reports_a_gone_worker() {
         let (tx, rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
         drop(rx);
-        assert_eq!(enqueue_bounded(&tx, 1), EnqueueOutcome::WorkerGone);
+        assert_eq!(enqueue_bounded(&tx, 1), Err(1));
+    }
+
+    #[test]
+    fn respawn_decision_honours_the_minimum_interval() {
+        assert_eq!(respawn_decision(None), RespawnDecision::Respawn);
+        assert_eq!(
+            respawn_decision(Some(Duration::ZERO)),
+            RespawnDecision::TooSoon
+        );
+        assert_eq!(
+            respawn_decision(Some(Duration::from_millis(4_999))),
+            RespawnDecision::TooSoon
+        );
+        assert_eq!(
+            respawn_decision(Some(NOTIFY_WORKER_RESPAWN_MIN_INTERVAL)),
+            RespawnDecision::Respawn
+        );
+    }
+
+    #[test]
+    fn claim_respawn_records_the_start_and_rate_limits() {
+        let last = AtomicU64::new(NEVER_SPAWNED);
+        assert_eq!(claim_respawn(&last, 100), RespawnDecision::Respawn);
+        assert_eq!(claim_respawn(&last, 200), RespawnDecision::TooSoon);
+        let interval_ms = u64::try_from(NOTIFY_WORKER_RESPAWN_MIN_INTERVAL.as_millis()).unwrap();
+        assert_eq!(
+            claim_respawn(&last, 100 + interval_ms - 1),
+            RespawnDecision::TooSoon
+        );
+        assert_eq!(
+            claim_respawn(&last, 100 + interval_ms),
+            RespawnDecision::Respawn
+        );
+    }
+
+    fn live_slot() -> (ArcSwapOption<Sender<u32>>, crossbeam_channel::Receiver<u32>) {
+        let (tx, rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        (ArcSwapOption::from_pointee(tx), rx)
+    }
+
+    #[test]
+    fn live_worker_is_used_without_consulting_the_respawn_hooks() {
+        let (slot, rx) = live_slot();
+        let outcome = enqueue_with_respawn(
+            &slot,
+            7,
+            || unreachable!("worker is alive"),
+            || unreachable!("worker is alive"),
+        );
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(rx.try_recv(), Ok(7));
+    }
+
+    #[test]
+    fn dead_worker_is_replaced_and_the_item_retried() {
+        let (slot, dead_rx) = live_slot();
+        drop(dead_rx);
+        let (fresh_tx, fresh_rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        let outcome =
+            enqueue_with_respawn(&slot, 9, || RespawnDecision::Respawn, || Some(fresh_tx));
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(fresh_rx.try_recv(), Ok(9));
+
+        // The replacement is now the installed worker.
+        assert_eq!(
+            enqueue_with_respawn(
+                &slot,
+                10,
+                || unreachable!("replacement is alive"),
+                || unreachable!("replacement is alive"),
+            ),
+            EnqueueOutcome::Enqueued
+        );
+        assert_eq!(fresh_rx.try_recv(), Ok(10));
+    }
+
+    #[test]
+    fn empty_slot_starts_a_worker() {
+        let slot = ArcSwapOption::<Sender<u32>>::empty();
+        let (tx, rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        let outcome = enqueue_with_respawn(&slot, 1, || RespawnDecision::Respawn, || Some(tx));
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert!(slot.load().is_some());
+    }
+
+    #[test]
+    fn too_soon_drops_the_item_without_spawning() {
+        let (slot, dead_rx) = live_slot();
+        drop(dead_rx);
+        let outcome = enqueue_with_respawn(
+            &slot,
+            1,
+            || RespawnDecision::TooSoon,
+            || unreachable!("rate limited"),
+        );
+        assert_eq!(outcome, EnqueueOutcome::RespawnSuppressed);
+    }
+
+    #[test]
+    fn failed_spawn_reports_a_gone_worker() {
+        let slot = ArcSwapOption::<Sender<u32>>::empty();
+        let outcome = enqueue_with_respawn(&slot, 1, || RespawnDecision::Respawn, || None);
+        assert_eq!(outcome, EnqueueOutcome::WorkerGone);
+        assert!(slot.load().is_none());
+    }
+
+    /// If another caller installs a replacement while ours is being started,
+    /// theirs wins and receives the item; ours is dropped.
+    #[test]
+    fn losing_the_swap_race_uses_the_winners_queue() {
+        let (slot, dead_rx) = live_slot();
+        drop(dead_rx);
+        let (winner_tx, winner_rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        let (loser_tx, loser_rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        let outcome = enqueue_with_respawn(
+            &slot,
+            5,
+            || RespawnDecision::Respawn,
+            || {
+                // The concurrent winner installs its queue before we do.
+                slot.store(Some(std::sync::Arc::new(winner_tx)));
+                Some(loser_tx)
+            },
+        );
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(winner_rx.try_recv(), Ok(5));
+        assert!(loser_rx.try_recv().is_err());
     }
 
     #[test]
