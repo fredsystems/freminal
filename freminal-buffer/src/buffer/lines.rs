@@ -251,8 +251,20 @@ impl Buffer {
                         self.scroll_region_up_primary();
                         // cursor stays in place
                     }
+                } else if self.is_cursor_on_last_screen_row() {
+                    // Below the bottom margin on the last screen row: the
+                    // cursor stays put; nothing scrolls and no row is pushed.
+                    //
+                    // xterm `xtermIndex` (cursor.c): "indexing when below
+                    // scrolling region is cursor down" -- if `cur_row >
+                    // bot_marg` it calls `CursorDown`, never `xtermScroll`;
+                    // and `CursorDown` clamps to `max_row` when below the
+                    // margin (`max = (cur_row > bot_marg ? max_row :
+                    // bot_marg)`). Pushing a row here scrolled the whole
+                    // screen, region included, into scrollback (148.C3).
                 } else {
-                    // Outside DECSTBM → just move down with no scrolling
+                    // Outside DECSTBM, above the last row -> move down one
+                    // row (`CursorDown`) with no scrolling.
                     if self.cursor.pos.y + 1 < self.rows.len() {
                         self.cursor.pos.y += 1;
                     } else {

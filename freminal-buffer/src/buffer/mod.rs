@@ -64,6 +64,8 @@ mod image_delete_tests;
 mod images;
 mod lifecycle;
 mod lines;
+#[cfg(test)]
+mod primary_wrap_below_margin_tests;
 mod reflow_remap;
 mod resize_and_alt;
 #[cfg(test)]
@@ -1155,6 +1157,25 @@ impl Buffer {
         Some(self.advance_row_for_wrap(row_idx, wrap_start_col))
     }
 
+    /// Whether the cursor is on the last visible screen row.
+    ///
+    /// The alternate screen is a fixed `height`-row grid, so this is
+    /// `cursor.y == height - 1`. On the primary screen the visible window is
+    /// the trailing `height` rows of `rows`, so this is the cursor's
+    /// screen-relative row being `height - 1`; with fewer than `height` rows
+    /// (buffer still filling) it is never true, because a row can still be
+    /// appended below the cursor.
+    ///
+    /// Callers pair this with "not at the bottom margin" to mean the cursor is
+    /// below the bottom margin on the last row, where xterm's `CursorDown`
+    /// (`cursor.c`) clamps to `max_row` instead of scrolling.
+    pub(in crate::buffer) fn is_cursor_on_last_screen_row(&self) -> bool {
+        match self.kind {
+            BufferType::Primary => self.cursor_screen_y() + 1 >= self.height,
+            BufferType::Alternate => self.cursor.pos.y + 1 >= self.height,
+        }
+    }
+
     /// Handle soft-wrap advancement: move the cursor to the next row when a
     /// line wraps.  Returns the new `row_idx`.
     ///
@@ -1183,13 +1204,14 @@ impl Buffer {
                 // row_idx stays the same — it now points to the freshly blanked
                 // bottom row of the scroll region.
                 row_idx
-            } else if self.kind == BufferType::Alternate && row_idx + 1 >= self.height {
-                // Below the bottom margin on the last screen row of the
-                // alternate screen: there is no row to wrap onto and nothing
-                // to scroll (the cursor is outside the region). The cursor
-                // stays on the row, so the wrapped text overwrites it from the
-                // wrap column. The alternate screen is a fixed `height`-row
-                // grid; appending a row here broke that invariant (#568).
+            } else if self.is_cursor_on_last_screen_row() {
+                // Below the bottom margin on the last screen row: there is no
+                // row to wrap onto and nothing to scroll (the cursor is
+                // outside the region). The cursor stays on the row, so the
+                // wrapped text overwrites it from the wrap column. Appending a
+                // row here broke the alternate screen's fixed `height`-row
+                // grid (#568) and, on the primary screen, scrolled the whole
+                // screen (region included) into scrollback (148.C3).
                 //
                 // xterm: `WrapLine` (charproc.c) calls `xtermIndex`, which for
                 // a cursor below `bot_marg` is `CursorDown` (cursor.c), and

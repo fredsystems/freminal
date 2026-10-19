@@ -8581,6 +8581,18 @@ Group F — Hygiene:
   freminal's primary buffer pushes a row. No invariant breaks, so this is a behaviour
   difference, not a crash. Scope: decide whether to match xterm; any change needs the
   scrollback consequences thought through. Not scheduled in Task 148.
+  **Done (maintainer request, 2026-10-19):** the primary screen now matches xterm-412
+  (`xtermIndex` -> `CursorDown`, which clamps to `max_row` below `bot_marg`; `WrapLine` uses
+  the same path). Below the bottom margin on the last visible row, LF/IND/NEL and auto-wrap
+  push no row and scroll nothing; a wrap overwrites that row from the wrap column. The new
+  `is_cursor_on_last_screen_row` serves both screens. A full-screen region can't have the
+  cursor below it, so ordinary scrollback is unchanged. Tests: 11 buffer tests and one
+  full-pipeline test; the old `lf_outside_region_below_in_primary_creates_scrollback` test
+  asserted the old behaviour and now asserts the xterm one. Benchmarks: `softwrap_heavy`,
+  `buffer_insert_large_line` and the eviction benches are within ±4%. `bench_lf_heavy` is
+  bimodal on this machine: the unchanged code measured 7.0 ms and 9.5 ms in back-to-back runs
+  (−28% / +36% A/B swings, same code), so it gives no signal; the changed arm is off its
+  path (full-screen region).
 - **148.C4 — `viewport().monitor_size` is never populated.** Surfaced in review of 148.17.
   `freminal-windowing` calls `egui_winit::State::take_egui_input` but not
   `egui_winit::update_viewport_info`, so `monitor_size` (like other `ViewportInfo` fields
