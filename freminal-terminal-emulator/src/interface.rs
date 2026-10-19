@@ -136,6 +136,16 @@ pub fn split_format_data_for_scrollback(
 /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for spec references.
 const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
 
+/// Capacity, in messages, of the bounded queue that carries terminal-generated
+/// replies to the PTY writer thread.
+///
+/// Each message is a single reply (one DA1 answer, one XTGETTCAP name, ...).
+/// With the XTGETTCAP caps (`MAX_XTGETTCAP_NAMES`, `MAX_XTGETTCAP_NAME_HEX_LEN`)
+/// each reply is small, so the bytes queued behind a child that does not read
+/// its tty stay bounded. Replies arriving while the queue is full are dropped.
+/// User input does not use this queue.
+pub const REPLY_QUEUE_CAPACITY: usize = 256;
+
 /// Change signal carried forward across snapshots the GUI will not render.
 ///
 /// `scroll_changed` is edge-triggered: it is computed by diffing the current
@@ -320,6 +330,11 @@ impl TerminalEmulator {
     /// `handle_incoming_data`.
     ///
     /// Used by playback mode, tests, and benchmarks.
+    ///
+    /// Keeps a single **unbounded** channel for both user input and replies
+    /// (unlike [`Self::new`], which bounds replies with
+    /// [`REPLY_QUEUE_CAPACITY`]): the caller drains the returned receiver, and
+    /// the fuzz harness relies on seeing every reply.
     #[must_use]
     pub fn new_headless(scrollback_limit: Option<usize>) -> (Self, Receiver<PtyWrite>) {
         use crossbeam_channel::unbounded;
@@ -365,7 +380,12 @@ impl TerminalEmulator {
         pane_id: u32,
         set_term_program: bool,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
+        // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
+        // `write_tx`, unbounded, carries user input; `reply_tx`, bounded,
+        // carries terminal-generated replies, so output made of queries cannot
+        // grow memory without bound when the child does not read its tty.
         let (write_tx, read_rx) = unbounded();
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(REPLY_QUEUE_CAPACITY);
         let (pty_tx, pty_rx) = unbounded();
 
         // Derive the command tuple from the positional `command` arg.
@@ -391,6 +411,7 @@ impl TerminalEmulator {
 
         let io = FreminalPtyInputOutput::new(
             read_rx,
+            reply_rx,
             pty_tx,
             PtySpawnConfig {
                 command,
@@ -409,8 +430,16 @@ impl TerminalEmulator {
             "Failed to send resize to pty"
         );
 
+        // The handler answers queries through the bounded `reply_tx`.  The
+        // state's own `write_tx` carries user input (`TerminalState::write`,
+        // focus events), so it stays on the unbounded user channel: a full
+        // reply queue must never block or drop a keystroke.
+        let mut internal = TerminalState::new(reply_tx, scrollback_limit);
+        internal.write_tx = write_tx.clone();
+        internal.handler.set_control_tx(write_tx.clone());
+
         let ret = Self {
-            internal: TerminalState::new(write_tx.clone(), scrollback_limit),
+            internal,
             pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,

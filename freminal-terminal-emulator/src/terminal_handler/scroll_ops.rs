@@ -303,7 +303,9 @@ impl TerminalHandler {
     /// dimensions to compute the actual pixel size.
     pub(super) fn send_pty_resize(&self, new_width: usize) {
         let height = self.buffer.terminal_height();
-        if let Some(tx) = &self.write_tx {
+        // Not a reply: prefer the unbounded control channel so a full reply
+        // queue cannot stall the PTY thread on this blocking send.
+        if let Some(tx) = self.control_tx.as_ref().or(self.write_tx.as_ref()) {
             let size = FreminalTerminalSize {
                 width: new_width,
                 height,

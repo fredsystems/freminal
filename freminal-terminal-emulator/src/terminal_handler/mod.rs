@@ -70,6 +70,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use freminal_buffer::buffer::Buffer;
@@ -260,6 +261,15 @@ pub struct TerminalHandler {
     saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
+    /// Replies dropped because `write_tx` was bounded and full
+    /// (GHSA-6cxq-f7hx-92v2).  Diagnostic counter; atomic so replies can be
+    /// counted from the `&self` write helpers.
+    dropped_replies: AtomicU64,
+    /// Optional channel for PTY commands that are not replies (the DECCOLM
+    /// `PtyWrite::Resize`).  When set it is the unbounded user-input channel,
+    /// so a full reply queue can never block or drop a resize; when unset,
+    /// such commands fall back to `write_tx`.
+    control_tx: Option<Sender<PtyWrite>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
     /// Finished OSC 133 command blocks queued for the GUI to drain via
@@ -486,6 +496,8 @@ impl TerminalHandler {
             character_replace: DecSpecialGraphics::default(),
             saved_decsc: ScreenScoped::default(),
             write_tx: None,
+            dropped_replies: AtomicU64::new(0),
+            control_tx: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
             last_graphic_char: None,
@@ -1091,6 +1103,14 @@ impl TerminalHandler {
     /// will be sent through this channel rather than silently discarded.
     pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
+    }
+
+    /// Set the channel for PTY commands that are not replies (currently the
+    /// DECCOLM resize).  Used when `write_tx` is the bounded reply queue, so a
+    /// resize is never blocked behind, or dropped with, queued replies
+    /// (GHSA-6cxq-f7hx-92v2).
+    pub fn set_control_tx(&mut self, tx: Sender<PtyWrite>) {
+        self.control_tx = Some(tx);
     }
 
     /// Drain and return all inner payloads queued by tmux DCS passthrough.

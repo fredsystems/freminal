@@ -8322,6 +8322,21 @@ Group F — Hygiene:
   saved session never holds a rejected or nonexistent OSC 7 path. The suspected
   `percent_decode` off-by-one was not real; a trailing `%XX` test pins it. No layout-save
   harness exists, so the save path is covered through the shared helper's tests.
+- **148.11 (done):** the PTY writer thread now reads two crossbeam channels: the existing
+  unbounded one for user input (keystrokes, paste, resize, the GUI's `pty_write_tx`), and a new
+  `bounded(REPLY_QUEUE_CAPACITY = 256)` one for terminal-generated replies.
+  `run_writer_loop` (`io/pty.rs`) uses `select_biased!` with user input first, so keystrokes
+  no longer queue behind replies. A reply and a keystroke pending at the same moment can now be
+  written in either order, user first. No locks; the GUI is unchanged. The handler sends
+  replies with `try_send`; on a full queue the reply is dropped and counted (`dropped_replies`,
+  rate-limited warn). The DECCOLM `PtyWrite::Resize` is not a reply: review found it would
+  block the PTY thread on a full queue, so a new `control_tx` routes it through the user
+  channel. XTGETTCAP answers at most `MAX_XTGETTCAP_NAMES` = 64 names per request and never
+  echoes a name longer than 128 hex characters (freminal policy; xterm-412 answers every
+  name). `new_headless` keeps one unbounded channel for the fuzz harness. Tests: 10,000 DA1
+  queries with no reader leave exactly 256 queued; a keystroke sent while the writer is blocked
+  is written before every queued reply; a DECCOLM resize gets through a full reply queue.
+  `bench_handle_incoming_data`: −0.5%.
 
 ### 148 Cleanup entries
 

@@ -14,11 +14,18 @@
 //! - High-level response writers (`write_apc_response`, `write_csi_response`,
 //!   `write_dcs_response`, `write_osc_response`)
 
+use std::sync::atomic::Ordering;
+
+use crossbeam_channel::TrySendError;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, pty_write::PtyWrite};
 
 use crate::io::{GuiReply, Osc99CloseTracking, WindowStateReport};
 
 use super::TerminalHandler;
+
+/// A dropped-reply warning is logged for the first drop and then once per this
+/// many drops; the rest are logged at debug level.
+const DROPPED_REPLY_WARN_INTERVAL: u64 = 1024;
 
 impl TerminalHandler {
     /// Return the APC introducer for PTY responses: `0x9F` in 8-bit mode,
@@ -76,12 +83,48 @@ impl TerminalHandler {
     }
 
     /// Write raw bytes back to the PTY.  Silently drops if no channel is set.
+    ///
+    /// The send never blocks.  In the real PTY path the sender is bounded
+    /// (`REPLY_QUEUE_CAPACITY`), so a child that stops reading its tty cannot
+    /// make a flood of queries (`ESC [ c` repeated, long XTGETTCAP lists) queue
+    /// replies without bound (GHSA-6cxq-f7hx-92v2).  When the queue is full the
+    /// reply is dropped and counted in [`Self::dropped_replies`]: a child that
+    /// is not reading cannot use the answer anyway, and a child that is will
+    /// simply see an unanswered query, as it would on a lost packet.  Unbounded
+    /// senders (headless, tests) never report `Full`.
     fn write_bytes_to_pty(&self, data: &[u8]) {
-        if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(PtyWrite::Write(data.to_vec()))
-        {
-            tracing::error!("Failed to write to PTY: {e}");
+        let Some(tx) = &self.write_tx else {
+            return;
+        };
+        match tx.try_send(PtyWrite::Write(data.to_vec())) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                let dropped = self
+                    .dropped_replies
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
+                // Warn on the first drop, then every `DROPPED_REPLY_WARN_INTERVAL`th,
+                // so a flood cannot also flood the log.
+                if dropped == 1 || dropped.is_multiple_of(DROPPED_REPLY_WARN_INTERVAL) {
+                    tracing::warn!(
+                        "PTY reply queue full; dropped terminal replies so far: {dropped}"
+                    );
+                } else {
+                    tracing::debug!("PTY reply queue full; dropped reply #{dropped}");
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::error!("Failed to write to PTY: reply channel disconnected");
+            }
         }
+    }
+
+    /// Number of terminal replies dropped because the PTY reply queue was full.
+    ///
+    /// Diagnostic only; it never decreases.
+    #[must_use]
+    pub fn dropped_replies(&self) -> u64 {
+        self.dropped_replies.load(Ordering::Relaxed)
     }
 
     /// Write an APC response to the PTY using the correct C1 encoding.
