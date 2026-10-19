@@ -8337,6 +8337,18 @@ Group F — Hygiene:
   queries with no reader leave exactly 256 queued; a keystroke sent while the writer is blocked
   is written before every queued reply; a DECCOLM resize gets through a full reply queue.
   `bench_handle_incoming_data`: −0.5%.
+- **148.13 (done):** `shm_read_bounds` now enforces `MAX_KITTY_DATA_BYTES` on both platforms
+  before anything is mapped or read (`EFBIG`), whether the length comes from `S=` or from the
+  object size. Unix reads with `FileExt::read_at` in a loop; a short read is
+  `KittyShmError::Truncated` (`EIO`), never SIGBUS. The `mmap` path and all of its `unsafe`
+  are gone (POSIX `mmap`: touching pages past the end of a truncated object raises SIGBUS, so
+  mapping only the requested range would not help). Windows keeps `MapViewOfFile` under the
+  cap. **Plan premise corrected:** kitty has no naming convention for `t=s`; `graphics.c`
+  unlinks every object it opened, and the `tty-graphics-protocol` rule is for `t=t` only.
+  Maintainer decision (2026-10-19): unlink as kitty does, but only when the opened object's
+  `st_uid` equals our effective uid (`shm_unlink_decision`); a failed `fstat` no longer
+  unlinks. Tests: cap table (every platform), a sparse cap+1 object, a deterministic
+  shrink-after-size read returning `Truncated`, and the owner-decision table.
 
 ### 148 Cleanup entries
 

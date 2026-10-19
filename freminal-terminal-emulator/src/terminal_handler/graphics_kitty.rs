@@ -519,97 +519,189 @@ fn shm_name_is_safe(name: &str) -> bool {
     !stripped.contains('/')
 }
 
+/// Why a `t=s` shared-memory read range was refused by [`shm_read_bounds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum ShmBoundsError {
+    /// The range does not fit within the object (or `offset + length`
+    /// overflowed `u64`).
+    #[error("shared memory read out of bounds")]
+    OutOfBounds,
+    /// The requested length exceeds [`MAX_KITTY_DATA_BYTES`].
+    #[error("shared memory read exceeds the {MAX_KITTY_DATA_BYTES}-byte limit")]
+    TooLarge,
+}
+
+impl ShmBoundsError {
+    /// The error response sent to the client for this refusal.
+    const fn reply(self) -> &'static str {
+        match self {
+            Self::OutOfBounds => "EINVAL:shared memory read out of bounds",
+            Self::TooLarge => "EFBIG:shared memory read exceeds the size limit",
+        }
+    }
+}
+
 /// Compute the `(offset, length)` byte range to read from a shared-memory
 /// object of `object_len` bytes, given the resolved `O=` byte offset and
 /// (optional) `S=` byte count.
 ///
-/// Returns `None` if the resulting range doesn't fit within the object
-/// (including on `u64` overflow while adding offset and length).
+/// Fails with [`ShmBoundsError::TooLarge`] if the length to read exceeds
+/// [`MAX_KITTY_DATA_BYTES`] (the same cap `t=f` / `t=t` files and chunked
+/// transfers obey), whether it came from `S=` or from the object's own
+/// length. This is checked before the bounds comparison so that no caller
+/// ever maps or allocates for an oversize request. Fails with
+/// [`ShmBoundsError::OutOfBounds`] if the range doesn't fit within the
+/// object (including on `u64` overflow while adding offset and length).
 ///
 /// This is pure arithmetic with no platform-specific API, so it is shared
 /// by both the POSIX and Windows `read_kitty_shared_memory`
 /// implementations. The Windows path has no equivalent to POSIX `fstat`
 /// (a Windows file-mapping handle doesn't expose its own size), so it
-/// passes `u64::MAX` as `object_len` — this still gets the checked
-/// `offset + read_len` overflow protection, just without a real upper
-/// bound; the real bound is enforced by `MapViewOfFile` failing if the
-/// mapping is smaller than requested.
-fn shm_read_bounds(object_len: u64, offset: u64, data_size: Option<u32>) -> Option<(u64, u64)> {
-    let read_len = data_size.map_or_else(|| object_len.saturating_sub(offset), u64::from);
-    let end = offset.checked_add(read_len)?;
-    (end <= object_len).then_some((offset, read_len))
-}
-
-/// Read `read_len` bytes at `offset` from a POSIX shared-memory object of
-/// `object_len` bytes, backed by `fd`.
-///
-/// Returns an empty vector without mapping anything if either length is
-/// zero (`mmap` requires a non-zero length).
-#[cfg(unix)]
-fn read_kitty_shm_range(
-    fd: &std::os::fd::OwnedFd,
+/// passes `u64::MAX` as `object_len` — this still gets the cap and the
+/// checked `offset + read_len` overflow protection, just without a real
+/// upper bound; the real bound is enforced by `MapViewOfFile` failing if
+/// the mapping is smaller than requested.
+fn shm_read_bounds(
     object_len: u64,
     offset: u64,
-    read_len: u64,
-) -> nix::Result<Vec<u8>> {
-    if object_len == 0 || read_len == 0 {
-        return Ok(Vec::new());
+    data_size: Option<u32>,
+) -> Result<(u64, u64), ShmBoundsError> {
+    let read_len = data_size.map_or_else(|| object_len.saturating_sub(offset), u64::from);
+    let cap = u64::value_from(MAX_KITTY_DATA_BYTES).unwrap_or(u64::MAX);
+    if read_len > cap {
+        return Err(ShmBoundsError::TooLarge);
     }
-
-    let map_len = std::num::NonZeroUsize::new(usize::value_from(object_len).unwrap_or(usize::MAX))
-        .unwrap_or(std::num::NonZeroUsize::MAX);
-    let offset_us = usize::value_from(offset).unwrap_or(0);
-    let read_len_us = usize::value_from(read_len).unwrap_or(0);
-
-    // SAFETY: `fd` references a shm object whose size (`object_len` ==
-    // `map_len`) was just confirmed via `fstat` by the caller, and
-    // `shm_read_bounds` has already verified `offset_us + read_len_us <=
-    // object_len`.
-    unsafe { mmap_copy_range(fd, map_len, offset_us, read_len_us) }
+    let end = offset
+        .checked_add(read_len)
+        .ok_or(ShmBoundsError::OutOfBounds)?;
+    if end <= object_len {
+        Ok((offset, read_len))
+    } else {
+        Err(ShmBoundsError::OutOfBounds)
+    }
 }
 
-/// Map `map_len` bytes of `fd` read-only, copy `read_len` bytes starting at
-/// `offset` out of the mapping, then unmap.
-///
-/// # Safety
-///
-/// `fd` must reference an object with at least `map_len` readable bytes,
-/// and `offset + read_len` must be `<= map_len.get()`.
+/// Whether freminal may `shm_unlink` a `t=s` object after reading it.
 #[cfg(unix)]
-unsafe fn mmap_copy_range(
-    fd: &std::os::fd::OwnedFd,
-    map_len: std::num::NonZeroUsize,
-    offset: usize,
-    read_len: usize,
-) -> nix::Result<Vec<u8>> {
-    use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShmUnlinkDecision {
+    /// The object belongs to this process's effective user: unlink it.
+    Unlink,
+    /// The object belongs to a different user: leave it alone.
+    SkipForeignOwner,
+    /// The owner could not be determined (`fstat` failed): leave it alone.
+    SkipUnknownOwner,
+}
 
-    // SAFETY: forwarded from this function's safety contract — `fd` covers
-    // at least `map_len` bytes. The mapping is read-only and is unmapped
-    // below before returning; no pointer derived from it escapes.
-    let ptr = unsafe {
-        mmap(
-            None,
-            map_len,
-            ProtFlags::PROT_READ,
-            MapFlags::MAP_SHARED,
-            fd,
-            0,
-        )
-    }?;
+/// Decide whether a `t=s` object may be unlinked after it was read.
+///
+/// kitty's `graphics.c` unlinks every shared-memory object it successfully
+/// opened, whatever its name — there is no naming convention for `t=s`
+/// (the `tty-graphics-protocol` substring rule applies only to `t=t`
+/// temporary files). The relevant comment in the `load_image_data_from_file`
+/// caller reads: "Client created temporary files and shared memory objects
+/// that were successfully opened are removed even when loading fails".
+///
+/// freminal keeps that behaviour but adds an ownership check, because the
+/// name is sender-supplied: an application could otherwise make the
+/// terminal destroy another user's (or a system service's) shared-memory
+/// object that the terminal merely has read permission on. The object is
+/// unlinked only when its owner (`fstat` `st_uid` of the opened
+/// descriptor) is the terminal's effective uid. The read itself is not
+/// affected by this decision.
+///
+/// `shm_unlink` takes a name, not a descriptor, so a swap of the name
+/// between the open and the unlink cannot be excluded entirely; the check
+/// narrows the window to objects the terminal's own user owns.
+#[cfg(unix)]
+const fn shm_unlink_decision(owner_uid: Option<u32>, euid: u32) -> ShmUnlinkDecision {
+    match owner_uid {
+        Some(uid) if uid == euid => ShmUnlinkDecision::Unlink,
+        Some(_) => ShmUnlinkDecision::SkipForeignOwner,
+        None => ShmUnlinkDecision::SkipUnknownOwner,
+    }
+}
 
-    // SAFETY: `ptr` is valid for `map_len.get()` bytes (the mmap length
-    // above); the caller's contract guarantees `offset + read_len <=
-    // map_len.get()`.
-    let bytes =
-        unsafe { std::slice::from_raw_parts(ptr.as_ptr().cast::<u8>().add(offset), read_len) };
-    let copied = bytes.to_vec();
+/// Why reading the contents of a POSIX `t=s` shared-memory object failed.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+enum KittyShmError {
+    #[error("shared memory object has an invalid size")]
+    InvalidSize,
+    #[error(transparent)]
+    Bounds(#[from] ShmBoundsError),
+    #[error("failed to read shared memory object: {0}")]
+    Read(std::io::Error),
+    /// The object ended before the requested range did, i.e. it was
+    /// truncated between the `fstat` that sized the read and the read itself.
+    #[error("shared memory object was truncated during the read")]
+    Truncated,
+}
 
-    // SAFETY: `ptr`/`map_len` are exactly the values returned by the
-    // matching `mmap` call above.
-    unsafe { munmap(ptr, map_len.get()) }?;
+#[cfg(unix)]
+impl KittyShmError {
+    /// The error response sent to the client for this failure.
+    const fn reply(&self) -> &'static str {
+        match self {
+            Self::InvalidSize => "EINVAL:invalid shared memory object size",
+            Self::Bounds(bounds) => bounds.reply(),
+            Self::Read(_) | Self::Truncated => "EIO:failed to read shared memory object",
+        }
+    }
+}
 
-    Ok(copied)
+/// Read `read_len` bytes at `offset` from the shared-memory object `file`
+/// with positioned reads.
+///
+/// `offset` / `read_len` come from [`shm_read_bounds`] over an object
+/// length that was observed earlier and may be stale. This deliberately does
+/// not `mmap` the object: per POSIX `mmap`, referencing a page of a mapping
+/// beyond the end of the underlying object (here: one a hostile client
+/// truncated with `ftruncate` after our `fstat`) raises `SIGBUS`, which
+/// kills the terminal, and mapping only the requested range is not enough
+/// because the range itself can be truncated away. `pread` instead returns
+/// a short count (or zero at end of object), which is reported as
+/// [`KittyShmError::Truncated`].
+#[cfg(unix)]
+fn read_kitty_shm_range(
+    file: &std::fs::File,
+    offset: u64,
+    read_len: u64,
+) -> Result<Vec<u8>, KittyShmError> {
+    use std::os::unix::fs::FileExt as _;
+
+    let len = usize::value_from(read_len).map_err(|_| ShmBoundsError::TooLarge)?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| ShmBoundsError::TooLarge)?;
+    buf.resize(len, 0);
+
+    let mut done: usize = 0;
+    while done < len {
+        let at = offset
+            .checked_add(u64::value_from(done).map_err(|_| ShmBoundsError::OutOfBounds)?)
+            .ok_or(ShmBoundsError::OutOfBounds)?;
+        match file.read_at(&mut buf[done..], at) {
+            Ok(0) => return Err(KittyShmError::Truncated),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(KittyShmError::Read(e)),
+        }
+    }
+    Ok(buf)
+}
+
+/// Size the read of an opened shared-memory object from `meta` and read it.
+#[cfg(unix)]
+fn read_kitty_shm_object(
+    file: &std::fs::File,
+    object_len: Option<u64>,
+    offset: u64,
+    data_size: Option<u32>,
+) -> Result<Vec<u8>, KittyShmError> {
+    let object_len = object_len.ok_or(KittyShmError::InvalidSize)?;
+    let (offset, read_len) = shm_read_bounds(object_len, offset, data_size)?;
+    read_kitty_shm_range(file, offset, read_len)
 }
 
 /// Whether `control` could belong to a continuation chunk of a chunked
@@ -1576,8 +1668,12 @@ impl TerminalHandler {
     /// The payload bytes are the UTF-8 POSIX shared-memory object name
     /// (e.g. `/kitty-shm-1234`). `data_size`/`data_offset` (the `S=`/`O=`
     /// control keys) select the byte range to read; if `data_size` is
-    /// absent, the whole object (from `data_offset`) is read. Per the kitty
-    /// spec, the object is unlinked after reading regardless of outcome.
+    /// absent, the whole object (from `data_offset`) is read. At most
+    /// [`MAX_KITTY_DATA_BYTES`] are read; a larger request is refused with
+    /// `EFBIG`. The contents are read with positioned reads, never `mmap`
+    /// (see [`read_kitty_shm_range`]). Like kitty, the object is unlinked
+    /// after reading regardless of outcome, but only when it is owned by
+    /// this process's effective user (see [`shm_unlink_decision`]).
     ///
     /// Security: POSIX shm names are `/name` — a single leading slash and
     /// no other slashes. Names containing a NUL byte, `..`, or an embedded
@@ -1597,7 +1693,9 @@ impl TerminalHandler {
     ) -> Option<Vec<u8>> {
         use nix::fcntl::OFlag;
         use nix::sys::mman::{shm_open, shm_unlink};
-        use nix::sys::stat::{Mode, fstat};
+        use nix::sys::stat::Mode;
+        use nix::unistd::geteuid;
+        use std::os::unix::fs::MetadataExt;
 
         let name = match std::str::from_utf8(payload) {
             Ok(s) => s,
@@ -1637,57 +1735,42 @@ impl TerminalHandler {
             }
         };
 
-        let Some(object_len) = fstat(&fd)
-            .ok()
-            .and_then(|stat| u64::value_from(stat.st_size).ok())
-        else {
-            tracing::warn!("Kitty graphics: shared memory object has an invalid size");
-            log_shm_name("shared memory object has an invalid size", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:invalid shared memory object size",
-            );
-            let _ = shm_unlink(name);
-            return None;
-        };
+        let file = std::fs::File::from(fd);
+        let meta = file.metadata().ok();
+        let decision = shm_unlink_decision(meta.as_ref().map(MetadataExt::uid), geteuid().as_raw());
+        let object_len = meta.as_ref().map(MetadataExt::size);
 
         let offset = u64::from(data_offset.unwrap_or(0));
-        let Some((offset, read_len)) = shm_read_bounds(object_len, offset, data_size) else {
-            tracing::warn!(
-                "Kitty graphics: shared memory read out of bounds (offset={offset}, object_len={object_len})"
-            );
-            log_shm_name("shared memory read out of bounds", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:shared memory read out of bounds",
-            );
-            let _ = shm_unlink(name);
-            return None;
-        };
-
-        let result = read_kitty_shm_range(&fd, object_len, offset, read_len).map_or_else(
-            |e| {
-                tracing::warn!("Kitty graphics: failed to map shared memory object: {e}");
-                log_shm_name("failed to map shared memory object", name);
+        let result = match read_kitty_shm_object(&file, object_len, offset, data_size) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!("Kitty graphics: failed to read shared memory object: {e}");
+                log_shm_name("failed to read shared memory object", name);
                 self.send_kitty_error(
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
-                    "EIO:failed to map shared memory object",
+                    e.reply(),
                 );
                 None
-            },
-            Some,
-        );
+            }
+        };
 
-        // Per the kitty spec, the shm object must be unlinked after reading
-        // regardless of outcome — the sender is not expected to unlink it.
+        // kitty unlinks every shared-memory object it opened, regardless of
+        // outcome (see `shm_unlink_decision` for the citation); freminal
+        // does the same but only for objects its own effective user owns.
         // A failure here is logged but does not fail an otherwise-successful
         // read (the data has already been copied out).
-        if let Err(e) = shm_unlink(name) {
-            tracing::warn!("Kitty graphics: failed to unlink shared memory object: {e}");
-            log_shm_name("failed to unlink shared memory object", name);
+        match decision {
+            ShmUnlinkDecision::Unlink => {
+                if let Err(e) = shm_unlink(name) {
+                    tracing::warn!("Kitty graphics: failed to unlink shared memory object: {e}");
+                    log_shm_name("failed to unlink shared memory object", name);
+                }
+            }
+            ShmUnlinkDecision::SkipForeignOwner | ShmUnlinkDecision::SkipUnknownOwner => {
+                tracing::debug!("Kitty graphics: not unlinking shared memory object: {decision:?}");
+                log_shm_name("not unlinking shared memory object", name);
+            }
         }
 
         result
@@ -1774,17 +1857,20 @@ impl TerminalHandler {
         };
 
         let offset = u64::from(data_offset.unwrap_or(0));
-        let Some((offset, read_len)) = shm_read_bounds(u64::MAX, offset, Some(data_size)) else {
-            tracing::warn!(
-                "Kitty graphics: shared memory read range overflows (offset={offset}, data_size={data_size})"
-            );
-            log_shm_name("shared memory read range overflows", name);
-            self.send_kitty_error(
-                kitty_id_no_number(image_id_hint, placement_id),
-                quiet,
-                "EINVAL:shared memory read out of bounds",
-            );
-            return None;
+        let (offset, read_len) = match shm_read_bounds(u64::MAX, offset, Some(data_size)) {
+            Ok(range) => range,
+            Err(e) => {
+                tracing::warn!(
+                    "Kitty graphics: shared memory read refused: {e} (offset={offset}, data_size={data_size})"
+                );
+                log_shm_name("shared memory read refused", name);
+                self.send_kitty_error(
+                    kitty_id_no_number(image_id_hint, placement_id),
+                    quiet,
+                    e.reply(),
+                );
+                return None;
+            }
         };
 
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -3799,7 +3885,14 @@ mod tests {
         FileIdentity, delete_kitty_temp_file, load_kitty_file, open_regular_kitty_file,
         verify_opened_kitty_file,
     };
-    use super::{KittyFileError, is_refused_kitty_path, read_capped};
+    use super::{
+        KittyFileError, ShmBoundsError, is_refused_kitty_path, read_capped, shm_read_bounds,
+    };
+    #[cfg(unix)]
+    use super::{
+        KittyShmError, MAX_KITTY_DATA_BYTES, ShmUnlinkDecision, read_kitty_shm_object,
+        read_kitty_shm_range, shm_unlink_decision,
+    };
     use freminal_common::{
         buffer_states::{
             format_tag::FormatTag,
@@ -7832,13 +7925,13 @@ mod tests {
         }
     }
 
-    /// Create a POSIX shm object of `data.len()` bytes containing `data`,
-    /// returning its unique name. Test-only helper for the `t=s` round-trip
-    /// tests below.
+    /// Create a POSIX shm object of `len` bytes (sparse: nothing is
+    /// written), returning its unique name and the creating (read-write)
+    /// descriptor.
     #[cfg(unix)]
-    fn create_test_shm_object(data: &[u8]) -> String {
+    fn create_test_shm_sized(len: u64) -> (String, std::fs::File) {
         use nix::fcntl::OFlag;
-        use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open};
+        use nix::sys::mman::shm_open;
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
 
@@ -7850,37 +7943,201 @@ mod tests {
         )
         .expect("shm_open (create) should succeed in test");
 
-        let len = i64::try_from(data.len()).expect("test data length fits in i64");
+        let len = i64::try_from(len).expect("test length fits in i64");
         ftruncate(&fd, len).expect("ftruncate should succeed in test");
+        (name, std::fs::File::from(fd))
+    }
 
-        if !data.is_empty() {
-            let map_len =
-                std::num::NonZeroUsize::new(data.len()).expect("test data must be non-empty here");
-            // SAFETY: `fd` was just sized to `data.len()` bytes via
-            // `ftruncate`; the mapping is read-write and unmapped
-            // immediately after the copy, before this function returns.
-            let ptr = unsafe {
-                mmap(
-                    None,
-                    map_len,
-                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    MapFlags::MAP_SHARED,
-                    &fd,
-                    0,
-                )
-            }
-            .expect("mmap should succeed in test");
-            // SAFETY: `ptr` is valid for `data.len()` writable bytes (the
-            // mmap length above matches `data.len()` exactly).
-            unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
-            }
-            // SAFETY: `ptr`/`map_len` are exactly the values returned by
-            // the matching `mmap` call above.
-            unsafe { munmap(ptr, map_len.get()) }.expect("munmap should succeed in test");
-        }
+    /// Create a POSIX shm object of `data.len()` bytes containing `data`,
+    /// returning its unique name. Test-only helper for the `t=s` round-trip
+    /// tests below.
+    #[cfg(unix)]
+    fn create_test_shm_object(data: &[u8]) -> String {
+        use std::os::unix::fs::FileExt as _;
 
+        let (name, file) = create_test_shm_sized(u64::try_from(data.len()).expect("fits in u64"));
+        file.write_all_at(data, 0)
+            .expect("writing the test shm object should succeed");
         name
+    }
+
+    #[test]
+    fn shm_read_bounds_table() {
+        const CAP: u64 = 400 * 1024 * 1024;
+
+        // Within the cap, S= given.
+        assert_eq!(shm_read_bounds(100, 10, Some(20)), Ok((10, 20)));
+        // Without S=: read to the end of the object from the offset.
+        assert_eq!(shm_read_bounds(100, 10, None), Ok((10, 90)));
+        // Empty read at the very end is in bounds.
+        assert_eq!(shm_read_bounds(100, 100, None), Ok((100, 0)));
+        // Exactly at the cap, via S= and via the object length.
+        assert_eq!(
+            shm_read_bounds(CAP, 0, Some(u32::try_from(CAP).unwrap())),
+            Ok((0, CAP))
+        );
+        assert_eq!(shm_read_bounds(CAP, 0, None), Ok((0, CAP)));
+        // Offset leaves exactly the cap remaining in a larger object.
+        assert_eq!(shm_read_bounds(CAP + 7, 7, None), Ok((7, CAP)));
+        // One past the cap via S=, even though the object is large enough.
+        assert_eq!(
+            shm_read_bounds(CAP + 1, 0, Some(u32::try_from(CAP + 1).unwrap())),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // One past the cap via the object length, no S=.
+        assert_eq!(
+            shm_read_bounds(CAP + 1, 0, None),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // The cap is applied before the bounds check: an oversize S= on a
+        // small object is TooLarge, never out of bounds.
+        assert_eq!(
+            shm_read_bounds(10, 0, Some(u32::MAX)),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // The Windows shape (object_len == u64::MAX): S= above the cap.
+        assert_eq!(
+            shm_read_bounds(u64::MAX, 0, Some(u32::MAX)),
+            Err(ShmBoundsError::TooLarge)
+        );
+        // ... and below the cap.
+        assert_eq!(shm_read_bounds(u64::MAX, 5, Some(16)), Ok((5, 16)));
+        // Range past the end of the object.
+        assert_eq!(
+            shm_read_bounds(100, 90, Some(11)),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+        assert_eq!(
+            shm_read_bounds(100, 101, None),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+        // offset + length overflows u64.
+        assert_eq!(
+            shm_read_bounds(u64::MAX, u64::MAX, Some(1)),
+            Err(ShmBoundsError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shm_unlink_decision_table() {
+        assert_eq!(
+            shm_unlink_decision(Some(1000), 1000),
+            ShmUnlinkDecision::Unlink
+        );
+        assert_eq!(shm_unlink_decision(Some(0), 0), ShmUnlinkDecision::Unlink);
+        assert_eq!(
+            shm_unlink_decision(Some(0), 1000),
+            ShmUnlinkDecision::SkipForeignOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(Some(1001), 1000),
+            ShmUnlinkDecision::SkipForeignOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(None, 1000),
+            ShmUnlinkDecision::SkipUnknownOwner
+        );
+        assert_eq!(
+            shm_unlink_decision(None, 0),
+            ShmUnlinkDecision::SkipUnknownOwner
+        );
+    }
+
+    /// An object one byte over the cap is refused before anything is read or
+    /// allocated (it is sparse, so even a wrongly-attempted read would be
+    /// observable only as a 400 MiB allocation), and is still unlinked
+    /// because the test process owns it.
+    #[test]
+    #[cfg(unix)]
+    fn kitty_shared_memory_oversize_object_rejected_with_efbig() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::shm_open;
+        use nix::sys::stat::Mode;
+
+        let over_cap = u64::try_from(MAX_KITTY_DATA_BYTES).unwrap() + 1;
+        let (name, _creator) = create_test_shm_sized(over_cap);
+
+        let (mut handler, rx) = kitty_handler();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(1),
+                src_height: Some(1),
+                image_id: Some(996),
+                ..KittyControlData::default()
+            },
+            payload: name.clone().into_bytes(),
+        };
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(handler.buffer().image_store().get(996).is_none());
+
+        let mut found = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg
+                && String::from_utf8_lossy(&bytes).contains("EFBIG")
+            {
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Expected an EFBIG error response for an oversize object"
+        );
+
+        assert!(
+            shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_err(),
+            "an own-uid object is unlinked even when the read is refused"
+        );
+    }
+
+    /// The shrink-after-`fstat` race, made deterministic: the read range is
+    /// derived from a stale (pre-truncation) object length, then the object
+    /// is truncated, then the read runs. The previous `mmap` implementation
+    /// raised SIGBUS here; the positioned read reports an error instead.
+    #[test]
+    #[cfg(unix)]
+    fn kitty_shared_memory_truncated_after_size_is_an_error_not_sigbus() {
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::{shm_open, shm_unlink};
+        use nix::sys::stat::Mode;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let data = vec![0xABu8; 3 * 4096];
+        let name = create_test_shm_object(&data);
+        let reader = std::fs::File::from(
+            shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).expect("open reader"),
+        );
+        let stale_len = reader.metadata().expect("fstat").size();
+        assert_eq!(stale_len, u64::try_from(data.len()).unwrap());
+
+        // The sender shrinks the object after we sized the read.
+        let creator = std::fs::File::from(
+            shm_open(name.as_str(), OFlag::O_RDWR, Mode::empty()).expect("open writer"),
+        );
+        creator.set_len(100).expect("truncate");
+
+        let result = read_kitty_shm_object(&reader, Some(stale_len), 0, None);
+        assert!(
+            matches!(result, Err(KittyShmError::Truncated)),
+            "expected Truncated, got {result:?}"
+        );
+        let result = read_kitty_shm_range(&reader, 4096, 4096);
+        assert!(matches!(result, Err(KittyShmError::Truncated)));
+
+        // A range that still fits after the shrink reads fine.
+        assert_eq!(
+            read_kitty_shm_range(&reader, 0, 100).expect("range within the new length"),
+            vec![0xABu8; 100]
+        );
+
+        shm_unlink(name.as_str()).expect("cleanup");
     }
 
     #[test]
