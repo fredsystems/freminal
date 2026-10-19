@@ -42,7 +42,7 @@ use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg,
     Osc99LinuxDaemon, Osc99PaneState, Osc99Registry, Osc99Request, PaneKeyboardFocus,
-    PaneVisibility, escape_body_markup,
+    PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -432,12 +432,14 @@ impl NotificationRouter {
             // unsupported). The primary inline-bytes icon is attached in
             // `show_system` on the background thread.
             .icon("freminal")
-            // OSC 9 / OSC 777 text is untrusted and some daemons render markup
-            // (KDE, dunst, mako). The spec only defines markup in the body,
-            // but some daemons format the summary too, and the escape is
-            // invisible, so both are escaped (issue #560), as OSC 99 does.
-            .summary(&escape_body_markup(req.summary()))
-            .body(&escape_body_markup(&req.body));
+            // OSC 9 / OSC 777 text is untrusted and some freedesktop daemons
+            // render markup (KDE, dunst, mako). The spec only defines markup
+            // in the body, but some daemons format the summary too, and the
+            // escape is invisible there, so both are escaped (issue #560), as
+            // OSC 99 does. macOS and Windows have no markup to defuse and
+            // would show the ZWNJ, so they get the raw text.
+            .summary(&daemon_safe_text(req.summary()))
+            .body(&daemon_safe_text(&req.body));
 
         // Error-category notifications use Critical urgency so they persist
         // and pop as a banner; everything else is Normal. Many Linux
@@ -460,6 +462,22 @@ impl NotificationRouter {
 
         notification
     }
+}
+
+/// Untrusted notification text made safe for the platform's notification
+/// presenter: markup-escaped on freedesktop daemons (Linux/BSD), where
+/// `<`/`&` may be interpreted (issue #560).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn daemon_safe_text(text: &str) -> String {
+    super::osc99::escape_body_markup(text)
+}
+
+/// Untrusted notification text for the platform's notification presenter:
+/// macOS and Windows do not interpret markup, so the text is passed through
+/// unchanged (escaping would only show a stray zero-width character).
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn daemon_safe_text(text: &str) -> String {
+    text.to_owned()
 }
 
 /// How many desktop notifications may wait for the notify worker. A program
@@ -997,10 +1015,13 @@ mod tests {
         }
     }
 
-    /// Issue #560: OSC 9 / OSC 777 text reaches the daemon markup-escaped, in
-    /// the summary and the body alike.
+    /// Issue #560: on freedesktop daemons (Linux/BSD), OSC 9 / OSC 777 text
+    /// reaches the daemon markup-escaped, in the summary and the body alike.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn build_system_notification_escapes_markup_in_summary_and_body() {
+        use crate::gui::osc99::escape_body_markup;
+
         let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
         let req = NotificationRequest {
             kind: NotificationKind::OscText,
@@ -1024,6 +1045,24 @@ mod tests {
             assert!(field.contains("<\u{200c}b>"));
             assert!(field.contains("&\u{200c} "));
         }
+    }
+
+    /// On platforms with no markup to defuse (macOS, Windows) the text is
+    /// delivered raw, with no stray zero-width characters.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    #[test]
+    fn build_system_notification_leaves_text_raw_without_markup_support() {
+        let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
+        let req = NotificationRequest {
+            kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc777),
+            title: Some(text.to_owned()),
+            body: text.to_owned(),
+        };
+        let notification = NotificationRouter::build_system_notification(&req);
+        assert_eq!(notification.summary, text);
+        assert_eq!(notification.body, text);
+        assert!(!notification.body.contains('\u{200c}'));
     }
 
     /// The queueing policy never blocks and never spawns: against a queue

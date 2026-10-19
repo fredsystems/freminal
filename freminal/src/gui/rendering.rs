@@ -311,14 +311,18 @@ fn cells_to_window_size(
     Vec2::new(width, height)
 }
 
-/// Whether an OSC 52 clipboard write from a pane is honoured under `policy`.
+/// Whether an OSC 52 clipboard write from a pane is honoured under the
+/// pane's `[security] allow_clipboard_write` policy.
 ///
-/// `pane_is_active` is whether the pane is the fully-active one (active tab and
-/// active pane). Only [`ClipboardWritePolicy::ActivePane`] consults it.
-const fn clipboard_write_permitted(policy: ClipboardWritePolicy, pane_is_active: bool) -> bool {
-    match policy {
+/// Only [`ClipboardWritePolicy::ActivePane`] consults the pane state, and it
+/// requires BOTH that the pane is the fully-active one (`flags.is_active`:
+/// active tab and active pane) AND that its window has OS focus
+/// (`flags.window_focused`): the policy's contract is "the active pane of the
+/// focused window", so an unfocused window's active pane must not write.
+const fn clipboard_write_permitted(flags: &WindowManipFlags) -> bool {
+    match flags.clipboard_write {
         ClipboardWritePolicy::All => true,
-        ClipboardWritePolicy::ActivePane => pane_is_active,
+        ClipboardWritePolicy::ActivePane => flags.is_active && flags.window_focused,
         ClipboardWritePolicy::Off => false,
     }
 }
@@ -735,17 +739,18 @@ pub(super) fn handle_window_manipulation(
             // Gated by [security] allow_clipboard_write: a dropped write emits
             // no toast and leaves the clipboard untouched (GHSA-v2hw-gcg8-2rfr).
             WindowManipulation::SetClipboard(_sel, content) => {
-                if clipboard_write_permitted(flags.clipboard_write, flags.is_active) {
+                if clipboard_write_permitted(flags) {
                     osc52_events.push(Osc52ToastEvent::Wrote {
                         bytes: content.len(),
                     });
                     ui.ctx().copy_text(content);
                 } else {
                     tracing::debug!(
-                        "OSC 52 clipboard write ({} bytes) dropped by policy {:?} (pane active: {})",
+                        "OSC 52 clipboard write ({} bytes) dropped by policy {:?} (pane active: {}, window focused: {})",
                         content.len(),
                         flags.clipboard_write,
-                        flags.is_active
+                        flags.is_active,
+                        flags.window_focused
                     );
                 }
             }
@@ -1122,6 +1127,7 @@ mod window_manipulation_reply_tests {
     fn run_set_clipboard_frame(
         policy: ClipboardWritePolicy,
         role: PaneRole,
+        focus: WindowFocus,
         content: &str,
     ) -> (Vec<Osc52ToastEvent>, Vec<String>) {
         let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
@@ -1135,7 +1141,7 @@ mod window_manipulation_reply_tests {
             allow_clipboard_read: false,
             clipboard_write: policy,
             is_active: matches!(role, PaneRole::Active),
-            window_focused: true,
+            window_focused: focus.is_focused(),
             is_only_pane: true,
             window_ops: WindowOpsPolicy::Refused,
             osc99: test_osc99_context(),
@@ -1183,36 +1189,39 @@ mod window_manipulation_reply_tests {
     }
 
     #[test]
-    fn osc52_write_follows_the_clipboard_write_policy_for_every_pane_role() {
+    fn osc52_write_follows_the_clipboard_write_policy_for_every_pane_role_and_focus() {
         use ClipboardWritePolicy::{ActivePane, All, Off};
         use PaneRole::{Active, Background};
+        use WindowFocus::{Focused, Unfocused};
 
-        for (policy, role, expect_write) in [
-            (ActivePane, Active, true),
-            (ActivePane, Background, false),
-            (All, Active, true),
-            (All, Background, true),
-            (Off, Active, false),
-            (Off, Background, false),
+        for (policy, role, focus, expect_write) in [
+            (ActivePane, Active, Focused, true),
+            // The active pane of an UNFOCUSED window must not write.
+            (ActivePane, Active, Unfocused, false),
+            (ActivePane, Background, Focused, false),
+            (ActivePane, Background, Unfocused, false),
+            (All, Active, Focused, true),
+            (All, Active, Unfocused, true),
+            (All, Background, Focused, true),
+            (All, Background, Unfocused, true),
+            (Off, Active, Focused, false),
+            (Off, Active, Unfocused, false),
+            (Off, Background, Focused, false),
+            (Off, Background, Unfocused, false),
         ] {
-            let (events, copied) = run_set_clipboard_frame(policy, role, "payload");
+            let (events, copied) = run_set_clipboard_frame(policy, role, focus, "payload");
+            let label = format!("{policy:?} {} {focus:?}", role_name(role));
             if expect_write {
-                assert_eq!(copied, ["payload"], "{policy:?} {}", role_name(role));
+                assert_eq!(copied, ["payload"], "{label}");
                 assert!(
                     matches!(events.as_slice(), [Osc52ToastEvent::Wrote { bytes: 7 }]),
-                    "{policy:?} {}: {events:?}",
-                    role_name(role)
+                    "{label}: {events:?}"
                 );
             } else {
-                assert!(
-                    copied.is_empty(),
-                    "{policy:?} {}: clipboard written",
-                    role_name(role)
-                );
+                assert!(copied.is_empty(), "{label}: clipboard written");
                 assert!(
                     events.is_empty(),
-                    "{policy:?} {}: toast for a dropped write: {events:?}",
-                    role_name(role)
+                    "{label}: toast for a dropped write: {events:?}"
                 );
             }
         }
@@ -1227,18 +1236,34 @@ mod window_manipulation_reply_tests {
 
     #[test]
     fn clipboard_write_permitted_truth_table() {
-        for (policy, pane_is_active, expected) in [
-            (ClipboardWritePolicy::ActivePane, true, true),
-            (ClipboardWritePolicy::ActivePane, false, false),
-            (ClipboardWritePolicy::All, true, true),
-            (ClipboardWritePolicy::All, false, true),
-            (ClipboardWritePolicy::Off, true, false),
-            (ClipboardWritePolicy::Off, false, false),
+        // (policy, pane is fully active, window focused, expected)
+        for (policy, is_active, window_focused, expected) in [
+            (ClipboardWritePolicy::ActivePane, true, true, true),
+            (ClipboardWritePolicy::ActivePane, true, false, false),
+            (ClipboardWritePolicy::ActivePane, false, true, false),
+            (ClipboardWritePolicy::ActivePane, false, false, false),
+            (ClipboardWritePolicy::All, true, true, true),
+            (ClipboardWritePolicy::All, true, false, true),
+            (ClipboardWritePolicy::All, false, true, true),
+            (ClipboardWritePolicy::All, false, false, true),
+            (ClipboardWritePolicy::Off, true, true, false),
+            (ClipboardWritePolicy::Off, true, false, false),
+            (ClipboardWritePolicy::Off, false, true, false),
+            (ClipboardWritePolicy::Off, false, false, false),
         ] {
+            let flags = WindowManipFlags {
+                allow_clipboard_read: false,
+                clipboard_write: policy,
+                is_active,
+                window_focused,
+                is_only_pane: true,
+                window_ops: WindowOpsPolicy::Refused,
+                osc99: test_osc99_context(),
+            };
             assert_eq!(
-                clipboard_write_permitted(policy, pane_is_active),
+                clipboard_write_permitted(&flags),
                 expected,
-                "{policy:?} active={pane_is_active}"
+                "{policy:?} active={is_active} focused={window_focused}"
             );
         }
     }
@@ -1700,15 +1725,7 @@ mod window_manipulation_reply_tests {
         let viewport_commands = full_output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
-            .map(|vp| {
-                vp.commands
-                    .iter()
-                    // egui itself sends `SetTheme` on the first frame; it is
-                    // not something a window operation produces.
-                    .filter(|c| !matches!(c, egui::ViewportCommand::SetTheme(_)))
-                    .cloned()
-                    .collect()
-            })
+            .map(|vp| vp.commands.clone())
             .unwrap_or_default();
         let replies = reply_rx
             .try_iter()
@@ -1718,6 +1735,26 @@ mod window_manipulation_reply_tests {
             })
             .collect();
         (viewport_commands, replies)
+    }
+
+    /// The viewport commands a window-mutating XTWINOPS operation can produce.
+    /// Selecting these (rather than "everything but egui's own `SetTheme`")
+    /// keeps the refusal assertions independent of whatever else egui sends
+    /// on a frame.
+    fn window_op_commands(commands: &[egui::ViewportCommand]) -> Vec<&egui::ViewportCommand> {
+        commands
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    egui::ViewportCommand::Minimized(_)
+                        | egui::ViewportCommand::OuterPosition(_)
+                        | egui::ViewportCommand::InnerSize(_)
+                        | egui::ViewportCommand::Maximized(_)
+                        | egui::ViewportCommand::Fullscreen(_)
+                )
+            })
+            .collect()
     }
 
     /// Recognises one viewport command.
@@ -1767,7 +1804,7 @@ mod window_manipulation_reply_tests {
             let (commands, replies) =
                 run_window_op_frame(vec![op.clone()], WindowOpsPolicy::Refused, None);
             assert!(
-                commands.is_empty(),
+                window_op_commands(&commands).is_empty(),
                 "{op:?} must not reach the window while refused: {commands:?}"
             );
             assert_eq!(replies, Vec::<GuiReply>::new());
@@ -1797,7 +1834,7 @@ mod window_manipulation_reply_tests {
             WindowOpsPolicy::Refused,
             None,
         );
-        assert!(commands.is_empty(), "{commands:?}");
+        assert!(window_op_commands(&commands).is_empty(), "{commands:?}");
         assert_eq!(
             replies,
             vec![

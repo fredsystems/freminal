@@ -2230,8 +2230,8 @@ impl SettingsModal {
             .response
             .on_hover_text(
                 "Which panes may replace the system clipboard through OSC 52. \
-                 \"Active pane only\" ignores writes from background tabs and \
-                 unfocused splits; \"All panes\" lets any pane write, so a \
+                 \"Active pane only\" ignores writes from background tabs, \
+                 unfocused splits and unfocused windows; \"All panes\" lets any pane write, so a \
                  program in a background tab can silently overwrite what you \
                  will next paste; \"Never\" disables OSC 52 writes. Writes \
                  larger than 1 MiB are always dropped.",
@@ -2310,8 +2310,9 @@ impl SettingsModal {
              the window through escape sequences (xterm's allowWindowOps). \
              Anything writing to the terminal, including a remote host over \
              ssh, can then rearrange your window. Resize and move targets \
-             are clamped to the monitor. Window size, position and title \
-             queries are unaffected. Leave off unless a tool you use needs it.",
+             are clamped to the monitor size when the windowing layer \
+             reports it, otherwise to a fixed 16384 px extent. Window size, \
+             position and title queries are unaffected. Leave off unless a tool you use needs it.",
         )
         .clickable();
         ui.add_space(4.0);

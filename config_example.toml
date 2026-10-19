@@ -289,7 +289,8 @@ limit = 10000
 
 # Which panes may write the system clipboard via OSC 52.
 #   "active_pane" -- only the active pane of the focused window; writes from
-#                    background tabs and unfocused splits are dropped (default)
+#                    background tabs, unfocused splits and unfocused windows
+#                    are dropped (default)
 #   "all"         -- every pane, including background tabs. Any program in any
 #                    tab can then silently replace what you will next paste.
 #   "off"         -- never honour OSC 52 writes
@@ -316,9 +317,10 @@ limit = 10000
 # Default: false (these requests are ignored).
 # When true, any program writing to the terminal -- including a remote host
 # over ssh, or untrusted `cat` output -- can move, resize, minimize or
-# full-screen your window. Resize and move targets are clamped to the
-# monitor. Report-only queries (window size, position and state, title) and
-# title push/pop are unaffected.
+# full-screen your window. Resize and move targets are clamped to the monitor
+# size when the windowing layer reports it, otherwise to a fixed 16384 px
+# extent (see cleanup 148.C4). Report-only queries (window size, position and
+# state, title) and title push/pop are unaffected.
 # allow_window_ops = false
 
 # Show a lock icon in the tab bar when the foreground process disables

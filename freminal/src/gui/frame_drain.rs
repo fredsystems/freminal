@@ -1034,8 +1034,18 @@ mod tests {
             .map_or(0, |vp| {
                 vp.commands
                     .iter()
-                    // egui itself sends `SetTheme` on the first frame.
-                    .filter(|c| !matches!(c, egui::ViewportCommand::SetTheme(_)))
+                    // Only the commands a window operation can produce; egui
+                    // sends others of its own (e.g. `SetTheme` on frame one).
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            egui::ViewportCommand::Minimized(_)
+                                | egui::ViewportCommand::OuterPosition(_)
+                                | egui::ViewportCommand::InnerSize(_)
+                                | egui::ViewportCommand::Maximized(_)
+                                | egui::ViewportCommand::Fullscreen(_)
+                        )
+                    })
                     .count()
             });
         assert_eq!(

@@ -8529,6 +8529,18 @@ Group F — Hygiene:
     (`myhost.attacker.example`).
   - **R12:** `t=s` reads grow in 1 MiB chunks instead of zero-filling the full request.
   - **R14d:** the shm tests clean up through a drop guard.
+  - **R3:** under `active_pane`, an OSC 52 write also needs the window focused (the docs
+    already said so).
+  - **R4:** `link_open` refuses `file:` launchers and executables (`LAUNCHER_EXTENSIONS` after
+    percent-decoding, NTFS stream and trailing-dot tricks, plus the unix exec bit at click
+    time via `decide_open`), and `mailto:` with an `attach`/`attachment` parameter.
+  - **R6:** window-ops docs say the clamp is to the monitor when reported, else 16384 px.
+  - **R10:** OSC 1338 requires an absolute `HISTFILE`.
+  - **R11b:** the ZWNJ markup escape applies only to Linux/BSD notifications.
+  - **R14a:** the FIFO tests fail loudly without `mkfifo`.
+  - **R14b:** `AUTO_DETECT_SCHEMES` is exported from `freminal-buffer` (re-exported by the
+    emulator), and `link_open` tests iterate it so scheme drift fails.
+  - **R14c:** the window-op tests filter for the specific viewport commands.
 
   The remaining review items are below.
 

@@ -708,8 +708,11 @@ in
             characters), maximize/restore and full-screen. Equivalent to
             xterm's allowWindowOps. When true, any program writing to the
             terminal, including a remote host over ssh, can move, resize or
-            full-screen your window. Report-only queries (window size,
-            position, state, title) and title push/pop are unaffected.
+            full-screen your window. Resize and move targets are clamped to
+            the monitor size when the windowing layer reports it, otherwise
+            to a fixed 16384 px extent (see cleanup 148.C4). Report-only
+            queries (window size, position, state, title) and title push/pop
+            are unaffected.
             Null uses the default (false).
           '';
         };

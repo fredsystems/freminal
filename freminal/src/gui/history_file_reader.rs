@@ -381,10 +381,13 @@ mod tests {
     fn fifo_is_not_a_regular_file_and_does_not_block() {
         let dir = tmp();
         let fifo = dir.path().join("fifo");
-        match std::process::Command::new("mkfifo").arg(&fifo).status() {
-            Ok(s) if s.success() => {}
-            _ => return, // mkfifo unavailable; nothing to test.
-        }
+        // mkfifo is part of coreutils on every supported unix; a missing or
+        // failing one must fail this test loudly rather than skip it.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be installed (coreutils) to test FIFO handling");
+        assert!(status.success(), "mkfifo {fifo:?} failed: {status}");
         let err = within_timeout(move || {
             read_history_file(&fifo, SymlinkPolicy::Follow).expect_err("must fail")
         });

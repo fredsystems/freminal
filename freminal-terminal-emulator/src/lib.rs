@@ -49,6 +49,10 @@ pub use freminal_buffer::image_store::{
 // Re-export `LineWidth` for the renderer to apply DECDWL / DECDHL scaling.
 pub use freminal_buffer::row::LineWidth;
 
+/// The URL schemes auto-detection recognises; the GUI link allow-list tests
+/// itself against this so the two cannot drift.
+pub use freminal_buffer::url_detect::AUTO_DETECT_SCHEMES;
+
 /// Git describe output for the current build.
 ///
 /// Typical values: `v0.7.0-3-gabc1234` (commits past a tag) or `v0.7.0` (on

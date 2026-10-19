@@ -8,10 +8,12 @@
 //! Notification daemons on Linux/BSD (KDE, dunst, mako) interpret a subset of
 //! HTML in the body, and sometimes the summary. Text that comes from a
 //! terminal program is untrusted, so every notification freminal hands to a
-//! daemon — OSC 99, OSC 9, OSC 777 — is escaped with [`escape_body_markup`].
-//! This lives in its own module, unconditionally compiled, because the OSC 9 /
-//! OSC 777 path runs on every platform while the rest of OSC 99 presentation
-//! is Linux/BSD only.
+//! freedesktop daemon — OSC 99, OSC 9, OSC 777 — is escaped with
+//! [`escape_body_markup`]. This lives in its own module, shared by the OSC 99
+//! presentation code and the OSC 9 / OSC 777 path, and is compiled only on
+//! Linux/BSD: macOS and Windows notifications have no markup to defuse, so
+//! they receive the raw text and the escape would only show a stray
+//! zero-width character.
 
 /// Zero width non-joiner, inserted after the characters kitty escapes in a
 /// body for daemons that interpret markup.

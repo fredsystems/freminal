@@ -524,9 +524,12 @@ pub fn spawn_loader_with_path(program: PathBuf, path: PathBuf, slot: SharedSeede
 /// Load shell history from an explicit `path` reported over `OSC 1338`,
 /// returning at most [`HISTORY_SEED_CAP`] entries.
 ///
-/// The path comes from terminal output and is therefore untrusted.  Three
+/// The path comes from terminal output and is therefore untrusted.  Four
 /// defences apply, in order:
 ///
+/// 0. The path must be absolute.  A relative path would resolve against
+///    whatever the GUI process's working directory happens to be, not the
+///    shell's, so it is skipped without being touched.
 /// 1. The path's basename must be on the history-file allow-list
 ///    ([`parser_kind_from_path`]) **regardless of the pane's shell**;
 ///    otherwise nothing is read.  Without this, an application could name
@@ -537,6 +540,13 @@ pub fn spawn_loader_with_path(program: PathBuf, path: PathBuf, slot: SharedSeede
 ///    [`SymlinkPolicy::Refuse`]: bounded, regular files only, and no
 ///    symlink in the final component.
 fn load_from_path(program: &Path, path: &Path) -> Vec<String> {
+    if !path.is_absolute() {
+        trace!(
+            "shell_history: OSC-driven load: {path:?} is not an absolute path \
+             (program={program:?}); skipping"
+        );
+        return Vec::new();
+    }
     let path_kind = parser_kind_from_path(path);
     if matches!(path_kind, ShellKind::Other) {
         trace!(
@@ -1266,6 +1276,44 @@ mod tests {
         assert_eq!(v, vec!["ls", "echo hi"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn osc_load_refuses_a_relative_path() {
+        use std::path::Component;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hist = tmp.path().join(".zsh_history");
+        std::fs::write(&hist, ": 1700000000:0;ls\n").expect("write");
+        // Control: the absolute path loads.
+        assert_eq!(load_from_path(Path::new("/bin/zsh"), &hist), vec!["ls"]);
+
+        // The same file named relative to the process's working directory
+        // (`../../tmp/...`), so it would be read if relativity were allowed.
+        let cwd = std::env::current_dir().expect("cwd");
+        let mut relative = PathBuf::new();
+        for _ in cwd
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+        {
+            relative.push("..");
+        }
+        relative.push(hist.strip_prefix("/").unwrap_or(&hist));
+        assert!(relative.is_relative());
+        assert!(
+            relative.is_file(),
+            "test setup: {relative:?} must resolve to the history file"
+        );
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), &relative),
+            [] as [String; 0]
+        );
+        // A bare file name is relative too.
+        assert_eq!(
+            load_from_path(Path::new("/bin/zsh"), Path::new(".zsh_history")),
+            [] as [String; 0]
+        );
+    }
+
     #[test]
     fn osc_load_accepts_zhistory_and_histfile_for_zsh() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -1309,10 +1357,13 @@ mod tests {
     fn osc_load_fifo_with_allowed_basename_yields_nothing_without_hanging() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let fifo = tmp.path().join(".zsh_history");
-        match std::process::Command::new("mkfifo").arg(&fifo).status() {
-            Ok(s) if s.success() => {}
-            _ => return, // mkfifo unavailable; nothing to test.
-        }
+        // mkfifo is part of coreutils on every supported unix; a missing or
+        // failing one must fail this test loudly rather than skip it.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be installed (coreutils) to test FIFO handling");
+        assert!(status.success(), "mkfifo {fifo:?} failed: {status}");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(load_from_path(Path::new("/bin/zsh"), &fifo));
