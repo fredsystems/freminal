@@ -4146,11 +4146,15 @@ mod tests {
     fn macos_shm_object_size_is_fixed_after_the_first_truncate() {
         let (name, file) = create_test_shm_sized(3 * 4096);
         let _cleanup = ShmGuard(name);
+        // XNU reports the size rounded up to the page size, so compare against
+        // what it reported before the attempt, not the requested length.
+        let before = file.metadata().expect("fstat").len();
+        assert!(before >= 3 * 4096);
         assert!(
             file.set_len(100).is_err(),
             "XNU must refuse to shrink a sized shm object"
         );
-        assert_eq!(file.metadata().expect("fstat").len(), 3 * 4096);
+        assert_eq!(file.metadata().expect("fstat").len(), before);
     }
 
     /// macOS: ranges inside the object read exactly; a range past its end is
@@ -4173,8 +4177,12 @@ mod tests {
         );
         let got = read_kitty_shm_range(&reader, 777, 5000).expect("range read");
         assert_eq!(got, data[777..5777]);
+        // XNU rounds the object up to whole pages (bytes past the data but
+        // inside the last page read as zeros, never SIGBUS); a range past the
+        // reported, page-rounded size is refused without mapping it.
+        let object_len = reader.metadata().expect("fstat").len();
         assert!(matches!(
-            read_kitty_shm_range(&reader, 0, 10_001),
+            read_kitty_shm_range(&reader, 0, object_len + 1),
             Err(KittyShmError::Truncated)
         ));
         assert_eq!(
