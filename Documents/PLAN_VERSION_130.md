@@ -8541,6 +8541,12 @@ Group F — Hygiene:
   - **R14b:** `AUTO_DETECT_SCHEMES` is exported from `freminal-buffer` (re-exported by the
     emulator), and `link_open` tests iterate it so scheme drift fails.
   - **R14c:** the window-op tests filter for the specific viewport commands.
+  - **R7:** `insert_text` no longer wraps when nothing placeable remains after a full row
+    (`wrap_would_place_text`), so a discarded glyph leaves no blank line. Benchmarks (A/B):
+    `softwrap_heavy` −2.8%, `buffer_insert_large_line` −1.8%, `buffer_insert_chunks` 0.0%.
+    The DECDWL-landing-row residual is 148.C8.
+  - **Recorded rather than fixed:** 148.C8–148.C11 below. Notes-only items: R13 (sixel work
+    is bounded by the DCS cap, inherent) and R14 dictionary (148.C6).
 
   The remaining review items are below.
 
@@ -8601,6 +8607,34 @@ Group F — Hygiene:
   `wide_gamut.rs`, and a test name with a misspelt `registry` in `osc99/dbus_service/mod.rs`; the
   `codespell:ignore` comments do not apply to typos. **Done:** `rin` and `gam` are added to
   `typos.toml` `extend-words` with their origin, and the test is renamed `..._registry_...`.
+- **148.C8 — A wrap onto a DECDWL row can still be empty.** Review finding R7 (residual).
+  `wrap_would_place_text` checks the widest fresh-row span, because the landing row's width is
+  unknown before the wrap. If the landing row is double-width, so its span is half, a wrap
+  can still land and place nothing, leaving one spurious blank line. It is reachable only
+  with DECDWL and a glyph wider than the half span. Scope: compute the landing row's span
+  before wrapping. Not scheduled in Task 148.
+- **148.C9 — Reply bound is per message, and GUI-side queues stay unbounded.** Review finding
+  R5. `REPLY_QUEUE_CAPACITY` (1024) bounds messages, not bytes: with
+  `allow_clipboard_read = true`, OSC 52 query replies carry the clipboard. Upstream of it,
+  `window_cmd_tx` (PTY to GUI report requests) and `input_tx` (GUI replies back) are
+  unbounded, so a non-draining GUI still amplifies. Scope: a byte budget (an atomic counter
+  shared by handler and writer, no locks) and bounds on the two GUI channels, per
+  `freminal-architecture`. Not scheduled in Task 148.
+- **148.C10 — OSC 7 / spawn-cwd follow-ups.** Review finding R9.
+  - `resolve_spawn_cwd` runs `is_dir()` (and `read_cwd`, which uses `sysinfo` on macOS and
+    Windows) on the GUI thread at new-tab or split time. An attacker-chosen path on a hung
+    network mount can stall the GUI. Move it off-thread or add a deadline.
+  - On Windows, an OSC 7 path (`/C:/...`) never passes `is_dir()`, so OSC 7 is silently
+    unused there.
+  - `last_session.toml` files written by older builds can carry an unvalidated cwd, and
+    restore uses them as-is.
+
+  Not scheduled in Task 148.
+- **148.C11 — Notification worker is never restarted.** Review finding R11a. If the
+  `freminal-notify` worker thread exits (panic), `OnceLock` keeps the dead sender and system
+  notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
+  respawn on `WorkerGone`, which needs an atomically swappable sender (`ArcSwap`), not a
+  `OnceLock`. Not scheduled in Task 148.
 
 ---
 

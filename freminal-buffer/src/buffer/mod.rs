@@ -1044,6 +1044,14 @@ impl Buffer {
                     // `leftover_start` is relative to `&text[start..]`.
                     start += leftover_start;
 
+                    // Nothing placeable left: do not wrap (R7); see
+                    // `wrap_would_place_text`.
+                    if !self.wrap_would_place_text(text, start, base_wrap_col, base_wrap_start_col)
+                    {
+                        let _ = self.enforce_scrollback_limit(0);
+                        return;
+                    }
+
                     // Scroll-region-aware wrap: same logic as PRE-WRAP.
                     col = final_col;
                     let Some(new_row_idx) = self.wrap_unless_stalled(
@@ -1065,6 +1073,34 @@ impl Buffer {
                 }
             }
         }
+    }
+
+    /// Whether wrapping would let any of `text[start..]` be written.
+    ///
+    /// A wrap is only worth taking if something can be placed on the row it
+    /// lands on. If every remaining glyph is wider than a fresh row, the next
+    /// `insert_text` iteration would discard them all -- but only after
+    /// `advance_row_for_wrap` had already pushed or scrolled a row, leaving a
+    /// spurious blank line (R7). Callers treat the text as ending instead: the
+    /// cursor stays in pending-wrap at the end of the row, exactly as if the
+    /// text had stopped at the last real write.
+    ///
+    /// The landing row's span is not known without wrapping, so this uses the
+    /// widest a fresh row can be: the margin-derived span with no DECDWL
+    /// halving. That can only err towards wrapping (the pre-existing
+    /// behaviour), never towards suppressing a wrap that would have placed
+    /// text.
+    fn wrap_would_place_text(
+        &self,
+        text: &[TChar],
+        start: usize,
+        base_wrap_col: usize,
+        base_wrap_start_col: usize,
+    ) -> bool {
+        let fresh_normal_span = base_wrap_col
+            .min(self.width)
+            .saturating_sub(base_wrap_start_col);
+        skip_unplaceable_glyphs(text, start, fresh_normal_span) < text.len()
     }
 
     /// Push the row `insert_text` is about to write into, if it does not exist

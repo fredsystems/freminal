@@ -259,3 +259,92 @@ fn wide_glyph_fitting_exactly_in_a_two_column_terminal_is_written() {
     assert_eq!(glyph_at(&buf, 0, 0), wide());
     assert_eq!(glyph_at(&buf, 1, 0), wide());
 }
+
+// ── Shape 4: a discard must not leave a wrap behind (review R7) ─────────
+//
+// Placeable text fills the row, then only unplaceable glyphs remain. The wrap
+// between them used to happen anyway -- pushing or scrolling a row -- before
+// the discard, so the cursor stayed on the old row while the buffer had
+// already grown. At the bottom of the screen the next character then wrapped
+// a second time and produced a blank line.
+
+/// Write `a`, then `a` + a wide glyph into two identical buffers and assert the
+/// wide glyph changed nothing; then `b` must wrap exactly once.
+fn assert_discard_after_full_row_leaves_no_wrap(mut with_wide: Buffer, mut reference: Buffer) {
+    reference.insert_text(&[narrow('a')]);
+    with_wide.insert_text(&[narrow('a'), wide()]);
+
+    assert_eq!(
+        with_wide.rows().len(),
+        reference.rows().len(),
+        "a discarded glyph must not push a row"
+    );
+    assert_eq!(
+        with_wide.cursor().pos,
+        reference.cursor().pos,
+        "a discarded glyph must not move the cursor"
+    );
+
+    reference.insert_text(&[narrow('b')]);
+    with_wide.insert_text(&[narrow('b')]);
+
+    assert_eq!(with_wide.rows().len(), reference.rows().len());
+    assert_eq!(with_wide.cursor().pos, reference.cursor().pos);
+    for row in 0..reference.rows().len() {
+        assert_eq!(
+            glyph_at(&with_wide, row, 0),
+            glyph_at(&reference, row, 0),
+            "row {row}"
+        );
+    }
+}
+
+fn at_bottom_row(mut buf: Buffer) -> Buffer {
+    let bottom = buf.terminal_height() - 1;
+    buf.set_cursor_pos(Some(0), Some(bottom));
+    buf
+}
+
+#[test]
+fn one_column_primary_bottom_row_discard_after_full_row_does_not_wrap() {
+    assert_discard_after_full_row_leaves_no_wrap(
+        at_bottom_row(Buffer::new(1, 4)),
+        at_bottom_row(Buffer::new(1, 4)),
+    );
+}
+
+#[test]
+fn one_column_primary_bottom_row_then_next_char_wraps_exactly_once() {
+    let mut buf = at_bottom_row(Buffer::new(1, 4));
+    buf.insert_text(&[narrow('a'), wide()]);
+    let rows_after_discard = buf.rows().len();
+    buf.insert_text(&[narrow('b')]);
+
+    assert_eq!(buf.rows().len(), rows_after_discard + 1, "exactly one wrap");
+    let last = buf.rows().len() - 1;
+    assert_eq!(glyph_at(&buf, last, 0), narrow('b'));
+    assert_eq!(glyph_at(&buf, last - 1, 0), narrow('a'), "no blank line");
+}
+
+#[test]
+fn one_column_alternate_bottom_row_discard_after_full_row_does_not_wrap() {
+    let alt = || {
+        let mut buf = Buffer::new(1, 4);
+        buf.switch_to_alternate();
+        at_bottom_row(buf)
+    };
+    assert_discard_after_full_row_leaves_no_wrap(alt(), alt());
+}
+
+#[test]
+fn double_width_span_one_bottom_row_discard_after_full_row_does_not_wrap() {
+    // One column: the DECDWL span (`(1 / 2).max(1)`) is 1, and so is the span
+    // of the normal row a wrap would land on, so the wide glyph is
+    // unplaceable either way.
+    let make = || {
+        let mut buf = at_bottom_row(Buffer::new(1, 4));
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        buf
+    };
+    assert_discard_after_full_row_leaves_no_wrap(make(), make());
+}
