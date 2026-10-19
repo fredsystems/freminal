@@ -8469,6 +8469,13 @@ Group F — Hygiene:
     keeps both targets for now; 148.C6 revisits it with nightly data.
   - **CI comment:** the `fuzz-smoke` comment in `ci.yml` no longer lists the fixed crashes.
   - **Corpus:** not published (maintainer-only).
+- **148.26 (done):** `ESCAPE_SEQUENCE_COVERAGE.md` rows updated for BS, DECDWL, REP,
+  DECSLRM, XTWINOPS and the title stack, OSC 0/1/2, 7, 8 and 52, the OSC size caps, XTGETTCAP,
+  sixel, kitty `_G` and `?2004`. OSC 1338 gained its first row. Both "Last updated" headers
+  have a 2026-10-19 Task 148 entry; `GAPS` records that the new limits and off-by-default
+  policies are deliberate, not gaps. CHT has no limits discussion, so it was skipped.
+  `config_example.toml` and the Nix module were updated in their subtasks (148.15–148.17).
+  `.github/SECURITY.md` makes no statement Task 148 falsifies, so it is unchanged.
 
 ### 148 Cleanup entries
 
