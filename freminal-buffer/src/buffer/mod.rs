@@ -73,6 +73,8 @@ mod row_store;
 mod screen_switch_tests;
 mod scroll;
 mod tabs;
+#[cfg(test)]
+mod wrap_progress_tests;
 
 /// Apply a signed `delta` (in cells or rows) to an unsigned `base` coordinate and clamp the
 /// result into `[lo, hi]`.
@@ -576,6 +578,36 @@ pub struct BufferHeapBreakdown {
     pub total_rows: usize,
 }
 
+/// Return the index of the first glyph in `text[start..]` that a fresh row of
+/// `fresh_span` columns can hold, or `text.len()` if there is none. Never less
+/// than `start`, which a stalled wrap may have pushed past the end of `text`.
+///
+/// `fresh_span` is the span a *fresh* row offers: the wrap span `insert_text`
+/// uses for the current row (`wrap_col - wrap_start_col`, after the DECDWL
+/// halving and DECSLRM margins), never beyond the physical width. A glyph whose
+/// display width exceeds it can never be placed, because wrapping to a new row
+/// does not help. It is discarded -- not written, cursor not moved, no wrap, no
+/// new row -- and the text after it carries on. This is what kitty and xterm
+/// do:
+///
+/// - kitty `kitty/screen.c`, `screen_draw_text`:
+///   `if ((unsigned)char_width > self->columns) continue; // discard too wide
+///   character`.
+/// - xterm-412 `charproc.c`, `dotext`:
+///   `if (last_chomp > right + 1) { break; /* give up - it is too big */ }`,
+///   where `right` is the (DECDWL-halved) right margin.
+///
+/// Before this, such a glyph wrapped forever: a row pushed per iteration on the
+/// primary screen (OOM), a scroll per iteration on the alternate screen (hang).
+/// Issue #558.
+fn skip_unplaceable_glyphs(text: &[TChar], start: usize, fresh_span: usize) -> usize {
+    text.iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, glyph)| glyph.display_width().max(1) <= fresh_span)
+        .map_or_else(|| text.len().max(start), |(index, _)| index)
+}
+
 /// Compute the number of screen columns that `text` will occupy when
 /// inserted starting at column `col`, clamped so as not to exceed
 /// `wrap_col`.  Wide characters (`display_width` = 2) count for 2 columns.
@@ -850,6 +882,12 @@ impl Buffer {
         let mut row_idx = self.cursor.pos.y;
         let mut col = self.cursor.pos.x;
 
+        // The value of `start` when the most recent soft-wrap happened. Two
+        // wraps with the same `start` between them means the wrap placed
+        // nothing, which is the non-progress that issue #558 spun on. See
+        // `wrap_unless_stalled`.
+        let mut last_wrap_start: Option<usize> = None;
+
         // When DECLRMM is active the effective right wrap column is
         // scroll_region_right + 1; wrapping starts a new row at
         // scroll_region_left rather than column 0. This base span is fixed for
@@ -894,6 +932,18 @@ impl Buffer {
                 (base_wrap_col, base_wrap_start_col)
             };
 
+            // Drop glyphs wider than a fresh row can ever hold; see
+            // `skip_unplaceable_glyphs`. `start > 0` here means a discard (or
+            // a stalled wrap below) consumed the tail of the text: nothing is
+            // left to write and the cursor stays where the last real write or
+            // wrap left it.
+            let fresh_span = wrap_col.min(self.width).saturating_sub(wrap_start_col);
+            start = skip_unplaceable_glyphs(text, start, fresh_span);
+            if start > 0 && start >= text.len() {
+                let _ = self.enforce_scrollback_limit(0);
+                return;
+            }
+
             // ┌─────────────────────────────────────────────┐
             // │ PRE-WRAP: if we're already at/past wrap_col,│
             // │ move to the next row as a soft-wrap row.    │
@@ -911,34 +961,21 @@ impl Buffer {
 
                 // Scroll-region-aware wrap: advance to the next row,
                 // preserving scrollback on full-screen primary buffers.
-                row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
+                let Some(new_row_idx) =
+                    self.wrap_unless_stalled(row_idx, wrap_start_col, start, &mut last_wrap_start)
+                else {
+                    // The previous wrap placed nothing, so this one would not
+                    // either. Drop the head glyph instead of wrapping again.
+                    start += 1;
+                    last_wrap_start = None;
+                    continue;
+                };
+                row_idx = new_row_idx;
                 col = wrap_start_col;
             }
 
-            // ┌─────────────────────────────────────────────┐
-            // │ Ensure the target row exists.               │
-            // │ If we got here without PRE-WRAP, it's a     │
-            // │ normal new logical line. If col == left and  │
-            // │ row_idx > 0, we are in a wrap continuation. │
-            // └─────────────────────────────────────────────┘
-            if row_idx >= self.rows.len() {
-                let is_wrap_continuation = col == wrap_start_col && row_idx > 0;
-
-                let origin = if is_wrap_continuation {
-                    RowOrigin::SoftWrap
-                } else {
-                    RowOrigin::HardBreak
-                };
-
-                let join = if is_wrap_continuation {
-                    RowJoin::ContinueLogicalLine
-                } else {
-                    RowJoin::NewLogicalLine
-                };
-
-                self.rows
-                    .push(Row::new_with_origin(self.width, origin, join));
-            }
+            // Ensure the target row exists (see `push_missing_insert_row`).
+            self.push_missing_insert_row(row_idx, col, wrap_start_col);
 
             // clone tag here to avoid long-lived borrows of &self
             let tag = self.current_tag.clone();
@@ -1004,12 +1041,78 @@ impl Buffer {
                     start += leftover_start;
 
                     // Scroll-region-aware wrap: same logic as PRE-WRAP.
-                    row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
+                    col = final_col;
+                    let Some(new_row_idx) = self.wrap_unless_stalled(
+                        row_idx,
+                        wrap_start_col,
+                        start,
+                        &mut last_wrap_start,
+                    ) else {
+                        // A wrap already happened with nothing placed since:
+                        // the head glyph does not fit even a fresh row. Drop
+                        // it and carry on from where this row ended.
+                        start += 1;
+                        last_wrap_start = None;
+                        continue;
+                    };
+                    row_idx = new_row_idx;
                     col = wrap_start_col;
                     // `col` stays wrap_start_col; next iteration writes there.
                 }
             }
         }
+    }
+
+    /// Push the row `insert_text` is about to write into, if it does not exist
+    /// yet.
+    ///
+    /// Reaching a missing row without a PRE-WRAP makes it a normal new logical
+    /// line. If `col == wrap_start_col` and `row_idx > 0` we arrived by a wrap,
+    /// so the row is a soft-wrap continuation.
+    fn push_missing_insert_row(&mut self, row_idx: usize, col: usize, wrap_start_col: usize) {
+        if row_idx < self.rows.len() {
+            return;
+        }
+
+        let is_wrap_continuation = col == wrap_start_col && row_idx > 0;
+
+        let (origin, join) = if is_wrap_continuation {
+            (RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine)
+        } else {
+            (RowOrigin::HardBreak, RowJoin::NewLogicalLine)
+        };
+
+        self.rows
+            .push(Row::new_with_origin(self.width, origin, join));
+    }
+
+    /// Soft-wrap via [`Self::advance_row_for_wrap`], unless the previous wrap
+    /// already happened at this same `start` index.
+    ///
+    /// This is the termination guarantee for [`Self::insert_text`]. `start`
+    /// only ever increases, so "the last wrap was at this `start`" means that
+    /// wrapping placed nothing: the glyph at `start` does not fit a fresh row.
+    /// Returns `None` in that case, without wrapping, and the caller drops that
+    /// glyph. Otherwise records `start` in `last_wrap_start` and returns the
+    /// new row index.
+    ///
+    /// Every wrap therefore needs `start` to have advanced since the one
+    /// before, so a call wraps at most `text.len() + 1` times whatever the row
+    /// spans are. The up-front discard in `insert_text` already removes the
+    /// glyphs this would catch; this makes termination independent of that
+    /// span arithmetic staying exact.
+    fn wrap_unless_stalled(
+        &mut self,
+        row_idx: usize,
+        wrap_start_col: usize,
+        start: usize,
+        last_wrap_start: &mut Option<usize>,
+    ) -> Option<usize> {
+        if *last_wrap_start == Some(start) {
+            return None;
+        }
+        *last_wrap_start = Some(start);
+        Some(self.advance_row_for_wrap(row_idx, wrap_start_col))
     }
 
     /// Handle soft-wrap advancement: move the cursor to the next row when a

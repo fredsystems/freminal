@@ -8243,6 +8243,22 @@ Group F — Hygiene:
   `SymlinkPolicy::Follow`. User-visible consequence: an OSC-reported `HISTFILE` with any
   other basename, or a symlinked one, is no longer loaded over OSC; the environment path
   still is. Windows UNC paths on this path are 148.C1.
+- **148.5 (done):** cause confirmed. `Row::insert_text_with_limit` returns
+  `Leftover { leftover_start: 0 }` for a glyph wider than even a fresh row, and
+  `Buffer::insert_text` wrapped again with no progress: a row pushed per pass on the primary
+  screen (the #558 OOM), a scroll per pass on the alternate screen (a hang). Chosen
+  behaviour: a glyph wider than the fresh-row span (`wrap_col - wrap_start_col` for that row,
+  after DECDWL halving and DECSLRM margins) is discarded: not written, cursor not moved, no
+  wrap; the following text continues. Precedent: kitty `screen.c` `screen_draw_text`
+  ("discard too wide character") and xterm-412 `charproc.c` `dotext` ("give up - it is too
+  big", against the DECDWL-halved right margin). This also changes DECDWL rows: a wide glyph
+  on a DECDWL row with span 1 used to wrap and be written on the next row, and is now
+  discarded as xterm does. Termination no longer depends on the span arithmetic:
+  `wrap_unless_stalled` refuses a second wrap with no glyph placed and drops the head glyph,
+  so one call wraps at most `text.len() + 1` times. Reproducers
+  `wide-glyph-one-column-primary-oom` and `wide-glyph-one-column-alternate-hang` (6 and 14
+  bytes). Benchmarks (A/B): `softwrap_heavy` +2.0%, `buffer_insert_large_line` +3.0%,
+  `buffer_insert_chunks` +0.7%, all within threshold.
 
 ### 148 Cleanup entries
 
