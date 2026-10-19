@@ -8402,6 +8402,12 @@ Group F — Hygiene:
   reason. There is no confirmation dialog: confirming other schemes waits for Task 133, and
   refusing is the strict subset. Residual: a local `file:` link to a launcher (`.desktop`,
   `.command`) is still handed to the OS opener, as the plan's "local file" allows.
+- **148.19 (done):** `build_system_notification` applies `escape_body_markup` (moved to the
+  every-platform `gui/osc99/markup.rs` and re-exported, not duplicated) to the summary and the
+  body. The per-notification thread is replaced by one lazily started `freminal-notify`
+  worker fed by `bounded(SYSTEM_NOTIFICATION_QUEUE = 16)` in a `OnceLock`. `enqueue_bounded`
+  returns `Enqueued | DroppedFull | WorkerGone`, and a burst drops notifications rather than
+  spawning threads. The test-only skip of the OS call is unchanged.
 
 ### 148 Cleanup entries
 

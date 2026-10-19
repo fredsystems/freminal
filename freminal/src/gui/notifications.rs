@@ -22,10 +22,11 @@
 //! intended sink; the toast leg never spawns a thread.
 
 use std::borrow::Cow;
-use std::sync::Weak;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, Weak};
 use std::time::Instant;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
 use freminal_common::buffer_states::osc99_notification::{
@@ -41,7 +42,7 @@ use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg,
     Osc99LinuxDaemon, Osc99PaneState, Osc99Registry, Osc99Request, PaneKeyboardFocus,
-    PaneVisibility,
+    PaneVisibility, escape_body_markup,
 };
 use super::toast::{ToastKind, ToastStack};
 
@@ -365,35 +366,28 @@ impl NotificationRouter {
     /// thread, the abort lands nondeterministically during test teardown and
     /// takes the whole harness down after every test has already passed. The
     /// routing policy that these unit tests exercise is fully evaluated before
-    /// this point, so skipping the spawn under test loses no coverage.
+    /// this point, so skipping the worker under test loses no coverage. The
+    /// queueing policy is covered separately through [`enqueue_bounded`].
+    ///
+    /// Notifications go to one long-lived worker through a bounded queue
+    /// ([`SYSTEM_NOTIFICATION_QUEUE`]); when it is full the notification is
+    /// dropped, never blocking the frame loop and never spawning a thread.
     fn show_system(req: &NotificationRequest) {
         // See the doc comment: the OS notification call aborts in test
-        // binaries on macOS (foreign ObjC exception). Never spawn it here.
+        // binaries on macOS (foreign ObjC exception). Never reach the worker here.
         if cfg!(test) {
             return;
         }
         let notification = Self::build_system_notification(req);
-        let builder = std::thread::Builder::new().name("freminal-notify".to_owned());
-        if let Err(e) = builder.spawn(move || {
-            // Attach the inline `image-data` icon on the background thread, not
-            // the GUI thread: the first call decodes the embedded PNG (~1 MiB
-            // RGBA), which must never block the frame loop (adversarial review
-            // finding 1). `build_system_notification` stays a pure, icon-less
-            // builder so it remains unit-testable without the decode; the
-            // Linux/BSD-only image attachment lives here. The `mut` rebind is
-            // scoped to this cfg so it isn't an unused-mut on macOS/Windows,
-            // where `image_data` does not exist.
-            #[cfg(all(unix, not(target_os = "macos")))]
-            let mut notification = notification;
-            #[cfg(all(unix, not(target_os = "macos")))]
-            if let Some(image) = freminal_icon_image() {
-                notification.image_data(image.clone());
+        let Some(queue) = system_notification_queue() else {
+            return;
+        };
+        match enqueue_bounded(queue, notification) {
+            EnqueueOutcome::Enqueued => {}
+            EnqueueOutcome::DroppedFull => log_dropped_notification(),
+            EnqueueOutcome::WorkerGone => {
+                tracing::warn!("desktop notification worker has exited; notification dropped");
             }
-            if let Err(e) = notification.show() {
-                tracing::warn!("failed to show desktop notification: {e}");
-            }
-        }) {
-            tracing::warn!("failed to spawn notification thread: {e}");
         }
     }
 
@@ -411,8 +405,8 @@ impl NotificationRouter {
     /// The *primary*, always-works icon — the embedded app icon as inline
     /// `image-data` bytes (the mechanism Discord & co. use, which shows even
     /// when freminal is not installed into the system icon theme) — is
-    /// attached separately, on the background notification thread, in
-    /// [`show_system`], because decoding the embedded PNG (~1 MiB RGBA) must
+    /// attached separately, on the background notification worker (the
+    /// `freminal-notify` thread), because decoding the embedded PNG (~1 MiB RGBA) must
     /// not run on the GUI thread. Keeping this builder icon-bytes-free is
     /// deliberate: it stays a pure, cheap, unit-testable function (no decode,
     /// no `image-data` platform gating) while the heavy Linux/BSD-only image
@@ -438,8 +432,12 @@ impl NotificationRouter {
             // unsupported). The primary inline-bytes icon is attached in
             // `show_system` on the background thread.
             .icon("freminal")
-            .summary(req.summary())
-            .body(&req.body);
+            // OSC 9 / OSC 777 text is untrusted and some daemons render markup
+            // (KDE, dunst, mako). The spec only defines markup in the body,
+            // but some daemons format the summary too, and the escape is
+            // invisible, so both are escaped (issue #560), as OSC 99 does.
+            .summary(&escape_body_markup(req.summary()))
+            .body(&escape_body_markup(&req.body));
 
         // Error-category notifications use Critical urgency so they persist
         // and pop as a banner; everything else is Normal. Many Linux
@@ -462,6 +460,91 @@ impl NotificationRouter {
 
         notification
     }
+}
+
+/// How many desktop notifications may wait for the notify worker. A program
+/// that emits OSC 9 / OSC 777 in a loop must not be able to grow an unbounded
+/// backlog (or an unbounded number of threads); past this, notifications are
+/// dropped.
+const SYSTEM_NOTIFICATION_QUEUE: usize = 16;
+
+/// What [`enqueue_bounded`] did with an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnqueueOutcome {
+    /// The item is waiting for the worker.
+    Enqueued,
+    /// The queue was full; the item was dropped.
+    DroppedFull,
+    /// The worker has exited; the item was dropped.
+    WorkerGone,
+}
+
+/// Hand `item` to a bounded queue without ever blocking or spawning.
+///
+/// This is the whole queueing policy of the desktop-notification path, kept
+/// separate from the OS call so it is testable without one.
+fn enqueue_bounded<T>(queue: &Sender<T>, item: T) -> EnqueueOutcome {
+    match queue.try_send(item) {
+        Ok(()) => EnqueueOutcome::Enqueued,
+        Err(TrySendError::Full(_)) => EnqueueOutcome::DroppedFull,
+        Err(TrySendError::Disconnected(_)) => EnqueueOutcome::WorkerGone,
+    }
+}
+
+/// Log a notification dropped because the queue was full: a warning for the
+/// first, then debug, so a flood cannot also flood the log.
+fn log_dropped_notification() {
+    static DROPPED: AtomicU64 = AtomicU64::new(0);
+    if DROPPED.fetch_add(1, Ordering::Relaxed) == 0 {
+        tracing::warn!(
+            "desktop notification queue is full; dropping notifications \
+             (further drops are logged at debug level)"
+        );
+    } else {
+        tracing::debug!("desktop notification queue is full; notification dropped");
+    }
+}
+
+/// The queue feeding the one long-lived `freminal-notify` worker, started on
+/// first use. `None` if the worker thread could not be spawned.
+fn system_notification_queue() -> Option<&'static Sender<notify_rust::Notification>> {
+    static QUEUE: OnceLock<Option<Sender<notify_rust::Notification>>> = OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            let (tx, rx) =
+                crossbeam_channel::bounded::<notify_rust::Notification>(SYSTEM_NOTIFICATION_QUEUE);
+            let spawned = std::thread::Builder::new()
+                .name("freminal-notify".to_owned())
+                .spawn(move || {
+                    for notification in rx {
+                        // The Linux/BSD `image-data` icon is attached here,
+                        // not on the GUI thread: the first call decodes the
+                        // embedded PNG (~1 MiB RGBA), which must never block
+                        // the frame loop. `build_system_notification` stays a
+                        // pure, icon-less builder so it remains unit-testable
+                        // without the decode. The `mut` rebind is scoped to
+                        // this cfg so it isn't an unused-mut on
+                        // macOS/Windows, where `image_data` does not exist.
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        let mut notification = notification;
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        if let Some(image) = freminal_icon_image() {
+                            notification.image_data(image.clone());
+                        }
+                        if let Err(e) = notification.show() {
+                            tracing::warn!("failed to show desktop notification: {e}");
+                        }
+                    }
+                });
+            match spawned {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    tracing::warn!("failed to spawn notification thread: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 /// The bundled freminal application icon as a notify-rust [`Image`], decoded
@@ -912,6 +995,60 @@ mod tests {
             title: None,
             body: body.to_owned(),
         }
+    }
+
+    /// Issue #560: OSC 9 / OSC 777 text reaches the daemon markup-escaped, in
+    /// the summary and the body alike.
+    #[test]
+    fn build_system_notification_escapes_markup_in_summary_and_body() {
+        let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
+        let req = NotificationRequest {
+            kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc777),
+            title: Some(text.to_owned()),
+            body: text.to_owned(),
+        };
+        let notification = NotificationRouter::build_system_notification(&req);
+        for field in [&notification.summary, &notification.body] {
+            assert_eq!(field, &escape_body_markup(text));
+            let chars: Vec<char> = field.chars().collect();
+            for (i, c) in chars.iter().enumerate() {
+                if *c == '<' || *c == '&' {
+                    assert_eq!(
+                        chars.get(i + 1),
+                        Some(&'\u{200c}'),
+                        "no ZWNJ after {c:?} at {i} in {field:?}"
+                    );
+                }
+            }
+            assert!(field.contains("<\u{200c}b>"));
+            assert!(field.contains("&\u{200c} "));
+        }
+    }
+
+    /// The queueing policy never blocks and never spawns: against a queue
+    /// nobody drains, exactly its capacity is accepted and the rest dropped.
+    #[test]
+    fn enqueue_bounded_accepts_capacity_then_drops() {
+        let (tx, _rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        let mut enqueued = 0_usize;
+        let mut dropped = 0_usize;
+        for i in 0..1000_u32 {
+            match enqueue_bounded(&tx, i) {
+                EnqueueOutcome::Enqueued => enqueued += 1,
+                EnqueueOutcome::DroppedFull => dropped += 1,
+                EnqueueOutcome::WorkerGone => unreachable!("receiver is alive"),
+            }
+        }
+        assert_eq!(enqueued, SYSTEM_NOTIFICATION_QUEUE);
+        assert_eq!(dropped, 1000 - SYSTEM_NOTIFICATION_QUEUE);
+    }
+
+    #[test]
+    fn enqueue_bounded_reports_a_gone_worker() {
+        let (tx, rx) = crossbeam_channel::bounded::<u32>(SYSTEM_NOTIFICATION_QUEUE);
+        drop(rx);
+        assert_eq!(enqueue_bounded(&tx, 1), EnqueueOutcome::WorkerGone);
     }
 
     #[test]
