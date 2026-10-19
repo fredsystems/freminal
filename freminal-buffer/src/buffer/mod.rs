@@ -45,6 +45,8 @@ use freminal_common::buffer_states::{
     modes::{reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2},
 };
 
+#[cfg(test)]
+mod alt_wrap_below_margin_tests;
 mod command_block_log;
 mod compression;
 mod cursor;
@@ -1142,6 +1144,19 @@ impl Buffer {
                 self.scroll_region_up_for_wrap();
                 // row_idx stays the same — it now points to the freshly blanked
                 // bottom row of the scroll region.
+                row_idx
+            } else if self.kind == BufferType::Alternate && row_idx + 1 >= self.height {
+                // Below the bottom margin on the last screen row of the
+                // alternate screen: there is no row to wrap onto and nothing
+                // to scroll (the cursor is outside the region). The cursor
+                // stays on the row, so the wrapped text overwrites it from the
+                // wrap column. The alternate screen is a fixed `height`-row
+                // grid; appending a row here broke that invariant (#568).
+                //
+                // xterm: `WrapLine` (charproc.c) calls `xtermIndex`, which for
+                // a cursor below `bot_marg` is `CursorDown` (cursor.c), and
+                // `CursorDown` clamps to `max_row` rather than growing or
+                // scrolling the screen.
                 row_idx
             } else {
                 let next = row_idx + 1;

@@ -8259,6 +8259,21 @@ Group F — Hygiene:
   `wide-glyph-one-column-primary-oom` and `wide-glyph-one-column-alternate-hang` (6 and 14
   bytes). Benchmarks (A/B): `softwrap_heavy` +2.0%, `buffer_insert_large_line` +3.0%,
   `buffer_insert_chunks` +0.7%, all within threshold.
+- **148.7 (done):** one producer for three of the four invariants. `advance_row_for_wrap`
+  appended a row to the alternate screen when an auto-wrap happened on the last screen row
+  below the DECSTBM bottom margin (`:595`, height + 1 rows); `?1049l` then parked that store
+  (`:750`), and a later `?1049h` rebuilt `height` rows around the stale cursor row (`:554`).
+  Fix: on the alternate screen's last row the wrap keeps the cursor on that row and the
+  wrapped text overwrites it from the wrap column, as xterm-412 does (`WrapLine` ->
+  `xtermIndex` -> `CursorDown`, which clamps to `max_row` below `bot_marg`). The
+  `image_cell_count` case (`:643`, r3) no longer reproduces from 148.3 (`ac8ee7a5`) onwards:
+  its stream relies on a stale DECSLRM margin. The invariants are unchanged. Reproducer
+  `alt-wrap-below-margin-grows-screen` (57 bytes). A 664 s sandboxed run found none of the
+  four classes; it found 123 flatten-oracle crashes (148.6) and one timeout (148.C2). The
+  primary-screen counterpart is 148.C3. Benchmarks (A/B): `softwrap_heavy` +2.1%,
+  `buffer_resize/*` −6.1% to +0.6%, `bench_alternate_screen_switch` and
+  `bench_alt_screen_transition_e2e` not significant (one +95% outlier on
+  `leave_alt_to_primary` did not repeat on two reruns: −0.03%, −1.8%).
 
 ### 148 Cleanup entries
 
@@ -8269,6 +8284,19 @@ Group F — Hygiene:
   path-classification function, apply it to the OSC 1338 path before any filesystem call.
   Verification: a table test on the classification at the OSC entry point;
   `cargo xtask check-windows`. Schedule: with or right after 148.14.
+- **148.C2 — CHT (`CSI Ps I`) loops `Ps` times with no progress check.** Surfaced by the
+  148.7 fuzz run (a 3241-byte `terminal_state` timeout; top frames `Buffer::tab_forward` from
+  `process_output_in_batch`). `tab_forward` calls `advance_to_next_tab_stop` `count` times
+  even once the cursor sits on the last column, so a huge parameter is a CPU hang, the same
+  family as GHSA-2746-x3cj-58c7. Scope: stop when a step does not move the cursor (or clamp
+  `count` to the number of stops); check `tab_backward` and any other count-driven loop in
+  `buffer/tabs.rs`. Verification: a test with `usize::MAX`; the minimised timeout as a
+  `terminal_state` regression. Schedule: before 148.25's fuzz reruns.
+- **148.C3 — Wrap / LF below the bottom margin on the primary screen's last row scrolls.**
+  Surfaced by 148.7. xterm-412 clamps there (`xtermIndex` -> `CursorDown` to `max_row`);
+  freminal's primary buffer pushes a row. No invariant breaks, so this is a behaviour
+  difference, not a crash. Scope: decide whether to match xterm; any change needs the
+  scrollback consequences thought through. Not scheduled in Task 148.
 
 ---
 
