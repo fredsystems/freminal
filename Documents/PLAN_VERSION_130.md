@@ -8359,6 +8359,18 @@ Group F — Hygiene:
   detected from the string and is out of scope. The Windows-only tests compile and pass
   `check-windows` clippy, but nothing runs them on Windows (maintainer check per
   "148 Verification").
+- **148.15 (done):** maintainer decision (2026-10-19): **off by default**; "ask" waits for
+  Task 133. New `[security] allow_kitty_file_transfer = false`, wired per
+  `freminal-config-options`: field, Settings Security tab, `config_example.toml`, the Nix
+  module, and tests. It reaches the PTY thread as
+  `HostCapabilities::kitty_file_transmission` (`KittyFileTransmission::{Refused, Allowed}`),
+  through the existing initial-state and `HostCapabilitiesChange` paths; Settings Apply
+  rebroadcasts on change. The gate runs before any file or shm access for `t=f`, `t=t` and
+  `t=s`: nothing is read, unlinked or deleted, and the reply is the uniform failed-open
+  `EBADF`. When allowed, every failure on a file-backed medium (open, path or name refusal,
+  bounds, too large, truncated, size mismatch, PNG or zlib failure, missing or zero
+  dimensions, `a=f` rect overflow) maps to the same reply in one place
+  (`send_kitty_medium_error`); `t=d` keeps its detailed errors.
 
 ### 148 Cleanup entries
 

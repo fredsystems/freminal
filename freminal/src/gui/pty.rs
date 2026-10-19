@@ -1439,6 +1439,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         };
 
         apply_initial_state(

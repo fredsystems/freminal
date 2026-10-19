@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use conv2::ValueFrom;
 use freminal_common::buffer_states::buffer_type::BufferType;
 use freminal_common::buffer_states::kitty_graphics::{
-    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId,
+    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, KittyTransmission,
     format_kitty_response_body,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
@@ -34,6 +34,8 @@ use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
     SubCellOffset, next_image_id, next_placement_instance_id,
 };
+
+use freminal_common::host_capabilities::KittyFileTransmission;
 
 use super::RealPlacement;
 use super::TerminalHandler;
@@ -110,11 +112,50 @@ const KITTY_CHUNK_LIMITS: ChunkLimits = ChunkLimits {
     max_total_bytes: MAX_KITTY_DATA_BYTES,
 };
 
-/// The single error response sent for every file-transmission failure.
+/// The single error response sent for every failure of a file-backed
+/// transmission (`t=f`, `t=t`, `t=s`).
 ///
-/// Deliberately uniform so the response does not reveal whether a path
-/// exists, is readable, or is a special file.
+/// Deliberately uniform so the response does not reveal whether a path or
+/// shared-memory object exists, is readable, how large it is, or whether it
+/// holds a valid image. It is also the reply when file-backed transmission is
+/// refused by configuration, so a client cannot tell "disabled" from
+/// "unreadable" (GHSA-8prj-mhmf-xpjg).
 const KITTY_FILE_ERROR_RESPONSE: &str = "EBADF:Failed to read image file";
+
+/// Whether `medium` makes the terminal read a host file or shared-memory
+/// object chosen by the sender (`t=f`, `t=t`, `t=s`), as opposed to carrying
+/// the image inline (`t=d`).
+///
+/// No wildcard: a new medium must be classified here.
+const fn medium_reads_host(medium: KittyTransmission) -> bool {
+    match medium {
+        KittyTransmission::Direct => false,
+        KittyTransmission::File | KittyTransmission::TempFile | KittyTransmission::SharedMemory => {
+            true
+        }
+    }
+}
+
+/// The reply to send for a failure to turn a `medium` transmission into an
+/// image.
+///
+/// For a host-reading medium every failure collapses to
+/// [`KITTY_FILE_ERROR_RESPONSE`], whatever the detailed `reply` is: the
+/// distinction between "missing", "wrong size", "not a PNG" and so on would let
+/// a remote party probe the host's files. Direct transmission keeps its
+/// detailed `reply`. The detailed reason belongs in the debug log.
+const fn medium_error_reply(medium: KittyTransmission, reply: &'static str) -> &'static str {
+    if medium_reads_host(medium) {
+        KITTY_FILE_ERROR_RESPONSE
+    } else {
+        reply
+    }
+}
+
+/// The transmission medium `control` selects (`t=`, default direct).
+fn kitty_medium(control: &KittyControlData) -> KittyTransmission {
+    control.transmission.unwrap_or(KittyTransmission::Direct)
+}
 
 /// Substring a `t=t` file's path must contain before freminal will delete it.
 const KITTY_TEMP_FILE_MARKER: &str = "tty-graphics-protocol";
@@ -1477,7 +1518,8 @@ impl TerminalHandler {
                         "Kitty RGBA: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
@@ -1497,7 +1539,8 @@ impl TerminalHandler {
                         "Kitty RGB: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
@@ -1520,7 +1563,8 @@ impl TerminalHandler {
                     let w = rgba_img.width();
                     let h = rgba_img.height();
                     if w == 0 || h == 0 {
-                        self.send_kitty_error(
+                        self.send_kitty_medium_error(
+                            kitty_medium(&cmd.control),
                             kitty_id_no_number(image_id_hint, placement_id),
                             quiet,
                             "EINVAL:decoded image has zero dimensions",
@@ -1532,7 +1576,8 @@ impl TerminalHandler {
                 Err(e) => {
                     tracing::warn!("Kitty PNG decode failed");
                     tracing::debug!("Kitty PNG decode failed: {e}");
-                    self.send_kitty_error(
+                    self.send_kitty_medium_error(
+                        kitty_medium(&cmd.control),
                         kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:PNG decode failed",
@@ -1572,7 +1617,8 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: zlib decompression failed");
                 tracing::debug!("Kitty graphics: zlib decompression failed: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    kitty_medium(&cmd.control),
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:zlib decompression failed",
@@ -1597,14 +1643,28 @@ impl TerminalHandler {
         placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<Vec<u8>> {
-        use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
-
         let payload = cmd.payload.as_slice();
-        match cmd
-            .control
-            .transmission
-            .unwrap_or(KittyTransmission::Direct)
+        let medium = kitty_medium(&cmd.control);
+
+        // The consent gate: before any file or shared-memory access, and
+        // before anything is removed. Refusal replies exactly as a failed open
+        // does, so "disabled" is indistinguishable from "unreadable".
+        if medium_reads_host(medium)
+            && self.host_capabilities.kitty_file_transmission == KittyFileTransmission::Refused
         {
+            tracing::debug!(
+                "Kitty graphics: refusing {medium:?} transmission: \
+                 [security] allow_kitty_file_transfer is off"
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                KITTY_FILE_ERROR_RESPONSE,
+            );
+            return None;
+        }
+
+        match medium {
             KittyTransmission::Direct => Some(payload.to_vec()),
             KittyTransmission::File => {
                 self.read_kitty_file(payload, image_id_hint, placement_id, quiet, false)
@@ -1725,7 +1785,8 @@ impl TerminalHandler {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory name is not valid UTF-8: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:invalid shared memory object name",
@@ -1737,7 +1798,8 @@ impl TerminalHandler {
         if !shm_name_is_safe(name) {
             tracing::warn!("Kitty graphics: refusing shared memory object name");
             log_shm_name("refusing shared memory object name", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EPERM:refused shared memory object name",
@@ -1750,7 +1812,8 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory object not found: {e}");
                 log_shm_name("shared memory object not found", name);
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "ENOENT:shared memory object not found",
@@ -1770,7 +1833,8 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: failed to read shared memory object: {e}");
                 log_shm_name("failed to read shared memory object", name);
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     e.reply(),
@@ -1841,7 +1905,8 @@ impl TerminalHandler {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Kitty graphics: shared memory name is not valid UTF-8: {e}");
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:invalid shared memory object name",
@@ -1853,7 +1918,8 @@ impl TerminalHandler {
         if !shm_name_is_safe(name) {
             tracing::warn!("Kitty graphics: refusing shared memory object name");
             log_shm_name("refusing shared memory object name", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EPERM:refused shared memory object name",
@@ -1872,7 +1938,8 @@ impl TerminalHandler {
                 "shared memory read on Windows requires an explicit S= size",
                 name,
             );
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:shared memory read requires S= on Windows",
@@ -1888,7 +1955,8 @@ impl TerminalHandler {
                     "Kitty graphics: shared memory read refused: {e} (offset={offset}, data_size={data_size})"
                 );
                 log_shm_name("shared memory read refused", name);
-                self.send_kitty_error(
+                self.send_kitty_medium_error(
+                    KittyTransmission::SharedMemory,
                     kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     e.reply(),
@@ -1905,7 +1973,8 @@ impl TerminalHandler {
         if handle.is_null() {
             tracing::warn!("Kitty graphics: shared memory object not found");
             log_shm_name("shared memory object not found", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "ENOENT:shared memory object not found",
@@ -1928,7 +1997,8 @@ impl TerminalHandler {
         if base.is_null() {
             tracing::warn!("Kitty graphics: failed to map shared memory object");
             log_shm_name("failed to map shared memory object", name);
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                KittyTransmission::SharedMemory,
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EIO:failed to map shared memory object",
@@ -1971,7 +2041,8 @@ impl TerminalHandler {
         quiet: u8,
     ) -> Option<(u32, u32)> {
         let Some(w) = cmd.control.src_width else {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing width (s)",
@@ -1979,7 +2050,8 @@ impl TerminalHandler {
             return None;
         };
         let Some(h) = cmd.control.src_height else {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
                 kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing height (v)",
@@ -2005,7 +2077,8 @@ impl TerminalHandler {
         quiet: u8,
     ) {
         if img_width_px == 0 || img_height_px == 0 {
-            self.send_kitty_error(
+            self.send_kitty_medium_error(
+                kitty_medium(control),
                 kitty_id_no_number(image_id_hint, control.placement_id),
                 quiet,
                 "EINVAL:zero dimension",
@@ -2789,6 +2862,65 @@ impl TerminalHandler {
         }
     }
 
+    /// Composite the decoded `a=f` rectangle `rect` (pixels, width, height)
+    /// onto its base canvas, giving the frame's new pixels.
+    ///
+    /// Sends the error and returns `None` if the base frame is missing or the
+    /// rectangle does not fit. The rectangle error goes through
+    /// [`Self::send_kitty_medium_error`], so for a file-backed medium it cannot
+    /// reveal the dimensions of the file.
+    fn compose_kitty_frame_canvas(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        stored_image: &InlineImage,
+        rect: &(Vec<u8>, u32, u32),
+    ) -> Option<Vec<u8>> {
+        let (rect_pixels, rect_w, rect_h) = rect;
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+
+        // Destination origin within the frame (`x`/`y`, default 0).
+        let dest_x = cmd.control.src_x.unwrap_or(0);
+        let dest_y = cmd.control.src_y.unwrap_or(0);
+
+        let canvas_w = stored_image.width_px;
+        let canvas_h = stored_image.height_px;
+
+        let mut canvas = self.resolve_frame_base_canvas(
+            cmd,
+            stored_image,
+            canvas_w,
+            canvas_h,
+            image_id_hint,
+            placement_id,
+            quiet,
+        )?;
+
+        // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
+        let overwrite = cmd.control.cell_x_offset.unwrap_or(0) != 0;
+        if let Err(msg) = composite_rect(
+            &mut canvas,
+            canvas_w,
+            canvas_h,
+            rect_pixels,
+            *rect_w,
+            *rect_h,
+            dest_x,
+            dest_y,
+            overwrite,
+        ) {
+            self.send_kitty_medium_error(
+                kitty_medium(&cmd.control),
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                msg,
+            );
+            return None;
+        }
+        Some(canvas)
+    }
+
     /// Handle `a=f` — transmit an animation frame.
     ///
     /// The transmitted rectangle (`x`/`y`/`s`/`v`) is composited onto a base
@@ -2830,47 +2962,15 @@ impl TerminalHandler {
             return;
         }
 
-        let Some((rect_pixels, rect_w, rect_h)) =
+        let Some(rect) =
             self.decode_kitty_frame_rect(cmd, &stored_image, image_id_hint, placement_id, quiet)
         else {
             return; // Error already sent by decode_kitty_payload.
         };
 
-        // Destination origin within the frame (`x`/`y`, default 0).
-        let dest_x = cmd.control.src_x.unwrap_or(0);
-        let dest_y = cmd.control.src_y.unwrap_or(0);
-
-        let canvas_w = stored_image.width_px;
-        let canvas_h = stored_image.height_px;
-
-        let Some(mut canvas) = self.resolve_frame_base_canvas(
-            cmd,
-            &stored_image,
-            canvas_w,
-            canvas_h,
-            image_id_hint,
-            placement_id,
-            quiet,
-        ) else {
-            return; // Error already sent by resolve_frame_base_canvas.
+        let Some(canvas) = self.compose_kitty_frame_canvas(cmd, &stored_image, &rect) else {
+            return; // Error already sent by compose_kitty_frame_canvas.
         };
-
-        // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
-        let overwrite = cmd.control.cell_x_offset.unwrap_or(0) != 0;
-        if let Err(msg) = composite_rect(
-            &mut canvas,
-            canvas_w,
-            canvas_h,
-            &rect_pixels,
-            rect_w,
-            rect_h,
-            dest_x,
-            dest_y,
-            overwrite,
-        ) {
-            self.send_kitty_error(kitty_id_no_number(image_id_hint, placement_id), quiet, msg);
-            return;
-        }
 
         // Gap-to-next-frame (`z=`).
         let gap_ms = resolve_gap_ms(cmd.control.z_index);
@@ -3139,6 +3239,27 @@ impl TerminalHandler {
             );
             self.write_apc_response(&response);
         }
+    }
+
+    /// Send the failure reply for a transmission over `medium`, respecting
+    /// quiet mode.
+    ///
+    /// The one place that makes file-backed media (`t=f`, `t=t`, `t=s`)
+    /// answer every failure with [`KITTY_FILE_ERROR_RESPONSE`]; see
+    /// [`medium_error_reply`]. `message` is the detailed reason a direct
+    /// transmission would get, and is logged for the others.
+    fn send_kitty_medium_error(
+        &self,
+        medium: KittyTransmission,
+        id: KittyResponseId,
+        quiet: u8,
+        message: &'static str,
+    ) {
+        let reply = medium_error_reply(medium, message);
+        if reply != message {
+            tracing::debug!("Kitty graphics: {medium:?} failure reported uniformly: {message}");
+        }
+        self.send_kitty_error(id, quiet, reply);
     }
 
     /// Send a Kitty graphics error response, respecting quiet mode.
@@ -3940,9 +4061,12 @@ mod tests {
     use super::super::{
         AltScreenAction, AltScreenMode, KittyImageState, KittyTransfer, TerminalHandler,
     };
+    use super::{KITTY_FILE_ERROR_RESPONSE, medium_error_reply};
     use freminal_common::buffer_states::buffer_type::BufferType;
     use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
+    use freminal_common::buffer_states::kitty_graphics::{KittyFormat, KittyTransmission};
     use freminal_common::buffer_states::row_number::RowNumber;
+    use freminal_common::host_capabilities::{HostCapabilities, KittyFileTransmission};
 
     // ------------------------------------------------------------------
     // Kitty graphics direct transfer tests
@@ -3954,6 +4078,19 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
+        (handler, rx)
+    }
+
+    /// Like [`kitty_handler`], with file-backed transmission (`t=f`, `t=t`,
+    /// `t=s`) enabled, as `[security] allow_kitty_file_transfer = true` does.
+    /// Tests that exercise reading must start from this one; the default
+    /// handler refuses those media.
+    fn kitty_handler_allowing_files() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let (mut handler, rx) = kitty_handler();
+        handler.set_host_capabilities(HostCapabilities {
+            kitty_file_transmission: KittyFileTransmission::Allowed,
+            ..HostCapabilities::default()
+        });
         (handler, rx)
     }
 
@@ -7107,7 +7244,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         // Write a minimal valid 1x1 red PNG to a temp file.
         let dir = std::env::temp_dir();
@@ -7219,11 +7356,362 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Consent gate and uniform replies (GHSA-8prj-mhmf-xpjg)
+    // -----------------------------------------------------------------------
+
+    /// Drain `rx`, require exactly one PTY reply, and return it.
+    fn sole_reply(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        let mut replies = drain_pty_text(rx);
+        assert_eq!(replies.len(), 1, "expected exactly one reply: {replies:?}");
+        replies.pop().unwrap_or_default()
+    }
+
+    /// Write `bytes` to a uniquely-named file in `temp_dir()` whose name
+    /// carries `prefix`, returning its path. The caller removes it.
+    fn write_unique_bytes(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::io::Write as _;
+
+        let mut file = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempfile_in(std::env::temp_dir())
+            .expect("failed to create temp file");
+        file.write_all(bytes).expect("failed to write temp file");
+        let (_, path) = file.keep().expect("failed to persist temp file");
+        path
+    }
+
+    /// The reply a transmission of a path that does not exist gets, as the
+    /// reference every other failure and every refusal must equal.
+    fn missing_file_reply(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+    ) -> String {
+        let missing = std::env::temp_dir().join("freminal_kitty_no_such_file.png");
+        transmit_kitty_file(
+            handler,
+            KittyTransmission::File,
+            7,
+            missing.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(rx);
+        assert!(
+            reply.contains(KITTY_FILE_ERROR_RESPONSE),
+            "unexpected reply for a missing file: {reply:?}"
+        );
+        reply
+    }
+
+    /// Transmit `path` as image 7 over `t=f` with `control`'s other keys, and
+    /// return the sole reply.
+    fn send_file_with(
+        handler: &mut TerminalHandler,
+        rx: &crossbeam_channel::Receiver<PtyWrite>,
+        control: &KittyControlData,
+        path: &std::path::Path,
+    ) -> String {
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(7),
+                ..control.clone()
+            },
+            payload: path.to_str().expect("utf-8").as_bytes().to_vec(),
+        });
+        sole_reply(rx)
+    }
+
+    #[test]
+    fn medium_error_reply_is_uniform_for_every_host_reading_medium() {
+        for medium in [
+            KittyTransmission::File,
+            KittyTransmission::TempFile,
+            KittyTransmission::SharedMemory,
+        ] {
+            for detail in [
+                "EINVAL:payload size mismatch",
+                "EINVAL:PNG decode failed",
+                "ENOENT:shared memory object not found",
+                "EFBIG:shared memory read exceeds the size limit",
+            ] {
+                assert_eq!(
+                    medium_error_reply(medium, detail),
+                    KITTY_FILE_ERROR_RESPONSE
+                );
+            }
+        }
+        // Direct transmission keeps its detailed replies.
+        assert_eq!(
+            medium_error_reply(KittyTransmission::Direct, "EINVAL:PNG decode failed"),
+            "EINVAL:PNG decode failed"
+        );
+    }
+
+    #[test]
+    fn kitty_file_transmission_is_refused_by_default() {
+        assert_eq!(
+            TerminalHandler::new(80, 24)
+                .host_capabilities()
+                .kitty_file_transmission,
+            KittyFileTransmission::Refused
+        );
+    }
+
+    #[test]
+    fn refused_t_f_does_not_read_an_existing_png_and_replies_as_a_failed_open() {
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let path = write_unique_png("freminal_gate_f_");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::File,
+            7,
+            path.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(&rx);
+        let still_there = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reply, reference, "refusal must look like a failed open");
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(still_there);
+    }
+
+    #[test]
+    fn refused_t_t_does_not_read_or_delete_a_marked_temp_file() {
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let path = write_unique_png("tty-graphics-protocol-gate-");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::TempFile,
+            7,
+            path.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let reply = sole_reply(&rx);
+        let survived = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reply, reference);
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(survived, "a refused t=t must not delete the file");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refused_t_s_does_not_read_or_unlink_an_existing_object() {
+        use nix::fcntl::OFlag;
+        use nix::sys::mman::{shm_open, shm_unlink};
+        use nix::sys::stat::Mode;
+
+        let (mut handler, rx) = kitty_handler();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let name = create_test_shm_object(&pixels);
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(2),
+                src_height: Some(1),
+                data_size: Some(u32::try_from(pixels.len()).expect("fits")),
+                image_id: Some(7),
+                ..KittyControlData::default()
+            },
+            payload: name.clone().into_bytes(),
+        });
+        let reply = sole_reply(&rx);
+        let still_there = shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_ok();
+        let _ = shm_unlink(name.as_str());
+
+        assert_eq!(reply, reference);
+        assert!(handler.buffer().image_store().get(7).is_none());
+        assert!(still_there, "a refused t=s must not unlink the object");
+    }
+
+    #[test]
+    fn the_gate_follows_live_capability_changes() {
+        let (mut handler, rx) = kitty_handler();
+        let path = write_unique_png("freminal_gate_live_");
+        let payload = path.to_str().expect("utf-8").as_bytes().to_vec();
+
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 7, payload.clone());
+        let refused = sole_reply(&rx);
+        assert!(refused.contains(KITTY_FILE_ERROR_RESPONSE));
+        assert!(handler.buffer().image_store().get(7).is_none());
+
+        handler.set_host_capabilities(HostCapabilities {
+            kitty_file_transmission: KittyFileTransmission::Allowed,
+            ..HostCapabilities::default()
+        });
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 8, payload.clone());
+        assert!(handler.buffer().image_store().get(8).is_some());
+        drain_pty_text(&rx);
+
+        handler.set_host_capabilities(HostCapabilities::default());
+        transmit_kitty_file(&mut handler, KittyTransmission::File, 9, payload);
+        let _ = std::fs::remove_file(&path);
+        assert!(handler.buffer().image_store().get(9).is_none());
+        assert!(sole_reply(&rx).contains(KITTY_FILE_ERROR_RESPONSE));
+    }
+
+    #[test]
+    fn refusal_honours_quiet_like_a_failed_open() {
+        let (mut handler, rx) = kitty_handler();
+        let path = write_unique_png("freminal_gate_quiet_");
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                transmission: Some(KittyTransmission::File),
+                image_id: Some(7),
+                quiet: 2,
+                ..KittyControlData::default()
+            },
+            payload: path.to_str().expect("utf-8").as_bytes().to_vec(),
+        });
+        let _ = std::fs::remove_file(&path);
+        assert!(drain_pty_text(&rx).is_empty(), "q=2 suppresses errors");
+    }
+
+    #[test]
+    fn allowed_file_failures_after_the_read_all_reply_identically() {
+        use freminal_common::buffer_states::kitty_graphics::KittyCompression;
+
+        let (mut handler, rx) = kitty_handler_allowing_files();
+        let reference = missing_file_reply(&mut handler, &rx);
+
+        // Sanity: the medium really is enabled, so the failures below happen
+        // after the read rather than at the gate.
+        let valid = write_unique_png("freminal_gate_valid_");
+        transmit_kitty_file(
+            &mut handler,
+            KittyTransmission::File,
+            8,
+            valid.to_str().expect("utf-8").as_bytes().to_vec(),
+        );
+        let _ = std::fs::remove_file(&valid);
+        assert!(handler.buffer().image_store().get(8).is_some());
+        drain_pty_text(&rx);
+
+        let wrong_size = write_unique_bytes("freminal_gate_size_", &[0_u8; 4]);
+        let not_a_png = write_unique_bytes("freminal_gate_png_", b"definitely not a PNG");
+        let not_zlib = write_unique_bytes("freminal_gate_zlib_", b"definitely not zlib");
+        let empty = write_unique_bytes("freminal_gate_empty_", &[]);
+
+        // The file holds 4 bytes; a 2x2 RGBA image needs 16.
+        let size_mismatch = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        let png_failure = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Png),
+                ..KittyControlData::default()
+            },
+            &not_a_png,
+        );
+        let rgb_mismatch = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgb),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        // A readable file with no dimensions given: still the same reply, so
+        // the absence of an error about `s=` cannot confirm the read worked.
+        let missing_dimensions = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                ..KittyControlData::default()
+            },
+            &wrong_size,
+        );
+        let zlib_failure = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                compression: Some(KittyCompression::Zlib),
+                src_width: Some(1),
+                src_height: Some(1),
+                ..KittyControlData::default()
+            },
+            &not_zlib,
+        );
+        // A zero-sized RGBA image from an empty file.
+        let zero_dimension = send_file_with(
+            &mut handler,
+            &rx,
+            &KittyControlData {
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(0),
+                src_height: Some(0),
+                ..KittyControlData::default()
+            },
+            &empty,
+        );
+
+        for path in [&wrong_size, &not_a_png, &not_zlib, &empty] {
+            let _ = std::fs::remove_file(path);
+        }
+
+        assert!(reference.contains(KITTY_FILE_ERROR_RESPONSE));
+        for (what, reply) in [
+            ("RGBA size mismatch", size_mismatch),
+            ("PNG decode failure", png_failure),
+            ("RGB size mismatch", rgb_mismatch),
+            ("missing dimensions", missing_dimensions),
+            ("zlib failure", zlib_failure),
+            ("zero dimension", zero_dimension),
+        ] {
+            assert_eq!(reply, reference, "{what}");
+        }
+        assert!(handler.buffer().image_store().get(7).is_none());
+    }
+
+    #[test]
+    fn direct_transmission_keeps_its_detailed_failure_replies() {
+        // The gate and the uniform reply are for host-reading media only.
+        let (mut handler, rx) = kitty_handler();
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Png),
+                image_id: Some(7),
+                ..KittyControlData::default()
+            },
+            payload: b"definitely not a PNG".to_vec(),
+        });
+        assert!(sole_reply(&rx).contains("EINVAL:PNG decode failed"));
+    }
+
     #[test]
     fn kitty_temp_file_transmission_reads_and_deletes() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let path = write_unique_png("tty-graphics-protocol-");
         let payload = path
@@ -7249,7 +7737,7 @@ mod tests {
     fn kitty_temp_file_without_marker_is_read_but_not_deleted() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let path = write_unique_png("freminal_unmarked_");
         let payload = path
@@ -7273,7 +7761,7 @@ mod tests {
     fn kitty_temp_file_symlink_reads_target_and_spares_unmarked_target() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         // The target has no marker; only the symlink's name does. The path
         // is canonicalised first, so the read follows the link and the
@@ -7447,7 +7935,7 @@ mod tests {
     fn kitty_file_directory_path_refused() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
         let dir = tempfile::tempdir().expect("tempdir");
         let payload = dir.path().to_str().expect("utf-8").as_bytes().to_vec();
 
@@ -7461,7 +7949,7 @@ mod tests {
     fn kitty_file_fifo_refused_without_blocking() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
         let dir = tempfile::tempdir().expect("tempdir");
         let fifo = dir.path().join("fifo");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
@@ -7477,7 +7965,7 @@ mod tests {
     fn kitty_file_proc_path_refused() {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         transmit_kitty_file(
             &mut handler,
@@ -7522,7 +8010,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // Build a platform-appropriate *absolute* path that does not exist.
         // A hardcoded `/tmp/...` string is not absolute on Windows (no drive
@@ -7557,112 +8045,9 @@ mod tests {
         );
 
         // An error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EBADF:Failed to read image file") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EBADF error response for missing file"
-        );
-    }
-
-    #[test]
-    fn kitty_file_transmission_relative_path_rejected() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Png),
-                transmission: Some(KittyTransmission::File),
-                image_id: Some(996),
-                ..KittyControlData::default()
-            },
-            payload: b"../../../etc/passwd".to_vec(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        // Should NOT be in the store.
-        assert!(
-            handler.buffer().image_store().get(996).is_none(),
-            "No image should be stored for a relative path"
-        );
-
-        // The uniform EBADF error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EBADF:Failed to read image file") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EBADF error response for relative path"
-        );
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn kitty_shared_memory_nonexistent_object_returns_enoent_windows() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        // A safe, well-formed name that does not correspond to any existing
-        // mapping — the point is that opening it fails. Kept short so it is
-        // consistent with the POSIX path and the shared naming helper.
-        let name = unique_shm_name();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Rgba),
-                transmission: Some(KittyTransmission::SharedMemory),
-                src_width: Some(1),
-                src_height: Some(1),
-                data_size: Some(4),
-                image_id: Some(995),
-                ..KittyControlData::default()
-            },
-            payload: name.into_bytes(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        assert!(
-            handler.buffer().image_store().get(995).is_none(),
-            "No image should be stored for a nonexistent shared memory object"
-        );
-
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("ENOENT") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an ENOENT error response for a nonexistent shared memory object"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed ENOENT reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 995);
     }
 
     #[test]
@@ -7672,7 +8057,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // No `S=` (`data_size`) supplied — Windows has no equivalent to
         // POSIX `fstat` to learn the object's size, so this must be
@@ -7697,19 +8082,9 @@ mod tests {
             "No image should be stored when S= is missing on Windows"
         );
 
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("EINVAL") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an EINVAL error response when S= is missing on Windows"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed EINVAL reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 995);
     }
 
     #[test]
@@ -7720,7 +8095,7 @@ mod tests {
         };
 
         for bad_name in ["/foo/bar", "/../etc/passwd"] {
-            let (mut handler, rx) = kitty_handler();
+            let (mut handler, rx) = kitty_handler_allowing_files();
 
             let cmd = KittyGraphicsCommand {
                 control: KittyControlData {
@@ -7743,19 +8118,9 @@ mod tests {
                 "No image should be stored for unsafe shared memory name {bad_name:?}"
             );
 
-            let mut found_error = false;
-            while let Ok(msg) = rx.try_recv() {
-                if let PtyWrite::Write(bytes) = msg {
-                    let text = String::from_utf8_lossy(&bytes);
-                    if text.contains("EPERM") {
-                        found_error = true;
-                    }
-                }
-            }
-            assert!(
-                found_error,
-                "Expected an EPERM error response for unsafe shared memory name {bad_name:?}"
-            );
+            // Every failure of a file-backed medium replies identically; the
+            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            assert_file_refused(&handler, &rx, 995);
         }
     }
 
@@ -7833,7 +8198,7 @@ mod tests {
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let (name, creator_handle) = create_test_shm_object_windows(&pixels);
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -7870,71 +8235,9 @@ mod tests {
         assert_eq!(stored.height_px, 1);
 
         // No error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if !text.contains("OK") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            !found_error,
-            "Expected no error response for a valid t=s transmission on Windows"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn kitty_shared_memory_nonexistent_object_returns_enoent() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
-        };
-
-        let (mut handler, rx) = kitty_handler();
-
-        // A safe, well-formed name that does not correspond to any existing
-        // object — the point is that `shm_open` fails with `ENOENT`. The name
-        // must fit macOS's 31-char shm limit, or the error would be
-        // `ENAMETOOLONG` instead. `unique_shm_name` never creates the object.
-        let name = unique_shm_name();
-
-        let cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::TransmitAndDisplay),
-                format: Some(KittyFormat::Rgba),
-                transmission: Some(KittyTransmission::SharedMemory),
-                src_width: Some(1),
-                src_height: Some(1),
-                image_id: Some(995),
-                ..KittyControlData::default()
-            },
-            payload: name.into_bytes(),
-        };
-
-        handler.handle_kitty_graphics(cmd);
-
-        // Should NOT be in the store.
-        assert!(
-            handler.buffer().image_store().get(995).is_none(),
-            "No image should be stored for a nonexistent shared memory object"
-        );
-
-        // An ENOENT error response should have been sent.
-        let mut found_error = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg {
-                let text = String::from_utf8_lossy(&bytes);
-                if text.contains("ENOENT") {
-                    found_error = true;
-                }
-            }
-        }
-        assert!(
-            found_error,
-            "Expected an ENOENT error response for a nonexistent shared memory object"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed ENOENT reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 995);
     }
 
     #[test]
@@ -7945,7 +8248,7 @@ mod tests {
         };
 
         for bad_name in ["/foo/bar", "/../etc/passwd", "/proc/self/mem"] {
-            let (mut handler, rx) = kitty_handler();
+            let (mut handler, rx) = kitty_handler_allowing_files();
 
             let cmd = KittyGraphicsCommand {
                 control: KittyControlData {
@@ -7967,19 +8270,9 @@ mod tests {
                 "No image should be stored for unsafe shared memory name {bad_name:?}"
             );
 
-            let mut found_error = false;
-            while let Ok(msg) = rx.try_recv() {
-                if let PtyWrite::Write(bytes) = msg {
-                    let text = String::from_utf8_lossy(&bytes);
-                    if text.contains("EPERM") {
-                        found_error = true;
-                    }
-                }
-            }
-            assert!(
-                found_error,
-                "Expected an EPERM error response for unsafe shared memory name {bad_name:?}"
-            );
+            // Every failure of a file-backed medium replies identically; the
+            // detailed EPERM reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+            assert_file_refused(&handler, &rx, 995);
         }
     }
 
@@ -8119,7 +8412,7 @@ mod tests {
         let over_cap = u64::try_from(MAX_KITTY_DATA_BYTES).unwrap() + 1;
         let (name, _creator) = create_test_shm_sized(over_cap);
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::TransmitAndDisplay),
@@ -8136,18 +8429,9 @@ mod tests {
 
         assert!(handler.buffer().image_store().get(996).is_none());
 
-        let mut found = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let PtyWrite::Write(bytes) = msg
-                && String::from_utf8_lossy(&bytes).contains("EFBIG")
-            {
-                found = true;
-            }
-        }
-        assert!(
-            found,
-            "Expected an EFBIG error response for an oversize object"
-        );
+        // Every failure of a file-backed medium replies identically; the
+        // detailed EFBIG reason is logged, never sent (GHSA-8prj-mhmf-xpjg).
+        assert_file_refused(&handler, &rx, 996);
 
         assert!(
             shm_open(name.as_str(), OFlag::O_RDONLY, Mode::empty()).is_err(),
@@ -8212,7 +8496,7 @@ mod tests {
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
         let name = create_test_shm_object(&pixels);
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -8278,7 +8562,7 @@ mod tests {
 
         let name = create_test_shm_object(&object);
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -8582,7 +8866,7 @@ mod tests {
         use crate::log_capture::{capture, warnings};
         use freminal_common::buffer_states::kitty_graphics::{KittyFormat, KittyTransmission};
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, _rx) = kitty_handler_allowing_files();
         let name = format!("/freminal-test-SECRETNAME-{}", std::process::id());
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -8615,7 +8899,7 @@ mod tests {
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
-        let (mut handler, rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler_allowing_files();
 
         // Invalid UTF-8 bytes.
         let cmd = KittyGraphicsCommand {

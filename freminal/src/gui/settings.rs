@@ -2208,6 +2208,30 @@ impl SettingsModal {
         ui.add_space(12.0);
 
         ui.checkbox(
+            &mut self.draft.security.allow_kitty_file_transfer,
+            "Allow Kitty File Transfer (t=f, t=t, t=s)",
+        )
+        .on_hover_text(
+            "Lets programs make the terminal read local files and shared \
+             memory objects through the kitty graphics protocol. Anything \
+             writing to the terminal, including a remote host over ssh, can \
+             then read (and, for temporary files and shared memory, remove) \
+             a path of its choosing and probe the reply to learn whether it \
+             succeeded. Leave off unless you use a tool that needs it.",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When enabled, programs can make the terminal read local \
+             files and shared memory via the kitty graphics protocol.\n\
+             This is a potential security risk if untrusted programs run \
+             inside the terminal.",
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
             &mut self.draft.security.password_indicator,
             "Password Indicator",
         )

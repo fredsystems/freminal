@@ -586,6 +586,18 @@ pub struct SecurityConfig {
     /// programs run inside the terminal.
     pub allow_clipboard_read: bool,
 
+    /// Allow applications to make the terminal read local files and shared
+    /// memory objects via the kitty graphics protocol (`t=f`, `t=t`, `t=s`).
+    ///
+    /// Default: `false` (such transmissions are refused with the same reply as
+    /// an unreadable file, and nothing is opened, read or deleted).
+    /// When `true`, any program writing to the terminal -- including a remote
+    /// host over `ssh` or untrusted `cat` output -- can make the terminal read
+    /// (and, for `t=t` temporary files and `t=s` shared memory, remove) a path
+    /// of its choosing, and can probe the reply to learn whether it succeeded.
+    /// Direct transmission (`t=d`) is unaffected.
+    pub allow_kitty_file_transfer: bool,
+
     /// Show a lock icon in the tab bar when the foreground process disables
     /// terminal echo (e.g. password prompts from `sudo`, `ssh`, `passwd`).
     ///
@@ -597,6 +609,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allow_clipboard_read: false,
+            allow_kitty_file_transfer: false,
             password_indicator: true,
         }
     }
@@ -3603,6 +3616,8 @@ mode = "none"
         original.tab_title.policy = TabTitlePolicy::OscWins;
         original.bell.mode = BellMode::None;
         original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.security.allow_kitty_file_transfer =
+            !Config::default().security.allow_kitty_file_transfer;
         original.paste_guard.patterns = !Config::default().paste_guard.patterns;
         original.close_guard.unknown_blocks = !Config::default().close_guard.unknown_blocks;
         original.shell_integration.set_term_program =
@@ -3671,6 +3686,10 @@ mode = "none"
         assert_eq!(
             loaded.security.allow_clipboard_read, original.security.allow_clipboard_read,
             "security section dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_kitty_file_transfer, original.security.allow_kitty_file_transfer,
+            "security.allow_kitty_file_transfer dropped"
         );
         assert_eq!(
             loaded.paste_guard.patterns, original.paste_guard.patterns,
@@ -3970,6 +3989,56 @@ mode = "both"
             !cfg.allow_clipboard_read,
             "clipboard read should default to false for security"
         );
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_defaults_to_false() {
+        assert!(
+            !SecurityConfig::default().allow_kitty_file_transfer,
+            "kitty file transfer must be off by default (GHSA-8prj-mhmf-xpjg)"
+        );
+        assert!(!Config::default().security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_apply_partial() {
+        let mut cfg = Config::default();
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_kitty_file_transfer = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.security.allow_kitty_file_transfer);
+        // An unrelated key in the same section keeps its default.
+        assert!(!cfg.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_omitted_stays_false() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert!(!security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_kitty_file_transfer_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.security.allow_kitty_file_transfer = true;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        assert!(toml_str.contains("allow_kitty_file_transfer = true"));
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.security.allow_kitty_file_transfer);
     }
 
     #[test]

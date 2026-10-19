@@ -593,6 +593,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         }
     }
 
@@ -818,6 +819,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         });
 
         let cmd = Osc99Command {

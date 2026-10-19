@@ -4403,6 +4403,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         };
         handler.set_host_capabilities(caps);
         assert_eq!(handler.host_capabilities(), caps);

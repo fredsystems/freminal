@@ -287,6 +287,17 @@ limit = 10000
 # run inside the terminal.
 # allow_clipboard_read = false
 
+# Allow applications to make the terminal read local files and shared memory
+# objects via the kitty graphics protocol (t=f, t=t and t=s transmission).
+# Default: false (such transmissions are refused with the same reply as an
+# unreadable file; nothing is opened, read or deleted).
+# When true, any program writing to the terminal -- including a remote host
+# over ssh, or untrusted `cat` output -- can make the terminal read (and, for
+# t=t temporary files and t=s shared memory, remove) a path of its choosing,
+# and can probe the reply to learn whether it succeeded. Direct transmission
+# (t=d) is unaffected.
+# allow_kitty_file_transfer = false
+
 # Show a lock icon in the tab bar when the foreground process disables
 # terminal echo (e.g. password prompts from sudo, ssh, passwd).
 # Default: true.

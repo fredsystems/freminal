@@ -12,9 +12,9 @@
 
 use freminal_common::config::{Config, NotificationRouting};
 use freminal_common::host_capabilities::{
-    HostCapabilities, Osc99ActivationReport, Osc99AutoExpiry, Osc99BodySupport, Osc99ButtonSupport,
-    Osc99CloseEvents, Osc99Features, Osc99FocusSupport, Osc99IconSupport, Osc99SoundNames,
-    Osc99Support, Osc99UrgencySupport,
+    HostCapabilities, KittyFileTransmission, Osc99ActivationReport, Osc99AutoExpiry,
+    Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport,
+    Osc99IconSupport, Osc99SoundNames, Osc99Support, Osc99UrgencySupport,
 };
 
 use freminal_common::send_or_log;
@@ -39,18 +39,33 @@ use super::window::PerWindowState;
 /// [`combine`]: each leg the `routing_osc99` setting uses has a capability
 /// table, and the routing decides how the legs' tables combine.
 pub(super) fn host_capabilities(config: &Config, daemon: Osc99LinuxDaemon) -> HostCapabilities {
+    HostCapabilities {
+        osc99: osc99_support(config, daemon),
+        kitty_file_transmission: kitty_file_transmission(config),
+    }
+}
+
+/// The OSC 99 facet of [`host_capabilities`].
+fn osc99_support(config: &Config, daemon: Osc99LinuxDaemon) -> Osc99Support {
     let notifications = &config.notifications;
     if !(notifications.enabled && notifications.osc_99) {
-        return HostCapabilities {
-            osc99: Osc99Support::Unsupported,
-        };
+        return Osc99Support::Unsupported;
     }
-    HostCapabilities {
-        osc99: combine(
-            notifications.routing_osc99,
-            Osc99Platform::current(),
-            daemon,
-        ),
+    combine(
+        notifications.routing_osc99,
+        Osc99Platform::current(),
+        daemon,
+    )
+}
+
+/// The kitty file-transmission facet of [`host_capabilities`]:
+/// [`KittyFileTransmission::Allowed`] only when `[security]
+/// allow_kitty_file_transfer` is on (GHSA-8prj-mhmf-xpjg).
+const fn kitty_file_transmission(config: &Config) -> KittyFileTransmission {
+    if config.security.allow_kitty_file_transfer {
+        KittyFileTransmission::Allowed
+    } else {
+        KittyFileTransmission::Refused
     }
 }
 
@@ -570,6 +585,63 @@ mod tests {
     }
 
     #[test]
+    fn kitty_file_transmission_is_refused_by_default() {
+        assert_eq!(
+            host_capabilities(&Config::default(), Osc99LinuxDaemon::assumed())
+                .kitty_file_transmission,
+            KittyFileTransmission::Refused
+        );
+    }
+
+    #[test]
+    fn kitty_file_transmission_follows_the_security_toggle_both_ways() {
+        for daemon in all_daemons() {
+            let mut config = Config::default();
+            config.security.allow_kitty_file_transfer = true;
+            assert_eq!(
+                host_capabilities(&config, daemon).kitty_file_transmission,
+                KittyFileTransmission::Allowed,
+                "{daemon:?}"
+            );
+            config.security.allow_kitty_file_transfer = false;
+            assert_eq!(
+                host_capabilities(&config, daemon).kitty_file_transmission,
+                KittyFileTransmission::Refused,
+                "{daemon:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_file_transmission_is_independent_of_the_notification_switches() {
+        for routing in ALL_ROUTINGS {
+            let mut config = config_with(routing);
+            config.security.allow_kitty_file_transfer = true;
+            assert_eq!(
+                host_capabilities(&config, Osc99LinuxDaemon::assumed()).kitty_file_transmission,
+                KittyFileTransmission::Allowed
+            );
+            config.notifications.enabled = false;
+            let caps = host_capabilities(&config, Osc99LinuxDaemon::assumed());
+            assert_eq!(caps.osc99, Osc99Support::Unsupported);
+            assert_eq!(caps.kitty_file_transmission, KittyFileTransmission::Allowed);
+        }
+    }
+
+    #[test]
+    fn toggling_kitty_file_transfer_is_a_host_capabilities_change() {
+        // `apply_new_config` rebroadcasts exactly when the resolved value
+        // differs, so the toggle must change it.
+        let mut on = Config::default();
+        on.security.allow_kitty_file_transfer = true;
+        let daemon = Osc99LinuxDaemon::assumed();
+        assert_ne!(
+            host_capabilities(&on, daemon),
+            host_capabilities(&Config::default(), daemon)
+        );
+    }
+
+    #[test]
     fn host_capabilities_follows_combine_on_the_current_platform() {
         for routing in ALL_ROUTINGS {
             for daemon in all_daemons() {
@@ -1018,6 +1090,7 @@ mod tests {
         let reply = Osc99LinuxDaemon::Available(no_actions_caps());
         let Some(HostCapabilities {
             osc99: Osc99Support::Supported(features),
+            ..
         }) = daemon_state_change(&config, assumed_daemon(), reply)
         else {
             panic!("a reply without actions must change a System-routed pane's capabilities");
@@ -1040,7 +1113,8 @@ mod tests {
         assert_eq!(
             daemon_state_change(&config, assumed_daemon(), Osc99LinuxDaemon::Unavailable),
             Some(HostCapabilities {
-                osc99: Osc99Support::Unsupported
+                osc99: Osc99Support::Unsupported,
+                ..HostCapabilities::default()
             })
         );
     }
@@ -1052,7 +1126,8 @@ mod tests {
         assert_eq!(
             daemon_state_change(&config, full_daemon(), Osc99LinuxDaemon::Unavailable),
             Some(HostCapabilities {
-                osc99: Osc99Support::Supported(toast_leg())
+                osc99: Osc99Support::Supported(toast_leg()),
+                ..HostCapabilities::default()
             })
         );
     }
@@ -1066,7 +1141,8 @@ mod tests {
         assert_eq!(
             daemon_state_change(&config, body_only_daemon(), Osc99LinuxDaemon::Unavailable),
             Some(HostCapabilities {
-                osc99: Osc99Support::Supported(toast_leg())
+                osc99: Osc99Support::Supported(toast_leg()),
+                ..HostCapabilities::default()
             })
         );
     }
@@ -1158,6 +1234,7 @@ mod tests {
     ) -> HostCapabilities {
         HostCapabilities {
             osc99: combine(routing, Osc99Platform::LinuxBsd, daemon),
+            ..HostCapabilities::default()
         }
     }
 
@@ -1303,6 +1380,7 @@ mod tests {
         let (in_flight, rxs_flight) = window_of(&mut ids, 3);
         let capabilities = HostCapabilities {
             osc99: Osc99Support::Supported(toast_leg()),
+            ..HostCapabilities::default()
         };
 
         send_host_capabilities([&in_map_a, &in_map_b], Some(&in_flight), capabilities);
