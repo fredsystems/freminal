@@ -192,6 +192,37 @@ writer. The first window gets ID 0, subsequent windows get incrementing IDs.
 
 ---
 
+## Security
+
+A recording contains everything typed in the recorded panes and everything the
+programs printed, so the file is treated as sensitive.
+
+- **File permissions.** On Unix the file is created with mode `0600` (owner
+  read/write only). If the path already exists with wider permissions it is
+  tightened to `0600` before being truncated. On Windows the file is created
+  with the default security descriptor, so it inherits the ACL of its
+  directory; this is documented behaviour and is not changed.
+- **Input is recorded verbatim, except while echo is off.** Keystrokes,
+  pastes, and PTY input are recorded as typed, with one exception: while the
+  pane's terminal echo is off (the same signal that drives the password lock
+  icon), their content is replaced. The event itself, its timing, and its
+  modifiers are kept so the recording stays useful for timing analysis.
+
+  | Event type       | While echo is off                                   |
+  | ---------------- | --------------------------------------------------- |
+  | `KeyboardInput`  | `key_name` is `"<redacted>"` and `encoded` is empty |
+  | `ClipboardPaste` | `data` is empty                                     |
+  | `PtyInput`       | `data` is empty                                     |
+
+  An empty payload is valid in the format; no format version change is
+  involved.
+
+- **Output is recorded in full.** `PtyOutput` is never redacted, so anything a
+  program prints (tokens, secrets echoed by a command, and so on) appears in
+  the recording.
+
+---
+
 ## Analysis Tool
 
 `sequence_decoder.py` at the repository root is the canonical tool for

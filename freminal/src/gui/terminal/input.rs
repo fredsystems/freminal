@@ -2853,7 +2853,9 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
             if let Some(ctx) = recording_ctx {
                 // For paste events, emit ClipboardPaste instead of KeyboardInput.
                 if let Event::Paste(text) = event {
-                    ctx.handle.emit(EventPayload::ClipboardPaste {
+                    // `emit_input` redacts the paste while the pane's echo is
+                    // off (a pasted password); see `redact_input_for_echo`.
+                    ctx.emit_input(EventPayload::ClipboardPaste {
                         pane_id: ctx.pane_id,
                         data: text.as_bytes().to_vec(),
                     });
@@ -2868,7 +2870,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                         Event::Cut => ("Ctrl+X".to_string(), 2u8),
                         _ => (String::new(), 0u8),
                     };
-                    ctx.handle.emit(EventPayload::KeyboardInput {
+                    ctx.emit_input(EventPayload::KeyboardInput {
                         window_id: ctx.window_id,
                         pane_id: ctx.pane_id,
                         key_name,

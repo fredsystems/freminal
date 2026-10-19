@@ -46,6 +46,10 @@ pub struct Args {
     ///
     /// When specified, all PTY I/O, keyboard/mouse input, and topology events
     /// are recorded to the given file. The file is finalized on clean exit.
+    ///
+    /// WARNING: a recording contains everything typed (except while terminal
+    /// echo is off, e.g. at a password prompt) and all program output. The
+    /// file is created owner-only (mode 0600) on Unix.
     #[arg(long = "recording-path")]
     pub recording_path: Option<PathBuf>,
 

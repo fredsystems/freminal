@@ -563,6 +563,93 @@ pub struct RecordingContext<'a> {
     pub window_id: u32,
     /// Recording-local pane identifier.
     pub pane_id: u32,
+    /// The pane's shared echo-off flag (maintained by the PTY reader thread).
+    ///
+    /// Read at each input emit site so keystrokes typed at a password prompt
+    /// are redacted — see [`redact_input_for_echo`].
+    pub echo_off: &'a std::sync::atomic::AtomicBool,
+}
+
+impl RecordingContext<'_> {
+    /// Emit a user-input event for this pane, redacting it if the pane's
+    /// terminal echo is currently off.
+    ///
+    /// Use this (not [`RecordingHandle::emit`]) for every event that carries
+    /// typed or pasted content.
+    pub fn emit_input(&self, payload: EventPayload) {
+        let echo = PtyEchoState::from_echo_off_flag(self.echo_off);
+        self.handle.emit(redact_input_for_echo(payload, echo));
+    }
+}
+
+/// Whether a pane's terminal is echoing typed characters back.
+///
+/// When echo is off (typically a password prompt) typed content is secret, so
+/// the recorder must not store it. See [`redact_input_for_echo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyEchoState {
+    /// The terminal echoes input; typed content is recorded verbatim.
+    Echoing,
+    /// Echo is off; typed content is redacted from the recording.
+    EchoOff,
+}
+
+impl PtyEchoState {
+    /// Read the current state from a pane's shared echo-off flag.
+    #[must_use]
+    pub fn from_echo_off_flag(echo_off: &std::sync::atomic::AtomicBool) -> Self {
+        if echo_off.load(std::sync::atomic::Ordering::Relaxed) {
+            Self::EchoOff
+        } else {
+            Self::Echoing
+        }
+    }
+}
+
+/// Literal substituted for `KeyboardInput::key_name` while echo is off.
+pub const REDACTED_KEY_NAME: &str = "<redacted>";
+
+/// Redact the content of a user-input event while the pane's echo is off.
+///
+/// While [`PtyEchoState::EchoOff`]:
+///
+/// - [`EventPayload::KeyboardInput`] keeps its timing, window, pane and
+///   modifiers, but `key_name` becomes [`REDACTED_KEY_NAME`] and `encoded`
+///   becomes empty.
+/// - [`EventPayload::ClipboardPaste`] and [`EventPayload::PtyInput`] keep
+///   their pane but `data` becomes empty.
+///
+/// Every other payload, and every payload while echoing, passes through
+/// unchanged. An empty payload is valid in the FREC format, so no format
+/// change is involved.
+#[must_use]
+pub fn redact_input_for_echo(payload: EventPayload, echo: PtyEchoState) -> EventPayload {
+    if echo == PtyEchoState::Echoing {
+        return payload;
+    }
+    match payload {
+        EventPayload::KeyboardInput {
+            window_id,
+            pane_id,
+            modifiers,
+            ..
+        } => EventPayload::KeyboardInput {
+            window_id,
+            pane_id,
+            key_name: REDACTED_KEY_NAME.to_string(),
+            modifiers,
+            encoded: Vec::new(),
+        },
+        EventPayload::ClipboardPaste { pane_id, .. } => EventPayload::ClipboardPaste {
+            pane_id,
+            data: Vec::new(),
+        },
+        EventPayload::PtyInput { pane_id, .. } => EventPayload::PtyInput {
+            pane_id,
+            data: Vec::new(),
+        },
+        other => other,
+    }
 }
 
 /// Handle for sending recording events from any thread.
@@ -742,6 +829,39 @@ impl WriterThread {
     }
 }
 
+/// Create (or truncate) the recording output file with owner-only permissions
+/// on Unix.
+///
+/// `OpenOptionsExt::mode` only applies when the file is created, so a
+/// pre-existing regular file with wider permissions is tightened via `fchmod`
+/// *before* it is truncated and written. Non-regular paths (e.g. `/dev/null`)
+/// are left untouched. On non-Unix platforms this is `File::create`.
+fn create_recording_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let meta = file.metadata()?;
+        if meta.is_file() {
+            if meta.permissions().mode() & 0o077 != 0 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.set_len(0)?;
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path)
+    }
+}
+
 /// Start a recording session.
 ///
 /// Creates the output file, spawns a dedicated writer thread, and returns a
@@ -783,6 +903,15 @@ impl RecordingJoinHandle {
 /// The channel is bounded to `channel_capacity` events. If the channel is full,
 /// events are silently dropped (the writer is I/O-bound, not the PTY thread).
 ///
+/// # File permissions
+///
+/// On Unix the file is created with mode `0o600` (owner read/write only), and
+/// an already-existing regular file is tightened to `0o600` before it is
+/// truncated, because a recording contains everything typed and displayed.
+/// On Windows the file is created with the default security descriptor, i.e.
+/// it inherits the ACL of its directory; that behaviour is documented, not
+/// changed.
+///
 /// # Errors
 ///
 /// Returns an error if the output file cannot be created or the writer thread
@@ -792,7 +921,7 @@ pub fn start_recording(
     metadata: RecordingMetadata,
     channel_capacity: usize,
 ) -> Result<(RecordingHandle, RecordingJoinHandle), RecordingError> {
-    let file = std::fs::File::create(path)?;
+    let file = create_recording_file(path)?;
     let writer = std::io::BufWriter::new(file);
     let (tx, rx) = crossbeam_channel::bounded(channel_capacity);
 
@@ -1828,5 +1957,201 @@ mod tests {
 
         // Verify footer duration covers the event span.
         assert!(parsed.total_duration_us >= parsed.events.last().unwrap().timestamp_us);
+    }
+
+    // ── File permissions (issue #563) ───────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private.frec");
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        drop(handle);
+        join.join();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "new recording must be owner-only, got {mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_wide_recording_file_is_tightened_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.frec");
+        std::fs::write(&path, b"stale contents from an earlier run").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        drop(handle);
+        join.join();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pre-existing 0644 file must become 0600");
+        // Truncation semantics are preserved: the stale bytes are gone and the
+        // result parses as a valid recording.
+        assert_eq!(read_frec_file(&path).metadata, test_metadata());
+    }
+
+    // ── Echo-off redaction (issue #563) ─────────────────────────────────────
+
+    fn sample_keyboard_input() -> EventPayload {
+        EventPayload::KeyboardInput {
+            window_id: 1,
+            pane_id: 2,
+            key_name: "p".to_string(),
+            modifiers: 0b0101,
+            encoded: b"p".to_vec(),
+        }
+    }
+
+    #[test]
+    fn redaction_is_identity_while_echoing() {
+        let samples = [
+            sample_keyboard_input(),
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: b"hunter2".to_vec(),
+            },
+            EventPayload::PtyInput {
+                pane_id: 2,
+                data: b"hunter2\r".to_vec(),
+            },
+        ];
+        for payload in samples {
+            assert_eq!(
+                redact_input_for_echo(payload.clone(), PtyEchoState::Echoing),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_blanks_keyboard_input_but_keeps_timing_metadata() {
+        assert_eq!(
+            redact_input_for_echo(sample_keyboard_input(), PtyEchoState::EchoOff),
+            EventPayload::KeyboardInput {
+                window_id: 1,
+                pane_id: 2,
+                key_name: "<redacted>".to_string(),
+                modifiers: 0b0101,
+                encoded: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_blanks_paste_and_pty_input_data() {
+        assert_eq!(
+            redact_input_for_echo(
+                EventPayload::ClipboardPaste {
+                    pane_id: 2,
+                    data: b"hunter2".to_vec(),
+                },
+                PtyEchoState::EchoOff
+            ),
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
+        assert_eq!(
+            redact_input_for_echo(
+                EventPayload::PtyInput {
+                    pane_id: 2,
+                    data: b"hunter2\r".to_vec(),
+                },
+                PtyEchoState::EchoOff
+            ),
+            EventPayload::PtyInput {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_passes_other_payloads_through_while_echo_off() {
+        let samples = [
+            EventPayload::PtyOutput {
+                pane_id: 2,
+                data: b"Password: ".to_vec(),
+            },
+            EventPayload::PaneResize {
+                pane_id: 2,
+                cols: 80,
+                rows: 24,
+            },
+            EventPayload::BellEvent {
+                pane_id: 2,
+                bell_type: 0,
+            },
+        ];
+        for payload in samples {
+            assert_eq!(
+                redact_input_for_echo(payload.clone(), PtyEchoState::EchoOff),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn echo_state_reads_the_shared_flag() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            PtyEchoState::from_echo_off_flag(&flag),
+            PtyEchoState::Echoing
+        );
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            PtyEchoState::from_echo_off_flag(&flag),
+            PtyEchoState::EchoOff
+        );
+    }
+
+    #[test]
+    fn recording_context_emit_input_redacts_only_while_echo_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redact.frec");
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        let echo_off = std::sync::atomic::AtomicBool::new(false);
+        let ctx = RecordingContext {
+            handle: &handle,
+            window_id: 1,
+            pane_id: 2,
+            echo_off: &echo_off,
+        };
+
+        ctx.emit_input(sample_keyboard_input());
+        echo_off.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctx.emit_input(sample_keyboard_input());
+        ctx.emit_input(EventPayload::ClipboardPaste {
+            pane_id: 2,
+            data: b"secret".to_vec(),
+        });
+        drop(handle);
+        join.join();
+
+        let events = read_frec_file(&path).events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].payload, sample_keyboard_input());
+        assert_eq!(
+            events[1].payload,
+            redact_input_for_echo(sample_keyboard_input(), PtyEchoState::EchoOff)
+        );
+        assert_eq!(
+            events[2].payload,
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
     }
 }

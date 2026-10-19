@@ -8417,6 +8417,16 @@ Group F — Hygiene:
   not stripped: the terminals disagree (xterm-412 turns BS, DEL, ENQ, EOT, ESC, NUL and the
   stty specials into spaces by default via `DEF_DISALLOWED_PASTE_CONTROLS`; kitty leaves
   them), and the paste guard already flags them. Unbracketed paste is unchanged.
+- **148.21 (done):** maintainer decision (2026-10-19): **0600 plus redaction**. On Unix,
+  `create_recording_file` opens with `mode(0o600)` and tightens a pre-existing file before
+  truncating it; non-regular targets such as `/dev/null` are left alone. Windows inherits the
+  directory ACL (documented). While the pane's echo is off (the existing `echo_off` atomic),
+  `redact_input_for_echo` replaces `KeyboardInput` (`key_name` becomes `"<redacted>"`,
+  `encoded` is emptied), `ClipboardPaste` and `PtyInput` contents; event timing and modifiers
+  are kept, and the FREC format is unchanged. All three emit sites use it (GUI via
+  `RecordingContext::emit_input`, the PTY consumer thread directly). `FREC_FORMAT.md` gains a
+  Security section and `--recording-path` help a warning. PTY output is still recorded in
+  full. The GUI emit sites are covered through `emit_input`, not an egui harness.
 
 ### 148 Cleanup entries
 
@@ -8455,6 +8465,11 @@ Group F — Hygiene:
   `current_monitor()` in the windowing crate. Changing egui viewport state falls under
   `freminal-egui-upgrade` / `EGUI_UPGRADE_ASSUMPTIONS.md`, so walk that checklist. Not
   scheduled in Task 148 (the default is off).
+- **148.C5 — `cargo xtask lint-markdown` fails on `main`.** Surfaced while verifying 148.21.
+  Pre-existing MD060 / MD033 errors in `PLAN_122_ORCHESTRATION_EXTRACTION.md` and
+  `PLAN_VERSION_090.md` fail the whole-repo markdown lint, which "148 Verification" lists.
+  Files touched by Task 148 are linted individually and pass. Scope: fix those two documents
+  (formatting only). Schedule: with 148.26.
 
 ---
 

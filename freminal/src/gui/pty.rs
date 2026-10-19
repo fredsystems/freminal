@@ -24,7 +24,9 @@ use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, PtyRead, SearchCorpus, WindowCommand};
-use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
+use freminal_terminal_emulator::recording::{
+    EventPayload, PtyEchoState, RecordingSwap, redact_input_for_echo,
+};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 use freminal_windowing::{RepaintProxy, WindowId};
@@ -592,6 +594,7 @@ pub fn spawn_pty_tab(
         tab_cfg.recording_pane_id,
         command_event_tx,
         reader_shutdown,
+        Arc::clone(&echo_off),
     );
 
     Ok(TabChannels {
@@ -638,6 +641,7 @@ fn spawn_pty_consumer_thread(
     recording_pane_id: u32,
     command_event_tx: Sender<CommandFinishedEvent>,
     reader_shutdown: Arc<AtomicBool>,
+    echo_off: Arc<AtomicBool>,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -843,10 +847,15 @@ fn spawn_pty_consumer_thread(
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
                             if let Some(rec) = recording_swap.load_full() {
-                                rec.emit(EventPayload::PtyInput {
-                                    pane_id: recording_pane_id,
-                                    data: bytes,
-                                });
+                                // Redacted while the pane's echo is off: these
+                                // bytes are a typed password (issue #563).
+                                rec.emit(redact_input_for_echo(
+                                    EventPayload::PtyInput {
+                                        pane_id: recording_pane_id,
+                                        data: bytes,
+                                    },
+                                    PtyEchoState::from_echo_off_flag(&echo_off),
+                                ));
                             }
                         }
                         InputEvent::FocusChange(focused) => {
@@ -1679,6 +1688,16 @@ mod tests {
     /// close the channel, and return what the child saw once the thread has
     /// exited.
     fn run_consumer_over(events: Vec<InputEvent>, recording_swap: RecordingSwap) -> Vec<ChildSaw> {
+        run_consumer_over_with_echo(events, recording_swap, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// As [`run_consumer_over`], with the pane's shared echo-off flag supplied
+    /// by the caller (the real one is set by the PTY reader thread).
+    fn run_consumer_over_with_echo(
+        events: Vec<InputEvent>,
+        recording_swap: RecordingSwap,
+        echo_off: Arc<AtomicBool>,
+    ) -> Vec<ChildSaw> {
         let (terminal, write_rx) = TerminalEmulator::new_headless(None);
         let (pty_read_tx, pty_read_rx) = unbounded::<PtyRead>();
         let (input_tx, input_rx) = unbounded::<InputEvent>();
@@ -1708,6 +1727,7 @@ mod tests {
             7,
             command_event_tx,
             Arc::new(AtomicBool::new(false)),
+            echo_off,
         );
 
         // The emulator owns every sender of `write_rx`, so the channel
@@ -1810,5 +1830,51 @@ mod tests {
             })
             .collect();
         assert_eq!(resizes, vec![(7, 72, 22)]);
+    }
+
+    /// Issue #563: `PtyInput` is recorded verbatim while echoing and with its
+    /// content blanked while the pane's echo is off; the child still receives
+    /// the real bytes in both cases.
+    #[test]
+    fn consumer_thread_redacts_recorded_pty_input_only_while_echo_is_off() {
+        use freminal_terminal_emulator::recording::{
+            RecordingMetadata, TopologySnapshot, parse_recording, start_recording,
+        };
+
+        for (echo_off, expected_recorded) in [(false, b"secret".to_vec()), (true, Vec::new())] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("input.frec");
+            let metadata = RecordingMetadata {
+                freminal_version: "test".to_string(),
+                created_at: 0,
+                term: "xterm-256color".to_string(),
+                initial_topology: TopologySnapshot { windows: vec![] },
+                scrollback_limit: 10_000,
+            };
+            let (handle, mut join) = start_recording(&path, metadata, 64).unwrap();
+            let swap = freminal_terminal_emulator::recording::empty_recording_swap();
+            swap.store(Some(Arc::new(handle)));
+
+            let saw = run_consumer_over_with_echo(
+                vec![InputEvent::Key(b"secret".to_vec())],
+                Arc::clone(&swap),
+                Arc::new(AtomicBool::new(echo_off)),
+            );
+            assert_eq!(saw, vec![ChildSaw::Write(b"secret".to_vec())]);
+
+            swap.store(None);
+            join.join();
+
+            let inputs: Vec<_> = parse_recording(&path)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter_map(|e| match e.payload {
+                    EventPayload::PtyInput { pane_id, data } => Some((pane_id, data)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inputs, vec![(7, expected_recorded)], "echo_off={echo_off}");
+        }
     }
 }
