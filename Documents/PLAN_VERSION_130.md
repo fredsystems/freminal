@@ -8207,6 +8207,13 @@ Group F — Hygiene:
   `oversize-raster-declaration`, `ensure-size-overflow-slice-panic`, `huge-repeat-growth`,
   `quadratic-growth` in `fuzz/regressions/sixel_parse/`; the old code fails replay. New
   benchmark `bench_parse_sixel/400x300` (added first): 262.9 µs -> 213.9 µs (−18.4%).
+  **Review fix (R1):** the adversarial review found a remaining quadratic path at the pixel
+  cap: once doubling would exceed `MAX_SIXEL_PIXELS`, the capacity was trimmed to the exact
+  logical width, so every further column reallocated the whole canvas (3308 reallocations,
+  30 s, from 5 KB). `grown_capacity` now splits the remaining pixel budget around the logical
+  extent (`cap_w = isqrt(MAX * w / h)`), giving O(log) reallocations (19 on that trace; doc
+  comment carries the argument). Reproducer `pixel-cap-boundary-regrowth`.
+  `bench_parse_sixel` is still −15.9% against the pre-148.2 baseline.
 - **148.4 (done):** BS from pending wrap in a one-column buffer now lands at column 0 instead
   of computing `0 - 1` (`buffer/lines.rs`). Semantics per xterm-412 `cursor.c` `CursorBack`
   (~147-169): with `do_wrap` set, reverse-wrap only consumes the pending wrap, otherwise the

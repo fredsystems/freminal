@@ -257,6 +257,10 @@ struct SixelDecoder {
     /// RGBA pixel buffer, row-major, `cap_width * cap_height * 4` bytes.
     /// Cells outside the logical extent are never written and stay zero.
     pixels: Vec<u8>,
+    /// Number of canvas reallocations so far (tests assert it stays
+    /// logarithmic; no production behaviour depends on it).
+    #[cfg(test)]
+    reallocations: usize,
 }
 
 impl SixelDecoder {
@@ -279,6 +283,8 @@ impl SixelDecoder {
             declared_height: 0,
             background,
             pixels: Vec::new(),
+            #[cfg(test)]
+            reallocations: 0,
         }
     }
 
@@ -303,6 +309,8 @@ impl SixelDecoder {
             declared_height: 0,
             background,
             pixels: Vec::new(),
+            #[cfg(test)]
+            reallocations: 0,
         }
     }
 
@@ -395,6 +403,10 @@ impl SixelDecoder {
         self.pixels = new_pixels;
         self.cap_width = new_cap_w;
         self.cap_height = new_cap_h;
+        #[cfg(test)]
+        {
+            self.reallocations += 1;
+        }
         true
     }
 
@@ -730,14 +742,50 @@ impl SixelDecoder {
 /// Choose the allocation size for a logical extent of `width` x `height`
 /// that no longer fits the current `cap_width` x `cap_height` allocation.
 ///
-/// Each axis that does not fit grows to
-/// `max(needed, 2 * old_capacity, MIN_ALLOC_DIMENSION)`, so a sequence of
-/// small growths reallocates only O(log n) times.  The result is then clamped
-/// to [`MAX_SIXEL_DIMENSION`] per axis and reduced, never below the logical
-/// extent, until `cap_width * cap_height <= MAX_SIXEL_PIXELS`.  The logical
-/// extent always satisfies the pixel cap (see [`clamped_canvas_size`]), so
-/// the reduction can always succeed: only over-allocation is trimmed, never
-/// the logical size.
+/// **Unconstrained growth.**  Each axis that does not fit grows to
+/// `max(needed, 2 * old_capacity, MIN_ALLOC_DIMENSION)`, clamped to
+/// [`MAX_SIXEL_DIMENSION`].  If the product of the two wanted capacities is
+/// within [`MAX_SIXEL_PIXELS`], that is the answer.
+///
+/// **Pixel-cap-constrained growth.**  Otherwise the over-allocation is
+/// *balanced* around the logical extent: with `s = sqrt(MAX / (w * h))` (the
+/// slack the pixel cap leaves) both axes get `s` times their logical size,
+/// `cap_w = isqrt(MAX * w / h)` and `cap_h = MAX / cap_w`, each clamped to
+/// `[logical, MAX_SIXEL_DIMENSION]`.  Because `w * h <= MAX` (see
+/// [`clamped_canvas_size`]) both are never below the logical extent, and
+/// `cap_w * cap_h <= MAX` since `cap_w * h <= sqrt(MAX * w * h) <= MAX`.
+/// Only over-allocation is ever trimmed, never the logical size.
+///
+/// The slack is deliberately derived from the *logical* extent of both axes
+/// rather than trimming one axis to fit the stale capacity of the other.
+/// Trimming the width capacity to exactly the logical width (the previous
+/// behaviour) made every further one-column growth reallocate and copy the
+/// whole canvas, thousands of times, from a few KB of input.
+///
+/// **Reallocation bound.**  A reallocation happens only when the logical
+/// extent outgrows a capacity, and logical extents never shrink.  Along any
+/// growth sequence there are O(log `MAX_SIXEL_DIMENSION`) reallocations:
+///
+/// - While unconstrained, the triggering axis at least doubles its capacity,
+///   and capacities only reset downward in the constrained regime below, so
+///   there are at most `log2(MAX_SIXEL_DIMENSION)` (about 14) per axis.
+/// - Let `phi = ln(MAX / (w * h))` be the pixel-cap slack.  After a
+///   constrained reallocation the capacities are `s * w` and `s * h` with
+///   `ln s = phi / 2`.  The next reallocation can only happen once an axis
+///   exceeds its capacity, so `w * h` has grown by at least a factor `s` and
+///   the new slack is `phi' <= phi - phi / 2 = phi / 2`.  The slack halves
+///   on every constrained reallocation, starting from at most
+///   `ln MAX` (about 17), and the capacity rounds to a whole column only
+///   while `phi >= 1 / MAX_SIXEL_DIMENSION`, so there are at most
+///   `log2(17 * MAX_SIXEL_DIMENSION)` (about 18) of them.  Once `phi` is
+///   smaller than that, fewer than two columns or rows of room remain under
+///   the pixel cap, so only a constant number of growths (and therefore
+///   reallocations) is still possible.
+///
+/// `MAX_SIXEL_DIMENSION`-clamped axes never trigger again (the logical size is
+/// clamped to the same limit), so they only shorten the sequence.  The tests
+/// `test_sixel_pixel_cap_boundary_growth_reallocates_logarithmically` and
+/// its siblings pin the bound empirically.
 fn grown_capacity(
     cap_width: usize,
     cap_height: usize,
@@ -753,16 +801,28 @@ fn grown_capacity(
                 .clamp(MIN_ALLOC_DIMENSION, MAX_SIXEL_DIMENSION)
         }
     };
-    let mut cap_w = grow(cap_width, width).max(width);
-    let mut cap_h = grow(cap_height, height).max(height);
+    let want_w = grow(cap_width, width).max(width);
+    let want_h = grow(cap_height, height).max(height);
 
     // Both are `<= MAX_SIXEL_DIMENSION` here, so the product cannot overflow.
-    if cap_w * cap_h > MAX_SIXEL_PIXELS && cap_h > 0 {
-        cap_w = cap_w.min((MAX_SIXEL_PIXELS / cap_h).max(width));
-        if cap_w * cap_h > MAX_SIXEL_PIXELS && cap_w > 0 {
-            cap_h = cap_h.min((MAX_SIXEL_PIXELS / cap_w).max(height));
-        }
+    if want_w * want_h <= MAX_SIXEL_PIXELS {
+        return (want_w, want_h);
     }
+
+    // Balanced slack around the logical extent.  On overflow (only possible
+    // for a 32-bit `usize`) fall back to the exact logical width, which is
+    // always valid.
+    let cap_w = width
+        .checked_mul(MAX_SIXEL_PIXELS)
+        .and_then(|n| n.checked_div(height))
+        .map_or(width, usize::isqrt)
+        .max(width)
+        .min(MAX_SIXEL_DIMENSION);
+    let cap_h = MAX_SIXEL_PIXELS
+        .checked_div(cap_w)
+        .unwrap_or(height)
+        .max(height)
+        .min(MAX_SIXEL_DIMENSION);
     (cap_w, cap_h)
 }
 
@@ -1620,6 +1680,74 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Decode `data` (the part after `q`) and return the decoder.
+    fn decode_counting(data: &[u8]) -> SixelDecoder {
+        let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+        decoder.decode(data);
+        assert!(decoder.invariant_holds());
+        decoder
+    }
+
+    /// Regression: with the canvas at a tall height, growing the width past
+    /// the pixel-cap boundary used to trim the width capacity to exactly the
+    /// logical width, so every further column reallocated and copied the
+    /// whole canvas (about 4000 copies of 35-50 MB from ~5 KB of input).
+    #[test]
+    fn test_sixel_pixel_cap_boundary_growth_reallocates_logarithmically() {
+        let mut data = b"~-".repeat(342);
+        data.extend(std::iter::repeat_n(b'~', 8000));
+        let started = std::time::Instant::now();
+        let decoder = decode_counting(&data);
+        let elapsed = started.elapsed();
+        // 343 bands = 2058 rows; 8000 columns fit under the pixel cap
+        // (8000 * 2058 < MAX_SIXEL_PIXELS), so nothing is clipped.
+        assert_eq!(decoder.height, 343 * 6);
+        assert_eq!(decoder.width, 8000);
+        assert!(
+            decoder.reallocations < 64,
+            "{} reallocations ({elapsed:?})",
+            decoder.reallocations
+        );
+    }
+
+    #[test]
+    fn test_sixel_alternating_axis_growth_reallocates_logarithmically() {
+        let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+        let mut x = 0usize;
+        for band in 0..1200usize {
+            decoder.ensure_size(x + 1, (band + 1) * 6);
+            x += 7;
+            decoder.ensure_size(x, (band + 1) * 6);
+            assert!(decoder.invariant_holds());
+        }
+        assert!(decoder.reallocations < 64, "{}", decoder.reallocations);
+    }
+
+    /// Every growth shape (width first, height first, one-pixel steps,
+    /// large jumps) keeps the reallocation count logarithmic.
+    #[test]
+    fn test_sixel_growth_sequences_reallocate_logarithmically() {
+        let steps: [(usize, usize); 6] = [(1, 6), (6, 1), (1, 1), (50, 6), (6, 50), (97, 31)];
+        for &(dx, dy) in &steps {
+            let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+            let (mut w, mut h) = (0usize, 0usize);
+            for _ in 0..10_000 {
+                w += dx;
+                h += dy;
+                decoder.ensure_size(w, h);
+                assert!(decoder.invariant_holds());
+                if decoder.width < w.min(MAX_SIXEL_DIMENSION) && decoder.height < h {
+                    break;
+                }
+            }
+            assert!(
+                decoder.reallocations < 64,
+                "step ({dx},{dy}): {}",
+                decoder.reallocations
+            );
         }
     }
 
