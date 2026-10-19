@@ -8501,6 +8501,13 @@ Group F — Hygiene:
   (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
   (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
   still need a maintainer run on Windows.
+- **148.23 (done):** removed `CARGO_BUILD_FEATURES = "playback"` and its comment from
+  `mkFreminalShell`, plus the fuzz-shell sentence about it (cargo never reads that variable,
+  and no crate declares `playback`). xtask's `run_cargo_no_features` existed only to strip it
+  and is gone; its callers use `run_cargo`. `nixfmt`, `statix` and `deadnix` are green, and
+  the three dev shells evaluate. Per `flake-dev-shell-discipline`, the maintainer must
+  re-enter `nix develop`; the variable had no effect on any tool, so later verification in
+  the old shell remains valid.
 
 ### 148 Cleanup entries
 
@@ -8554,6 +8561,11 @@ Group F — Hygiene:
   `sixel_parse` and `frec_parse` (unblocked by 148.2 and 148.8), shorten plateaued targets,
   and revisit the `ansi_parser` dictionary mapping (148.25 measured −1.2% cov in one run).
   Schedule: after a week of nightly runs on main with Task 148 merged.
+- **148.C7 — `cargo xtask ci` lint fails on `main` (typos).** Surfaced while verifying 148.23.
+  `typos` flagged the terminfo reverse-index capability name (10 times in this document), `gam_sRGB` in
+  `wide_gamut.rs`, and a test name with a misspelt `registry` in `osc99/dbus_service/mod.rs`; the
+  `codespell:ignore` comments do not apply to typos. **Done:** `rin` and `gam` are added to
+  `typos.toml` `extend-words` with their origin, and the test is renamed `..._registry_...`.
 
 ---
 

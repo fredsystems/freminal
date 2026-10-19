@@ -673,28 +673,26 @@ fn bench_compile() -> Result<()> {
 /// This is the complement to the main CI steps which use `--all-features`.
 /// It catches `#[cfg(feature = "…")]` gating errors where code behind an
 /// optional feature flag accidentally leaks into or breaks the default build.
-/// For example, the `playback` feature gates recording/playback code; this
-/// step ensures the workspace compiles and tests pass without it. Covers the
-/// same [`LINT_PACKAGE_SCOPE`] as the all-features passes.
+/// For example, the `frame-profiling` feature gates render-path
+/// instrumentation; this step ensures the workspace compiles and tests pass
+/// without it. Covers the same [`LINT_PACKAGE_SCOPE`] as the all-features
+/// passes.
 fn test_default_features() -> Result<()> {
     tracing::info!("running default-features pass (no optional features)");
-    // Unset CARGO_BUILD_FEATURES so the Nix devshell's "playback" default
-    // doesn't leak into this pass — we need to verify the code compiles and
-    // passes tests with NO optional features enabled.
     let mut clippy = vec!["clippy"];
     clippy.extend(LINT_PACKAGE_SCOPE);
     clippy.extend(["--all-targets", "--", "-D", "warnings"]);
-    run_cargo_no_features(clippy)?;
+    run_cargo(clippy)?;
 
     let mut nextest = vec!["nextest", "run"];
     nextest.extend(LINT_PACKAGE_SCOPE);
     nextest.extend(["--lib", "--bins", "--tests", "--examples"]);
-    run_cargo_no_features(nextest)?;
+    run_cargo(nextest)?;
 
     let mut doc = vec!["test"];
     doc.extend(LINT_PACKAGE_SCOPE);
     doc.push("--doc");
-    run_cargo_no_features(doc)?;
+    run_cargo(doc)?;
     Ok(())
 }
 
@@ -1148,15 +1146,6 @@ fn set_executable(path: &str) -> Result<()> {
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
 const fn set_executable(_path: &str) -> Result<()> {
-    Ok(())
-}
-
-/// Run a cargo subcommand with `CARGO_BUILD_FEATURES` removed from the
-/// environment, ensuring no optional features leak in from the devshell.
-fn run_cargo_no_features(args: Vec<&str>) -> Result<()> {
-    cmd("cargo", args)
-        .env_remove("CARGO_BUILD_FEATURES")
-        .run_with_trace()?;
     Ok(())
 }
 

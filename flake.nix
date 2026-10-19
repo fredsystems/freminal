@@ -576,10 +576,6 @@
 
                     LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
 
-                    # Enable the `playback` feature by default in the devshell so
-                    # developers get recording/playback support without extra flags.
-                    CARGO_BUILD_FEATURES = "playback";
-
                     shellHook = ''
                       ${chk.shellHook}
 
@@ -640,10 +636,7 @@
               # No C toolchain is added: mkShell's stdenv already provides the
               # `cc` that libfuzzer-sys compiles libFuzzer with.  No `git` is
               # added either: freminal-terminal-emulator/build.rs falls back to
-              # "unknown" when `git describe` fails.  `CARGO_BUILD_FEATURES` is
-              # not set: it is not a cargo setting, and no workspace crate
-              # declares a `playback` feature any more, so it is dead weight in
-              # the other shells too and is not carried over here.
+              # "unknown" when `git describe` fails.
               fuzz = pkgs.mkShell {
                 buildInputs = [
                   fuzzToolchain
