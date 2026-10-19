@@ -577,6 +577,8 @@ limit = 10000
 # separator it is treated as a file path; otherwise Freminal looks for
 # ~/.config/freminal/layouts/<name>.toml.
 # Overridden by the --layout CLI flag.
+# Layouts are trusted input: their command/shell/env entries run without
+# confirmation, so only point this at layouts you wrote or reviewed.
 # Default: unset (open a single default pane).
 # layout = "dev"
 

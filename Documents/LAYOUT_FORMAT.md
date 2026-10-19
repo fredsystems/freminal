@@ -287,11 +287,11 @@ Layouts can be applied in three ways:
 ```toml
 [startup]
 # Save the current layout on exit and restore it on next launch.
-# The layout is saved to ~/.config/freminal/layouts/_last_session.toml
-restore_last_session = false
+# The layout is saved to ~/.config/freminal/layouts/last_session.toml
+restore_last_session = true
 ```
 
-When enabled, Freminal saves the current layout to `_last_session.toml` on
+When enabled, Freminal saves the current layout to `last_session.toml` on
 clean exit. On next launch (if no `--layout` flag is given), it restores from
 this file. Topology, geometry, and CWDs are restored; running programs are
 not (they have exited).
@@ -304,3 +304,33 @@ Layouts in `~/.config/freminal/layouts/` are discovered automatically. The
 menu bar shows them under "Layouts" with their `layout.name` field. The
 Settings Modal's "Layouts" tab lists all discovered layouts with name,
 description, and a preview of the topology.
+
+---
+
+## Security: layouts are trusted input
+
+A layout file is executable configuration, equivalent to a shell script. The
+`command`, `shell` and `env` fields (and each pane's working directory) are
+applied with no confirmation prompt when the layout is loaded: `command` is
+typed into the pane's shell as if you had entered it, `shell` selects the
+program that is spawned, and `env` is exported into the pane's environment.
+
+A layout can reach Freminal from several places, and all of them apply it
+without asking:
+
+- Any file in the layout library (`~/.config/freminal/layouts/` or your
+  platform's equivalent), including `last_session.toml`, which auto-save
+  writes and `startup.restore_last_session` reloads on launch.
+- The `--layout <name|path>` command-line argument, which accepts either a
+  library name or a path to any `.toml` file.
+- The `[startup] layout` config key, which takes the same name or path.
+- The Layouts menu, which loads from the library.
+
+Terminal output cannot write `command`, `shell` or `env`. A program running in
+a pane can only influence the working directory recorded when a layout is
+saved (through OSC 7), and that value is validated before it is used.
+
+Only load layouts you wrote or have read. Treat a layout you downloaded the
+same way you would treat a script: read it before you run it. Keep the layout
+directory writable only by you, since anyone who can write a file there can
+have its commands run the next time that layout, or the last session, loads.

@@ -8427,6 +8427,15 @@ Group F — Hygiene:
   `RecordingContext::emit_input`, the PTY consumer thread directly). `FREC_FORMAT.md` gains a
   Security section and `--recording-path` help a warning. PTY output is still recorded in
   full. The GUI emit sites are covered through `emit_input`, not an egui harness.
+- **148.22 (done):** maintainer decision (2026-10-19): **document as trusted input**.
+  `LAYOUT_FORMAT.md` has a new "Security: layouts are trusted input" section: `command` is
+  typed into the shell, `shell` picks the program, and `env` is exported, all without
+  confirmation. It lists the reach (the layout library including `last_session.toml`,
+  `--layout`, `[startup] layout`, the Layouts menu); terminal output cannot write these
+  fields. A one-line warning was added to `README.md` and the `[startup] layout` comment in
+  `config_example.toml`. The doc's stale auto-save section was corrected while there
+  (`last_session.toml`, not `_last_session.toml`; `restore_last_session` defaults to
+  `true`). #562 closes.
 
 ### 148 Cleanup entries
 

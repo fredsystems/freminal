@@ -45,6 +45,8 @@ Split any direction, navigate with the keyboard, resize, zoom, close, reorder, a
 **Saved layouts**
 Reusable TOML-defined workspaces with per-pane working directory, startup command, shell override, and environment variables. Variable substitution for cross-project templates. Auto-save on exit, auto-restore on launch.
 
+Layout files run their `command`, `shell` and `env` entries without confirmation, so treat them like shell scripts and only load ones you trust; see [Documents/LAYOUT_FORMAT.md](Documents/LAYOUT_FORMAT.md#security-layouts-are-trusted-input).
+
 **Session recording**
 Capture an entire multi-window, multi-pane session — output, input, and topology changes — into a single time-indexed file. Replay externally with the included decoder.
 
