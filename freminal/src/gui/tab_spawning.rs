@@ -328,7 +328,28 @@ impl FreminalGui {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next_id();
 
-        let cwd = leaf.directory.as_deref().map(std::path::Path::new);
+        // A layout directory is only used if it passes a bounded existence
+        // check; otherwise the pane starts in the default directory rather
+        // than failing to spawn.
+        let cwd = leaf
+            .directory
+            .as_deref()
+            .filter(|dir| match super::platform::check_spawn_directory(dir) {
+                Ok(()) => true,
+                Err(reason) => {
+                    warn!(
+                        "layout: pane '{}' directory unusable ({reason}); using the default directory",
+                        leaf.id
+                    );
+                    tracing::debug!(
+                        "layout: pane '{}' rejected directory {:?}",
+                        leaf.id,
+                        dir.chars().take(128).flat_map(char::escape_debug).collect::<String>()
+                    );
+                    false
+                }
+            })
+            .map(std::path::Path::new);
         let shell_override = leaf.shell.as_deref();
         let extra_env = if leaf.env.is_empty() {
             None

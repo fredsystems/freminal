@@ -11,11 +11,14 @@
 //! - [`parse_osc7_uri`] — validate and parse `file://hostname/path` URIs
 //!   emitted by OSC 7
 //! - [`Osc7Rejection`] — why an OSC 7 URI was refused
+//! - [`Osc7PathStyle`] — which path syntax the decoded URI path must follow
 //! - [`local_hostname`] — the machine's own hostname, resolved once
 //! - [`percent_decode`] — strict URL percent-decode of a string
 //! - [`hex_val`] — convert a single ASCII hex digit to its numeric value
 
 use std::sync::OnceLock;
+
+use freminal_common::windows_path::{WindowsPathKind, classify_windows_path};
 
 /// Why an OSC 7 URI was refused by [`parse_osc7_uri`].
 ///
@@ -104,8 +107,48 @@ fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
     host.eq_ignore_ascii_case(local) || host.eq_ignore_ascii_case(first_label(local))
 }
 
+/// Path syntax an OSC 7 URI path must follow for the host platform.
+///
+/// A `file://` URI path is always `/`-rooted, but what follows depends on the
+/// platform: on POSIX it *is* the filesystem path, while on Windows a local
+/// drive path appears as `/C:/Users/x` and the leading `/` is URI syntax, not
+/// part of the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc7PathStyle {
+    /// POSIX: the decoded URI path is used verbatim.
+    Posix,
+    /// Windows: the decoded URI path must be `/` followed by a local
+    /// drive-letter path; the `/` is stripped.
+    Windows,
+}
+
+impl Osc7PathStyle {
+    /// The style of the platform freminal is running on.
+    const fn native() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Posix
+        }
+    }
+}
+
 /// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
-/// component.
+/// component, using the running platform's path syntax.
+///
+/// See [`parse_osc7_uri_styled`] for the rules.
+///
+/// # Errors
+///
+/// Returns an [`Osc7Rejection`] describing why the URI was refused.
+pub(super) fn parse_osc7_uri(
+    uri: &str,
+    local_hostname: Option<&str>,
+) -> Result<String, Osc7Rejection> {
+    parse_osc7_uri_styled(uri, local_hostname, Osc7PathStyle::native())
+}
+
+/// Parse an OSC 7 URI with an explicit [`Osc7PathStyle`].
 ///
 /// The host must designate this machine: empty, `localhost`
 /// (RFC 8089 §2/§3), or `local_hostname` (RFC 4343 case-insensitive match,
@@ -118,12 +161,14 @@ fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
 /// UTF-8 (no lossy replacement), absolute, and free of control characters
 /// (NUL, C0 and C1); otherwise [`Osc7Rejection::InvalidPath`] is returned.
 ///
-/// # Errors
-///
-/// Returns an [`Osc7Rejection`] describing why the URI was refused.
-pub(super) fn parse_osc7_uri(
+/// With [`Osc7PathStyle::Windows`] the decoded path must additionally be `/`
+/// followed by a local drive path (`/C:/Users/x`); the `/` is stripped, and
+/// anything else (UNC `//host/share`, device paths, drive-relative or
+/// drive-less paths) is [`Osc7Rejection::InvalidPath`].
+fn parse_osc7_uri_styled(
     uri: &str,
     local_hostname: Option<&str>,
+    style: Osc7PathStyle,
 ) -> Result<String, Osc7Rejection> {
     let rest = uri
         .strip_prefix("file://")
@@ -144,7 +189,17 @@ pub(super) fn parse_osc7_uri(
         return Err(Osc7Rejection::InvalidPath);
     }
 
-    Ok(decoded)
+    match style {
+        Osc7PathStyle::Posix => Ok(decoded),
+        Osc7PathStyle::Windows => {
+            let drive_path = decoded.strip_prefix('/').unwrap_or(&decoded);
+            if classify_windows_path(drive_path) == WindowsPathKind::LocalDrive {
+                Ok(drive_path.to_owned())
+            } else {
+                Err(Osc7Rejection::InvalidPath)
+            }
+        }
+    }
 }
 
 /// Decode percent-encoded bytes (`%XX`) in a string.
@@ -289,6 +344,56 @@ mod tests {
                 "uri={uri:?} host={host:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_osc7_uri_windows_style_table() {
+        let cases: &[(&str, Result<&str, Osc7Rejection>)] = &[
+            ("file:///C:/Users/x", Ok("C:/Users/x")),
+            ("file:///c:/x", Ok("c:/x")),
+            ("file://localhost/D:/a%20b", Ok("D:/a b")),
+            ("file:///C:/", Ok("C:/")),
+            ("file:////host/share", Err(Osc7Rejection::InvalidPath)),
+            (
+                "file://localhost//host/share",
+                Err(Osc7Rejection::InvalidPath),
+            ),
+            ("file:///tmp", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:x", Err(Osc7Rejection::InvalidPath)),
+            ("file:////%3F/C:/x", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:/a%0ab", Err(Osc7Rejection::InvalidPath)),
+            ("file://other/C:/x", Err(Osc7Rejection::ForeignHost)),
+        ];
+        for (uri, expected) in cases {
+            assert_eq!(
+                parse_osc7_uri_styled(uri, None, Osc7PathStyle::Windows),
+                expected.map(str::to_owned),
+                "uri={uri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_osc7_uri_posix_style_keeps_drive_like_paths_verbatim() {
+        assert_eq!(
+            parse_osc7_uri_styled("file:///C:/Users/x", None, Osc7PathStyle::Posix),
+            Ok("/C:/Users/x".to_owned())
+        );
+        assert_eq!(
+            parse_osc7_uri_styled("file:///tmp", None, Osc7PathStyle::Posix),
+            Ok("/tmp".to_owned())
+        );
+    }
+
+    #[test]
+    fn native_style_matches_platform() {
+        let expected = if cfg!(windows) {
+            Osc7PathStyle::Windows
+        } else {
+            Osc7PathStyle::Posix
+        };
+        assert_eq!(Osc7PathStyle::native(), expected);
     }
 
     #[test]

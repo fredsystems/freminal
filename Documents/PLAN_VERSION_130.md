@@ -8662,7 +8662,17 @@ Group F — Hygiene:
   - `last_session.toml` files written by older builds can carry an unvalidated cwd, and
     restore uses them as-is.
 
-  Not scheduled in Task 148.
+  **Done (2026-10-19):**
+  - `resolve_spawn_cwd` runs on a helper thread under `SPAWN_CWD_DEADLINE` (250 ms,
+    `with_deadline` -> `Done | TimedOut | Unavailable`). On timeout the pane starts in the
+    default directory. A thread stuck on a hung mount is left to finish; this runs once per
+    user action, or once per pane per minute for the session autosave.
+  - `parse_osc7_uri` takes an `Osc7PathStyle`: on Windows, `/C:/x` becomes `C:/x` and anything
+    but a local-drive path is rejected. Both styles are tested on Linux.
+  - Layout and session restore check `directory` (no control characters, deadline-bounded
+    `is_dir`) and fall back to the default directory instead of failing the pane
+    (`LAYOUT_FORMAT.md` says so). An existing but hostile directory saved by an old build
+    cannot be told apart; layouts are trusted input (148.22).
 - **148.C11 — Notification worker is never restarted.** Review finding R11a. If the
   `freminal-notify` worker thread exits (panic), `OnceLock` keeps the dead sender and system
   notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:

@@ -186,6 +186,10 @@ terminal panes.
 | `title`     | String | No       | Initial pane title (before shell OSC overrides)          |
 | `active`    | Bool   | No       | If true, this pane/tab has focus on launch               |
 
+A pane whose `directory` does not exist, is not a directory, contains control
+characters, or cannot be checked within 250 ms starts in the default directory
+instead of failing.
+
 A tab with a single pane omits `parent`, `position`, and `split` — just one
 pane entry with the leaf properties.
 
