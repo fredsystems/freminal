@@ -869,6 +869,18 @@ pub fn parse_recording(path: &std::path::Path) -> Result<ParsedRecording, ParseE
 
 /// Parse FREC v2 from an in-memory byte slice.
 ///
+/// Every count, length and offset in the file is attacker-controlled, so each is
+/// bounded against the bytes that are actually present *before* anything is
+/// allocated or indexed with it: positions are computed with checked
+/// arithmetic, and the seek index is never preallocated beyond the bytes
+/// remaining between its start and the footer.
+///
+/// `MessagePack` payloads need no extra bound. They are decoded from a slice that
+/// is already bounded by the file length, and `rmp_serde` reads strings and
+/// binary blobs as borrowed sub-slices (failing on a declared length past the end
+/// of the slice) while serde caps the preallocation for a declared array or map
+/// length, so a hostile declared length cannot cause a large allocation.
+///
 /// # Errors
 ///
 /// Returns [`ParseError`] if the data is not a valid FREC v2 file.
@@ -898,15 +910,11 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     // Flags (reserved).
     pos += 4;
 
-    let meta_len = usize::value_from(read_u32_le(data, pos)).unwrap_or(0);
+    let meta_len = usize::value_from(read_u32_le(data, pos)?).unwrap_or(0);
     pos += 4;
 
-    if pos + meta_len > data.len() {
-        return Err(ParseError::InvalidFormat(
-            "metadata length exceeds file size".to_string(),
-        ));
-    }
-    let metadata: RecordingMetadata = rmp_serde::from_slice(&data[pos..pos + meta_len])?;
+    let metadata_bytes = slice_at(data, pos, meta_len, "metadata length exceeds file size")?;
+    let metadata: RecordingMetadata = rmp_serde::from_slice(metadata_bytes)?;
     pos += meta_len;
 
     // --- Footer ---
@@ -914,32 +922,23 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     if &data[footer_start + 24..footer_start + 28] != FREC_MAGIC {
         return Err(ParseError::InvalidFormat("bad footer magic".to_string()));
     }
-    let seek_index_offset = usize::value_from(read_u64_le(data, footer_start))
+    let seek_index_offset = usize::value_from(read_u64_le(data, footer_start)?)
         .map_err(|_| ParseError::InvalidFormat("seek_index_offset overflows usize".to_string()))?;
-    let total_duration_us = read_u64_le(data, footer_start + 8);
-    let total_events = read_u64_le(data, footer_start + 16);
+    let total_duration_us = read_u64_le(data, footer_start + 8)?;
+    let total_events = read_u64_le(data, footer_start + 16)?;
 
     // --- Events ---
     let mut events = Vec::new();
     let mut event_pos = pos;
     while event_pos < seek_index_offset {
-        if event_pos + EVENT_HEADER_SIZE > data.len() {
-            return Err(ParseError::InvalidFormat(
-                "truncated event header".to_string(),
-            ));
-        }
-        let timestamp_us = read_u64_le(data, event_pos);
+        let header = slice_at(data, event_pos, EVENT_HEADER_SIZE, "truncated event header")?;
+        let timestamp_us = read_u64_le(header, 0)?;
         // Skip event_type byte (we deserialize payload which includes the variant).
-        let payload_len = usize::value_from(read_u32_le(data, event_pos + 9)).unwrap_or(0);
+        let payload_len = usize::value_from(read_u32_le(header, 9)?).unwrap_or(0);
         event_pos += EVENT_HEADER_SIZE;
 
-        if event_pos + payload_len > data.len() {
-            return Err(ParseError::InvalidFormat(
-                "truncated event payload".to_string(),
-            ));
-        }
-        let payload: EventPayload =
-            rmp_serde::from_slice(&data[event_pos..event_pos + payload_len])?;
+        let payload_bytes = slice_at(data, event_pos, payload_len, "truncated event payload")?;
+        let payload: EventPayload = rmp_serde::from_slice(payload_bytes)?;
         events.push(RecordingEvent {
             timestamp_us,
             payload,
@@ -947,31 +946,7 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
         event_pos += payload_len;
     }
 
-    // --- Seek index ---
-    let mut idx_pos = seek_index_offset;
-    if idx_pos + 8 > footer_start {
-        return Err(ParseError::InvalidFormat(
-            "seek index overlaps footer".to_string(),
-        ));
-    }
-    let entry_count = usize::value_from(read_u64_le(data, idx_pos)).map_err(|_| {
-        ParseError::InvalidFormat("seek index entry_count overflows usize".to_string())
-    })?;
-    idx_pos += 8;
-
-    let mut seek_index = Vec::with_capacity(entry_count);
-    for _ in 0..entry_count {
-        if idx_pos + SEEK_INDEX_ENTRY_SIZE > footer_start {
-            return Err(ParseError::InvalidFormat(
-                "truncated seek index".to_string(),
-            ));
-        }
-        seek_index.push(SeekIndexEntry {
-            timestamp_us: read_u64_le(data, idx_pos),
-            file_offset: read_u64_le(data, idx_pos + 8),
-        });
-        idx_pos += SEEK_INDEX_ENTRY_SIZE;
-    }
+    let seek_index = parse_seek_index(data, seek_index_offset, footer_start)?;
 
     Ok(ParsedRecording {
         metadata,
@@ -982,30 +957,82 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     })
 }
 
+/// Parse the seek index that starts at `seek_index_offset` and must end at or
+/// before `footer_start`.
+///
+/// The declared `entry_count` is checked against the bytes between the end of the
+/// count field and the footer before the result vector is allocated, so the
+/// allocation is at most `footer_start` bytes' worth of entries.
+fn parse_seek_index(
+    data: &[u8],
+    seek_index_offset: usize,
+    footer_start: usize,
+) -> Result<Vec<SeekIndexEntry>, ParseError> {
+    let overlaps_footer = || ParseError::InvalidFormat("seek index overlaps footer".to_string());
+    let truncated = || ParseError::InvalidFormat("truncated seek index".to_string());
+
+    let entries_start = seek_index_offset
+        .checked_add(8)
+        .ok_or_else(overlaps_footer)?;
+    if entries_start > footer_start {
+        return Err(overlaps_footer());
+    }
+    let entry_count = usize::value_from(read_u64_le(data, seek_index_offset)?).map_err(|_| {
+        ParseError::InvalidFormat("seek index entry_count overflows usize".to_string())
+    })?;
+
+    let table_len = entry_count
+        .checked_mul(SEEK_INDEX_ENTRY_SIZE)
+        .ok_or_else(truncated)?;
+    let table_end = entries_start.checked_add(table_len).ok_or_else(truncated)?;
+    if table_end > footer_start {
+        return Err(truncated());
+    }
+    let table = slice_at(data, entries_start, table_len, "truncated seek index")?;
+
+    table
+        .as_chunks::<SEEK_INDEX_ENTRY_SIZE>()
+        .0
+        .iter()
+        .map(|entry| {
+            Ok(SeekIndexEntry {
+                timestamp_us: read_u64_le(entry, 0)?,
+                file_offset: read_u64_le(entry, 8)?,
+            })
+        })
+        .collect()
+}
+
+/// Borrow `len` bytes of `data` starting at `start`.
+///
+/// Fails with `ParseError::InvalidFormat(what)` if the range does not fit inside
+/// `data`, including when `start + len` overflows `usize`.
+fn slice_at<'a>(
+    data: &'a [u8],
+    start: usize,
+    len: usize,
+    what: &str,
+) -> Result<&'a [u8], ParseError> {
+    start
+        .checked_add(len)
+        .and_then(|end| data.get(start..end))
+        .ok_or_else(|| ParseError::InvalidFormat(what.to_string()))
+}
+
 /// Read a little-endian `u32` from a byte slice at the given offset.
-const fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let bytes: [u8; 4] = [
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ];
-    u32::from_le_bytes(bytes)
+fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, ParseError> {
+    slice_at(data, offset, 4, "truncated u32 field")?
+        .try_into()
+        .map(u32::from_le_bytes)
+        .map_err(|_| ParseError::InvalidFormat("truncated u32 field".to_string()))
 }
 
 /// Read a little-endian `u64` from a byte slice at the given offset.
-const fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    let bytes: [u8; 8] = [
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ];
-    u64::from_le_bytes(bytes)
+fn read_u64_le(data: &[u8], offset: usize) -> Result<u64, ParseError> {
+    slice_at(data, offset, 8, "truncated u64 field")?
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| ParseError::InvalidFormat("truncated u64 field".to_string()))
 }
 
 // ---------------------------------------------------------------------------

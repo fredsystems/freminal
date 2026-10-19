@@ -8293,6 +8293,17 @@ Group F — Hygiene:
   three runs (wide intervals, not significant), `build_snapshot_80x24_clean` −7.9%,
   `bench_visible_flatten` +1.5%, `bench_flatten_url_heavy` 0.0%,
   `bench_flatten_wrapped_url_heavy` +1.6% (n.s.).
+- **148.8 (done):** the only crash cause was the seek index: `Vec::with_capacity(entry_count)`
+  from an unchecked u64 (the #556 allocation, the 155 GB OOMs and the `capacity overflow`
+  panics; all 28,546 historical fork-mode artifacts classify as this). `parse_seek_index`
+  now checks `entry_count * 16` against the bytes before the footer, with checked arithmetic,
+  before allocating. All other offsets go through a checked `slice_at`, and
+  `read_u32_le`/`read_u64_le` are fallible (hardening; the old comparisons already rejected
+  those inputs on 64-bit). The msgpack hypothesis was refuted: rmp-serde 1.3.1 `from_slice`
+  borrows str/bin/ext and fails on a declared length past the slice, and serde caps
+  array/map preallocation; a test pins it. Reproducers `seek-index-huge-entry-count` and
+  `seek-index-capacity-overflow` in `fuzz/regressions/frec_parse/`. A 300 s `frec_parse` run
+  (26M execs) and all 36,388 historical artifacts are clean.
 
 ### 148 Cleanup entries
 
