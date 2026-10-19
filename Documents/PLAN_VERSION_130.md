@@ -8408,6 +8408,15 @@ Group F — Hygiene:
   worker fed by `bounded(SYSTEM_NOTIFICATION_QUEUE = 16)` in a `OnceLock`. `enqueue_bounded`
   returns `Enqueued | DroppedFull | WorkerGone`, and a burst drops notifications rather than
   spawning threads. The test-only skip of the OS call is unchanged.
+- **148.20 (done):** done ahead of 147.4 (maintainer decision 2026-10-19; 147.4 rebases onto
+  `wrap_bracketed_paste`). When bracketed paste is on, `sanitize_bracketed_paste` removes
+  both markers (`200~` and `201~`) in their 7-bit `ESC [` and 8-bit U+009B forms, including
+  markers reassembled around a removed one, in one linear pass (removal happens on the output
+  buffer). Precedent: kitty `utils.py` `sanitize_for_bracketed_paste` strips the end marker to
+  a fixpoint; stripping the start marker too is freminal's extension. Other C0 controls are
+  not stripped: the terminals disagree (xterm-412 turns BS, DEL, ENQ, EOT, ESC, NUL and the
+  stty specials into spaces by default via `DEF_DISALLOWED_PASTE_CONTROLS`; kitty leaves
+  them), and the paste guard already flags them. Unbracketed paste is unchanged.
 
 ### 148 Cleanup entries
 
