@@ -598,6 +598,10 @@ pub enum ClipboardWritePolicy {
 /// Security-related configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+// Independent TOML toggles (clipboard read, kitty file transfer, window
+// operations, password indicator), each mapping directly to a documented
+// `[security]` key; collapsing them into an enum would distort the schema.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SecurityConfig {
     /// Allow applications to read the system clipboard via OSC 52 query.
     ///
@@ -629,6 +633,19 @@ pub struct SecurityConfig {
     /// Direct transmission (`t=d`) is unaffected.
     pub allow_kitty_file_transfer: bool,
 
+    /// Allow applications to change the window through XTWINOPS escape
+    /// sequences (`CSI Ps ; Ps ; Ps t`): de-iconify (1), minimize (2), move
+    /// (3), resize in pixels (4) or characters (8), maximize/restore (9) and
+    /// full-screen (10).  Equivalent to xterm's `allowWindowOps` resource.
+    ///
+    /// Default: `false` (such requests are dropped).
+    /// When `true`, any program writing to the terminal -- including a remote
+    /// host over `ssh` or untrusted `cat` output -- can move, resize,
+    /// minimize or full-screen the window (targets are clamped to the
+    /// monitor).  Report-only queries (window size, position and state,
+    /// title) and title push/pop are unaffected.
+    pub allow_window_ops: bool,
+
     /// Show a lock icon in the tab bar when the foreground process disables
     /// terminal echo (e.g. password prompts from `sudo`, `ssh`, `passwd`).
     ///
@@ -642,6 +659,7 @@ impl Default for SecurityConfig {
             allow_clipboard_read: false,
             allow_clipboard_write: ClipboardWritePolicy::default(),
             allow_kitty_file_transfer: false,
+            allow_window_ops: false,
             password_indicator: true,
         }
     }
@@ -3651,6 +3669,7 @@ mode = "none"
         original.security.allow_clipboard_write = ClipboardWritePolicy::Off;
         original.security.allow_kitty_file_transfer =
             !Config::default().security.allow_kitty_file_transfer;
+        original.security.allow_window_ops = !Config::default().security.allow_window_ops;
         original.paste_guard.patterns = !Config::default().paste_guard.patterns;
         original.close_guard.unknown_blocks = !Config::default().close_guard.unknown_blocks;
         original.shell_integration.set_term_program =
@@ -3728,6 +3747,10 @@ mode = "none"
         assert_eq!(
             loaded.security.allow_kitty_file_transfer, original.security.allow_kitty_file_transfer,
             "security.allow_kitty_file_transfer dropped"
+        );
+        assert_eq!(
+            loaded.security.allow_window_ops, original.security.allow_window_ops,
+            "security.allow_window_ops dropped"
         );
         assert_eq!(
             loaded.paste_guard.patterns, original.paste_guard.patterns,
@@ -4077,6 +4100,56 @@ allow_clipboard_read = true
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.security.allow_kitty_file_transfer);
+    }
+
+    #[test]
+    fn security_config_window_ops_defaults_to_false() {
+        assert!(
+            !SecurityConfig::default().allow_window_ops,
+            "XTWINOPS window operations must be off by default (GHSA-67hw-cw29-r66f)"
+        );
+        assert!(!Config::default().security.allow_window_ops);
+    }
+
+    #[test]
+    fn security_config_window_ops_apply_partial() {
+        let mut cfg = Config::default();
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_window_ops = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(cfg.security.allow_window_ops);
+        // An unrelated key in the same section keeps its default.
+        assert!(!cfg.security.allow_clipboard_read);
+    }
+
+    #[test]
+    fn security_config_window_ops_omitted_stays_false() {
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[security]
+allow_clipboard_read = true
+",
+        )
+        .expect("valid TOML");
+        let security = partial.security.expect("security section present");
+        assert!(!security.allow_window_ops);
+    }
+
+    #[test]
+    fn security_config_window_ops_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.security.allow_window_ops = true;
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
+        assert!(toml_str.contains("allow_window_ops = true"));
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("serialized TOML should round-trip");
+        assert!(deserialized.security.allow_window_ops);
     }
 
     #[test]

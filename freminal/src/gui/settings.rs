@@ -2270,6 +2270,10 @@ impl SettingsModal {
 
         ui.add_space(12.0);
 
+        self.show_window_ops_setting(ui);
+
+        ui.add_space(12.0);
+
         ui.checkbox(
             &mut self.draft.security.password_indicator,
             "Password Indicator",
@@ -2292,6 +2296,32 @@ impl SettingsModal {
         ui.separator();
         ui.add_space(8.0);
         self.show_close_guard_section(ui);
+    }
+
+    /// The XTWINOPS window-operations checkbox of the Security tab
+    /// (`[security] allow_window_ops`).
+    fn show_window_ops_setting(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.security.allow_window_ops,
+            "Allow Window Operations (XTWINOPS)",
+        )
+        .on_hover_text(
+            "Lets programs minimize, move, resize, maximize and full-screen \
+             the window through escape sequences (xterm's allowWindowOps). \
+             Anything writing to the terminal, including a remote host over \
+             ssh, can then rearrange your window. Resize and move targets \
+             are clamped to the monitor. Window size, position and title \
+             queries are unaffected. Leave off unless a tool you use needs it.",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When enabled, programs can move, resize, minimize and \
+             full-screen the window.\n\
+             This is a potential security risk if untrusted programs run \
+             inside the terminal.",
+        );
     }
 
     /// The Close Guard subsection of the Security tab (Task 98.9).

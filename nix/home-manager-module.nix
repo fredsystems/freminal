@@ -121,6 +121,7 @@ let
           allow_clipboard_read
           allow_clipboard_write
           allow_kitty_file_transfer
+          allow_window_ops
           ;
       };
 
@@ -694,6 +695,21 @@ in
             host over ssh, can make the terminal read (and for t=t and t=s,
             remove) a path of its choosing and probe the reply to learn whether
             it succeeded. Direct transmission (t=d) is unaffected.
+            Null uses the default (false).
+          '';
+        };
+
+        allow_window_ops = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Allow applications to change the window through XTWINOPS escape
+            sequences: minimize, de-iconify, move, resize (pixels or
+            characters), maximize/restore and full-screen. Equivalent to
+            xterm's allowWindowOps. When true, any program writing to the
+            terminal, including a remote host over ssh, can move, resize or
+            full-screen your window. Report-only queries (window size,
+            position, state, title) and title push/pop are unaffected.
             Null uses the default (false).
           '';
         };

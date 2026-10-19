@@ -309,6 +309,18 @@ limit = 10000
 # (t=d) is unaffected.
 # allow_kitty_file_transfer = false
 
+# Allow applications to change the window through XTWINOPS escape sequences
+# (CSI Ps ; Ps ; Ps t): minimize and de-iconify (1, 2), move (3), resize in
+# pixels (4) or characters (8), maximize/restore (9) and full-screen (10).
+# Equivalent to xterm's allowWindowOps resource.
+# Default: false (these requests are ignored).
+# When true, any program writing to the terminal -- including a remote host
+# over ssh, or untrusted `cat` output -- can move, resize, minimize or
+# full-screen your window. Resize and move targets are clamped to the
+# monitor. Report-only queries (window size, position and state, title) and
+# title push/pop are unaffected.
+# allow_window_ops = false
+
 # Show a lock icon in the tab bar when the foreground process disables
 # terminal echo (e.g. password prompts from sudo, ssh, passwd).
 # Default: true.

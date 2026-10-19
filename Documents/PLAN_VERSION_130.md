@@ -8381,6 +8381,16 @@ Group F — Hygiene:
   its own accumulation limit, `MAX_OSC_CLIPBOARD_BYTES` (the base64 size of the cap plus 256
   bytes, about 1.33 MiB). An over-limit OSC 52 is discarded as before but no longer buffers
   64 MiB; OSC 1337 keeps `MAX_OSC_LARGE_BYTES`. Query handling is unchanged.
+- **148.17 (done):** maintainer decision (2026-10-19): **off by default**, as xterm's
+  `allowWindowOps`. New `[security] allow_window_ops = false`, with the full config wiring.
+  `WindowManipFlags.window_ops` (`WindowOpsPolicy`) is checked before any handling.
+  `is_mutating_window_op` is an exhaustive `const fn`, so a new variant must be classified
+  before it compiles. It gates CSI 1/2/3/4/8/9/10 t; reports, title set and title push/pop
+  stay available. When allowed, CSI 8 uses `saturating_mul` and conv2. Resize targets are
+  clamped to [1, monitor] and move targets to [0, monitor); the parameters are `usize`, so
+  only the upper bound can overflow. When `monitor_size` is unknown, the bound is
+  `FALLBACK_MONITOR_EXTENT` (16384 logical px). `freminal-windowing` never populates
+  `monitor_size`, so today the fallback is what bounds the window (148.C4).
 
 ### 148 Cleanup entries
 
@@ -8410,6 +8420,15 @@ Group F — Hygiene:
   freminal's primary buffer pushes a row. No invariant breaks, so this is a behaviour
   difference, not a crash. Scope: decide whether to match xterm; any change needs the
   scrollback consequences thought through. Not scheduled in Task 148.
+- **148.C4 — `viewport().monitor_size` is never populated.** Surfaced in review of 148.17.
+  `freminal-windowing` calls `egui_winit::State::take_egui_input` but not
+  `egui_winit::update_viewport_info`, so `monitor_size` (like other `ViewportInfo` fields
+  eframe fills) is always `None`. XTWINOPS resize and move clamp to the 16384 px fallback
+  rather than the real monitor, so an opted-in user (`allow_window_ops = true`) can still be
+  moved off a smaller monitor. Scope: populate `monitor_size` from winit's
+  `current_monitor()` in the windowing crate. Changing egui viewport state falls under
+  `freminal-egui-upgrade` / `EGUI_UPGRADE_ASSUMPTIONS.md`, so walk that checklist. Not
+  scheduled in Task 148 (the default is off).
 
 ---
 

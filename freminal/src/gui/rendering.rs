@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::config::{BellMode, ClipboardWritePolicy};
+use freminal_common::config::{BellMode, ClipboardWritePolicy, SecurityConfig};
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
@@ -143,9 +143,172 @@ pub(super) struct WindowManipFlags {
     pub window_focused: bool,
     /// Whether this pane is the only pane in its tab (no splits).
     pub is_only_pane: bool,
+    /// Whether window-mutating XTWINOPS operations are honoured
+    /// (`[security] allow_window_ops`).
+    pub window_ops: WindowOpsPolicy,
     /// Where this pane's OSC 99 requests come from and the pane's state this
     /// frame, stamped onto every collected OSC 99 request.
     pub osc99: Osc99PaneContext,
+}
+
+/// Whether window-mutating XTWINOPS operations (`CSI Ps ; Ps ; Ps t`) are
+/// honoured.  Mirrors `[security] allow_window_ops` (xterm's `allowWindowOps`).
+///
+/// Any program writing to the terminal -- including a remote host over `ssh`
+/// or untrusted `cat` output -- can emit these sequences, so the default is
+/// [`Self::Refused`] (GHSA-67hw-cw29-r66f).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WindowOpsPolicy {
+    /// Mutating window operations are dropped.  Report-only queries and title
+    /// handling are unaffected.  The default.
+    Refused,
+    /// Mutating window operations are applied, with resize and move targets
+    /// clamped to the monitor (see [`clamp_resize_target`] and
+    /// [`clamp_move_target`]).
+    Allowed,
+}
+
+impl WindowOpsPolicy {
+    /// The policy selected by the `[security]` section of the config.
+    pub(super) const fn from_security(security: &SecurityConfig) -> Self {
+        if security.allow_window_ops {
+            Self::Allowed
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+/// Whether `op` changes the OS window (state, size or position) rather than
+/// reporting on it or touching the title.
+///
+/// These are the operations [`WindowOpsPolicy::Refused`] drops: de-iconify,
+/// minimize, move, resize (pixels or characters), maximize/restore and the
+/// three full-screen operations.  The match is deliberately exhaustive (no
+/// wildcard) so a new [`WindowManipulation`] variant cannot be added without
+/// being classified here.
+const fn is_mutating_window_op(op: &WindowManipulation) -> bool {
+    match op {
+        WindowManipulation::DeIconifyWindow
+        | WindowManipulation::MinimizeWindow
+        | WindowManipulation::MoveWindow(_, _)
+        | WindowManipulation::ResizeWindow(_, _)
+        | WindowManipulation::ResizeWindowToLinesAndColumns(_, _)
+        | WindowManipulation::MaximizeWindow
+        | WindowManipulation::RestoreNonMaximizedWindow
+        | WindowManipulation::NotFullScreen
+        | WindowManipulation::FullScreen
+        | WindowManipulation::ToggleFullScreen => true,
+        // Raise/Lower/Refresh are accepted no-ops; everything else reports
+        // state, manages the title, or is not an XTWINOPS operation at all.
+        WindowManipulation::RaiseWindowToTopOfStackingOrder
+        | WindowManipulation::LowerWindowToBottomOfStackingOrder
+        | WindowManipulation::RefreshWindow
+        | WindowManipulation::ReportWindowState
+        | WindowManipulation::ReportWindowPositionWholeWindow
+        | WindowManipulation::ReportWindowPositionTextArea
+        | WindowManipulation::ReportWindowSizeInPixels
+        | WindowManipulation::ReportWindowTextAreaSizeInPixels
+        | WindowManipulation::ReportRootWindowSizeInPixels
+        | WindowManipulation::ReportCharacterSizeInPixels
+        | WindowManipulation::ReportTerminalSizeInCharacters
+        | WindowManipulation::ReportRootWindowSizeInCharacters
+        | WindowManipulation::ReportIconLabel
+        | WindowManipulation::ReportTitle
+        | WindowManipulation::SetTitleBarText(_)
+        | WindowManipulation::SaveWindowTitleToStack
+        | WindowManipulation::RestoreWindowTitleFromStack
+        | WindowManipulation::SetClipboard(_, _)
+        | WindowManipulation::QueryClipboard(_)
+        | WindowManipulation::Bell
+        | WindowManipulation::Notification { .. }
+        | WindowManipulation::Notification99(_)
+        | WindowManipulation::Osc99Control { .. }
+        | WindowManipulation::Osc99CacheIcon { .. } => false,
+    }
+}
+
+/// Extent, in logical pixels per axis, assumed for the monitor when the
+/// windowing layer has not reported its size.  Large enough never to get in
+/// the way of a real display, small enough that a hostile resize or move
+/// request cannot ask the window system for an absurd geometry.
+const FALLBACK_MONITOR_EXTENT: f32 = 16_384.0;
+
+/// The per-axis bound used to clamp resize and move targets: the reported
+/// monitor size, or [`FALLBACK_MONITOR_EXTENT`] when it is unknown or not a
+/// usable size (non-finite, or under one pixel on an axis).
+fn monitor_bounds(monitor_size: Option<Vec2>) -> Vec2 {
+    let axis = |extent: f32| {
+        if extent.is_finite() && extent >= 1.0 {
+            extent
+        } else {
+            FALLBACK_MONITOR_EXTENT
+        }
+    };
+    monitor_size.map_or_else(
+        || Vec2::splat(FALLBACK_MONITOR_EXTENT),
+        |size| Vec2::new(axis(size.x), axis(size.y)),
+    )
+}
+
+/// Clamp `value` to `[min, max]`; a NaN becomes `min`.  Requires
+/// `min <= max` and both finite, which every caller guarantees.
+const fn clamp_axis(value: f32, min: f32, max: f32) -> f32 {
+    if value.is_nan() {
+        min
+    } else {
+        value.clamp(min, max)
+    }
+}
+
+/// Convert a terminal-supplied count to `f32`, saturating to [`f32::MAX`] if
+/// the conversion is refused so the later clamp -- not a silent zero --
+/// decides the outcome.
+fn count_to_f32(count: usize) -> f32 {
+    count.approx_as::<f32>().unwrap_or(f32::MAX)
+}
+
+/// Clamp a requested window size (logical pixels) to the monitor, never below
+/// 1x1.  `bounds` comes from [`monitor_bounds`].
+///
+/// The request parameters are `usize`, so a negative size is already
+/// impossible; the lower bound only rules out a zero-sized window.
+const fn clamp_resize_target(width: f32, height: f32, bounds: Vec2) -> Vec2 {
+    Vec2::new(
+        clamp_axis(width, 1.0, bounds.x),
+        clamp_axis(height, 1.0, bounds.y),
+    )
+}
+
+/// Clamp a requested window origin (logical pixels) so it stays within
+/// `[0, bounds)` on each axis.  `bounds` comes from [`monitor_bounds`].
+///
+/// The request parameters are `usize`, so a negative coordinate is already
+/// impossible (xterm's signed form is rejected at parse time); only the upper
+/// bound can be exceeded.
+const fn clamp_move_target(x: f32, y: f32, bounds: Vec2) -> Pos2 {
+    Pos2::new(
+        clamp_axis(x, 0.0, (bounds.x - 1.0).max(0.0)),
+        clamp_axis(y, 0.0, (bounds.y - 1.0).max(0.0)),
+    )
+}
+
+/// The window size in logical pixels requested by `CSI 8 ; rows ; cols t`:
+/// `rows`/`cols` character cells at `font_height`/`font_width` pixels each,
+/// plus the chrome (`width_difference`, `height_difference`) around the
+/// terminal area.  The cell arithmetic saturates, so a hostile row or column
+/// count produces a huge-but-finite size for [`clamp_resize_target`] to cap
+/// instead of overflowing.
+fn cells_to_window_size(
+    rows: usize,
+    cols: usize,
+    font_width: usize,
+    font_height: usize,
+    chrome: Vec2,
+) -> Vec2 {
+    let width = count_to_f32(cols.saturating_mul(font_width)) + chrome.x;
+    let height = count_to_f32(rows.saturating_mul(font_height)) + chrome.y;
+    Vec2::new(width, height)
 }
 
 /// Whether an OSC 52 clipboard write from a pane is honoured under `policy`.
@@ -282,6 +445,14 @@ pub(super) fn handle_window_manipulation(
             WindowCommand::Viewport(cmd) | WindowCommand::Report(cmd) => cmd,
         };
 
+        // Window-mutating operations are refused outright unless the user opted
+        // in (`[security] allow_window_ops`).  This runs before every other
+        // arm so no later arm can act on a refused operation.
+        if flags.window_ops == WindowOpsPolicy::Refused && is_mutating_window_op(&window_event) {
+            debug!("XTWINOPS {window_event:?} dropped: [security] allow_window_ops is off");
+            continue;
+        }
+
         match window_event {
             // ── Viewport-mutating commands: skip for inactive tabs ───
             // An inactive tab must not resize, move, minimize, or fullscreen
@@ -332,18 +503,18 @@ pub(super) fn handle_window_manipulation(
                 ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
             }
             WindowManipulation::MoveWindow(x, y) => {
-                let x = x.approx_as::<f32>().unwrap_or_default();
-                let y = y.approx_as::<f32>().unwrap_or_default();
+                let bounds = monitor_bounds(ui.ctx().input(|i| i.viewport().monitor_size));
+                let target = clamp_move_target(count_to_f32(x), count_to_f32(y), bounds);
 
                 ui.ctx()
-                    .send_viewport_cmd(ViewportCommand::OuterPosition(Pos2::new(x, y)));
+                    .send_viewport_cmd(ViewportCommand::OuterPosition(target));
             }
             WindowManipulation::ResizeWindow(width, height) => {
-                let width = width.approx_as::<f32>().unwrap_or_default();
-                let height = height.approx_as::<f32>().unwrap_or_default();
+                let bounds = monitor_bounds(ui.ctx().input(|i| i.viewport().monitor_size));
+                let target = clamp_resize_target(count_to_f32(width), count_to_f32(height), bounds);
 
                 ui.ctx()
-                    .send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(width, height)));
+                    .send_viewport_cmd(ViewportCommand::InnerSize(target));
             }
             WindowManipulation::MaximizeWindow => {
                 ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(true));
@@ -353,18 +524,22 @@ pub(super) fn handle_window_manipulation(
                     .send_viewport_cmd(ViewportCommand::Maximized(false));
             }
             WindowManipulation::ResizeWindowToLinesAndColumns(input_height, input_width) => {
-                let available_height = ui.available_height();
-                let available_width = ui.available_width();
-                let width_difference = window_width.width() - available_width;
-                let height_difference = window_width.height() - available_height;
-                let width = input_width * font_width;
-                let height = input_height * font_height;
-
-                let width = width.approx_as::<f32>().unwrap_or_default() + width_difference;
-                let height = height.approx_as::<f32>().unwrap_or_default() + height_difference;
+                let chrome = Vec2::new(
+                    window_width.width() - ui.available_width(),
+                    window_width.height() - ui.available_height(),
+                );
+                let bounds = monitor_bounds(ui.ctx().input(|i| i.viewport().monitor_size));
+                let requested = cells_to_window_size(
+                    input_height,
+                    input_width,
+                    font_width,
+                    font_height,
+                    chrome,
+                );
+                let target = clamp_resize_target(requested.x, requested.y, bounds);
 
                 ui.ctx()
-                    .send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(width, height)));
+                    .send_viewport_cmd(ViewportCommand::InnerSize(target));
             }
             WindowManipulation::NotFullScreen => {
                 ui.ctx()
@@ -713,7 +888,9 @@ mod osc52_toast_text_tests {
 #[cfg(test)]
 mod window_manipulation_reply_tests {
     use super::{
-        Osc52ToastEvent, WindowManipFlags, clipboard_write_permitted, handle_window_manipulation,
+        FALLBACK_MONITOR_EXTENT, Osc52ToastEvent, WindowManipFlags, WindowOpsPolicy,
+        cells_to_window_size, clamp_move_target, clamp_resize_target, clipboard_write_permitted,
+        handle_window_manipulation, is_mutating_window_op, monitor_bounds,
     };
     use crate::gui::frame_drain::WindowFocus;
     use crate::gui::osc99::{
@@ -732,7 +909,7 @@ mod window_manipulation_reply_tests {
         Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-    use freminal_common::config::{BellMode, ClipboardWritePolicy};
+    use freminal_common::config::{BellMode, ClipboardWritePolicy, SecurityConfig};
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, WindowCommand, WindowStateReport};
 
     /// Everything [`handle_window_manipulation`] produced for one frame, plus
@@ -825,6 +1002,7 @@ mod window_manipulation_reply_tests {
             is_active: true,
             window_focused: true,
             is_only_pane: true,
+            window_ops: WindowOpsPolicy::Refused,
             osc99,
         };
         let mut title_stack = TitleStack::new();
@@ -904,6 +1082,7 @@ mod window_manipulation_reply_tests {
             is_active: matches!(role, PaneRole::Active),
             window_focused: true,
             is_only_pane: true,
+            window_ops: WindowOpsPolicy::Refused,
             osc99: test_osc99_context(),
         };
         let mut bell_active = false;
@@ -958,6 +1137,7 @@ mod window_manipulation_reply_tests {
             is_active: matches!(role, PaneRole::Active),
             window_focused: true,
             is_only_pane: true,
+            window_ops: WindowOpsPolicy::Refused,
             osc99: test_osc99_context(),
         };
         let mut title_stack = TitleStack::new();
@@ -1353,6 +1533,417 @@ mod window_manipulation_reply_tests {
                 GuiReply::WindowState(WindowStateReport::Normal),
                 GuiReply::WindowTitle("Freminal".to_owned()),
             ]
+        );
+    }
+
+    // ── XTWINOPS gating and clamping (GHSA-67hw-cw29-r66f) ──────────────
+
+    /// Every [`WindowManipulation`] variant with whether it is a mutating
+    /// window operation.  Kept in step with the exhaustive match in
+    /// `is_mutating_window_op`: a new variant fails to compile there first.
+    fn every_variant_with_mutating_flag() -> Vec<(WindowManipulation, bool)> {
+        use freminal_common::buffer_states::osc::OscNotifySource;
+        use freminal_common::buffer_states::window_manipulation::NotificationKind;
+        vec![
+            (WindowManipulation::DeIconifyWindow, true),
+            (WindowManipulation::MinimizeWindow, true),
+            (WindowManipulation::MoveWindow(1, 2), true),
+            (WindowManipulation::ResizeWindow(1, 2), true),
+            (WindowManipulation::RaiseWindowToTopOfStackingOrder, false),
+            (
+                WindowManipulation::LowerWindowToBottomOfStackingOrder,
+                false,
+            ),
+            (WindowManipulation::RefreshWindow, false),
+            (
+                WindowManipulation::ResizeWindowToLinesAndColumns(1, 2),
+                true,
+            ),
+            (WindowManipulation::MaximizeWindow, true),
+            (WindowManipulation::RestoreNonMaximizedWindow, true),
+            (WindowManipulation::NotFullScreen, true),
+            (WindowManipulation::FullScreen, true),
+            (WindowManipulation::ToggleFullScreen, true),
+            (WindowManipulation::ReportWindowState, false),
+            (WindowManipulation::ReportWindowPositionWholeWindow, false),
+            (WindowManipulation::ReportWindowPositionTextArea, false),
+            (WindowManipulation::ReportWindowSizeInPixels, false),
+            (WindowManipulation::ReportWindowTextAreaSizeInPixels, false),
+            (WindowManipulation::ReportRootWindowSizeInPixels, false),
+            (WindowManipulation::ReportCharacterSizeInPixels, false),
+            (WindowManipulation::ReportTerminalSizeInCharacters, false),
+            (WindowManipulation::ReportRootWindowSizeInCharacters, false),
+            (WindowManipulation::ReportIconLabel, false),
+            (WindowManipulation::ReportTitle, false),
+            (WindowManipulation::SetTitleBarText("t".to_owned()), false),
+            (WindowManipulation::SaveWindowTitleToStack, false),
+            (WindowManipulation::RestoreWindowTitleFromStack, false),
+            (
+                WindowManipulation::SetClipboard("c".to_owned(), "x".to_owned()),
+                false,
+            ),
+            (WindowManipulation::QueryClipboard("c".to_owned()), false),
+            (WindowManipulation::Bell, false),
+            (
+                WindowManipulation::Notification {
+                    kind: NotificationKind::OscText,
+                    source: OscNotifySource::Osc9,
+                    title: None,
+                    body: "b".to_owned(),
+                },
+                false,
+            ),
+            (
+                WindowManipulation::Notification99(Box::new(sample_notification())),
+                false,
+            ),
+            (
+                WindowManipulation::Osc99Control {
+                    id: "n1".to_owned(),
+                    kind: Osc99ControlKind::Close,
+                },
+                false,
+            ),
+            (
+                WindowManipulation::Osc99CacheIcon {
+                    key: "k".to_owned(),
+                    data: vec![1],
+                },
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn is_mutating_window_op_classifies_every_variant() {
+        for (op, expected) in every_variant_with_mutating_flag() {
+            assert_eq!(is_mutating_window_op(&op), expected, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn window_ops_policy_follows_the_security_config() {
+        let mut security = SecurityConfig::default();
+        assert_eq!(
+            WindowOpsPolicy::from_security(&security),
+            WindowOpsPolicy::Refused,
+            "window operations must be refused by default"
+        );
+        security.allow_window_ops = true;
+        assert_eq!(
+            WindowOpsPolicy::from_security(&security),
+            WindowOpsPolicy::Allowed
+        );
+    }
+
+    /// Run `commands` for a pane through one headless frame under `policy` and
+    /// return every viewport command egui was asked to send, plus the replies.
+    fn run_window_op_frame(
+        commands: Vec<WindowManipulation>,
+        policy: WindowOpsPolicy,
+        monitor_size: Option<egui::Vec2>,
+    ) -> (Vec<egui::ViewportCommand>, Vec<GuiReply>) {
+        let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
+        let (reply_tx, reply_rx): (_, Receiver<InputEvent>) = unbounded();
+        let reply_tx = Arc::new(reply_tx);
+        for cmd in commands {
+            if let Err(e) = window_cmd_tx.send(WindowCommand::Viewport(cmd)) {
+                panic!("send window command: {e}");
+            }
+        }
+        let flags = WindowManipFlags {
+            allow_clipboard_read: false,
+            clipboard_write: ClipboardWritePolicy::default(),
+            is_active: true,
+            window_focused: true,
+            is_only_pane: true,
+            window_ops: policy,
+            osc99: test_osc99_context(),
+        };
+        let mut title_stack = TitleStack::new();
+        let mut tab_title = String::new();
+        let mut bell_active = false;
+        let mut bell_since = None;
+        let mut notifications = Vec::new();
+        let mut osc99_requests = Vec::new();
+        let mut osc52_events = Vec::new();
+
+        let mut raw = egui::RawInput::default();
+        raw.viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .monitor_size = monitor_size;
+        let ctx = egui::Context::default();
+        // No painter here: defuse the `TexturesDelta` drop-bomb (A2 in
+        // EGUI_UPGRADE_ASSUMPTIONS.md).
+        let mut full_output = ctx.run_ui(raw, |ui| {
+            handle_window_manipulation(
+                ui,
+                &window_cmd_rx,
+                &reply_tx,
+                8,
+                16,
+                ui.max_rect(),
+                &mut title_stack,
+                &mut tab_title,
+                &mut bell_active,
+                &mut bell_since,
+                BellMode::None,
+                &flags,
+                &mut notifications,
+                &mut osc99_requests,
+                &mut osc52_events,
+            );
+        });
+        full_output.textures_delta.clear();
+
+        let viewport_commands = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|vp| {
+                vp.commands
+                    .iter()
+                    // egui itself sends `SetTheme` on the first frame; it is
+                    // not something a window operation produces.
+                    .filter(|c| !matches!(c, egui::ViewportCommand::SetTheme(_)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let replies = reply_rx
+            .try_iter()
+            .map(|event| match event {
+                InputEvent::Reply(reply) => reply,
+                other => panic!("expected InputEvent::Reply, got {other:?}"),
+            })
+            .collect();
+        (viewport_commands, replies)
+    }
+
+    /// Recognises one viewport command.
+    type ViewportPredicate = fn(&egui::ViewportCommand) -> bool;
+
+    /// The mutating operations, each paired with a predicate recognising the
+    /// viewport command it must produce when allowed.
+    fn mutating_ops_with_expected_command() -> Vec<(WindowManipulation, ViewportPredicate)> {
+        vec![
+            (WindowManipulation::DeIconifyWindow, |c| {
+                matches!(c, egui::ViewportCommand::Minimized(false))
+            }),
+            (WindowManipulation::MinimizeWindow, |c| {
+                matches!(c, egui::ViewportCommand::Minimized(true))
+            }),
+            (WindowManipulation::MoveWindow(10, 20), |c| {
+                matches!(c, egui::ViewportCommand::OuterPosition(_))
+            }),
+            (WindowManipulation::ResizeWindow(800, 600), |c| {
+                matches!(c, egui::ViewportCommand::InnerSize(_))
+            }),
+            (
+                WindowManipulation::ResizeWindowToLinesAndColumns(24, 80),
+                |c| matches!(c, egui::ViewportCommand::InnerSize(_)),
+            ),
+            (WindowManipulation::MaximizeWindow, |c| {
+                matches!(c, egui::ViewportCommand::Maximized(true))
+            }),
+            (WindowManipulation::RestoreNonMaximizedWindow, |c| {
+                matches!(c, egui::ViewportCommand::Maximized(false))
+            }),
+            (WindowManipulation::FullScreen, |c| {
+                matches!(c, egui::ViewportCommand::Fullscreen(true))
+            }),
+            (WindowManipulation::NotFullScreen, |c| {
+                matches!(c, egui::ViewportCommand::Fullscreen(false))
+            }),
+            (WindowManipulation::ToggleFullScreen, |c| {
+                matches!(c, egui::ViewportCommand::Fullscreen(_))
+            }),
+        ]
+    }
+
+    #[test]
+    fn refused_policy_drops_every_mutating_window_op() {
+        for (op, _) in mutating_ops_with_expected_command() {
+            let (commands, replies) =
+                run_window_op_frame(vec![op.clone()], WindowOpsPolicy::Refused, None);
+            assert!(
+                commands.is_empty(),
+                "{op:?} must not reach the window while refused: {commands:?}"
+            );
+            assert_eq!(replies, Vec::<GuiReply>::new());
+        }
+    }
+
+    #[test]
+    fn allowed_policy_applies_every_mutating_window_op() {
+        for (op, expected) in mutating_ops_with_expected_command() {
+            let (commands, _) =
+                run_window_op_frame(vec![op.clone()], WindowOpsPolicy::Allowed, None);
+            assert!(
+                commands.iter().any(expected),
+                "{op:?} must produce its viewport command while allowed: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refused_policy_still_answers_report_queries() {
+        let (commands, replies) = run_window_op_frame(
+            vec![
+                WindowManipulation::MinimizeWindow,
+                WindowManipulation::ReportWindowState,
+                WindowManipulation::ReportTitle,
+            ],
+            WindowOpsPolicy::Refused,
+            None,
+        );
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(
+            replies,
+            vec![
+                GuiReply::WindowState(WindowStateReport::Normal),
+                GuiReply::WindowTitle("Freminal".to_owned()),
+            ],
+            "report-only operations are not gated"
+        );
+    }
+
+    #[test]
+    fn refused_policy_still_sets_the_title() {
+        let (commands, _) = run_window_op_frame(
+            vec![WindowManipulation::SetTitleBarText("hello".to_owned())],
+            WindowOpsPolicy::Refused,
+            None,
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Title(t) if t == "hello")),
+            "title set is not a gated operation: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn allowed_oversized_resize_is_clamped_to_the_monitor() {
+        let monitor = egui::Vec2::new(1920.0, 1080.0);
+        let (commands, _) = run_window_op_frame(
+            vec![
+                WindowManipulation::ResizeWindowToLinesAndColumns(usize::MAX, usize::MAX),
+                WindowManipulation::ResizeWindow(usize::MAX, usize::MAX),
+            ],
+            WindowOpsPolicy::Allowed,
+            Some(monitor),
+        );
+        let sizes: Vec<egui::Vec2> = commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::ViewportCommand::InnerSize(size) => Some(*size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, vec![monitor, monitor]);
+    }
+
+    #[test]
+    fn allowed_far_move_is_clamped_inside_the_monitor() {
+        let monitor = egui::Vec2::new(1920.0, 1080.0);
+        let (commands, _) = run_window_op_frame(
+            vec![WindowManipulation::MoveWindow(usize::MAX, usize::MAX)],
+            WindowOpsPolicy::Allowed,
+            Some(monitor),
+        );
+        assert!(
+            commands.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(p) if *p == egui::Pos2::new(1919.0, 1079.0)
+            )),
+            "{commands:?}"
+        );
+    }
+
+    // ── Pure clamping helpers ────────────────────────────────────────
+
+    #[test]
+    fn cells_to_window_size_saturates_instead_of_overflowing() {
+        let size = cells_to_window_size(usize::MAX, usize::MAX, 8, 16, egui::Vec2::ZERO);
+        assert!(size.x.is_finite() && size.y.is_finite());
+        let clamped = clamp_resize_target(size.x, size.y, egui::Vec2::new(1920.0, 1080.0));
+        assert_eq!(clamped, egui::Vec2::new(1920.0, 1080.0));
+        // A zero font size is not a divide or a panic either.
+        let zero = cells_to_window_size(usize::MAX, usize::MAX, 0, 0, egui::Vec2::ZERO);
+        assert_eq!(zero, egui::Vec2::ZERO);
+    }
+
+    #[test]
+    fn cells_to_window_size_adds_chrome_and_leaves_normal_values_alone() {
+        let size = cells_to_window_size(24, 80, 8, 16, egui::Vec2::new(10.0, 30.0));
+        assert_eq!(size, egui::Vec2::new(650.0, 414.0));
+        let bounds = monitor_bounds(Some(egui::Vec2::new(1920.0, 1080.0)));
+        assert_eq!(clamp_resize_target(size.x, size.y, bounds), size);
+    }
+
+    #[test]
+    fn clamp_resize_target_never_goes_below_one_pixel() {
+        let bounds = egui::Vec2::new(1920.0, 1080.0);
+        assert_eq!(
+            clamp_resize_target(0.0, 0.0, bounds),
+            egui::Vec2::new(1.0, 1.0)
+        );
+        assert_eq!(
+            clamp_resize_target(-50.0, f32::NAN, bounds),
+            egui::Vec2::new(1.0, 1.0)
+        );
+        assert_eq!(
+            clamp_resize_target(f32::INFINITY, 5000.0, bounds),
+            bounds,
+            "an infinite request is capped, not propagated"
+        );
+    }
+
+    #[test]
+    fn clamp_move_target_keeps_the_origin_inside_the_monitor() {
+        let bounds = egui::Vec2::new(1920.0, 1080.0);
+        assert_eq!(
+            clamp_move_target(0.0, 0.0, bounds),
+            egui::Pos2::new(0.0, 0.0)
+        );
+        assert_eq!(
+            clamp_move_target(100.0, 200.0, bounds),
+            egui::Pos2::new(100.0, 200.0)
+        );
+        assert_eq!(
+            clamp_move_target(1.0e9, 1.0e9, bounds),
+            egui::Pos2::new(1919.0, 1079.0),
+            "the origin stays strictly inside [0, monitor)"
+        );
+        assert_eq!(
+            clamp_move_target(-5000.0, f32::NAN, bounds),
+            egui::Pos2::new(0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn unknown_or_unusable_monitor_size_uses_the_fallback() {
+        let fallback = egui::Vec2::splat(FALLBACK_MONITOR_EXTENT);
+        assert_eq!(monitor_bounds(None), fallback);
+        assert_eq!(monitor_bounds(Some(egui::Vec2::ZERO)), fallback);
+        assert_eq!(
+            monitor_bounds(Some(egui::Vec2::new(f32::NAN, f32::INFINITY))),
+            fallback
+        );
+        // One good axis is kept; only the bad one falls back.
+        assert_eq!(
+            monitor_bounds(Some(egui::Vec2::new(1920.0, 0.0))),
+            egui::Vec2::new(1920.0, FALLBACK_MONITOR_EXTENT)
+        );
+        assert_eq!(
+            clamp_resize_target(1.0e9, 1.0e9, fallback),
+            fallback,
+            "an unknown monitor still bounds a resize"
+        );
+        assert_eq!(
+            clamp_move_target(1.0e9, 1.0e9, fallback),
+            egui::Pos2::new(FALLBACK_MONITOR_EXTENT - 1.0, FALLBACK_MONITOR_EXTENT - 1.0)
         );
     }
 }
