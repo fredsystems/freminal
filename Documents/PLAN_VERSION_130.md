@@ -55,7 +55,7 @@ enriched stubs again and get re-decomposed at activation.
 | 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Pending merge | None                               |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -8508,6 +8508,9 @@ Group F — Hygiene:
   | GHSA-67hw-cw29-r66f | low      | 148.17 | `58b202eb`    |
   | GHSA-jhw2-xjg6-mwhq | medium   | 148.18 | `32a09934`    |
 
+  **Done (2026-10-20):** PR #572 merged as `1d9b7166` (merge commit, so the branch hashes
+  above are on `main`). At the maintainer's direction all 13 advisories now read vulnerable
+  `< 0.13.0-beta.2`, patched `0.13.0-beta.2`; CVE requests remain the maintainer's.
   Issues closed by the merge: #556 (148.8), #557 (148.4), #558 (148.5), #559 (148.6), #560
   (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
   (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
