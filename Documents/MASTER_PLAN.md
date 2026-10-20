@@ -248,7 +248,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 145 | Kitty Shell-Integration Compatibility       | `PLAN_VERSION_130.md` (Task 145)              | Planned       | Task 129; decision            |
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
 | 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
-| 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Pending merge | None                          |
+| 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
 
 ---
 
@@ -835,7 +835,7 @@ Update this section as tasks complete:
 | 131  | 2026-10-10 | 2026-10-11 | 131.1-131.10, C1-C5, two review passes; merged via PR #537 (`61b86bf5`)            |
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
-| 148  | 2026-10-19 |            | 148.1-148.27, C1-C12 except C6, reviews R1-R7/RC1-RC10; task-148 branch            |
+| 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
 
 ---
 
