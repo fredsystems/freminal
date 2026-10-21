@@ -218,7 +218,7 @@ impl LoadedFace {
     /// Load from static (bundled) font data.
     ///
     /// The `&'static` bytes are copied into an `Arc<[u8]>` exactly once here,
-    /// at load time, so that later face-cache misses reuse the same allocation
+    /// at load time, so that later shaper-cache misses reuse the same allocation
     /// via a cheap `Arc::clone` rather than re-copying the (multi-MB) bundled
     /// font on every miss (Task #430).
     fn from_static(data: &'static [u8]) -> Option<Self> {
@@ -544,18 +544,33 @@ pub struct FontManager {
 
     /// Per-face cache of `harfrust` shaping data (Task #430).
     /// Populated lazily by [`Self::build_cached_shaper`] (invoked from
-    /// [`Self::shape_cached`]) and cleared whenever the underlying font
-    /// bytes may have changed (`rebuild`) or for consistency on a
-    /// size/DPI change (`set_font_size`, `update_pixels_per_point`), even
-    /// though the bytes themselves are unaffected by those. `None` means the
-    /// face is not loaded or failed to parse as a `harfrust::FontRef`.
-    face_cache: RefCell<FxHashMap<FaceId, Option<CachedShaper>>>,
+    /// [`Self::shape_cached`]). A cached `ShaperData` is tied to the exact
+    /// bytes and collection index it was built from, so an entry must be
+    /// dropped whenever its `FaceId` may start naming different bytes:
+    ///
+    /// - `rebuild` clears the whole cache (the font family may change).
+    /// - `set_font_size` and `update_pixels_per_point` evict only the
+    ///   `FaceId::System(_)` entries (see
+    ///   [`Self::evict_system_face_shaping_caches`]). They drop `system_faces`,
+    ///   which `FaceId::System(idx)` indexes into, so the same id can name a
+    ///   different font afterwards. Every other entry survives: those faces'
+    ///   bytes are not touched by a size or DPI change, and `ShaperData` is
+    ///   independent of size (shaping sets no scale, so positions are in font
+    ///   units).
+    ///
+    /// `None` means the face is not loaded, its collection index does not fit
+    /// in `u32`, or it failed to parse as a `harfrust::FontRef`.
+    shaper_cache: RefCell<FxHashMap<FaceId, Option<CachedShaper>>>,
 
     /// Per-`(face, ligatures, script, direction)` cache of compiled
     /// `harfrust::ShapePlan`s (Task #430). Plan compilation is the
     /// second-most expensive part of cold shaping after shaper-data
     /// construction; caching it avoids recompiling an identical plan on every
-    /// shape call. Cleared alongside `face_cache`.
+    /// shape call. Invalidated together with `shaper_cache` and for the same
+    /// reason: a plan is compiled against a specific face's bytes, so `rebuild`
+    /// clears it and `set_font_size` / `update_pixels_per_point` evict only the
+    /// entries whose `FaceId` is `System(_)`. A plan does not depend on size
+    /// or DPI, so the remaining entries stay valid.
     plan_cache: RefCell<FxHashMap<PlanKey, Arc<harfrust::ShapePlan>>>,
 
     /// Authoritative cell width in integer pixels.
@@ -674,7 +689,7 @@ impl FontManager {
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
             fallback_metrics_cache: RefCell::new(FxHashMap::default()),
-            face_cache: RefCell::new(FxHashMap::default()),
+            shaper_cache: RefCell::new(FxHashMap::default()),
             plan_cache: RefCell::new(FxHashMap::default()),
             cell_width,
             cell_height,
@@ -808,23 +823,26 @@ impl FontManager {
         self.loaded_face(face_id).map(|f| f.index)
     }
 
-    /// Shape `buffer` for `face_id` using cached `harfrust::ShaperData` and a
+    /// Shape `text` for `face_id` using cached `harfrust::ShaperData` and a
     /// cached compiled `harfrust::ShapePlan` (Task #430), instead of
     /// rebuilding the per-font shaping data and recompiling the plan on every
     /// call.
     ///
-    /// This calls `buffer.guess_segment_properties()` itself, so callers need
-    /// not (it is idempotent: it only fills an unset script and an invalid
-    /// direction). harfrust does not guess them on its own, and both are
-    /// required: `ShapePlan::new` asserts the direction is not `Invalid`, and
-    /// `Shaper::shape` asserts (always-on, not debug-only) that the plan's
-    /// script/direction equal the buffer's. Guessing here guarantees the plan
-    /// is built from, and keyed by, exactly the properties the buffer will be
-    /// shaped with, so a caller that forgets cannot panic production.
+    /// The input `harfrust::UnicodeBuffer` is built here (`new`, `push_str`,
+    /// `guess_segment_properties`) rather than supplied by the caller. harfrust
+    /// does not guess segment properties on its own, and both are required:
+    /// `ShapePlan::new` asserts the direction is not `Invalid`, and shaping
+    /// with a plan requires the plan's script/direction to equal the buffer's
+    /// (in harfrust 0.12 this is an always-on `assert_eq!` in
+    /// `shape_with_plan`; the crate's rustdoc describes it as debug-only, so a
+    /// harfrust bump must re-check which it is).
     ///
-    /// The plan is compiled from `ligatures.features()`, which is also passed
-    /// to `ShapeOptions::features`; the plan key contains `ligatures`, so it
-    /// fully determines the plan's inputs.
+    /// The plan key `(FaceId, LigatureShaping, Script, Direction)` captures
+    /// every plan input: the buffer is built here with no language set
+    /// (language is always `None`), and script and direction are guessed here,
+    /// so a caller cannot shape with a language, script or direction the key
+    /// does not record. The plan's features come from `ligatures.features()`,
+    /// which is also passed to `ShapeOptions::features`.
     ///
     /// Returns `None` if the face is not loaded or fails to parse as a
     /// `harfrust::FontRef` — callers must fall back to tofu glyphs in that
@@ -834,17 +852,19 @@ impl FontManager {
         &self,
         face_id: FaceId,
         ligatures: LigatureShaping,
-        mut buffer: harfrust::UnicodeBuffer,
+        text: &str,
     ) -> Option<harfrust::GlyphBuffer> {
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
         buffer.guess_segment_properties();
 
-        if !self.face_cache.borrow().contains_key(&face_id) {
+        if !self.shaper_cache.borrow().contains_key(&face_id) {
             let built = self.build_cached_shaper(face_id);
-            self.face_cache.borrow_mut().insert(face_id, built);
+            self.shaper_cache.borrow_mut().insert(face_id, built);
         }
 
-        let face_cache = self.face_cache.borrow();
-        let cached = face_cache.get(&face_id)?.as_ref()?;
+        let shaper_cache = self.shaper_cache.borrow();
+        let cached = shaper_cache.get(&face_id)?.as_ref()?;
         // Cheap per-call borrow views over the cached bytes and shaper data.
         let font_ref = harfrust::FontRef::from_index(&cached.bytes, cached.index).ok()?;
         let shaper = cached.data.shaper(&font_ref).build();
@@ -867,8 +887,10 @@ impl FontManager {
             // collapses `None` to `script::UNKNOWN` — and reimplementing the
             // guesser to recover it would risk drifting from harfrust. This
             // collapse is safe: when a plan is supplied, `Shaper::shape`
-            // matches it to the buffer with an always-on `assert_eq!` (not a
-            // `debug_assert`) of `buffer.script.unwrap_or(UNKNOWN)` against
+            // matches it to the buffer with an `assert_eq!` (always-on in
+            // harfrust 0.12, not a `debug_assert`; its rustdoc calls it
+            // debug-only, so re-check on a harfrust bump) of
+            // `buffer.script.unwrap_or(UNKNOWN)` against
             // `plan.script.unwrap_or(UNKNOWN)`, so harfrust itself treats
             // `None` and `Some(UNKNOWN)` as equivalent for plan selection, and
             // no real font registers a `zzzz` (UNKNOWN) OpenType script tag,
@@ -897,8 +919,27 @@ impl FontManager {
         Some(shaper.shape(buffer, options))
     }
 
+    /// Drop every cached shaper and shape plan whose `FaceId` is
+    /// `FaceId::System(_)`.
+    ///
+    /// Called when `system_faces` has just been cleared (`set_font_size`,
+    /// `update_pixels_per_point`): `FaceId::System(idx)` indexes into that
+    /// vector, so after repopulation the same id can name a different font and
+    /// a cached `ShaperData` / `ShapePlan` for it would shape with the wrong
+    /// one. Primary, bundled and emoji entries are kept: those faces are only
+    /// replaced in `rebuild`, and their shaping data and plans do not depend
+    /// on size or DPI.
+    fn evict_system_face_shaping_caches(&self) {
+        self.shaper_cache
+            .borrow_mut()
+            .retain(|face_id, _| !matches!(face_id, FaceId::System(_)));
+        self.plan_cache
+            .borrow_mut()
+            .retain(|(face_id, ..), _| !matches!(face_id, FaceId::System(_)));
+    }
+
     /// Build (but do not cache) a [`CachedShaper`] for `face_id`. Called from
-    /// [`Self::shape_cached`] on a face-cache miss.
+    /// [`Self::shape_cached`] on a shaper-cache miss.
     ///
     /// Parses the font once (to validate it and build the `ShaperData`) and
     /// returns `None` if the face is not loaded, its collection index does not
@@ -914,13 +955,13 @@ impl FontManager {
         Some(CachedShaper { bytes, index, data })
     }
 
-    /// Number of faces currently cached in [`Self::face_cache`].
+    /// Number of shaper-data entries currently cached in [`Self::shaper_cache`].
     ///
     /// Test-only: exposes cache population without leaking internals into
     /// the production API.
     #[cfg(test)]
-    pub(crate) fn face_cache_len(&self) -> usize {
-        self.face_cache.borrow().len()
+    pub(crate) fn shaper_cache_len(&self) -> usize {
+        self.shaper_cache.borrow().len()
     }
 
     /// Number of shape plans currently cached in [`Self::plan_cache`].
@@ -1084,7 +1125,7 @@ impl FontManager {
         // (compiled against a specific face) may now reference the wrong
         // font entirely — this clear is required for correctness, not just
         // consistency (Task #430).
-        self.face_cache.borrow_mut().clear();
+        self.shaper_cache.borrow_mut().clear();
         self.plan_cache.borrow_mut().clear();
 
         if effective_family_changed {
@@ -1103,7 +1144,9 @@ impl FontManager {
     ///
     /// Used by font zoom (Ctrl+Plus/Minus/0) to apply a per-tab effective
     /// font size that differs from the config's base size.  Returns `Ok(true)`
-    /// if the size actually changed and caches were invalidated.
+    /// if the size actually changed and caches were invalidated (system-face
+    /// shaping caches are evicted; see
+    /// [`Self::evict_system_face_shaping_caches`]).
     ///
     /// # Errors
     ///
@@ -1126,11 +1169,14 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
-        // The underlying font bytes are unchanged by a size-only change, so
-        // this is not strictly required for correctness, but it is cleared
-        // for consistency with the other per-face caches above (Task #430).
-        self.face_cache.borrow_mut().clear();
-        self.plan_cache.borrow_mut().clear();
+        // `system_faces` was just cleared and `FaceId::System(idx)` indexes
+        // into it, so cached shaping data for a `System` id may name a
+        // different font once the vector is repopulated: evict those entries.
+        // A size change does not touch the primary, bundled or emoji faces'
+        // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
+        // are independent of size (no scale is set; positions are font
+        // units), so the other entries stay valid (Task #430).
+        self.evict_system_face_shaping_caches();
 
         Ok(true)
     }
@@ -1173,11 +1219,14 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
-        // The underlying font bytes are unchanged by a DPI-only change, so
-        // this is not strictly required for correctness, but it is cleared
-        // for consistency with the other per-face caches above (Task #430).
-        self.face_cache.borrow_mut().clear();
-        self.plan_cache.borrow_mut().clear();
+        // `system_faces` was just cleared and `FaceId::System(idx)` indexes
+        // into it, so cached shaping data for a `System` id may name a
+        // different font once the vector is repopulated: evict those entries.
+        // A DPI change does not touch the primary, bundled or emoji faces'
+        // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
+        // are independent of DPI (no scale is set; positions are font units),
+        // so the other entries stay valid (Task #430).
+        self.evict_system_face_shaping_caches();
 
         Ok(true)
     }
@@ -2489,68 +2538,34 @@ mod tests {
         );
     }
 
-    /// `shape_cached` guesses segment properties itself: an unguessed buffer
-    /// (script unset, direction `Invalid`) must neither panic in harfrust's
-    /// plan-construction / plan-match asserts nor shape differently from one
-    /// that was guessed up front. Hebrew is right-to-left and absent from the
-    /// bundled face, so it also exercises a non-default direction (the glyphs
-    /// are simply `.notdef`).
-    #[test]
-    fn shape_cached_guesses_segment_properties_itself() {
-        let fm = default_manager();
-
-        for text in ["AB", "\u{05D0}\u{05D1}"] {
-            let mut unguessed = harfrust::UnicodeBuffer::new();
-            unguessed.push_str(text);
-            let from_unguessed = fm
-                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, unguessed)
-                .expect("an unguessed buffer must still shape");
-
-            let mut guessed = harfrust::UnicodeBuffer::new();
-            guessed.push_str(text);
-            guessed.guess_segment_properties();
-            let from_guessed = fm
-                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, guessed)
-                .expect("a guessed buffer must shape");
-
-            assert_eq!(
-                from_unguessed.glyph_infos().len(),
-                from_guessed.glyph_infos().len(),
-                "`{text}`: glyph count must not depend on pre-guessing"
-            );
-            for (a, b) in from_unguessed
-                .glyph_infos()
-                .iter()
-                .zip(from_guessed.glyph_infos())
-            {
-                assert_eq!((a.glyph_id, a.cluster), (b.glyph_id, b.cluster), "`{text}`");
-            }
-            for (a, b) in from_unguessed
-                .glyph_positions()
-                .iter()
-                .zip(from_guessed.glyph_positions())
-            {
-                assert_eq!(
-                    (a.x_advance, a.y_advance, a.x_offset, a.y_offset),
-                    (b.x_advance, b.y_advance, b.x_offset, b.y_offset),
-                    "`{text}`"
-                );
-            }
-        }
-    }
-
-    /// Shape `text` on `PrimaryRegular` and flatten the result to
-    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
-    fn shape_flat(
+    /// Shape `text` through an uncached harfrust reference built directly from
+    /// the face bytes, with a guessed buffer and no plan, and flatten the
+    /// result like [`shape_flat`].
+    fn shape_reference_flat(
         fm: &FontManager,
+        face_id: FaceId,
         text: &str,
         ligatures: LigatureShaping,
     ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let bytes = fm.face_data(face_id).expect("face must be loaded");
+        let index = u32::value_from(fm.face_index(face_id).expect("face must be loaded"))
+            .expect("face index must fit in u32");
+        let font_ref = harfrust::FontRef::from_index(bytes, index).expect("face must parse");
+        let shaper_data = harfrust::ShaperData::new(&font_ref);
+        let shaper = shaper_data.shaper(&font_ref).build();
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
-        let output = fm
-            .shape_cached(FaceId::PrimaryRegular, ligatures, buffer)
-            .expect("the bundled regular face must shape");
+        buffer.guess_segment_properties();
+        let output = shaper.shape(
+            buffer,
+            harfrust::ShapeOptions::new().features(ligatures.features()),
+        );
+        flatten_glyph_buffer(&output)
+    }
+
+    /// Flatten a shaped buffer to
+    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
+    fn flatten_glyph_buffer(output: &harfrust::GlyphBuffer) -> Vec<(u32, u32, i32, i32, i32, i32)> {
         output
             .glyph_infos()
             .iter()
@@ -2566,6 +2581,55 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// `shape_cached` builds and guesses the buffer itself, so a right-to-left
+    /// run (non-default direction, plan key differs from LTR) must shape
+    /// without tripping harfrust's plan-construction / plan-match asserts and
+    /// must equal an uncached reference built with `guess_segment_properties`.
+    /// Hebrew is absent from the bundled face, so its glyphs are `.notdef`;
+    /// one glyph per character is still expected.
+    #[test]
+    fn shape_cached_shapes_rtl_text_without_panicking() {
+        let fm = default_manager();
+
+        for text in ["AB", "\u{05D0}\u{05D1}"] {
+            let cached = fm
+                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, text)
+                .unwrap_or_else(|| panic!("`{text}` must shape"));
+            assert_eq!(
+                cached.glyph_infos().len(),
+                2,
+                "`{text}`: two characters must shape to two glyphs"
+            );
+            assert_eq!(
+                flatten_glyph_buffer(&cached),
+                shape_reference_flat(&fm, FaceId::PrimaryRegular, text, LigatureShaping::Disabled),
+                "`{text}`: cached output must equal the uncached reference"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_cached_handles_empty_text() {
+        let fm = default_manager();
+        let output = fm
+            .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "")
+            .expect("empty text must still shape on a loaded face");
+        assert_eq!(output.glyph_infos().len(), 0);
+    }
+
+    /// Shape `text` on `PrimaryRegular` and flatten the result to
+    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
+    fn shape_flat(
+        fm: &FontManager,
+        text: &str,
+        ligatures: LigatureShaping,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let output = fm
+            .shape_cached(FaceId::PrimaryRegular, ligatures, text)
+            .expect("the bundled regular face must shape");
+        flatten_glyph_buffer(&output)
     }
 
     /// The plan cache is keyed on the ligature mode, so whichever mode shapes
@@ -2595,8 +2659,18 @@ mod tests {
             ids(&enabled_a),
             "the bundled face ligates `->`, so the two modes must shape differently"
         );
-        assert_eq!(ids(&disabled_a), [17, 34]);
-        assert_eq!(ids(&enabled_a), [13760, 14040]);
+
+        // With ligatures off, each character shapes to its own cmap glyph; the
+        // expected ids come from the face itself rather than being hard-coded.
+        let charmap = enabled_first
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("the bundled regular face must be loaded")
+            .charmap();
+        assert_eq!(
+            ids(&disabled_a),
+            [u32::from(charmap.map('-')), u32::from(charmap.map('>'))],
+            "Disabled must shape `->` to the per-character cmap glyphs"
+        );
     }
 
     #[test]
@@ -2629,20 +2703,18 @@ mod tests {
         );
     }
 
-    // --- Task #430: shape_cached reuses the Face + ShapePlan caches ---
+    // --- Task #430: shape_cached reuses the ShaperData + ShapePlan caches ---
 
     #[test]
-    fn shape_cached_reuses_face_and_plan_across_calls() {
+    fn shape_cached_reuses_shaper_and_plan_across_calls() {
         let fm = default_manager();
 
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str("AB");
-        let first = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
+        let first = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "AB");
         assert!(first.is_some(), "first shape_cached call should succeed");
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             1,
-            "face cache should have one entry after the first call"
+            "shaper cache should have one entry after the first call"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2650,14 +2722,12 @@ mod tests {
             "plan cache should have one entry after the first call"
         );
 
-        let mut buffer2 = harfrust::UnicodeBuffer::new();
-        buffer2.push_str("CD");
-        let second = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer2);
+        let second = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "CD");
         assert!(second.is_some(), "second shape_cached call should succeed");
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             1,
-            "face cache must not grow on a cache hit for the same face"
+            "shaper cache must not grow on a cache hit for the same face"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2671,18 +2741,14 @@ mod tests {
     fn shape_cached_misses_on_face_change() {
         let fm = default_manager();
 
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "A");
 
-        let mut buffer2 = harfrust::UnicodeBuffer::new();
-        buffer2.push_str("B");
-        let _ = fm.shape_cached(FaceId::PrimaryBold, LigatureShaping::Disabled, buffer2);
+        let _ = fm.shape_cached(FaceId::PrimaryBold, LigatureShaping::Disabled, "B");
 
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             2,
-            "a different FaceId must populate a separate face-cache entry"
+            "a different FaceId must populate a separate shaper-cache entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2692,14 +2758,12 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_clears_face_and_plan_caches() {
+    fn rebuild_clears_shaper_and_plan_caches() {
         let config = Config::default();
         let mut fm = FontManager::new(&config, 1.0).unwrap();
 
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "A");
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let mut new_config = config;
@@ -2707,9 +2771,9 @@ mod tests {
         let _ = fm.rebuild(&new_config, 1.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             0,
-            "face cache must be cleared by rebuild()"
+            "shaper cache must be cleared by rebuild()"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2718,52 +2782,142 @@ mod tests {
         );
     }
 
+    /// Primary, bundled and emoji faces keep their cached shaper and plan
+    /// across a size/DPI change: their bytes are untouched and shaping is
+    /// size-independent (positions are in font units).
     #[test]
-    fn set_font_size_clears_face_and_plan_caches() {
+    fn set_font_size_keeps_non_system_shaping_caches() {
         let mut fm = default_manager();
 
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let before = shape_flat(&fm, "->", LigatureShaping::Enabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
-            0,
-            "face cache must be cleared by set_font_size()"
+            fm.shaper_cache_len(),
+            1,
+            "set_font_size() must keep the PrimaryRegular shaper entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
-            0,
-            "plan cache must be cleared by set_font_size()"
+            1,
+            "set_font_size() must keep the PrimaryRegular plan entry"
+        );
+        assert_eq!(
+            shape_flat(&fm, "->", LigatureShaping::Enabled),
+            before,
+            "re-shaping the primary face after set_font_size() must be unchanged"
         );
     }
 
+    /// Primary, bundled and emoji faces keep their cached shaper and plan
+    /// across a size/DPI change: their bytes are untouched and shaping is
+    /// size-independent (positions are in font units).
     #[test]
-    fn update_ppp_changed_clears_face_and_plan_caches() {
+    fn update_ppp_changed_keeps_non_system_shaping_caches() {
         let mut fm = default_manager();
 
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let before = shape_flat(&fm, "->", LigatureShaping::Enabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let _ = fm.update_pixels_per_point(2.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
-            0,
-            "face cache must be cleared by update_pixels_per_point()"
+            fm.shaper_cache_len(),
+            1,
+            "update_pixels_per_point() must keep the PrimaryRegular shaper entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
-            0,
-            "plan cache must be cleared by update_pixels_per_point()"
+            1,
+            "update_pixels_per_point() must keep the PrimaryRegular plan entry"
         );
+        assert_eq!(
+            shape_flat(&fm, "->", LigatureShaping::Enabled),
+            before,
+            "re-shaping the primary face after update_pixels_per_point() must be unchanged"
+        );
+    }
+
+    /// Seed the caches with a `FaceId::System(0)` entry alongside the real
+    /// `PrimaryRegular` ones. The `System(0)` shaper entry is a cached failure
+    /// and the plan is borrowed from the primary shaper: both are only cache
+    /// values here, the point is which keys survive.
+    fn seed_system_face_shaping_caches(fm: &FontManager) {
+        let _ = shape_flat(fm, "->", LigatureShaping::Disabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let plan = {
+            let loaded = fm
+                .loaded_face(FaceId::PrimaryRegular)
+                .expect("primary regular must be loaded");
+            let bytes = loaded.arc_bytes();
+            let font_ref = harfrust::FontRef::from_index(&bytes, 0).expect("face must parse");
+            let data = harfrust::ShaperData::new(&font_ref);
+            let shaper = data.shaper(&font_ref).build();
+            Arc::new(harfrust::ShapePlan::new(
+                &shaper,
+                harfrust::Direction::LeftToRight,
+                Some(harfrust::script::LATIN),
+                None,
+                LigatureShaping::Disabled.features(),
+            ))
+        };
+        fm.shaper_cache.borrow_mut().insert(FaceId::System(0), None);
+        fm.plan_cache.borrow_mut().insert(
+            (
+                FaceId::System(0),
+                LigatureShaping::Disabled,
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+            ),
+            plan,
+        );
+        assert_eq!(fm.shaper_cache_len(), 2);
+        assert_eq!(fm.plan_cache_len(), 2);
+    }
+
+    /// Assert that exactly the `System(_)` cache entries are gone and the
+    /// `PrimaryRegular` ones remain.
+    fn assert_only_system_shaping_caches_evicted(fm: &FontManager, what: &str) {
+        assert_eq!(fm.shaper_cache_len(), 1, "{what}: shaper cache size");
+        assert!(
+            fm.shaper_cache
+                .borrow()
+                .contains_key(&FaceId::PrimaryRegular),
+            "{what}: PrimaryRegular shaper entry must remain"
+        );
+        assert!(
+            !fm.shaper_cache.borrow().contains_key(&FaceId::System(0)),
+            "{what}: System(0) shaper entry must be evicted"
+        );
+        assert_eq!(fm.plan_cache_len(), 1, "{what}: plan cache size");
+        assert!(
+            fm.plan_cache
+                .borrow()
+                .keys()
+                .all(|(face_id, ..)| *face_id == FaceId::PrimaryRegular),
+            "{what}: only PrimaryRegular plan entries may remain"
+        );
+    }
+
+    /// `FaceId::System(idx)` indexes into `system_faces`, which a size or DPI
+    /// change drops, so cached shaping data keyed on a system face must go.
+    #[test]
+    fn size_and_dpi_changes_evict_system_face_shaping_caches() {
+        let mut sized = default_manager();
+        seed_system_face_shaping_caches(&sized);
+        let _ = sized.set_font_size(sized.font_size_pt() + 4.0).unwrap();
+        assert_only_system_shaping_caches_evicted(&sized, "set_font_size()");
+
+        let mut scaled = default_manager();
+        seed_system_face_shaping_caches(&scaled);
+        let _ = scaled.update_pixels_per_point(2.0).unwrap();
+        assert_only_system_shaping_caches_evicted(&scaled, "update_pixels_per_point()");
     }
 
     // --- Test 15: swash FontRef creation ---

@@ -965,15 +965,12 @@ fn shape_run_canonical(
 ) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
-    // Build the input buffer. `shape_cached` guesses its segment properties
+    // Try to shape via the cached shaper data + ShapePlan (Task #430).
+    // `shape_cached` builds the buffer and guesses its segment properties
     // (script, direction) itself before looking up or building the matching
     // cached `ShapePlan`.
-    let mut buffer = harfrust::UnicodeBuffer::new();
-    buffer.push_str(&run.text);
-
-    // Try to shape via the cached shaper data + ShapePlan (Task #430).
     font_manager
-        .shape_cached(run.face_id, ligatures, buffer)
+        .shape_cached(run.face_id, ligatures, &run.text)
         .map_or_else(
             || {
                 // No face available — produce tofu (glyph_id=0) per character.
@@ -2307,7 +2304,7 @@ mod tests {
         assert!(glyphs[0].x_px.abs() < f32::EPSILON);
     }
 
-    // --- Task #430: shape_with_plan output-identity vs the old shape() path ---
+    // --- Task #430: cached-plan output-identity vs an uncached one-shot shape ---
 
     /// One shaped glyph's full identity: glyph id, source cluster, and the
     /// positional data (advances + offsets). Positions are included because
@@ -2386,10 +2383,8 @@ mod tests {
         } else {
             LigatureShaping::Disabled
         };
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str(text);
         let output = fm
-            .shape_cached(face_id, ligatures, buffer)
+            .shape_cached(face_id, ligatures, text)
             .expect("shape_cached must succeed for a loaded face");
         glyph_identities(&output)
     }

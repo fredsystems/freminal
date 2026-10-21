@@ -90,6 +90,15 @@ const UNIT_QUAD: [f32; 12] = [
     1.0, 0.0, 1.0, 1.0, 0.0, 1.0, // triangle 2
 ];
 
+/// Ligature mode every toast run is shaped with, in both
+/// [`ToastTextRenderer::measure`] and [`ToastTextRenderer::build_instances`].
+///
+/// Toast text shapes with ligatures disabled (`kern` on): the same feature set
+/// the terminal uses when its ligatures are turned off, so the `FontManager`'s
+/// shared shape-plan cache never mixes feature sets. `measure` sizes the toast
+/// pill before `build_instances` draws it, so both must use this one value.
+const TOAST_LIGATURE_SHAPING: LigatureShaping = LigatureShaping::Disabled;
+
 /// Initial size (pixels, square) of the dedicated toast-text glyph atlas.
 ///
 /// Toast text is tiny compared to a full terminal grid — a handful of short
@@ -388,14 +397,7 @@ impl ToastTextRenderer {
         // as `emit_run` does.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
-        // Toast text shapes with ligatures disabled (kern on): the same feature
-        // set the terminal uses with ligatures off, so the shared plan cache
-        // can never mix feature sets.
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str(text);
-
-        let Some(shaped) = font_manager.shape_cached(face_id, LigatureShaping::Disabled, buffer)
-        else {
+        let Some(shaped) = font_manager.shape_cached(face_id, TOAST_LIGATURE_SHAPING, text) else {
             warn!("toast_text_pass: face {face_id:?} could not shape measured run {text:?}");
             return ToastTextMetrics::ZERO;
         };
@@ -472,13 +474,7 @@ impl ToastTextRenderer {
         // module-level "single-face-per-run" docs.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
-        // Toast text shapes with ligatures disabled (kern on): the same feature
-        // set the terminal uses with ligatures off, so the shared plan cache
-        // can never mix feature sets.
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str(&run.text);
-
-        let Some(shaped) = font_manager.shape_cached(face_id, LigatureShaping::Disabled, buffer)
+        let Some(shaped) = font_manager.shape_cached(face_id, TOAST_LIGATURE_SHAPING, &run.text)
         else {
             warn!(
                 "toast_text_pass: face {face_id:?} could not shape toast run {:?}",
@@ -713,9 +709,12 @@ const fn pack_glyph_instance(
 mod tests {
     #[allow(unused_imports)] // referenced in the `measure` tests below.
     use super::{
-        FG_INSTANCE_FLOATS, ToastTextMetrics, ToastTextRenderer, ToastTextRun, pack_glyph_instance,
+        FG_INSTANCE_FLOATS, ToastTextMetrics, ToastTextRenderer, ToastTextRun, gl_f32_i32,
+        pack_glyph_instance,
     };
-    use crate::gui::font_manager::FontManager;
+    use crate::gui::atlas::GlyphKey;
+    use crate::gui::font_manager::{FaceId, FontManager, GlyphStyle, LigatureShaping};
+    use conv2::ValueFrom;
     use freminal_common::config::Config;
 
     /// Helper: create a default `FontManager` for tests, exactly as
@@ -905,5 +904,113 @@ mod tests {
         let large = renderer.measure("Hi", 24.0, &mut fm);
         assert!(large.width > small.width);
         assert!(large.height > small.height);
+    }
+
+    /// Sum of `x_advance` over `text` shaped with `ligatures` on the face the
+    /// first character resolves to, scaled to `size_px` — the width `measure`
+    /// would report for that ligature mode.
+    fn shaped_width(
+        fm: &mut FontManager,
+        text: &str,
+        size_px: f32,
+        ligatures: LigatureShaping,
+    ) -> f32 {
+        let first = text.chars().next().expect("text must be non-empty");
+        let (face_id, _) = fm.resolve_glyph(first, GlyphStyle::new(false, false));
+        let upem = fm
+            .swash_font_ref(face_id)
+            .map(|f| f.metrics(&[]).units_per_em)
+            .expect("face must be loaded");
+        let scale = size_px / f32::from(upem);
+        fm.shape_cached(face_id, ligatures, text)
+            .expect("face must shape")
+            .glyph_positions()
+            .iter()
+            .map(|pos| gl_f32_i32(pos.x_advance) * scale)
+            .sum()
+    }
+
+    /// `measure` shapes with the toast ligature mode and is independent of
+    /// whatever mode the shared `FontManager` shaped the same text with
+    /// earlier (the plan cache must not leak between modes). The bundled face
+    /// is monospaced, so ligature and per-character shaping have equal
+    /// advance sums: this pins cache independence and the width derivation,
+    /// while `build_instances_rasterises_toast_text_without_ligatures` is
+    /// the test that distinguishes the two modes.
+    #[test]
+    fn measure_matches_disabled_shaped_width_after_enabled_shape_of_same_text() {
+        let renderer = ToastTextRenderer::new();
+
+        let mut fresh = test_font_manager();
+        let baseline = renderer.measure("->", 16.0, &mut fresh);
+
+        let mut warmed = test_font_manager();
+        let _ = shaped_width(&mut warmed, "->", 16.0, LigatureShaping::Enabled);
+        let after_enabled = renderer.measure("->", 16.0, &mut warmed);
+        assert_eq!(
+            after_enabled, baseline,
+            "a prior Enabled shape of the same text must not change a toast measurement"
+        );
+
+        let expected = shaped_width(&mut fresh, "->", 16.0, LigatureShaping::Disabled);
+        assert!(
+            (baseline.width - expected).abs() < f32::EPSILON,
+            "measure width {} must equal the Disabled-shaped advance sum {expected}",
+            baseline.width
+        );
+    }
+
+    /// Rasterised toast glyphs are the per-character (ligature-off) glyphs:
+    /// the atlas holds the cmap glyphs of `-` and `>` and none of the ligature
+    /// glyphs the face substitutes for `->` when ligatures are enabled. This
+    /// fails if a toast call site is switched to `LigatureShaping::Enabled`.
+    #[test]
+    fn build_instances_rasterises_toast_text_without_ligatures() {
+        let mut renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let face_id = FaceId::PrimaryRegular;
+        let size_px: u16 = 16;
+
+        // Warm the shared caches with the ligature shaping first, so a mode
+        // leak would also show up here.
+        let ligature_ids: Vec<u16> = fm
+            .shape_cached(face_id, LigatureShaping::Enabled, "->")
+            .expect("face must shape")
+            .glyph_infos()
+            .iter()
+            .map(|info| u16::value_from(info.glyph_id).expect("glyph id fits in u16"))
+            .collect();
+        let charmap = fm
+            .swash_font_ref(face_id)
+            .expect("face must be loaded")
+            .charmap();
+        let plain_ids = [charmap.map('-'), charmap.map('>')];
+        assert_ne!(
+            ligature_ids,
+            plain_ids.to_vec(),
+            "the bundled face must ligate `->` for this test to discriminate"
+        );
+
+        let mut run = sample_run("->");
+        run.size_px = f32::from(size_px);
+        let _ = renderer.build_instances(&[run], &mut fm);
+
+        let key = |glyph_id| GlyphKey {
+            glyph_id,
+            face_id,
+            size_px,
+        };
+        for id in plain_ids {
+            assert!(
+                renderer.atlas.get(&key(id)).is_some(),
+                "per-character glyph {id} must be rasterised for toast text"
+            );
+        }
+        for id in ligature_ids {
+            assert!(
+                renderer.atlas.get(&key(id)).is_none(),
+                "ligature glyph {id} must not be rasterised for toast text"
+            );
+        }
     }
 }

@@ -406,7 +406,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("shape_visible_partial_dirty_200x50", |b| {
         // `iter_batched_ref` (not `iter_batched`): the routine takes the
         // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
-        // (freeing the cached parsed `Face` and compiled `ShapePlan`,
+        // (freeing the cached `ShaperData` and compiled `ShapePlan`,
         // Task #430) happens OUTSIDE the timed region. In production the
         // `FontManager` lives for the whole session and is never dropped
         // per frame, so timing its `Drop` here would measure a cost that
