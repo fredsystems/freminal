@@ -21,6 +21,23 @@ use crate::ansi_components::tracer::{
     escape_sequence_for_log_bounded, lossy_sequence_for_log_bounded,
 };
 
+/// Most capability names answered for one XTGETTCAP request; extra names are
+/// ignored.
+///
+/// This is freminal resource policy, not xterm behaviour: xterm answers every
+/// name in the request (`misc.c`, the `XTGETTCAP` case of `do_dcs`, xterm-412).
+/// Real clients ask for a handful of names; the cap bounds the replies one
+/// request can queue.
+pub const MAX_XTGETTCAP_NAMES: usize = 64;
+
+/// Longest capability name, in hex characters, that XTGETTCAP will decode or
+/// echo.  A longer name is answered `DCS 0 + r ST` without echoing it.
+///
+/// Freminal resource policy (xterm echoes any name, `misc.c`, xterm-412): no
+/// capability freminal answers has a name anywhere near this long, so the echo
+/// of an unknown name is bounded to this size.
+pub const MAX_XTGETTCAP_NAME_HEX_LEN: usize = 128;
+
 impl TerminalHandler {
     /// Handle a DCS (Device Control String) sequence.
     ///
@@ -218,8 +235,26 @@ impl TerminalHandler {
         let payload_str = String::from_utf8_lossy(hex_payload);
 
         // Split on ';' to support multiple capability queries in a single DCS.
+        let mut answered = 0_usize;
         for hex_name in payload_str.split(';') {
             if hex_name.is_empty() {
+                continue;
+            }
+
+            if answered >= MAX_XTGETTCAP_NAMES {
+                tracing::debug!(
+                    "XTGETTCAP: more than {MAX_XTGETTCAP_NAMES} names in one request; ignoring the rest"
+                );
+                break;
+            }
+            answered += 1;
+
+            if hex_name.len() > MAX_XTGETTCAP_NAME_HEX_LEN {
+                tracing::debug!(
+                    "XTGETTCAP: name of {} hex characters exceeds the limit; not echoed",
+                    hex_name.len()
+                );
+                self.write_dcs_response("0+r");
                 continue;
             }
 
@@ -912,6 +947,63 @@ mod tests {
         let response2 = recv_pty_response(&rx);
         let tn_hex = TerminalHandler::hex_encode("xterm-256color");
         assert_eq!(response2, format!("\x1bP1+r544E={tn_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_answers_at_most_max_names_per_request() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // 1000 copies of "RGB" (524742).
+        let names = vec!["524742"; 1000].join(";");
+        let dcs = build_dcs_payload(format!("+q{names}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(rx.try_iter().count(), super::MAX_XTGETTCAP_NAMES);
+        assert_eq!(super::MAX_XTGETTCAP_NAMES, 64);
+    }
+
+    #[test]
+    fn xtgettcap_exactly_max_names_all_answered() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let names = vec!["524742"; super::MAX_XTGETTCAP_NAMES].join(";");
+        let dcs = build_dcs_payload(format!("+q{names}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(rx.try_iter().count(), super::MAX_XTGETTCAP_NAMES);
+    }
+
+    #[test]
+    fn xtgettcap_overlong_unknown_name_not_echoed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        // 10_000 hex characters of well-formed, unknown name.
+        let name = "41".repeat(5000);
+        let dcs = build_dcs_payload(format!("+q{name}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(recv_pty_response(&rx), "\x1bP0+r\x1b\\");
+        assert!(rx.try_recv().is_err(), "exactly one reply expected");
+    }
+
+    #[test]
+    fn xtgettcap_name_at_hex_limit_is_still_echoed() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let name = "41".repeat(super::MAX_XTGETTCAP_NAME_HEX_LEN / 2);
+        assert_eq!(name.len(), super::MAX_XTGETTCAP_NAME_HEX_LEN);
+        let dcs = build_dcs_payload(format!("+q{name}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        assert_eq!(recv_pty_response(&rx), format!("\x1bP0+r{name}\x1b\\"));
     }
 
     #[test]

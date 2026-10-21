@@ -34,6 +34,8 @@ mod icon_lookup;
 mod icon_raster;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod icon_tempfiles;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod markup;
 mod pane_state;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod presentation;
@@ -65,6 +67,8 @@ pub use effects::{RecordedShow, RecordingSystemBackend};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub(in crate::gui) use glue::Osc99CellAccess;
 pub use icon_cache::Osc99IconCache;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(in crate::gui) use markup::escape_body_markup;
 pub use pane_state::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, PaneActivity, PaneKeyboardFocus, PaneVisibility,
     TabActivity, WindowMinimized, ZoomOcclusion,

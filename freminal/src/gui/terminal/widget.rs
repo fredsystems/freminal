@@ -1083,7 +1083,13 @@ fn render_context_menu_area(
                 if let Some(ref url) = url_under_cursor {
                     ui.separator();
                     let label = format!("Open {}", truncate_url(url, 40));
-                    if ui.button(label).clicked() {
+                    // A target the allow-list would refuse is shown disabled
+                    // rather than offered and silently ignored.
+                    let openable = matches!(
+                        crate::gui::link_open::classify_link(url),
+                        crate::gui::link_open::LinkOpenDecision::Open
+                    );
+                    if ui.add_enabled(openable, egui::Button::new(label)).clicked() {
                         *action = Some(ContextMenuAction::OpenUrl(url.clone()));
                         *close = true;
                     }
@@ -1187,17 +1193,7 @@ fn dispatch_context_menu_action(
             view_state.selection.select_all(snap);
         }
         ContextMenuAction::OpenUrl(url) => {
-            let url_str = url;
-            if let Err(e) = std::thread::Builder::new()
-                .name("freminal-open-url".to_string())
-                .spawn(move || {
-                    if let Err(e) = open::that(&url_str) {
-                        error!("Failed to open URL {url_str}: {e}");
-                    }
-                })
-            {
-                error!("Failed to spawn URL-open thread: {e}");
-            }
+            crate::gui::link_open::open_link(url);
         }
         ContextMenuAction::CopyUrl(url) => {
             ui.ctx().copy_text(url);
@@ -4955,7 +4951,15 @@ impl FreminalTerminalWidget {
                     )
                     .show(|ui| {
                         ui.label(&url_text);
-                        ui.weak(if cfg!(target_os = "macos") {
+                        // Same pure rule the context menu uses to disable
+                        // "Open URL", so both entry points agree.
+                        let openable = matches!(
+                            crate::gui::link_open::classify_link(&url_text),
+                            crate::gui::link_open::LinkOpenDecision::Open
+                        );
+                        ui.weak(if !openable {
+                            "Opening this link is blocked by policy"
+                        } else if cfg!(target_os = "macos") {
                             "Cmd+click to open"
                         } else {
                             "Ctrl+click to open"
@@ -4970,17 +4974,7 @@ impl FreminalTerminalWidget {
                             && (i.modifiers.ctrl || i.modifiers.mac_cmd)
                     });
                     if clicked {
-                        let url_str = url.url.clone();
-                        if let Err(e) = std::thread::Builder::new()
-                            .name("freminal-open-url".to_string())
-                            .spawn(move || {
-                                if let Err(e) = open::that(&url_str) {
-                                    error!("Failed to open URL {url_str}: {e}");
-                                }
-                            })
-                        {
-                            error!("Failed to spawn URL-open thread: {e}");
-                        }
+                        crate::gui::link_open::open_link(url.url.clone());
                     }
                 }
             } else {

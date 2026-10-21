@@ -227,25 +227,26 @@ pub(in crate::buffer) struct MergeWindowFp {
 /// instead of re-walking and re-rebasing every row's tags on every single
 /// frame.
 ///
-/// # Why `fp` + `first_rebuilt_row` alone are not sufficient
+/// # Why `fp` + the merge floor alone are not sufficient
 ///
 /// `MergeWindowFp` equality only proves the window covers the *same logical
 /// rows* (same first row number, same length) at the *same detection
 /// setting* -- not that every individual row within it still holds the
-/// content it held when this cache was built. The `first_rebuilt_row` signal
-/// (any row that was `dirty` or had a `None` cache entry on the current call)
-/// catches ordinary edits, but **cannot** catch an in-place *rotation* of
+/// content it held when this cache was built. The merge floor signal
+/// (the first row that was `dirty` or had a `None` cache entry on the current
+/// call, pulled back across a wrapped-URL group where needed) catches
+/// ordinary edits, but **cannot** catch an in-place *rotation* of
 /// already-clean cache entries between row indices without touching their
 /// `dirty`/`None` status -- which is exactly what `scroll.rs`'s confined
 /// scroll-region primitives (`scroll_slice_up`/`scroll_slice_down`) do. A
 /// rotation changes which content sits at a given row number, and the number
 /// is the one thing the fingerprint trusts. Those two sites don't rely on
-/// `fp`/`first_rebuilt_row` at all: each one sets `self.merge_cache = None`
+/// `fp`/the merge floor at all: each one sets `self.merge_cache = None`
 /// explicitly, at the exact point where it performs the rotation, forcing the
 /// next flatten to take the full-merge fallback instead of reusing a
 /// now-stale prefix. See `Buffer::merge_cache`'s field doc for the complete
 /// accounting of every invalidation mechanism (fingerprint,
-/// `first_rebuilt_row`, and the explicit-`None` sites) and which sites rely
+/// the merge floor, and the explicit-`None` sites) and which sites rely
 /// on which.
 ///
 /// Front eviction (`enforce_scrollback_limit`, `scroll_up`,
@@ -353,6 +354,29 @@ impl<'a> MergedWindow<'a> {
             tags: &cached.tags,
             row_offsets: &cached.row_offsets,
         }
+    }
+
+    /// Whether the tag covering the last flat character **before** window
+    /// row `row` begins carries a URL.
+    ///
+    /// `false` for row `0` (nothing precedes it) and for an out-of-range
+    /// `row`. A URL tag that reaches a row boundary is the only way a
+    /// previous merge can have attributed the end of one row to a URL that
+    /// continued into the next — see
+    /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`]'s "merge floor"
+    /// section. O(log tags).
+    fn url_tag_reaches_row_start(self, row: usize) -> bool {
+        let Some(&cut) = self.row_offsets.get(row) else {
+            return false;
+        };
+        if cut == 0 {
+            return false;
+        }
+        let first_after = self.tags.partition_point(|tag| tag.start < cut);
+        first_after
+            .checked_sub(1)
+            .and_then(|idx| self.tags.get(idx))
+            .is_some_and(|tag| tag.url.is_some())
     }
 
     /// Half-open `[start, end)` flat-character range covered by window row
@@ -532,8 +556,10 @@ impl Buffer {
     /// - a previous [`MergeCache`] exists,
     /// - its [`MergeWindowFp`] (first-row logical number + window length +
     ///   auto-detect) matches this call's,
-    /// - a `boundary` row index exists (`min` of `first_rebuilt_row` — from
-    ///   Step 1 — and the smallest `row_idx` in `refined_auto_urls` — from
+    /// - a `boundary` row index exists (`min` of the merge floor — the first
+    ///   rebuilt row, pulled back across a wrapped-URL group whose
+    ///   refinement the rebuild can invalidate; from Step 1 — and the
+    ///   smallest `row_idx` in `refined_auto_urls` — from
     ///   Step 1.5; either can be `None`, in which case the other alone is
     ///   the boundary, and if both are `None` there is no boundary at all,
     ///   meaning nothing in the window needs re-merging),
@@ -936,18 +962,17 @@ impl Buffer {
         // exact window. Only when this holds is it safe to let Step 1 skip
         // redetecting an unchanged wrapped-URL group — see
         // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment.
-        let reuse_available = merge_cache.as_ref().is_some_and(|cached| cached.fp == fp);
+        let previous = merge_cache
+            .as_ref()
+            .filter(|cached| cached.fp == fp)
+            .map(MergedWindow::from_cache);
+        let reuse_available = previous.is_some();
 
-        let (refined_auto_urls, first_rebuilt_row) =
-            Self::refresh_row_cache_and_refine_wrapped_urls(
-                rows,
-                cache,
-                auto_detect,
-                reuse_available,
-            );
+        let (refined_auto_urls, merge_floor) =
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, previous);
 
         let refined_min_row = refined_auto_urls.first().map(|(idx, _)| *idx);
-        let boundary = match (first_rebuilt_row, refined_min_row) {
+        let boundary = match (merge_floor, refined_min_row) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) | (None, Some(a)) => Some(a),
             (None, None) => None,
@@ -1061,7 +1086,7 @@ impl Buffer {
         // `reuse_available` was already `false`, `refined_auto_urls` is
         // already fully (ungated) correct and reused as-is.
         let full_refined_auto_urls = if reuse_available {
-            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false).0
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, None).0
         } else {
             refined_auto_urls
         };
@@ -1187,7 +1212,7 @@ impl Buffer {
         context: &str,
     ) {
         let (oracle_refined, _) =
-            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false);
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, None);
         let oracle = Self::merge_row_caches_full(cache, &oracle_refined);
         assert_eq!(
             actual,
@@ -1319,13 +1344,13 @@ impl Buffer {
         // and fix up auto-detected URLs that wrap across rows. See
         // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment. This
         // (full, uncached-merge) path never needs the incremental merge
-        // boundary, so `first_rebuilt_row` is discarded. `reuse_available =
-        // false`: there is no merge cache here for a skipped group's rows to
-        // ever be reused from (see that parameter's doc comment), so
+        // boundary, so the merge floor is discarded. `previous = None`:
+        // there is no merge cache here for a skipped group's rows to ever be
+        // reused from (see that parameter's doc comment), so
         // redetection gating must stay disabled — every group with URL
         // signal is always redetected, matching the pre-Part-C behavior.
-        let (refined_auto_urls, _first_rebuilt_row) =
-            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false);
+        let (refined_auto_urls, _merge_floor) =
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, None);
 
         // ── Step 2: merge per-row results into the global flat vectors. This
         // is a pure function of `(cache, refined_auto_urls)` — see
@@ -1593,74 +1618,86 @@ impl Buffer {
     /// allocation) whenever no row needed correction — the overwhelmingly
     /// common case.
     ///
-    /// Also returns `first_rebuilt_row`: the smallest `row_idx` (window
-    /// relative) whose cache entry was actually rebuilt this call (`row.dirty`
-    /// was set, or its cache entry was `None`/stale) — `None` when nothing in
-    /// the window needed rebuilding at all. [`Buffer::visible_as_tchars_and_tags_extended`]
-    /// uses this as the incremental merge boundary: see its doc comment.
+    /// Also returns the **merge floor**: the smallest `row_idx` (window
+    /// relative) whose merged output this call may have changed relative to
+    /// `previous` — `None` when nothing in the window needed rebuilding at
+    /// all. [`Buffer::visible_as_tchars_and_tags_extended`] uses it as the
+    /// incremental merge boundary: see its doc comment. It is the first
+    /// rebuilt row (`row.dirty` was set, or its cache entry was `None` /
+    /// stale), pulled back to the start of that row's logical-line group
+    /// when URL refinement could reach across the boundary; see below.
     ///
-    /// ## Task 121 Part C: gating group redetection on dirtiness
+    /// ## Task 121 Part C: gating group redetection, and the merge floor
     ///
-    /// When `reuse_available` is `true`, [`redetect_urls_for_group`] is only
-    /// called for a wrapped-URL group when the group has URL signal **and**
-    /// at least one row in that group was actually rebuilt this call
-    /// (tracked below as `group_has_rebuilt_row`). When `reuse_available` is
-    /// `false`, gating is disabled entirely and every group with URL signal
-    /// is always redetected — the original (Pass A) behavior.
+    /// `previous` is `Some` **only** when the caller is about to reuse rows
+    /// from a previous, still-valid, already-merged result (i.e. the
+    /// incremental fast path in `visible_as_tchars_and_tags_extended`, and
+    /// only once it has confirmed `MergeCache::fp` still matches). Every
+    /// other caller — [`Self::rows_as_tchars_and_tags_cached`] (used by the
+    /// scrollback path, which has no merge cache at all) and any debug-only
+    /// oracle recomputation — must pass `None`, which disables gating
+    /// entirely: every group with URL signal is always redetected (the
+    /// original Pass A behavior). Without a previous merge to fall back on,
+    /// skipping redetection for a clean-but-never-refined group would
+    /// permanently bake the group's raw, wrap-truncated per-row `auto_urls`
+    /// into the merge output instead of the correct wrap-boundary-safe URL,
+    /// since nothing else will ever re-derive it.
     ///
-    /// `reuse_available` must be `true` **only** when the caller is about to
-    /// reuse rows skipped here from a previous, still-valid, already-merged
-    /// result (i.e. the incremental fast path in
-    /// `visible_as_tchars_and_tags_extended`, and only once it has confirmed
-    /// `MergeCache::fp` still matches). Every other caller —
-    /// [`Self::rows_as_tchars_and_tags_cached`] (used by the scrollback path,
-    /// which has no merge cache at all) and any debug-only oracle
-    /// recomputation — must pass `false`. Without a previous merge to fall
-    /// back on, skipping redetection for a clean-but-never-refined group
-    /// would permanently bake the group's raw, wrap-truncated per-row
-    /// `auto_urls` into the merge output instead of the correct
-    /// wrap-boundary-safe URL, since nothing else will ever re-derive it.
+    /// With a `previous` merge, everything strictly before the merge floor
+    /// is copied from it verbatim and everything at or after the floor is
+    /// re-merged from the rows' cache entries plus this sparse refined list.
+    /// That is only correct when the copied prefix is exactly what a from-
+    /// scratch merge would produce for those rows, which a URL refinement
+    /// (a group's URLs depend on **all** of the group's rows, and on which
+    /// rows are in the group at all) can falsify in two ways. Both were
+    /// the cause of issue #559 (incremental/oracle divergence):
     ///
-    /// **Why skipping a clean group cannot diverge from re-detecting it
-    /// anyway, when `reuse_available` is `true`:** when a group is skipped,
-    /// every row in it keeps whatever `auto_urls` its (unchanged)
-    /// `RowCacheEntry` already holds — the exact same `auto_urls` the
-    /// *previous* call's redetection left in place, because nothing rebuilt
-    /// those entries in between. Two cases for where that group sits
-    /// relative to the incremental merge boundary computed from
-    /// `first_rebuilt_row`:
+    /// 1. **A clean group lying after the first rebuilt row.** It is
+    ///    re-merged from its cache entries, which hold only the single-row
+    ///    (wrap-truncated) `auto_urls`, so it must be redetected. A group is
+    ///    therefore skipped only when it ends at or before the merge floor
+    ///    (`merge_floor >= group_end`), i.e. it is wholly in the copied
+    ///    prefix. (An earlier formulation only required the group *itself*
+    ///    to contain a rebuilt row, which let a clean group below an edited
+    ///    line silently lose its wrapped-URL refinement.)
+    /// 2. **A rebuilt row changes the refinement of rows before it.** The
+    ///    previous merge refined the group *as it was*, including the
+    ///    rebuilt row's old content and old `join`. If the rebuilt row is a
+    ///    soft-wrap continuation, the rows of its group before it were
+    ///    refined together with it, so the floor is pulled back to the
+    ///    group's first row (whether or not the group has URL signal now:
+    ///    the signal may have lived in the rebuilt row's *old* content).
+    ///    If the rebuilt row instead starts a new logical line, the group
+    ///    ending just before it may previously have continued into it; that
+    ///    group's floor is pulled back to its first row when it spans more
+    ///    than one row, or, for a single-row group, when `previous` has a
+    ///    URL tag reaching the rebuilt row's start (a single row can only
+    ///    have been refined if a URL actually ran across that boundary).
+    ///    This keeps the common case — the rebuilt row follows an ordinary
+    ///    unwrapped line — at a floor of exactly the first rebuilt row.
     ///
-    /// - The group lies **entirely before** the boundary: those rows are
-    ///   reused verbatim from the previous merge's cached prefix (never
-    ///   re-merged), so their previously-spliced URL tags are exactly what
-    ///   ships — consistent by construction. This is exactly the case
-    ///   `reuse_available` promises will hold.
-    /// - The group has **any row at or after** the boundary: that row's
-    ///   cache entry was itself rebuilt (`dirty` or `None`), which is exactly
-    ///   the condition that sets `group_has_rebuilt_row` for this group, so
-    ///   redetection **does** fire and the tail (incremental) merge consumes
-    ///   the freshly refined entry — never silently falls back to a stale
-    ///   per-row `auto_urls`.
-    ///
-    /// So a group is only ever skipped when either (a) it is wholly reused
-    /// from the cached prefix (correct: nothing new to redetect), or (b) it
-    /// is wholly within the freshly-merged tail but happens to have no
-    /// rebuilt row — impossible, since "within the tail" is defined by
-    /// having a rebuilt row. There is no third case — **provided the
-    /// prefix-reuse promise `reuse_available` encodes actually holds**,
-    /// which is the caller's responsibility to verify before passing `true`.
+    /// Pulling the floor back never costs more than the logical line's
+    /// rows, which the tail merge walks anyway once any of them is dirty.
     fn refresh_row_cache_and_refine_wrapped_urls(
         rows: &mut [Row],
         cache: &mut [Option<RowCacheEntry>],
         auto_detect: bool,
-        reuse_available: bool,
+        previous: Option<MergedWindow<'_>>,
     ) -> (Vec<(usize, Vec<AutoUrlRange>)>, Option<usize>) {
         let row_count = rows.len();
         let mut refined_auto_urls: Vec<(usize, Vec<AutoUrlRange>)> = Vec::new();
         let mut group_start = 0usize;
         let mut group_has_url_signal = false;
-        let mut group_has_rebuilt_row = false;
-        let mut first_rebuilt_row: Option<usize> = None;
+        let mut merge_floor: Option<usize> = None;
+
+        // A group `[start, end)` is redetected when it has more than one row
+        // and some URL signal, unless the previous merge's copy of it can be
+        // trusted: that is, `previous` exists and the group ends at or
+        // before the merge floor (or no row has been rebuilt at all).
+        let must_redetect = |floor: Option<usize>, group_end: usize| match previous {
+            None => true,
+            Some(_) => floor.is_some_and(|f| f < group_end),
+        };
 
         for row_idx in 0..row_count {
             // Invalidate cache entries that were built with a different
@@ -1683,11 +1720,22 @@ impl Buffer {
                 needs_rebuild
             };
 
-            if rebuilt_this_row {
-                if first_rebuilt_row.is_none() {
-                    first_rebuilt_row = Some(row_idx);
-                }
-                group_has_rebuilt_row = true;
+            let continues_group =
+                row_idx != 0 && rows[row_idx].join == RowJoin::ContinueLogicalLine;
+
+            if rebuilt_this_row && merge_floor.is_none() {
+                // `group_start` still names the group *before* this row when
+                // this row starts a new one — it is only advanced below.
+                let previous_group_may_have_continued = row_idx > 0
+                    && (row_idx - group_start > 1
+                        || previous.is_some_and(|prev| prev.url_tag_reaches_row_start(row_idx)));
+                let floor = if auto_detect && (continues_group || previous_group_may_have_continued)
+                {
+                    group_start
+                } else {
+                    row_idx
+                };
+                merge_floor = Some(floor);
             }
 
             if !auto_detect {
@@ -1698,18 +1746,15 @@ impl Buffer {
             // not a soft-wrap continuation of the previous one. Runs of
             // `RowJoin::ContinueLogicalLine` rows are one DECAWM-wrapped
             // logical line; see `redetect_urls_for_group`'s doc comment.
-            let starts_new_group =
-                row_idx == 0 || rows[row_idx].join != RowJoin::ContinueLogicalLine;
-            if starts_new_group {
+            if !continues_group {
                 if row_idx - group_start > 1
                     && group_has_url_signal
-                    && (!reuse_available || group_has_rebuilt_row)
+                    && must_redetect(merge_floor, row_idx)
                 {
                     redetect_urls_for_group(cache, group_start, row_idx, &mut refined_auto_urls);
                 }
                 group_start = row_idx;
                 group_has_url_signal = false;
-                group_has_rebuilt_row = rebuilt_this_row;
             }
             // Two independent signals that this row might be part of a
             // wrapped URL:
@@ -1737,12 +1782,12 @@ impl Buffer {
         if auto_detect
             && row_count - group_start > 1
             && group_has_url_signal
-            && (!reuse_available || group_has_rebuilt_row)
+            && must_redetect(merge_floor, row_count)
         {
             redetect_urls_for_group(cache, group_start, row_count, &mut refined_auto_urls);
         }
 
-        (refined_auto_urls, first_rebuilt_row)
+        (refined_auto_urls, merge_floor)
     }
 
     /// Collect the indices of tags in `tags` that carry a URL.
@@ -3061,16 +3106,16 @@ mod incremental_merge_equivalence_tests {
         let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
         buf.ensure_decompressed(visible_start..visible_end);
         let auto_detect = buf.auto_detect_urls;
-        // `reuse_available = false`: this test replays Step 1 + Step 2
+        // `previous = None`: this test replays Step 1 + Step 2
         // directly (bypassing `merge_cache` entirely), so gating must stay
         // disabled here too — same as the real `merge_row_caches_full`
         // (scrollback/full-merge) callers.
         let (rows, cache, _) = buf.rows.split_mut();
-        let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
+        let (refined, _merge_floor) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
             &mut rows[visible_start..visible_end],
             &mut cache[visible_start..visible_end],
             auto_detect,
-            false,
+            None,
         );
         let actual =
             Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined);
@@ -3285,11 +3330,11 @@ mod incremental_merge_tests {
         buf.ensure_decompressed(visible_start..visible_end);
         let auto_detect = buf.auto_detect_urls;
         let (rows, cache, _) = buf.rows.split_mut();
-        let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
+        let (refined, _merge_floor) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
             &mut rows[visible_start..visible_end],
             &mut cache[visible_start..visible_end],
             auto_detect,
-            false,
+            None,
         );
         Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined)
     }
@@ -4965,5 +5010,186 @@ mod row_epoch_tests {
             "a z_index-only placement change must bump the row's epoch — \
              the whole placement is compared, not just image_id"
         );
+    }
+}
+
+/// Regression tests for issue #559: the incremental flatten fast path must
+/// reproduce the full-merge oracle when a wrapped-URL group's refinement is
+/// invalidated, or depends on, a row that was rebuilt.
+///
+/// Every test flattens once (priming the merge cache), changes the buffer,
+/// flattens again through the incremental path, and compares the result with
+/// [`Buffer::visible_as_tchars_and_tags_full_merge`] called directly — so the
+/// assertion holds in release test builds, where the internal
+/// `debug_assert!` oracle is compiled out.
+#[cfg(test)]
+mod incremental_url_refinement_tests {
+    use super::*;
+    use crate::buffer::Buffer;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// The URL strings carried by a merge's URL tags, in order.
+    fn url_strings(tags: &[FormatTag], url_indices: &[usize]) -> Vec<String> {
+        url_indices
+            .iter()
+            .filter_map(|&i| tags.get(i).and_then(|t| t.url.as_ref()))
+            .map(|u| u.url.clone())
+            .collect()
+    }
+
+    fn assert_incremental_matches_full_merge(buf: &mut Buffer, context: &str) {
+        let incremental = buf.visible_as_tchars_and_tags(0);
+        let full = buf.visible_as_tchars_and_tags_full_merge(0);
+        assert_eq!(incremental, full, "{context}: incremental != full merge");
+    }
+
+    /// A clean wrapped-URL group *below* an edited row must keep its
+    /// wrap-boundary-safe URL. Before the fix the group was skipped because
+    /// it held no rebuilt row itself, and the tail re-merge (which starts at
+    /// the edited row above it) fell back to the truncated per-row
+    /// detection.
+    #[test]
+    fn clean_wrapped_url_group_below_a_rebuilt_row_keeps_its_full_url() {
+        let mut buf = Buffer::new(20, 4);
+        assert!(buf.auto_detect_urls());
+
+        buf.insert_text(&text("head"));
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&text("plain"));
+        buf.handle_lf();
+        buf.handle_cr();
+        // 28 characters: wraps from row 2 onto row 3.
+        let url = "https://example.com/abcdefgh";
+        buf.insert_text(&text(url));
+        assert_eq!(buf.rows()[3].join, RowJoin::ContinueLogicalLine);
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        // Touch only row 1, which sits above the wrapped group.
+        buf.rows[1].mark_dirty();
+
+        assert_incremental_matches_full_merge(&mut buf, "dirty row above a wrapped URL");
+        let (_chars, tags, _offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        let urls = url_strings(&tags, &url_indices);
+        assert!(!urls.is_empty(), "the wrapped URL must still be detected");
+        assert!(
+            urls.iter().all(|u| u == url),
+            "every URL tag must carry the full URL, got {urls:?}"
+        );
+    }
+
+    /// Editing the last row of a group so the group no longer has URL signal
+    /// must also drop the URL tag on the group's *earlier*, clean rows: the
+    /// previous merge refined them together with the old content of the row.
+    #[test]
+    fn rebuilt_continuation_row_invalidates_stale_url_on_earlier_group_rows() {
+        let mut buf = Buffer::new(20, 3);
+        assert!(buf.auto_detect_urls());
+
+        buf.insert_text(&text("head"));
+        buf.handle_lf();
+        buf.handle_cr();
+        // Row 1 ends in `m`; row 2 starts `ailto:http:/`. The partial scheme
+        // `http:/` at the end of row 2 is the group's only URL signal, and
+        // together the rows read as the URL `mailto:http:/`.
+        buf.insert_text(&text("abcdefghijklmnopqrsm"));
+        buf.insert_text(&text("ailto:http:/"));
+        assert_eq!(buf.rows()[2].join, RowJoin::ContinueLogicalLine);
+
+        let (_c, tags, _o, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert_eq!(
+            url_strings(&tags, &url_indices),
+            vec!["mailto:http:/".to_owned()],
+            "setup: the wrapped URL must be detected across both rows"
+        );
+
+        // Appending `?` removes the partial-scheme signal from row 2.
+        buf.insert_text(&text("?"));
+
+        assert_incremental_matches_full_merge(&mut buf, "signal lost from a continuation row");
+        let (_c, tags, _o, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(
+            url_strings(&tags, &url_indices).is_empty(),
+            "no URL may survive on the earlier, clean row of the group"
+        );
+    }
+
+    /// A rebuilt row that stops being a continuation (here by clearing its
+    /// join) ends the group before it, so the group's earlier rows must not
+    /// keep a URL refined together with the row's old content.
+    #[test]
+    fn rebuilt_row_that_stops_continuing_invalidates_url_on_the_row_before() {
+        let mut buf = Buffer::new(20, 3);
+        assert!(buf.auto_detect_urls());
+
+        buf.insert_text(&text("head"));
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&text("abcdefghijklmnopqrsm"));
+        buf.insert_text(&text("ailto:http:/"));
+        assert_eq!(buf.rows()[2].join, RowJoin::ContinueLogicalLine);
+
+        let (_c, tags, _o, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert_eq!(url_strings(&tags, &url_indices).len(), 1, "setup");
+
+        buf.rows[2].join = RowJoin::NewLogicalLine;
+        buf.rows[2].mark_dirty();
+
+        assert_incremental_matches_full_merge(&mut buf, "group split by a rebuilt row");
+        let (_c, tags, _o, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(
+            url_strings(&tags, &url_indices).is_empty(),
+            "the row before a now-separate row must lose the cross-row URL"
+        );
+    }
+
+    /// The merge floor must stay at the first rebuilt row when URL refinement
+    /// cannot reach across the boundary: the incremental path is only worth
+    /// having if an ordinary edit does not drag extra rows into the
+    /// re-merge.
+    #[test]
+    fn merge_floor_is_the_first_rebuilt_row_when_no_wrapped_group_is_involved() {
+        let mut buf = Buffer::new(20, 8);
+        for i in 0..8 {
+            buf.insert_text(&text(&format!("line {i}")));
+            if i < 7 {
+                buf.handle_lf();
+                buf.handle_cr();
+            }
+        }
+        let _ = buf.visible_as_tchars_and_tags(0);
+
+        buf.rows[5].mark_dirty();
+        let auto_detect = buf.auto_detect_urls;
+        let previous = buf.merge_cache.as_ref().map(MergedWindow::from_cache);
+        let (rows, cache, _) = buf.rows.split_mut();
+        let (refined, floor) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
+            &mut rows[..8],
+            &mut cache[..8],
+            auto_detect,
+            previous,
+        );
+        assert!(refined.is_empty(), "no wrapped group, nothing to refine");
+        assert_eq!(floor, Some(5), "floor must be the first rebuilt row");
+    }
+
+    /// With nothing rebuilt there is no floor at all, so the no-op fast path
+    /// still applies.
+    #[test]
+    fn merge_floor_is_none_when_nothing_was_rebuilt() {
+        let mut buf = Buffer::new(20, 4);
+        buf.insert_text(&text("one"));
+        let _ = buf.visible_as_tchars_and_tags(0);
+
+        let auto_detect = buf.auto_detect_urls;
+        let previous = buf.merge_cache.as_ref().map(MergedWindow::from_cache);
+        let (rows, cache, _) = buf.rows.split_mut();
+        let (_refined, floor) =
+            Buffer::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, previous);
+        assert_eq!(floor, None);
     }
 }

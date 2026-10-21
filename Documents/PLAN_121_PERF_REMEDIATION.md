@@ -197,19 +197,19 @@ not re-litigated by someone reading the source document that prompted it.
 All eleven subtasks below are merged to `main`. Every SHA and PR number here was
 verified against the repository. Do not redo any of this work.
 
-| #      | Subtask                                                  | Landed as        |
-| ------ | -------------------------------------------------------- | ---------------- |
-| 121.1  | Batched LF+flatten benchmark at scrollback capacity      | `76dd67f9`       |
-| 121.2  | `merge_cache` invalidation on scrollback-capacity drain  | PR #458          |
-| 121.3  | `FaceId` font caches to `FxHashMap`                      | PR #460          |
-| 121.4  | Command-block gutter hover repaint over-firing           | PR #461          |
-| 121.5  | Region-gate pointer-move full-present; skip no-op PTY repaint | PR #464     |
-| 121.6  | Frame-profiling harness                                  | `0620cc60`       |
-| 121.7  | Replay gate-blocker + per-signal instrumentation         | `436a54f1`       |
-| 121.8  | `RedrawRequested` disqualified `ChromeMode::Replay`      | `7d483998`       |
-| 121.9  | egui repaint-cause instrumentation                       | `ab88d0f5`       |
-| 121.10 | Pointer-frame suppression + repaint-delay override       | `19780e16`       |
-| 121.11 | CodeRabbit remediation on PR #465                        | `f762ca02`       |
+| #      | Subtask                                                       | Landed as  |
+| ------ | ------------------------------------------------------------- | ---------- |
+| 121.1  | Batched LF+flatten benchmark at scrollback capacity           | `76dd67f9` |
+| 121.2  | `merge_cache` invalidation on scrollback-capacity drain       | PR #458    |
+| 121.3  | `FaceId` font caches to `FxHashMap`                           | PR #460    |
+| 121.4  | Command-block gutter hover repaint over-firing                | PR #461    |
+| 121.5  | Region-gate pointer-move full-present; skip no-op PTY repaint | PR #464    |
+| 121.6  | Frame-profiling harness                                       | `0620cc60` |
+| 121.7  | Replay gate-blocker + per-signal instrumentation              | `436a54f1` |
+| 121.8  | `RedrawRequested` disqualified `ChromeMode::Replay`           | `7d483998` |
+| 121.9  | egui repaint-cause instrumentation                            | `ab88d0f5` |
+| 121.10 | Pointer-frame suppression + repaint-delay override            | `19780e16` |
+| 121.11 | CodeRabbit remediation on PR #465                             | `f762ca02` |
 
 Subtasks 121.6 through 121.11 all shipped in PR #465.
 
@@ -694,15 +694,15 @@ accuracy** — "unactioned" was true when it was written and is not any more. Ev
 entry in this group carried a "measure/confirm before fixing" instruction, and every
 one has now had it honoured. The result:
 
-| Subtask | #459 item | Outcome                                                       |
-| ------- | --------- | ------------------------------------------------------------- |
-| 121.18  | 3         | Closed — a redesign, not a subtask (2026-08-16)               |
+| Subtask | #459 item | Outcome                                                         |
+| ------- | --------- | --------------------------------------------------------------- |
+| 121.18  | 3         | Closed — a redesign, not a subtask (2026-08-16)                 |
 | 121.19  | 4         | Closed — the ASCII gate is inert at default config (2026-08-16) |
-| 121.20  | 5         | Live, but needs a maintainer gate decision (2026-08-20)       |
-| 121.21  | 6         | Closed — not a freminal-side problem (2026-08-20)             |
-| 121.22  | 7         | Closed — freminal owns no lever (2026-08-20)                  |
-| 121.23  | 8         | Complete — `Documents/PROFILING.md`                           |
-| 121.24  | —         | Complete — measured and refuted (2026-08-20)                  |
+| 121.20  | 5         | Live, but needs a maintainer gate decision (2026-08-20)         |
+| 121.21  | 6         | Closed — not a freminal-side problem (2026-08-20)               |
+| 121.22  | 7         | Closed — freminal owns no lever (2026-08-20)                    |
+| 121.23  | 8         | Complete — `Documents/PROFILING.md`                             |
+| 121.24  | —         | Complete — measured and refuted (2026-08-20)                    |
 
 **Four of the six candidate items did not survive contact with their own
 verification step.** That is worth stating plainly rather than burying, because it
@@ -1501,11 +1501,11 @@ highlighting on tabs appeared to work throughout.
 Recorded so future work does not repeat the sequence. Each was a plausible,
 code-reading-derived hypothesis; each was disproved by a maintainer build test.
 
-| # | Hypothesis                                                      | Result                                                                                   |
-| - | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| 1 | Half-wired #436.8 drag latch: OR the latch into the frame drain | **Falsified.** Reduced tab-click failures, made border drags *worse*. Withdrawn.          |
-| 2 | 121.13 raised `Replay` duty cycle and is the cause; revert it   | **Falsified.** Revert verified present in the build; symptom persisted.                   |
-| 3 | Dependency change in the beta.6→beta.7 window                   | **Ruled out** statically: only `toml 1.1.3→1.1.4`. egui stack pinned and untouched.      |
+| #   | Hypothesis                                                      | Result                                                                              |
+| --- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| 1   | Half-wired #436.8 drag latch: OR the latch into the frame drain | **Falsified.** Reduced tab-click failures, made border drags *worse*. Withdrawn.    |
+| 2   | 121.13 raised `Replay` duty cycle and is the cause; revert it   | **Falsified.** Revert verified present in the build; symptom persisted.             |
+| 3   | Dependency change in the beta.6→beta.7 window                   | **Ruled out** statically: only `toml 1.1.3→1.1.4`. egui stack pinned and untouched. |
 
 Hypothesis 1 was wrong because it protects the span *after* a press registers, and the
 decisive frame is the one *before* it (see below). Hypothesis 2 was wrong because
@@ -1695,10 +1695,10 @@ changed the scheduling, and before the cache was found to be unsound. Re-derive 
 
 **Separate the two mechanisms before measuring — they are routinely conflated.**
 
-| Mechanism            | What it decides                                                       | Status after 121.32  |
-| -------------------- | --------------------------------------------------------------------- | -------------------- |
-| Frame suppression    | Whether a `CursorMoved` schedules a repaint **at all** (`should_schedule_cursor_moved` / `pointer_motion_needs_repaint`, `event_loop.rs`) | **Intact, untouched** |
-| Chrome cache         | Given a frame happens, rebuild chrome widgets or replay a cached texture (`ChromeMode`) | **Disabled globally** |
+| Mechanism         | What it decides                                                                                                                           | Status after 121.32   |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Frame suppression | Whether a `CursorMoved` schedules a repaint **at all** (`should_schedule_cursor_moved` / `pointer_motion_needs_repaint`, `event_loop.rs`) | **Intact, untouched** |
+| Chrome cache      | Given a frame happens, rebuild chrome widgets or replay a cached texture (`ChromeMode`)                                                   | **Disabled globally** |
 
 The "don't render when the pointer is just moving over terminal content" win is
 mechanism 1 and still works. 121.32 disabled mechanism 2, and disabled it on **every

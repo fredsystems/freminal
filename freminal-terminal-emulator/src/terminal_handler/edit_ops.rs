@@ -12,6 +12,20 @@ use super::TerminalHandler;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
 
+/// Largest repeat count REP (CSI Ps b) will honour.
+///
+/// xterm caps every CSI numeric parameter at `MAX_I_PARAM` (65535,
+/// `ptyx.h`), so its effective REP maximum is 65535 repeats; `CASE_REP` in
+/// `charproc.c` then prints the character through the normal text path.
+/// Larger counts are clamped to this, as in xterm; unclamped, a hostile stream
+/// could request an arbitrarily large allocation and amount of work
+/// (GHSA-2746-x3cj-58c7).
+const REP_MAX_COUNT: usize = 65_535;
+
+/// Number of characters written per `Buffer::insert_text` call while
+/// servicing REP. Bounds the working buffer, independent of the repeat count.
+const REP_CHUNK_LEN: usize = 256;
+
 impl TerminalHandler {
     /// Handle erase in display (ED)
     pub fn handle_erase_in_display(&mut self, mode: EraseDisplayMode) {
@@ -58,10 +72,24 @@ impl TerminalHandler {
     }
 
     /// Handle REP (CSI Ps b) — repeat the last graphic character Ps times.
+    ///
+    /// `count` is clamped to [`REP_MAX_COUNT`], and the repeats are written in
+    /// fixed-size chunks of [`REP_CHUNK_LEN`] so memory use is O(chunk), never
+    /// O(count). Successive `Buffer::insert_text` calls continue exactly where
+    /// the previous one stopped (the cursor, including a pending wrap, is the
+    /// only state carried between calls), so the result is identical to a
+    /// single call with all `count` characters.
     pub(super) fn handle_repeat_character(&mut self, count: usize) {
-        if let Some(ref ch) = self.last_graphic_char {
-            let repeated = vec![*ch; count];
-            self.buffer.insert_text(&repeated);
+        let Some(ch) = self.last_graphic_char else {
+            return;
+        };
+
+        let chunk = [ch; REP_CHUNK_LEN];
+        let mut remaining = count.min(REP_MAX_COUNT);
+        while remaining > 0 {
+            let n = remaining.min(REP_CHUNK_LEN);
+            self.buffer.insert_text(&chunk[..n]);
+            remaining -= n;
         }
     }
 }

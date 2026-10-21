@@ -563,6 +563,93 @@ pub struct RecordingContext<'a> {
     pub window_id: u32,
     /// Recording-local pane identifier.
     pub pane_id: u32,
+    /// The pane's shared echo-off flag (maintained by the PTY reader thread).
+    ///
+    /// Read at each input emit site so keystrokes typed at a password prompt
+    /// are redacted — see [`redact_input_for_echo`].
+    pub echo_off: &'a std::sync::atomic::AtomicBool,
+}
+
+impl RecordingContext<'_> {
+    /// Emit a user-input event for this pane, redacting it if the pane's
+    /// terminal echo is currently off.
+    ///
+    /// Use this (not [`RecordingHandle::emit`]) for every event that carries
+    /// typed or pasted content.
+    pub fn emit_input(&self, payload: EventPayload) {
+        let echo = PtyEchoState::from_echo_off_flag(self.echo_off);
+        self.handle.emit(redact_input_for_echo(payload, echo));
+    }
+}
+
+/// Whether a pane's terminal is echoing typed characters back.
+///
+/// When echo is off (typically a password prompt) typed content is secret, so
+/// the recorder must not store it. See [`redact_input_for_echo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyEchoState {
+    /// The terminal echoes input; typed content is recorded verbatim.
+    Echoing,
+    /// Echo is off; typed content is redacted from the recording.
+    EchoOff,
+}
+
+impl PtyEchoState {
+    /// Read the current state from a pane's shared echo-off flag.
+    #[must_use]
+    pub fn from_echo_off_flag(echo_off: &std::sync::atomic::AtomicBool) -> Self {
+        if echo_off.load(std::sync::atomic::Ordering::Relaxed) {
+            Self::EchoOff
+        } else {
+            Self::Echoing
+        }
+    }
+}
+
+/// Literal substituted for `KeyboardInput::key_name` while echo is off.
+pub const REDACTED_KEY_NAME: &str = "<redacted>";
+
+/// Redact the content of a user-input event while the pane's echo is off.
+///
+/// While [`PtyEchoState::EchoOff`]:
+///
+/// - [`EventPayload::KeyboardInput`] keeps its timing, window, pane and
+///   modifiers, but `key_name` becomes [`REDACTED_KEY_NAME`] and `encoded`
+///   becomes empty.
+/// - [`EventPayload::ClipboardPaste`] and [`EventPayload::PtyInput`] keep
+///   their pane but `data` becomes empty.
+///
+/// Every other payload, and every payload while echoing, passes through
+/// unchanged. An empty payload is valid in the FREC format, so no format
+/// change is involved.
+#[must_use]
+pub fn redact_input_for_echo(payload: EventPayload, echo: PtyEchoState) -> EventPayload {
+    if echo == PtyEchoState::Echoing {
+        return payload;
+    }
+    match payload {
+        EventPayload::KeyboardInput {
+            window_id,
+            pane_id,
+            modifiers,
+            ..
+        } => EventPayload::KeyboardInput {
+            window_id,
+            pane_id,
+            key_name: REDACTED_KEY_NAME.to_string(),
+            modifiers,
+            encoded: Vec::new(),
+        },
+        EventPayload::ClipboardPaste { pane_id, .. } => EventPayload::ClipboardPaste {
+            pane_id,
+            data: Vec::new(),
+        },
+        EventPayload::PtyInput { pane_id, .. } => EventPayload::PtyInput {
+            pane_id,
+            data: Vec::new(),
+        },
+        other => other,
+    }
 }
 
 /// Handle for sending recording events from any thread.
@@ -742,6 +829,39 @@ impl WriterThread {
     }
 }
 
+/// Create (or truncate) the recording output file with owner-only permissions
+/// on Unix.
+///
+/// `OpenOptionsExt::mode` only applies when the file is created, so a
+/// pre-existing regular file with wider permissions is tightened via `fchmod`
+/// *before* it is truncated and written. Non-regular paths (e.g. `/dev/null`)
+/// are left untouched. On non-Unix platforms this is `File::create`.
+fn create_recording_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let meta = file.metadata()?;
+        if meta.is_file() {
+            if meta.permissions().mode() & 0o077 != 0 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.set_len(0)?;
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path)
+    }
+}
+
 /// Start a recording session.
 ///
 /// Creates the output file, spawns a dedicated writer thread, and returns a
@@ -783,6 +903,15 @@ impl RecordingJoinHandle {
 /// The channel is bounded to `channel_capacity` events. If the channel is full,
 /// events are silently dropped (the writer is I/O-bound, not the PTY thread).
 ///
+/// # File permissions
+///
+/// On Unix the file is created with mode `0o600` (owner read/write only), and
+/// an already-existing regular file is tightened to `0o600` before it is
+/// truncated, because a recording contains everything typed and displayed.
+/// On Windows the file is created with the default security descriptor, i.e.
+/// it inherits the ACL of its directory; that behaviour is documented, not
+/// changed.
+///
 /// # Errors
 ///
 /// Returns an error if the output file cannot be created or the writer thread
@@ -792,7 +921,7 @@ pub fn start_recording(
     metadata: RecordingMetadata,
     channel_capacity: usize,
 ) -> Result<(RecordingHandle, RecordingJoinHandle), RecordingError> {
-    let file = std::fs::File::create(path)?;
+    let file = create_recording_file(path)?;
     let writer = std::io::BufWriter::new(file);
     let (tx, rx) = crossbeam_channel::bounded(channel_capacity);
 
@@ -869,6 +998,18 @@ pub fn parse_recording(path: &std::path::Path) -> Result<ParsedRecording, ParseE
 
 /// Parse FREC v2 from an in-memory byte slice.
 ///
+/// Every count, length and offset in the file is attacker-controlled, so each is
+/// bounded against the bytes that are actually present *before* anything is
+/// allocated or indexed with it: positions are computed with checked
+/// arithmetic, and the seek index is never preallocated beyond the bytes
+/// remaining between its start and the footer.
+///
+/// `MessagePack` payloads need no extra bound. They are decoded from a slice that
+/// is already bounded by the file length, and `rmp_serde` reads strings and
+/// binary blobs as borrowed sub-slices (failing on a declared length past the end
+/// of the slice) while serde caps the preallocation for a declared array or map
+/// length, so a hostile declared length cannot cause a large allocation.
+///
 /// # Errors
 ///
 /// Returns [`ParseError`] if the data is not a valid FREC v2 file.
@@ -898,15 +1039,11 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     // Flags (reserved).
     pos += 4;
 
-    let meta_len = usize::value_from(read_u32_le(data, pos)).unwrap_or(0);
+    let meta_len = usize::value_from(read_u32_le(data, pos)?).unwrap_or(0);
     pos += 4;
 
-    if pos + meta_len > data.len() {
-        return Err(ParseError::InvalidFormat(
-            "metadata length exceeds file size".to_string(),
-        ));
-    }
-    let metadata: RecordingMetadata = rmp_serde::from_slice(&data[pos..pos + meta_len])?;
+    let metadata_bytes = slice_at(data, pos, meta_len, "metadata length exceeds file size")?;
+    let metadata: RecordingMetadata = rmp_serde::from_slice(metadata_bytes)?;
     pos += meta_len;
 
     // --- Footer ---
@@ -914,32 +1051,23 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     if &data[footer_start + 24..footer_start + 28] != FREC_MAGIC {
         return Err(ParseError::InvalidFormat("bad footer magic".to_string()));
     }
-    let seek_index_offset = usize::value_from(read_u64_le(data, footer_start))
+    let seek_index_offset = usize::value_from(read_u64_le(data, footer_start)?)
         .map_err(|_| ParseError::InvalidFormat("seek_index_offset overflows usize".to_string()))?;
-    let total_duration_us = read_u64_le(data, footer_start + 8);
-    let total_events = read_u64_le(data, footer_start + 16);
+    let total_duration_us = read_u64_le(data, footer_start + 8)?;
+    let total_events = read_u64_le(data, footer_start + 16)?;
 
     // --- Events ---
     let mut events = Vec::new();
     let mut event_pos = pos;
     while event_pos < seek_index_offset {
-        if event_pos + EVENT_HEADER_SIZE > data.len() {
-            return Err(ParseError::InvalidFormat(
-                "truncated event header".to_string(),
-            ));
-        }
-        let timestamp_us = read_u64_le(data, event_pos);
+        let header = slice_at(data, event_pos, EVENT_HEADER_SIZE, "truncated event header")?;
+        let timestamp_us = read_u64_le(header, 0)?;
         // Skip event_type byte (we deserialize payload which includes the variant).
-        let payload_len = usize::value_from(read_u32_le(data, event_pos + 9)).unwrap_or(0);
+        let payload_len = usize::value_from(read_u32_le(header, 9)?).unwrap_or(0);
         event_pos += EVENT_HEADER_SIZE;
 
-        if event_pos + payload_len > data.len() {
-            return Err(ParseError::InvalidFormat(
-                "truncated event payload".to_string(),
-            ));
-        }
-        let payload: EventPayload =
-            rmp_serde::from_slice(&data[event_pos..event_pos + payload_len])?;
+        let payload_bytes = slice_at(data, event_pos, payload_len, "truncated event payload")?;
+        let payload: EventPayload = rmp_serde::from_slice(payload_bytes)?;
         events.push(RecordingEvent {
             timestamp_us,
             payload,
@@ -947,31 +1075,7 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
         event_pos += payload_len;
     }
 
-    // --- Seek index ---
-    let mut idx_pos = seek_index_offset;
-    if idx_pos + 8 > footer_start {
-        return Err(ParseError::InvalidFormat(
-            "seek index overlaps footer".to_string(),
-        ));
-    }
-    let entry_count = usize::value_from(read_u64_le(data, idx_pos)).map_err(|_| {
-        ParseError::InvalidFormat("seek index entry_count overflows usize".to_string())
-    })?;
-    idx_pos += 8;
-
-    let mut seek_index = Vec::with_capacity(entry_count);
-    for _ in 0..entry_count {
-        if idx_pos + SEEK_INDEX_ENTRY_SIZE > footer_start {
-            return Err(ParseError::InvalidFormat(
-                "truncated seek index".to_string(),
-            ));
-        }
-        seek_index.push(SeekIndexEntry {
-            timestamp_us: read_u64_le(data, idx_pos),
-            file_offset: read_u64_le(data, idx_pos + 8),
-        });
-        idx_pos += SEEK_INDEX_ENTRY_SIZE;
-    }
+    let seek_index = parse_seek_index(data, seek_index_offset, footer_start)?;
 
     Ok(ParsedRecording {
         metadata,
@@ -982,30 +1086,82 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
     })
 }
 
+/// Parse the seek index that starts at `seek_index_offset` and must end at or
+/// before `footer_start`.
+///
+/// The declared `entry_count` is checked against the bytes between the end of the
+/// count field and the footer before the result vector is allocated, so the
+/// allocation is at most `footer_start` bytes' worth of entries.
+fn parse_seek_index(
+    data: &[u8],
+    seek_index_offset: usize,
+    footer_start: usize,
+) -> Result<Vec<SeekIndexEntry>, ParseError> {
+    let overlaps_footer = || ParseError::InvalidFormat("seek index overlaps footer".to_string());
+    let truncated = || ParseError::InvalidFormat("truncated seek index".to_string());
+
+    let entries_start = seek_index_offset
+        .checked_add(8)
+        .ok_or_else(overlaps_footer)?;
+    if entries_start > footer_start {
+        return Err(overlaps_footer());
+    }
+    let entry_count = usize::value_from(read_u64_le(data, seek_index_offset)?).map_err(|_| {
+        ParseError::InvalidFormat("seek index entry_count overflows usize".to_string())
+    })?;
+
+    let table_len = entry_count
+        .checked_mul(SEEK_INDEX_ENTRY_SIZE)
+        .ok_or_else(truncated)?;
+    let table_end = entries_start.checked_add(table_len).ok_or_else(truncated)?;
+    if table_end > footer_start {
+        return Err(truncated());
+    }
+    let table = slice_at(data, entries_start, table_len, "truncated seek index")?;
+
+    table
+        .as_chunks::<SEEK_INDEX_ENTRY_SIZE>()
+        .0
+        .iter()
+        .map(|entry| {
+            Ok(SeekIndexEntry {
+                timestamp_us: read_u64_le(entry, 0)?,
+                file_offset: read_u64_le(entry, 8)?,
+            })
+        })
+        .collect()
+}
+
+/// Borrow `len` bytes of `data` starting at `start`.
+///
+/// Fails with `ParseError::InvalidFormat(what)` if the range does not fit inside
+/// `data`, including when `start + len` overflows `usize`.
+fn slice_at<'a>(
+    data: &'a [u8],
+    start: usize,
+    len: usize,
+    what: &str,
+) -> Result<&'a [u8], ParseError> {
+    start
+        .checked_add(len)
+        .and_then(|end| data.get(start..end))
+        .ok_or_else(|| ParseError::InvalidFormat(what.to_string()))
+}
+
 /// Read a little-endian `u32` from a byte slice at the given offset.
-const fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let bytes: [u8; 4] = [
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ];
-    u32::from_le_bytes(bytes)
+fn read_u32_le(data: &[u8], offset: usize) -> Result<u32, ParseError> {
+    slice_at(data, offset, 4, "truncated u32 field")?
+        .try_into()
+        .map(u32::from_le_bytes)
+        .map_err(|_| ParseError::InvalidFormat("truncated u32 field".to_string()))
 }
 
 /// Read a little-endian `u64` from a byte slice at the given offset.
-const fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    let bytes: [u8; 8] = [
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ];
-    u64::from_le_bytes(bytes)
+fn read_u64_le(data: &[u8], offset: usize) -> Result<u64, ParseError> {
+    slice_at(data, offset, 8, "truncated u64 field")?
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| ParseError::InvalidFormat("truncated u64 field".to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1801,5 +1957,201 @@ mod tests {
 
         // Verify footer duration covers the event span.
         assert!(parsed.total_duration_us >= parsed.events.last().unwrap().timestamp_us);
+    }
+
+    // ── File permissions (issue #563) ───────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn recording_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private.frec");
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        drop(handle);
+        join.join();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "new recording must be owner-only, got {mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_wide_recording_file_is_tightened_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.frec");
+        std::fs::write(&path, b"stale contents from an earlier run").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        drop(handle);
+        join.join();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "pre-existing 0644 file must become 0600");
+        // Truncation semantics are preserved: the stale bytes are gone and the
+        // result parses as a valid recording.
+        assert_eq!(read_frec_file(&path).metadata, test_metadata());
+    }
+
+    // ── Echo-off redaction (issue #563) ─────────────────────────────────────
+
+    fn sample_keyboard_input() -> EventPayload {
+        EventPayload::KeyboardInput {
+            window_id: 1,
+            pane_id: 2,
+            key_name: "p".to_string(),
+            modifiers: 0b0101,
+            encoded: b"p".to_vec(),
+        }
+    }
+
+    #[test]
+    fn redaction_is_identity_while_echoing() {
+        let samples = [
+            sample_keyboard_input(),
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: b"hunter2".to_vec(),
+            },
+            EventPayload::PtyInput {
+                pane_id: 2,
+                data: b"hunter2\r".to_vec(),
+            },
+        ];
+        for payload in samples {
+            assert_eq!(
+                redact_input_for_echo(payload.clone(), PtyEchoState::Echoing),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_blanks_keyboard_input_but_keeps_timing_metadata() {
+        assert_eq!(
+            redact_input_for_echo(sample_keyboard_input(), PtyEchoState::EchoOff),
+            EventPayload::KeyboardInput {
+                window_id: 1,
+                pane_id: 2,
+                key_name: "<redacted>".to_string(),
+                modifiers: 0b0101,
+                encoded: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_blanks_paste_and_pty_input_data() {
+        assert_eq!(
+            redact_input_for_echo(
+                EventPayload::ClipboardPaste {
+                    pane_id: 2,
+                    data: b"hunter2".to_vec(),
+                },
+                PtyEchoState::EchoOff
+            ),
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
+        assert_eq!(
+            redact_input_for_echo(
+                EventPayload::PtyInput {
+                    pane_id: 2,
+                    data: b"hunter2\r".to_vec(),
+                },
+                PtyEchoState::EchoOff
+            ),
+            EventPayload::PtyInput {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn redaction_passes_other_payloads_through_while_echo_off() {
+        let samples = [
+            EventPayload::PtyOutput {
+                pane_id: 2,
+                data: b"Password: ".to_vec(),
+            },
+            EventPayload::PaneResize {
+                pane_id: 2,
+                cols: 80,
+                rows: 24,
+            },
+            EventPayload::BellEvent {
+                pane_id: 2,
+                bell_type: 0,
+            },
+        ];
+        for payload in samples {
+            assert_eq!(
+                redact_input_for_echo(payload.clone(), PtyEchoState::EchoOff),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn echo_state_reads_the_shared_flag() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            PtyEchoState::from_echo_off_flag(&flag),
+            PtyEchoState::Echoing
+        );
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            PtyEchoState::from_echo_off_flag(&flag),
+            PtyEchoState::EchoOff
+        );
+    }
+
+    #[test]
+    fn recording_context_emit_input_redacts_only_while_echo_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redact.frec");
+        let (handle, mut join) = start_recording(&path, test_metadata(), 64).unwrap();
+        let echo_off = std::sync::atomic::AtomicBool::new(false);
+        let ctx = RecordingContext {
+            handle: &handle,
+            window_id: 1,
+            pane_id: 2,
+            echo_off: &echo_off,
+        };
+
+        ctx.emit_input(sample_keyboard_input());
+        echo_off.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctx.emit_input(sample_keyboard_input());
+        ctx.emit_input(EventPayload::ClipboardPaste {
+            pane_id: 2,
+            data: b"secret".to_vec(),
+        });
+        drop(handle);
+        join.join();
+
+        let events = read_frec_file(&path).events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].payload, sample_keyboard_input());
+        assert_eq!(
+            events[1].payload,
+            redact_input_for_echo(sample_keyboard_input(), PtyEchoState::EchoOff)
+        );
+        assert_eq!(
+            events[2].payload,
+            EventPayload::ClipboardPaste {
+                pane_id: 2,
+                data: Vec::new(),
+            }
+        );
     }
 }

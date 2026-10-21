@@ -398,7 +398,6 @@ dependencies = [
  "freminal-common",
  "lz4_flex",
  "regex",
- "vergen",
 ]
 
 [[package]]
@@ -425,7 +424,6 @@ dependencies = [
  "freminal-common",
  "freminal-terminal-emulator",
  "libfuzzer-sys",
- "toml",
 ]
 
 [[package]]

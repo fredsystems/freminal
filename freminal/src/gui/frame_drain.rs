@@ -497,6 +497,7 @@ pub(super) fn drain_window_manipulation_commands(
                 let shell_set = rendering::handle_window_manipulation(
                     ui,
                     &pane.window_cmd_rx,
+                    &pane.window_cmd_budget,
                     &pane.reply_tx,
                     font_width,
                     font_height,
@@ -508,9 +509,11 @@ pub(super) fn drain_window_manipulation_commands(
                     config.bell.mode,
                     &rendering::WindowManipFlags {
                         allow_clipboard_read: config.security.allow_clipboard_read,
+                        clipboard_write: config.security.allow_clipboard_write,
                         is_active: is_fully_active,
                         window_focused: window_focus.is_focused(),
                         is_only_pane,
+                        window_ops: rendering::WindowOpsPolicy::from_security(&config.security),
                         osc99,
                     },
                     &mut events.osc_notifications,
@@ -541,8 +544,9 @@ mod tests {
         Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
     };
     use crate::gui::panes::{Pane, PaneId, PaneIdGenerator};
-    use crate::gui::pty::CommandFinishedEvent;
+    use crate::gui::pty::{CommandFinishedEvent, WindowCommandBudget};
     use crate::gui::tabs::{Tab, TabId, TabManager};
+    use crate::gui::title_stack::TitleStack;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
     use freminal_common::buffer_states::osc99_notification::{
         Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
@@ -629,9 +633,10 @@ mod tests {
             title: String::new(),
             bell_active: false,
             pending_copy: false,
-            title_stack: Vec::new(),
+            title_stack: TitleStack::new(),
             view_state: crate::gui::view_state::ViewState::new(),
             echo_off: Arc::new(AtomicBool::new(false)),
+            window_cmd_budget: WindowCommandBudget::default(),
             child_pid: None,
             render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
                 crate::gui::renderer::WindowPostRenderer::new(),
@@ -961,7 +966,10 @@ mod tests {
             panic!("send to bg pane: {e}");
         }
 
-        let config = Config::default();
+        // Window operations are refused by default; this test is about the
+        // active/inactive discrimination, so opt in.
+        let mut config = Config::default();
+        config.security.allow_window_ops = true;
         let ctx = egui::Context::default();
         // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
         // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
@@ -993,6 +1001,98 @@ mod tests {
             "exactly one Minimized(true) command must reach the OS window — from the \
              active pane only, never from the non-active tab's discarded copy"
         );
+    }
+
+    #[test]
+    fn drain_window_manipulation_commands_refuses_window_ops_by_default() {
+        let (mut tabs, active_tx, _bg_tx) = two_tab_manager_with_window_cmd_senders();
+        if let Err(e) = active_tx.send(WindowCommand::Viewport(WindowManipulation::MinimizeWindow))
+        {
+            panic!("send to active pane: {e}");
+        }
+
+        // The default config leaves `[security] allow_window_ops` off.
+        let config = Config::default();
+        assert!(!config.security.allow_window_ops);
+        let ctx = egui::Context::default();
+        // No painter here: defuse the `TexturesDelta` drop-bomb (A2 in
+        // EGUI_UPGRADE_ASSUMPTIONS.md).
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = drain_window_manipulation_commands(
+                ui,
+                &mut tabs,
+                8,
+                16,
+                WindowFocus::Focused,
+                WindowId::for_test(1),
+                &config,
+            );
+        });
+        full_output.textures_delta.clear();
+
+        let viewport_commands = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(0, |vp| {
+                vp.commands
+                    .iter()
+                    // Only the commands a window operation can produce; egui
+                    // sends others of its own (e.g. `SetTheme` on frame one).
+                    .filter(|c| {
+                        matches!(
+                            c,
+                            egui::ViewportCommand::Minimized(_)
+                                | egui::ViewportCommand::OuterPosition(_)
+                                | egui::ViewportCommand::InnerSize(_)
+                                | egui::ViewportCommand::Maximized(_)
+                                | egui::ViewportCommand::Fullscreen(_)
+                        )
+                    })
+                    .count()
+            });
+        assert_eq!(
+            viewport_commands, 0,
+            "a minimize request must not reach the OS window unless allow_window_ops is on"
+        );
+    }
+
+    #[test]
+    fn drain_window_manipulation_commands_bounds_every_panes_title_stack() {
+        use crate::gui::title_stack::MAX_TITLE_STACK_DEPTH;
+
+        let (mut tabs, active_tx, bg_tx) = two_tab_manager_with_window_cmd_senders();
+        for _ in 0..5000 {
+            for tx in [&active_tx, &bg_tx] {
+                if let Err(e) = tx.send(WindowCommand::Viewport(
+                    WindowManipulation::SaveWindowTitleToStack,
+                )) {
+                    panic!("send save-title: {e}");
+                }
+            }
+        }
+
+        let config = Config::default();
+        let ctx = egui::Context::default();
+        // No painter here: defuse the `TexturesDelta` drop-bomb (A2 in
+        // EGUI_UPGRADE_ASSUMPTIONS.md).
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = drain_window_manipulation_commands(
+                ui,
+                &mut tabs,
+                8,
+                16,
+                WindowFocus::Focused,
+                WindowId::for_test(1),
+                &config,
+            );
+        });
+        full_output.textures_delta.clear();
+
+        let depths: Vec<usize> = tabs
+            .iter()
+            .filter_map(|tab| tab.active_pane().map(|p| p.title_stack.len()))
+            .collect();
+        assert_eq!(depths, vec![MAX_TITLE_STACK_DEPTH, MAX_TITLE_STACK_DEPTH]);
     }
 
     // ── Per-pane OSC 99 state (Task 138.5) ───────────────────────────────

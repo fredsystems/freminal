@@ -114,7 +114,7 @@ originally implied. Agents must check the following code paths before adding any
 | Inline rename UI                  | `freminal/src/gui/menu.rs:756`, `freminal/src/gui/actions.rs:489`                      |
 | Layout schema                     | `freminal-common/src/layout.rs`                                                        |
 | `LayoutPane::env`                 | `freminal-common/src/layout.rs:175` (HashMap, already round-trips)                     |
-| `LayoutTab::title`                | `freminal-common/src/layout.rs:221` (Option<String>, today only used for authoring)    |
+| `LayoutTab::title`                | `freminal-common/src/layout.rs:221` (`Option<String>`, today only used for authoring)  |
 | `extra_env` PTY plumbing          | `freminal/src/gui/pty.rs:95`, `freminal/src/gui/tab_spawning.rs:341`                   |
 | OSC 7 CWD tracking                | `freminal-terminal-emulator/src/terminal_handler/shell_integration.rs`                 |
 | Toast stack                       | `freminal/src/gui/toast.rs` (`ToastStack::error`, `info`)                              |
@@ -3873,7 +3873,7 @@ tasks.
   `truncate_url`.
 - "Copy URL" right-click menu item (`31c1b1a`, 2026-06-03): new
   `ContextMenuAction::CopyUrl(String)` variant; menu button rendered
-  immediately after "Open <url>" in the URL conditional block;
+  immediately after "Open `<url>`" in the URL conditional block;
   dispatcher calls `ui.ctx().copy_text(url)` (egui's clipboard API,
   same path the existing `Copy` / `CopyCommandOutput` actions use).
   Verification: 103/103 suites green, clippy clean. Visual

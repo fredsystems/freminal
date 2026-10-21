@@ -7,6 +7,7 @@ use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
 use crate::io::SearchCorpus;
 use crate::snapshot::BufferExtent;
+use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use cursor_ops::SavedDecscState;
@@ -59,7 +60,7 @@ use freminal_common::{
     colors::{ColorPalette, DynamicColorSlot, ResolvedColors, TerminalColor},
     cursor::CursorVisualStyle,
     host_capabilities::{HostCapabilities, Osc99Support},
-    pty_write::PtyWrite,
+    pty_write::{FreminalTerminalSize, PtyWrite},
     themes::ThemePalette,
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
@@ -70,6 +71,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::time::Instant;
 
 use freminal_buffer::buffer::Buffer;
@@ -95,6 +97,7 @@ mod reports;
 mod reset;
 mod screen_scoped;
 mod scroll_ops;
+pub use scroll_ops::PtyResizeSend;
 mod sgr;
 mod shell_integration;
 mod window_ops;
@@ -260,6 +263,30 @@ pub struct TerminalHandler {
     saved_decsc: ScreenScoped<Option<SavedDecscState>>,
     /// Optional channel for writing responses back to the PTY.
     write_tx: Option<Sender<PtyWrite>>,
+    /// Replies dropped because `write_tx` was bounded and full, or because
+    /// queuing them would exceed the reply byte budget (`reply_budget`)
+    /// (GHSA-6cxq-f7hx-92v2, 148.C9).  Diagnostic counter; atomic so replies can be
+    /// counted from the `&self` write helpers.
+    dropped_replies: AtomicU64,
+    /// Bytes of replies currently queued on `write_tx` and not yet written by
+    /// the PTY writer thread, shared with that thread (148.C9).  The handler
+    /// adds a reply's length when it queues it and the writer subtracts it
+    /// once written; a reply that would push the total past
+    /// `MAX_QUEUED_REPLY_BYTES` is dropped.  `None` (headless, tests) means
+    /// no byte budget.
+    reply_budget: Option<Arc<AtomicUsize>>,
+    /// Optional channel for PTY commands that are not replies (the DECCOLM
+    /// `PtyWrite::Resize`).  When set it is the unbounded user-input channel,
+    /// so a full reply queue can never block or drop a resize; when unset,
+    /// such commands fall back to `write_tx`.
+    control_tx: Option<Sender<PtyWrite>>,
+    /// Latest-value slot for a pending DECCOLM resize, shared with the PTY
+    /// writer.  When set, `send_pty_resize` stores the size here and queues a
+    /// `PtyWrite::ApplyPendingResize` marker only if the slot was empty, so
+    /// repeated `CSI ?3h` / `?3l` against a child that is not reading its tty
+    /// cannot grow the unbounded control channel.  `None` (headless, tests)
+    /// sends `PtyWrite::Resize` directly.
+    pending_resize: Option<Arc<ArcSwapOption<FreminalTerminalSize>>>,
     /// Queued window-manipulation commands waiting to be consumed by the GUI.
     window_commands: Vec<WindowManipulation>,
     /// Finished OSC 133 command blocks queued for the GUI to drain via
@@ -486,6 +513,10 @@ impl TerminalHandler {
             character_replace: DecSpecialGraphics::default(),
             saved_decsc: ScreenScoped::default(),
             write_tx: None,
+            dropped_replies: AtomicU64::new(0),
+            reply_budget: None,
+            control_tx: None,
+            pending_resize: None,
             window_commands: Vec::new(),
             pending_command_events: Vec::new(),
             last_graphic_char: None,
@@ -1091,6 +1122,27 @@ impl TerminalHandler {
     /// will be sent through this channel rather than silently discarded.
     pub fn set_write_tx(&mut self, tx: Sender<PtyWrite>) {
         self.write_tx = Some(tx);
+    }
+
+    /// Share the queued-reply byte counter with the PTY writer thread, which
+    /// turns on the byte budget for replies sent through `write_tx` (148.C9).
+    pub fn set_reply_budget(&mut self, queued_bytes: Arc<AtomicUsize>) {
+        self.reply_budget = Some(queued_bytes);
+    }
+
+    /// Set the channel for PTY commands that are not replies (currently the
+    /// DECCOLM resize).  Used when `write_tx` is the bounded reply queue, so a
+    /// resize is never blocked behind, or dropped with, queued replies
+    /// (GHSA-6cxq-f7hx-92v2).
+    pub fn set_control_tx(&mut self, tx: Sender<PtyWrite>) {
+        self.control_tx = Some(tx);
+    }
+
+    /// Share the pending column-mode resize slot with the PTY writer thread.
+    /// With it set, DECCOLM resizes are coalesced to the latest size (see
+    /// `send_pty_resize`).
+    pub fn set_pending_resize(&mut self, slot: Arc<ArcSwapOption<FreminalTerminalSize>>) {
+        self.pending_resize = Some(slot);
     }
 
     /// Drain and return all inner payloads queued by tmux DCS passthrough.
@@ -3310,7 +3362,9 @@ mod tests {
     fn recv_pty_string(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
         match rx.try_recv().expect("expected a PtyWrite") {
             PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8"),
-            other @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {other:?}"),
+            other @ (PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize) => {
+                panic!("expected PtyWrite::Write, got {other:?}")
+            }
         }
     }
 
@@ -4383,6 +4437,7 @@ mod tests {
                 buttons: Osc99ButtonSupport::Supported,
                 icons: Osc99IconSupport::Supported,
             }),
+            ..HostCapabilities::default()
         };
         handler.set_host_capabilities(caps);
         assert_eq!(handler.host_capabilities(), caps);
@@ -4629,10 +4684,14 @@ mod tests {
     #[test]
     fn osc_remote_host_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+        // A local directory looks different in a `file://` URI per platform.
+        let (uri, expected) = if cfg!(windows) {
+            ("file://localhost/C:/Users/user", "C:/Users/user")
+        } else {
+            ("file://localhost/home/user", "/home/user")
+        };
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri.to_string()));
+        assert_eq!(handler.current_working_directory(), Some(expected));
     }
 
     #[test]

@@ -2207,6 +2207,73 @@ impl SettingsModal {
 
         ui.add_space(12.0);
 
+        ui.label("Allow Clipboard Write (OSC 52):");
+        ui.add_space(2.0);
+        ComboBox::from_id_salt("security_clipboard_write")
+            .selected_text(clipboard_write_policy_label(
+                self.draft.security.allow_clipboard_write,
+            ))
+            .show_ui(ui, |ui| {
+                for policy in [
+                    config::ClipboardWritePolicy::ActivePane,
+                    config::ClipboardWritePolicy::All,
+                    config::ClipboardWritePolicy::Off,
+                ] {
+                    ui.selectable_value(
+                        &mut self.draft.security.allow_clipboard_write,
+                        policy,
+                        clipboard_write_policy_label(policy),
+                    )
+                    .clickable();
+                }
+            })
+            .response
+            .on_hover_text(
+                "Which panes may replace the system clipboard through OSC 52. \
+                 \"Active pane only\" ignores writes from background tabs, \
+                 unfocused splits and unfocused windows; \"All panes\" lets any pane write, so a \
+                 program in a background tab can silently overwrite what you \
+                 will next paste; \"Never\" disables OSC 52 writes. Writes \
+                 larger than 1 MiB are always dropped.",
+            )
+            .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "A program that can replace your clipboard can plant a command \
+             you will later paste into a shell.",
+        );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.security.allow_kitty_file_transfer,
+            "Allow Kitty File Transfer (t=f, t=t, t=s)",
+        )
+        .on_hover_text(
+            "Lets programs make the terminal read local files and shared \
+             memory objects through the kitty graphics protocol. Anything \
+             writing to the terminal, including a remote host over ssh, can \
+             then read (and, for temporary files and shared memory, remove) \
+             a path of its choosing and probe the reply to learn whether it \
+             succeeded. Leave off unless you use a tool that needs it.",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When enabled, programs can make the terminal read local \
+             files and shared memory via the kitty graphics protocol.\n\
+             This is a potential security risk if untrusted programs run \
+             inside the terminal.",
+        );
+
+        ui.add_space(12.0);
+
+        self.show_window_ops_setting(ui);
+
+        ui.add_space(12.0);
+
         ui.checkbox(
             &mut self.draft.security.password_indicator,
             "Password Indicator",
@@ -2229,6 +2296,33 @@ impl SettingsModal {
         ui.separator();
         ui.add_space(8.0);
         self.show_close_guard_section(ui);
+    }
+
+    /// The XTWINOPS window-operations checkbox of the Security tab
+    /// (`[security] allow_window_ops`).
+    fn show_window_ops_setting(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.security.allow_window_ops,
+            "Allow Window Operations (XTWINOPS)",
+        )
+        .on_hover_text(
+            "Lets programs minimize, move, resize, maximize and full-screen \
+             the window through escape sequences (xterm's allowWindowOps). \
+             Anything writing to the terminal, including a remote host over \
+             ssh, can then rearrange your window. Resize and move targets \
+             are clamped to the monitor size, or to a fixed 16384 px \
+             extent when the monitor is unknown. Window size, \
+             position and title queries are unaffected. Leave off unless a tool you use needs it.",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When enabled, programs can move, resize, minimize and \
+             full-screen the window.\n\
+             This is a potential security risk if untrusted programs run \
+             inside the terminal.",
+        );
     }
 
     /// The Close Guard subsection of the Security tab (Task 98.9).
@@ -3108,6 +3202,14 @@ const fn notification_routing_label(routing: config::NotificationRouting) -> &'s
     }
 }
 
+const fn clipboard_write_policy_label(policy: config::ClipboardWritePolicy) -> &'static str {
+    match policy {
+        config::ClipboardWritePolicy::ActivePane => "Active pane only",
+        config::ClipboardWritePolicy::All => "All panes",
+        config::ClipboardWritePolicy::Off => "Never",
+    }
+}
+
 const fn freminal_toast_routing_label(routing: config::FreminalToastRouting) -> &'static str {
     match routing {
         config::FreminalToastRouting::Toast => "Toast",
@@ -3455,6 +3557,22 @@ mod tests {
         assert_eq!(
             notification_routing_label(config::NotificationRouting::Disabled),
             "Disabled"
+        );
+    }
+
+    #[test]
+    fn clipboard_write_policy_label_covers_every_variant() {
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::ActivePane),
+            "Active pane only"
+        );
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::All),
+            "All panes"
+        );
+        assert_eq!(
+            clipboard_write_policy_label(config::ClipboardWritePolicy::Off),
+            "Never"
         );
     }
 

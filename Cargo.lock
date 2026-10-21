@@ -1547,6 +1547,7 @@ dependencies = [
  "glow",
  "harfrust",
  "image",
+ "libc",
  "notify-rust",
  "open",
  "regex",
@@ -1577,7 +1578,6 @@ dependencies = [
  "proptest",
  "regex",
  "test-log",
- "vergen",
 ]
 
 [[package]]

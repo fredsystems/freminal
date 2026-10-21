@@ -24,31 +24,31 @@ via PR #472** (merge commit `e533ed00`).
 
 ### Done — 19 subtasks plus 3 cleanup entries
 
-| Subtask    | Commit     | Note                                                       |
-| ---------- | ---------- | ---------------------------------------------------------- |
-| 122.0      | `ee278082` | merged to `main` before the branch                          |
-| 122.14     | `4e2949d9` | **amended** — original spec was self-contradictory          |
-| 122.1      | `be982808` | inventory verified; nothing had moved                       |
-| 122.2      | `d360c897` | `Point`/`Rect` in `freminal-common`                         |
-| 122.3      | `cb83143c` | + `geometry_interop.rs` seam (scope widened)                |
-| **122.3a** | `67ab18f2` | **added** — `Option<bool>` → `ActiveSubtree`                |
-| 122.4      | `9e82b412` | `PublishedFrameState`                                       |
-| 122.5      | `c6e584c0` | pane-resolution chain extracted — the success criterion     |
-| **122.5a** | `16b5efb9` | **added** — `pointer_motion.rs` module                      |
-| 122.6      | `79ce4dc1` | `DummyApp` overrides; completes Group A                     |
-| 122.7      | `4d023728` | two zero-egui blocks                                        |
-| 122.8      | `ab6f382f` | window-command drain + OSC routing                          |
-| 122.9      | `cba0b833` | frame-damage aggregation (double-write preserved)           |
-| 122.10     | `5b81ef4e` | chrome-signal staging                                       |
-| 122.11     | `f5a12776` | `show`'s dirty-tracking block                               |
-| **122.11a**| `0fd403af` | **added** — `frame_drain.rs` consolidation                  |
-| 122.12     | `82975fbb` | params/result named; `InputCarryState`, `PaneFocus`         |
-| 122.13     | `ea58d9d3` | rename; plan's "one file" scope was stale — six files       |
-| 122.15     | `cd0dc0e4` | terminal-rect origin published; unblocks 121.17             |
-| 122.16     | (this)     | document reconciliation                                     |
-| **122.C1** | PR #472    | **resolved** — key-encoding characterisation tests           |
-| **122.C2** | PR #472    | **resolved** — production `assert_eq!` panic removed         |
-| **122.C3** | PR #472    | **resolved** — `frame_dirty.rs`; `widget.rs` 5,796 -> 5,035  |
+| Subtask     | Commit     | Note                                                        |
+| ----------- | ---------- | ----------------------------------------------------------- |
+| 122.0       | `ee278082` | merged to `main` before the branch                          |
+| 122.14      | `4e2949d9` | **amended** — original spec was self-contradictory          |
+| 122.1       | `be982808` | inventory verified; nothing had moved                       |
+| 122.2       | `d360c897` | `Point`/`Rect` in `freminal-common`                         |
+| 122.3       | `cb83143c` | + `geometry_interop.rs` seam (scope widened)                |
+| **122.3a**  | `67ab18f2` | **added** — `Option<bool>` → `ActiveSubtree`                |
+| 122.4       | `9e82b412` | `PublishedFrameState`                                       |
+| 122.5       | `c6e584c0` | pane-resolution chain extracted — the success criterion     |
+| **122.5a**  | `16b5efb9` | **added** — `pointer_motion.rs` module                      |
+| 122.6       | `79ce4dc1` | `DummyApp` overrides; completes Group A                     |
+| 122.7       | `4d023728` | two zero-egui blocks                                        |
+| 122.8       | `ab6f382f` | window-command drain + OSC routing                          |
+| 122.9       | `cba0b833` | frame-damage aggregation (double-write preserved)           |
+| 122.10      | `5b81ef4e` | chrome-signal staging                                       |
+| 122.11      | `f5a12776` | `show`'s dirty-tracking block                               |
+| **122.11a** | `0fd403af` | **added** — `frame_drain.rs` consolidation                  |
+| 122.12      | `82975fbb` | params/result named; `InputCarryState`, `PaneFocus`         |
+| 122.13      | `ea58d9d3` | rename; plan's "one file" scope was stale — six files       |
+| 122.15      | `cd0dc0e4` | terminal-rect origin published; unblocks 121.17             |
+| 122.16      | (this)     | document reconciliation                                     |
+| **122.C1**  | PR #472    | **resolved** — key-encoding characterisation tests          |
+| **122.C2**  | PR #472    | **resolved** — production `assert_eq!` panic removed        |
+| **122.C3**  | PR #472    | **resolved** — `frame_dirty.rs`; `widget.rs` 5,796 -> 5,035 |
 
 ### Interruption: the beta.7 chrome regression
 
@@ -86,9 +86,9 @@ numbered entries here rather than TODOs or informal known-issues sections.
 
 | Entry  | Surfaced   | Summary                                                              | Status   |
 | ------ | ---------- | -------------------------------------------------------------------- | -------- |
-| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space`  | Resolved |
-| 122.C2 | activation | `assert_eq!` production panic path in `control_key`                   | Resolved |
-| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it         | Resolved |
+| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space` | Resolved |
+| 122.C2 | activation | `assert_eq!` production panic path in `control_key`                  | Resolved |
+| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it        | Resolved |
 
 **A process note worth keeping, because it is the reason these nearly shipped
 open.** The protocol says a cleanup entry "is part of the task — not a separate
@@ -113,14 +113,14 @@ What each fix was:
 
 The question is fair and the answer is mostly — but not entirely — benign.
 
-| Category                        | Net    | Note                                            |
-| ------------------------------- | ------ | ----------------------------------------------- |
-| `Documents/`                    | +766   | this plan document; not code                     |
-| `pane_resolution_bench.rs`      | +469   | 122.14; `performance-benchmarks` mandates a bench where none existed |
-| New modules (4 files)           | +2,573 | see composition below                            |
-| `freminal-common/geometry.rs`   | +342   | new neutral `Point`/`Rect` + tests               |
-| `app_impl.rs`                   | **-311** | the target shrank (-249 code lines)            |
-| `widget.rs`                     | **-101** | was +645; reversed by 122.C3, now below `main` |
+| Category                      | Net      | Note                                                                 |
+| ----------------------------- | -------- | -------------------------------------------------------------------- |
+| `Documents/`                  | +766     | this plan document; not code                                         |
+| `pane_resolution_bench.rs`    | +469     | 122.14; `performance-benchmarks` mandates a bench where none existed |
+| New modules (4 files)         | +2,573   | see composition below                                                |
+| `freminal-common/geometry.rs` | +342     | new neutral `Point`/`Rect` + tests                                   |
+| `app_impl.rs`                 | **-311** | the target shrank (-249 code lines)                                  |
+| `widget.rs`                   | **-101** | was +645; reversed by 122.C3, now below `main`                       |
 
 The four new modules (`pointer_motion.rs`, `frame_drain.rs`,
 `published_frame_state.rs`, `geometry_interop.rs`) total 2,573 lines composed as:
@@ -193,13 +193,13 @@ claim otherwise in commit messages or the PR.
 
 ## Re-measurement (2026-07-30, `main` at `f8ebd17a`)
 
-| Target                                          | §8 figure | At 122's creation | **Now**   |
-| ----------------------------------------------- | --------- | ----------------- | --------- |
-| `App::update` (`app_impl.rs:1081-4212`)         | 2,743     | 3,051             | **3,132** |
+| Target                                           | §8 figure | At 122's creation | **Now**   |
+| ------------------------------------------------ | --------- | ----------------- | --------- |
+| `App::update` (`app_impl.rs:1081-4212`)          | 2,743     | 3,051             | **3,132** |
 | `central_body` closure (`app_impl.rs:1826-3858`) | 1,859     | 1,989             | **2,033** |
-| `widget.rs::show` (`widget.rs:1818-3699`)       | 1,851     | 1,851             | **1,882** |
+| `widget.rs::show` (`widget.rs:1818-3699`)        | 1,851     | 1,851             | **1,882** |
 | `write_input_to_terminal` (`input.rs:1379-2604`) | 1,226     | 1,226             | **1,226** |
-| `panes/mod.rs` `Rect` / `Pos2` occurrences      | 44        | 58                | **58**    |
+| `panes/mod.rs` `Rect` / `Pos2` occurrences       | 44        | 58                | **58**    |
 
 The drift is **entirely in the frame path**, and +81 of the latest `App::update`
 growth came from PR #467's Group B bug fixes. `write_input_to_terminal` and the
@@ -271,24 +271,24 @@ and only one class is genuinely unowned:
 
 Type B — read from outside any frame. **This is Group A's scope.**
 
-| Field                         | Def (`window.rs`) | Type                       | Written (`app_impl.rs`)          | Read out-of-frame |
-| ----------------------------- | ----------------- | -------------------------- | -------------------------------- | ----------------- |
-| `cached_central_rect`         | 491               | `Option<egui::Rect>`       | 2114 (in `central_body`)         | 879, 906          |
-| `cached_gutter_inset_logical` | 509               | `f32`                      | 1895 (in `central_body`)         | 903               |
-| `chrome_head_rects`           | 514               | `Option<Vec<egui::Rect>>`  | 1753 (`Full` only)               | 755               |
-| `chrome_border_rects`         | 518               | `Vec<egui::Rect>`          | 2461, cleared 2467               | 756               |
-| `chrome_toast_rects`          | 581               | `Vec<egui::Rect>`          | 3970, cleared 3915               | 766               |
-| `pending_chrome_signals`      | 422               | `ChromeSignals` (14 bools) | 3374-3390                        | 866-867           |
-| `resize_overlay`              | 204               | `Option<ResizeOverlayState>` | 3113 set, 3663 cleared; 524 init | 849-856         |
+| Field                         | Def (`window.rs`) | Type                         | Written (`app_impl.rs`)          | Read out-of-frame |
+| ----------------------------- | ----------------- | ---------------------------- | -------------------------------- | ----------------- |
+| `cached_central_rect`         | 491               | `Option<egui::Rect>`         | 2114 (in `central_body`)         | 879, 906          |
+| `cached_gutter_inset_logical` | 509               | `f32`                        | 1895 (in `central_body`)         | 903               |
+| `chrome_head_rects`           | 514               | `Option<Vec<egui::Rect>>`    | 1753 (`Full` only)               | 755               |
+| `chrome_border_rects`         | 518               | `Vec<egui::Rect>`            | 2461, cleared 2467               | 756               |
+| `chrome_toast_rects`          | 581               | `Vec<egui::Rect>`            | 3970, cleared 3915               | 766               |
+| `pending_chrome_signals`      | 422               | `ChromeSignals` (14 bools)   | 3374-3390                        | 866-867           |
+| `resize_overlay`              | 204               | `Option<ResizeOverlayState>` | 3113 set, 3663 cleared; 524 init | 849-856           |
 
 Type A — drained same tick, already contracted. **Not restructured.**
 
-| Field                             | Def | Written                          | Drained   |
-| --------------------------------- | --- | -------------------------------- | --------- |
-| `pending_frame_damage`            | 359 | 3240 pre-comp, **4041 post-comp** | 1027-1039 |
-| `pending_chrome_damage`           | 411 | 4025-4029                        | 1050-1062 |
-| `pending_terminal_band_range`     | 380 | 3758                             | 1041-1048 |
-| `pending_terminal_requested_delay` | 477 | 3830, 3984-3987                  | 1064-1075 |
+| Field                              | Def | Written                           | Drained   |
+| ---------------------------------- | --- | --------------------------------- | --------- |
+| `pending_frame_damage`             | 359 | 3240 pre-comp, **4041 post-comp** | 1027-1039 |
+| `pending_chrome_damage`            | 411 | 4025-4029                         | 1050-1062 |
+| `pending_terminal_band_range`      | 380 | 3758                              | 1041-1048 |
+| `pending_terminal_requested_delay` | 477 | 3830, 3984-3987                   | 1064-1075 |
 
 Type C — cross-module, on `PaneRenderCache`. **Noted, not restructured.**
 
@@ -691,15 +691,15 @@ Scope: new module in `freminal-common/src/`, plus `freminal-common/src/lib.rs`.
 What: add a toolkit-neutral geometry module. The required API is **exactly**
 this, measured exhaustively from `panes/mod.rs`:
 
-| Item                             | Uses in `panes/mod.rs` |
-| -------------------------------- | ---------------------- |
-| `Rect::from_min_max(min, max)`   | 34                     |
-| `Point` constructor (`pos2`-equivalent) | 68              |
-| `.min` / `.max` fields (each `.x`, `.y`) | 28 / 25         |
-| `.contains(point) -> bool`       | 15                     |
-| `.width() -> f32`                | 10                     |
-| `.height() -> f32`               | 7                      |
-| `.center() -> Point`             | 4                      |
+| Item                                     | Uses in `panes/mod.rs` |
+| ---------------------------------------- | ---------------------- |
+| `Rect::from_min_max(min, max)`           | 34                     |
+| `Point` constructor (`pos2`-equivalent)  | 68                     |
+| `.min` / `.max` fields (each `.x`, `.y`) | 28 / 25                |
+| `.contains(point) -> bool`               | 15                     |
+| `.width() -> f32`                        | 10                     |
+| `.height() -> f32`                       | 7                      |
+| `.center() -> Point`                     | 4                      |
 
 Plus derives `PartialEq` (relied on by `assert_eq!` at `panes/mod.rs:1871`),
 `Copy`, `Clone`, `Debug`.
@@ -1044,13 +1044,13 @@ as a result — the extraction added ~450 lines of tests to the god file it was
 meant to relieve. Measured after 122.5, one coherent concept accounts for
 ~840 of those lines:
 
-| Part                                                                | Lines |
-| ------------------------------------------------------------------- | ----- |
-| `PointerMotionPaneSignals`, `PaneSnapshotInputs`, `PaneResolution`  | ~387  |
-| `pane_hover_region_risk`, `pane_hover_region_terms`,                | (in   |
-| `pointer_in_gutter_strip`, `animation_in_flight_composed`,          | the   |
+| Part                                                                  | Lines  |
+| --------------------------------------------------------------------- | ------ |
+| `PointerMotionPaneSignals`, `PaneSnapshotInputs`, `PaneResolution`    | ~387   |
+| `pane_hover_region_risk`, `pane_hover_region_terms`,                  | (in    |
+| `pointer_in_gutter_strip`, `animation_in_flight_composed`,            | the    |
 | `pointer_motion_needs_repaint_decision`, `resolve_pane_under_pointer` | above) |
-| their 35 test functions                                             | ~450  |
+| their 35 test functions                                               | ~450   |
 
 That is one concept — **the out-of-frame pointer-motion repaint decision** —
 and `freminal-module-cohesion` says it should be a module whose path names it.
@@ -1544,8 +1544,8 @@ Bench file: `freminal/benches/pane_resolution_bench.rs`. Captured 2026-07-30 on
 `PaneTree::layout` — the pointer-motion chain's step 1, and the frame path's
 layout call. `chain/16` is the degenerate right-leaning shape.
 
-| Bench ID            | Median    |
-| ------------------- | --------- |
+| Bench ID             | Median    |
+| -------------------- | --------- |
 | `layout/balanced/1`  | 32.816 ns |
 | `layout/balanced/2`  | 45.409 ns |
 | `layout/balanced/4`  | 80.883 ns |
@@ -1561,8 +1561,8 @@ exhaustive subtree scan). At 16 panes the difference is ~43%, which is why both
 are recorded — measuring only `active_first` would have understated the
 baseline.
 
-| Bench ID                       | Median    |
-| ------------------------------ | --------- |
+| Bench ID                        | Median    |
+| ------------------------------- | --------- |
 | `split_borders/active_first/1`  | 15.393 ns |
 | `split_borders/active_last/1`   | 15.559 ns |
 | `split_borders/active_first/2`  | 67.040 ns |
@@ -1583,8 +1583,8 @@ spans 362-425 ns) exceeds the gap, so those pairs are within noise. Only the
 id). Balanced and chain land within noise of each other, as predicted: a full
 depth-first search visits the same node count under either shape.
 
-| Bench ID          | Median    |
-| ----------------- | --------- |
+| Bench ID           | Median    |
+| ------------------ | --------- |
 | `find/balanced/1`  | 4.4778 ns |
 | `find/balanced/2`  | 6.5536 ns |
 | `find/balanced/4`  | 14.703 ns |
@@ -1596,29 +1596,29 @@ depth-first search visits the same node count under either shape.
 `app_impl.rs:930-933`. `first_hit` is flat in pane count (matches immediately);
 `last_hit` and `miss` scale, as a linear scan must.
 
-| Bench ID                    | Median    |
-| --------------------------- | --------- |
-| `pane_at_pos/first_hit/1`    | 4.9338 ns |
-| `pane_at_pos/last_hit/1`     | 4.5014 ns |
-| `pane_at_pos/miss/1`         | 4.1744 ns |
-| `pane_at_pos/first_hit/2`    | 6.1305 ns |
-| `pane_at_pos/last_hit/2`     | 7.6166 ns |
-| `pane_at_pos/miss/2`         | 5.8324 ns |
-| `pane_at_pos/first_hit/4`    | 6.2849 ns |
-| `pane_at_pos/last_hit/4`     | 6.1088 ns |
-| `pane_at_pos/miss/4`         | 6.3946 ns |
-| `pane_at_pos/first_hit/8`    | 5.2452 ns |
-| `pane_at_pos/last_hit/8`     | 12.538 ns |
-| `pane_at_pos/miss/8`         | 7.5946 ns |
-| `pane_at_pos/first_hit/16`   | 5.5787 ns |
-| `pane_at_pos/last_hit/16`    | 24.230 ns |
-| `pane_at_pos/miss/16`        | 11.306 ns |
+| Bench ID                   | Median    |
+| -------------------------- | --------- |
+| `pane_at_pos/first_hit/1`  | 4.9338 ns |
+| `pane_at_pos/last_hit/1`   | 4.5014 ns |
+| `pane_at_pos/miss/1`       | 4.1744 ns |
+| `pane_at_pos/first_hit/2`  | 6.1305 ns |
+| `pane_at_pos/last_hit/2`   | 7.6166 ns |
+| `pane_at_pos/miss/2`       | 5.8324 ns |
+| `pane_at_pos/first_hit/4`  | 6.2849 ns |
+| `pane_at_pos/last_hit/4`   | 6.1088 ns |
+| `pane_at_pos/miss/4`       | 6.3946 ns |
+| `pane_at_pos/first_hit/8`  | 5.2452 ns |
+| `pane_at_pos/last_hit/8`   | 12.538 ns |
+| `pane_at_pos/miss/8`       | 7.5946 ns |
+| `pane_at_pos/first_hit/16` | 5.5787 ns |
+| `pane_at_pos/last_hit/16`  | 24.230 ns |
+| `pane_at_pos/miss/16`      | 11.306 ns |
 
 `active_highlight_segment` — frame-path divider highlight, not pane-count
 parameterised.
 
-| Bench ID                              | Median    |
-| ------------------------------------- | --------- |
+| Bench ID                                 | Median    |
+| ---------------------------------------- | --------- |
 | `active_highlight_segment/bordering`     | 6.8619 ns |
 | `active_highlight_segment/non_bordering` | 5.4369 ns |
 
@@ -1633,10 +1633,10 @@ so a quiet machine is not achievable and should not be waited for.
 Two full runs of the **identical binary**, pinned (`taskset -c 12,13,14,15
 nice -n -5`), give this run-to-run spread:
 
-| Spread on identical code | IDs | Examples                                        |
-| ------------------------ | --- | ----------------------------------------------- |
-| > 15%                    | 12  | `split_borders/active_first/4` **54%**, `/16` 22% |
-| 5-15%                    | 12  | `layout/balanced/16` 5.5%, `find/balanced/8` 7.8% |
+| Spread on identical code | IDs | Examples                                             |
+| ------------------------ | --- | ---------------------------------------------------- |
+| > 15%                    | 12  | `split_borders/active_first/4` **54%**, `/16` 22%    |
+| 5-15%                    | 12  | `layout/balanced/16` 5.5%, `find/balanced/8` 7.8%    |
 | < 5%                     | 15  | `pane_at_pos/miss/16` 0.1%, `layout/balanced/4` 1.1% |
 
 Unpinned it is far worse — up to 71% on a single ID. Pinning is worth doing and
@@ -1825,12 +1825,12 @@ pattern and the decision is now testable where it previously was not.
 
 It did **not** do the relocation. All of it landed in `widget.rs`:
 
-| Metric                    | Before | After | Delta   |
-| ------------------------- | ------ | ----- | ------- |
-| `show()` length           | 1,882  | 1,663 | **-219** |
-| `widget.rs` total         | 5,136  | 5,781 | **+645** |
-| `widget.rs` code-only     | 3,064  | 3,422 | **+358** |
-| `widget.rs` test region   | 60     | 76    | +16     |
+| Metric                  | Before | After | Delta    |
+| ----------------------- | ------ | ----- | -------- |
+| `show()` length         | 1,882  | 1,663 | **-219** |
+| `widget.rs` total       | 5,136  | 5,781 | **+645** |
+| `widget.rs` code-only   | 3,064  | 3,422 | **+358** |
+| `widget.rs` test region | 60     | 76    | +16      |
 
 So the god *function* shrank modestly while the god *file* grew substantially,
 and the growth is **not** test coverage — only 16 of the 645 lines are tests.

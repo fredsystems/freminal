@@ -14,11 +14,29 @@
 //! - High-level response writers (`write_apc_response`, `write_csi_response`,
 //!   `write_dcs_response`, `write_osc_response`)
 
+use std::sync::atomic::Ordering;
+
+use crossbeam_channel::TrySendError;
 use freminal_common::{buffer_states::modes::s8c1t::S8c1t, pty_write::PtyWrite};
 
+use crate::interface::MAX_QUEUED_REPLY_BYTES;
 use crate::io::{GuiReply, Osc99CloseTracking, WindowStateReport};
 
 use super::TerminalHandler;
+
+/// A dropped-reply warning is logged for the first drop and then once per this
+/// many drops; the rest are logged at debug level.
+const DROPPED_REPLY_WARN_INTERVAL: u64 = 1024;
+
+/// Whether queueing a reply of `len` bytes behind `queued` already-queued reply
+/// bytes would exceed `MAX_QUEUED_REPLY_BYTES`.
+///
+/// An empty queue (`queued == 0`) always admits the reply, however large, so a
+/// single big legitimate reply (an OSC 52 clipboard answer) is never made
+/// impossible by the budget.
+const fn reply_exceeds_byte_budget(queued: usize, len: usize) -> bool {
+    queued > 0 && queued.saturating_add(len) > MAX_QUEUED_REPLY_BYTES
+}
 
 impl TerminalHandler {
     /// Return the APC introducer for PTY responses: `0x9F` in 8-bit mode,
@@ -76,12 +94,81 @@ impl TerminalHandler {
     }
 
     /// Write raw bytes back to the PTY.  Silently drops if no channel is set.
+    ///
+    /// The send never blocks.  In the real PTY path the sender is bounded
+    /// twice over, so a child that stops reading its tty cannot make a flood
+    /// of queries (`ESC [ c` repeated, long XTGETTCAP lists) queue replies
+    /// without bound (GHSA-6cxq-f7hx-92v2):
+    ///
+    /// - by **messages**: `REPLY_QUEUE_CAPACITY`; and
+    /// - by **bytes**: `MAX_QUEUED_REPLY_BYTES`, tracked in the counter shared
+    ///   with the writer thread (148.C9).  A message bound alone is not enough,
+    ///   because an OSC 52 query reply carries the clipboard (only when
+    ///   `allow_clipboard_read` is on) and a GUI-originated reply can be larger
+    ///   than a DA answer.  A reply that would push the queued total past the
+    ///   byte budget is dropped, except that one reply is always accepted into
+    ///   an empty queue, so a single large legitimate reply is not impossible.
+    ///
+    /// A dropped reply is counted in [`Self::dropped_replies`]: a child that is
+    /// not reading cannot use the answer anyway, and a child that is will
+    /// simply see an unanswered query, as it would on a lost packet.  Unbounded
+    /// senders (headless, tests) never report `Full`, and without a byte budget
+    /// no byte check is made.
     fn write_bytes_to_pty(&self, data: &[u8]) {
-        if let Some(tx) = &self.write_tx
-            && let Err(e) = tx.send(PtyWrite::Write(data.to_vec()))
-        {
-            tracing::error!("Failed to write to PTY: {e}");
+        let Some(tx) = &self.write_tx else {
+            return;
+        };
+        if let Some(budget) = &self.reply_budget {
+            // This thread is the only adder and the writer only subtracts, so
+            // the value can only fall between this load and the add below.
+            let queued = budget.load(Ordering::Relaxed);
+            if reply_exceeds_byte_budget(queued, data.len()) {
+                self.note_dropped_reply("PTY reply byte budget exceeded");
+                return;
+            }
+            // Count the bytes *before* sending: the writer may receive and
+            // release the message before a post-send add would run.
+            budget.fetch_add(data.len(), Ordering::Relaxed);
         }
+        match tx.try_send(PtyWrite::Write(data.to_vec())) {
+            Ok(()) => {}
+            Err(err) => {
+                // The message was not queued, so take its bytes back.
+                if let Some(budget) = &self.reply_budget {
+                    budget.fetch_sub(data.len(), Ordering::Relaxed);
+                }
+                match err {
+                    TrySendError::Full(_) => self.note_dropped_reply("PTY reply queue full"),
+                    TrySendError::Disconnected(_) => {
+                        tracing::error!("Failed to write to PTY: reply channel disconnected");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Count a dropped reply and log it, rate-limited.
+    fn note_dropped_reply(&self, reason: &str) {
+        let dropped = self
+            .dropped_replies
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        // Warn on the first drop, then every `DROPPED_REPLY_WARN_INTERVAL`th,
+        // so a flood cannot also flood the log.
+        if dropped == 1 || dropped.is_multiple_of(DROPPED_REPLY_WARN_INTERVAL) {
+            tracing::warn!("{reason}; dropped terminal replies so far: {dropped}");
+        } else {
+            tracing::debug!("{reason}; dropped reply #{dropped}");
+        }
+    }
+
+    /// Number of terminal replies dropped because the PTY reply queue was full
+    /// or queuing them would exceed the reply byte budget.
+    ///
+    /// Diagnostic only; it never decreases.
+    #[must_use]
+    pub fn dropped_replies(&self) -> u64 {
+        self.dropped_replies.load(Ordering::Relaxed)
     }
 
     /// Write an APC response to the PTY using the correct C1 encoding.

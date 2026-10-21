@@ -38,7 +38,7 @@ FFI code reached).
 | `compact_row`          | `CompactRow::from_bytes` (the scrollback compression format), then `to_row` and re-encode.                                                            | Consumed length never exceeds the input; `from_bytes(row.to_bytes())` succeeds and consumes every byte; re-encoding is stable (compared on the encoding).                                           |
 | `base64`               | `decode`, `decode_strict` and `StreamDecoder` on raw input, plus encode/decode round trips.                                                           | Strict success implies lenient agrees; padded and unpadded round trips return the data; `StreamDecoder` equals one-shot `decode` on encoder output (not asserted for raw input, where they differ). |
 | `layout_toml`          | `Layout::from_str_content`, then `validate`, `resolve` and `to_toml_string`. Deliberately skips `apply_variables` and file I/O.                       | No invariant.                                                                                                                                                                                       |
-| `config_toml`          | Deserialising `Config` from TOML (the `Config` derive and the `toml` parser only; `ConfigPartial`, `apply_partial` and `validate` are private).       | No invariant.                                                                                                                                                                                       |
+| `config_toml`          | Loading `Config` from TOML via `Config::from_toml_str` (`ConfigPartial`, `apply_partial` and `validate`).                                             | No invariant.                                                                                                                                                                                       |
 
 Targets that take chunked input (`ansi_parser`, `terminal_state`, `base64`)
 derive their chunk lengths from the first input byte(s) via
@@ -55,6 +55,7 @@ fuzz/
   fuzz_targets/<t>.rs      one harness per target
   src/lib.rs               helpers shared by more than one target
   seeds/<t>/               curated, small, COMMITTED, never written by any run
+  dict/*.dict              libFuzzer dictionaries, COMMITTED, read by `fuzz` / `fuzz-smoke`
   regressions/<t>/         minimized crash reproducers, COMMITTED with the fix
   corpus/<t>/              local working corpus        (gitignored; a checkout of the
                            private corpus repository, see "Persistent corpus")
@@ -66,6 +67,17 @@ fuzz/
   states quickly. Keep it small. A run reads it but writes new inputs to the
   working corpus (the first directory on the libFuzzer command line), never
   here.
+- **`dict/`** holds libFuzzer dictionaries: lists of tokens (escape-sequence
+  introducers, CSI/OSC/DCS/APC openers, sixel and kitty-graphics keys, wide and
+  combining UTF-8) that libFuzzer splices into inputs, so a run does not have
+  to rediscover `ESC [ ? 1 0 4 9 h` byte by byte. `xtask` passes
+  `-dict=<repo>/fuzz/dict/<file>` to every `fuzz` and `fuzz-smoke` run (and so
+  to the nightly job) for the targets that have one. `ansi_parser` and
+  `terminal_state` share `ansi.dict`; the mapping is `dictionary_for_target` in
+  `xtask/src/fuzz/dictionary.rs`. Replay and corpus merge do not use it. The
+  repository is bound read-only at its real path inside the sandbox, so the
+  file is visible there. A target with no mapping, or whose file is missing, runs
+  without one.
 - **`regressions/<t>`** holds minimized reproducers of bugs that have been
   **fixed**. Commit a reproducer here in the same PR as its fix. Do **not**
   commit a reproducer for a bug that still crashes: `fuzz-replay` replays this

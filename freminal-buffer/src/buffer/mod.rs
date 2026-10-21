@@ -45,6 +45,8 @@ use freminal_common::buffer_states::{
     modes::{reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2},
 };
 
+#[cfg(test)]
+mod alt_wrap_below_margin_tests;
 mod command_block_log;
 mod compression;
 mod cursor;
@@ -62,6 +64,8 @@ mod image_delete_tests;
 mod images;
 mod lifecycle;
 mod lines;
+#[cfg(test)]
+mod primary_wrap_below_margin_tests;
 mod reflow_remap;
 mod resize_and_alt;
 #[cfg(test)]
@@ -73,6 +77,8 @@ mod row_store;
 mod screen_switch_tests;
 mod scroll;
 mod tabs;
+#[cfg(test)]
+mod wrap_progress_tests;
 
 /// Apply a signed `delta` (in cells or rows) to an unsigned `base` coordinate and clamp the
 /// result into `[lo, hi]`.
@@ -194,9 +200,11 @@ pub struct Buffer {
     ///    different rows, front eviction that moves the window onto
     ///    different rows (every line feed at scrollback capacity), or a
     ///    detection toggle all change `fp` and force a full merge.
-    /// 2. **`first_rebuilt_row`** (recomputed on every call): any row in the
-    ///    window that is `dirty` or has a `None` cache entry. Catches
-    ///    ordinary per-row edits.
+    /// 2. **The merge floor** (recomputed on every call): the first row in
+    ///    the window that is `dirty` or has a `None` cache entry, pulled back
+    ///    to the start of its logical line when a wrapped-URL refinement can
+    ///    reach across it (see `refresh_row_cache_and_refine_wrapped_urls`).
+    ///    Catches ordinary per-row edits.
     /// 3. **Explicit `self.merge_cache = None`**, at sites where (1) and (2)
     ///    cannot observe that cached content is stale:
     ///    - **Wholesale row-cache replacement** — the new content's
@@ -211,7 +219,7 @@ pub struct Buffer {
     ///      its cached representation, only its index changes) without
     ///      marking the moved rows dirty and without renumbering anything:
     ///      the rows keep their numbers while the content under those
-    ///      numbers rotates, so *neither* `fp` *nor* `first_rebuilt_row`
+    ///      numbers rotates, so *neither* `fp` *nor* the merge floor
     ///      observes it. Each contains its own `self.merge_cache = None;` at
     ///      the point where the rotation happens; that line is
     ///      load-bearing, **not** a redundant leftover safe to delete —
@@ -576,6 +584,71 @@ pub struct BufferHeapBreakdown {
     pub total_rows: usize,
 }
 
+/// Return the index of the first glyph in `text[start..]` that a fresh row of
+/// `fresh_span` columns can hold, or `text.len()` if there is none. Never less
+/// than `start`, which a stalled wrap may have pushed past the end of `text`.
+///
+/// `fresh_span` is the span a *fresh* row offers: the wrap span `insert_text`
+/// uses for the current row (`wrap_col - wrap_start_col`, after the DECDWL
+/// halving and DECSLRM margins), never beyond the physical width. A glyph whose
+/// display width exceeds it can never be placed, because wrapping to a new row
+/// does not help. It is discarded -- not written, cursor not moved, no wrap, no
+/// new row -- and the text after it carries on. This is what kitty and xterm
+/// do:
+///
+/// - kitty `kitty/screen.c`, `screen_draw_text`:
+///   `if ((unsigned)char_width > self->columns) continue; // discard too wide
+///   character`.
+/// - xterm-412 `charproc.c`, `dotext`:
+///   `if (last_chomp > right + 1) { break; /* give up - it is too big */ }`,
+///   where `right` is the (DECDWL-halved) right margin.
+///
+/// Before this, such a glyph wrapped forever: a row pushed per iteration on the
+/// primary screen (OOM), a scroll per iteration on the alternate screen (hang).
+/// Issue #558.
+fn skip_unplaceable_glyphs(text: &[TChar], start: usize, fresh_span: usize) -> usize {
+    text.iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, glyph)| glyph.display_width().max(1) <= fresh_span)
+        .map_or_else(|| text.len().max(start), |(index, _)| index)
+}
+
+/// What [`Buffer::wrap_if_placeable`] did.
+enum WrapOutcome {
+    /// No remaining glyph fits the landing row: nothing was wrapped and the
+    /// text is treated as ended.
+    NothingPlaceable,
+    /// The previous wrap placed nothing and this one would not either: nothing
+    /// was wrapped; the caller drops the head glyph.
+    Stalled,
+    /// Wrapped; the cursor is on this row.
+    Landed(usize),
+}
+
+/// The `(wrap_col, wrap_start_col)` of a row, given the margin-derived base
+/// span.
+///
+/// On a double-width or double-height row (DECDWL/DECDHL) each cell renders at
+/// 2x the normal width, so only half as many columns fit. The *span*
+/// (`base_wrap_col - base_wrap_start_col`) is halved rather than the screen
+/// width so this composes with a DECLRMM-restricted scroll region, and clamped
+/// to at least 1 so a 1-column margin never collapses to a zero-width,
+/// unwrappable row.
+const fn row_wrap_bounds(
+    is_double_width: bool,
+    base_wrap_col: usize,
+    base_wrap_start_col: usize,
+) -> (usize, usize) {
+    if is_double_width {
+        let span = base_wrap_col - base_wrap_start_col;
+        let half_span = if span / 2 > 1 { span / 2 } else { 1 };
+        (base_wrap_start_col + half_span, base_wrap_start_col)
+    } else {
+        (base_wrap_col, base_wrap_start_col)
+    }
+}
+
 /// Compute the number of screen columns that `text` will occupy when
 /// inserted starting at column `col`, clamped so as not to exceed
 /// `wrap_col`.  Wide characters (`display_width` = 2) count for 2 columns.
@@ -850,6 +923,12 @@ impl Buffer {
         let mut row_idx = self.cursor.pos.y;
         let mut col = self.cursor.pos.x;
 
+        // The value of `start` when the most recent soft-wrap happened. Two
+        // wraps with the same `start` between them means the wrap placed
+        // nothing, which is the non-progress that issue #558 spun on. See
+        // `wrap_unless_stalled`.
+        let mut last_wrap_start: Option<usize> = None;
+
         // When DECLRMM is active the effective right wrap column is
         // scroll_region_right + 1; wrapping starts a new row at
         // scroll_region_left rather than column 0. This base span is fixed for
@@ -886,13 +965,23 @@ impl Buffer {
                 .rows
                 .get(row_idx)
                 .is_some_and(|row| row.line_width.is_double_width());
-            let (wrap_col, wrap_start_col) = if current_row_is_double_width {
-                let span = base_wrap_col - base_wrap_start_col;
-                let half_span = (span / 2).max(1);
-                (base_wrap_start_col + half_span, base_wrap_start_col)
-            } else {
-                (base_wrap_col, base_wrap_start_col)
-            };
+            let (wrap_col, wrap_start_col) = row_wrap_bounds(
+                current_row_is_double_width,
+                base_wrap_col,
+                base_wrap_start_col,
+            );
+
+            // Drop glyphs wider than a fresh row can ever hold; see
+            // `skip_unplaceable_glyphs`. `start > 0` here means a discard (or
+            // a stalled wrap below) consumed the tail of the text: nothing is
+            // left to write and the cursor stays where the last real write or
+            // wrap left it.
+            let fresh_span = self.fresh_span_of(wrap_col, wrap_start_col);
+            start = skip_unplaceable_glyphs(text, start, fresh_span);
+            if start > 0 && start >= text.len() {
+                let _ = self.enforce_scrollback_limit(0);
+                return;
+            }
 
             // ┌─────────────────────────────────────────────┐
             // │ PRE-WRAP: if we're already at/past wrap_col,│
@@ -909,36 +998,25 @@ impl Buffer {
                     return; // nothing left to insert
                 }
 
-                // Scroll-region-aware wrap: advance to the next row,
-                // preserving scrollback on full-screen primary buffers.
-                row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
-                col = wrap_start_col;
+                // Wrap unless nothing remaining is placeable on the landing
+                // row (R7); the wrap changes the row, so the span and the
+                // placeable glyphs are recomputed on the next iteration.
+                let Some((next_row, next_col)) = self.take_wrap(
+                    text,
+                    (&mut start, &mut last_wrap_start),
+                    (row_idx, wrap_start_col),
+                    (base_wrap_col, base_wrap_start_col),
+                    col,
+                ) else {
+                    return;
+                };
+                row_idx = next_row;
+                col = next_col;
+                continue;
             }
 
-            // ┌─────────────────────────────────────────────┐
-            // │ Ensure the target row exists.               │
-            // │ If we got here without PRE-WRAP, it's a     │
-            // │ normal new logical line. If col == left and  │
-            // │ row_idx > 0, we are in a wrap continuation. │
-            // └─────────────────────────────────────────────┘
-            if row_idx >= self.rows.len() {
-                let is_wrap_continuation = col == wrap_start_col && row_idx > 0;
-
-                let origin = if is_wrap_continuation {
-                    RowOrigin::SoftWrap
-                } else {
-                    RowOrigin::HardBreak
-                };
-
-                let join = if is_wrap_continuation {
-                    RowJoin::ContinueLogicalLine
-                } else {
-                    RowJoin::NewLogicalLine
-                };
-
-                self.rows
-                    .push(Row::new_with_origin(self.width, origin, join));
-            }
+            // Ensure the target row exists (see `push_missing_insert_row`).
+            self.push_missing_insert_row(row_idx, col, wrap_start_col);
 
             // clone tag here to avoid long-lived borrows of &self
             let tag = self.current_tag.clone();
@@ -1003,12 +1081,279 @@ impl Buffer {
                     // `leftover_start` is relative to `&text[start..]`.
                     start += leftover_start;
 
-                    // Scroll-region-aware wrap: same logic as PRE-WRAP.
-                    row_idx = self.advance_row_for_wrap(row_idx, wrap_start_col);
-                    col = wrap_start_col;
-                    // `col` stays wrap_start_col; next iteration writes there.
+                    // Scroll-region-aware wrap: same logic as PRE-WRAP, unless
+                    // nothing remaining is placeable on the landing row (R7).
+                    // A stalled wrap carries on from where this row ended.
+                    let Some((next_row, next_col)) = self.take_wrap(
+                        text,
+                        (&mut start, &mut last_wrap_start),
+                        (row_idx, wrap_start_col),
+                        (base_wrap_col, base_wrap_start_col),
+                        final_col,
+                    ) else {
+                        return;
+                    };
+                    row_idx = next_row;
+                    col = next_col;
                 }
             }
+        }
+    }
+
+    /// Apply one wrap decision from [`Self::wrap_if_placeable`] for
+    /// `insert_text`, returning the `(row_idx, col)` to continue from, or
+    /// `None` when `insert_text` must return.
+    ///
+    /// - `NothingPlaceable`: nothing remaining fits the landing row, so the
+    ///   rest is discarded without wrapping (the scrollback limit is still
+    ///   enforced) and `None` is returned.
+    /// - `Stalled`: the previous wrap placed nothing, so the head glyph is
+    ///   dropped and writing continues at `stall_col` on the same row.
+    /// - `Landed`: continue at the wrap start column of the new row.
+    ///
+    /// `progress` is `insert_text`'s `(start, last_wrap_start)`.
+    fn take_wrap(
+        &mut self,
+        text: &[TChar],
+        progress: (&mut usize, &mut Option<usize>),
+        row: (usize, usize),
+        base: (usize, usize),
+        stall_col: usize,
+    ) -> Option<(usize, usize)> {
+        let (start, last_wrap_start) = progress;
+        match self.wrap_if_placeable(text, *start, row, base, last_wrap_start) {
+            WrapOutcome::NothingPlaceable => {
+                let _ = self.enforce_scrollback_limit(0);
+                None
+            }
+            WrapOutcome::Stalled => {
+                *start += 1;
+                *last_wrap_start = None;
+                Some((row.0, stall_col))
+            }
+            WrapOutcome::Landed(new_row_idx) => Some((new_row_idx, row.1)),
+        }
+    }
+
+    /// The wrap step of `insert_text`, both after a row filled with text left
+    /// over and for a PRE-WRAP (cursor already at the wrap column).
+    ///
+    /// Declines to wrap when no remaining glyph fits the row the wrap would
+    /// land on (see [`Self::landing_row_span_for_wrap`]); otherwise wraps via
+    /// [`Self::wrap_unless_stalled`]. `row` is `(row_idx, wrap_start_col)` of
+    /// the row that just filled and `base` the margin-derived
+    /// `(base_wrap_col, base_wrap_start_col)`.
+    fn wrap_if_placeable(
+        &mut self,
+        text: &[TChar],
+        start: usize,
+        row: (usize, usize),
+        base: (usize, usize),
+        last_wrap_start: &mut Option<usize>,
+    ) -> WrapOutcome {
+        let (row_idx, wrap_start_col) = row;
+        let (base_wrap_col, base_wrap_start_col) = base;
+        if self.nothing_placeable_on_landing_row(text, start, row_idx, base) {
+            return WrapOutcome::NothingPlaceable;
+        }
+        let landing_span =
+            self.landing_row_span_for_wrap(row_idx, base_wrap_col, base_wrap_start_col);
+        let Some(landed) =
+            self.wrap_unless_stalled(row_idx, wrap_start_col, start, last_wrap_start)
+        else {
+            return WrapOutcome::Stalled;
+        };
+        // The prediction must be the span `insert_text` computes for the row
+        // the wrap really landed on.
+        debug_assert_eq!(
+            landing_span,
+            self.row_fresh_span(landed, base_wrap_col, base_wrap_start_col),
+            "landing_row_span_for_wrap diverged from advance_row_for_wrap"
+        );
+        WrapOutcome::Landed(landed)
+    }
+
+    /// Whether no glyph of `text[start..]` fits the row a soft-wrap from
+    /// `row_idx` would land on, so wrapping would only add a spurious row.
+    ///
+    /// Shared by both wrap sites of `insert_text` (PRE-WRAP and after a row
+    /// filled with text left over). `base` is the margin-derived
+    /// `(base_wrap_col, base_wrap_start_col)`.
+    fn nothing_placeable_on_landing_row(
+        &self,
+        text: &[TChar],
+        start: usize,
+        row_idx: usize,
+        base: (usize, usize),
+    ) -> bool {
+        let (base_wrap_col, base_wrap_start_col) = base;
+        let landing_span =
+            self.landing_row_span_for_wrap(row_idx, base_wrap_col, base_wrap_start_col);
+        skip_unplaceable_glyphs(text, start, landing_span) >= text.len()
+    }
+
+    /// The usable span of the row a soft-wrap from `row_idx` would land on.
+    ///
+    /// A wrap is only worth taking if something can be placed on the row it
+    /// lands on. If every remaining glyph is wider than that row's span, the
+    /// next `insert_text` iteration would discard them all -- but only after
+    /// `advance_row_for_wrap` had already pushed or scrolled a row, leaving a
+    /// spurious blank line (R7). `insert_text` treats the text as ending
+    /// instead: the cursor stays in pending-wrap at the end of the row,
+    /// exactly as if the text had stopped at the last real write.
+    ///
+    /// The landing row decides the span, because a DECDWL/DECDHL row halves it
+    /// (148.C8). This mirrors the branch selection of
+    /// [`Self::advance_row_for_wrap`] without mutating, and returns the span
+    /// as [`Self::row_fresh_span`] would for the row the wrap lands on:
+    ///
+    /// - full-screen primary at the region bottom: a pushed row, always
+    ///   single-width;
+    /// - at the region bottom otherwise: the row is blanked by a whole-row
+    ///   scroll (`scroll_slice_up` installs a fresh single-width row) **unless**
+    ///   the primary screen's DECLRMM confines the scroll to columns or the
+    ///   region is a single row (no scroll happens), in which case the
+    ///   cursor's own row, with its own `line_width`, is the landing row;
+    /// - below the bottom margin on the last screen row: the cursor's own row;
+    /// - otherwise the next row: a pushed row (single-width) when it does not
+    ///   exist, else the existing row, whose `line_width` is **kept** by
+    ///   `reuse_row_as_softwrap`.
+    ///
+    /// Keep this in step with `advance_row_for_wrap`; `insert_text` checks the
+    /// two agree in debug builds.
+    fn landing_row_span_for_wrap(
+        &self,
+        row_idx: usize,
+        base_wrap_col: usize,
+        base_wrap_start_col: usize,
+    ) -> usize {
+        let at_region_bottom = self.is_cursor_at_scroll_region_bottom();
+        let is_full_screen_region = self.scroll_region_top == 0
+            && self.scroll_region_bottom == self.height.saturating_sub(1);
+
+        let landing_is_double_width =
+            if at_region_bottom && self.kind == BufferType::Primary && is_full_screen_region {
+                false
+            } else if at_region_bottom {
+                // The wrap-scroll (`scroll_region_up_for_wrap`) is confined to
+                // the DECLRMM columns on the primary screen, and on the
+                // alternate screen when the margins are narrower than the
+                // screen (xterm `xtermScroll`); otherwise it shifts whole rows.
+                let confined_to_columns = match self.kind {
+                    BufferType::Primary => self.declrmm_enabled == Declrmm::Enabled,
+                    BufferType::Alternate => self.declrmm_margins_are_partial(),
+                };
+                let scrolls_whole_row =
+                    !confined_to_columns && self.scroll_region_top < self.scroll_region_bottom;
+                !scrolls_whole_row && self.row_is_double_width(row_idx)
+            } else if self.is_cursor_on_last_screen_row() {
+                self.row_is_double_width(row_idx)
+            } else {
+                self.row_is_double_width(row_idx + 1)
+            };
+
+        let (wrap_col, wrap_start_col) =
+            row_wrap_bounds(landing_is_double_width, base_wrap_col, base_wrap_start_col);
+        self.fresh_span_of(wrap_col, wrap_start_col)
+    }
+
+    /// The fresh-row span `insert_text` computes for the existing row
+    /// `row_idx`: the margin-derived span, halved on a DECDWL/DECDHL row.
+    fn row_fresh_span(
+        &self,
+        row_idx: usize,
+        base_wrap_col: usize,
+        base_wrap_start_col: usize,
+    ) -> usize {
+        let (wrap_col, wrap_start_col) = row_wrap_bounds(
+            self.row_is_double_width(row_idx),
+            base_wrap_col,
+            base_wrap_start_col,
+        );
+        self.fresh_span_of(wrap_col, wrap_start_col)
+    }
+
+    /// Whether row `row_idx` exists and is DECDWL/DECDHL.
+    fn row_is_double_width(&self, row_idx: usize) -> bool {
+        self.rows
+            .get(row_idx)
+            .is_some_and(|row| row.line_width.is_double_width())
+    }
+
+    /// The columns a row wrapping at `wrap_col` from `wrap_start_col` can hold,
+    /// never past the physical width.
+    fn fresh_span_of(&self, wrap_col: usize, wrap_start_col: usize) -> usize {
+        wrap_col.min(self.width).saturating_sub(wrap_start_col)
+    }
+
+    /// Push the row `insert_text` is about to write into, if it does not exist
+    /// yet.
+    ///
+    /// Reaching a missing row without a PRE-WRAP makes it a normal new logical
+    /// line. If `col == wrap_start_col` and `row_idx > 0` we arrived by a wrap,
+    /// so the row is a soft-wrap continuation.
+    fn push_missing_insert_row(&mut self, row_idx: usize, col: usize, wrap_start_col: usize) {
+        if row_idx < self.rows.len() {
+            return;
+        }
+
+        let is_wrap_continuation = col == wrap_start_col && row_idx > 0;
+
+        let (origin, join) = if is_wrap_continuation {
+            (RowOrigin::SoftWrap, RowJoin::ContinueLogicalLine)
+        } else {
+            (RowOrigin::HardBreak, RowJoin::NewLogicalLine)
+        };
+
+        self.rows
+            .push(Row::new_with_origin(self.width, origin, join));
+    }
+
+    /// Soft-wrap via [`Self::advance_row_for_wrap`], unless the previous wrap
+    /// already happened at this same `start` index.
+    ///
+    /// This is the termination guarantee for [`Self::insert_text`]. `start`
+    /// only ever increases, so "the last wrap was at this `start`" means that
+    /// wrapping placed nothing: the glyph at `start` does not fit a fresh row.
+    /// Returns `None` in that case, without wrapping, and the caller drops that
+    /// glyph. Otherwise records `start` in `last_wrap_start` and returns the
+    /// new row index.
+    ///
+    /// Every wrap therefore needs `start` to have advanced since the one
+    /// before, so a call wraps at most `text.len() + 1` times whatever the row
+    /// spans are. The up-front discard in `insert_text` already removes the
+    /// glyphs this would catch; this makes termination independent of that
+    /// span arithmetic staying exact.
+    fn wrap_unless_stalled(
+        &mut self,
+        row_idx: usize,
+        wrap_start_col: usize,
+        start: usize,
+        last_wrap_start: &mut Option<usize>,
+    ) -> Option<usize> {
+        if *last_wrap_start == Some(start) {
+            return None;
+        }
+        *last_wrap_start = Some(start);
+        Some(self.advance_row_for_wrap(row_idx, wrap_start_col))
+    }
+
+    /// Whether the cursor is on the last visible screen row.
+    ///
+    /// The alternate screen is a fixed `height`-row grid, so this is
+    /// `cursor.y == height - 1`. On the primary screen the visible window is
+    /// the trailing `height` rows of `rows`, so this is the cursor's
+    /// screen-relative row being `height - 1`; with fewer than `height` rows
+    /// (buffer still filling) it is never true, because a row can still be
+    /// appended below the cursor.
+    ///
+    /// Callers pair this with "not at the bottom margin" to mean the cursor is
+    /// below the bottom margin on the last row, where xterm's `CursorDown`
+    /// (`cursor.c`) clamps to `max_row` instead of scrolling.
+    pub(in crate::buffer) fn is_cursor_on_last_screen_row(&self) -> bool {
+        match self.kind {
+            BufferType::Primary => self.cursor_screen_y() + 1 >= self.height,
+            BufferType::Alternate => self.cursor.pos.y + 1 >= self.height,
         }
     }
 
@@ -1039,6 +1384,20 @@ impl Buffer {
                 self.scroll_region_up_for_wrap();
                 // row_idx stays the same — it now points to the freshly blanked
                 // bottom row of the scroll region.
+                row_idx
+            } else if self.is_cursor_on_last_screen_row() {
+                // Below the bottom margin on the last screen row: there is no
+                // row to wrap onto and nothing to scroll (the cursor is
+                // outside the region). The cursor stays on the row, so the
+                // wrapped text overwrites it from the wrap column. Appending a
+                // row here broke the alternate screen's fixed `height`-row
+                // grid (#568) and, on the primary screen, scrolled the whole
+                // screen (region included) into scrollback (148.C3).
+                //
+                // xterm: `WrapLine` (charproc.c) calls `xtermIndex`, which for
+                // a cursor below `bot_marg` is `CursorDown` (cursor.c), and
+                // `CursorDown` clamps to `max_row` rather than growing or
+                // scrolling the screen.
                 row_idx
             } else {
                 let next = row_idx + 1;
@@ -2358,6 +2717,62 @@ mod backspace_tests {
         // A second BS moves left normally: col 8 → col 7.
         buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 7);
+    }
+
+    /// Regression (issue #557): BS from pending-wrap in a 1-column terminal
+    /// used to compute `0 - 1` (debug panic / release wrap to `usize::MAX`).
+    /// Matches xterm `CursorBack`: the pending wrap is cleared and the cursor
+    /// stays at column 0 whether or not reverse-wrap is enabled.
+    #[test]
+    fn backspace_from_pending_wrap_in_one_column_buffer_stays_at_column_zero() {
+        for (reverse_wrap, xt_rev_wrap2) in [
+            (ReverseWrapAround::DontWrap, XtRevWrap2::Disabled),
+            (ReverseWrapAround::WrapAround, XtRevWrap2::Disabled),
+            (ReverseWrapAround::WrapAround, XtRevWrap2::Enabled),
+            (ReverseWrapAround::DontWrap, XtRevWrap2::Enabled),
+        ] {
+            let mut buf = Buffer::new(1, 5);
+
+            // Reproducer shape from the fuzz regression: `J BS J BS`.
+            for _ in 0..2 {
+                buf.insert_text(&[TChar::from('J')]);
+                assert_eq!(
+                    buf.cursor.pos.x, 1,
+                    "writing into the only column enters pending-wrap"
+                );
+                let y_before = buf.cursor.pos.y;
+
+                buf.handle_backspace(reverse_wrap, xt_rev_wrap2);
+
+                assert_eq!(
+                    buf.cursor.pos.x, 0,
+                    "BS from pending-wrap must land at column 0 \
+                     (reverse_wrap={reverse_wrap:?}, xt_rev_wrap2={xt_rev_wrap2:?})"
+                );
+                assert_eq!(
+                    buf.cursor.pos.y, y_before,
+                    "BS from pending-wrap must not change the row"
+                );
+            }
+        }
+    }
+
+    /// A BS at column 0 of a 1-column buffer still follows the normal
+    /// column-0 rules (no move without reverse-wrap).
+    #[test]
+    fn backspace_at_column_zero_in_one_column_buffer_is_noop() {
+        let mut buf = Buffer::new(1, 5);
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
+        assert_eq!(buf.cursor.pos.x, 0);
+        assert_eq!(buf.cursor.pos.y, 0);
+    }
+
+    /// `handle_lf` compared `scroll_region_bottom` against `height - 1`,
+    /// which underflows on a zero-height buffer.
+    #[test]
+    fn line_feed_in_zero_height_buffer_does_not_underflow() {
+        let mut buf = Buffer::new(1, 0);
+        buf.handle_lf();
     }
 }
 
@@ -9992,5 +10407,145 @@ mod scrollback_compaction_tests {
             breakdown.url_bytes, expected,
             "a URL shared across cells must be counted once ({expected} bytes), not per-cell"
         );
+    }
+}
+
+/// 148.C8: `landing_row_span_for_wrap` (a non-mutating prediction) must agree,
+/// for every branch of `advance_row_for_wrap`, with the span `insert_text`
+/// computes for the row the wrap really lands on.
+#[cfg(test)]
+mod wrap_landing_tests {
+    use super::*;
+    use crate::row::LineWidth;
+
+    const WIDTH: usize = 6;
+    const HEIGHT: usize = 4;
+
+    /// Mark the row under the cursor DECDWL (span halves from 6 to 3).
+    fn make_cursor_row_double_width(buf: &mut Buffer) {
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    }
+
+    /// Predict, wrap for real, and compare. Returns the agreed span.
+    fn predicted_equals_actual(buf: &mut Buffer) -> usize {
+        let row_idx = buf.cursor.pos.y;
+        let predicted = buf.landing_row_span_for_wrap(row_idx, WIDTH, 0);
+        let landed = buf.advance_row_for_wrap(row_idx, 0);
+        let actual = buf.row_fresh_span(landed, WIDTH, 0);
+        assert_eq!(predicted, actual, "prediction diverged from the real wrap");
+        actual
+    }
+
+    fn alt_buffer() -> Buffer {
+        let mut buf = Buffer::new(WIDTH, HEIGHT);
+        buf.switch_to_alternate();
+        buf
+    }
+
+    #[test]
+    fn full_screen_primary_bottom_lands_on_a_pushed_single_width_row() {
+        let mut buf = Buffer::new(WIDTH, HEIGHT);
+        buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn whole_row_scroll_lands_on_a_blanked_single_width_row() {
+        let mut buf = alt_buffer();
+        buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn partial_region_primary_scroll_lands_on_a_blanked_single_width_row() {
+        let mut buf = Buffer::new(WIDTH, HEIGHT);
+        buf.set_scroll_region(1, 3);
+        buf.set_cursor_pos(Some(0), Some(2));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn primary_declrmm_column_scroll_keeps_the_cursor_row_width() {
+        let mut buf = Buffer::new(WIDTH, HEIGHT);
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_scroll_region(1, 3);
+        buf.set_cursor_pos(Some(0), Some(2));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
+    }
+
+    #[test]
+    fn alternate_declrmm_full_width_margins_scroll_whole_rows() {
+        // DECLRMM on but the margins span the screen: xterm's
+        // `scroll_full_line` holds, so the landing row is blanked
+        // (single-width).
+        let mut buf = alt_buffer();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn alternate_declrmm_partial_margins_keep_the_cursor_row_width() {
+        // 148.C12: with narrower margins the alternate screen's wrap-scroll is
+        // column-confined (as on the primary), so the cursor's own row, with
+        // its own `line_width`, is the landing row.
+        let mut buf = alt_buffer();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(1, 4);
+        buf.set_cursor_pos(Some(1), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
+    }
+
+    #[test]
+    fn single_row_region_keeps_the_cursor_row_width() {
+        // Not reachable through `set_scroll_region` (it rejects top >= bottom),
+        // but the scroll helpers do guard on it, so the prediction must too.
+        let mut buf = alt_buffer();
+        buf.scroll_region_top = HEIGHT - 1;
+        buf.scroll_region_bottom = HEIGHT - 1;
+        buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
+    }
+
+    #[test]
+    fn below_the_bottom_margin_on_the_last_row_stays_on_the_cursor_row() {
+        let mut buf = alt_buffer();
+        buf.set_scroll_region(1, 2);
+        buf.set_cursor_pos(Some(0), Some(HEIGHT - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
+    }
+
+    #[test]
+    fn next_row_reused_keeps_its_double_width() {
+        let mut buf = alt_buffer();
+        buf.set_cursor_pos(Some(0), Some(1));
+        make_cursor_row_double_width(&mut buf);
+        buf.set_cursor_pos(Some(0), Some(0));
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH / 2);
+    }
+
+    #[test]
+    fn next_row_reused_stays_single_width_whatever_the_cursor_row_is() {
+        let mut buf = alt_buffer();
+        buf.set_cursor_pos(Some(0), Some(0));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
+    }
+
+    #[test]
+    fn next_row_missing_lands_on_a_pushed_single_width_row() {
+        let mut buf = Buffer::new(WIDTH, HEIGHT);
+        let rows = buf.rows.len();
+        buf.set_cursor_pos(Some(0), Some(rows - 1));
+        make_cursor_row_double_width(&mut buf);
+        assert_eq!(predicted_equals_actual(&mut buf), WIDTH);
     }
 }

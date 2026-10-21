@@ -72,6 +72,9 @@ pub mod terminfo;
 pub mod themes;
 /// Persisted ephemeral UI window geometry (e.g. Settings window).
 pub mod window_state;
+/// Classification of path strings by Windows path syntax (UNC, device,
+/// drive-letter), used to refuse network paths before any filesystem call.
+pub mod windows_path;
 
 #[macro_use]
 extern crate tracing;

@@ -1012,7 +1012,7 @@ mod tests {
         let msg = rx.try_recv().expect("should have received a message");
         match msg {
             PtyWrite::Write(bytes) => assert_eq!(bytes, vec![b'A']),
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1027,7 +1027,7 @@ mod tests {
         // Default LNM=Normal → Enter sends CR (0x0D)
         match msg {
             PtyWrite::Write(bytes) => assert_eq!(bytes, vec![b'\r']),
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1066,7 +1066,7 @@ mod tests {
                 let resp = String::from_utf8(bytes).expect("valid UTF-8");
                 assert!(resp.contains("1006;1"), "Expected set (;1), got: {resp:?}");
             }
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1088,7 +1088,7 @@ mod tests {
                     "Expected reset (;2), got: {resp:?}"
                 );
             }
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1108,7 +1108,7 @@ mod tests {
                 let resp = String::from_utf8(bytes).expect("valid UTF-8");
                 assert!(resp.contains("1016;1"), "Expected set (;1), got: {resp:?}");
             }
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1149,7 +1149,7 @@ mod tests {
                 // Shift+Right = ESC [ 1 ; 2 C
                 assert_eq!(bytes, b"\x1b[1;2C");
             }
-            PtyWrite::Resize(_) => panic!("unexpected Resize"),
+            PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => panic!("unexpected resize"),
         }
     }
 
@@ -1258,7 +1258,7 @@ mod tests {
         rx.try_iter()
             .filter_map(|msg| match msg {
                 PtyWrite::Write(bytes) => Some(bytes),
-                PtyWrite::Resize(_) => None,
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => None,
             })
             .collect()
     }

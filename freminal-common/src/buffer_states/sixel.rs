@@ -19,6 +19,27 @@ use conv2::ValueFrom;
 /// Maximum number of palette entries supported.
 pub const MAX_PALETTE: usize = 256;
 
+/// Maximum width or height, in pixels, of a decoded Sixel image.
+///
+/// Matches kitty's `MAX_IMAGE_DIMENSION` (`kitty/graphics.c` line 28, 10000).
+/// Raster-attribute declarations beyond this are ignored; data that would
+/// grow the canvas beyond it is clipped.
+pub const MAX_SIXEL_DIMENSION: usize = 10_000;
+
+/// Maximum total pixel count of a decoded Sixel image.
+///
+/// 16,777,216 pixels is 64 MiB of RGBA, which fits a full 4K screen and is
+/// one fifth of freminal's 320 MiB kitty image-store base quota
+/// (`KITTY_IMAGE_BASE_QUOTA_BYTES` in `freminal-buffer`, which
+/// `freminal-common` cannot depend on, hence this named constant).
+pub const MAX_SIXEL_PIXELS: usize = 4096 * 4096;
+
+/// Smallest allocated canvas dimension, in pixels, when the decoder
+/// (re)allocates.  Avoids a burst of tiny reallocations while an image is
+/// still a few columns or bands in; the allocation is zeroed lazily by the
+/// allocator, so the slack costs address space, not work.
+const MIN_ALLOC_DIMENSION: usize = 64;
+
 /// Return a freshly initialised VT340-compatible default palette.
 ///
 /// Indices 0–15 are set to the standard VT340 default colours; higher indices
@@ -214,18 +235,32 @@ struct SixelDecoder {
     x: usize,
     /// Current band index (each band is 6 pixels tall).
     band: usize,
-    /// Image width in pixels (may grow as data arrives).
+    /// Logical image width in pixels (may grow as data arrives).  This is
+    /// the extent that `set_pixel` bounds-checks against and that `finish`
+    /// crops to.
     width: usize,
-    /// Image height in pixels (may grow as bands are added).
+    /// Logical image height in pixels (may grow as bands are added).
     height: usize,
+    /// Allocated canvas width in pixels; the row stride of `pixels`.
+    /// Always `>= width`.  Grows geometrically so repeated one-column or
+    /// one-band growth is amortised O(1) per cell instead of re-copying the
+    /// whole image each time.
+    cap_width: usize,
+    /// Allocated canvas height in pixels.  Always `>= height`.
+    cap_height: usize,
     /// Declared image width from raster attributes (0 = not set).
     declared_width: usize,
     /// Declared image height from raster attributes (0 = not set).
     declared_height: usize,
     /// Background mode.
     background: SixelBackground,
-    /// RGBA pixel buffer, row-major.
+    /// RGBA pixel buffer, row-major, `cap_width * cap_height * 4` bytes.
+    /// Cells outside the logical extent are never written and stay zero.
     pixels: Vec<u8>,
+    /// Number of canvas reallocations so far (tests assert it stays
+    /// logarithmic; no production behaviour depends on it).
+    #[cfg(test)]
+    reallocations: usize,
 }
 
 impl SixelDecoder {
@@ -242,10 +277,14 @@ impl SixelDecoder {
             band: 0,
             width: 0,
             height: 0,
+            cap_width: 0,
+            cap_height: 0,
             declared_width: 0,
             declared_height: 0,
             background,
             pixels: Vec::new(),
+            #[cfg(test)]
+            reallocations: 0,
         }
     }
 
@@ -264,14 +303,120 @@ impl SixelDecoder {
             band: 0,
             width: 0,
             height: 0,
+            cap_width: 0,
+            cap_height: 0,
             declared_width: 0,
             declared_height: 0,
             background,
             pixels: Vec::new(),
+            #[cfg(test)]
+            reallocations: 0,
         }
     }
 
-    /// Ensure the pixel buffer is large enough to hold the given dimensions.
+    /// Whether the decoder invariant holds:
+    ///
+    /// - the logical extent fits inside the allocation
+    ///   (`width <= cap_width`, `height <= cap_height`);
+    /// - the allocation is within [`MAX_SIXEL_DIMENSION`] per axis and
+    ///   [`MAX_SIXEL_PIXELS`] in total (the logical extent is therefore too);
+    /// - `pixels` is exactly `cap_width * cap_height * 4` bytes long.
+    fn invariant_holds(&self) -> bool {
+        self.width <= self.cap_width
+            && self.height <= self.cap_height
+            && self.cap_width <= MAX_SIXEL_DIMENSION
+            && self.cap_height <= MAX_SIXEL_DIMENSION
+            && self
+                .cap_width
+                .checked_mul(self.cap_height)
+                .is_some_and(|n| {
+                    n <= MAX_SIXEL_PIXELS && n.checked_mul(4) == Some(self.pixels.len())
+                })
+    }
+
+    /// Fill the cells newly exposed by growing the logical extent from
+    /// `old_w` x `old_h` to `new_w` x `new_h` with the background: `Paint`
+    /// uses the *current* palette entry 0 (alpha 255), `Transparent` uses
+    /// zeroes.  Cells inside the old extent are untouched.
+    ///
+    /// Done on every logical growth, reallocating or not, because
+    /// over-allocated cells may hold an older fill.
+    fn fill_exposed(&mut self, old_w: usize, old_h: usize, new_w: usize, new_h: usize) {
+        let (r, g, b) = self.palette[0];
+        let fill: [u8; 4] = match self.background {
+            SixelBackground::Paint => [r, g, b, 255],
+            SixelBackground::Transparent => [0; 4],
+        };
+        let stride = self.cap_width;
+        let mut fill_span = |y: usize, x_start: usize, x_end: usize| {
+            let row_base = y.saturating_mul(stride);
+            let start = row_base.saturating_add(x_start).saturating_mul(4);
+            let end = row_base.saturating_add(x_end).saturating_mul(4);
+            if let Some(span) = self.pixels.get_mut(start..end) {
+                for pixel in span.as_chunks_mut::<4>().0 {
+                    *pixel = fill;
+                }
+            }
+        };
+        // Rows inside the old extent: only the columns to the right of it.
+        if new_w > old_w {
+            for y in 0..old_h {
+                fill_span(y, old_w, new_w);
+            }
+        }
+        // Rows below the old extent: exposed in full.
+        for y in old_h..new_h {
+            fill_span(y, 0, new_w);
+        }
+    }
+
+    /// Reallocate the canvas to `new_cap_w` x `new_cap_h`, keeping only the
+    /// logical region's rows.  The new allocation is zeroed; the caller
+    /// fills newly exposed cells afterwards.
+    fn reallocate(&mut self, new_cap_w: usize, new_cap_h: usize) -> bool {
+        let Some(size) = new_cap_w
+            .checked_mul(new_cap_h)
+            .and_then(|n| n.checked_mul(4))
+        else {
+            return false;
+        };
+        let mut new_pixels = vec![0u8; size];
+
+        if let Some(old_row_bytes) = self.cap_width.checked_mul(4).filter(|&n| n > 0)
+            && let Some(new_row_bytes) = new_cap_w.checked_mul(4)
+            && let Some(copy_bytes) = self.width.checked_mul(4)
+        {
+            for (old_row, new_row) in self
+                .pixels
+                .chunks_exact(old_row_bytes)
+                .zip(new_pixels.chunks_exact_mut(new_row_bytes))
+                .take(self.height)
+            {
+                if let (Some(src), Some(dst)) =
+                    (old_row.get(..copy_bytes), new_row.get_mut(..copy_bytes))
+                {
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+
+        self.pixels = new_pixels;
+        self.cap_width = new_cap_w;
+        self.cap_height = new_cap_h;
+        #[cfg(test)]
+        {
+            self.reallocations += 1;
+        }
+        true
+    }
+
+    /// Grow the logical image extent towards the requested dimensions.
+    ///
+    /// The logical size is clamped by [`clamped_canvas_size`], so existing
+    /// dimensions never shrink and growth beyond the caps is clipped.  If it
+    /// no longer fits the allocation, the allocation grows geometrically
+    /// (see [`grown_capacity`]).  Newly exposed cells are then filled with
+    /// the background.
     fn ensure_size(&mut self, new_width: usize, new_height: usize) {
         if new_width <= self.width && new_height <= self.height {
             return;
@@ -279,66 +424,28 @@ impl SixelDecoder {
 
         let old_width = self.width;
         let old_height = self.height;
-        let final_width = new_width.max(self.width);
-        let final_height = new_height.max(self.height);
+        let (final_width, final_height) =
+            clamped_canvas_size(old_width, old_height, new_width, new_height);
 
-        if old_width == 0 || old_height == 0 {
-            // First allocation.
-            self.width = final_width;
-            self.height = final_height;
-            let size = final_width
-                .checked_mul(final_height)
-                .and_then(|n| n.checked_mul(4))
-                .unwrap_or(0);
-            self.pixels = match self.background {
-                SixelBackground::Paint => {
-                    let (r, g, b) = self.palette[0];
-                    let mut buf = vec![0u8; size];
-                    // `as_chunks_mut` yields fixed-size arrays, so the four
-                    // component writes are bounds-check-free (clippy 1.98's
-                    // `chunks_exact_to_as_chunks`). `size` is a multiple of 4
-                    // by construction, so the remainder is always empty.
-                    for pixel in buf.as_chunks_mut::<4>().0 {
-                        *pixel = [r, g, b, 255];
-                    }
-                    buf
-                }
-                SixelBackground::Transparent => vec![0u8; size],
-            };
+        if final_width == old_width && final_height == old_height {
+            return;
+        }
+        if final_width == 0 || final_height == 0 {
             return;
         }
 
-        // Resize existing buffer.
-        let new_total = final_width
-            .checked_mul(final_height)
-            .and_then(|n| n.checked_mul(4))
-            .unwrap_or(0);
-        let mut new_pixels = match self.background {
-            SixelBackground::Paint => {
-                let (r, g, b) = self.palette[0];
-                let mut buf = vec![0u8; new_total];
-                // See the comment on the initial-allocation path above.
-                for pixel in buf.as_chunks_mut::<4>().0 {
-                    *pixel = [r, g, b, 255];
-                }
-                buf
+        if final_width > self.cap_width || final_height > self.cap_height {
+            let (cap_w, cap_h) =
+                grown_capacity(self.cap_width, self.cap_height, final_width, final_height);
+            if !self.reallocate(cap_w, cap_h) {
+                return;
             }
-            SixelBackground::Transparent => vec![0u8; new_total],
-        };
-
-        // Copy old rows into the new buffer.
-        let copy_width = old_width.min(final_width);
-        for y in 0..old_height.min(final_height) {
-            let old_row_start = y * old_width * 4;
-            let new_row_start = y * final_width * 4;
-            let copy_bytes = copy_width * 4;
-            new_pixels[new_row_start..new_row_start + copy_bytes]
-                .copy_from_slice(&self.pixels[old_row_start..old_row_start + copy_bytes]);
         }
 
-        self.pixels = new_pixels;
+        self.fill_exposed(old_width, old_height, final_width, final_height);
         self.width = final_width;
         self.height = final_height;
+        debug_assert!(self.invariant_holds());
     }
 
     /// Set a single pixel at (px, py) to the current palette colour.
@@ -347,7 +454,7 @@ impl SixelDecoder {
             return;
         }
         let (red, green, blue) = self.palette[self.current_color];
-        let offset = (py * self.width + px) * 4;
+        let offset = (py * self.cap_width + px) * 4;
         if offset + 3 < self.pixels.len() {
             self.pixels[offset] = red;
             self.pixels[offset + 1] = green;
@@ -357,23 +464,50 @@ impl SixelDecoder {
     }
 
     /// Apply a single sixel data byte (encodes 6 vertical pixels).
+    ///
+    /// Only the columns that land inside the (capped) canvas are visited, so a
+    /// huge `!` repeat count costs O(width), not O(count).
     fn apply_sixel(&mut self, sixel_value: u8, count: usize) {
-        let band_y = self.band * 6;
-        let needed_height = band_y + 6;
-        let needed_width = self.x + count;
+        let band_y = self.band.saturating_mul(6);
+        let needed_height = band_y.saturating_add(6);
+        let needed_width = self.x.saturating_add(count);
 
         self.ensure_size(needed_width, needed_height);
 
-        for dx in 0..count {
-            let px = self.x + dx;
-            for bit in 0..6u8 {
-                if sixel_value & (1 << bit) != 0 {
-                    self.set_pixel(px, band_y + usize::from(bit));
+        if band_y < self.height {
+            let end = needed_width.min(self.width);
+            for px in self.x..end {
+                for bit in 0..6u8 {
+                    if sixel_value & (1 << bit) != 0 {
+                        self.set_pixel(px, band_y.saturating_add(usize::from(bit)));
+                    }
                 }
             }
         }
 
-        self.x += count;
+        self.x = needed_width;
+    }
+
+    /// Apply a raster-attributes size declaration (`Ph` x `Pv`).
+    ///
+    /// Like xterm, a declaration that is zero in either dimension, or that
+    /// exceeds [`MAX_SIXEL_DIMENSION`] / [`MAX_SIXEL_PIXELS`], is ignored
+    /// rather than allocated for.
+    fn declare_raster(&mut self, ph: u32, pv: u32) {
+        let width = usize_from_u32(ph);
+        let height = usize_from_u32(pv);
+        if ph > 0
+            && pv > 0
+            && width <= MAX_SIXEL_DIMENSION
+            && height <= MAX_SIXEL_DIMENSION
+            && width
+                .checked_mul(height)
+                .is_some_and(|n| n <= MAX_SIXEL_PIXELS)
+        {
+            self.declared_width = width;
+            self.declared_height = height;
+            self.ensure_size(width, height);
+        }
     }
 
     /// Parse a numeric parameter from the data stream, returning `(value, bytes_consumed)`.
@@ -448,11 +582,7 @@ impl SixelDecoder {
                     let (pv, c4) = Self::parse_number(&data[i..]);
                     i += c4;
 
-                    if ph > 0 && pv > 0 {
-                        self.declared_width = usize_from_u32(ph);
-                        self.declared_height = usize_from_u32(pv);
-                        self.ensure_size(self.declared_width, self.declared_height);
-                    }
+                    self.declare_raster(ph, pv);
                 }
                 // `#` — colour introducer
                 b'#' => {
@@ -503,7 +633,7 @@ impl SixelDecoder {
                 // `-` — graphics new line (x = 0, next band)
                 b'-' => {
                     self.x = 0;
-                    self.band += 1;
+                    self.band = self.band.saturating_add(1);
                     i += 1;
                 }
                 // Skip any other bytes (whitespace, etc.)
@@ -514,39 +644,86 @@ impl SixelDecoder {
         }
     }
 
-    /// Finalise and return the decoded image.
-    fn finish(mut self) -> Option<SixelImage> {
-        if self.width == 0 || self.height == 0 {
-            return None;
+    /// Crop the allocation to the logical extent, leaving a tight
+    /// `width * height * 4` buffer whose stride is `width`.
+    fn crop_to_logical(&mut self) {
+        if let Some(old_row_bytes) = self.cap_width.checked_mul(4).filter(|&n| n > 0)
+            && let Some(row_bytes) = self.width.checked_mul(4)
+        {
+            if self.cap_width == self.width {
+                // Rows are already contiguous; just drop the spare rows.
+                self.pixels.truncate(row_bytes.saturating_mul(self.height));
+            } else {
+                let mut tight = Vec::with_capacity(row_bytes.saturating_mul(self.height));
+                for row in self.pixels.chunks_exact(old_row_bytes).take(self.height) {
+                    if let Some(head) = row.get(..row_bytes) {
+                        tight.extend_from_slice(head);
+                    }
+                }
+                self.pixels = tight;
+            }
         }
+        self.cap_width = self.width;
+        self.cap_height = self.height;
+    }
 
-        // If declared dimensions are larger than actual content, the buffer was
-        // already sized to declared dimensions.  If actual content exceeded the
-        // declared dimensions, the buffer grew dynamically.  Either way, the
-        // final dimensions are `self.width` x `self.height`.
-
+    /// Trim the (already cropped, tight) image to the raster-attribute
+    /// dimensions when the declared size is smaller than the image.
+    ///
+    /// Requires `cap_width == width`, `cap_height == height` (see
+    /// [`Self::crop_to_logical`]) and keeps that true.
+    fn trim_to_declared(&mut self) {
         // Trim height to declared height if raster attributes specified it and
         // actual content didn't exceed it.
-        if self.declared_height > 0 && self.declared_height < self.height {
-            let trimmed_size = self.declared_width.max(self.width) * self.declared_height * 4;
+        if self.declared_height > 0
+            && self.declared_height < self.height
+            && let Some(trimmed_size) = self
+                .width
+                .checked_mul(self.declared_height)
+                .and_then(|n| n.checked_mul(4))
+        {
             self.pixels.truncate(trimmed_size);
             self.height = self.declared_height;
         }
 
         // Trim width if declared and narrower than buffer.
-        if self.declared_width > 0 && self.declared_width < self.width {
-            let new_width = self.declared_width;
-            let mut trimmed = vec![0u8; new_width * self.height * 4];
-            for y in 0..self.height {
-                let src_start = y * self.width * 4;
-                let dst_start = y * new_width * 4;
-                let copy_bytes = new_width * 4;
-                trimmed[dst_start..dst_start + copy_bytes]
-                    .copy_from_slice(&self.pixels[src_start..src_start + copy_bytes]);
+        if self.declared_width > 0
+            && self.declared_width < self.width
+            && let Some(old_row_bytes) = self.width.checked_mul(4)
+            && let Some(new_row_bytes) = self.declared_width.checked_mul(4)
+        {
+            let mut trimmed = Vec::with_capacity(new_row_bytes.saturating_mul(self.height));
+            for row in self.pixels.chunks_exact(old_row_bytes) {
+                if let Some(head) = row.get(..new_row_bytes) {
+                    trimmed.extend_from_slice(head);
+                }
             }
             self.pixels = trimmed;
-            self.width = new_width;
+            self.width = self.declared_width;
         }
+
+        self.cap_width = self.width;
+        self.cap_height = self.height;
+    }
+
+    /// Finalise and return the decoded image.
+    ///
+    /// If declared dimensions are larger than actual content, the buffer was
+    /// already sized to the declared dimensions.  If actual content exceeded
+    /// them, the buffer grew dynamically (within the caps).  Either way the
+    /// final dimensions are `self.width` x `self.height` after trimming.
+    fn finish(mut self) -> Option<SixelImage> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+
+        self.crop_to_logical();
+        self.trim_to_declared();
+        // `truncate` keeps the over-allocated capacity (up to the 64 MiB pixel
+        // cap); the image store charges only `pixels.len()` against its quota,
+        // so release the spare capacity before the buffer is stored.
+        self.pixels.shrink_to_fit();
+        debug_assert!(self.invariant_holds());
 
         Some(SixelImage {
             pixels: self.pixels,
@@ -560,46 +737,154 @@ impl SixelDecoder {
     /// Used when `?1070` is reset (shared color registers): the caller can
     /// persist the returned palette and pass it to the next image via
     /// `parse_sixel_with_shared_palette`.
-    fn finish_into_parts(mut self) -> (Option<SixelImage>, [(u8, u8, u8); MAX_PALETTE]) {
+    fn finish_into_parts(self) -> (Option<SixelImage>, [(u8, u8, u8); MAX_PALETTE]) {
         let palette = self.palette;
-
-        if self.width == 0 || self.height == 0 {
-            return (None, palette);
-        }
-
-        if self.declared_height > 0 && self.declared_height < self.height {
-            let trimmed_size = self.declared_width.max(self.width) * self.declared_height * 4;
-            self.pixels.truncate(trimmed_size);
-            self.height = self.declared_height;
-        }
-
-        if self.declared_width > 0 && self.declared_width < self.width {
-            let new_width = self.declared_width;
-            let mut trimmed = vec![0u8; new_width * self.height * 4];
-            for y in 0..self.height {
-                let src_start = y * self.width * 4;
-                let dst_start = y * new_width * 4;
-                let copy_bytes = new_width * 4;
-                trimmed[dst_start..dst_start + copy_bytes]
-                    .copy_from_slice(&self.pixels[src_start..src_start + copy_bytes]);
-            }
-            self.pixels = trimmed;
-            self.width = new_width;
-        }
-
-        let Some(width) = u32::value_from(self.width).ok() else {
-            return (None, palette);
-        };
-        let Some(height) = u32::value_from(self.height).ok() else {
-            return (None, palette);
-        };
-        let image = SixelImage {
-            pixels: self.pixels,
-            width,
-            height,
-        };
-        (Some(image), palette)
+        (self.finish(), palette)
     }
+}
+
+/// Choose the allocation size for a logical extent of `width` x `height`
+/// that no longer fits the current `cap_width` x `cap_height` allocation.
+///
+/// **Unconstrained growth.**  Each axis that does not fit grows to
+/// `max(needed, 2 * old_capacity, MIN_ALLOC_DIMENSION)`, clamped to
+/// [`MAX_SIXEL_DIMENSION`].  If the product of the two wanted capacities is
+/// within [`MAX_SIXEL_PIXELS`], that is the answer.
+///
+/// **Pixel-cap-constrained growth.**  Otherwise the over-allocation is
+/// *balanced* around the logical extent: with `s = sqrt(MAX / (w * h))` (the
+/// slack the pixel cap leaves) both axes get `s` times their logical size,
+/// `cap_w = isqrt(MAX * w / h)` and `cap_h = MAX / cap_w`, each clamped to
+/// `[logical, MAX_SIXEL_DIMENSION]`.  Because `w * h <= MAX` (see
+/// [`clamped_canvas_size`]) both are never below the logical extent, and
+/// `cap_w * cap_h <= MAX` since `cap_w * h <= sqrt(MAX * w * h) <= MAX`.
+/// Only over-allocation is ever trimmed, never the logical size.
+///
+/// The slack is deliberately derived from the *logical* extent of both axes
+/// rather than trimming one axis to fit the stale capacity of the other.
+/// Trimming the width capacity to exactly the logical width (the previous
+/// behaviour) made every further one-column growth reallocate and copy the
+/// whole canvas, thousands of times, from a few KB of input.
+///
+/// **Reallocation bound.**  A reallocation happens only when the logical
+/// extent outgrows a capacity, and logical extents never shrink.  Along any
+/// growth sequence there are O(log `MAX_SIXEL_DIMENSION`) reallocations:
+///
+/// - While unconstrained, the triggering axis at least doubles its capacity,
+///   and capacities only reset downward in the constrained regime below, so
+///   there are at most `log2(MAX_SIXEL_DIMENSION)` (about 14) per axis.
+/// - Let `phi = ln(MAX / (w * h))` be the pixel-cap slack.  After a
+///   constrained reallocation the capacities are `s * w` and `s * h` with
+///   `ln s = phi / 2`.  The next reallocation can only happen once an axis
+///   exceeds its capacity, so `w * h` has grown by at least a factor `s` and
+///   the new slack is `phi' <= phi - phi / 2 = phi / 2`.  The slack halves
+///   on every constrained reallocation, starting from at most
+///   `ln MAX` (about 17), and the capacity rounds to a whole column only
+///   while `phi >= 1 / MAX_SIXEL_DIMENSION`, so there are at most
+///   `log2(17 * MAX_SIXEL_DIMENSION)` (about 18) of them.  Once `phi` is
+///   smaller than that, fewer than two columns or rows of room remain under
+///   the pixel cap, so only a constant number of growths (and therefore
+///   reallocations) is still possible.
+///
+/// `MAX_SIXEL_DIMENSION`-clamped axes never trigger again (the logical size is
+/// clamped to the same limit), so they only shorten the sequence.  The tests
+/// `test_sixel_pixel_cap_boundary_growth_reallocates_logarithmically` and
+/// its siblings pin the bound empirically.
+fn grown_capacity(
+    cap_width: usize,
+    cap_height: usize,
+    width: usize,
+    height: usize,
+) -> (usize, usize) {
+    let grow = |cap: usize, needed: usize| -> usize {
+        if needed <= cap {
+            cap
+        } else {
+            needed
+                .max(cap.saturating_mul(2))
+                .clamp(MIN_ALLOC_DIMENSION, MAX_SIXEL_DIMENSION)
+        }
+    };
+    let want_w = grow(cap_width, width).max(width);
+    let want_h = grow(cap_height, height).max(height);
+
+    // Both are `<= MAX_SIXEL_DIMENSION` here, so the product cannot overflow.
+    if want_w * want_h <= MAX_SIXEL_PIXELS {
+        return (want_w, want_h);
+    }
+
+    // Balanced slack around the logical extent.  On overflow (only possible
+    // for a 32-bit `usize`) fall back to the exact logical width, which is
+    // always valid.
+    let cap_w = width
+        .checked_mul(MAX_SIXEL_PIXELS)
+        .and_then(|n| n.checked_div(height))
+        .map_or(width, usize::isqrt)
+        .max(width)
+        .min(MAX_SIXEL_DIMENSION);
+    let cap_h = MAX_SIXEL_PIXELS
+        .checked_div(cap_w)
+        .unwrap_or(height)
+        .max(height)
+        .min(MAX_SIXEL_DIMENSION);
+    (cap_w, cap_h)
+}
+
+/// Compute the canvas size to grow to when `want_width` x `want_height` is
+/// requested and the canvas is currently `cur_width` x `cur_height`.
+///
+/// Assuming the current size already satisfies the invariant
+/// (`<= MAX_SIXEL_DIMENSION` each, product `<= MAX_SIXEL_PIXELS`), the result:
+///
+/// 1. never shrinks either current dimension;
+/// 2. is clamped to [`MAX_SIXEL_DIMENSION`] in each dimension;
+/// 3. if the product still exceeds [`MAX_SIXEL_PIXELS`], first limits the width
+///    (when it is growing) to `MAX_SIXEL_PIXELS / height`, then, if that was
+///    not enough, limits the height (when it is growing) to
+///    `MAX_SIXEL_PIXELS / width`.  Neither limit goes below the current
+///    dimension, so if neither can grow the current size is kept.
+const fn clamped_canvas_size(
+    cur_width: usize,
+    cur_height: usize,
+    want_width: usize,
+    want_height: usize,
+) -> (usize, usize) {
+    let mut width = if want_width > cur_width {
+        want_width
+    } else {
+        cur_width
+    };
+    let mut height = if want_height > cur_height {
+        want_height
+    } else {
+        cur_height
+    };
+    if width > MAX_SIXEL_DIMENSION {
+        width = MAX_SIXEL_DIMENSION;
+    }
+    if height > MAX_SIXEL_DIMENSION {
+        height = MAX_SIXEL_DIMENSION;
+    }
+
+    // Both are now <= 10_000, so the product cannot overflow.
+    if width * height > MAX_SIXEL_PIXELS {
+        if width > cur_width {
+            // `height > 0` because the product exceeds the cap.
+            let limit = MAX_SIXEL_PIXELS / height;
+            width = if limit > cur_width { limit } else { cur_width };
+        }
+        if width * height > MAX_SIXEL_PIXELS && height > cur_height {
+            // `width > 0` because the product exceeds the cap.
+            let limit = MAX_SIXEL_PIXELS / width;
+            height = if limit > cur_height {
+                limit
+            } else {
+                cur_height
+            };
+        }
+    }
+
+    (width, height)
 }
 
 /// Parse Sixel data using a shared (persistent) palette.
@@ -1100,5 +1385,798 @@ mod tests {
         let img = img.unwrap();
         assert_eq!(img.width, 1);
         assert_eq!(img.height, 6);
+    }
+
+    // --- Task 148.2: bounded allocation (GHSA-w475-m9wf-775r) ---
+
+    /// Every image the decoder returns must satisfy the documented caps and
+    /// be internally consistent.
+    fn assert_within_caps(img: &SixelImage) {
+        let width = usize::value_from(img.width).unwrap();
+        let height = usize::value_from(img.height).unwrap();
+        assert!(width <= MAX_SIXEL_DIMENSION, "width {width}");
+        assert!(height <= MAX_SIXEL_DIMENSION, "height {height}");
+        assert!(width * height <= MAX_SIXEL_PIXELS, "{width}x{height}");
+        assert_eq!(img.pixels.len(), width * height * 4);
+    }
+
+    #[test]
+    fn test_sixel_advisory_input_does_not_allocate_unbounded() {
+        // Inner DCS content from GHSA-w475-m9wf-775r.
+        let inner: &[u8] = b"(q\";\";;56;1\x1fq\"05;;2;26221056;1;";
+        if let Some(img) = parse_sixel(inner) {
+            assert_within_caps(&img);
+        }
+    }
+
+    #[test]
+    fn test_sixel_oversize_raster_declaration_is_ignored() {
+        // Ph = 10001 exceeds MAX_SIXEL_DIMENSION: the declaration is ignored,
+        // so the image is sized from the data alone (1 column, 1 band).
+        let img = parse_sixel(b"q\"1;1;10001;10#0;2;100;0;0~").unwrap();
+        assert_eq!((img.width, img.height), (1, 6));
+        assert_within_caps(&img);
+
+        // Pv = 10001 likewise.
+        let img = parse_sixel(b"q\"1;1;10;10001#0;2;100;0;0~").unwrap();
+        assert_eq!((img.width, img.height), (1, 6));
+
+        // Each dimension is in range but the product exceeds MAX_SIXEL_PIXELS.
+        let img = parse_sixel(b"q\"1;1;5000;5000#0;2;100;0;0~").unwrap();
+        assert_eq!((img.width, img.height), (1, 6));
+
+        // u32::MAX in both.
+        let img = parse_sixel(b"q\"1;1;4294967295;4294967295~").unwrap();
+        assert_eq!((img.width, img.height), (1, 6));
+    }
+
+    #[test]
+    fn test_sixel_declaration_at_dimension_cap_is_accepted() {
+        // 10000 x 1 is exactly at the dimension cap and well inside the pixel
+        // cap, so the declaration is honoured.
+        let img = parse_sixel(b"q\"1;1;10000;1#0;2;100;0;0~").unwrap();
+        assert_eq!((img.width, img.height), (10_000, 1));
+        assert_within_caps(&img);
+    }
+
+    #[test]
+    fn test_sixel_declaration_at_pixel_cap_boundary_is_accepted() {
+        // 4096 x 4096 is exactly MAX_SIXEL_PIXELS; draw a single band.
+        let img = parse_sixel(b"q\"1;1;4096;4096#0;2;100;0;0~").unwrap();
+        assert_eq!((img.width, img.height), (4096, 4096));
+        assert_eq!(img.pixels.len(), MAX_SIXEL_PIXELS * 4);
+        // The single band painted the top-left pixel red.
+        assert_eq!(&img.pixels[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_sixel_huge_repeat_is_clipped_and_fast() {
+        let img = parse_sixel(b"q#0;2;100;0;0!4294967295~").unwrap();
+        assert_eq!(usize::value_from(img.width).unwrap(), MAX_SIXEL_DIMENSION);
+        assert_eq!(img.height, 6);
+        assert_within_caps(&img);
+        // Clipped, not skipped: the drawn columns are red.
+        assert_eq!(&img.pixels[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_sixel_many_bands_are_clipped_to_dimension_cap() {
+        let mut inner = b"q#0;2;100;0;0".to_vec();
+        inner.extend(std::iter::repeat_n(b'-', 3000));
+        inner.push(b'~');
+        let img = parse_sixel(&inner).unwrap();
+        assert_eq!(usize::value_from(img.height).unwrap(), MAX_SIXEL_DIMENSION);
+        assert_eq!(img.width, 1);
+        assert_within_caps(&img);
+    }
+
+    #[test]
+    fn test_sixel_repeated_huge_repeats_do_not_wrap_position() {
+        // Two u32::MAX repeats push `x` far past the cap; must not overflow
+        // or panic, and the canvas stays within the caps.
+        let img = parse_sixel(b"q!4294967295~!4294967295~!4294967295~").unwrap();
+        assert_within_caps(&img);
+    }
+
+    #[test]
+    fn test_sixel_overflowing_declaration_after_data_does_not_panic() {
+        // Data first (allocates a 1x6 canvas), then a declaration whose
+        // `width * height * 4` overflows `usize`: the old resize path built an
+        // empty buffer and panicked slicing it.
+        let img = parse_sixel(b"q~\"1;1;4294967295;4294967295~").unwrap();
+        assert_within_caps(&img);
+        // One column from the leading `~`, one from the trailing `~`.
+        assert_eq!((img.width, img.height), (2, 6));
+    }
+
+    #[test]
+    fn test_sixel_overflowing_declaration_before_data_does_not_panic() {
+        let img = parse_sixel(b"q\"1;1;4294967295;4294967295~~~").unwrap();
+        assert_within_caps(&img);
+        // The declaration is ignored; the three `~` each draw one column.
+        assert_eq!((img.width, img.height), (3, 6));
+    }
+
+    #[test]
+    fn test_sixel_growth_beyond_pixel_cap_keeps_product_within_cap() {
+        // 4000 x 4000 is accepted (16,000,000 px).  Drawing at x = 9000 would
+        // need 9001 x 4000 = 36M px, so the width growth is limited to what
+        // fits under the pixel cap.
+        let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+        decoder.decode(b"\"1;1;4000;4000#0;2;100;0;0!9000?~");
+        assert!(decoder.invariant_holds());
+        assert_eq!(decoder.height, 4000);
+        assert_eq!(decoder.width, MAX_SIXEL_PIXELS / 4000);
+        // The finished image is trimmed to the declared 4000 x 4000.
+        let img = decoder.finish().unwrap();
+        assert_within_caps(&img);
+        assert_eq!((img.width, img.height), (4000, 4000));
+    }
+
+    #[test]
+    fn test_sixel_shared_palette_path_is_bounded() {
+        let palette = default_sixel_palette();
+        let (img, _) =
+            parse_sixel_with_shared_palette(b"q\"1;1;4294967295;4294967295!4294967295~", palette);
+        assert_within_caps(&img.unwrap());
+    }
+
+    #[test]
+    fn test_clamped_canvas_size_properties() {
+        // Never shrinks, never exceeds the caps, product stays within the cap.
+        let samples = [
+            0,
+            1,
+            6,
+            100,
+            4095,
+            4096,
+            4194,
+            9999,
+            10_000,
+            10_001,
+            usize::MAX,
+        ];
+        for &cw in &samples {
+            for &ch in &samples {
+                // Only valid current sizes (the decoder invariant).
+                if cw > MAX_SIXEL_DIMENSION
+                    || ch > MAX_SIXEL_DIMENSION
+                    || cw * ch > MAX_SIXEL_PIXELS
+                    || (cw == 0) != (ch == 0)
+                {
+                    continue;
+                }
+                for &ww in &samples {
+                    for &wh in &samples {
+                        let (w, h) = clamped_canvas_size(cw, ch, ww, wh);
+                        assert!(w >= cw && h >= ch, "shrunk {cw}x{ch} -> {w}x{h}");
+                        assert!(w <= MAX_SIXEL_DIMENSION && h <= MAX_SIXEL_DIMENSION);
+                        assert!(
+                            w * h <= MAX_SIXEL_PIXELS,
+                            "{cw}x{ch} want {ww}x{wh} -> {w}x{h}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Amortised growth (Task 148.2) ---
+
+    /// Interleaved one-character-at-a-time growth.  Each `~` grows the
+    /// logical width by one column on a canvas that is already 10000 rows
+    /// tall; reallocating and copying the whole image per column cost ~18 s
+    /// (release) on the previous implementation, far beyond nextest's
+    /// slow-test threshold even in a debug build.  With geometric capacity
+    /// growth the work is proportional to the final image area.
+    #[test]
+    fn test_sixel_one_column_growth_on_tall_image_is_amortised() {
+        let mut inner = b"q".to_vec();
+        inner.extend(std::iter::repeat_n(b'-', 1666));
+        inner.extend(std::iter::repeat_n(b'~', 1677));
+        let img = parse_sixel(&inner).unwrap();
+        assert_within_caps(&img);
+        assert_eq!(
+            (
+                usize::value_from(img.width).unwrap(),
+                usize::value_from(img.height).unwrap()
+            ),
+            (1677, MAX_SIXEL_DIMENSION)
+        );
+    }
+
+    /// Wide band built one column at a time, then one band at a time
+    /// underneath it.  Each new band grows the height of a 9000-column image
+    /// by 6 rows; copying the image per band is ~10 GB of memcpy in total.
+    #[test]
+    fn test_sixel_one_band_growth_on_wide_image_is_amortised() {
+        let mut inner = b"q".to_vec();
+        inner.extend(std::iter::repeat_n(b'~', 9000));
+        for _ in 0..1600 {
+            inner.extend_from_slice(b"-~");
+        }
+        let img = parse_sixel(&inner).unwrap();
+        assert_within_caps(&img);
+        // 9000 columns leave room for 16,777,216 / 9000 = 1864 rows.
+        assert_eq!(img.width, 9000);
+        assert_eq!(img.height, 1864);
+    }
+
+    #[test]
+    fn test_sixel_paint_background_uses_palette0_at_each_growth() {
+        // P2 = 0: Paint.  Each growth exposes new cells painted with the
+        // palette entry 0 in force *at that moment*; cells already inside the
+        // image keep their earlier fill.
+        let inner = b"0;0;0q#0;2;100;0;0#1;2;100;100;100@\
+                      #0;2;0;100;0#1@\
+                      #0;2;0;0;100#1-@";
+        let inner: Vec<u8> = inner
+            .iter()
+            .copied()
+            .filter(|&b| b != b' ' && b != b'\n')
+            .collect();
+        let img = parse_sixel(&inner).unwrap();
+        assert_eq!((img.width, img.height), (2, 12));
+        let px = |x: usize, y: usize| -> [u8; 4] {
+            let o = (y * 2 + x) * 4;
+            [
+                img.pixels[o],
+                img.pixels[o + 1],
+                img.pixels[o + 2],
+                img.pixels[o + 3],
+            ]
+        };
+        let white = [255, 255, 255, 255];
+        let red = [255, 0, 0, 255];
+        let green = [0, 255, 0, 255];
+        let blue = [0, 0, 255, 255];
+        for y in 0..12 {
+            for x in 0..2 {
+                let expected = match (x, y) {
+                    (0 | 1, 0) | (0, 6) => white,
+                    (0, 1..=5) => red,
+                    (1, 1..=5) => green,
+                    _ => blue,
+                };
+                assert_eq!(px(x, y), expected, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sixel_transparent_background_never_fills_growth() {
+        // P2 = 1: Transparent.  Redefining palette 0 must not leak into the
+        // exposed area.
+        let img = parse_sixel(b"0;1;0q#0;2;100;0;0#1;2;100;100;100@#0;2;0;100;0#1@-@").unwrap();
+        assert_eq!((img.width, img.height), (2, 12));
+        for y in 0..12usize {
+            for x in 0..2usize {
+                let o = (y * 2 + x) * 4;
+                let painted = matches!((x, y), (0 | 1, 0) | (0, 6));
+                let expected: [u8; 4] = if painted { [255; 4] } else { [0; 4] };
+                assert_eq!(img.pixels[o..o + 4], expected, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_grown_capacity_properties() {
+        let samples = [0, 1, 6, 63, 64, 65, 1000, 4096, 4194, 9999, 10_000];
+        for &cw in &samples {
+            for &ch in &samples {
+                if cw * ch > MAX_SIXEL_PIXELS {
+                    continue;
+                }
+                for &w in &samples {
+                    for &h in &samples {
+                        // Logical extent must itself satisfy the invariant.
+                        if w == 0 || h == 0 || w * h > MAX_SIXEL_PIXELS {
+                            continue;
+                        }
+                        let (nw, nh) = grown_capacity(cw, ch, w, h);
+                        assert!(nw >= w && nh >= h, "{cw}x{ch} for {w}x{h} -> {nw}x{nh}");
+                        assert!(nw <= MAX_SIXEL_DIMENSION && nh <= MAX_SIXEL_DIMENSION);
+                        assert!(
+                            nw * nh <= MAX_SIXEL_PIXELS,
+                            "{cw}x{ch} for {w}x{h} -> {nw}x{nh}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Decode `data` (the part after `q`) and return the decoder.
+    fn decode_counting(data: &[u8]) -> SixelDecoder {
+        let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+        decoder.decode(data);
+        assert!(decoder.invariant_holds());
+        decoder
+    }
+
+    /// Regression: with the canvas at a tall height, growing the width past
+    /// the pixel-cap boundary used to trim the width capacity to exactly the
+    /// logical width, so every further column reallocated and copied the
+    /// whole canvas (about 4000 copies of 35-50 MB from ~5 KB of input).
+    /// The stored buffer holds no spare capacity: the image store charges
+    /// `pixels.len()`, so over-allocated capacity (the decoder allocates at
+    /// least 64x64 and grows geometrically) would escape its quota.
+    #[test]
+    fn test_sixel_finished_pixels_have_no_spare_capacity() {
+        for data in [&b"q~"[..], b"q\"1;1;3;2~~~", b"q#0;2;100;0;0!300~-!5~"] {
+            let image = parse_sixel(data).expect("image");
+            assert_eq!(
+                image.pixels.capacity(),
+                image.pixels.len(),
+                "spare capacity for {data:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sixel_pixel_cap_boundary_growth_reallocates_logarithmically() {
+        let mut data = b"~-".repeat(342);
+        data.extend(std::iter::repeat_n(b'~', 8000));
+        let started = std::time::Instant::now();
+        let decoder = decode_counting(&data);
+        let elapsed = started.elapsed();
+        // 343 bands = 2058 rows; 8000 columns fit under the pixel cap
+        // (8000 * 2058 < MAX_SIXEL_PIXELS), so nothing is clipped.
+        assert_eq!(decoder.height, 343 * 6);
+        assert_eq!(decoder.width, 8000);
+        assert!(
+            decoder.reallocations < 64,
+            "{} reallocations ({elapsed:?})",
+            decoder.reallocations
+        );
+    }
+
+    #[test]
+    fn test_sixel_alternating_axis_growth_reallocates_logarithmically() {
+        let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+        let mut x = 0usize;
+        for band in 0..1200usize {
+            decoder.ensure_size(x + 1, (band + 1) * 6);
+            x += 7;
+            decoder.ensure_size(x, (band + 1) * 6);
+            assert!(decoder.invariant_holds());
+        }
+        assert!(decoder.reallocations < 64, "{}", decoder.reallocations);
+    }
+
+    /// Every growth shape (width first, height first, one-pixel steps,
+    /// large jumps) keeps the reallocation count logarithmic.
+    #[test]
+    fn test_sixel_growth_sequences_reallocate_logarithmically() {
+        let steps: [(usize, usize); 6] = [(1, 6), (6, 1), (1, 1), (50, 6), (6, 50), (97, 31)];
+        for &(dx, dy) in &steps {
+            let mut decoder = SixelDecoder::new(SixelBackground::Paint);
+            let (mut w, mut h) = (0usize, 0usize);
+            for _ in 0..10_000 {
+                w += dx;
+                h += dy;
+                decoder.ensure_size(w, h);
+                assert!(decoder.invariant_holds());
+                if decoder.width < w.min(MAX_SIXEL_DIMENSION) && decoder.height < h {
+                    break;
+                }
+            }
+            assert!(
+                decoder.reallocations < 64,
+                "step ({dx},{dy}): {}",
+                decoder.reallocations
+            );
+        }
+    }
+
+    /// Deterministic pseudo-random sixel streams (both backgrounds, raster
+    /// attributes, palette redefinition, repeats, `$` and `-`) must decode
+    /// byte-identically to the pre-148.2 decoder.
+    #[test]
+    fn test_sixel_matches_reference_decoder_on_small_inputs() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |bound: u64| -> u64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+
+        for case in 0..4000 {
+            let mut inner = format!("0;{};0q", next(3)).into_bytes();
+            let tokens = 1 + next(40);
+            for _ in 0..tokens {
+                let tok = match next(12) {
+                    0..=3 => {
+                        let ch = u8::try_from(0x3F + next(64)).unwrap();
+                        vec![ch]
+                    }
+                    4 | 5 => {
+                        let ch = u8::try_from(0x3F + next(64)).unwrap();
+                        let mut t = format!("!{}", next(21)).into_bytes();
+                        t.push(ch);
+                        t
+                    }
+                    6 => b"-".to_vec(),
+                    7 => b"$".to_vec(),
+                    8 => format!("#{};2;{};{};{}", next(4), next(101), next(101), next(101))
+                        .into_bytes(),
+                    9 => format!("#{}", next(4)).into_bytes(),
+                    10 => format!("#{};1;{};{};{}", next(4), next(361), next(101), next(101))
+                        .into_bytes(),
+                    _ => format!("\"1;1;{};{}", 1 + next(25), 1 + next(25)).into_bytes(),
+                };
+                inner.extend_from_slice(&tok);
+            }
+
+            let new = parse_sixel(&inner);
+            let old = reference::parse(&inner);
+            match (new, old) {
+                (None, None) => {}
+                (Some(n), Some(o)) => {
+                    assert_eq!((n.width, n.height), (o.width, o.height), "case {case}");
+                    assert_eq!(
+                        n.pixels,
+                        o.pixels,
+                        "case {case}: {}",
+                        String::from_utf8_lossy(&inner)
+                    );
+                }
+                (n, o) => panic!(
+                    "case {case}: new={:?} old={:?}",
+                    n.map(|i| (i.width, i.height)),
+                    o.map(|i| (i.width, i.height))
+                ),
+            }
+        }
+    }
+
+    /// Verbatim copy of the pre-148.2 decoder (uncapped, reallocating on every
+    /// growth, tight buffer).  Kept in the test module only, for small inputs,
+    /// to pin that the amortised canvas is byte-identical with the behaviour
+    /// shipped on `main`.
+    mod reference {
+        use super::super::*;
+
+        /// Internal state for the Sixel decoder.
+        struct RefDecoder {
+            /// Palette: 256 entries of (R, G, B).
+            palette: [(u8, u8, u8); MAX_PALETTE],
+            /// Currently selected palette index.
+            current_color: usize,
+            /// Pixel x position within the current band.
+            x: usize,
+            /// Current band index (each band is 6 pixels tall).
+            band: usize,
+            /// Image width in pixels (may grow as data arrives).
+            width: usize,
+            /// Image height in pixels (may grow as bands are added).
+            height: usize,
+            /// Declared image width from raster attributes (0 = not set).
+            declared_width: usize,
+            /// Declared image height from raster attributes (0 = not set).
+            declared_height: usize,
+            /// Background mode.
+            background: SixelBackground,
+            /// RGBA pixel buffer, row-major.
+            pixels: Vec<u8>,
+        }
+
+        impl RefDecoder {
+            fn new(background: SixelBackground) -> Self {
+                let mut palette = [(0u8, 0u8, 0u8); MAX_PALETTE];
+                for (i, &(r, g, b)) in DEFAULT_PALETTE_16.iter().enumerate() {
+                    palette[i] = (r, g, b);
+                }
+
+                Self {
+                    palette,
+                    current_color: 0,
+                    x: 0,
+                    band: 0,
+                    width: 0,
+                    height: 0,
+                    declared_width: 0,
+                    declared_height: 0,
+                    background,
+                    pixels: Vec::new(),
+                }
+            }
+
+            /// Ensure the pixel buffer is large enough to hold the given dimensions.
+            fn ensure_size(&mut self, new_width: usize, new_height: usize) {
+                if new_width <= self.width && new_height <= self.height {
+                    return;
+                }
+
+                let old_width = self.width;
+                let old_height = self.height;
+                let final_width = new_width.max(self.width);
+                let final_height = new_height.max(self.height);
+
+                if old_width == 0 || old_height == 0 {
+                    // First allocation.
+                    self.width = final_width;
+                    self.height = final_height;
+                    let size = final_width
+                        .checked_mul(final_height)
+                        .and_then(|n| n.checked_mul(4))
+                        .unwrap_or(0);
+                    self.pixels = match self.background {
+                        SixelBackground::Paint => {
+                            let (r, g, b) = self.palette[0];
+                            let mut buf = vec![0u8; size];
+                            // `as_chunks_mut` yields fixed-size arrays, so the four
+                            // component writes are bounds-check-free (clippy 1.98's
+                            // `chunks_exact_to_as_chunks`). `size` is a multiple of 4
+                            // by construction, so the remainder is always empty.
+                            for pixel in buf.as_chunks_mut::<4>().0 {
+                                *pixel = [r, g, b, 255];
+                            }
+                            buf
+                        }
+                        SixelBackground::Transparent => vec![0u8; size],
+                    };
+                    return;
+                }
+
+                // Resize existing buffer.
+                let new_total = final_width
+                    .checked_mul(final_height)
+                    .and_then(|n| n.checked_mul(4))
+                    .unwrap_or(0);
+                let mut new_pixels = match self.background {
+                    SixelBackground::Paint => {
+                        let (r, g, b) = self.palette[0];
+                        let mut buf = vec![0u8; new_total];
+                        // See the comment on the initial-allocation path above.
+                        for pixel in buf.as_chunks_mut::<4>().0 {
+                            *pixel = [r, g, b, 255];
+                        }
+                        buf
+                    }
+                    SixelBackground::Transparent => vec![0u8; new_total],
+                };
+
+                // Copy old rows into the new buffer.
+                let copy_width = old_width.min(final_width);
+                for y in 0..old_height.min(final_height) {
+                    let old_row_start = y * old_width * 4;
+                    let new_row_start = y * final_width * 4;
+                    let copy_bytes = copy_width * 4;
+                    new_pixels[new_row_start..new_row_start + copy_bytes]
+                        .copy_from_slice(&self.pixels[old_row_start..old_row_start + copy_bytes]);
+                }
+
+                self.pixels = new_pixels;
+                self.width = final_width;
+                self.height = final_height;
+            }
+
+            /// Set a single pixel at (px, py) to the current palette colour.
+            fn set_pixel(&mut self, px: usize, py: usize) {
+                if px >= self.width || py >= self.height {
+                    return;
+                }
+                let (red, green, blue) = self.palette[self.current_color];
+                let offset = (py * self.width + px) * 4;
+                if offset + 3 < self.pixels.len() {
+                    self.pixels[offset] = red;
+                    self.pixels[offset + 1] = green;
+                    self.pixels[offset + 2] = blue;
+                    self.pixels[offset + 3] = 255;
+                }
+            }
+
+            /// Apply a single sixel data byte (encodes 6 vertical pixels).
+            fn apply_sixel(&mut self, sixel_value: u8, count: usize) {
+                let band_y = self.band * 6;
+                let needed_height = band_y + 6;
+                let needed_width = self.x + count;
+
+                self.ensure_size(needed_width, needed_height);
+
+                for dx in 0..count {
+                    let px = self.x + dx;
+                    for bit in 0..6u8 {
+                        if sixel_value & (1 << bit) != 0 {
+                            self.set_pixel(px, band_y + usize::from(bit));
+                        }
+                    }
+                }
+
+                self.x += count;
+            }
+
+            /// Parse a numeric parameter from the data stream, returning `(value, bytes_consumed)`.
+            fn parse_number(data: &[u8]) -> (u32, usize) {
+                let mut val: u32 = 0;
+                let mut len = 0;
+                for &b in data {
+                    if b.is_ascii_digit() {
+                        val = val.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+                        len += 1;
+                    } else {
+                        break;
+                    }
+                }
+                (val, len)
+            }
+
+            /// Decode the sixel data stream (everything after `q`).
+            fn decode(&mut self, data: &[u8]) {
+                let mut i = 0;
+                let len = data.len();
+
+                // If raster attributes declared dimensions, pre-allocate.
+                // We'll check for them in the first pass of the data.
+
+                while i < len {
+                    let b = data[i];
+                    match b {
+                        // Sixel data character: ? (0x3F) through ~ (0x7E)
+                        0x3F..=0x7E => {
+                            let sixel_value = b - 0x3F;
+                            self.apply_sixel(sixel_value, 1);
+                            i += 1;
+                        }
+                        // `!` — repeat introducer: !<count><sixel-char>
+                        b'!' => {
+                            i += 1;
+                            let (count, consumed) = Self::parse_number(&data[i..]);
+                            i += consumed;
+                            if i < len {
+                                let ch = data[i];
+                                if (0x3F..=0x7E).contains(&ch) {
+                                    let sixel_value = ch - 0x3F;
+                                    let repeat = if count == 0 { 1 } else { usize_from_u32(count) };
+                                    self.apply_sixel(sixel_value, repeat);
+                                }
+                                i += 1;
+                            }
+                        }
+                        // `"` — raster attributes: "Pan;Pad;Ph;Pv
+                        b'"' => {
+                            i += 1;
+                            // Pan (pixel aspect numerator)
+                            let (_pan, c1) = Self::parse_number(&data[i..]);
+                            i += c1;
+                            if i < len && data[i] == b';' {
+                                i += 1;
+                            }
+                            // Pad (pixel aspect denominator)
+                            let (_pad, c2) = Self::parse_number(&data[i..]);
+                            i += c2;
+                            if i < len && data[i] == b';' {
+                                i += 1;
+                            }
+                            // Ph (width)
+                            let (ph, c3) = Self::parse_number(&data[i..]);
+                            i += c3;
+                            if i < len && data[i] == b';' {
+                                i += 1;
+                            }
+                            // Pv (height)
+                            let (pv, c4) = Self::parse_number(&data[i..]);
+                            i += c4;
+
+                            if ph > 0 && pv > 0 {
+                                self.declared_width = usize_from_u32(ph);
+                                self.declared_height = usize_from_u32(pv);
+                                self.ensure_size(self.declared_width, self.declared_height);
+                            }
+                        }
+                        // `#` — colour introducer
+                        b'#' => {
+                            i += 1;
+                            // Pc (palette index)
+                            let (pc, c1) = Self::parse_number(&data[i..]);
+                            i += c1;
+
+                            if i < len && data[i] == b';' {
+                                // Colour definition: #Pc;Pu;Px;Py;Pz
+                                i += 1;
+                                let (pu, c2) = Self::parse_number(&data[i..]);
+                                i += c2;
+                                if i < len && data[i] == b';' {
+                                    i += 1;
+                                }
+                                let (px, c3) = Self::parse_number(&data[i..]);
+                                i += c3;
+                                if i < len && data[i] == b';' {
+                                    i += 1;
+                                }
+                                let (py, c4) = Self::parse_number(&data[i..]);
+                                i += c4;
+                                if i < len && data[i] == b';' {
+                                    i += 1;
+                                }
+                                let (pz, c5) = Self::parse_number(&data[i..]);
+                                i += c5;
+
+                                let idx = usize_from_u32(pc).min(MAX_PALETTE - 1);
+                                self.palette[idx] = if pu == 1 {
+                                    hls_to_rgb(px, py, pz)
+                                } else {
+                                    // pu == 2 (RGB) or default to RGB
+                                    pct_to_rgb(px, py, pz)
+                                };
+                                self.current_color = idx;
+                            } else {
+                                // Colour selection only: #Pc
+                                self.current_color = usize_from_u32(pc).min(MAX_PALETTE - 1);
+                            }
+                        }
+                        // `$` — graphics carriage return (x = 0, same band)
+                        b'$' => {
+                            self.x = 0;
+                            i += 1;
+                        }
+                        // `-` — graphics new line (x = 0, next band)
+                        b'-' => {
+                            self.x = 0;
+                            self.band += 1;
+                            i += 1;
+                        }
+                        // Skip any other bytes (whitespace, etc.)
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+
+            /// Finalise and return the decoded image.
+            fn finish(mut self) -> Option<SixelImage> {
+                if self.width == 0 || self.height == 0 {
+                    return None;
+                }
+
+                // If declared dimensions are larger than actual content, the buffer was
+                // already sized to declared dimensions.  If actual content exceeded the
+                // declared dimensions, the buffer grew dynamically.  Either way, the
+                // final dimensions are `self.width` x `self.height`.
+
+                // Trim height to declared height if raster attributes specified it and
+                // actual content didn't exceed it.
+                if self.declared_height > 0 && self.declared_height < self.height {
+                    let trimmed_size =
+                        self.declared_width.max(self.width) * self.declared_height * 4;
+                    self.pixels.truncate(trimmed_size);
+                    self.height = self.declared_height;
+                }
+
+                // Trim width if declared and narrower than buffer.
+                if self.declared_width > 0 && self.declared_width < self.width {
+                    let new_width = self.declared_width;
+                    let mut trimmed = vec![0u8; new_width * self.height * 4];
+                    for y in 0..self.height {
+                        let src_start = y * self.width * 4;
+                        let dst_start = y * new_width * 4;
+                        let copy_bytes = new_width * 4;
+                        trimmed[dst_start..dst_start + copy_bytes]
+                            .copy_from_slice(&self.pixels[src_start..src_start + copy_bytes]);
+                    }
+                    self.pixels = trimmed;
+                    self.width = new_width;
+                }
+
+                Some(SixelImage {
+                    pixels: self.pixels,
+                    width: u32::value_from(self.width).ok()?,
+                    height: u32::value_from(self.height).ok()?,
+                })
+            }
+        }
+
+        pub fn parse(inner: &[u8]) -> Option<SixelImage> {
+            let q_pos = inner.iter().position(|&b| b == b'q')?;
+            let params = parse_dcs_params(&inner[..q_pos]);
+            let background = SixelBackground::from_param(params.p2);
+            let mut decoder = RefDecoder::new(background);
+            decoder.decode(&inner[q_pos + 1..]);
+            decoder.finish()
+        }
     }
 }

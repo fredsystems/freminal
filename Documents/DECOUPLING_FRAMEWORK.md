@@ -153,14 +153,14 @@ cost would drop from 96 us to roughly 27 us.
 
 ### Active workload (PTY output every 50 ms)
 
-| Metric                        | Value                       |
-| ----------------------------- | --------------------------- |
-| `chrome_mode_replay`          | 0 of 840 frames             |
-| `zero_change_presented`       | 179 of 840 (21%)            |
-| freminal's own                | 77 us/frame (36%)           |
-| egui's own                    | 56 us/frame (27%)           |
-| present (`swap`)              | 70 us/frame (33%)           |
-| observed frame rate           | ~40 fps for ~20 PTY events/s |
+| Metric                  | Value                        |
+| ----------------------- | ---------------------------- |
+| `chrome_mode_replay`    | 0 of 840 frames              |
+| `zero_change_presented` | 179 of 840 (21%)             |
+| freminal's own          | 77 us/frame (36%)            |
+| egui's own              | 56 us/frame (27%)            |
+| present (`swap`)        | 70 us/frame (33%)            |
+| observed frame rate     | ~40 fps for ~20 PTY events/s |
 
 Two findings here: **21% of frames presented with nothing changed at all**
 (there is no `FrameDamage::None` — an all-`Unchanged` result still returns
@@ -189,12 +189,12 @@ same call. **The event that drove the frame disqualified the frame.**
 
 A one-line carve-out fixed it. Steady-state Replay went 0% → 100%:
 
-| Metric               | Before | After   | Change |
-| -------------------- | ------ | ------- | ------ |
-| chrome construction  | 69 us  | 10 us   | -86%   |
-| freminal's own       | 96 us  | 42 us   | -56%   |
-| total per idle frame | 434 us | 376 us  | -13.4% |
-| partial present      | 115/120 | 120/120 | —     |
+| Metric               | Before  | After   | Change |
+| -------------------- | ------- | ------- | ------ |
+| chrome construction  | 69 us   | 10 us   | -86%   |
+| freminal's own       | 96 us   | 42 us   | -56%   |
+| total per idle frame | 434 us  | 376 us  | -13.4% |
+| partial present      | 115/120 | 120/120 | —      |
 
 **This destroyed the strongest maintenance argument in this document.** The
 claim was "we carry 13 undocumented assumptions for an optimisation that never
@@ -418,14 +418,14 @@ but survive as band-hosting mechanics. The `#435`/`#436` three-axis machinery
 
 Do not rebuild these. They exist, they work, and they are egui-free or nearly so.
 
-| Asset                              | Location                             | Use                              |
-| ---------------------------------- | ------------------------------------ | -------------------------------- |
-| SDF rounded-rect + shadow shader   | `freminal/src/gui/renderer/toast_pass.rs` | Chrome surfaces, tabs, popups |
-| Proportional text-run rendering    | `freminal/src/gui/renderer/toast_text_pass.rs` | All chrome text          |
-| Glyph atlas, harfrust, swash       | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping            |
-| EGL partial present, buffer age    | `freminal-windowing/src/gl_context.rs` | Keep verbatim, egui-free       |
-| Toast stack (fully bespoke chrome) | `freminal/src/gui/toast.rs`          | Working precedent for the pattern |
-| Keybinding model (`BindingMap`)    | `freminal-common/src/keybindings.rs` | Toolkit-neutral already          |
+| Asset                              | Location                                           | Use                               |
+| ---------------------------------- | -------------------------------------------------- | --------------------------------- |
+| SDF rounded-rect + shadow shader   | `freminal/src/gui/renderer/toast_pass.rs`          | Chrome surfaces, tabs, popups     |
+| Proportional text-run rendering    | `freminal/src/gui/renderer/toast_text_pass.rs`     | All chrome text                   |
+| Glyph atlas, harfrust, swash       | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping                      |
+| EGL partial present, buffer age    | `freminal-windowing/src/gl_context.rs`             | Keep verbatim, egui-free          |
+| Toast stack (fully bespoke chrome) | `freminal/src/gui/toast.rs`                        | Working precedent for the pattern |
+| Keybinding model (`BindingMap`)    | `freminal-common/src/keybindings.rs`               | Toolkit-neutral already           |
 
 Toasts (issue #433) are the proof of concept: animated, hit-tested,
 GL-drawn chrome with its own text pass and no egui widgets.
@@ -437,26 +437,26 @@ GL-drawn chrome with its own text pass and no egui widgets.
 Bespoke overlays are a deliberate art direction — visually distinct from
 chrome is desirable, not a compromise.
 
-| Element                        | File                  | Bucket | Text input |
-| ------------------------------ | --------------------- | ------ | ---------- |
-| Menu bar                       | `menu.rs`             | HOT    | no         |
-| Tab bar                        | `menu.rs`             | HOT    | no         |
-| Tab rename editor              | `menu.rs`             | HOT    | yes        |
-| Scrollbar                      | `terminal/widget.rs`  | HOT    | no         |
-| Command-block gutter and folds | `terminal/widget.rs`  | HOT    | no         |
-| Bell flash                     | `terminal/widget.rs`  | HOT    | no         |
-| Resize overlay HUD             | `app_impl.rs`         | HOT    | no         |
-| Password lock icon             | `terminal/widget.rs`  | HOT    | no         |
-| Context menu                   | `terminal/widget.rs`  | HOT    | no         |
-| Toasts                         | `toast.rs`            | HOT    | no (done)  |
-| Search overlay                 | `search.rs`           | HOT    | yes        |
-| Command-history palette        | `command_history.rs`  | HOT    | yes        |
-| Settings (approx. 20 tabs)     | `settings.rs`         | AUX    | yes        |
-| Keybinding recorder            | `settings.rs`         | AUX    | yes        |
-| Paste guard                    | `paste_guard.rs`      | AUX    | yes (multiline) |
-| Close guard                    | `close_guard.rs`      | AUX    | no         |
-| Broadcast guard                | `broadcast_guard.rs`  | AUX    | no         |
-| About, Welcome, Save Layout    | `menu.rs`, `welcome.rs` | AUX  | yes (name field) |
+| Element                        | File                    | Bucket | Text input       |
+| ------------------------------ | ----------------------- | ------ | ---------------- |
+| Menu bar                       | `menu.rs`               | HOT    | no               |
+| Tab bar                        | `menu.rs`               | HOT    | no               |
+| Tab rename editor              | `menu.rs`               | HOT    | yes              |
+| Scrollbar                      | `terminal/widget.rs`    | HOT    | no               |
+| Command-block gutter and folds | `terminal/widget.rs`    | HOT    | no               |
+| Bell flash                     | `terminal/widget.rs`    | HOT    | no               |
+| Resize overlay HUD             | `app_impl.rs`           | HOT    | no               |
+| Password lock icon             | `terminal/widget.rs`    | HOT    | no               |
+| Context menu                   | `terminal/widget.rs`    | HOT    | no               |
+| Toasts                         | `toast.rs`              | HOT    | no (done)        |
+| Search overlay                 | `search.rs`             | HOT    | yes              |
+| Command-history palette        | `command_history.rs`    | HOT    | yes              |
+| Settings (approx. 20 tabs)     | `settings.rs`           | AUX    | yes              |
+| Keybinding recorder            | `settings.rs`           | AUX    | yes              |
+| Paste guard                    | `paste_guard.rs`        | AUX    | yes (multiline)  |
+| Close guard                    | `close_guard.rs`        | AUX    | no               |
+| Broadcast guard                | `broadcast_guard.rs`    | AUX    | no               |
+| About, Welcome, Save Layout    | `menu.rs`, `welcome.rs` | AUX    | yes (name field) |
 
 Keeping AUX on egui reduces the bespoke text-input requirement from nine
 surfaces (including a multiline editor and the keybinding recorder, which
@@ -480,15 +480,15 @@ one**, or Phase 4 forces a foundation rewrite.
 We keep **winit + glutin**. We write **zero platform backends**. This was
 initially muddled; the corrected split is:
 
-| Layer                                              | Platform-specific | Owner              |
-| -------------------------------------------------- | ----------------- | ------------------ |
-| Window, event loop, raw input, clipboard, IME plumbing | yes           | winit              |
-| GL context, surface, partial present               | yes               | glutin, `gl_context.rs` |
-| Shape and text drawing                             | no                | ours (exists)      |
-| Layout, hit-test, focus, popup stack               | no                | ours (new)         |
-| Widgets                                            | no                | ours (new)         |
-| IME consumption (preedit render, cursor area)       | no                | ours (new)         |
-| Accessibility tree                                 | yes               | AccessKit, later   |
+| Layer                                                  | Platform-specific | Owner                   |
+| ------------------------------------------------------ | ----------------- | ----------------------- |
+| Window, event loop, raw input, clipboard, IME plumbing | yes               | winit                   |
+| GL context, surface, partial present                   | yes               | glutin, `gl_context.rs` |
+| Shape and text drawing                                 | no                | ours (exists)           |
+| Layout, hit-test, focus, popup stack                   | no                | ours (new)              |
+| Widgets                                                | no                | ours (new)              |
+| IME consumption (preedit render, cursor area)          | no                | ours (new)              |
+| Accessibility tree                                     | yes               | AccessKit, later        |
 
 Consequences worth writing down:
 
@@ -507,15 +507,15 @@ Consequences worth writing down:
 
 Do not re-litigate these without new evidence.
 
-| Option                                    | Verdict  | Reason                                                                                                 |
-| ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------ |
-| Keep egui, push the damage machinery further | Rejected | Requires more undocumented-internals dependence; `chrome_repaint_settled` already reads private state (A10) |
-| Adopt wezterm's `window` crate            | Rejected | A winit alternative, not a widget toolkit; unpublished; depends on wezterm-internal crates; wezterm does not hit the idle target itself |
-| Native toolkit per platform (ghostty)     | Rejected | Triples chrome surface; contradicts one-renderer-everywhere; reintroduces per-platform event loops removed by Tasks 62–66; terminal-content a11y is bespoke regardless |
-| Cache chrome to a texture, composite it   | Rejected | Hit-testing needs a live `Ui` behind the pixels; font-atlas staleness worse; adds a second staleness clock; only pays off exactly where `Replay` already should |
-| Adopt an existing retained-mode Rust GUI  | Rejected | No mature crate composites into an existing GL context without owning the event loop; candidates are early-stage |
-| Drop the menu bar for a command palette   | Rejected | Maintainer ruling: menu bar is non-negotiable                                                          |
-| Minimal chrome (Alacritty model)          | Rejected | Tabs, muxing, layouts and settings are shipped product identity                                        |
+| Option                                       | Verdict  | Reason                                                                                                                                                                 |
+| -------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Keep egui, push the damage machinery further | Rejected | Requires more undocumented-internals dependence; `chrome_repaint_settled` already reads private state (A10)                                                            |
+| Adopt wezterm's `window` crate               | Rejected | A winit alternative, not a widget toolkit; unpublished; depends on wezterm-internal crates; wezterm does not hit the idle target itself                                |
+| Native toolkit per platform (ghostty)        | Rejected | Triples chrome surface; contradicts one-renderer-everywhere; reintroduces per-platform event loops removed by Tasks 62–66; terminal-content a11y is bespoke regardless |
+| Cache chrome to a texture, composite it      | Rejected | Hit-testing needs a live `Ui` behind the pixels; font-atlas staleness worse; adds a second staleness clock; only pays off exactly where `Replay` already should        |
+| Adopt an existing retained-mode Rust GUI     | Rejected | No mature crate composites into an existing GL context without owning the event loop; candidates are early-stage                                                       |
+| Drop the menu bar for a command palette      | Rejected | Maintainer ruling: menu bar is non-negotiable                                                                                                                          |
+| Minimal chrome (Alacritty model)             | Rejected | Tabs, muxing, layouts and settings are shipped product identity                                                                                                        |
 
 On IME and accessibility as reasons to keep egui: freminal gets **zero
 AccessKit today** — `egui-winit`'s `accesskit` feature is not in its default

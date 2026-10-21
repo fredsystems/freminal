@@ -1,5 +1,16 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-19 — Task 148 (security and fuzz findings remediation).
+No gap row is added or removed: every Task 148 change is a limit, policy or
+crash fix on an implemented sequence, recorded in `ESCAPE_SEQUENCE_COVERAGE.md`
+(REP, BS, wide glyphs, DECSLRM, Sixel, OSC 0/1/2, OSC 7, OSC 8, OSC 52,
+OSC 1338, `CSI t`, XTGETTCAP, kitty graphics file media, bracketed paste).
+XTGETTCAP answering at most 64 names per request is a deliberate freminal limit
+(xterm answers every name). The mutating `CSI t` window operations and kitty
+graphics `t=f` / `t=t` / `t=s` are off by default (`[security] allow_window_ops`,
+`allow_kitty_file_transfer`); they work once enabled. A confirmation prompt
+instead of a plain off switch waits for Task 133.
+
 Last updated: 2026-10-12 — Task 138 (OSC 99 conformance), closed. The OSC 99 row
 in "OSC Gaps" (Kitty notifications) is removed. Its last open item was the eight
 standard icon names, which the spec requires every implementation to support:

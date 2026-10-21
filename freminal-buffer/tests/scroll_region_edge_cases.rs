@@ -168,25 +168,25 @@ fn scroll_region_resets_cursor_x() {
 // ============================================================================
 
 #[test]
-fn lf_outside_region_below_in_primary_creates_scrollback() {
+fn lf_outside_region_below_on_last_row_in_primary_does_not_scroll() {
     let mut buf = Buffer::new(10, 10);
     tag_rows(&mut buf, 10);
 
     buf.set_scroll_region(2, 5); // Region: rows 1..4 (0-based)
 
-    // Move cursor outside region (to row 8, 0-based)
-    buf.set_cursor_pos(Some(1), Some(9)); // 1-based: col 1, row 9
+    // Move cursor below the region, onto the last screen row (0-based row 9).
+    buf.set_cursor_pos(Some(1), Some(9));
 
     let rows_before = buf.rows().len();
+    let y_before = buf.cursor().pos.y;
 
-    // LF outside region in primary buffer should behave normally:
-    // at bottom of screen, it adds a new row and scrollback
+    // LF below the bottom margin on the last row is cursor down, which
+    // clamps at the last row: xterm `xtermIndex` / `CursorDown` (cursor.c).
+    // Nothing scrolls and no row is pushed into scrollback (Task 148.C3).
     buf.handle_lf();
 
-    let rows_after = buf.rows().len();
-
-    // Should have added a row (scrollback behavior)
-    assert!(rows_after > rows_before);
+    assert_eq!(buf.rows().len(), rows_before);
+    assert_eq!(buf.cursor().pos.y, y_before);
 }
 
 #[test]

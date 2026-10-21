@@ -273,12 +273,13 @@ impl FreminalGui {
 
     /// Read the current working directory of the shell in the given pane.
     ///
-    /// Source priority:
+    /// Source priority (see [`crate::gui::platform::resolve_spawn_cwd`]):
     /// 1. The OSC 7 cwd carried in the pane's latest snapshot
-    ///    (`snap.cwd`).  When the shell runs freminal's shell integration it
-    ///    emits `OSC 7` at every prompt, so this is present, free (a single
-    ///    atomic snapshot load, no syscall), and tracks the user's perceived
-    ///    cwd across `cd` and subshells.
+    ///    (`snap.cwd`), used only if it names an existing directory.  When the
+    ///    shell runs freminal's shell integration it emits `OSC 7` at every
+    ///    prompt, so this tracks the user's perceived cwd across `cd` and
+    ///    subshells.  The emulator already rejects foreign-host and malformed
+    ///    URIs; the `is_dir` check guards against bogus paths that remain.
     /// 2. Fallback: [`crate::gui::platform::read_cwd`], which inspects the OS
     ///    process — Linux (`/proc/<pid>/cwd`), macOS / Windows (via `sysinfo`).
     ///    This covers users who do *not* run shell integration (where
@@ -314,13 +315,10 @@ impl FreminalGui {
             .and_then(|win| find_in(win, pane_id))
             .or_else(|| self.windows.values().find_map(|win| find_in(win, pane_id)))?;
 
-        // Priority 1: OSC 7 cwd from the latest snapshot (no syscall).
-        if let Some(cwd) = pane.arc_swap.load().cwd.clone() {
-            return Some(cwd);
-        }
-
-        // Priority 2: OS process inspection (one syscall; only when OSC 7 absent).
-        crate::gui::platform::read_cwd(pane.child_pid?)
+        // OSC 7 is unauthenticated, so `resolve_spawn_cwd` trusts the
+        // snapshot cwd only when it names an existing directory and otherwise
+        // falls back to OS process inspection of the child PID.
+        crate::gui::platform::resolve_spawn_cwd(pane.arc_swap.load().cwd.as_deref(), pane.child_pid)
     }
 
     /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]

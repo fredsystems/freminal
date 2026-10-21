@@ -265,7 +265,8 @@ impl VtTestHelper {
         while let Ok(msg) = self.write_rx.try_recv() {
             match msg {
                 PtyWrite::Write(bytes) => messages.push(bytes),
-                PtyWrite::Resize(_) => {} // Ignore resize messages.
+                // Ignore resize messages.
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => {}
             }
         }
         messages

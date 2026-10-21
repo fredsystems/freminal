@@ -52,7 +52,7 @@ impl Rig {
             .into_iter()
             .filter_map(|msg| match msg {
                 PtyWrite::Write(bytes) => Some(bytes),
-                PtyWrite::Resize(_) => None,
+                PtyWrite::Resize(_) | PtyWrite::ApplyPendingResize => None,
             })
             .flatten()
             .collect()
@@ -317,7 +317,13 @@ fn ris_abandons_an_in_flight_iterm2_multipart_transfer() {
 #[test]
 fn ris_keeps_the_osc7_working_directory() {
     let mut rig = Rig::new(80, 24);
-    rig.feed(b"\x1b]7;file://localhost/home/user/project\x1b\\");
+    // A local directory looks different in a `file://` URI per platform.
+    let uri = if cfg!(windows) {
+        "file://localhost/C:/Users/user/project"
+    } else {
+        "file://localhost/home/user/project"
+    };
+    rig.feed(format!("\x1b]7;{uri}\x1b\\").as_bytes());
     let before = rig
         .state
         .handler

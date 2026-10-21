@@ -287,6 +287,42 @@ limit = 10000
 # run inside the terminal.
 # allow_clipboard_read = false
 
+# Which panes may write the system clipboard via OSC 52.
+#   "active_pane" -- only the active pane of the focused window; writes from
+#                    background tabs, unfocused splits and unfocused windows
+#                    are dropped (default)
+#   "all"         -- every pane, including background tabs. Any program in any
+#                    tab can then silently replace what you will next paste.
+#   "off"         -- never honour OSC 52 writes
+# A write whose decoded payload exceeds 1 MiB is always dropped, whatever this
+# is set to.
+# Default: "active_pane".
+# allow_clipboard_write = "active_pane"
+
+# Allow applications to make the terminal read local files and shared memory
+# objects via the kitty graphics protocol (t=f, t=t and t=s transmission).
+# Default: false (such transmissions are refused with the same reply as an
+# unreadable file; nothing is opened, read or deleted).
+# When true, any program writing to the terminal -- including a remote host
+# over ssh, or untrusted `cat` output -- can make the terminal read (and, for
+# t=t temporary files and t=s shared memory, remove) a path of its choosing,
+# and can probe the reply to learn whether it succeeded. Direct transmission
+# (t=d) is unaffected.
+# allow_kitty_file_transfer = false
+
+# Allow applications to change the window through XTWINOPS escape sequences
+# (CSI Ps ; Ps ; Ps t): minimize and de-iconify (1, 2), move (3), resize in
+# pixels (4) or characters (8), maximize/restore (9) and full-screen (10).
+# Equivalent to xterm's allowWindowOps resource.
+# Default: false (these requests are ignored).
+# When true, any program writing to the terminal -- including a remote host
+# over ssh, or untrusted `cat` output -- can move, resize, minimize or
+# full-screen your window. Resize and move targets are clamped to the monitor
+# size, or to a fixed 16384 px extent when the monitor is unknown. Report-only
+# queries (window size, position and state, title) and title push/pop are
+# unaffected.
+# allow_window_ops = false
+
 # Show a lock icon in the tab bar when the foreground process disables
 # terminal echo (e.g. password prompts from sudo, ssh, passwd).
 # Default: true.
@@ -543,6 +579,8 @@ limit = 10000
 # separator it is treated as a file path; otherwise Freminal looks for
 # ~/.config/freminal/layouts/<name>.toml.
 # Overridden by the --layout CLI flag.
+# Layouts are trusted input: their command/shell/env entries run without
+# confirmation, so only point this at layouts you wrote or reviewed.
 # Default: unset (open a single default pane).
 # layout = "dev"
 

@@ -42,35 +42,35 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status   | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | -------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned  | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned  | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned  | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Planned  | None (148.20 waits for 147.4)      |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned  | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned  | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned  | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned  | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned  | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned  | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned  | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned  | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned  | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned  | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned  | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned  | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned  | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned  | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned  | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -7084,6 +7084,9 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 
 #### 147.4 — Generated CSI / SS3 introducers honour S8C1T
 
+- **Note (148.20, 2026-10-19):** 148.20 landed first by maintainer decision. The paste
+  wrapper is now `wrap_bracketed_paste` in `freminal/src/gui/actions.rs`, which strips
+  embedded markers before framing; 147.4 rebases its S8C1T framing onto that helper.
 - **Source:** 130 adversarial review finding 8; GAPS "8-bit C1 Control Gap".
 - **Design (resolved):** a rewrite of the encoded bytes is not safe, because Alt+`[` and
   Alt+`O` legitimately send `ESC [` and `ESC O`. Instead, each construction site emits its
@@ -7620,16 +7623,17 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   checkout.
 - **Depends on:** nothing.
 
-#### 147.31 — `cargo doc -p freminal` emits 58 rustdoc warnings
+#### 147.31 — `cargo doc -p freminal` emits 68 rustdoc warnings
 
 - **Source:** issue #530 review (found checking that the branch added no rustdoc warnings; the
   three it did add were fixed there). Predates #530; reproduces on `main`.
-- **Defect today:** `cargo doc -p freminal --no-deps` warns 58 times: public docs linking to
-  private items (`private_intra_doc_links`, e.g. `box_drawing.rs`, `shaping.rs` `RunCache`,
+- **Defect today:** `cargo doc -p freminal --no-deps` warns 68 times (58 when found; the Task
+  148 merge added 10): public docs linking to private items (`private_intra_doc_links`, e.g.
+  `box_drawing.rs`, `shaping.rs` `RunCache`,
   `toast_pass.rs`, `settings.rs` `VisualPreview`) and unresolved links
   (`broken_intra_doc_links`, e.g. `renderer/mod.rs` `profiling::*`, `chrome_style.rs`
   `Visuals`, `panes/mod.rs` `PaneTreeSnapshot`). No CI job runs rustdoc, so they accumulate.
-- **Scope:** doc comments across `freminal/src/gui/` only; no code changes.
+- **Scope:** doc comments across `freminal/src/` only; no code changes.
 - **Fix:** resolve each link (correct path, or plain backticks where the target is private),
   then add `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` to
   `cargo xtask ci` (and the CI workflow) so it cannot regress.
@@ -8220,7 +8224,592 @@ Group F — Hygiene:
 
 ### 148 Status notes
 
-(none yet)
+- **148.1 (done):** REP clamps its count to 65535 and writes in 256-char chunks
+  (`terminal_handler/edit_ops.rs`). Clamp citation: xterm-412 caps every CSI numeric
+  parameter at `MAX_I_PARAM` = 65535 (`ptyx.h:406`, applied in `charproc.c` `CASE_ESC_DIGIT`)
+  and `CASE_REP` prints the character through `dotext`, so xterm's REP maximum is 65535 and
+  autowrap/scroll apply as for text. This deliberately clamps to xterm's limit rather than to
+  the visible cell count: a visible-cell clamp would change the cursor column and scrollback
+  for counts past one screen. Chunked `insert_text` is equivalent to one call (cursor,
+  including pending wrap, is the only carried state); pinned by
+  `tests/rep_repeat_count.rs` (autowrap on/off, DECSLRM, DECDWL, wide glyph, cap,
+  `usize::MAX`, full parser). Reproducer `fuzz/regressions/terminal_state/rep-huge-count`
+  fails on the old code (36 GB malloc) and replays clean. Benchmarks vs `main`:
+  `bench_parse_plain_text/parser_push/4096` −3.5%, `buffer_insert_chunks/insert_chunks_1000/500`
+  −2.0% (noise; REP is not on either path).
+- **148.2 (done):** sixel decoder caps (`freminal-common/src/buffer_states/sixel.rs`):
+  `MAX_SIXEL_DIMENSION` = 10000 per axis (kitty `MAX_IMAGE_DIMENSION`, `kitty/graphics.c:28`)
+  and `MAX_SIXEL_PIXELS` = 4096x4096 (64 MiB RGBA, a named constant because `freminal-common`
+  cannot see the image-store quota). Behaviour follows xterm-412 `graphics_sixel.c`: a raster
+  declaration over the cap is a data error and ignored (~624-631); data beyond the cap is
+  clipped, not rejected (~153). `!` repeats visit only on-canvas columns (O(width)); all size
+  arithmetic is checked; the decoder keeps an allocation separate from the logical extent and
+  grows geometrically, which also removed a quadratic re-copy (a 3.3 KB input took 17.9 s,
+  now 92 ms). Output is byte-identical to `main` (4000-input comparison against a test-only
+  copy of the old decoder, plus the palette-0-redefinition Paint case). Reproducers
+  `oversize-raster-declaration`, `ensure-size-overflow-slice-panic`, `huge-repeat-growth`,
+  `quadratic-growth` in `fuzz/regressions/sixel_parse/`; the old code fails replay. New
+  benchmark `bench_parse_sixel/400x300` (added first): 262.9 µs -> 213.9 µs (−18.4%).
+  **Review fix (R1):** the adversarial review found a remaining quadratic path at the pixel
+  cap: once doubling would exceed `MAX_SIXEL_PIXELS`, the capacity was trimmed to the exact
+  logical width, so every further column reallocated the whole canvas (3308 reallocations,
+  30 s, from 5 KB). `grown_capacity` now splits the remaining pixel budget around the logical
+  extent (`cap_w = isqrt(MAX * w / h)`), giving O(log) reallocations (19 on that trace; doc
+  comment carries the argument). Reproducer `pixel-cap-boundary-regrowth`.
+  `bench_parse_sixel` is still −15.9% against the pre-148.2 baseline.
+- **148.4 (done):** BS from pending wrap in a one-column buffer now lands at column 0 instead
+  of computing `0 - 1` (`buffer/lines.rs`). Semantics per xterm-412 `cursor.c` `CursorBack`
+  (~147-169): with `do_wrap` set, reverse-wrap only consumes the pending wrap, otherwise the
+  column is decremented and clamped to the left margin; at width 1 both give column 0 with
+  no reverse wrap. Width >= 2 is unchanged. The same-file audit found one more underflow,
+  `self.height - 1` in `handle_lf` on a zero-height buffer, fixed with `saturating_sub`; all
+  other subtractions are guarded. Reproducer
+  `fuzz/regressions/terminal_state/bs-one-column-underflow` (the #557 bytes).
+- **148.3 (done):** one producer found. `Buffer::set_size` never revalidated the DECSLRM
+  left/right margins, so after a narrowing resize `scroll_region_right` kept the old right
+  edge; text written under DECLRMM wrapped past the buffer width and parked the cursor there,
+  and a later CBT sliced the tab-stop table out of range. New
+  `revalidate_left_right_margins` (`buffer/resize_and_alt.rs`): full-width margins follow the
+  new width, margins that no longer fit reset to full width, a still-valid partial pair is
+  kept (mirrors the existing top/bottom handling; xterm-412 `ScreenResize` resets margins
+  unconditionally via `resetMargins`, and `set_lr_margins` clamps to `max_col`). This also
+  fixes a widening resize leaving default margins at the old width. Defence in depth:
+  `tab_backward` clamps the start column to the tab table and slices with `get`. Minimised
+  46-byte reproducer `fuzz/regressions/terminal_state/cbt-stale-column-ghsa-8f32`; the
+  3062-byte advisory input also replays clean. Two sandboxed 10-minute `terminal_state` runs
+  on the fixed tree found no further column producers; their other findings (flatten oracle,
+  alternate row count, cursor row, parked alternate store) are 148.6 / 148.7 material.
+  Benchmarks (A/B on the same tree): `bench_cursor_ops` −0.2%, `bench_move_cursor_relative`
+  −1.6%, `buffer_resize/shrink_height` +0.3%, `grow_height` −0.4%. A +20-27% delta on the
+  two height benches against the session-start `main` baseline is environmental: reverting
+  every buffer change since `main` gives the same numbers.
+- **148.9 (done):** new `freminal/src/gui/history_file_reader.rs`: `read_history_file` opens
+  with `O_NONBLOCK` (a FIFO never blocks) and, for the OSC 1338 path, `O_NOFOLLOW`
+  (`SymlinkPolicy::Refuse`); `fstat` on the opened handle must be a regular file; reads are
+  capped at `MAX_HISTORY_FILE_BYTES` (8 MiB), taking the newest tail from a line boundary.
+  `load_from_path` (OSC 1338) now always applies the basename allow-list, whatever the
+  shell; the list gains `.zhistory` (prezto default) and `.histfile` (zsh-newuser-install
+  default). The environment-derived path (trusted) uses the same reader with
+  `SymlinkPolicy::Follow`. User-visible consequence: an OSC-reported `HISTFILE` with any
+  other basename, or a symlinked one, is no longer loaded over OSC; the environment path
+  still is. Windows UNC paths on this path are 148.C1.
+- **148.5 (done):** cause confirmed. `Row::insert_text_with_limit` returns
+  `Leftover { leftover_start: 0 }` for a glyph wider than even a fresh row, and
+  `Buffer::insert_text` wrapped again with no progress: a row pushed per pass on the primary
+  screen (the #558 OOM), a scroll per pass on the alternate screen (a hang). Chosen
+  behaviour: a glyph wider than the fresh-row span (`wrap_col - wrap_start_col` for that row,
+  after DECDWL halving and DECSLRM margins) is discarded: not written, cursor not moved, no
+  wrap; the following text continues. Precedent: kitty `screen.c` `screen_draw_text`
+  ("discard too wide character") and xterm-412 `charproc.c` `dotext` ("give up - it is too
+  big", against the DECDWL-halved right margin). This also changes DECDWL rows: a wide glyph
+  on a DECDWL row with span 1 used to wrap and be written on the next row, and is now
+  discarded as xterm does. Termination no longer depends on the span arithmetic:
+  `wrap_unless_stalled` refuses a second wrap with no glyph placed and drops the head glyph,
+  so one call wraps at most `text.len() + 1` times. Reproducers
+  `wide-glyph-one-column-primary-oom` and `wide-glyph-one-column-alternate-hang` (6 and 14
+  bytes). Benchmarks (A/B): `softwrap_heavy` +2.0%, `buffer_insert_large_line` +3.0%,
+  `buffer_insert_chunks` +0.7%, all within threshold.
+- **148.7 (done):** one producer for three of the four invariants. `advance_row_for_wrap`
+  appended a row to the alternate screen when an auto-wrap happened on the last screen row
+  below the DECSTBM bottom margin (`:595`, height + 1 rows); `?1049l` then parked that store
+  (`:750`), and a later `?1049h` rebuilt `height` rows around the stale cursor row (`:554`).
+  Fix: on the alternate screen's last row the wrap keeps the cursor on that row and the
+  wrapped text overwrites it from the wrap column, as xterm-412 does (`WrapLine` ->
+  `xtermIndex` -> `CursorDown`, which clamps to `max_row` below `bot_marg`). The
+  `image_cell_count` case (`:643`, r3) no longer reproduces from 148.3 (`ac8ee7a5`) onwards:
+  its stream relies on a stale DECSLRM margin. The invariants are unchanged. Reproducer
+  `alt-wrap-below-margin-grows-screen` (57 bytes). A 664 s sandboxed run found none of the
+  four classes; it found 123 flatten-oracle crashes (148.6) and one timeout (148.C2). The
+  primary-screen counterpart is 148.C3. Benchmarks (A/B): `softwrap_heavy` +2.1%,
+  `buffer_resize/*` −6.1% to +0.6%, `bench_alternate_screen_switch` and
+  `bench_alt_screen_transition_e2e` not significant (one +95% outlier on
+  `leave_alt_to_primary` did not repeat on two reruns: −0.03%, −1.8%).
+- **148.6 (done):** the incremental path was wrong; the full merge is correct. Both causes are
+  in wrapped auto-URL refinement in `refresh_row_cache_and_refine_wrapped_urls`
+  (`buffer/flatten.rs`), not OSC 8 itself: (1) a clean wrapped-URL group below the first
+  rebuilt row was skipped for redetection, so the tail re-merge fell back to its
+  wrap-truncated per-row URLs; (2) a rebuilt soft-wrap continuation row (or a row a
+  previous URL ran into) invalidated the refinement of rows before it, which the copied
+  prefix kept. Fix: the first rebuilt row becomes a merge floor, pulled back to the start of
+  the logical-line group when refinement can reach across it; a group is skipped only when it
+  ends at or before the floor. Common case unchanged (floor = first rebuilt row, pinned by a
+  test). The oracle stays; a 100-seed x 250-step property test in
+  `freminal-terminal-emulator/tests/flatten_incremental_oracle.rs` compares both paths
+  explicitly, so it also holds in release test builds. Reproducers
+  `flatten-incremental-clean-wrapped-url-group-below-rebuilt-row` (minimised from #559) and
+  `flatten-incremental-stale-url-before-rebuilt-continuation-row`. All 124 divergence
+  artifacts from the 148.7 run pass; a 669 s run on the fixed tree found nothing in any
+  class. Benchmarks (A/B): `build_snapshot_80x24_partial_dirty` −2.0% / −3.2% / −5.4% over
+  three runs (wide intervals, not significant), `build_snapshot_80x24_clean` −7.9%,
+  `bench_visible_flatten` +1.5%, `bench_flatten_url_heavy` 0.0%,
+  `bench_flatten_wrapped_url_heavy` +1.6% (n.s.).
+- **148.8 (done):** the only crash cause was the seek index: `Vec::with_capacity(entry_count)`
+  from an unchecked u64 (the #556 allocation, the 155 GB OOMs and the `capacity overflow`
+  panics; all 28,546 historical fork-mode artifacts classify as this). `parse_seek_index`
+  now checks `entry_count * 16` against the bytes before the footer, with checked arithmetic,
+  before allocating. All other offsets go through a checked `slice_at`, and
+  `read_u32_le`/`read_u64_le` are fallible (hardening; the old comparisons already rejected
+  those inputs on 64-bit). The msgpack hypothesis was refuted: rmp-serde 1.3.1 `from_slice`
+  borrows str/bin/ext and fails on a declared length past the slice, and serde caps
+  array/map preallocation; a test pins it. Reproducers `seek-index-huge-entry-count` and
+  `seek-index-capacity-overflow` in `fuzz/regressions/frec_parse/`. A 300 s `frec_parse` run
+  (26M execs) and all 36,388 historical artifacts are clean.
+- **148.10 (done):** new `freminal/src/gui/title_stack.rs` `TitleStack`, depth 10, a push onto
+  a full stack drops the oldest entry: xterm-412 `ptyx.h` `MAX_SAVED_TITLES 10` with
+  `misc.c` `xtermPushTitle`'s ring, and kitty `window.py` `deque(maxlen=10)`. It replaces the
+  `Vec<String>` on every pane, active or background. OSC 0/1/2 titles are truncated at parse
+  time to `MAX_TITLE_BYTES` = 4096 at a UTF-8 boundary (`ansi_components/osc.rs`). This is a
+  freminal resource cap; neither xterm nor kitty bounds titles below its OSC buffer. Tests:
+  5000 pushes stay at depth 10 for an active and a background pane; a 1 MiB title becomes
+  4096 bytes.
+- **148.12 (done):** `parse_osc7_uri` now returns `Result<String, Osc7Rejection>`. The host must
+  be empty, `localhost`, or the local hostname (`gethostname` / `COMPUTERNAME`, computed once),
+  compared ASCII case-insensitively, with a short-name (first DNS label) match either way for
+  macOS shells (RFC 8089 §2-3, RFC 4343). The decoded path must be valid UTF-8, absolute and
+  free of control characters (so `%00` is rejected). A rejected URI clears the stored cwd. New
+  `platform::resolve_spawn_cwd` trusts the OSC 7 path only if `is_dir()` holds, otherwise falls
+  back to `read_cwd(child_pid)`; new tabs, splits and layout/session saving all use it, so a
+  saved session never holds a rejected or nonexistent OSC 7 path. The suspected
+  `percent_decode` off-by-one was not real; a trailing `%XX` test pins it. No layout-save
+  harness exists, so the save path is covered through the shared helper's tests.
+- **148.11 (done):** the PTY writer thread now reads two crossbeam channels: the existing
+  unbounded one for user input (keystrokes, paste, resize, the GUI's `pty_write_tx`), and a new
+  `bounded(REPLY_QUEUE_CAPACITY)` one for terminal-generated replies (256 here; raised to
+  1024 by review fix R5, and given a 4 MiB byte budget by 148.C9).
+  `run_writer_loop` (`io/pty.rs`) uses `select_biased!` with user input first, so keystrokes
+  no longer queue behind replies. A reply and a keystroke pending at the same moment can now be
+  written in either order, user first. No locks; the GUI is unchanged. The handler sends
+  replies with `try_send`; on a full queue the reply is dropped and counted (`dropped_replies`,
+  rate-limited warn). The DECCOLM `PtyWrite::Resize` is not a reply: review found it would
+  block the PTY thread on a full queue, so a new `control_tx` routes it through the user
+  channel. XTGETTCAP answers at most `MAX_XTGETTCAP_NAMES` = 64 names per request and never
+  echoes a name longer than 128 hex characters (freminal policy; xterm-412 answers every
+  name). `new_headless` keeps one unbounded channel for the fuzz harness. Tests: 10,000 DA1
+  queries with no reader leave exactly `REPLY_QUEUE_CAPACITY` queued; a keystroke sent while the writer is blocked
+  is written before every queued reply; a DECCOLM resize gets through a full reply queue.
+  `bench_handle_incoming_data`: −0.5%.
+- **148.13 (done):** `shm_read_bounds` now enforces `MAX_KITTY_DATA_BYTES` on both platforms
+  before anything is mapped or read (`EFBIG`), whether the length comes from `S=` or from the
+  object size. Unix reads with `FileExt::read_at` in a loop; a short read is
+  `KittyShmError::Truncated` (`EIO`), never SIGBUS. The `mmap` path and all of its `unsafe`
+  are gone (POSIX `mmap`: touching pages past the end of a truncated object raises SIGBUS, so
+  mapping only the requested range would not help). Windows keeps `MapViewOfFile` under the
+  cap. **Plan premise corrected:** kitty has no naming convention for `t=s`; `graphics.c`
+  unlinks every object it opened, and the `tty-graphics-protocol` rule is for `t=t` only.
+  Maintainer decision (2026-10-19): unlink as kitty does, but only when the opened object's
+  `st_uid` equals our effective uid (`shm_unlink_decision`); a failed `fstat` no longer
+  unlinks. Tests: cap table (every platform), a sparse cap+1 object, a deterministic
+  shrink-after-size read returning `Truncated`, and the owner-decision table.
+- **148.14 (done, with 148.C1):** new pure `freminal-common/src/windows_path.rs`.
+  `classify_windows_path` returns a `WindowsPathKind` (`LocalDrive`, `Unc`, `DeviceOrVerbatim`,
+  `DriveRelative`, `Relative`); it treats `\` and `/` alike and is table-tested on every
+  platform. On Windows, `load_kitty_file` (`t=f` / `t=t`) and `read_history_file` (OSC 1338
+  and the env HISTFILE path) refuse anything but a `X:\` local-drive path before any
+  filesystem call, so no SMB connection (and no NTLM challenge-response) is attempted. The
+  kitty reply stays the uniform `EBADF`. A drive letter mapped to a network share cannot be
+  detected from the string and is out of scope. The Windows-only tests compile and pass
+  `check-windows` clippy, but nothing runs them on Windows (maintainer check per
+  "148 Verification").
+- **148.15 (done):** maintainer decision (2026-10-19): **off by default**; "ask" waits for
+  Task 133. New `[security] allow_kitty_file_transfer = false`, wired per
+  `freminal-config-options`: field, Settings Security tab, `config_example.toml`, the Nix
+  module, and tests. It reaches the PTY thread as
+  `HostCapabilities::kitty_file_transmission` (`KittyFileTransmission::{Refused, Allowed}`),
+  through the existing initial-state and `HostCapabilitiesChange` paths; Settings Apply
+  rebroadcasts on change. The gate runs before any file or shm access for `t=f`, `t=t` and
+  `t=s`: nothing is read, unlinked or deleted, and the reply is the uniform failed-open
+  `EBADF`. When allowed, every failure on a file-backed medium (open, path or name refusal,
+  bounds, too large, truncated, size mismatch, PNG or zlib failure, missing or zero
+  dimensions, `a=f` rect overflow) maps to the same reply in one place
+  (`send_kitty_medium_error`); `t=d` keeps its detailed errors.
+- **148.16 (done):** maintainer decision (2026-10-19): **active pane only, 1 MiB**. New
+  `[security] allow_clipboard_write = "active_pane" | "all" | "off"` (`ClipboardWritePolicy`),
+  with the full config wiring (Settings combo box, `config_example.toml`, Nix enum option,
+  tests). `handle_window_manipulation` writes only when `clipboard_write_permitted(policy,
+  is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
+  shows no toast and is logged at debug with the byte count only. The decoded OSC 52 write
+  cap is `MAX_OSC52_WRITE_BYTES` = 1 MiB (`osc_clipboard.rs`), and the parser gives OSC 52
+  its own accumulation limit, `MAX_OSC_CLIPBOARD_BYTES` (the base64 size of the cap plus 256
+  bytes, about 1.33 MiB). An over-limit OSC 52 is discarded as before but no longer buffers
+  64 MiB; OSC 1337 keeps `MAX_OSC_LARGE_BYTES`. Query handling is unchanged.
+- **148.17 (done):** maintainer decision (2026-10-19): **off by default**, as xterm's
+  `allowWindowOps`. New `[security] allow_window_ops = false`, with the full config wiring.
+  `WindowManipFlags.window_ops` (`WindowOpsPolicy`) is checked before any handling.
+  `is_mutating_window_op` is an exhaustive `const fn`, so a new variant must be classified
+  before it compiles. It gates CSI 1/2/3/4/8/9/10 t; reports, title set and title push/pop
+  stay available. When allowed, CSI 8 uses `saturating_mul` and conv2. Resize targets are
+  clamped to [1, monitor] and move targets to [0, monitor); the parameters are `usize`, so
+  only the upper bound can overflow. When `monitor_size` is unknown, the bound is
+  `FALLBACK_MONITOR_EXTENT` (16384 logical px); 148.C4 made `freminal-windowing`
+  populate `monitor_size`.
+- **148.18 (done):** new `freminal/src/gui/link_open.rs`. `classify_link` decides and
+  `open_link` opens; both entry points use it (Ctrl/Cmd-click, and the context menu, whose
+  "Open URL" entry is now disabled for a refused target). Allowed: `http`/`https`/`ftp` with
+  `//`, `mailto`, and local `file` (empty or `localhost` authority, absolute path, no UNC
+  form, backslash, `%5C`, or leading `/%2F`). This is the same scheme set auto-detection
+  produces, so one rule covers OSC 8 and detected URLs. The scheme syntax follows RFC 3986
+  §3.1; a one-letter scheme is treated as a drive letter. Everything else (`ms-msdt:`,
+  `search-ms:`, `smb:`, bare paths, `\\host\share`) is refused with a warn naming only the
+  reason. There is no confirmation dialog: confirming other schemes waits for Task 133, and
+  refusing is the strict subset. Residual: a local `file:` link to a launcher (`.desktop`,
+  `.command`) is still handed to the OS opener, as the plan's "local file" allows.
+- **148.19 (done):** `build_system_notification` applies `escape_body_markup` (moved to the
+  every-platform `gui/osc99/markup.rs` and re-exported, not duplicated) to the summary and the
+  body. The per-notification thread is replaced by one lazily started `freminal-notify`
+  worker fed by `bounded(SYSTEM_NOTIFICATION_QUEUE = 16)` in a `OnceLock`. `enqueue_bounded`
+  returns `Enqueued | DroppedFull | WorkerGone`, and a burst drops notifications rather than
+  spawning threads. The test-only skip of the OS call is unchanged.
+- **148.20 (done):** done ahead of 147.4 (maintainer decision 2026-10-19; 147.4 rebases onto
+  `wrap_bracketed_paste`). When bracketed paste is on, `sanitize_bracketed_paste` removes
+  both markers (`200~` and `201~`) in their 7-bit `ESC [` and 8-bit U+009B forms, including
+  markers reassembled around a removed one, in one linear pass (removal happens on the output
+  buffer). Precedent: kitty `utils.py` `sanitize_for_bracketed_paste` strips the end marker to
+  a fixpoint; stripping the start marker too is freminal's extension. Other C0 controls are
+  not stripped: the terminals disagree (xterm-412 turns BS, DEL, ENQ, EOT, ESC, NUL and the
+  stty specials into spaces by default via `DEF_DISALLOWED_PASTE_CONTROLS`; kitty leaves
+  them), and the paste guard already flags them. Unbracketed paste is unchanged.
+- **148.21 (done):** maintainer decision (2026-10-19): **0600 plus redaction**. On Unix,
+  `create_recording_file` opens with `mode(0o600)` and tightens a pre-existing file before
+  truncating it; non-regular targets such as `/dev/null` are left alone. Windows inherits the
+  directory ACL (documented). While the pane's echo is off (the existing `echo_off` atomic),
+  `redact_input_for_echo` replaces `KeyboardInput` (`key_name` becomes `"<redacted>"`,
+  `encoded` is emptied), `ClipboardPaste` and `PtyInput` contents; event timing and modifiers
+  are kept, and the FREC format is unchanged. All three emit sites use it (GUI via
+  `RecordingContext::emit_input`, the PTY consumer thread directly). `FREC_FORMAT.md` gains a
+  Security section and `--recording-path` help a warning. PTY output is still recorded in
+  full. The GUI emit sites are covered through `emit_input`, not an egui harness.
+- **148.22 (done):** maintainer decision (2026-10-19): **document as trusted input**.
+  `LAYOUT_FORMAT.md` has a new "Security: layouts are trusted input" section: `command` is
+  typed into the shell, `shell` picks the program, and `env` is exported, all without
+  confirmation. It lists the reach (the layout library including `last_session.toml`,
+  `--layout`, `[startup] layout`, the Layouts menu); terminal output cannot write these
+  fields. A one-line warning was added to `README.md` and the `[startup] layout` comment in
+  `config_example.toml`. The doc's stale auto-save section was corrected while there
+  (`last_session.toml`, not `_last_session.toml`; `restore_last_session` defaults to
+  `true`). #562 closes.
+- **148.24 (done):** `vergen` is now only a build-dependency of `freminal-terminal-emulator`
+  (its `build.rs` is the sole user). `freminal-buffer` had an unused `vergen`
+  build-dependency and no `build.rs`, so it was dropped. The workspace cargo-machete ignore
+  for `vergen` is gone and `cargo machete` is clean without it. `homepage` (identical to
+  `repository`; nothing reads `CARGO_PKG_HOMEPAGE`) is removed from `[workspace.package]` and
+  every member. The fuzz `cargo check` prints no manifest warnings.
+- **148.25 (done, retune deferred to 148.C6):** all reproducers from 148.1–148.8 and 148.C2
+  replay clean under `fuzz-replay`.
+  - **Reruns:** each affected target ran 330 s with 8 jobs, keep-going, sandboxed, on the fixed
+    tree. Execs: `terminal_state` 0.85M, `sixel_parse` 3.5M, `frec_parse` 198M,
+    `ansi_parser` 17.9M, `config_toml` 67.5M, `kitty_graphics_parse` 545M. None found a crash,
+    OOM or timeout. Earlier 10-minute `terminal_state` runs during 148.3, 148.6 and 148.7
+    surfaced the findings fixed there and 148.C2.
+  - **Config loader:** new `Config::from_toml_str` (`ConfigPartial` + `apply_partial` +
+    `validate`, no filesystem or environment; parse errors are `ConfigError::ParseStr`). The
+    `config_toml` target now fuzzes it, and the fuzz crate's unused `toml` dependency is gone.
+  - **Dictionary:** `fuzz/dict/ansi.dict` (93 tokens: C0/C1, introducers, common CSI/OSC/DCS/APC
+    forms, sixel and UTF-8 tokens). xtask's `dictionary_for_target` passes `-dict=` for
+    `ansi_parser` and `terminal_state` (not for replay or cmin).
+  - **Dictionary coverage:** 20-minute runs from the seeds only, `-fork=4`, with and without:
+
+    | Target           | Dictionary | cov   | ft    | corpus |
+    | ---------------- | ---------- | ----- | ----- | ------ |
+    | `terminal_state` | with       | 15356 | 72015 | 8892   |
+    | `terminal_state` | without    | 14576 | 65561 | 7470   |
+    | `ansi_parser`    | with       | 4668  | 26402 | 6449   |
+    | `ansi_parser`    | without    | 4725  | 27181 | 6707   |
+
+    That is +5.4% cov and +9.9% ft for `terminal_state`; `ansi_parser` is −1.2% / −2.9% (one run
+    each, so within likely noise; the seeds probably already carry most tokens). The mapping
+    keeps both targets for now; 148.C6 revisits it with nightly data.
+  - **CI comment:** the `fuzz-smoke` comment in `ci.yml` no longer lists the fixed crashes.
+  - **Corpus:** not published (maintainer-only).
+- **148.26 (done):** `ESCAPE_SEQUENCE_COVERAGE.md` rows updated for BS, DECDWL, REP,
+  DECSLRM, XTWINOPS and the title stack, OSC 0/1/2, 7, 8 and 52, the OSC size caps, XTGETTCAP,
+  sixel, kitty `_G` and `?2004`. OSC 1338 gained its first row. Both "Last updated" headers
+  have a 2026-10-19 Task 148 entry; `GAPS` records that the new limits and off-by-default
+  policies are deliberate, not gaps. CHT has no limits discussion, so it was skipped.
+  `config_example.toml` and the Nix module were updated in their subtasks (148.15–148.17).
+  `.github/SECURITY.md` makes no statement Task 148 falsifies, so it is unchanged.
+- **148.27 (table ready; the rest is the maintainer's):** each published advisory and its fix
+  on `task-148/security-remediation`. The hashes are branch commits; re-map them if the PR is
+  squash- or rebase-merged. Once a release ships, the maintainer sets each advisory's patched
+  version and requests CVEs where warranted. No agent edits advisories.
+
+  | Advisory            | Severity | Fix    | Branch commit |
+  | ------------------- | -------- | ------ | ------------- |
+  | GHSA-2746-x3cj-58c7 | high     | 148.1  | `a1647497`    |
+  | GHSA-w475-m9wf-775r | medium   | 148.2  | `68bc89b8`    |
+  | GHSA-8f32-mj37-fw6v | high     | 148.3  | `ac8ee7a5`    |
+  | GHSA-4whv-2cx6-772h | high     | 148.9  | `48880c72`    |
+  | GHSA-jh4m-7w5g-j4qg | medium   | 148.10 | `c3f421ee`    |
+  | GHSA-6cxq-f7hx-92v2 | low      | 148.11 | `bf950f58`    |
+  | GHSA-8836-pm5j-jcp4 | low      | 148.12 | `37b46a8e`    |
+  | GHSA-j533-jhh2-ff2x | low      | 148.13 | `9ff54e8b`    |
+  | GHSA-3g79-vfp3-q57g | medium   | 148.14 | `b9a2388b`    |
+  | GHSA-8prj-mhmf-xpjg | medium   | 148.15 | `ae490c87`    |
+  | GHSA-v2hw-gcg8-2rfr | low      | 148.16 | `9d828944`    |
+  | GHSA-67hw-cw29-r66f | low      | 148.17 | `58b202eb`    |
+  | GHSA-jhw2-xjg6-mwhq | medium   | 148.18 | `32a09934`    |
+
+  **Done (2026-10-20):** PR #572 merged as `1d9b7166` (merge commit, so the branch hashes
+  above are on `main`). At the maintainer's direction all 13 advisories now read vulnerable
+  `< 0.13.0-beta.2`, patched `0.13.0-beta.2`; CVE requests remain the maintainer's.
+  Issues closed by the merge: #556 (148.8), #557 (148.4), #558 (148.5), #559 (148.6), #560
+  (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
+  (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
+  still need a maintainer run on Windows.
+- **148.23 (done):** removed `CARGO_BUILD_FEATURES = "playback"` and its comment from
+  `mkFreminalShell`, plus the fuzz-shell sentence about it (cargo never reads that variable,
+  and no crate declares `playback`). xtask's `run_cargo_no_features` existed only to strip it
+  and is gone; its callers use `run_cargo`. `nixfmt`, `statix` and `deadnix` are green, and
+  the three dev shells evaluate. Per `flake-dev-shell-discipline`, the maintainer must
+  re-enter `nix develop`; the variable had no effect on any tool, so later verification in
+  the old shell remains valid.
+
+- **Adversarial review (2026-10-19):** one CODE-REVIEW pass over the whole branch diff; the
+  fixes are commits `148.R*`.
+  - **R1:** the sixel quadratic at the pixel cap (a 148.2 note covers it).
+  - **R2:** kitty `a=q` now answers the uniform `EBADF` for a refused file-backed medium,
+    instead of claiming support.
+  - **R5:** `REPLY_QUEUE_CAPACITY` is raised to 1024, and the docs now say the bound is in
+    messages, not bytes. An OSC 52 query reply carries the clipboard when reads are allowed.
+  - **R8:** `FREC_FORMAT.md` and `--recording-path` now state the redaction limits: raw-mode
+    prompts are not detected, Windows is never redacted, and timing is kept.
+  - **R9a:** OSC 7 no longer accepts a host whose first label equals the local name
+    (`myhost.attacker.example`).
+  - **R12:** `t=s` reads grow in 1 MiB chunks instead of zero-filling the full request.
+  - **R14d:** the shm tests clean up through a drop guard.
+  - **R3:** under `active_pane`, an OSC 52 write also needs the window focused (the docs
+    already said so).
+  - **R4:** `link_open` refuses `file:` launchers and executables (`LAUNCHER_EXTENSIONS` after
+    percent-decoding, NTFS stream and trailing-dot tricks, plus the unix exec bit at click
+    time via `decide_open`), and `mailto:` with an `attach`/`attachment` parameter.
+  - **R6:** window-ops docs say the clamp is to the monitor when reported, else 16384 px.
+  - **R10:** OSC 1338 requires an absolute `HISTFILE`.
+  - **R11b:** the ZWNJ markup escape applies only to Linux/BSD notifications.
+  - **R14a:** the FIFO tests fail loudly without `mkfifo`.
+  - **R14b:** `AUTO_DETECT_SCHEMES` is exported from `freminal-buffer` (re-exported by the
+    emulator), and `link_open` tests iterate it so scheme drift fails.
+  - **R14c:** the window-op tests filter for the specific viewport commands.
+  - **R7:** `insert_text` no longer wraps when nothing placeable remains after a full row
+    (`wrap_would_place_text`), so a discarded glyph leaves no blank line. Benchmarks (A/B):
+    `softwrap_heavy` −2.8%, `buffer_insert_large_line` −1.8%, `buffer_insert_chunks` 0.0%.
+    The DECDWL-landing-row residual is 148.C8.
+  - **Recorded rather than fixed:** 148.C8–148.C11 below. Notes-only items: R13 (sixel work
+    is bounded by the DCS cap, inherent) and R14 dictionary (148.C6).
+
+  The remaining review items are below.
+
+- **Cleanup review (2026-10-19):** one CODE-REVIEW pass over the 148.C3/C4/C8/C9/C10/C11/C12
+  commits. C3 and C12 match xterm; the C9 counters and the C11 respawn were judged sound.
+  Fixed as RC1–RC10:
+  - **RC1:** OSC 7 tests now use a per-platform URI (`sample_osc7`), or run the pure tables
+    with `Osc7PathStyle::Posix`, so Windows CI passes after 148.C10.
+  - **RC4:** a stalled wrap resumes from the end of the filled row again.
+  - **RC5:** PRE-WRAP uses the same landing-row check as the Leftover wrap, sharing a new
+    `take_wrap` helper. Two tests fail on the old code.
+  - **RC10a:** a debug `eprintln!` is removed.
+  - **RC2:** Viewport-class window commands are capped too (`MAX_OUTSTANDING_VIEWPORT_COMMANDS`
+    = 4096 per pane, `WindowCommandBudget`). Under a flood against a stalled GUI, intermediate
+    titles, clipboard writes and notifications past the cap are dropped (documented).
+  - **RC8:** the first drop of either class warns and names the class.
+  - **RC3:** at most `MAX_STUCK_PROBES` (4) directory-probe threads may remain stuck after
+    their deadline. Past that, `with_deadline` returns `Skipped` at once without spawning or
+    waiting, so a hung mount costs at most four 250 ms stalls and four threads.
+  - **RC6:** monitor-size refreshes on `Moved` / `Resized` are debounced to 250 ms. A
+    deferred refresh is retried on a later frame (`DeferredRefresh`), so a drag that ends
+    inside the interval still updates.
+  - **RC10b:** nit fixes (comment wrap, log wording, test classification).
+  - **RC7, RC9:** doc fixes: the A14 wording, and the LF/IND/NEL and DECSLRM coverage rows for
+    148.C3 and 148.C12.
+
+- **PR #572 review (2026-10-19):** CI and the CodeRabbit / Copilot comments.
+  - **RD1 (CI):** macOS shared-memory objects reject `read`/`pread` (`ESPIPE`), so 148.13
+    broke `t=s` on macOS. macOS now reads through `mmap`, which is safe there because XNU fixes
+    an object's size at its first `ftruncate` (`pshm_truncate`); the other unix platforms keep
+    `pread`. A 148.15 edit had replaced the Windows `t=s` round-trip test's success check with
+    a refusal check; restored.
+  - **RD2:**
+    - **Resize coalescing:** DECCOLM resizes coalesce through a latest-value slot
+      (`PtyWrite::ApplyPendingResize`), so at most one marker is ever queued.
+    - **GUI replies:** dropped once the pane's input queue already holds 1024 messages
+      (keystrokes are never dropped).
+    - **Window commands:** the budget also bounds payload bytes (16 MiB, both classes; OSC 99
+      icons count).
+    - **Sixel:** the stored pixels release spare capacity, which the image-store quota did not
+      charge.
+    - **Links:** the `file:` exec-bit `stat` moved to the opener thread; `LAUNCHER_EXTENSIONS`
+      gains macOS and Windows run-on-open formats; the Ctrl/Cmd-click tooltip says when a link
+      is blocked.
+    - **Docs and tests:** `dropped_replies` docs, a misnamed `.frec` test, the 148.11 capacity
+      numbers and the dictionary table.
+  - **RD4:** the coalesced DECCOLM resize could reorder against the GUI's direct resizes (a
+    marker queued before a GUI resize applied a later DECCOLM size, leaving the PTY and the
+    emulator at different widths). All runtime resizes (`set_win_size`, `handle_resize_event`,
+    DECCOLM) now go through `TerminalHandler::route_pty_resize` and the same latest-value
+    slot, so the last size stored is the one applied. CodeRabbit's suggestion (clear the slot
+    before a direct resize) still lets an earlier marker pick up a later DECCOLM size, so it was
+    not used. A regression test fails on the previous code.
+
+### 148 Cleanup entries
+
+- **148.C1 — OSC 1338 `HISTFILE` on Windows accepts UNC paths.** Surfaced in review of 148.9.
+  The bounded reader opens whatever path the shell reports; on Windows a `\\host\share\...`
+  path with an allow-listed basename still makes the OS contact the host (the same NTLM
+  leak as GHSA-3g79-vfp3-q57g for kitty `t=f`). Scope: once 148.14 lands its pure
+  path-classification function, apply it to the OSC 1338 path before any filesystem call.
+  Verification: a table test on the classification at the OSC entry point;
+  `cargo xtask check-windows`. Schedule: with or right after 148.14.
+  **Done** in the 148.14 commit.
+- **148.C2 — CHT (`CSI Ps I`) loops `Ps` times with no progress check.** Surfaced by the
+  148.7 fuzz run (a 3241-byte `terminal_state` timeout; top frames `Buffer::tab_forward` from
+  `process_output_in_batch`). `tab_forward` calls `advance_to_next_tab_stop` `count` times
+  even once the cursor sits on the last column, so a huge parameter is a CPU hang, the same
+  family as GHSA-2746-x3cj-58c7. Scope: stop when a step does not move the cursor (or clamp
+  `count` to the number of stops); check `tab_backward` and any other count-driven loop in
+  `buffer/tabs.rs`. Verification: a test with `usize::MAX`; the minimised timeout as a
+  `terminal_state` regression. Schedule: before 148.25's fuzz reruns.
+  **Done:** `tab_forward` stops once a step leaves the column unchanged
+  (`advance_to_next_tab_stop` only writes the cursor column, so later steps would be no-ops);
+  `tab_backward` already runs at most `width + 1` times; no count-driven loop in the
+  handler. The original timeout was `CSI 42222222222 I`; it now runs in 0.03 s. Reproducer
+  `cht-huge-count-hang` (hand-crafted, `usize::MAX` count).
+- **148.C3 — Wrap / LF below the bottom margin on the primary screen's last row scrolls.**
+  Surfaced by 148.7. xterm-412 clamps there (`xtermIndex` -> `CursorDown` to `max_row`);
+  freminal's primary buffer pushes a row. No invariant breaks, so this is a behaviour
+  difference, not a crash. Scope: decide whether to match xterm; any change needs the
+  scrollback consequences thought through. Not scheduled in Task 148.
+  **Done (maintainer request, 2026-10-19):** the primary screen now matches xterm-412
+  (`xtermIndex` -> `CursorDown`, which clamps to `max_row` below `bot_marg`; `WrapLine` uses
+  the same path). Below the bottom margin on the last visible row, LF/IND/NEL and auto-wrap
+  push no row and scroll nothing; a wrap overwrites that row from the wrap column. The new
+  `is_cursor_on_last_screen_row` serves both screens. A full-screen region can't have the
+  cursor below it, so ordinary scrollback is unchanged. Tests: 11 buffer tests and one
+  full-pipeline test; the old `lf_outside_region_below_in_primary_creates_scrollback` test
+  asserted the old behaviour and now asserts the xterm one. Benchmarks: `softwrap_heavy`,
+  `buffer_insert_large_line` and the eviction benches are within ±4%. `bench_lf_heavy` is
+  bimodal on this machine: the unchanged code measured 7.0 ms and 9.5 ms in back-to-back runs
+  (−28% / +36% A/B swings, same code), so it gives no signal; the changed arm is off its
+  path (full-screen region).
+- **148.C4 — `viewport().monitor_size` is never populated.** Surfaced in review of 148.17.
+  `freminal-windowing` calls `egui_winit::State::take_egui_input` but not
+  `egui_winit::update_viewport_info`, so `monitor_size` (like other `ViewportInfo` fields
+  eframe fills) is always `None`. XTWINOPS resize and move clamp to the 16384 px fallback
+  rather than the real monitor, so an opted-in user (`allow_window_ops = true`) can still be
+  moved off a smaller monitor. Scope: populate `monitor_size` from winit's
+  `current_monitor()` in the windowing crate. Changing egui viewport state falls under
+  `freminal-egui-upgrade` / `EGUI_UPGRADE_ASSUMPTIONS.md`, so walk that checklist. Not
+  scheduled in Task 148 (the default is off).
+  **Done (2026-10-19):** new `freminal-windowing/src/monitor_size.rs` caches each window's
+  monitor size in logical points (`current_monitor()`, converted as egui-winit 0.36.2
+  `update_viewport_info` does), refreshed at creation and on `Resized`, `Moved` and
+  `ScaleFactorChanged`, never per frame. It is injected into
+  `RawInput::viewports[id].monitor_size` after `take_egui_input`. Only that field is written;
+  the full `update_viewport_info` is deliberately not called, since it would change title,
+  rect and focus inputs the app relies on. `EGUI_UPGRADE_ASSUMPTIONS.md` A13 gains a note
+  (scale-factor divisor); A14 (`RawInput::focused`) is untouched because only
+  `monitor_size` is written, and a test pins that the other `ViewportInfo` fields stay unset. The 16384 px fallback now applies only
+  when no monitor is reported.
+- **148.C5 — `cargo xtask lint-markdown` fails on `main`.** Surfaced while verifying 148.21.
+  Pre-existing MD060 / MD033 errors in `PLAN_122_ORCHESTRATION_EXTRACTION.md` and
+  `PLAN_VERSION_090.md` fail the whole-repo markdown lint, which "148 Verification" lists.
+  Files touched by Task 148 are linted individually and pass. Scope: fix those two documents
+  (formatting only). Schedule: with 148.26.
+  **Done:** formatting-only fixes in those two files and in `DECOUPLING_FRAMEWORK.md`,
+  `PLAN_121_PERF_REMEDIATION.md`, `FUTURE_PLANS.md` (an MD033 disable around a real
+  `<details>` block) and the `freminal-module-cohesion` skill; every tracked `.md` lints clean.
+  A local `cargo xtask lint-markdown` can still fail on git-ignored `.direnv/` and
+  `.opencode/node_modules/`, which CI does not have.
+- **148.C6 — Retune `fuzz/nightly-plan.txt` from a week of nightly results.** Deferred from
+  148.25 with maintainer agreement (2026-10-19): it needs a week of nightly data. Raise
+  `sixel_parse` and `frec_parse` (unblocked by 148.2 and 148.8), shorten plateaued targets,
+  and revisit the `ansi_parser` dictionary mapping (148.25 measured −1.2% cov in one run).
+  Schedule: after a week of nightly runs on main with Task 148 merged.
+  **Decision (2026-10-19):** after merge, raise `sixel_parse` and `frec_parse` and do the
+  full retune from 3–5 nightly runs on `main` with these fixes (the two runs so far were on
+  pre-fix `812b1550`, distorted by known crashes).
+  **Blocked (2026-10-19):** the only cleanup entry not done in this PR. It needs a week of
+  nightly fuzz results from `main` with these fixes merged, which cannot exist yet.
+- **148.C7 — `cargo xtask ci` lint fails on `main` (typos).** Surfaced while verifying 148.23.
+  `typos` flagged the terminfo reverse-index capability name (10 times in this document), `gam_sRGB` in
+  `wide_gamut.rs`, and a test name with a misspelt `registry` in `osc99/dbus_service/mod.rs`; the
+  `codespell:ignore` comments do not apply to typos. **Done:** `rin` and `gam` are added to
+  `typos.toml` `extend-words` with their origin, and the test is renamed `..._registry_...`.
+- **148.C8 — A wrap onto a DECDWL row can still be empty.** Review finding R7 (residual).
+  `wrap_would_place_text` checks the widest fresh-row span, because the landing row's width is
+  unknown before the wrap. If the landing row is double-width, so its span is half, a wrap
+  can still land and place nothing, leaving one spurious blank line. It is reachable only
+  with DECDWL and a glyph wider than the half span. Scope: compute the landing row's span
+  before wrapping. Not scheduled in Task 148.
+  **Done (2026-10-19):** `landing_row_span_for_wrap` predicts, without mutating, the row
+  `advance_row_for_wrap` would land on and returns its span (DECDWL-halved). A narrow landing
+  row is possible in three branches: the next existing row (`reuse_row_as_softwrap` keeps
+  `line_width`), staying on the last row below the margin (148.C3), and a DECLRMM
+  column-confined scroll on the primary screen. Pushed and freshly blanked rows are always
+  single-width. A `debug_assert` in the new `wrap_after_leftover`, plus eleven per-branch unit
+  tests, keep the prediction in sync with the real wrap; `wrap_unless_stalled` stays as the
+  backstop. Benchmarks (A/B): `softwrap_heavy` +1.1%, `buffer_insert_large_line` −0.8%,
+  `buffer_insert_chunks` −1.8%. Surfaced 148.C12.
+- **148.C9 — Reply bound is per message, and GUI-side queues stay unbounded.** Review finding
+  R5. `REPLY_QUEUE_CAPACITY` (1024) bounds messages, not bytes: with
+  `allow_clipboard_read = true`, OSC 52 query replies carry the clipboard. Upstream of it,
+  `window_cmd_tx` (PTY to GUI report requests) and `input_tx` (GUI replies back) are
+  unbounded, so a non-draining GUI still amplifies. Scope: a byte budget (an atomic counter
+  shared by handler and writer, no locks) and bounds on the two GUI channels, per
+  `freminal-architecture`. Not scheduled in Task 148.
+  **Done (2026-10-19):** atomics only, no new channels or locks.
+  - **Byte budget:** `MAX_QUEUED_REPLY_BYTES` (4 MiB) is tracked in an `Arc<AtomicUsize>`
+    shared by the handler and the writer (`ReplyQueue`). A reply that would exceed it is
+    dropped unless the queue is empty, so one large legitimate clipboard reply still fits.
+    The handler adds before `try_send` and refunds on failure; the writer subtracts after
+    writing a reply.
+  - **Report cap:** `MAX_OUTSTANDING_REPORTS` (256) per pane counts Report-class window
+    commands sent to the GUI but not yet handled. `post_event` drops a report at the cap (the
+    query goes unanswered, as with a dropped reply), and `handle_window_manipulation`
+    releases one slot per drained Report before any branch, so refused ones release too.
+  - **`input_tx`:** stays unbounded and documented: it carries keystrokes, and GUI replies on
+    it are now bounded by the report cap.
+  - **Tests:** 1000 `CSI 14 t` with no GUI draining leave exactly 256 reports; two 3 MiB
+    replies, the second dropped; budget refunds and writer release.
+  - **Benchmark:** `bench_handle_incoming_data` −2.7%.
+- **148.C10 — OSC 7 / spawn-cwd follow-ups.** Review finding R9.
+  - `resolve_spawn_cwd` runs `is_dir()` (and `read_cwd`, which uses `sysinfo` on macOS and
+    Windows) on the GUI thread at new-tab or split time. An attacker-chosen path on a hung
+    network mount can stall the GUI. Move it off-thread or add a deadline.
+  - On Windows, an OSC 7 path (`/C:/...`) never passes `is_dir()`, so OSC 7 is silently
+    unused there.
+  - `last_session.toml` files written by older builds can carry an unvalidated cwd, and
+    restore uses them as-is.
+
+  **Done (2026-10-19):**
+  - `resolve_spawn_cwd` runs on a helper thread under `SPAWN_CWD_DEADLINE` (250 ms,
+    `with_deadline` -> `Done | TimedOut | Unavailable`). On timeout the pane starts in the
+    default directory. A thread stuck on a hung mount is left to finish; this runs once per
+    user action, or once per pane per minute for the session autosave.
+  - `parse_osc7_uri` takes an `Osc7PathStyle`: on Windows, `/C:/x` becomes `C:/x` and anything
+    but a local-drive path is rejected. Both styles are tested on Linux.
+  - Layout and session restore check `directory` (no control characters, deadline-bounded
+    `is_dir`) and fall back to the default directory instead of failing the pane
+    (`LAYOUT_FORMAT.md` says so). An existing but hostile directory saved by an old build
+    cannot be told apart; layouts are trusted input (148.22).
+- **148.C11 — Notification worker is never restarted.** Review finding R11a. If the
+  `freminal-notify` worker thread exits (panic), `OnceLock` keeps the dead sender and system
+  notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
+  respawn on `WorkerGone`, which needs an atomically swappable sender (`ArcSwap`), not a
+  `OnceLock`. Not scheduled in Task 148.
+  **Done (2026-10-19):** the worker sender lives in a static `ArcSwapOption`. On
+  `WorkerGone` (or empty) `enqueue_with_respawn` spawns a fresh worker, installs it with
+  `compare_and_swap` (a racing winner's queue is used instead), and retries the enqueue once.
+  Respawns are rate-limited to one per 5 s (`claim_respawn`, an atomic timestamp), so a
+  panicking worker cannot become a thread per notification. No locks. Generic over the spawn
+  closure and tested without the OS call.
+- **148.C12 — Auto-wrap at the region bottom on the alternate screen ignores DECLRMM.**
+  Surfaced by 148.C8. `scroll_region_up_for_wrap` scrolls whole rows on the alternate screen
+  (`scroll_slice_up`), even with left/right margins set. The primary screen and SU use the
+  column-confined `scroll_slice_up_confined`. xterm-412 `WrapLine` -> `xtermIndex` ->
+  `xtermScroll` scrolls only inside the margins in left/right mode. Scope: use the confined
+  scroll on the alternate screen when DECLRMM is on.
+  **Done (2026-10-19):** with DECLRMM on and partial margins, the alternate screen uses
+  `scroll_slice_up_confined`; full-width margins or DECLRMM off still scroll whole rows.
+  `landing_row_span_for_wrap` predicts the cursor's own row in that case. Tests: buffer and
+  full-pipeline margin-confinement tests (both fail on the old code) and both pins.
 
 ---
 

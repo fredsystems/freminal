@@ -8,45 +8,206 @@
 //! This module contains the OSC 7 CWD-tracking URI parser and its
 //! supporting utilities:
 //!
-//! - [`parse_osc7_uri`] — parse `file://hostname/path` URIs emitted by OSC 7
-//! - [`percent_decode`] — URL percent-decode a string
+//! - [`parse_osc7_uri`] — validate and parse `file://hostname/path` URIs
+//!   emitted by OSC 7
+//! - [`Osc7Rejection`] — why an OSC 7 URI was refused
+//! - [`Osc7PathStyle`] — which path syntax the decoded URI path must follow
+//! - [`local_hostname`] — the machine's own hostname, resolved once
+//! - [`percent_decode`] — strict URL percent-decode of a string
 //! - [`hex_val`] — convert a single ASCII hex digit to its numeric value
 
-/// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
-/// component.
+use std::sync::OnceLock;
+
+use freminal_common::windows_path::{WindowsPathKind, classify_windows_path};
+
+/// Why an OSC 7 URI was refused by [`parse_osc7_uri`].
 ///
-/// The hostname is intentionally ignored — it is only meaningful for network
-/// file-systems and most shells send `localhost` or the local hostname.
+/// OSC 7 is unauthenticated: any program that can write to the terminal (a
+/// `cat`-ed file, a remote shell, an `ssh` session) can emit it. The reported
+/// directory is later used to start new tabs and splits and is written into
+/// saved layouts, so everything that is not a plain absolute local path is
+/// rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Osc7Rejection {
+    /// The URI does not start with `file://`.
+    #[error("not a file:// URI")]
+    NotFileScheme,
+    /// The URI has no path component after the host.
+    #[error("URI has no path")]
+    NoPath,
+    /// The URI names a host other than this machine; the path refers to a
+    /// directory on another computer.
+    #[error("URI names a host other than this machine")]
+    ForeignHost,
+    /// The percent-decoded path is not valid UTF-8, is not absolute, or
+    /// contains a control character (including NUL).
+    #[error("path is not a valid absolute path")]
+    InvalidPath,
+}
+
+/// The local machine's hostname, resolved once per process.
+///
+/// The value is immutable after first initialisation, so the [`OnceLock`]
+/// involves no locking concern between threads. `None` when the OS cannot
+/// report a hostname (or reports a non-UTF-8 / empty one); in that case only
+/// the empty host and `localhost` are accepted by [`parse_osc7_uri`].
+pub(super) fn local_hostname() -> Option<&'static str> {
+    static HOSTNAME: OnceLock<Option<String>> = OnceLock::new();
+    HOSTNAME
+        .get_or_init(|| {
+            let name = read_local_hostname()?;
+            if name.is_empty() { None } else { Some(name) }
+        })
+        .as_deref()
+}
+
+#[cfg(unix)]
+fn read_local_hostname() -> Option<String> {
+    nix::unistd::gethostname()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+}
+
+#[cfg(windows)]
+fn read_local_hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_local_hostname() -> Option<String> {
+    None
+}
+
+/// The first DNS label of `host` (everything before the first `.`).
+fn first_label(host: &str) -> &str {
+    host.split('.').next().unwrap_or(host)
+}
+
+/// Whether the host component of a `file://` URI designates this machine.
+///
+/// RFC 8089 §2 and §3: the host of a file URI is either empty or the string
+/// `localhost` for the local machine, and any other host names a different
+/// machine. Host names compare ASCII case-insensitively (RFC 4343).
+///
+/// A shell commonly reports the short name (`mac`) while the OS hostname is
+/// fully qualified (`mac.local`), so a reported host equal to the first DNS
+/// label of the local name is also accepted. The reverse is **not**: a
+/// reported FQDN whose first label equals the local name (`myhost.attacker.example`
+/// against a local `myhost`) names a different machine and is rejected, so a
+/// remote party cannot claim to be this host by choosing a suffix. The price
+/// is that a shell reporting a FQDN while `gethostname` returns the short name
+/// is rejected too, and the pane falls back to the process's working directory.
+fn host_is_local(host: &str, local_hostname: Option<&str>) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Some(local) = local_hostname.filter(|l| !l.is_empty()) else {
+        return false;
+    };
+    host.eq_ignore_ascii_case(local) || host.eq_ignore_ascii_case(first_label(local))
+}
+
+/// Path syntax an OSC 7 URI path must follow for the host platform.
+///
+/// A `file://` URI path is always `/`-rooted, but what follows depends on the
+/// platform: on POSIX it *is* the filesystem path, while on Windows a local
+/// drive path appears as `/C:/Users/x` and the leading `/` is URI syntax, not
+/// part of the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc7PathStyle {
+    /// POSIX: the decoded URI path is used verbatim.
+    Posix,
+    /// Windows: the decoded URI path must be `/` followed by a local
+    /// drive-letter path; the `/` is stripped.
+    Windows,
+}
+
+impl Osc7PathStyle {
+    /// The style of the platform freminal is running on.
+    const fn native() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Posix
+        }
+    }
+}
+
+/// Parse an OSC 7 URI of the form `file://hostname/path` and return the path
+/// component, using the running platform's path syntax.
+///
+/// See [`parse_osc7_uri_styled`] for the rules.
+///
+/// # Errors
+///
+/// Returns an [`Osc7Rejection`] describing why the URI was refused.
+pub(super) fn parse_osc7_uri(
+    uri: &str,
+    local_hostname: Option<&str>,
+) -> Result<String, Osc7Rejection> {
+    parse_osc7_uri_styled(uri, local_hostname, Osc7PathStyle::native())
+}
+
+/// Parse an OSC 7 URI with an explicit [`Osc7PathStyle`].
+///
+/// The host must designate this machine: empty, `localhost`
+/// (RFC 8089 §2/§3), or `local_hostname` (RFC 4343 case-insensitive match,
+/// including the local name's own first DNS label; see [`host_is_local`]). When
+/// `local_hostname` is `None` only the empty host and `localhost` are
+/// accepted. Any other host yields [`Osc7Rejection::ForeignHost`].
 ///
 /// Percent-encoded bytes (e.g. `%20` for space) are decoded so the returned
-/// path is a normal filesystem path string.
+/// path is a normal filesystem path string. The decoded path must be valid
+/// UTF-8 (no lossy replacement), absolute, and free of control characters
+/// (NUL, C0 and C1); otherwise [`Osc7Rejection::InvalidPath`] is returned.
 ///
-/// Returns `None` when the URI does not start with `file://` or has no path.
-pub(super) fn parse_osc7_uri(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
+/// With [`Osc7PathStyle::Windows`] the decoded path must additionally be `/`
+/// followed by a local drive path (`/C:/Users/x`); the `/` is stripped, and
+/// anything else (UNC `//host/share`, device paths, drive-relative or
+/// drive-less paths) is [`Osc7Rejection::InvalidPath`].
+fn parse_osc7_uri_styled(
+    uri: &str,
+    local_hostname: Option<&str>,
+    style: Osc7PathStyle,
+) -> Result<String, Osc7Rejection> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or(Osc7Rejection::NotFileScheme)?;
 
     // The path starts at the first '/' after the hostname.
-    // `file:///path` (empty hostname) → rest = "/path"
-    // `file://hostname/path`          → rest = "hostname/path"
-    let path = if rest.starts_with('/') {
-        rest
-    } else {
-        let slash_pos = rest.find('/')?;
-        &rest[slash_pos..]
-    };
+    // `file:///path` (empty hostname) → host = "",         path = "/path"
+    // `file://hostname/path`          → host = "hostname", path = "/path"
+    let slash_pos = rest.find('/').ok_or(Osc7Rejection::NoPath)?;
+    let (host, path) = rest.split_at(slash_pos);
 
-    if path.is_empty() {
-        return None;
+    if !host_is_local(host, local_hostname) {
+        return Err(Osc7Rejection::ForeignHost);
     }
 
-    Some(percent_decode(path))
+    let decoded = percent_decode(path).ok_or(Osc7Rejection::InvalidPath)?;
+    if !decoded.starts_with('/') || decoded.chars().any(char::is_control) {
+        return Err(Osc7Rejection::InvalidPath);
+    }
+
+    match style {
+        Osc7PathStyle::Posix => Ok(decoded),
+        Osc7PathStyle::Windows => {
+            let drive_path = decoded.strip_prefix('/').unwrap_or(&decoded);
+            if classify_windows_path(drive_path) == WindowsPathKind::LocalDrive {
+                Ok(drive_path.to_owned())
+            } else {
+                Err(Osc7Rejection::InvalidPath)
+            }
+        }
+    }
 }
 
 /// Decode percent-encoded bytes (`%XX`) in a string.
 ///
 /// Only valid two-hex-digit sequences are decoded; malformed sequences are
-/// passed through verbatim.
-fn percent_decode(input: &str) -> String {
+/// passed through verbatim. Returns `None` when the decoded bytes are not
+/// valid UTF-8 (they are never lossily replaced).
+fn percent_decode(input: &str) -> Option<String> {
     let mut output = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
@@ -62,7 +223,7 @@ fn percent_decode(input: &str) -> String {
         output.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&output).into_owned()
+    String::from_utf8(output).ok()
 }
 
 /// Convert an ASCII hex digit to its numeric value.
@@ -89,121 +250,305 @@ mod tests {
     // OSC 7 CWD tracking tests
     // ------------------------------------------------------------------
 
-    #[test]
-    fn parse_osc7_uri_with_hostname() {
-        let result = parse_osc7_uri("file://myhost/home/user/projects");
-        assert_eq!(result, Some("/home/user/projects".to_string()));
+    const HOST: Option<&str> = Some("myhost.example.org");
+
+    /// A per-platform OSC 7 sample: `(uri, expected_cwd)` for a directory
+    /// `sub` below the sample root, reported by the `localhost` host.
+    ///
+    /// The native path style decides what a local directory looks like in a
+    /// `file://` URI, so handler-level tests that run through the native
+    /// parser cannot hard-code a POSIX path.
+    fn sample_osc7(sub: &str) -> (String, String) {
+        if cfg!(windows) {
+            (
+                format!("file://localhost/C:/Users/user{sub}"),
+                format!("C:/Users/user{sub}"),
+            )
+        } else {
+            (
+                format!("file://localhost/home/user{sub}"),
+                format!("/home/user{sub}"),
+            )
+        }
     }
 
     #[test]
-    fn parse_osc7_uri_empty_hostname() {
-        // file:///path — empty hostname (common on macOS)
-        let result = parse_osc7_uri("file:///home/user/projects");
-        assert_eq!(result, Some("/home/user/projects".to_string()));
+    fn parse_osc7_uri_table() {
+        let cases: &[(&str, Option<&str>, Result<&str, Osc7Rejection>)] = &[
+            // Host handling.
+            ("file:///home/user", HOST, Ok("/home/user")),
+            ("file://localhost/tmp", HOST, Ok("/tmp")),
+            ("file://LOCALHOST/tmp", HOST, Ok("/tmp")),
+            ("file://LocalHost/tmp", None, Ok("/tmp")),
+            ("file://myhost.example.org/tmp", HOST, Ok("/tmp")),
+            ("file://MYHOST.Example.ORG/tmp", HOST, Ok("/tmp")),
+            // Reported short name matches the first label of the local name.
+            (
+                "file://myhost/home/user/projects",
+                HOST,
+                Ok("/home/user/projects"),
+            ),
+            // A reported FQDN whose first label is the local (short) name is a
+            // different machine as far as we can tell, so it is rejected.
+            (
+                "file://mac.local/tmp",
+                Some("mac"),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            (
+                "file://myhost.attacker.example/tmp",
+                Some("myhost"),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            // The local FQDN itself still matches.
+            ("file://mac.local/tmp", Some("mac.local"), Ok("/tmp")),
+            ("file://other/tmp", HOST, Err(Osc7Rejection::ForeignHost)),
+            ("file://x/tmp", HOST, Err(Osc7Rejection::ForeignHost)),
+            ("file://myhost/tmp", None, Err(Osc7Rejection::ForeignHost)),
+            (
+                "file://myhost/tmp",
+                Some(""),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            (
+                "file://.evil/tmp",
+                Some(""),
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            (
+                "file://127.0.0.1/tmp",
+                HOST,
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            // Scheme / structure.
+            (
+                "http://example.com/path",
+                HOST,
+                Err(Osc7Rejection::NotFileScheme),
+            ),
+            ("ftp://host/path", HOST, Err(Osc7Rejection::NotFileScheme)),
+            ("", HOST, Err(Osc7Rejection::NotFileScheme)),
+            ("file://", HOST, Err(Osc7Rejection::NoPath)),
+            ("file://myhost", HOST, Err(Osc7Rejection::NoPath)),
+            // Path validity after decoding.
+            ("file:///a%00b", HOST, Err(Osc7Rejection::InvalidPath)),
+            ("file:///a%0ab", HOST, Err(Osc7Rejection::InvalidPath)),
+            ("file:///a%1bb", HOST, Err(Osc7Rejection::InvalidPath)),
+            ("file:///a%c2%9bb", HOST, Err(Osc7Rejection::InvalidPath)),
+            ("file:///a\u{7}b", HOST, Err(Osc7Rejection::InvalidPath)),
+            ("file:///a%ffb", HOST, Err(Osc7Rejection::InvalidPath)),
+            // Escaped slashes in the host are not path separators.
+            (
+                "file://localhost%2Ftmp/x",
+                HOST,
+                Err(Osc7Rejection::ForeignHost),
+            ),
+            // Valid decoding.
+            ("file:///tmp/%41", HOST, Ok("/tmp/A")),
+            (
+                "file:///home/user/my%20project",
+                HOST,
+                Ok("/home/user/my project"),
+            ),
+            (
+                "file:///home/user/dir%20with%20spaces/sub%2Fdir",
+                HOST,
+                Ok("/home/user/dir with spaces/sub/dir"),
+            ),
+            ("file:///Espa%C3%B1a", HOST, Ok("/España")),
+        ];
+        for (uri, host, expected) in cases {
+            assert_eq!(
+                parse_osc7_uri_styled(uri, *host, Osc7PathStyle::Posix),
+                expected.map(str::to_owned),
+                "uri={uri:?} host={host:?}"
+            );
+        }
     }
 
     #[test]
-    fn parse_osc7_uri_localhost() {
-        let result = parse_osc7_uri("file://localhost/tmp");
-        assert_eq!(result, Some("/tmp".to_string()));
+    fn parse_osc7_uri_uses_the_native_path_style() {
+        let (uri, expected) = sample_osc7("/project");
+        assert_eq!(parse_osc7_uri(&uri, None), Ok(expected));
     }
 
     #[test]
-    fn parse_osc7_uri_percent_encoded_space() {
-        let result = parse_osc7_uri("file:///home/user/my%20project");
-        assert_eq!(result, Some("/home/user/my project".to_string()));
+    fn parse_osc7_uri_windows_style_table() {
+        let cases: &[(&str, Result<&str, Osc7Rejection>)] = &[
+            ("file:///C:/Users/x", Ok("C:/Users/x")),
+            ("file:///c:/x", Ok("c:/x")),
+            ("file://localhost/D:/a%20b", Ok("D:/a b")),
+            ("file:///C:/", Ok("C:/")),
+            ("file:////host/share", Err(Osc7Rejection::InvalidPath)),
+            (
+                "file://localhost//host/share",
+                Err(Osc7Rejection::InvalidPath),
+            ),
+            ("file:///tmp", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:x", Err(Osc7Rejection::InvalidPath)),
+            ("file:////%3F/C:/x", Err(Osc7Rejection::InvalidPath)),
+            ("file:///C:/a%0ab", Err(Osc7Rejection::InvalidPath)),
+            ("file://other/C:/x", Err(Osc7Rejection::ForeignHost)),
+        ];
+        for (uri, expected) in cases {
+            assert_eq!(
+                parse_osc7_uri_styled(uri, None, Osc7PathStyle::Windows),
+                expected.map(str::to_owned),
+                "uri={uri:?}"
+            );
+        }
     }
 
     #[test]
-    fn parse_osc7_uri_multiple_percent_encodings() {
-        let result = parse_osc7_uri("file:///home/user/dir%20with%20spaces/sub%2Fdir");
+    fn parse_osc7_uri_posix_style_keeps_drive_like_paths_verbatim() {
         assert_eq!(
-            result,
-            Some("/home/user/dir with spaces/sub/dir".to_string())
+            parse_osc7_uri_styled("file:///C:/Users/x", None, Osc7PathStyle::Posix),
+            Ok("/C:/Users/x".to_owned())
+        );
+        assert_eq!(
+            parse_osc7_uri_styled("file:///tmp", None, Osc7PathStyle::Posix),
+            Ok("/tmp".to_owned())
         );
     }
 
     #[test]
-    fn parse_osc7_uri_not_file_scheme() {
-        assert_eq!(parse_osc7_uri("http://example.com/path"), None);
-        assert_eq!(parse_osc7_uri("https://example.com/path"), None);
-        assert_eq!(parse_osc7_uri("ftp://host/path"), None);
+    fn native_style_matches_platform() {
+        let expected = if cfg!(windows) {
+            Osc7PathStyle::Windows
+        } else {
+            Osc7PathStyle::Posix
+        };
+        assert_eq!(Osc7PathStyle::native(), expected);
     }
 
     #[test]
-    fn parse_osc7_uri_no_path_after_hostname() {
-        // "file://hostname" with no trailing slash — no path
-        assert_eq!(parse_osc7_uri("file://hostname"), None);
+    fn osc7_rejection_display_is_static_and_payload_free() {
+        assert_eq!(
+            Osc7Rejection::NotFileScheme.to_string(),
+            "not a file:// URI"
+        );
+        assert_eq!(Osc7Rejection::NoPath.to_string(), "URI has no path");
+        assert_eq!(
+            Osc7Rejection::ForeignHost.to_string(),
+            "URI names a host other than this machine"
+        );
+        assert_eq!(
+            Osc7Rejection::InvalidPath.to_string(),
+            "path is not a valid absolute path"
+        );
     }
 
     #[test]
-    fn parse_osc7_uri_empty_string() {
-        assert_eq!(parse_osc7_uri(""), None);
-    }
-
-    #[test]
-    fn parse_osc7_uri_just_file_scheme() {
-        assert_eq!(parse_osc7_uri("file://"), None);
+    fn local_hostname_is_stable_and_non_empty_when_present() {
+        let first = local_hostname();
+        assert_eq!(first, local_hostname());
+        if let Some(h) = first {
+            assert_ne!(h, "");
+        }
     }
 
     #[test]
     fn percent_decode_no_encoding() {
-        assert_eq!(percent_decode("/home/user"), "/home/user");
+        assert_eq!(percent_decode("/home/user").as_deref(), Some("/home/user"));
     }
 
     #[test]
     fn percent_decode_malformed_sequence() {
         // %ZZ is not valid hex — pass through verbatim
-        assert_eq!(percent_decode("/path%ZZfoo"), "/path%ZZfoo");
+        assert_eq!(
+            percent_decode("/path%ZZfoo").as_deref(),
+            Some("/path%ZZfoo")
+        );
     }
 
     #[test]
     fn percent_decode_truncated_at_end() {
         // % at end of string with not enough chars
-        assert_eq!(percent_decode("/path%2"), "/path%2");
-        assert_eq!(percent_decode("/path%"), "/path%");
+        assert_eq!(percent_decode("/path%2").as_deref(), Some("/path%2"));
+        assert_eq!(percent_decode("/path%").as_deref(), Some("/path%"));
+    }
+
+    #[test]
+    fn percent_decode_trailing_complete_escape() {
+        // A complete `%XX` as the very last three bytes must be decoded.
+        assert_eq!(percent_decode("/path%41").as_deref(), Some("/pathA"));
+        assert_eq!(percent_decode("%41").as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn percent_decode_invalid_utf8_is_rejected() {
+        assert_eq!(percent_decode("/a%ffb"), None);
+        assert_eq!(percent_decode("/a%c3"), None);
     }
 
     #[test]
     fn percent_decode_multibyte_utf8() {
         // € is U+20AC, encoded as UTF-8 bytes E2 82 AC
-        assert_eq!(percent_decode("/cost%E2%82%AC100"), "/cost€100");
+        assert_eq!(
+            percent_decode("/cost%E2%82%AC100").as_deref(),
+            Some("/cost€100")
+        );
         // ñ is U+00F1, encoded as UTF-8 bytes C3 B1
-        assert_eq!(percent_decode("/Espa%C3%B1a"), "/España");
+        assert_eq!(percent_decode("/Espa%C3%B1a").as_deref(), Some("/España"));
         // 日 is U+65E5, encoded as UTF-8 bytes E6 97 A5
-        assert_eq!(percent_decode("/%E6%97%A5"), "/日");
+        assert_eq!(percent_decode("/%E6%97%A5").as_deref(), Some("/日"));
+    }
+
+    #[test]
+    fn handle_osc_foreign_host_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        assert_eq!(handler.current_working_directory(), Some(expected.as_str()));
+        handler.handle_osc(&AnsiOscType::RemoteHost(
+            "file://definitely-not-this-host.invalid/home/attacker".to_string(),
+        ));
+        assert_eq!(handler.current_working_directory(), None);
+    }
+
+    #[test]
+    fn handle_osc_nul_in_path_clears_cwd() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        let (bad_uri, _) = sample_osc7("%00/evil");
+        handler.handle_osc(&AnsiOscType::RemoteHost(bad_uri));
+        assert_eq!(handler.current_working_directory(), None);
     }
 
     #[test]
     fn handle_osc_remote_host_sets_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user"));
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
+        assert_eq!(handler.current_working_directory(), Some(expected.as_str()));
     }
 
     #[test]
     fn handle_osc_remote_host_updates_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user/a".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user/a"));
+        let (uri_a, expected_a) = sample_osc7("/a");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri_a));
+        assert_eq!(
+            handler.current_working_directory(),
+            Some(expected_a.as_str())
+        );
 
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user/b".to_string(),
-        ));
-        assert_eq!(handler.current_working_directory(), Some("/home/user/b"));
+        let (uri_b, expected_b) = sample_osc7("/b");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri_b));
+        assert_eq!(
+            handler.current_working_directory(),
+            Some(expected_b.as_str())
+        );
     }
 
     #[test]
     fn handle_osc_remote_host_invalid_uri_clears_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
         // First set a valid CWD
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         assert!(handler.current_working_directory().is_some());
 
         // Now send an invalid URI — CWD should be cleared (set to None)
@@ -216,9 +561,8 @@ mod tests {
         // The OSC 7 working directory describes the process, not the screen
         // (maintainer decision, Task 131 reset table), so RIS keeps it.
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost(
-            "file://localhost/home/user".to_string(),
-        ));
+        let (uri, _) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         let before = handler.current_working_directory().map(str::to_owned);
         assert!(before.is_some());
 
@@ -488,13 +832,14 @@ mod tests {
     #[test]
     fn prompt_start_captures_cwd() {
         let mut handler = TerminalHandler::new(80, 24);
-        handler.handle_osc(&AnsiOscType::RemoteHost("file:///home/user".to_string()));
+        let (uri, expected) = sample_osc7("");
+        handler.handle_osc(&AnsiOscType::RemoteHost(uri));
         handler.handle_osc(&AnsiOscType::Ftcs(FtcsMarker::PromptStart {
             fid: "test".to_owned(),
         }));
         assert_eq!(
             handler.buffer().command_blocks()[0].cwd.as_deref(),
-            Some("/home/user")
+            Some(expected.as_str())
         );
     }
 
@@ -752,23 +1097,5 @@ mod tests {
             handler.buffer().command_blocks()[1].status(),
             freminal_common::buffer_states::command_block::CommandStatus::Running
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_osc7_uri additional edge cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_osc7_uri_with_percent_encoded_file_url() {
-        // Explicit test for the case mentioned in the task description
-        let result = parse_osc7_uri("file:///home/user/my%20file.txt");
-        assert_eq!(result, Some("/home/user/my file.txt".to_string()));
-    }
-
-    #[test]
-    fn parse_osc7_uri_file_scheme_with_empty_rest() {
-        // "file://" → rest is empty → no slash found for hostname path
-        // rest.starts_with('/') = false, find('/') = None → returns None
-        assert_eq!(parse_osc7_uri("file://"), None);
     }
 }
