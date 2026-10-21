@@ -323,14 +323,96 @@ struct CachedShaper {
     data: harfrust::ShaperData,
 }
 
+/// Named ligature-shaping mode: the single source of truth for the OpenType
+/// feature set freminal shapes with.
+///
+/// Each variant selects one full, fixed feature list ([`Self::features`]), and
+/// the variant itself is part of [`PlanKey`]. Because the plan cache is keyed
+/// on this value rather than on a caller-supplied feature slice, the key fully
+/// determines the inputs the cached `ShapePlan` is compiled from: two callers
+/// can never share a plan compiled for a different feature set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LigatureShaping {
+    /// `liga`/`calt` enabled.
+    Enabled,
+    /// `liga`/`calt` explicitly disabled.
+    Disabled,
+}
+
+/// Feature list for [`LigatureShaping::Enabled`].
+const FEATURES_LIGATURES_ENABLED: [harfrust::Feature; 4] = ligature_features(1);
+
+/// Feature list for [`LigatureShaping::Disabled`].
+const FEATURES_LIGATURES_DISABLED: [harfrust::Feature; 4] = ligature_features(0);
+
+/// Build the feature list with `liga`/`calt` set to `lig_value`.
+///
+/// Struct literals (not `Feature::new`) so this can be `const`; `start = 0`
+/// and `end = u32::MAX` are exactly what `Feature::new(tag, value, ..)`
+/// produces for an unbounded range, i.e. a global feature.
+const fn ligature_features(lig_value: u32) -> [harfrust::Feature; 4] {
+    [
+        // Enable kerning.
+        harfrust::Feature {
+            tag: harfrust::Tag::new(b"kern"),
+            value: 1,
+            start: 0,
+            end: u32::MAX,
+        },
+        // Standard ligatures — controlled by config.
+        harfrust::Feature {
+            tag: harfrust::Tag::new(b"liga"),
+            value: lig_value,
+            start: 0,
+            end: u32::MAX,
+        },
+        // Contextual alternates — controlled by config.
+        harfrust::Feature {
+            tag: harfrust::Tag::new(b"calt"),
+            value: lig_value,
+            start: 0,
+            end: u32::MAX,
+        },
+        // Discretionary ligatures — always disabled (too aggressive for
+        // terminal use; can be revisited later).
+        harfrust::Feature {
+            tag: harfrust::Tag::new(b"dlig"),
+            value: 0,
+            start: 0,
+            end: u32::MAX,
+        },
+    ]
+}
+
+impl LigatureShaping {
+    /// The OpenType features to shape with in this mode.
+    ///
+    /// `kern` is always enabled. `liga` and `calt` are enabled for
+    /// [`Self::Enabled`] and explicitly disabled (value 0) for
+    /// [`Self::Disabled`], to prevent ligature formation even in fonts that
+    /// enable them by default. `dlig` is always disabled.
+    #[must_use]
+    pub(crate) const fn features(self) -> &'static [harfrust::Feature] {
+        match self {
+            Self::Enabled => &FEATURES_LIGATURES_ENABLED,
+            Self::Disabled => &FEATURES_LIGATURES_DISABLED,
+        }
+    }
+}
+
 /// Cache key for a compiled `harfrust::ShapePlan` (Task #430).
 ///
-/// Distinguishes plans by face, the ligature-feature-set identity
-/// (`shaping_features(ligatures)` only ever varies on this bool), and the
-/// buffer's guessed script/direction. `harfrust::Script` and
-/// `harfrust::Direction` already implement `Copy + Eq + Hash`, so no
-/// synthetic hashable representation is needed.
-type PlanKey = (FaceId, bool, harfrust::Script, harfrust::Direction);
+/// Distinguishes plans by face, ligature mode (which fully determines the
+/// feature list, see [`LigatureShaping::features`]), and the buffer's guessed
+/// script/direction. `harfrust::Script` and `harfrust::Direction` already
+/// implement `Copy + Eq + Hash`, so no synthetic hashable representation is
+/// needed.
+type PlanKey = (
+    FaceId,
+    LigatureShaping,
+    harfrust::Script,
+    harfrust::Direction,
+);
 
 /// The four style variants of a single font family.
 struct PrimaryFaces {
@@ -724,9 +806,9 @@ impl FontManager {
     /// is built from, and keyed by, exactly the properties the buffer will be
     /// shaped with, so a caller that forgets cannot panic production.
     ///
-    /// `features` must be the same slice contents for every call with the
-    /// same `(face_id, ligatures)`: it is baked into the cached plan and is
-    /// also passed to `ShapeOptions::features`.
+    /// The plan is compiled from `ligatures.features()`, which is also passed
+    /// to `ShapeOptions::features`; the plan key contains `ligatures`, so it
+    /// fully determines the plan's inputs.
     ///
     /// Returns `None` if the face is not loaded or fails to parse as a
     /// `harfrust::FontRef` — callers must fall back to tofu glyphs in that
@@ -735,8 +817,7 @@ impl FontManager {
     pub(crate) fn shape_cached(
         &self,
         face_id: FaceId,
-        ligatures: bool,
-        features: &[harfrust::Feature],
+        ligatures: LigatureShaping,
         mut buffer: harfrust::UnicodeBuffer,
     ) -> Option<harfrust::GlyphBuffer> {
         buffer.guess_segment_properties();
@@ -752,6 +833,7 @@ impl FontManager {
         let font_ref = harfrust::FontRef::from_index(&cached.bytes, cached.index).ok()?;
         let shaper = cached.data.shaper(&font_ref).build();
 
+        let features = ligatures.features();
         let script = buffer.script();
         let direction = buffer.direction();
         let plan_key: PlanKey = (face_id, ligatures, script, direction);
@@ -2400,20 +2482,19 @@ mod tests {
     #[test]
     fn shape_cached_guesses_segment_properties_itself() {
         let fm = default_manager();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         for text in ["AB", "\u{05D0}\u{05D1}"] {
             let mut unguessed = harfrust::UnicodeBuffer::new();
             unguessed.push_str(text);
             let from_unguessed = fm
-                .shape_cached(FaceId::PrimaryRegular, false, &features, unguessed)
+                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, unguessed)
                 .expect("an unguessed buffer must still shape");
 
             let mut guessed = harfrust::UnicodeBuffer::new();
             guessed.push_str(text);
             guessed.guess_segment_properties();
             let from_guessed = fm
-                .shape_cached(FaceId::PrimaryRegular, false, &features, guessed)
+                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, guessed)
                 .expect("a guessed buffer must shape");
 
             assert_eq!(
@@ -2442,16 +2523,105 @@ mod tests {
         }
     }
 
+    /// Shape `text` on `PrimaryRegular` and flatten the result to
+    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
+    fn shape_flat(
+        fm: &FontManager,
+        text: &str,
+        ligatures: LigatureShaping,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = fm
+            .shape_cached(FaceId::PrimaryRegular, ligatures, buffer)
+            .expect("the bundled regular face must shape");
+        output
+            .glyph_infos()
+            .iter()
+            .zip(output.glyph_positions())
+            .map(|(info, pos)| {
+                (
+                    info.glyph_id,
+                    info.cluster,
+                    pos.x_advance,
+                    pos.y_advance,
+                    pos.x_offset,
+                    pos.y_offset,
+                )
+            })
+            .collect()
+    }
+
+    /// The plan cache is keyed on the ligature mode, so whichever mode shapes
+    /// first on a given manager must not decide the plan used by the other.
+    #[test]
+    fn plan_cache_ligature_modes_do_not_contaminate_each_other() {
+        let enabled_first = default_manager();
+        let enabled_a = shape_flat(&enabled_first, "->", LigatureShaping::Enabled);
+        let disabled_a = shape_flat(&enabled_first, "->", LigatureShaping::Disabled);
+
+        let disabled_first = default_manager();
+        let disabled_b = shape_flat(&disabled_first, "->", LigatureShaping::Disabled);
+        let enabled_b = shape_flat(&disabled_first, "->", LigatureShaping::Enabled);
+
+        assert_eq!(
+            disabled_a, disabled_b,
+            "Disabled output must not depend on which mode shaped first"
+        );
+        assert_eq!(
+            enabled_a, enabled_b,
+            "Enabled output must not depend on which mode shaped first"
+        );
+
+        let ids = |v: &[(u32, u32, i32, i32, i32, i32)]| v.iter().map(|g| g.0).collect::<Vec<_>>();
+        assert_ne!(
+            ids(&disabled_a),
+            ids(&enabled_a),
+            "the bundled face ligates `->`, so the two modes must shape differently"
+        );
+        assert_eq!(ids(&disabled_a), [17, 34]);
+        assert_eq!(ids(&enabled_a), [13760, 14040]);
+    }
+
+    #[test]
+    fn ligature_mode_feature_lists_are_pinned() {
+        let tuples = |mode: LigatureShaping| {
+            mode.features()
+                .iter()
+                .map(|f| (f.tag, f.value, f.start, f.end))
+                .collect::<Vec<_>>()
+        };
+        let tag = |t: &[u8; 4]| harfrust::Tag::new(t);
+
+        assert_eq!(
+            tuples(LigatureShaping::Enabled),
+            [
+                (tag(b"kern"), 1, 0, u32::MAX),
+                (tag(b"liga"), 1, 0, u32::MAX),
+                (tag(b"calt"), 1, 0, u32::MAX),
+                (tag(b"dlig"), 0, 0, u32::MAX),
+            ]
+        );
+        assert_eq!(
+            tuples(LigatureShaping::Disabled),
+            [
+                (tag(b"kern"), 1, 0, u32::MAX),
+                (tag(b"liga"), 0, 0, u32::MAX),
+                (tag(b"calt"), 0, 0, u32::MAX),
+                (tag(b"dlig"), 0, 0, u32::MAX),
+            ]
+        );
+    }
+
     // --- Task #430: shape_cached reuses the Face + ShapePlan caches ---
 
     #[test]
     fn shape_cached_reuses_face_and_plan_across_calls() {
         let fm = default_manager();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str("AB");
-        let first = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let first = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
         assert!(first.is_some(), "first shape_cached call should succeed");
         assert_eq!(
             fm.face_cache_len(),
@@ -2466,7 +2636,7 @@ mod tests {
 
         let mut buffer2 = harfrust::UnicodeBuffer::new();
         buffer2.push_str("CD");
-        let second = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer2);
+        let second = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer2);
         assert!(second.is_some(), "second shape_cached call should succeed");
         assert_eq!(
             fm.face_cache_len(),
@@ -2484,15 +2654,14 @@ mod tests {
     #[test]
     fn shape_cached_misses_on_face_change() {
         let fm = default_manager();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
 
         let mut buffer2 = harfrust::UnicodeBuffer::new();
         buffer2.push_str("B");
-        let _ = fm.shape_cached(FaceId::PrimaryBold, false, &features, buffer2);
+        let _ = fm.shape_cached(FaceId::PrimaryBold, LigatureShaping::Disabled, buffer2);
 
         assert_eq!(
             fm.face_cache_len(),
@@ -2510,11 +2679,10 @@ mod tests {
     fn rebuild_clears_face_and_plan_caches() {
         let config = Config::default();
         let mut fm = FontManager::new(&config, 1.0).unwrap();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
         assert_eq!(fm.face_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
@@ -2537,11 +2705,10 @@ mod tests {
     #[test]
     fn set_font_size_clears_face_and_plan_caches() {
         let mut fm = default_manager();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
         assert_eq!(fm.face_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
@@ -2562,11 +2729,10 @@ mod tests {
     #[test]
     fn update_ppp_changed_clears_face_and_plan_caches() {
         let mut fm = default_manager();
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"kern"), 1, ..)];
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str("A");
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, buffer);
         assert_eq!(fm.face_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 

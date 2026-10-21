@@ -24,7 +24,7 @@ use freminal_common::buffer_states::{
 };
 use freminal_terminal_emulator::LineWidth;
 
-use super::font_manager::{FaceId, FontManager, GlyphStyle};
+use super::font_manager::{FaceId, FontManager, GlyphStyle, LigatureShaping};
 
 // ---------------------------------------------------------------------------
 //  Public types
@@ -140,24 +140,6 @@ pub struct ShapingCache {
     stats: ShapingCacheStats,
     /// Subtask 124.6: content-addressed run-level glyph-template cache.
     run_cache: RunCache,
-}
-
-/// Named ligature-shaping mode, used only as the `ligatures` component of
-/// [`RunCacheKey`].
-///
-/// The `ligatures: bool` flag threaded through every shaping function
-/// (`shape_visible`, `shape_runs`, `shape_single_run`, ...) predates subtask
-/// 124.6 and is grandfathered as-is at every existing call site. This type
-/// exists so that the run-cache *key* — new in 124.6 — never carries a bare
-/// `bool`: the pre-existing flag is classified into a named domain value
-/// inline at the one point it crosses into the new cache key, rather than
-/// threading another bool parameter through new code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum LigatureShaping {
-    /// `calt`/`liga` were enabled for this run.
-    Enabled,
-    /// `calt`/`liga` were disabled for this run.
-    Disabled,
 }
 
 /// Content-addressed key for [`RunCache`].
@@ -414,9 +396,12 @@ impl ShapingCache {
             self.entries.truncate(line_count);
         }
 
-        // Built once per call rather than once per line: the feature list is
-        // identical for every run sharing this `ligatures` setting.
-        let features = shaping_features(ligatures);
+        // Classify the grandfathered `ligatures: bool` once per call.
+        let ligatures = if ligatures {
+            LigatureShaping::Enabled
+        } else {
+            LigatureShaping::Disabled
+        };
 
         let mut result = Vec::with_capacity(line_count);
 
@@ -468,13 +453,8 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = self.shape_runs_via_run_cache(
-                    &runs,
-                    font_manager,
-                    cell_width,
-                    ligatures,
-                    &features,
-                );
+                let shaped_runs =
+                    self.shape_runs_via_run_cache(&runs, font_manager, cell_width, ligatures);
                 let shaped_line = Arc::new(ShapedLine {
                     runs: shaped_runs,
                     line_width: lw,
@@ -504,13 +484,10 @@ impl ShapingCache {
         runs: &[TextRun],
         font_manager: &FontManager,
         cell_width: f32,
-        ligatures: bool,
-        features: &[harfrust::Feature],
+        ligatures: LigatureShaping,
     ) -> Vec<ShapedRun> {
         runs.iter()
-            .map(|run| {
-                self.shape_run_via_run_cache(run, font_manager, cell_width, ligatures, features)
-            })
+            .map(|run| self.shape_run_via_run_cache(run, font_manager, cell_width, ligatures))
             .collect()
     }
 
@@ -521,16 +498,11 @@ impl ShapingCache {
         run: &TextRun,
         font_manager: &FontManager,
         cell_width: f32,
-        ligatures: bool,
-        features: &[harfrust::Feature],
+        ligatures: LigatureShaping,
     ) -> ShapedRun {
         let key = RunCacheKey {
             face_id: run.face_id,
-            ligatures: if ligatures {
-                LigatureShaping::Enabled
-            } else {
-                LigatureShaping::Disabled
-            },
+            ligatures,
             text: run.text.clone(),
             char_widths: run.char_widths.clone(),
         };
@@ -539,7 +511,7 @@ impl ShapingCache {
             template
         } else {
             self.stats.run_misses = self.stats.run_misses.saturating_add(1);
-            let glyphs = shape_run_canonical(run, font_manager, ligatures, features);
+            let glyphs = shape_run_canonical(run, font_manager, ligatures);
             let template: GlyphTemplate = Arc::from(glyphs);
             self.run_cache.current.insert(key, Arc::clone(&template));
             template
@@ -557,8 +529,7 @@ impl ShapingCache {
     ///
     /// Returns `None` on a genuine miss in both generations; the caller is
     /// responsible for shaping and inserting in that case (kept out of this
-    /// method so it doesn't need `font_manager`/`features` just to record a
-    /// hit).
+    /// method so it doesn't need `font_manager` just to record a hit).
     fn run_cache_lookup(&mut self, key: &RunCacheKey) -> Option<GlyphTemplate> {
         if let Some(template) = self.run_cache.current.get(key) {
             self.stats.run_hits = self.stats.run_hits.saturating_add(1);
@@ -821,45 +792,15 @@ fn push_char_to_run(text: &mut String, ch: char) {
 //  Shaping
 // ---------------------------------------------------------------------------
 
-/// Build the harfrust OpenType feature list.
-///
-/// When `ligatures` is `true`, `liga` and `calt` are enabled (value 1) so the
-/// font's standard and contextual ligatures are applied during shaping.
-/// When `false`, all three ligature tags (`liga`, `calt`, `dlig`) are
-/// explicitly disabled (value 0) to prevent ligature formation even in fonts
-/// that enable them by default.
-///
-/// `kern` (kerning) is always enabled.
-fn shaping_features(ligatures: bool) -> Vec<harfrust::Feature> {
-    use harfrust::Tag;
-    let lig_value = u32::from(ligatures);
-    vec![
-        // Enable kerning.
-        harfrust::Feature::new(Tag::new(b"kern"), 1, ..),
-        // Standard ligatures — controlled by config.
-        harfrust::Feature::new(Tag::new(b"liga"), lig_value, ..),
-        // Contextual alternates — controlled by config.
-        harfrust::Feature::new(Tag::new(b"calt"), lig_value, ..),
-        // Discretionary ligatures — always disabled (too aggressive for
-        // terminal use; can be revisited later).
-        harfrust::Feature::new(Tag::new(b"dlig"), 0, ..),
-    ]
-}
-
 /// Shape a set of `TextRun`s into `ShapedRun`s.
-///
-/// `features` is built once by the caller (see [`ShapingCache::shape_visible`])
-/// rather than once per run, since it is identical for every run sharing the
-/// same `ligatures` setting.
 fn shape_runs(
     runs: &[TextRun],
     font_manager: &FontManager,
     cell_width: f32,
-    ligatures: bool,
-    features: &[harfrust::Feature],
+    ligatures: LigatureShaping,
 ) -> Vec<ShapedRun> {
     runs.iter()
-        .map(|run| shape_single_run(run, font_manager, cell_width, ligatures, features))
+        .map(|run| shape_single_run(run, font_manager, cell_width, ligatures))
         .collect()
 }
 
@@ -968,8 +909,12 @@ pub fn shape_placeholder_line(
         });
     }
 
-    let features = shaping_features(ligatures);
-    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures, &features);
+    let ligatures = if ligatures {
+        LigatureShaping::Enabled
+    } else {
+        LigatureShaping::Disabled
+    };
+    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
     ShapedLine {
         runs: shaped_runs,
         line_width: LineWidth::Normal,
@@ -991,10 +936,9 @@ fn shape_single_run(
     run: &TextRun,
     font_manager: &FontManager,
     cell_width: f32,
-    ligatures: bool,
-    features: &[harfrust::Feature],
+    ligatures: LigatureShaping,
 ) -> ShapedRun {
-    let template = shape_run_canonical(run, font_manager, ligatures, features);
+    let template = shape_run_canonical(run, font_manager, ligatures);
     build_shaped_run_from_template(run, &template, cell_width)
 }
 
@@ -1017,8 +961,7 @@ fn shape_single_run(
 fn shape_run_canonical(
     run: &TextRun,
     font_manager: &FontManager,
-    ligatures: bool,
-    features: &[harfrust::Feature],
+    ligatures: LigatureShaping,
 ) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
@@ -1030,7 +973,7 @@ fn shape_run_canonical(
 
     // Try to shape via the cached shaper data + ShapePlan (Task #430).
     font_manager
-        .shape_cached(run.face_id, ligatures, features, buffer)
+        .shape_cached(run.face_id, ligatures, buffer)
         .map_or_else(
             || {
                 // No face available — produce tofu (glyph_id=0) per character.
@@ -1242,16 +1185,20 @@ mod tests {
         FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
-    /// Helper: shape `runs`, building the feature list internally (mirroring
-    /// what `ShapingCache::shape_visible` does once per call in production).
+    /// Helper: shape `runs`, classifying the `ligatures` flag the same way
+    /// `ShapingCache::shape_visible` does once per call in production.
     fn shape_runs_test(
         runs: &[TextRun],
         fm: &FontManager,
         cell_w: f32,
         ligatures: bool,
     ) -> Vec<ShapedRun> {
-        let features = shaping_features(ligatures);
-        shape_runs(runs, fm, cell_w, ligatures, &features)
+        let ligatures = if ligatures {
+            LigatureShaping::Enabled
+        } else {
+            LigatureShaping::Disabled
+        };
+        shape_runs(runs, fm, cell_w, ligatures)
     }
 
     /// Helper: create a simple format tag covering a range.
@@ -1518,15 +1465,14 @@ mod tests {
     #[test]
     fn run_cache_hits_on_identical_key() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
         assert_eq!(cache.stats().run_hits, 0);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1538,14 +1484,13 @@ mod tests {
     #[test]
     fn run_cache_misses_when_face_id_differs() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
         let run_b = make_run("hello", 0, FaceId::PrimaryBold);
 
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1558,14 +1503,12 @@ mod tests {
     #[test]
     fn run_cache_misses_when_ligatures_differs() {
         let fm = test_font_manager();
-        let features_off = shaping_features(false);
-        let features_on = shaping_features(true);
         let mut cache = ShapingCache::new();
 
         let run = make_run("->", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features_off);
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, true, &features_on);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Enabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1578,14 +1521,13 @@ mod tests {
     #[test]
     fn run_cache_misses_when_text_differs() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
         let run_b = make_run("world", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(stats.run_misses, 2, "different run text must not hit");
@@ -1612,7 +1554,6 @@ mod tests {
     #[test]
     fn run_cache_misses_when_char_widths_differ_for_identical_text() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("e", 0, FaceId::PrimaryRegular);
@@ -1623,10 +1564,10 @@ mod tests {
             ..make_run("e", 0, FaceId::PrimaryRegular)
         };
 
-        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
-        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_misses, 2,
@@ -1653,12 +1594,11 @@ mod tests {
         use freminal_common::buffer_states::fonts::FontDecorations;
 
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let cell_w = 10.0;
 
         let run_a = make_run("hi", 0, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, cell_w, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, cell_w, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         // Same (face_id, ligatures, text) as `run_a`, but every field NOT
@@ -1684,7 +1624,8 @@ mod tests {
             ..make_run("hi", 7, FaceId::PrimaryRegular)
         };
 
-        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, cell_w, false, &features);
+        let shaped_b =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1781,54 +1722,52 @@ mod tests {
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_ascii_at_nonzero_position() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         // Populate the cache from a run at one position and pixel cell width...
         let run_a = make_run("hello world", 2, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 8.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 8.0, LigatureShaping::Disabled);
 
         // ...then hit it from a DIFFERENT run (same face/ligatures/text) at a
         // different col_start and a different (non-1.0) pixel cell_width.
         let run_b = make_run("hello world", 17, FaceId::PrimaryRegular);
         let cell_w_b = 13.5;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        let actual =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_shaped_runs_eq(&actual, &expected, "ascii nonzero col_start/cell_width");
     }
 
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_ligature_text() {
         let fm = test_font_manager();
-        let features = shaping_features(true);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("->", 0, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, true, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Enabled);
 
         let run_b = make_run("->", 4, FaceId::PrimaryRegular);
         let cell_w_b = 12.0;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, true, &features);
+        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Enabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached ligature template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, true, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Enabled);
         assert_shaped_runs_eq(&actual, &expected, "ligature text with ligatures enabled");
     }
 
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_wide_unicode_text() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         // U+4E2D (中): a single wide CJK character, display_width = 2. The
@@ -1839,7 +1778,7 @@ mod tests {
             col_count: 2,
             ..make_run("中", 3, FaceId::PrimaryRegular)
         };
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 9.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 9.0, LigatureShaping::Disabled);
 
         let run_b = TextRun {
             char_widths: vec![2],
@@ -1847,14 +1786,15 @@ mod tests {
             ..make_run("中", 11, FaceId::PrimaryRegular)
         };
         let cell_w_b = 14.25;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        let actual =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached wide-glyph template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_shaped_runs_eq(&actual, &expected, "wide unicode cluster/cell widths");
 
         // Sanity: this genuinely exercises the wide-glyph path (not a
@@ -1869,14 +1809,13 @@ mod tests {
     #[test]
     fn run_cache_quiet_lookups_do_not_evict_prior_generation() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("alpha", 0, FaceId::PrimaryRegular);
 
         // "Call 1": miss-bearing — rotates once, then shapes `run` into the
         // new current generation.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         // "Call 2": quiet. A quiet `shape_visible` call never touches
@@ -1887,7 +1826,7 @@ mod tests {
         // template must still be reachable: it becomes `previous` when call
         // 3 rotates `current` (still holding it from call 1).
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1899,25 +1838,24 @@ mod tests {
     #[test]
     fn run_cache_third_miss_bearing_generation_evicts_the_first() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("alpha", 0, FaceId::PrimaryRegular);
         let other = make_run("beta", 0, FaceId::PrimaryRegular);
 
         // Generation 1: shape `run`.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
 
         // Generation 2: shape something else. `run` is not looked up here,
         // so it survives only as the (now) `previous` generation.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&other, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&other, &fm, 10.0, LigatureShaping::Disabled);
 
         // Generation 3: rotates again. Generation 1 (which held `run`) is now
         // neither `current` nor `previous` — bounded to two generations, it
         // must be gone.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1930,14 +1868,13 @@ mod tests {
     #[test]
     fn run_cache_duplicate_runs_in_the_same_call_hit_the_current_generation() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run_row1 = make_run("same text", 0, FaceId::PrimaryRegular);
         let run_row2 = make_run("same text", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run_row1, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_row2, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_row1, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_row2, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1951,13 +1888,12 @@ mod tests {
     #[test]
     fn clear_invalidates_run_cache() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_hits, 1);
 
         cache.clear();
@@ -1965,7 +1901,7 @@ mod tests {
         // Subtask 124.6: `clear()` must drop both run-cache generations, not
         // just the line cache — a font rebuild can reuse a `FaceId` for
         // entirely different font data.
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_misses,
             2,
@@ -1976,12 +1912,11 @@ mod tests {
     #[test]
     fn reset_stats_preserves_run_cache_entries() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         cache.reset_stats();
@@ -1989,7 +1924,7 @@ mod tests {
 
         // The cached template must still be there — reset_stats zeroes only
         // the tally, per its own contract (mirroring the line cache).
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -2422,11 +2357,18 @@ mod tests {
         let shaper_data = harfrust::ShaperData::new(&font_ref);
         let shaper = shaper_data.shaper(&font_ref).build();
 
-        let features = shaping_features(ligatures);
+        let ligatures = if ligatures {
+            LigatureShaping::Enabled
+        } else {
+            LigatureShaping::Disabled
+        };
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
-        let output = shaper.shape(buffer, harfrust::ShapeOptions::new().features(&features));
+        let output = shaper.shape(
+            buffer,
+            harfrust::ShapeOptions::new().features(ligatures.features()),
+        );
         glyph_identities(&output)
     }
 
@@ -2439,11 +2381,15 @@ mod tests {
         fm: &FontManager,
         ligatures: bool,
     ) -> Vec<GlyphIdentity> {
-        let features = shaping_features(ligatures);
+        let ligatures = if ligatures {
+            LigatureShaping::Enabled
+        } else {
+            LigatureShaping::Disabled
+        };
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
         let output = fm
-            .shape_cached(face_id, ligatures, &features, buffer)
+            .shape_cached(face_id, ligatures, buffer)
             .expect("shape_cached must succeed for a loaded face");
         glyph_identities(&output)
     }

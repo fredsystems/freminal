@@ -63,7 +63,7 @@ use conv2::{ApproxFrom, RoundToNearest, ValueFrom};
 use tracing::{error, warn};
 
 use super::super::atlas::{GlyphAtlas, GlyphKey};
-use super::super::font_manager::{FontManager, GlyphStyle};
+use super::super::font_manager::{FontManager, GlyphStyle, LigatureShaping};
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
 use super::gl_facade::Gl;
 use super::gl_init_state::GlInitState;
@@ -388,10 +388,14 @@ impl ToastTextRenderer {
         // as `emit_run` does.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
+        // Toast text shapes with ligatures disabled (kern on): the same feature
+        // set the terminal uses with ligatures off, so the shared plan cache
+        // can never mix feature sets.
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
 
-        let Some(shaped) = font_manager.shape_cached(face_id, false, &[], buffer) else {
+        let Some(shaped) = font_manager.shape_cached(face_id, LigatureShaping::Disabled, buffer)
+        else {
             warn!("toast_text_pass: face {face_id:?} could not shape measured run {text:?}");
             return ToastTextMetrics::ZERO;
         };
@@ -468,10 +472,14 @@ impl ToastTextRenderer {
         // module-level "single-face-per-run" docs.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
+        // Toast text shapes with ligatures disabled (kern on): the same feature
+        // set the terminal uses with ligatures off, so the shared plan cache
+        // can never mix feature sets.
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(&run.text);
 
-        let Some(shaped) = font_manager.shape_cached(face_id, false, &[], buffer) else {
+        let Some(shaped) = font_manager.shape_cached(face_id, LigatureShaping::Disabled, buffer)
+        else {
             warn!(
                 "toast_text_pass: face {face_id:?} could not shape toast run {:?}",
                 run.text
