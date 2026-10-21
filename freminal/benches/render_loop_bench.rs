@@ -390,7 +390,7 @@ fn ligature_heavy_visible_chars(
 
 /// Partial-dirty path (issue #405 Part B): prime the cache, then change a
 /// single visible row's content each sample and re-shape. `ShapingCache` is
-/// per-row content-hashed, so only the one changed row re-shapes (rustybuzz)
+/// per-row content-hashed, so only the one changed row re-shapes (harfrust)
 /// while every other row is an `Arc::clone` hit. This isolates the shaping
 /// stage's genuinely-incremental behaviour — in contrast to the downstream
 /// vertex builders (`build_bg_instances`/`build_fg_instances`), which are
@@ -596,12 +596,13 @@ fn crossframe_shaping_frames(
 /// btop that rewrites most cells every frame.
 ///
 /// Because the `FontManager` persists across frames, this benchmark exercises
-/// the cross-frame Face/`ShapePlan` cache (Task #430): the parsed
-/// `rustybuzz::Face` and compiled `ShapePlan` are reused across every frame,
-/// so a changed row re-shapes via `shape_with_plan` without re-parsing the
-/// face or recompiling the plan. It is the faithful cross-frame model of the
-/// production render loop, in contrast to `shape_visible_partial_dirty_200x50`
-/// (which rebuilds the manager per iteration) — see that bench's note.
+/// the cross-frame shaper/`ShapePlan` cache (Task #430): the cached
+/// `harfrust::ShaperData` and compiled `ShapePlan` are reused across every
+/// frame, so a changed row re-shapes via the cached plan without rebuilding
+/// the shaper data or recompiling the plan. It is the faithful cross-frame
+/// model of the production render loop, in contrast to
+/// `shape_visible_partial_dirty_200x50` (which rebuilds the manager per
+/// iteration) — see that bench's note.
 fn bench_shaping_crossframe(c: &mut Criterion) {
     let width = 200usize;
     let height = 50usize;

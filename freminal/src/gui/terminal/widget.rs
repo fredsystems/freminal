@@ -5217,7 +5217,7 @@ impl FreminalTerminalWidget {
     /// Live-preview the OpenType ligature toggle (issue #452 phase B)
     /// without a full [`FontManager::rebuild`].
     ///
-    /// Ligatures only change which shaping features `rustybuzz` applies --
+    /// Ligatures only change which shaping features `harfrust` applies --
     /// no new fonts are loaded and no metrics change -- so calling the full
     /// config-apply path (which reparses font files) would be wasted work on
     /// every preview edit. This only flips the cached toggle `show()` reads

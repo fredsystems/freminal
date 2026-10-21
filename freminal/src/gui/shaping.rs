@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Run segmentation and text shaping via `rustybuzz`.
+//! Run segmentation and text shaping via `harfrust`.
 //!
 //! Splits visible terminal content into [`TextRun`] spans based on format changes
 //! and font-face boundaries, then shapes each run to produce glyph IDs and advances.
@@ -31,7 +31,7 @@ use super::font_manager::{FaceId, FontManager, GlyphStyle};
 // ---------------------------------------------------------------------------
 
 /// A contiguous span of characters that share the same format and font face,
-/// suitable for a single `rustybuzz::shape()` call.
+/// suitable for a single `harfrust` shape call.
 #[derive(Debug, Clone)]
 pub struct TextRun {
     /// Column index of the first character in this run (within a single line).
@@ -63,7 +63,7 @@ pub struct TextRun {
 /// The output of shaping a single [`TextRun`].
 ///
 /// Contains glyph IDs, x-advances, y-offsets, and cluster→character mapping
-/// produced by `rustybuzz`.
+/// produced by `harfrust`.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
     /// Glyph ID in the font.
@@ -269,15 +269,15 @@ impl RunCache {
 pub struct ShapingCacheStats {
     /// Lines served by an `Arc` refcount bump.
     pub hits: u64,
-    /// Lines re-segmented and re-shaped through rustybuzz.
+    /// Lines re-segmented and re-shaped through harfrust.
     pub misses: u64,
     /// Subtask 124.6: runs served from [`RunCache`] (current or previous
-    /// generation) as a template clone, without a `rustybuzz` shape call.
+    /// generation) as a template clone, without a `harfrust` shape call.
     /// Only counted for runs belonging to a line that missed the line-level
     /// cache — a line hit never touches the run cache at all.
     pub run_hits: u64,
     /// Subtask 124.6: runs that missed [`RunCache`] entirely and were shaped
-    /// fresh through `rustybuzz`.
+    /// fresh through `harfrust`.
     pub run_misses: u64,
 }
 
@@ -505,7 +505,7 @@ impl ShapingCache {
         font_manager: &FontManager,
         cell_width: f32,
         ligatures: bool,
-        features: &[rustybuzz::Feature],
+        features: &[harfrust::Feature],
     ) -> Vec<ShapedRun> {
         runs.iter()
             .map(|run| {
@@ -515,14 +515,14 @@ impl ShapingCache {
     }
 
     /// Shape a single run via [`Self::run_cache`], falling back to a fresh
-    /// `rustybuzz` shape on a genuine miss.
+    /// `harfrust` shape on a genuine miss.
     fn shape_run_via_run_cache(
         &mut self,
         run: &TextRun,
         font_manager: &FontManager,
         cell_width: f32,
         ligatures: bool,
-        features: &[rustybuzz::Feature],
+        features: &[harfrust::Feature],
     ) -> ShapedRun {
         let key = RunCacheKey {
             face_id: run.face_id,
@@ -821,7 +821,7 @@ fn push_char_to_run(text: &mut String, ch: char) {
 //  Shaping
 // ---------------------------------------------------------------------------
 
-/// Build the rustybuzz OpenType feature list.
+/// Build the harfrust OpenType feature list.
 ///
 /// When `ligatures` is `true`, `liga` and `calt` are enabled (value 1) so the
 /// font's standard and contextual ligatures are applied during shaping.
@@ -830,19 +830,19 @@ fn push_char_to_run(text: &mut String, ch: char) {
 /// that enable them by default.
 ///
 /// `kern` (kerning) is always enabled.
-fn shaping_features(ligatures: bool) -> Vec<rustybuzz::Feature> {
-    use rustybuzz::ttf_parser::Tag;
+fn shaping_features(ligatures: bool) -> Vec<harfrust::Feature> {
+    use harfrust::Tag;
     let lig_value = u32::from(ligatures);
     vec![
         // Enable kerning.
-        rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 1, ..),
+        harfrust::Feature::new(Tag::new(b"kern"), 1, ..),
         // Standard ligatures — controlled by config.
-        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), lig_value, ..),
+        harfrust::Feature::new(Tag::new(b"liga"), lig_value, ..),
         // Contextual alternates — controlled by config.
-        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), lig_value, ..),
+        harfrust::Feature::new(Tag::new(b"calt"), lig_value, ..),
         // Discretionary ligatures — always disabled (too aggressive for
         // terminal use; can be revisited later).
-        rustybuzz::Feature::new(Tag::from_bytes(b"dlig"), 0, ..),
+        harfrust::Feature::new(Tag::new(b"dlig"), 0, ..),
     ]
 }
 
@@ -856,7 +856,7 @@ fn shape_runs(
     font_manager: &FontManager,
     cell_width: f32,
     ligatures: bool,
-    features: &[rustybuzz::Feature],
+    features: &[harfrust::Feature],
 ) -> Vec<ShapedRun> {
     runs.iter()
         .map(|run| shape_single_run(run, font_manager, cell_width, ligatures, features))
@@ -976,9 +976,9 @@ pub fn shape_placeholder_line(
     }
 }
 
-/// Shape a single `TextRun` via `rustybuzz`.
+/// Shape a single `TextRun` via `harfrust`.
 ///
-/// Composed from [`shape_run_canonical`] (the actual `rustybuzz` call, at
+/// Composed from [`shape_run_canonical`] (the actual `harfrust` call, at
 /// the canonical `col_start = 0` / pixel `cell_width = 1.0` position) and
 /// [`build_shaped_run_from_template`] (rebasing to `run`'s real position and
 /// attaching its metadata). This is the same composition
@@ -992,13 +992,13 @@ fn shape_single_run(
     font_manager: &FontManager,
     cell_width: f32,
     ligatures: bool,
-    features: &[rustybuzz::Feature],
+    features: &[harfrust::Feature],
 ) -> ShapedRun {
     let template = shape_run_canonical(run, font_manager, ligatures, features);
     build_shaped_run_from_template(run, &template, cell_width)
 }
 
-/// Shape `run` via `rustybuzz` at the canonical position `col_start = 0` and
+/// Shape `run` via `harfrust` at the canonical position `col_start = 0` and
 /// canonical pixel cell width `1.0`, producing glyph identity data whose
 /// `x_px` is exactly the glyph's column offset *within the run*, independent
 /// of where the run actually sits or how wide a cell is in pixels.
@@ -1018,20 +1018,17 @@ fn shape_run_canonical(
     run: &TextRun,
     font_manager: &FontManager,
     ligatures: bool,
-    features: &[rustybuzz::Feature],
+    features: &[harfrust::Feature],
 ) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
-    // Build the input buffer and guess its segment properties (script,
-    // direction) exactly as `rustybuzz::shape()` does internally — this is
-    // required up front because `shape_cached` needs a concrete
-    // script/direction to look up (or build) the matching cached
-    // `ShapePlan` before it can shape.
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    // Build the input buffer. `shape_cached` guesses its segment properties
+    // (script, direction) itself before looking up or building the matching
+    // cached `ShapePlan`.
+    let mut buffer = harfrust::UnicodeBuffer::new();
     buffer.push_str(&run.text);
-    buffer.guess_segment_properties();
 
-    // Try to shape via the cached Face + ShapePlan (Task #430).
+    // Try to shape via the cached shaper data + ShapePlan (Task #430).
     font_manager
         .shape_cached(run.face_id, ligatures, features, buffer)
         .map_or_else(
@@ -1093,14 +1090,14 @@ fn build_shaped_run_from_template(
     }
 }
 
-/// Build `ShapedGlyph`s from `rustybuzz` output, snapping to the cell grid.
+/// Build `ShapedGlyph`s from `harfrust` output, snapping to the cell grid.
 ///
 /// The cell grid is authoritative: glyph positions are snapped to column
 /// boundaries.  When ligatures are active, a single glyph may cover multiple
 /// input characters.  Its `cell_width` is the sum of those characters'
 /// individual widths so it spans the correct number of terminal cells.
 fn build_shaped_glyphs(
-    infos: &[rustybuzz::GlyphInfo],
+    infos: &[harfrust::GlyphInfo],
     run_text: &str,
     char_widths: &[usize],
     col_start: usize,
@@ -1110,7 +1107,7 @@ fn build_shaped_glyphs(
 ) -> Vec<ShapedGlyph> {
     let mut glyphs = Vec::with_capacity(infos.len());
 
-    // Build a byte-offset → char-index lookup table.  `rustybuzz` cluster
+    // Build a byte-offset → char-index lookup table.  `harfrust` cluster
     // values are byte offsets into the UTF-8 input string.  We need char
     // indices to index into `char_widths`.
     let byte_to_char: Vec<(usize, usize)> = run_text
@@ -1695,7 +1692,7 @@ mod tests {
         );
         assert_eq!(
             stats.run_misses, 1,
-            "a run-cache hit must not call rustybuzz again"
+            "a run-cache hit must not call harfrust again"
         );
 
         // The hit must carry run_b's OWN metadata, never run_a's.
@@ -2081,8 +2078,8 @@ mod tests {
     // -- build_shaped_glyphs: ligature-aware cluster mapping --
 
     /// Helper: construct a `GlyphInfo` with just the fields we need.
-    fn make_glyph_info(glyph_id: u32, cluster: u32) -> rustybuzz::GlyphInfo {
-        let mut info = rustybuzz::GlyphInfo::default();
+    fn make_glyph_info(glyph_id: u32, cluster: u32) -> harfrust::GlyphInfo {
+        let mut info = harfrust::GlyphInfo::default();
         info.glyph_id = glyph_id;
         info.cluster = cluster;
         info
@@ -2386,7 +2383,7 @@ mod tests {
 
     /// Collect the full per-glyph identity (id, cluster, x/y advance, x/y
     /// offset) from a shaped `GlyphBuffer`.
-    fn glyph_identities(output: &rustybuzz::GlyphBuffer) -> Vec<GlyphIdentity> {
+    fn glyph_identities(output: &harfrust::GlyphBuffer) -> Vec<GlyphIdentity> {
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
         infos
@@ -2405,11 +2402,12 @@ mod tests {
             .collect()
     }
 
-    /// Shape `text` as a single same-format run via the OLD `rustybuzz::shape()`
-    /// entry point — bypassing `FontManager`'s face/plan cache entirely, by
-    /// parsing the face directly from the raw bytes — for comparison against
-    /// the new cached `shape_cached` path.
-    fn shape_via_old_api(
+    /// Shape `text` as a single same-format run via an uncached, one-shot
+    /// harfrust reference path — bypassing `FontManager`'s shaper/plan
+    /// caches entirely by building the `FontRef`, `ShaperData` and `Shaper`
+    /// directly from the raw bytes and letting harfrust compile a throwaway
+    /// plan — for comparison against the cached `shape_cached` path.
+    fn shape_uncached_reference(
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
@@ -2420,47 +2418,49 @@ mod tests {
             .face_index(face_id)
             .and_then(|i| u32::value_from(i).ok())
             .expect("face index must be loaded and fit in u32");
-        let face = rustybuzz::Face::from_slice(bytes, index).expect("face must parse");
+        let font_ref = harfrust::FontRef::from_index(bytes, index).expect("face must parse");
+        let shaper_data = harfrust::ShaperData::new(&font_ref);
+        let shaper = shaper_data.shaper(&font_ref).build();
 
         let features = shaping_features(ligatures);
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
-        let output = rustybuzz::shape(&face, &features, buffer);
+        buffer.guess_segment_properties();
+        let output = shaper.shape(buffer, harfrust::ShapeOptions::new().features(&features));
         glyph_identities(&output)
     }
 
-    /// Shape `text` through the NEW cached `shape_cached` path (the same
+    /// Shape `text` through the cached `shape_cached` path (the same
     /// entry point `shape_single_run` uses in production), returning the
     /// same per-glyph identity sequence for comparison.
-    fn shape_via_new_api(
+    fn shape_via_cached_path(
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
         ligatures: bool,
     ) -> Vec<GlyphIdentity> {
         let features = shaping_features(ligatures);
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
-        buffer.guess_segment_properties();
         let output = fm
             .shape_cached(face_id, ligatures, &features, buffer)
             .expect("shape_cached must succeed for a loaded face");
         glyph_identities(&output)
     }
 
-    /// Regression guard for the core claim of Task #430: caching the parsed
-    /// `Face` and the compiled `ShapePlan` and shaping via
-    /// `shape_with_plan` must produce IDENTICAL output — glyph ids, source
-    /// clusters, AND positional data (advances + offsets) — to the previous
-    /// `rustybuzz::shape()` call for every kind of content the terminal
-    /// renderer shapes: plain Latin text, ligating/contextual sequences, a
-    /// CJK (wide) character, and an emoji (routed to a different face
-    /// entirely). Positions are asserted because `kern` is always enabled,
+    /// Regression guard for the core claim of Task #430: caching the
+    /// `ShaperData` and the compiled `ShapePlan` and shaping with the cached
+    /// plan must produce IDENTICAL output — glyph ids, source clusters, AND
+    /// positional data (advances + offsets) — to an uncached one-shot shape
+    /// (see `shape_uncached_reference`) for every kind of content the
+    /// terminal renderer shapes: plain Latin text, ligating/contextual
+    /// sequences, a CJK (wide) character, and an emoji (routed to a different
+    /// face entirely). Positions are asserted because `kern` is always enabled,
     /// so a plan-caching regression could shift advances without touching
     /// glyph ids. If this test ever fails, the perf change altered
     /// rendering, which is the one thing it must never do.
     #[test]
-    fn shape_with_plan_matches_old_shape_for_mixed_content() {
+    fn cached_plan_shape_matches_uncached_shape_for_mixed_content() {
         let fm = test_font_manager();
 
         let samples: &[(&str, FaceId, bool)] = &[
@@ -2471,24 +2471,24 @@ mod tests {
         ];
 
         for &(text, face_id, ligatures) in samples {
-            let old = shape_via_old_api(text, face_id, &fm, ligatures);
-            let new = shape_via_new_api(text, face_id, &fm, ligatures);
+            let uncached = shape_uncached_reference(text, face_id, &fm, ligatures);
+            let cached = shape_via_cached_path(text, face_id, &fm, ligatures);
             assert_eq!(
-                old, new,
-                "`{text}` (ligatures={ligatures}): shape_with_plan output \
-                 must match the old rustybuzz::shape() output exactly"
+                uncached, cached,
+                "`{text}` (ligatures={ligatures}): cached-plan shape output \
+                 must match the uncached one-shot shape output exactly"
             );
         }
 
         // Emoji routes to a different face (FaceId::Emoji) entirely — the
         // bundled Noto Color Emoji floor (Task #402) guarantees one is
         // always loaded, so this is deterministic across hosts.
-        let old_emoji = shape_via_old_api("😀", FaceId::Emoji, &fm, false);
-        let new_emoji = shape_via_new_api("😀", FaceId::Emoji, &fm, false);
+        let uncached_emoji = shape_uncached_reference("😀", FaceId::Emoji, &fm, false);
+        let cached_emoji = shape_via_cached_path("😀", FaceId::Emoji, &fm, false);
         assert_eq!(
-            old_emoji, new_emoji,
-            "emoji: shape_with_plan output must match the old rustybuzz::shape() \
-             output exactly"
+            uncached_emoji, cached_emoji,
+            "emoji: cached-plan shape output must match the uncached one-shot \
+             shape output exactly"
         );
     }
 
@@ -2684,7 +2684,8 @@ mod tests {
 
         for case in GOLDEN_BUNDLED_SHAPING {
             for (ligatures, expected) in [(false, case.off), (true, case.on)] {
-                let actual = shape_via_new_api(case.text, FaceId::PrimaryRegular, &fm, ligatures);
+                let actual =
+                    shape_via_cached_path(case.text, FaceId::PrimaryRegular, &fm, ligatures);
                 assert_eq!(
                     actual.as_slice(),
                     expected,
@@ -2698,8 +2699,8 @@ mod tests {
         // Sanity: the ligature path must actually be exercised by the bundled
         // font, otherwise the `on` column pins nothing interesting.
         let ligature_changed = ["->", "!=", "==="].iter().any(|text| {
-            shape_via_new_api(text, FaceId::PrimaryRegular, &fm, true)
-                != shape_via_new_api(text, FaceId::PrimaryRegular, &fm, false)
+            shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, true)
+                != shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, false)
         });
         assert!(
             ligature_changed,
@@ -2839,7 +2840,7 @@ mod shaping_cache_hit_rate {
     /// one run, so at the RUN layer the 23 rows that are byte-identical to a
     /// row shaped a moment ago (just at a different line index and thus a
     /// different `RunCacheKey`-irrelevant position) now hit the
-    /// content-addressed run cache instead of paying a fresh `rustybuzz`
+    /// content-addressed run cache instead of paying a fresh `harfrust`
     /// call. Only the one genuinely new bottom row misses.
     #[test]
     fn a_scroll_by_one_line_reuses_unchanged_runs() {

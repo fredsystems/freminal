@@ -206,20 +206,21 @@ mod tests {
     /// silently rendering as tofu at runtime.
     #[test]
     fn every_icon_resolves_in_bundled_font() {
-        let face = rustybuzz::Face::from_slice(bundled_regular_font_bytes(), 0)
+        let font = swash::FontRef::from_index(bundled_regular_font_bytes(), 0)
             .expect("bundled CaskaydiaCove regular face must parse");
+        let charmap = font.charmap();
 
         for icon in ChromeIcon::ALL {
             let cp = icon.codepoint();
-            let glyph = face.glyph_index(cp);
+            let glyph = charmap.map(cp);
             assert!(
-                glyph.is_some(),
+                glyph != 0,
                 "ChromeIcon::{icon:?} codepoint U+{:04X} has no glyph in the bundled font",
                 u32::from(cp),
             );
             // A resolved glyph must have a real (nonzero-id) outline mapping; the
-            // ttf-parser `.notdef` glyph is id 0 and is what `glyph_index`
-            // returns for absent characters, so `is_some()` already excludes it.
+            // `.notdef` glyph is id 0 and is what swash's `charmap().map`
+            // returns for absent characters, so `!= 0` already excludes it.
         }
     }
 

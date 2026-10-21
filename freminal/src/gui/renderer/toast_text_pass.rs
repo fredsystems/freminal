@@ -31,7 +31,7 @@
 //!
 //! - [`ToastTextRenderer::build_instances`] — runs on the **main thread**.
 //!   Takes `&mut FontManager`, shapes each [`ToastTextRun`] via
-//!   `rustybuzz`, rasterises any new glyphs into `self.atlas`, and returns a
+//!   `harfrust`, rasterises any new glyphs into `self.atlas`, and returns a
 //!   flat `Vec<f32>` of `FG_INSTANCE_FLOATS`-per-glyph instance data. Issues
 //!   **no GL calls**.
 //! - [`ToastTextRenderer::upload_and_draw`] — runs from the **GL callback**.
@@ -41,7 +41,7 @@
 //!
 //! ## Single-face-per-run assumption
 //!
-//! Each [`ToastTextRun`] is shaped as a single `rustybuzz` run against the
+//! Each [`ToastTextRun`] is shaped as a single `harfrust` run against the
 //! face resolved from its **first character**. This is correct for the
 //! common toast cases (a label string, a detail string, or a single icon
 //! glyph) but does **not** handle a run that mixes, say, a bundled
@@ -364,7 +364,7 @@ impl ToastTextRenderer {
     /// any glyph is drawn. Shapes `text` the same way [`Self::build_instances`]
     /// does — resolving the whole run against the face of its first
     /// character (see the module-level single-face-per-run docs) — but reads
-    /// only [`rustybuzz::GlyphPosition::x_advance`] and the face's scaled
+    /// only [`harfrust::GlyphPosition::x_advance`] and the face's scaled
     /// `swash` metrics, issuing no atlas insertions and no GL calls.
     ///
     /// **Must be called on the main thread** — like [`Self::build_instances`],
@@ -388,9 +388,8 @@ impl ToastTextRenderer {
         // as `emit_run` does.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
-        buffer.guess_segment_properties();
 
         let Some(shaped) = font_manager.shape_cached(face_id, false, &[], buffer) else {
             warn!("toast_text_pass: face {face_id:?} could not shape measured run {text:?}");
@@ -469,9 +468,8 @@ impl ToastTextRenderer {
         // module-level "single-face-per-run" docs.
         let (face_id, _) = font_manager.resolve_glyph(first_char, GlyphStyle::new(false, false));
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(&run.text);
-        buffer.guess_segment_properties();
 
         let Some(shaped) = font_manager.shape_cached(face_id, false, &[], buffer) else {
             warn!(
@@ -487,11 +485,11 @@ impl ToastTextRenderer {
         let size_px: u16 =
             <u16 as ApproxFrom<f32, RoundToNearest>>::approx_from(run.size_px).unwrap_or(u16::MAX);
 
-        // `rustybuzz::Face` positions are in raw font design units (the
-        // face's own `units_per_em`), not pixels — `FontManager::shape_cached`
-        // builds the `rustybuzz::Face` with no ppem/scale applied (see
-        // `FontManager::build_cached_face`). Recover `units_per_em` from the
-        // same swash `FontRef` the atlas rasterises through, mirroring
+        // `harfrust` positions are in raw font design units (the face's own
+        // `units_per_em`), not pixels — `FontManager::shape_cached` shapes
+        // without setting `ShapeOptions::scale`, so no ppem/scale is applied
+        // (see `FontManager::build_cached_shaper`). Recover `units_per_em`
+        // from the same swash `FontRef` the atlas rasterises through, mirroring
         // `compute_cell_metrics`'s identical lookup (and its `1.0` fallback
         // for the pathological case of a font reporting `units_per_em == 0`,
         // which should not occur in practice for a valid font).
@@ -515,8 +513,9 @@ impl ToastTextRenderer {
             let y_offset_px = gl_f32_i32(pos.y_offset) * font_unit_scale;
             let x_advance_px = gl_f32_i32(pos.x_advance) * font_unit_scale;
 
-            // `info.glyph_id` is a `u32` guaranteed by rustybuzz to fit in
-            // `u16` (a post-shaping glyph ID, not a pre-shaping codepoint).
+            // `info.glyph_id` is a `u32` post-shaping glyph ID (not a
+            // pre-shaping codepoint); glyph IDs in an sfnt font are 16-bit, so
+            // it fits in `u16`, falling back to `.notdef` (0) otherwise.
             let glyph_id: u16 = u16::value_from(info.glyph_id).unwrap_or(0);
             let key = GlyphKey {
                 glyph_id,
@@ -530,7 +529,7 @@ impl ToastTextRenderer {
             {
                 // Pixel position: pen + font-unit offset + atlas bearing.
                 // `x_offset`/`y_offset` move the pen before drawing without
-                // affecting the advance (see `rustybuzz::GlyphPosition`
+                // affecting the advance (see `harfrust::GlyphPosition`
                 // docs); `y_offset` is up-positive in font space, so it is
                 // subtracted to convert into this module's top-left-origin
                 // pixel space (matching `baseline_y - bearing_y` below).
