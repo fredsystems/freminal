@@ -36,7 +36,8 @@ use criterion::{
 };
 use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::colors::cursor_f;
-use freminal::gui::font_manager::{FontManager, LigatureShaping};
+use freminal::gui::font_manager::FontManager;
+use freminal::gui::ligature_shaping::LigatureShaping;
 use freminal::gui::renderer::{
     BackgroundFrame, CursorBlinkPhase, CursorDrawParams, FgRenderOptions,
     build_background_instances, build_foreground_instances,

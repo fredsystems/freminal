@@ -1954,7 +1954,8 @@ mod tests {
     use freminal_common::themes::{self, ThemePalette};
 
     use crate::gui::colors::cursor_f;
-    use crate::gui::font_manager::{FontManager, LigatureShaping};
+    use crate::gui::font_manager::FontManager;
+    use crate::gui::ligature_shaping::LigatureShaping;
     use crate::gui::shaping::{ShapedGlyph, ShapedLine, ShapedRun};
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
     use freminal_common::buffer_states::fonts::FontWeight;

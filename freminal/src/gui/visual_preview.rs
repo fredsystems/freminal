@@ -49,7 +49,7 @@
 //! error) — see [`ShaderErrorRoute`] for how a preview-time failure is kept
 //! off the terminal windows' toast stack without weakening the toast
 //! behaviour a committed (Apply) failure still gets.
-use super::font_manager::LigatureShaping;
+use super::ligature_shaping::LigatureShaping;
 use freminal_common::config::{
     BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
     UnfocusedCursorStyle,

@@ -24,7 +24,8 @@ use freminal_common::buffer_states::{
 };
 use freminal_terminal_emulator::LineWidth;
 
-use super::font_manager::{FaceId, FontManager, GlyphStyle, LigatureShaping};
+use super::font_manager::{FaceId, FontManager, GlyphStyle};
+use super::ligature_shaping::LigatureShaping;
 
 // ---------------------------------------------------------------------------
 //  Public types
@@ -167,7 +168,7 @@ pub struct ShapingCache {
 struct RunCacheKey {
     /// The font face the run resolved to.
     face_id: FaceId,
-    /// Whether ligature features were enabled for this run. Part of the key
+    /// The ligature mode this run was shaped in. Part of the key
     /// because the same text shapes to different glyphs with `calt`/`liga`
     /// on versus off.
     ligatures: LigatureShaping,
@@ -1514,7 +1515,7 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(
             stats.run_misses, 2,
-            "the ligatures flag must be part of the run-cache key"
+            "the ligature mode must be part of the run-cache key"
         );
         assert_eq!(stats.run_hits, 0);
     }
@@ -2242,7 +2243,7 @@ mod tests {
     }
 
     /// Regression guard: the bundled default font must actually form ligatures
-    /// when `ligatures = true`.
+    /// under `LigatureShaping::Enabled`.
     ///
     /// This is the test that would have caught the `MesloLGS`
     /// "ligature-feature-on-but-font-has-no-ligatures" bug that motivated the
@@ -2261,7 +2262,7 @@ mod tests {
     /// It fails if the bundled font is ever swapped back to a non-ligating face
     /// such as `MesloLGS`, or to the `CaskaydiaMono` variant (which strips
     /// `calt`): in those fonts the glyphs are identical regardless of the
-    /// ligature feature flag.
+    /// ligature mode.
     #[test]
     fn bundled_font_forms_ligatures() {
         for seq in ["->", "=>", "==="] {
@@ -3154,7 +3155,8 @@ mod tests {
 #[cfg(test)]
 mod shaping_cache_hit_rate {
     use super::{FormatTag, ShapingCache, ShapingCacheStats};
-    use crate::gui::font_manager::{FontManager, LigatureShaping};
+    use crate::gui::font_manager::FontManager;
+    use crate::gui::ligature_shaping::LigatureShaping;
     use freminal_common::buffer_states::tchar::TChar;
     use freminal_common::config::Config;
 

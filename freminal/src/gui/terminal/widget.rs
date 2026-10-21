@@ -38,8 +38,9 @@ use super::{
     super::{
         atlas::GlyphAtlas,
         colors::cursor_f,
-        font_manager::{FontManager, LigatureShaping},
+        font_manager::FontManager,
         frame_drain::WindowFocus,
+        ligature_shaping::LigatureShaping,
         renderer::{
             BackgroundFrame, CursorBlinkPhase, CursorDrawParams, CursorVertRange, FgRenderOptions,
             GlRetireQueue, ImageDrawEntry, MatchHighlight, PaneBackground, TerminalRenderer,

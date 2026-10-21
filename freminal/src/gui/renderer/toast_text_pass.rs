@@ -63,7 +63,8 @@ use conv2::{ApproxFrom, RoundToNearest, ValueFrom};
 use tracing::{error, warn};
 
 use super::super::atlas::{GlyphAtlas, GlyphKey};
-use super::super::font_manager::{FontManager, GlyphStyle, LigatureShaping};
+use super::super::font_manager::{FontManager, GlyphStyle};
+use super::super::ligature_shaping::LigatureShaping;
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
 use super::gl_facade::Gl;
 use super::gl_init_state::GlInitState;
@@ -713,7 +714,8 @@ mod tests {
         pack_glyph_instance,
     };
     use crate::gui::atlas::GlyphKey;
-    use crate::gui::font_manager::{FaceId, FontManager, GlyphStyle, LigatureShaping};
+    use crate::gui::font_manager::{FaceId, FontManager, GlyphStyle};
+    use crate::gui::ligature_shaping::LigatureShaping;
     use conv2::ValueFrom;
     use freminal_common::config::Config;
 

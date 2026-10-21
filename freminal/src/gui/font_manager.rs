@@ -19,8 +19,10 @@ use std::sync::Arc;
 use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
 use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
-use freminal_common::config::{Config, FontConfig};
+use freminal_common::config::Config;
 use rustc_hash::FxHashMap;
+
+use super::ligature_shaping::LigatureShaping;
 
 // ---------------------------------------------------------------------------
 //  Bundled font data (compiled into the binary via include_bytes!)
@@ -337,97 +339,6 @@ struct CachedShaper {
     index: u32,
     /// The expensive, reusable per-face shaping data.
     data: harfrust::ShaperData,
-}
-
-/// Named ligature-shaping mode: the single source of truth for the OpenType
-/// feature set freminal shapes with.
-///
-/// Each variant selects one full, fixed feature list ([`Self::features`]), and
-/// the variant itself is part of [`PlanKey`]. Because the plan cache is keyed
-/// on this value rather than on a caller-supplied feature slice, the key fully
-/// determines the inputs the cached `ShapePlan` is compiled from: two callers
-/// can never share a plan compiled for a different feature set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LigatureShaping {
-    /// `liga`/`calt` enabled.
-    Enabled,
-    /// `liga`/`calt` explicitly disabled.
-    Disabled,
-}
-
-/// Feature list for [`LigatureShaping::Enabled`].
-const FEATURES_LIGATURES_ENABLED: [harfrust::Feature; 4] = ligature_features(1);
-
-/// Feature list for [`LigatureShaping::Disabled`].
-const FEATURES_LIGATURES_DISABLED: [harfrust::Feature; 4] = ligature_features(0);
-
-/// Build the feature list with `liga`/`calt` set to `lig_value`.
-///
-/// Struct literals (not `Feature::new`) so this can be `const`; `start = 0`
-/// and `end = u32::MAX` are exactly what `Feature::new(tag, value, ..)`
-/// produces for an unbounded range, i.e. a global feature.
-const fn ligature_features(lig_value: u32) -> [harfrust::Feature; 4] {
-    [
-        // Enable kerning.
-        harfrust::Feature {
-            tag: harfrust::Tag::new(b"kern"),
-            value: 1,
-            start: 0,
-            end: u32::MAX,
-        },
-        // Standard ligatures — controlled by config.
-        harfrust::Feature {
-            tag: harfrust::Tag::new(b"liga"),
-            value: lig_value,
-            start: 0,
-            end: u32::MAX,
-        },
-        // Contextual alternates — controlled by config.
-        harfrust::Feature {
-            tag: harfrust::Tag::new(b"calt"),
-            value: lig_value,
-            start: 0,
-            end: u32::MAX,
-        },
-        // Discretionary ligatures — always disabled (too aggressive for
-        // terminal use; can be revisited later).
-        harfrust::Feature {
-            tag: harfrust::Tag::new(b"dlig"),
-            value: 0,
-            start: 0,
-            end: u32::MAX,
-        },
-    ]
-}
-
-impl LigatureShaping {
-    /// Classify the TOML `font.ligatures` toggle into the domain enum.
-    ///
-    /// This is the single place the config bool is turned into a
-    /// [`LigatureShaping`]; everything downstream of config loading carries
-    /// the enum, never the bool.
-    #[must_use]
-    pub const fn from_config(font: &FontConfig) -> Self {
-        if font.ligatures {
-            Self::Enabled
-        } else {
-            Self::Disabled
-        }
-    }
-
-    /// The OpenType features to shape with in this mode.
-    ///
-    /// `kern` is always enabled. `liga` and `calt` are enabled for
-    /// [`Self::Enabled`] and explicitly disabled (value 0) for
-    /// [`Self::Disabled`], to prevent ligature formation even in fonts that
-    /// enable them by default. `dlig` is always disabled.
-    #[must_use]
-    pub(crate) const fn features(self) -> &'static [harfrust::Feature] {
-        match self {
-            Self::Enabled => &FEATURES_LIGATURES_ENABLED,
-            Self::Disabled => &FEATURES_LIGATURES_DISABLED,
-        }
-    }
 }
 
 /// Cache key for a compiled `harfrust::ShapePlan` (Task #430).
@@ -1160,7 +1071,7 @@ impl FontManager {
     /// font size that differs from the config's base size.  Returns `Ok(true)`
     /// if the size actually changed and caches were invalidated (system-face
     /// shaping caches are evicted; see
-    /// [`Self::evict_system_face_shaping_caches`]).
+    /// `evict_system_face_shaping_caches`).
     ///
     /// # Errors
     ///
@@ -2601,27 +2512,28 @@ mod tests {
     /// run (non-default direction, plan key differs from LTR) must shape
     /// without tripping harfrust's plan-construction / plan-match asserts and
     /// must equal an uncached reference built with `guess_segment_properties`.
-    /// Hebrew is absent from the bundled face, so its glyphs are `.notdef`;
-    /// one glyph per character is still expected.
+    /// Hebrew is absent from the bundled face, so it shapes to `.notdef`
+    /// (one glyph per character). This test exercises the RTL
+    /// direction / plan-key path only; real shaping output across scripts is
+    /// pinned by `golden_extended_bundled_shaping_matches_rustybuzz`.
     #[test]
-    fn shape_cached_shapes_rtl_text_without_panicking() {
+    fn shape_cached_handles_rtl_direction_without_panicking() {
         let fm = default_manager();
+        let text = "\u{05D0}\u{05D1}";
 
-        for text in ["AB", "\u{05D0}\u{05D1}"] {
-            let cached = fm
-                .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, text)
-                .unwrap_or_else(|| panic!("`{text}` must shape"));
-            assert_eq!(
-                cached.glyph_infos().len(),
-                2,
-                "`{text}`: two characters must shape to two glyphs"
-            );
-            assert_eq!(
-                flatten_glyph_buffer(&cached),
-                shape_reference_flat(&fm, FaceId::PrimaryRegular, text, LigatureShaping::Disabled),
-                "`{text}`: cached output must equal the uncached reference"
-            );
-        }
+        let cached = fm
+            .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, text)
+            .expect("RTL text must shape");
+        assert_eq!(
+            cached.glyph_infos().len(),
+            2,
+            "two characters must shape to two glyphs"
+        );
+        assert_eq!(
+            flatten_glyph_buffer(&cached),
+            shape_reference_flat(&fm, FaceId::PrimaryRegular, text, LigatureShaping::Disabled),
+            "cached output must equal the uncached reference"
+        );
     }
 
     #[test]
@@ -2684,36 +2596,6 @@ mod tests {
             ids(&disabled_a),
             [u32::from(charmap.map('-')), u32::from(charmap.map('>'))],
             "Disabled must shape `->` to the per-character cmap glyphs"
-        );
-    }
-
-    #[test]
-    fn ligature_mode_feature_lists_are_pinned() {
-        let tuples = |mode: LigatureShaping| {
-            mode.features()
-                .iter()
-                .map(|f| (f.tag, f.value, f.start, f.end))
-                .collect::<Vec<_>>()
-        };
-        let tag = |t: &[u8; 4]| harfrust::Tag::new(t);
-
-        assert_eq!(
-            tuples(LigatureShaping::Enabled),
-            [
-                (tag(b"kern"), 1, 0, u32::MAX),
-                (tag(b"liga"), 1, 0, u32::MAX),
-                (tag(b"calt"), 1, 0, u32::MAX),
-                (tag(b"dlig"), 0, 0, u32::MAX),
-            ]
-        );
-        assert_eq!(
-            tuples(LigatureShaping::Disabled),
-            [
-                (tag(b"kern"), 1, 0, u32::MAX),
-                (tag(b"liga"), 0, 0, u32::MAX),
-                (tag(b"calt"), 0, 0, u32::MAX),
-                (tag(b"dlig"), 0, 0, u32::MAX),
-            ]
         );
     }
 
@@ -2921,6 +2803,9 @@ mod tests {
 
     /// `FaceId::System(idx)` indexes into `system_faces`, which a size or DPI
     /// change drops, so cached shaping data keyed on a system face must go.
+    /// This pins the retain predicate on both caches; see
+    /// `system_face_replaced_after_size_change_is_shaped_with_new_bytes` for
+    /// the end-to-end behaviour.
     #[test]
     fn size_and_dpi_changes_evict_system_face_shaping_caches() {
         let mut sized = default_manager();
@@ -2932,6 +2817,69 @@ mod tests {
         seed_system_face_shaping_caches(&scaled);
         let _ = scaled.update_pixels_per_point(2.0).unwrap();
         assert_only_system_shaping_caches_evicted(&scaled, "update_pixels_per_point()");
+    }
+
+    /// Shape `"->"` on `face_id` with ligatures enabled and flatten the result.
+    fn shape_arrow_enabled(
+        fm: &FontManager,
+        face_id: FaceId,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let output = fm
+            .shape_cached(face_id, LigatureShaping::Enabled, "->")
+            .expect("face must shape");
+        flatten_glyph_buffer(&output)
+    }
+
+    /// After `change` drops `system_faces`, `FaceId::System(0)` can name a
+    /// different font. Shaping it must use the new font's bytes, not a stale
+    /// cached `ShaperData` built from the previous occupant of index 0.
+    fn assert_system_face_reshaped_after(change: impl FnOnce(&mut FontManager), what: &str) {
+        let mut fm = default_manager();
+
+        fm.system_faces
+            .push(LoadedFace::from_static(CASKAYDIA_BOLD).expect("bundled bold loads"));
+        let bold_on_system = shape_arrow_enabled(&fm, FaceId::System(0));
+        let bold_reference = shape_arrow_enabled(&fm, FaceId::PrimaryBold);
+        assert_eq!(
+            bold_on_system, bold_reference,
+            "{what}: System(0) holding the bold bytes must shape like PrimaryBold"
+        );
+
+        change(&mut fm);
+        assert!(
+            fm.system_faces.is_empty(),
+            "{what}: the change must drop system_faces"
+        );
+        fm.system_faces
+            .push(LoadedFace::from_static(CASKAYDIA_ITALIC).expect("bundled italic loads"));
+
+        let italic_on_system = shape_arrow_enabled(&fm, FaceId::System(0));
+        let italic_reference = shape_arrow_enabled(&fm, FaceId::PrimaryItalic);
+        assert_eq!(
+            italic_on_system, italic_reference,
+            "{what}: System(0) must be shaped with the new (italic) bytes"
+        );
+        assert_ne!(
+            italic_on_system, bold_on_system,
+            "{what}: bold and italic must ligate `->` differently, otherwise this test \
+             cannot detect a stale ShaperData"
+        );
+    }
+
+    #[test]
+    fn system_face_replaced_after_size_change_is_shaped_with_new_bytes() {
+        assert_system_face_reshaped_after(
+            |fm| {
+                let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
+            },
+            "set_font_size()",
+        );
+        assert_system_face_reshaped_after(
+            |fm| {
+                let _ = fm.update_pixels_per_point(2.0).unwrap();
+            },
+            "update_pixels_per_point()",
+        );
     }
 
     // --- Test 15: swash FontRef creation ---
