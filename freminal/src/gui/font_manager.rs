@@ -19,7 +19,7 @@ use std::sync::Arc;
 use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
 use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
-use freminal_common::config::Config;
+use freminal_common::config::{Config, FontConfig};
 use rustc_hash::FxHashMap;
 
 // ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ struct CachedShaper {
 /// determines the inputs the cached `ShapePlan` is compiled from: two callers
 /// can never share a plan compiled for a different feature set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum LigatureShaping {
+pub enum LigatureShaping {
     /// `liga`/`calt` enabled.
     Enabled,
     /// `liga`/`calt` explicitly disabled.
@@ -401,6 +401,20 @@ const fn ligature_features(lig_value: u32) -> [harfrust::Feature; 4] {
 }
 
 impl LigatureShaping {
+    /// Classify the TOML `font.ligatures` toggle into the domain enum.
+    ///
+    /// This is the single place the config bool is turned into a
+    /// [`LigatureShaping`]; everything downstream of config loading carries
+    /// the enum, never the bool.
+    #[must_use]
+    pub const fn from_config(font: &FontConfig) -> Self {
+        if font.ligatures {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
     /// The OpenType features to shape with in this mode.
     ///
     /// `kern` is always enabled. `liga` and `calt` are enabled for

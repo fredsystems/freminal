@@ -49,6 +49,7 @@
 //! error) — see [`ShaderErrorRoute`] for how a preview-time failure is kept
 //! off the terminal windows' toast stack without weakening the toast
 //! behaviour a committed (Apply) failure still gets.
+use super::font_manager::LigatureShaping;
 use freminal_common::config::{
     BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
     UnfocusedCursorStyle,
@@ -63,9 +64,9 @@ use std::time::{Duration, Instant};
 /// Grouped into its own type -- rather than four flat fields on
 /// [`VisualPreview`] -- purely to keep that struct's own bool count under
 /// clippy's `struct_excessive_bools` threshold (`blink` and `trail` are two
-/// of `VisualPreview`'s four TOML-config-toggle bools; `ligatures` and
-/// `hide_menu_bar` are the other two). The grouping doubles as a genuine
-/// cohesive unit -- these fields are exactly `CursorConfig` -- unlike
+/// of `VisualPreview`'s remaining TOML-config-toggle bools, alongside
+/// `hide_menu_bar`). The grouping doubles as a genuine cohesive unit --
+/// these fields are exactly `CursorConfig` -- unlike
 /// `FreminalTerminalWidget::WidgetDisplayToggles`, which groups otherwise
 /// unrelated toggles for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +92,7 @@ pub(super) struct CursorPreview {
 /// (see the module doc) rather than applying immediately like the phase A/B
 /// fields. Grouped into its own type both for that shared debounce handling
 /// and because it maps directly onto `FontConfig`'s three layout-affecting
-/// fields (`ligatures` is phase B and stays a flat bool on [`VisualPreview`]
+/// fields (`ligatures` is phase B and stays a flat field on [`VisualPreview`]
 /// since it never needs debouncing).
 #[derive(Debug, Clone)]
 pub(super) struct FontPreview {
@@ -251,8 +252,9 @@ pub struct VisualPreview {
     /// Cursor shape/blink/trail(+duration). See [`CursorPreview`].
     pub(super) cursor: CursorPreview,
 
-    /// OpenType ligature shaping toggle (`FontConfig::ligatures`).
-    pub(super) ligatures: bool,
+    /// OpenType ligature shaping mode, classified from `FontConfig::ligatures`
+    /// by [`LigatureShaping::from_config`].
+    pub(super) ligatures: LigatureShaping,
 
     /// Background image opacity (`UiConfig::background_image_opacity`).
     pub(super) background_image_opacity: f32,
@@ -333,7 +335,7 @@ impl VisualPreview {
                 trail_duration_ms: config.cursor.trail_duration_ms,
                 unfocused_style: config.cursor.unfocused_style,
             },
-            ligatures: config.font.ligatures,
+            ligatures: LigatureShaping::from_config(&config.font),
             background_image_opacity: config.ui.background_image_opacity,
             background_image_mode: config.ui.background_image_mode,
             hide_menu_bar: config.ui.hide_menu_bar,
@@ -426,7 +428,7 @@ pub(super) struct VisualPreviewDiff {
     /// `Some(new_style)` if the unfocused-cursor style changed.
     pub(super) cursor_unfocused_style: Option<UnfocusedCursorStyle>,
     /// `Some(new_ligatures)` if the ligature toggle changed.
-    pub(super) ligatures: Option<bool>,
+    pub(super) ligatures: Option<LigatureShaping>,
     /// `Some(new_opacity)` if the background image opacity changed.
     pub(super) background_image_opacity: Option<f32>,
     /// `Some(new_mode)` if the background image fit mode changed.
@@ -765,9 +767,9 @@ impl<T: Clone + PartialEq> DebouncedPreview<T> {
 mod tests {
     use super::{
         BackgroundImagePathChange, DebounceDecision, DebouncedPreview, FontFamilyChange,
-        FontPreview, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, ShaderErrorRoute, ShaderPathChange,
-        StyleProfile, VisualPreview, debounce_decision, debounced_revert_needs_push,
-        shader_error_route_for, shader_error_route_on_settings_close,
+        FontPreview, LigatureShaping, PATH_PREVIEW_DEBOUNCE, PreviewTrigger, ShaderErrorRoute,
+        ShaderPathChange, StyleProfile, VisualPreview, debounce_decision,
+        debounced_revert_needs_push, shader_error_route_for, shader_error_route_on_settings_close,
     };
     use freminal_common::config::{
         BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition, ThemeMode,
@@ -847,7 +849,7 @@ mod tests {
         assert!(preview.cursor.trail);
         assert_eq!(preview.cursor.trail_duration_ms, 400);
         assert_eq!(preview.cursor.unfocused_style, UnfocusedCursorStyle::Hidden);
-        assert!(!preview.ligatures);
+        assert_eq!(preview.ligatures, LigatureShaping::Disabled);
         assert!((preview.background_image_opacity - 0.75).abs() < f32::EPSILON);
         assert_eq!(preview.background_image_mode, BackgroundImageMode::Tile);
         assert!(preview.hide_menu_bar);
@@ -1024,7 +1026,10 @@ mod tests {
         after.cursor.trail = !before.cursor.trail;
         after.cursor.trail_duration_ms = before.cursor.trail_duration_ms + 50;
         after.cursor.unfocused_style = UnfocusedCursorStyle::Unchanged;
-        after.ligatures = !before.ligatures;
+        after.ligatures = match before.ligatures {
+            LigatureShaping::Enabled => LigatureShaping::Disabled,
+            LigatureShaping::Disabled => LigatureShaping::Enabled,
+        };
         after.background_image_opacity = before.background_image_opacity + 0.1;
         after.background_image_mode = BackgroundImageMode::Tile;
         after.hide_menu_bar = !before.hide_menu_bar;

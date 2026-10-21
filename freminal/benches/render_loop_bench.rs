@@ -36,7 +36,7 @@ use criterion::{
 };
 use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::colors::cursor_f;
-use freminal::gui::font_manager::FontManager;
+use freminal::gui::font_manager::{FontManager, LigatureShaping};
 use freminal::gui::renderer::{
     BackgroundFrame, CursorBlinkPhase, CursorDrawParams, FgRenderOptions,
     build_background_instances, build_foreground_instances,
@@ -425,7 +425,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 );
                 // Produce a variant with exactly one row changed. Rows are
@@ -458,7 +458,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
                     width,
                     fm,
                     *cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             },
@@ -476,12 +476,10 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
     let mut group = c.benchmark_group("shaping_ligatures");
     group.throughput(Throughput::Elements(total_chars));
 
-    for ligatures in [false, true] {
-        let label = if ligatures {
-            "ligatures_on"
-        } else {
-            "ligatures_off"
-        };
+    for (ligatures, label) in [
+        (LigatureShaping::Disabled, "ligatures_off"),
+        (LigatureShaping::Enabled, "ligatures_on"),
+    ] {
         group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
             b.iter_batched(
                 || {
@@ -514,7 +512,15 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
         // Prime the cache.
-        let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            &chars,
+            &tags,
+            width,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         b.iter(|| {
             std::hint::black_box(cache.shape_visible(
@@ -523,7 +529,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
                 width,
                 &mut fm,
                 cell_w,
-                false,
+                LigatureShaping::Disabled,
                 &[],
             ));
         });
@@ -630,7 +636,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                 width,
                 &mut fm,
                 cell_w,
-                false,
+                LigatureShaping::Disabled,
                 &[],
             ));
         });
@@ -660,7 +666,15 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
             let mut cache = ShapingCache::new();
             #[allow(clippy::cast_precision_loss)]
             let cell_w = fm.cell_width() as f32;
-            let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+            let _ = cache.shape_visible(
+                &chars,
+                &tags,
+                width,
+                &mut fm,
+                cell_w,
+                LigatureShaping::Disabled,
+                &[],
+            );
 
             b.iter(|| {
                 std::hint::black_box(cache.shape_visible(
@@ -669,7 +683,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             });
@@ -721,7 +735,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             });
@@ -751,7 +765,15 @@ fn build_shaped_lines_for_size(
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
-    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+    let lines = cache.shape_visible(
+        &chars,
+        &tags,
+        width,
+        &mut fm,
+        cell_w,
+        LigatureShaping::Disabled,
+        &[],
+    );
     (lines, fm)
 }
 
@@ -825,7 +847,15 @@ fn build_shaped_lines_for_background_corpus(
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
-    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+    let lines = cache.shape_visible(
+        &chars,
+        &tags,
+        width,
+        &mut fm,
+        cell_w,
+        LigatureShaping::Disabled,
+        &[],
+    );
     (lines, fm)
 }
 
@@ -859,7 +889,7 @@ fn build_shaped_lines_for_indexed_size(
         width,
         &mut fm,
         cell_w,
-        false,
+        LigatureShaping::Disabled,
         &[],
     );
     (lines, fm)
@@ -1371,7 +1401,7 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
                     TerminalColor::BrightBlack,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                 ));
             },
             BatchSize::SmallInput,
@@ -1391,7 +1421,7 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
                     TerminalColor::BrightBlack,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                 ));
             },
             BatchSize::SmallInput,

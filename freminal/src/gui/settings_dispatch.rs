@@ -719,7 +719,7 @@ impl FreminalGui {
         }
     }
 
-    /// Preview the ligature toggle (GUI-side cached flag on each window's
+    /// Preview the ligature mode (GUI-side cached value on each window's
     /// `terminal_widget`, no `FontManager::rebuild`) — issue #452 phase B.
     ///
     /// A ligature change alters shaping output, so each window whose toggle
@@ -730,11 +730,11 @@ impl FreminalGui {
         diff: &VisualPreviewDiff,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
-        let Some(enabled) = diff.ligatures else {
+        let Some(ligatures) = diff.ligatures else {
             return;
         };
         for win in self.windows.values_mut() {
-            if win.terminal_widget.set_ligatures_preview(enabled) {
+            if win.terminal_widget.set_ligatures_preview(ligatures) {
                 win.invalidate_all_pane_atlases();
             }
         }

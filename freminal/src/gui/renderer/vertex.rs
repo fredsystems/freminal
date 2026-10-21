@@ -1954,7 +1954,7 @@ mod tests {
     use freminal_common::themes::{self, ThemePalette};
 
     use crate::gui::colors::cursor_f;
-    use crate::gui::font_manager::FontManager;
+    use crate::gui::font_manager::{FontManager, LigatureShaping};
     use crate::gui::shaping::{ShapedGlyph, ShapedLine, ShapedRun};
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
     use freminal_common::buffer_states::fonts::FontWeight;
@@ -2849,7 +2849,15 @@ mod tests {
             .map(|&b| freminal_common::buffer_states::tchar::TChar::Ascii(b))
             .collect();
         let tags = vec![freminal_common::buffer_states::format_tag::FormatTag::default()];
-        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let lines = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         let mut instances = Vec::new();
         build_foreground_instances(
@@ -2989,7 +2997,15 @@ mod tests {
             colors: cell_colors,
             ..Default::default()
         }];
-        let lines = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let lines = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         let mut instances = Vec::new();
         build_foreground_instances(

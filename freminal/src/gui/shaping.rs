@@ -384,7 +384,7 @@ impl ShapingCache {
         term_width: usize,
         font_manager: &mut FontManager,
         cell_width: f32,
-        ligatures: bool,
+        ligatures: LigatureShaping,
         visible_line_widths: &[LineWidth],
     ) -> Vec<Arc<ShapedLine>> {
         let lines = split_into_lines(visible_chars);
@@ -395,13 +395,6 @@ impl ShapingCache {
         if self.entries.len() > line_count {
             self.entries.truncate(line_count);
         }
-
-        // Classify the grandfathered `ligatures: bool` once per call.
-        let ligatures = if ligatures {
-            LigatureShaping::Enabled
-        } else {
-            LigatureShaping::Disabled
-        };
 
         let mut result = Vec::with_capacity(line_count);
 
@@ -827,7 +820,7 @@ pub fn shape_placeholder_line(
     fg: freminal_common::colors::TerminalColor,
     font_manager: &mut FontManager,
     cell_width: f32,
-    ligatures: bool,
+    ligatures: LigatureShaping,
 ) -> ShapedLine {
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
 
@@ -909,11 +902,6 @@ pub fn shape_placeholder_line(
         });
     }
 
-    let ligatures = if ligatures {
-        LigatureShaping::Enabled
-    } else {
-        LigatureShaping::Disabled
-    };
     let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
     ShapedLine {
         runs: shaped_runs,
@@ -1182,22 +1170,6 @@ mod tests {
         FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
-    /// Helper: shape `runs`, classifying the `ligatures` flag the same way
-    /// `ShapingCache::shape_visible` does once per call in production.
-    fn shape_runs_test(
-        runs: &[TextRun],
-        fm: &FontManager,
-        cell_w: f32,
-        ligatures: bool,
-    ) -> Vec<ShapedRun> {
-        let ligatures = if ligatures {
-            LigatureShaping::Enabled
-        } else {
-            LigatureShaping::Disabled
-        };
-        shape_runs(runs, fm, cell_w, ligatures)
-    }
-
     /// Helper: create a simple format tag covering a range.
     fn make_tag(start: usize, end: usize) -> FormatTag {
         FormatTag {
@@ -1323,7 +1295,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 3);
@@ -1355,7 +1327,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 1);
@@ -1382,7 +1354,7 @@ mod tests {
             "emoji must resolve to FaceId::Emoji (bundled Noto floor guarantees one)"
         );
 
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());
     }
@@ -1417,11 +1389,27 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         // First call — cache miss.
-        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r1 = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         assert_eq!(r1.len(), 1);
 
         // Second call with identical input — cache hit.
-        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r2 = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         assert_eq!(r2.len(), 1);
 
         // Results should be identical (same glyph count).
@@ -1438,11 +1426,27 @@ mod tests {
         let chars1 = vec![TChar::Ascii(b'X')];
         let tags = vec![make_tag(0, 10)];
 
-        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            &chars1,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         // Change content.
         let chars2 = vec![TChar::Ascii(b'Y')];
-        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r2 = cache.shape_visible(
+            &chars2,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         // Should still produce valid output (cache miss, re-shaped).
         assert_eq!(r2.len(), 1);
@@ -2220,7 +2224,7 @@ mod tests {
     /// fixtures), this drives the actual shaping pipeline against the bundled
     /// default face, so it observes whether the font's `calt` table actually
     /// rewrites glyphs for ligating sequences.
-    fn bundled_glyph_ids(text: &str, ligatures: bool) -> Vec<u16> {
+    fn bundled_glyph_ids(text: &str, ligatures: LigatureShaping) -> Vec<u16> {
         let mut fm = test_font_manager();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
@@ -2232,7 +2236,7 @@ mod tests {
         // A same-format ASCII run must stay a single run so a ligature can form.
         assert_eq!(runs.len(), 1, "`{text}` should be one run");
 
-        let shaped = shape_runs_test(&runs, &fm, cell_w, ligatures);
+        let shaped = shape_runs(&runs, &fm, cell_w, ligatures);
         assert_eq!(shaped.len(), 1);
         shaped[0].glyphs.iter().map(|g| g.glyph_id).collect()
     }
@@ -2261,8 +2265,8 @@ mod tests {
     #[test]
     fn bundled_font_forms_ligatures() {
         for seq in ["->", "=>", "==="] {
-            let with_lig = bundled_glyph_ids(seq, true);
-            let without_lig = bundled_glyph_ids(seq, false);
+            let with_lig = bundled_glyph_ids(seq, LigatureShaping::Enabled);
+            let without_lig = bundled_glyph_ids(seq, LigatureShaping::Disabled);
 
             // The ligature feature must have changed the shaping output. If the
             // bundled font has no `calt` coverage (Meslo, CaskaydiaMono), the
@@ -2343,7 +2347,7 @@ mod tests {
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
-        ligatures: bool,
+        ligatures: LigatureShaping,
     ) -> Vec<GlyphIdentity> {
         let bytes = fm.face_data(face_id).expect("face must be loaded");
         let index: u32 = fm
@@ -2354,11 +2358,6 @@ mod tests {
         let shaper_data = harfrust::ShaperData::new(&font_ref);
         let shaper = shaper_data.shaper(&font_ref).build();
 
-        let ligatures = if ligatures {
-            LigatureShaping::Enabled
-        } else {
-            LigatureShaping::Disabled
-        };
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
@@ -2376,13 +2375,8 @@ mod tests {
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
-        ligatures: bool,
+        ligatures: LigatureShaping,
     ) -> Vec<GlyphIdentity> {
-        let ligatures = if ligatures {
-            LigatureShaping::Enabled
-        } else {
-            LigatureShaping::Disabled
-        };
         let output = fm
             .shape_cached(face_id, ligatures, text)
             .expect("shape_cached must succeed for a loaded face");
@@ -2404,11 +2398,15 @@ mod tests {
     fn cached_plan_shape_matches_uncached_shape_for_mixed_content() {
         let fm = test_font_manager();
 
-        let samples: &[(&str, FaceId, bool)] = &[
-            ("Hello, world!", FaceId::PrimaryRegular, false),
-            ("->", FaceId::PrimaryRegular, true),
-            ("!=", FaceId::PrimaryRegular, true),
-            ("中", FaceId::PrimaryRegular, false),
+        let samples: &[(&str, FaceId, LigatureShaping)] = &[
+            (
+                "Hello, world!",
+                FaceId::PrimaryRegular,
+                LigatureShaping::Disabled,
+            ),
+            ("->", FaceId::PrimaryRegular, LigatureShaping::Enabled),
+            ("!=", FaceId::PrimaryRegular, LigatureShaping::Enabled),
+            ("中", FaceId::PrimaryRegular, LigatureShaping::Disabled),
         ];
 
         for &(text, face_id, ligatures) in samples {
@@ -2416,7 +2414,7 @@ mod tests {
             let cached = shape_via_cached_path(text, face_id, &fm, ligatures);
             assert_eq!(
                 uncached, cached,
-                "`{text}` (ligatures={ligatures}): cached-plan shape output \
+                "`{text}` ({ligatures:?}): cached-plan shape output \
                  must match the uncached one-shot shape output exactly"
             );
         }
@@ -2424,8 +2422,10 @@ mod tests {
         // Emoji routes to a different face (FaceId::Emoji) entirely — the
         // bundled Noto Color Emoji floor (Task #402) guarantees one is
         // always loaded, so this is deterministic across hosts.
-        let uncached_emoji = shape_uncached_reference("😀", FaceId::Emoji, &fm, false);
-        let cached_emoji = shape_via_cached_path("😀", FaceId::Emoji, &fm, false);
+        let uncached_emoji =
+            shape_uncached_reference("😀", FaceId::Emoji, &fm, LigatureShaping::Disabled);
+        let cached_emoji =
+            shape_via_cached_path("😀", FaceId::Emoji, &fm, LigatureShaping::Disabled);
         assert_eq!(
             uncached_emoji, cached_emoji,
             "emoji: cached-plan shape output must match the uncached one-shot \
@@ -2624,13 +2624,16 @@ mod tests {
         assert_ne!(charmap.map('\u{308}'), 0, "bundled face must cover U+0308");
 
         for case in GOLDEN_BUNDLED_SHAPING {
-            for (ligatures, expected) in [(false, case.off), (true, case.on)] {
+            for (ligatures, expected) in [
+                (LigatureShaping::Disabled, case.off),
+                (LigatureShaping::Enabled, case.on),
+            ] {
                 let actual =
                     shape_via_cached_path(case.text, FaceId::PrimaryRegular, &fm, ligatures);
                 assert_eq!(
                     actual.as_slice(),
                     expected,
-                    "`{:?}` (ligatures={ligatures}): shaped output no longer matches the \
+                    "`{:?}` ({ligatures:?}): shaped output no longer matches the \
                      pinned golden values",
                     case.text
                 );
@@ -2640,8 +2643,13 @@ mod tests {
         // Sanity: the ligature path must actually be exercised by the bundled
         // font, otherwise the `on` column pins nothing interesting.
         let ligature_changed = ["->", "!=", "==="].iter().any(|text| {
-            shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, true)
-                != shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, false)
+            shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, LigatureShaping::Enabled)
+                != shape_via_cached_path(
+                    text,
+                    FaceId::PrimaryRegular,
+                    &fm,
+                    LigatureShaping::Disabled,
+                )
         });
         assert!(
             ligature_changed,
@@ -3115,12 +3123,15 @@ mod tests {
         );
 
         for case in GOLDEN_BUNDLED_SHAPING_EXTENDED {
-            for (ligatures, expected) in [(false, case.off), (true, case.on)] {
+            for (ligatures, expected) in [
+                (LigatureShaping::Disabled, case.off),
+                (LigatureShaping::Enabled, case.on),
+            ] {
                 let actual = shape_via_cached_path(case.text, case.face, &fm, ligatures);
                 assert_eq!(
                     actual.as_slice(),
                     expected,
-                    "{:?} `{:?}` (ligatures={ligatures}): shaped output differs from the \
+                    "{:?} `{:?}` ({ligatures:?}): shaped output differs from the \
                      rustybuzz 0.20.1 reference",
                     case.face,
                     case.text
@@ -3143,10 +3154,9 @@ mod tests {
 #[cfg(test)]
 mod shaping_cache_hit_rate {
     use super::{FormatTag, ShapingCache, ShapingCacheStats};
+    use crate::gui::font_manager::{FontManager, LigatureShaping};
     use freminal_common::buffer_states::tchar::TChar;
     use freminal_common::config::Config;
-
-    use crate::gui::font_manager::FontManager;
 
     /// A `width` x `height` grid of newline-separated ASCII, generated from
     /// cell coordinates so every row is distinct and the content is
@@ -3184,7 +3194,15 @@ mod shaping_cache_hit_rate {
         cache.reset_stats();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
-        let _ = cache.shape_visible(chars, &tags, width, fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            chars,
+            &tags,
+            width,
+            fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         cache.stats()
     }
 
