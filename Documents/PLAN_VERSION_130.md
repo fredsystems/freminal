@@ -7601,6 +7601,42 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Tests:** the existing anchor tests, ported.
 - **Depends on:** nothing.
 
+#### 147.30 — Fuzz sandbox symlink test depends on the checkout location
+
+- **Source:** issue #530 per-commit verification (found running `cargo xtask test` in a
+  worktree under `/tmp/opencode/`). Predates #530; reproduces on `main`.
+- **Defect today:** `xtask/src/fuzz/sandbox.rs`
+  `a_symlink_into_tmp_is_rejected_under_bwrap` creates its link directory with
+  `tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))` and asserts
+  `!hidden_by_private_tmpfs(&link)`. When the checkout itself lives under `/tmp`, the link is
+  under `/tmp` too, so the assertion fails and `cargo xtask test` stops there. CI and normal
+  checkouts are unaffected, but the test is not hermetic with respect to where the repository
+  sits.
+- **Scope:** `xtask/src/fuzz/sandbox.rs` (that test only).
+- **Fix:** create the link directory somewhere guaranteed not to be under `/tmp` or
+  `/dev/shm` (or skip the "link is not itself hidden" premise with an explicit, asserted
+  precondition), so the test checks the resolved-target rule regardless of checkout location.
+- **Tests / verification:** the test passes from a checkout under `/tmp` and from the normal
+  checkout.
+- **Depends on:** nothing.
+
+#### 147.31 — `cargo doc -p freminal` emits 58 rustdoc warnings
+
+- **Source:** issue #530 review (found checking that the branch added no rustdoc warnings; the
+  three it did add were fixed there). Predates #530; reproduces on `main`.
+- **Defect today:** `cargo doc -p freminal --no-deps` warns 58 times: public docs linking to
+  private items (`private_intra_doc_links`, e.g. `box_drawing.rs`, `shaping.rs` `RunCache`,
+  `toast_pass.rs`, `settings.rs` `VisualPreview`) and unresolved links
+  (`broken_intra_doc_links`, e.g. `renderer/mod.rs` `profiling::*`, `chrome_style.rs`
+  `Visuals`, `panes/mod.rs` `PaneTreeSnapshot`). No CI job runs rustdoc, so they accumulate.
+- **Scope:** doc comments across `freminal/src/gui/` only; no code changes.
+- **Fix:** resolve each link (correct path, or plain backticks where the target is private),
+  then add `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` to
+  `cargo xtask ci` (and the CI workflow) so it cannot regress.
+- **Tests / verification:** `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` is
+  clean.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -7678,7 +7714,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26, 147.27, 147.28 and 147.29 are independent.
+- 147.19, 147.26, 147.27, 147.28, 147.29, 147.30 and 147.31 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -7712,9 +7748,9 @@ issues #556–#564, #566 and #568.
 
 Scope is exactly those items. Out of scope:
 
-- **#567 and #530** (unmaintained dependencies): fixed after this task, as their own work. (#530 has since been resolved on branch
-  `task-530/harfrust-migration`: `rustybuzz` replaced by `harfrust` and `ttf-parser` removed
-  from the graph.)
+- **#567 and #530** (unmaintained dependencies): fixed after this task, as their own work.
+  (#530 has since been resolved on branch `task-530/harfrust-migration`: `rustybuzz` replaced
+  by `harfrust` and `ttf-parser` removed from the graph.)
 - **#565** (xtask is never linted for Windows): tooling, not a security or fuzz finding.
 - **#554** (CodeRabbit configuration) and **#552** (lint relocation): already handled on this
   branch.

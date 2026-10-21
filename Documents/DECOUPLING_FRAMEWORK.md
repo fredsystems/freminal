@@ -422,7 +422,7 @@ Do not rebuild these. They exist, they work, and they are egui-free or nearly so
 | ---------------------------------- | ------------------------------------ | -------------------------------- |
 | SDF rounded-rect + shadow shader   | `freminal/src/gui/renderer/toast_pass.rs` | Chrome surfaces, tabs, popups |
 | Proportional text-run rendering    | `freminal/src/gui/renderer/toast_text_pass.rs` | All chrome text          |
-| Glyph atlas, rustybuzz, swash      | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping            |
+| Glyph atlas, harfrust, swash       | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping            |
 | EGL partial present, buffer age    | `freminal-windowing/src/gl_context.rs` | Keep verbatim, egui-free       |
 | Toast stack (fully bespoke chrome) | `freminal/src/gui/toast.rs`          | Working precedent for the pattern |
 | Keybinding model (`BindingMap`)    | `freminal-common/src/keybindings.rs` | Toolkit-neutral already          |
