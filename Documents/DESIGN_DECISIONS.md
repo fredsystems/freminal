@@ -27,9 +27,23 @@ together with the egui stack; `renovate.json` enforces `<0.13`.
 Compiled shape plans are cached under `(FaceId, LigatureShaping, Script, Direction)`.
 `LigatureShaping` owns the full OpenType feature list for each mode, so the key fully determines
 the plan's inputs and one caller (for example toast text) can never decide the plan another
-caller (the terminal grid) gets. The pinned golden test `golden_bundled_shaping_output_is_pinned`
-in `freminal/src/gui/shaping.rs` is the output-identity guard for the bundled fonts across a
-shaping-library change.
+caller (the terminal grid) gets. `shape_cached` takes the text and builds the harfrust buffer
+itself (no language set; script and direction guessed), so the plan key captures every input to
+the plan. `FontManager::rebuild` clears both caches; a font size or DPI change evicts only the
+`FaceId::System` entries (system face ids are reassigned), because shaping data and plans are
+size-independent and every other entry stays valid.
+
+Toast text deliberately shapes with ligatures disabled (`TOAST_LIGATURE_SHAPING`, one constant
+shared by measurement and drawing), so the shared plan cache never mixes feature sets. Until the
+fix in #530 the plan key ignored the feature list, so a toast could switch ligatures on in the
+terminal.
+
+Two pinned golden tests in `freminal/src/gui/shaping.rs` are the output-identity guard across the
+shaping-library change, both captured from rustybuzz 0.20.1 before the migration:
+`golden_bundled_shaping_output_is_pinned` covers the regular face with a Latin and ligature
+corpus, and `golden_extended_bundled_shaping_matches_rustybuzz` covers every bundled face (bold,
+italic and bold-italic CaskaydiaCove; Noto Color Emoji including ZWJ, VS16 and flags) plus CJK,
+RTL and Indic text on the regular face.
 
 ### Why winit and egui-winit build without default features
 

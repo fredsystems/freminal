@@ -6706,7 +6706,8 @@ The new findings are disposed of in 138.C18–C22.
 - **`cargo deny` advisories.** RUSTSEC-2026-0206 (`rustybuzz` unmaintained) and
   RUSTSEC-2026-0192 (`ttf-parser` unmaintained) also fail on `main`. They predate Task 138
   and come from the font-shaping stack. Task 138 does not address them; they are for the
-  maintainer to route.
+  maintainer to route. (#530 has since been resolved on branch `task-530/harfrust-migration`:
+  `rustybuzz` replaced by `harfrust` and `ttf-parser` removed from the graph.)
 
 ### 138 Status notes
 
@@ -7711,7 +7712,9 @@ issues #556–#564, #566 and #568.
 
 Scope is exactly those items. Out of scope:
 
-- **#567 and #530** (unmaintained dependencies): fixed after this task, as their own work.
+- **#567 and #530** (unmaintained dependencies): fixed after this task, as their own work. (#530 has since been resolved on branch
+  `task-530/harfrust-migration`: `rustybuzz` replaced by `harfrust` and `ttf-parser` removed
+  from the graph.)
 - **#565** (xtask is never linted for Windows): tooling, not a security or fuzz finding.
 - **#554** (CodeRabbit configuration) and **#552** (lint relocation): already handled on this
   branch.
