@@ -2491,6 +2491,221 @@ mod tests {
              output exactly"
         );
     }
+
+    /// One golden corpus entry: the exact shaped output for `text` with
+    /// ligatures OFF and ON.
+    struct GoldenCase {
+        text: &'static str,
+        off: &'static [GlyphIdentity],
+        on: &'static [GlyphIdentity],
+    }
+
+    /// Golden shaping output for the bundled `CaskaydiaCove` regular face.
+    /// Tuples are `(glyph_id, cluster, x_advance, y_advance, x_offset,
+    /// y_offset)`.
+    const GOLDEN_BUNDLED_SHAPING: &[GoldenCase] = &[
+        GoldenCase {
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13760, 0, 1200, 0, 0, 0), (14040, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(13730, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (13977, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "<=>",
+            off: &[
+                (32, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (34, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (14046, 0, 1200, 0, 0, 0),
+                (14026, 1, 1200, 0, 0, 0),
+                (14034, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "www",
+            off: &[
+                (91, 0, 1200, 0, 0, 0),
+                (91, 1, 1200, 0, 0, 0),
+                (91, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12848, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "|>",
+            off: &[(96, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13971, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "/**/",
+            off: &[
+                (19, 0, 1200, 0, 0, 0),
+                (14, 1, 1200, 0, 0, 0),
+                (14, 2, 1200, 0, 0, 0),
+                (19, 3, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (19, 0, 1200, 0, 0, 0),
+                (14, 1, 1200, 0, 0, 0),
+                (14, 2, 1200, 0, 0, 0),
+                (19, 3, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "e\u{301}",
+            off: &[(172, 0, 1200, 0, 0, 0)],
+            on: &[(172, 0, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "a\u{308}",
+            off: &[(167, 0, 1200, 0, 0, 0)],
+            on: &[(167, 0, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1140, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1140, 0)],
+        },
+    ];
+
+    /// Golden regression test: pins the full shaped output (glyph id, cluster,
+    /// advances and offsets, for every glyph) of the production
+    /// `FontManager::shape_cached` path against the bundled regular face, with
+    /// ligatures off and on.
+    ///
+    /// The literals were captured from rustybuzz 0.20.1 before the harfrust
+    /// migration (issue #530). Any change to these numbers means shaping output
+    /// changed and must be explained, not re-pinned.
+    ///
+    /// The corpus covers plain Latin, ligating/contextual sequences (`calt`),
+    /// precomposed combining sequences (`e` + U+0301, `a` + U+0308), and one
+    /// combining mark with no precomposed form (`x` + U+0301) so that mark
+    /// positioning (`x_offset`) is pinned too.
+    #[test]
+    fn golden_bundled_shaping_output_is_pinned() {
+        // `Config::default()` has no user font family, so the primary regular
+        // face is the bundled CaskaydiaCove regardless of installed fonts.
+        let fm = test_font_manager();
+        assert_eq!(
+            fm.face_data(FaceId::PrimaryRegular),
+            Some(crate::gui::font_manager::bundled_regular_font_bytes()),
+            "PrimaryRegular must be the bundled CaskaydiaCove face"
+        );
+
+        // The combining-mark cases are only meaningful if the face covers them.
+        let charmap = fm
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("bundled face must be loaded")
+            .charmap();
+        assert_ne!(charmap.map('\u{301}'), 0, "bundled face must cover U+0301");
+        assert_ne!(charmap.map('\u{308}'), 0, "bundled face must cover U+0308");
+
+        for case in GOLDEN_BUNDLED_SHAPING {
+            for (ligatures, expected) in [(false, case.off), (true, case.on)] {
+                let actual = shape_via_new_api(case.text, FaceId::PrimaryRegular, &fm, ligatures);
+                assert_eq!(
+                    actual.as_slice(),
+                    expected,
+                    "`{:?}` (ligatures={ligatures}): shaped output no longer matches the \
+                     pinned golden values",
+                    case.text
+                );
+            }
+        }
+
+        // Sanity: the ligature path must actually be exercised by the bundled
+        // font, otherwise the `on` column pins nothing interesting.
+        let ligature_changed = ["->", "!=", "==="].iter().any(|text| {
+            shape_via_new_api(text, FaceId::PrimaryRegular, &fm, true)
+                != shape_via_new_api(text, FaceId::PrimaryRegular, &fm, false)
+        });
+        assert!(
+            ligature_changed,
+            "ligatures ON must change the shaping of at least one of `->`, `!=`, `===`"
+        );
+    }
 }
 
 /// Subtask 124.16: the shaping cache's hit rate on the four workloads that
