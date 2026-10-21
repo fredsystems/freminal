@@ -44,7 +44,12 @@ duct = "1.1.2"
 # move in lockstep, so all three are exact-pinned together.
 egui = { version = "=0.36.2", default-features = false, features = ["default_fonts", "persistence"] }
 egui_glow = { version = "=0.36.2", default-features = false }
-egui-winit = "=0.36.2"
+# egui-winit's default features are disabled only to stop it re-enabling
+# `winit/default` (which pulls `wayland-csd-adwaita` -> ab_glyph -> ttf-parser,
+# #530); the list below is its default set minus `winit/default`. The version
+# pin is unchanged and the `EGUI_UPGRADE_ASSUMPTIONS.md` checklist still
+# governs any bump.
+egui-winit = { version = "=0.36.2", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 filedescriptor = "0.8.3"
 flate2 = "1.1.10"
 fontdb = "0.24.0"
@@ -112,7 +117,16 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 vergen = { version = "10.0.3", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
-winit = { version = "0.30.13", features = ["rwh_06"] }
+# default-features is off because winit's default `wayland-csd-adwaita` pulls
+# sctk-adwaita -> ab_glyph -> owned_ttf_parser -> ttf-parser (unmaintained,
+# RUSTSEC-2026-0192, #530). The list below is winit 0.30's default set with
+# `wayland-csd-adwaita` swapped for `wayland-csd-adwaita-notitle`. Accepted
+# tradeoff: client-side decorations on Wayland compositors without
+# server-side decorations (e.g. GNOME) lose their title text; buttons and the
+# drag area remain. winit 0.31's `wayland-csd-adwaita-skrifa` restores titles
+# once egui-winit moves to winit 0.31. egui-winit must also keep `winit/default`
+# off (see its entry above); re-enabling its defaults reintroduces ttf-parser.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita-notitle", "wayland-dlopen", "x11"] }
 winreg = "0.56.0"
 # Direct dependency for the Linux/BSD OSC 99 notification service (Task 138.12):
 # one blocking-API D-Bus connection owns `Notify` / `CloseNotification` /
