@@ -80,6 +80,22 @@ pub(crate) const fn bundled_regular_font_bytes() -> &'static [u8] {
     CASKAYDIA_REGULAR
 }
 
+/// Bundled font bytes backing `face`, for tests asserting a face is the
+/// bundled one. `None` for faces that are not bundled-backed by default
+/// (the `Bundled*` fallbacks and `System`).
+#[cfg(test)]
+#[must_use]
+pub(crate) fn bundled_face_bytes(face: FaceId) -> Option<&'static [u8]> {
+    match face {
+        FaceId::PrimaryRegular => Some(CASKAYDIA_REGULAR),
+        FaceId::PrimaryBold => Some(CASKAYDIA_BOLD),
+        FaceId::PrimaryItalic => Some(CASKAYDIA_ITALIC),
+        FaceId::PrimaryBoldItalic => Some(CASKAYDIA_BOLD_ITALIC),
+        FaceId::Emoji => Some(NOTO_COLOR_EMOJI),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Supporting types
 // ---------------------------------------------------------------------------

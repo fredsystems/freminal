@@ -2653,6 +2653,486 @@ mod tests {
             "ligatures ON must change the shaping of at least one of `->`, `!=`, `===`"
         );
     }
+
+    /// One extended golden corpus entry: like [`GoldenCase`], but for an
+    /// explicit bundled face.
+    struct ExtendedGoldenCase {
+        face: FaceId,
+        text: &'static str,
+        off: &'static [GlyphIdentity],
+        on: &'static [GlyphIdentity],
+    }
+
+    /// Golden shaping output across every bundled face and a wider script
+    /// range than [`GOLDEN_BUNDLED_SHAPING`]: bold, italic and bold-italic
+    /// `CaskaydiaCove`, the bundled Noto Color Emoji face (ZWJ, VS16, flags,
+    /// skin tones, keycaps), and non-Latin scripts (CJK, Hebrew, Arabic,
+    /// Devanagari) plus variation selector, empty, space and tab inputs on
+    /// the regular face. Tuples are `(glyph_id, cluster, x_advance,
+    /// y_advance, x_offset, y_offset)`.
+    ///
+    /// The bundled faces carry no CJK coverage, so the CJK entry shapes to
+    /// `.notdef` (glyph 0); that still pins cluster and advance behaviour.
+    ///
+    /// Values captured from rustybuzz 0.20.1 at commit 602af317 (the
+    /// pre-migration tree) for issue #530 review finding M1. A difference
+    /// means harfrust shapes differently and must be explained, not
+    /// re-pinned.
+    const GOLDEN_BUNDLED_SHAPING_EXTENDED: &[ExtendedGoldenCase] = &[
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13760, 0, 1200, 0, 0, 0), (14040, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(13730, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (13977, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1139, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1139, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(12602, 0, 1200, 0, 0, 0), (12881, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(12572, 0, 1200, 0, 0, 0), (13466, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12818, 0, 1200, 0, 0, 0),
+                (13466, 1, 1200, 0, 0, 0),
+                (13466, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(12602, 0, 1200, 0, 0, 0), (12881, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(12572, 0, 1200, 0, 0, 0), (13466, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12818, 0, 1200, 0, 0, 0),
+                (13466, 1, 1200, 0, 0, 0),
+                (13466, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F600}",
+            off: &[(883, 0, 2550, 0, 0, 0)],
+            on: &[(883, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            off: &[(2022, 0, 2550, 0, 0, 0)],
+            on: &[(2022, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{2764}\u{FE0F}",
+            off: &[(168, 0, 2550, 0, 0, 0)],
+            on: &[(168, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F1FA}\u{1F1F8}",
+            off: &[(1772, 0, 2550, 0, 0, 0)],
+            on: &[(1772, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F44D}\u{1F3FD}",
+            off: &[(1969, 0, 2550, 0, 0, 0)],
+            on: &[(1969, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "1\u{FE0F}\u{20E3}",
+            off: &[(1485, 0, 2550, 0, 0, 0)],
+            on: &[(1485, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{4E2D}\u{6587}",
+            off: &[(0, 0, 1200, 0, 0, 0), (0, 3, 1200, 0, 0, 0)],
+            on: &[(0, 0, 1200, 0, 0, 0), (0, 3, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{5E9}\u{5DC}\u{5D5}\u{5DD}",
+            off: &[
+                (661, 6, 1200, 0, 0, 0),
+                (653, 4, 1200, 0, 0, 0),
+                (660, 2, 1200, 0, 0, 0),
+                (673, 0, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (661, 6, 1200, 0, 0, 0),
+                (653, 4, 1200, 0, 0, 0),
+                (660, 2, 1200, 0, 0, 0),
+                (673, 0, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{645}\u{631}\u{62D}\u{628}\u{627}",
+            off: &[
+                (12872, 8, 1200, 0, 0, 0),
+                (12909, 6, 1200, 0, 0, 0),
+                (13048, 4, 1200, 0, 0, 0),
+                (13094, 2, 1200, 0, 0, 0),
+                (13354, 0, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12872, 8, 1200, 0, 0, 0),
+                (12909, 6, 1200, 0, 0, 0),
+                (13048, 4, 1200, 0, 0, 0),
+                (13094, 2, 1200, 0, 0, 0),
+                (13354, 0, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947}",
+            off: &[
+                (0, 0, 1200, 0, 0, 0),
+                (0, 3, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (0, 0, 1200, 0, 0, 0),
+                (0, 3, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "a\u{FE0E}",
+            off: &[(69, 0, 1200, 0, 0, 0), (4, 0, 0, 0, 0, 0)],
+            on: &[(69, 0, 1200, 0, 0, 0), (4, 0, 0, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "",
+            off: &[],
+            on: &[],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "  ",
+            off: &[(4, 0, 1200, 0, 0, 0), (4, 1, 1200, 0, 0, 0)],
+            on: &[(4, 0, 1200, 0, 0, 0), (4, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\t",
+            off: &[(0, 0, 1200, 0, 0, 0)],
+            on: &[(0, 0, 1200, 0, 0, 0)],
+        },
+    ];
+
+    /// Pins the full shaped output of the production `shape_cached` path for
+    /// every bundled face (see [`GOLDEN_BUNDLED_SHAPING_EXTENDED`]), with
+    /// ligatures off and on.
+    #[test]
+    fn golden_extended_bundled_shaping_matches_rustybuzz() {
+        // `Config::default()` has no user font family, so every primary face
+        // is the bundled CaskaydiaCove and the emoji face is the bundled Noto
+        // Color Emoji, regardless of installed fonts.
+        let fm = test_font_manager();
+        for face in [
+            FaceId::PrimaryRegular,
+            FaceId::PrimaryBold,
+            FaceId::PrimaryItalic,
+            FaceId::PrimaryBoldItalic,
+            FaceId::Emoji,
+        ] {
+            let bundled = crate::gui::font_manager::bundled_face_bytes(face);
+            assert!(bundled.is_some(), "{face:?} must have bundled font bytes");
+            assert_eq!(
+                fm.face_data(face),
+                bundled,
+                "{face:?} must be the bundled face"
+            );
+        }
+
+        // The CJK case is pinned as `.notdef`; make that premise explicit.
+        let charmap = fm
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("bundled face must be loaded")
+            .charmap();
+        assert_eq!(
+            charmap.map('\u{4E2D}'),
+            0,
+            "bundled regular face is expected to have no CJK coverage"
+        );
+
+        for case in GOLDEN_BUNDLED_SHAPING_EXTENDED {
+            for (ligatures, expected) in [(false, case.off), (true, case.on)] {
+                let actual = shape_via_cached_path(case.text, case.face, &fm, ligatures);
+                assert_eq!(
+                    actual.as_slice(),
+                    expected,
+                    "{:?} `{:?}` (ligatures={ligatures}): shaped output differs from the \
+                     rustybuzz 0.20.1 reference",
+                    case.face,
+                    case.text
+                );
+            }
+        }
+    }
 }
 
 /// Subtask 124.16: the shaping cache's hit rate on the four workloads that
