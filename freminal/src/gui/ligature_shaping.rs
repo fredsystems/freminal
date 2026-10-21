@@ -11,7 +11,7 @@ use freminal_common::config::FontConfig;
 /// Named ligature-shaping mode: the single source of truth for the OpenType
 /// feature set freminal shapes with.
 ///
-/// Each variant selects one full, fixed feature list ([`Self::features`]), and
+/// Each variant selects one full, fixed feature list (`features`), and
 /// the variant itself is part of the font manager's shape-plan cache key
 /// (`PlanKey`). Because the plan cache is keyed on this value rather than on a
 /// caller-supplied feature slice, the key fully determines the inputs the
@@ -92,7 +92,7 @@ impl LigatureShaping {
     /// [`Self::Disabled`], to prevent ligature formation even in fonts that
     /// enable them by default. `dlig` is always disabled.
     #[must_use]
-    pub const fn features(self) -> &'static [harfrust::Feature] {
+    pub(crate) const fn features(self) -> &'static [harfrust::Feature] {
         match self {
             Self::Enabled => &FEATURES_LIGATURES_ENABLED,
             Self::Disabled => &FEATURES_LIGATURES_DISABLED,

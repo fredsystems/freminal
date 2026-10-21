@@ -319,9 +319,9 @@ With scheduling largely handled, the remaining cost is per-frame work, and
 issue #459's unactioned candidate list is the roadmap. Highest-value first, per
 the maintainer:
 
-1. **Font/text pipeline** — unicode width, rustybuzz shaping (#459 item 4's
-   ASCII/simple-text fast path), and `build_foreground_instances`. Judged the
-   most logical next target.
+1. **Font/text pipeline** — unicode width, rustybuzz (now harfrust, #530)
+   shaping (#459 item 4's ASCII/simple-text fast path), and
+   `build_foreground_instances`. Judged the most logical next target.
 2. **Non-incremental vertex-instance build** (#459 item 3) — both
    `build_background_instances` and `build_foreground_instances` clear and walk
    every visible row unconditionally; there is no per-row incremental vertex
