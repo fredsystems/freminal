@@ -10011,6 +10011,41 @@ confirmed by diffing against `main` that the moved code changes no behaviour.
 - **150.C22 (B9): import grouping.** `freminal_notify` imports join the external-crate group.
 - **150.C23 (B10): verified, nothing to fix.** `test-utils = ["zbus/p2p"]` on Windows is
   covered by `cargo xtask check-windows`, which runs `--all-features` and passed.
+- **Status (2026-10-22): all done.** They landed in three commits:
+  - **`68a25cdb`**: the crate side, C1–C5, C7–C15, the crate half of C18 and the crate
+    half of C20.
+    - `cargo test -p freminal-notify` passes on its own (360 tests).
+    - `tombi` reordered the new manifest's tables.
+    - The orchestrator removed one vacuous assertion the C14 rewrite had added, and stopped
+      `IconPreparer`'s `Debug` from printing the drawn PNGs.
+    - C13 removed exactly one test (`windows_plain_toast_fields_are_silent_short_and_powershell`,
+      three constant-only assertions).
+  - **`de53e55a`**: the GUI side, C17, the GUI half of C18, C19, the GUI half of C20, and
+    C22.
+  - **`c239c4f8`**: the docs, C6 and C21.
+
+  Two decisions inside C18:
+  - **`feed_back_failed_legs`:** the planned "gate the call" form fails `check-windows`
+    (unused `registry`, `needless_pass_by_ref_mut`). Every other fix needs a `cfg` at eight
+    call sites or a suppression. The non-Linux definition is kept: it states that
+    platform's real semantics (nothing can fail, so there is nothing to feed back) and
+    asserts them. This is not the R10 shape, and `main` had the same split one level up.
+  - **`NotifyWake`:** kept on every platform, with the reason in its module docs.
+
+  C18 also moved three policy predicates to `any(test, Linux/BSD)`, and their pure-policy
+  tests now run on every platform. Final counts: 9574 tests, clippy clean, `check-windows`
+  clean, rustdoc warnings for `freminal` 69 (unchanged).
+- **Manual-test finding, 2026-10-22: not a freminal defect.** The maintainer ran
+  `test-scripts/osc99_notifications.py` against wayle 0.1.3.
+  - **Step 6** (`[0001][0002]…`) is the intended numbered long body.
+  - **Step 7**: the toast updated but the desktop popup did not. A session-bus capture shows
+    freminal sending the update with `replaces_id` set to the first notification's id (177).
+    It then closes 177 after `w=5000`, and wayle confirms the close of 177.
+  - The same `Notify` pair sent from `busctl` with freminal's exact actions and hints also
+    left the popup unchanged. A bare pair (no actions or hints) was repainted.
+  - So wayle accepts `replaces_id` but does not repaint a visible popup that carries
+    actions or hints. It is an upstream wayle bug, reproducible with `busctl` alone, and
+    no freminal change is planned.
 
 ---
 
