@@ -24,21 +24,21 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use freminal_common::config::NotificationsConfig;
+use freminal_notify::{LinuxDaemon, PlainSink};
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, SystemNotifyEvent};
 use freminal_windowing::WindowId;
 use tracing::trace;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use super::Osc99DbusHandle;
 use super::{
-    NoSystemBackend, NoUntrackedBackend, Osc99Effect, Osc99EffectSink, Osc99IconCache,
-    Osc99LinuxDaemon, Osc99Origin, Osc99Registry, Osc99Request, Osc99SystemBackend,
-    Osc99UntrackedBackend, apply_osc99_effects,
+    Osc99Effect, Osc99EffectSink, Osc99IconCache, Osc99Origin, Osc99Registry, Osc99Request,
+    apply_osc99_effects,
 };
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::host_capabilities::PlainNotifyEntry;
-use crate::gui::notifications::{NotificationRouter, SystemNotifySink};
+use crate::gui::notifications::NotificationRouter;
 use crate::gui::toast::ToastStack;
 use crate::gui::window::PerWindowState;
 
@@ -56,15 +56,15 @@ const MAX_DEFERRED_OSC99_REQUESTS: usize = 256;
 /// A show or close that could not even be queued will never produce a service
 /// event, so a failed show is fed back to `registry` as `ShowFailed` and a
 /// failed close as `Closed`, and what the registry returns is executed in one
-/// more pass (Linux/BSD only: elsewhere the executor never produces those
-/// effects). On return the sink's `failed_system_*` lists are empty.
+/// more pass ([`feed_back_failed_legs`]; Linux/BSD only: elsewhere the
+/// executor never produces those effects). On return the sink's
+/// `failed_system_*` lists are empty.
 ///
 /// The extra pass cannot recurse: a failed show or close only closes the Linux
 /// leg, so the registry answers with at most a close report, never another
 /// `ShowLinuxSystem` or `CloseLinuxSystem`. The follow-up effects therefore run
 /// against backends that fail every request, and a failure there (which cannot
 /// happen) is only logged.
-#[cfg(all(unix, not(target_os = "macos")))]
 fn apply_and_feed_back(
     effects: Vec<Osc99Effect>,
     registry: &mut Osc99Registry,
@@ -72,20 +72,6 @@ fn apply_and_feed_back(
 ) {
     apply_osc99_effects(effects, sink);
     feed_back_failed_legs(registry, sink);
-}
-
-/// [`apply_and_feed_back`] where there is no desktop-notification service
-/// (macOS and Windows): only that service is ever asked to show or close, so
-/// nothing can have failed and there is nothing to feed back. The registry is
-/// read-only here, which is why the signature differs.
-#[cfg(not(all(unix, not(target_os = "macos"))))]
-fn apply_and_feed_back(
-    effects: Vec<Osc99Effect>,
-    _registry: &Osc99Registry,
-    sink: &mut Osc99EffectSink<'_>,
-) {
-    apply_osc99_effects(effects, sink);
-    debug_assert!(sink.failed_system_shows.is_empty() && sink.failed_system_closes.is_empty());
 }
 
 /// The feedback pass of `apply_and_feed_back`: report the sink's failed
@@ -112,7 +98,7 @@ fn feed_back_failed_legs(registry: &mut Osc99Registry, sink: &mut Osc99EffectSin
         .flat_map(|(instance, event)| registry.on_system_event(instance, event))
         .collect();
 
-    let (mut no_system, mut no_untracked) = (NoSystemBackend, NoUntrackedBackend);
+    let (mut no_system, mut no_untracked) = (NoTrackedBackend, NoUntrackedBackend);
     let mut follow_up = Osc99EffectSink::new(&mut *sink.toasts, &mut no_system, &mut no_untracked);
     apply_osc99_effects(effects, &mut follow_up);
     let Osc99EffectSink {
@@ -129,6 +115,16 @@ fn feed_back_failed_legs(registry: &mut Osc99Registry, sink: &mut Osc99EffectSin
             "OSC 99: a failed show or close produced another system request; ignored (cannot happen)"
         );
     }
+}
+
+/// [`feed_back_failed_legs`] where there is no desktop-notification service
+/// (macOS and Windows): only that service is ever asked to show or close, so
+/// nothing can have failed and there is nothing to feed back.
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn feed_back_failed_legs(_registry: &mut Osc99Registry, sink: &mut Osc99EffectSink<'_>) {
+    let shows = std::mem::take(&mut sink.failed_system_shows);
+    let closes = std::mem::take(&mut sink.failed_system_closes);
+    debug_assert!(shows.is_empty() && closes.is_empty());
 }
 
 /// Route `requests` strictly in order (Task 138.C10, G1) and apply each one's
@@ -154,7 +150,7 @@ fn route_requests(
     requests: impl IntoIterator<Item = Osc99Request>,
     notifications: &NotificationsConfig,
     window_focus: WindowFocus,
-    daemon: Osc99LinuxDaemon,
+    daemon: LinuxDaemon,
     icon_cache: &mut Osc99IconCache,
     registry: &mut Osc99Registry,
     sink: &mut Osc99EffectSink<'_>,
@@ -290,15 +286,15 @@ fn deliver_toast_events(registry: &mut Osc99Registry, sink: &mut Osc99EffectSink
 /// [`crate::gui::notifications::Osc99DisplayContext::daemon`]).
 #[cfg(all(unix, not(target_os = "macos")))]
 fn record_daemon_state(
-    daemon: &std::cell::Cell<Osc99LinuxDaemon>,
-    new: Osc99LinuxDaemon,
+    daemon: &std::cell::Cell<LinuxDaemon>,
+    new: LinuxDaemon,
     config: &freminal_common::config::Config,
 ) -> Option<freminal_common::host_capabilities::HostCapabilities> {
     let old = daemon.replace(new);
     if old == new {
         return None;
     }
-    if matches!(new, Osc99LinuxDaemon::Unavailable) {
+    if matches!(new, LinuxDaemon::Unavailable) {
         tracing::warn!(
             "the desktop-notification service is unavailable; OSC 99 with System routing \
              stops being advertised, and Both and SystemWhenUnfocused fall back to \
@@ -318,29 +314,30 @@ fn record_daemon_state(
 /// the caller holds.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn deliver_system_events(
-    events: Vec<super::Osc99DbusEvent>,
-    daemon: &std::cell::Cell<Osc99LinuxDaemon>,
+    events: Vec<SystemNotifyEvent>,
+    daemon: &std::cell::Cell<LinuxDaemon>,
     config: &freminal_common::config::Config,
     registry: &mut Osc99Registry,
     sink: &mut Osc99EffectSink<'_>,
     mut broadcast: impl FnMut(freminal_common::host_capabilities::HostCapabilities),
 ) {
-    use super::{Osc99DbusEvent, Osc99SystemLegEvent};
+    use super::Osc99SystemLegEvent;
 
     let mut effects = Vec::new();
     for event in events {
         let (instance, leg_event) = match event {
-            Osc99DbusEvent::Shown { instance } => {
+            SystemNotifyEvent::Shown { instance } => {
                 tracing::trace!(instance = ?instance, "OSC 99: desktop notification shown");
                 continue;
             }
-            Osc99DbusEvent::ShowFailed { instance } => (instance, Osc99SystemLegEvent::ShowFailed),
-            Osc99DbusEvent::Activated { instance, action } => (
-                instance,
-                Osc99SystemLegEvent::Activated(action.to_leg_activation()),
-            ),
-            Osc99DbusEvent::Closed { instance } => (instance, Osc99SystemLegEvent::Closed),
-            Osc99DbusEvent::Capabilities(capabilities) => {
+            SystemNotifyEvent::ShowFailed { instance } => {
+                (instance, Osc99SystemLegEvent::ShowFailed)
+            }
+            SystemNotifyEvent::Activated { instance, action } => {
+                (instance, Osc99SystemLegEvent::Activated(action.into()))
+            }
+            SystemNotifyEvent::Closed { instance } => (instance, Osc99SystemLegEvent::Closed),
+            SystemNotifyEvent::Capabilities(capabilities) => {
                 tracing::debug!(
                     body = ?capabilities.body,
                     actions = ?capabilities.actions,
@@ -349,17 +346,16 @@ fn deliver_system_events(
                     "notification daemon capabilities"
                 );
                 if let Some(changed) =
-                    record_daemon_state(daemon, Osc99LinuxDaemon::Available(capabilities), config)
+                    record_daemon_state(daemon, LinuxDaemon::Available(capabilities), config)
                 {
                     broadcast(changed);
                 }
                 continue;
             }
-            Osc99DbusEvent::Unavailable => {
+            SystemNotifyEvent::Unavailable => {
                 // The service already logged why; `record_daemon_state` logs
                 // the consequence.
-                if let Some(changed) =
-                    record_daemon_state(daemon, Osc99LinuxDaemon::Unavailable, config)
+                if let Some(changed) = record_daemon_state(daemon, LinuxDaemon::Unavailable, config)
                 {
                     broadcast(changed);
                 }
@@ -371,42 +367,6 @@ fn deliver_system_events(
     if !effects.is_empty() {
         apply_and_feed_back(effects, registry, sink);
     }
-}
-
-/// The decision behind `FreminalGui::system_notify_sink`, over the handle cell.
-///
-/// A running service gives a sink carrying a sender, without consulting
-/// `wanted`. Otherwise `wanted` says whether the service should start: if it
-/// should, `spawn` runs (once) and its handle is stored in `slot`; if not, the
-/// sink drops system notifications. A cell that is already borrowed (logged at
-/// debug), whether to look or to store the started service, gives the same
-/// empty sink and spawns nothing.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_system_notify_sink(
-    slot: &RefCell<Option<Osc99DbusHandle>>,
-    wanted: impl FnOnce() -> bool,
-    spawn: impl FnOnce() -> Osc99DbusHandle,
-) -> SystemNotifySink {
-    let busy = || {
-        tracing::debug!("desktop-notification service handle busy; system notifications dropped");
-        SystemNotifySink::none()
-    };
-    match slot.try_borrow() {
-        Ok(running) => {
-            if let Some(handle) = running.as_ref() {
-                return SystemNotifySink::through(handle.plain_sender());
-            }
-        }
-        Err(_) => return busy(),
-    }
-    if !wanted() {
-        return SystemNotifySink::none();
-    }
-    let Ok(mut running) = slot.try_borrow_mut() else {
-        return busy();
-    };
-    let handle = running.get_or_insert_with(spawn);
-    SystemNotifySink::through(handle.plain_sender())
 }
 
 /// Whether `queue` holds work for the next frame. A busy queue counts as
@@ -662,11 +622,7 @@ impl FreminalGui {
     /// no `RefCell`, so it is safe with the toast and registry borrows held.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn route_osc99_system_events(&self, current: &PerWindowState) {
-        if !self
-            .osc99_dbus
-            .try_borrow()
-            .is_ok_and(|slot| slot.is_some())
-        {
+        if !self.notifier.is_started() {
             return;
         }
         let (Ok(mut toasts), Ok(mut registry)) = (
@@ -676,12 +632,7 @@ impl FreminalGui {
             tracing::warn!("OSC 99: toast stack or registry busy; system events deferred");
             return;
         };
-        let events: Vec<super::Osc99DbusEvent> = match self.osc99_dbus.try_borrow() {
-            Ok(slot) => slot
-                .as_ref()
-                .map_or_else(Vec::new, |handle| handle.try_events().collect()),
-            Err(_) => return,
-        };
+        let events: Vec<SystemNotifyEvent> = self.notifier.drain_events();
 
         self.with_osc99_sink(&mut toasts, |sink| {
             deliver_system_events(
@@ -702,78 +653,50 @@ impl FreminalGui {
     /// there
     /// ([`plain_notifications_may_use_system_leg`](crate::gui::host_capabilities::plain_notifications_may_use_system_leg)).
     /// It then lives for the rest of the process; calling this again is a
-    /// no-op.
+    /// no-op. Only Linux/BSD has a notification service to start.
     ///
     /// A busy handle cell leaves the service unstarted; the next call retries,
-    /// and until then effects are applied against [`NoSystemBackend`].
+    /// and until then effects are applied against
+    /// [`NoTrackedBackend`].
     #[cfg(all(unix, not(target_os = "macos")))]
-    pub(in crate::gui) fn ensure_osc99_dbus_started(&self) {
-        if !crate::gui::host_capabilities::notification_service_wanted(&self.config) {
-            return;
-        }
-        let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
-            return;
-        };
-        slot.get_or_insert_with(|| self.spawn_osc99_dbus());
-    }
-
-    /// Start the service, whose events are drained by the frame loop and whose
-    /// every event wakes an idle window.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn spawn_osc99_dbus(&self) -> super::Osc99DbusHandle {
-        tracing::debug!("starting the desktop-notification service");
-        super::Osc99DbusService::spawn(self.osc99_wake.waker())
+    pub(in crate::gui) fn ensure_notification_service_started(&self) {
+        self.notifier
+            .ensure_started(crate::gui::host_capabilities::notification_service_demand(
+                &self.config,
+            ));
     }
 
     /// Where a plain notification (OSC 9 / OSC 777 / command-finished / the
     /// Settings "Test Notification" button) goes to be shown, for a routing
     /// call made through `entry` under `config`.
     ///
-    /// On Linux/BSD that is freminal's own D-Bus service: it is started here
-    /// when `config` can route to the system leg through `entry` (the Test
-    /// button ignores `notifications.enabled`, so it must be able to start the
-    /// service when the master switch is off) and already running otherwise.
-    /// A busy handle cell (logged at debug), or a service that is neither
-    /// running nor wanted, gives a sink that drops system notifications.
-    /// Callers build the sink only when they have a notification to route. A
-    /// running service costs a shared borrow of the handle cell and one
-    /// `Sender` clone; the cell is borrowed mutably only to start the service.
+    /// On Linux/BSD that is the `freminal-notify` crate's D-Bus service: it is
+    /// started here when `config` can route to the system leg through `entry`
+    /// (the Test button ignores `notifications.enabled`, so it must be able to
+    /// start the service when the master switch is off) and already running
+    /// otherwise. A busy handle cell (logged at debug), or a service that is
+    /// neither running nor wanted, gives a sink that drops system
+    /// notifications. Callers build the sink only when they have a notification
+    /// to route.
     ///
-    /// Elsewhere the sink carries nothing and the platform worker is used.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// Elsewhere the sink is the platform worker. The policy is decided here;
+    /// [`DesktopNotifier::plain_sink`](freminal_notify::DesktopNotifier::plain_sink)
+    /// obeys it.
     pub(in crate::gui) fn system_notify_sink(
         &self,
         config: &NotificationsConfig,
         entry: PlainNotifyEntry,
-    ) -> SystemNotifySink {
-        resolve_system_notify_sink(
-            &self.osc99_dbus,
-            || crate::gui::host_capabilities::plain_notifications_may_use_system_leg(config, entry),
-            || self.spawn_osc99_dbus(),
-        )
-    }
-
-    /// [`Self::system_notify_sink`] where there is no desktop-notification
-    /// service (macOS and Windows): the platform worker shows the
-    /// notification, and the sink has nothing to carry.
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    pub(in crate::gui) const fn system_notify_sink(
-        &self,
-        _config: &NotificationsConfig,
-        _entry: PlainNotifyEntry,
-    ) -> SystemNotifySink {
-        // The same signature as Linux/BSD's, which reads the service from
-        // `self`; the worker here is a process-wide queue.
-        let _ = self;
-        SystemNotifySink::none()
+    ) -> PlainSink {
+        self.notifier
+            .plain_sink(|| crate::gui::host_capabilities::plain_notification_demand(config, entry))
     }
 
     /// Run `f` with an [`Osc99EffectSink`] over `toasts` and the live
     /// desktop-notification backends, then queue the panes the sink was asked
     /// to focus on `self.osc99_focus_requests`.
     ///
-    /// The service is started by [`Self::ensure_osc99_dbus_started`], not
-    /// here. If it is not running (the slot is empty or busy), a
+    /// The service is started by [`Self::ensure_notification_service_started`],
+    /// not here. If it is not running (or its cell is busy), a
     /// [`Osc99Effect::ShowLinuxSystem`] is applied to a backend that fails
     /// every show, which ends the system leg. Platforms without the service
     /// apply that effect to the same backend; it is never produced there.
@@ -786,32 +709,13 @@ impl FreminalGui {
         toasts: &mut ToastStack,
         f: impl FnOnce(&mut Osc99EffectSink<'_>) -> R,
     ) -> R {
-        let mut no_system = NoSystemBackend;
-        let mut no_untracked = NoUntrackedBackend;
-        // A busy cell cannot happen (showing a notification calls nothing back
-        // into the GUI), but if it did the show would be lost, not deferred:
-        // the untracked leg has no failure to feed back.
-        let mut untracked_slot = self.osc99_untracked.try_borrow_mut().ok();
-        let untracked: &mut dyn Osc99UntrackedBackend = match untracked_slot.as_deref_mut() {
-            Some(backend) => backend.as_mut(),
-            None => &mut no_untracked,
-        };
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let mut dbus = self.osc99_dbus.try_borrow_mut().ok();
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let system: &mut dyn Osc99SystemBackend = match dbus.as_mut().and_then(|slot| slot.as_mut())
-        {
-            Some(handle) => handle,
-            None => &mut no_system,
-        };
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        let system: &mut dyn Osc99SystemBackend = &mut no_system;
-
-        let mut sink = Osc99EffectSink::new(toasts, system, untracked);
-        let result = f(&mut sink);
-        let focus_requests = std::mem::take(&mut sink.focus_requests);
-        self.queue_osc99_focus_requests(focus_requests);
-        result
+        self.notifier.with_backends(|system, untracked| {
+            let mut sink = Osc99EffectSink::new(toasts, system, untracked);
+            let result = f(&mut sink);
+            let focus_requests = std::mem::take(&mut sink.focus_requests);
+            self.queue_osc99_focus_requests(focus_requests);
+            result
+        })
     }
 
     /// Append `requests` to the focus queue the next `update()` drains.
@@ -876,15 +780,16 @@ mod tests {
         Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
     use freminal_common::config::NotificationRouting;
+    use freminal_notify::NotificationInstanceId;
+    use freminal_notify::test_support::RecordingTrackedBackend;
+    use freminal_notify::test_support::RecordingUntrackedBackend;
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
     use super::*;
     use crate::gui::notifications::Osc99Control;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    use crate::gui::osc99::dbus_service::{DetachedQueue, detached_handle};
     use crate::gui::osc99::{
-        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99InstanceId, Osc99PaneState,
-        PaneKeyboardFocus, PaneVisibility, RecordingSystemBackend, RecordingUntrackedBackend,
+        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneState,
+        PaneKeyboardFocus, PaneVisibility, instance_toast_key,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
 
@@ -996,7 +901,7 @@ mod tests {
         toasts: ToastStack,
         icons: Osc99IconCache,
         registry: Osc99Registry,
-        system: RecordingSystemBackend,
+        system: RecordingTrackedBackend,
         untracked: RecordingUntrackedBackend,
     }
 
@@ -1006,7 +911,7 @@ mod tests {
                 toasts: ToastStack::default(),
                 icons: Osc99IconCache::default(),
                 registry: Osc99Registry::default(),
-                system: RecordingSystemBackend::default(),
+                system: RecordingTrackedBackend::default(),
                 untracked: RecordingUntrackedBackend::default(),
             }
         }
@@ -1035,7 +940,7 @@ mod tests {
                     requests.iter().cloned(),
                     notifications,
                     WindowFocus::Focused,
-                    Osc99LinuxDaemon::assumed(),
+                    LinuxDaemon::assumed(),
                     icons,
                     registry,
                     sink,
@@ -1056,12 +961,12 @@ mod tests {
         rig: &mut Rig,
         request: &Osc99Request,
         notifications: &NotificationsConfig,
-    ) -> Osc99InstanceId {
+    ) -> NotificationInstanceId {
         let effects = NotificationRouter::route_osc99_request(
             request.clone(),
             notifications,
             WindowFocus::Focused,
-            Osc99LinuxDaemon::assumed(),
+            LinuxDaemon::assumed(),
             &mut rig.icons,
             &mut rig.registry,
         );
@@ -1179,11 +1084,11 @@ mod tests {
         // `Closed`, which the next delivery hands to the registry.
         let toast_events = vec![
             crate::gui::toast::ToastEvent {
-                key: instance.to_toast_key(),
+                key: instance_toast_key(instance),
                 kind: crate::gui::toast::ToastEventKind::Activated,
             },
             crate::gui::toast::ToastEvent {
-                key: instance.to_toast_key(),
+                key: instance_toast_key(instance),
                 kind: crate::gui::toast::ToastEventKind::Closed,
             },
         ];
@@ -1309,7 +1214,7 @@ mod tests {
         let notifications = config(NotificationRouting::Toast);
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
 
-        rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.close_keyed(instance_toast_key(instance));
         rig.toasts.finish_closing_fades();
         rig.deliver_toast_events();
 
@@ -1332,7 +1237,7 @@ mod tests {
         let mut rig = Rig::new();
         let notifications = config(NotificationRouting::Toast);
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
-        rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.close_keyed(instance_toast_key(instance));
         rig.toasts.finish_closing_fades();
 
         rig.deliver_toast_events();
@@ -1365,11 +1270,10 @@ mod tests {
         use freminal_common::config::Config;
 
         use super::*;
-        use crate::gui::osc99::{
-            Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99DbusEvent, Osc99Leg,
-            dbus_service::Osc99SystemAction,
-        };
+        use crate::gui::osc99::Osc99Leg;
         use freminal_common::host_capabilities::HostCapabilities;
+        use freminal_notify::test_support::RecordedShowAnswer;
+        use freminal_notify::{DaemonCapabilities, DaemonSupport, SystemAction, SystemNotifyEvent};
 
         fn system_config() -> NotificationsConfig {
             config(NotificationRouting::System)
@@ -1383,7 +1287,10 @@ mod tests {
         }
 
         /// A rig with `data` shown on the system leg only, its show queued.
-        fn shown_on_system(pane: &LivePane, data: Notification99Data) -> (Rig, Osc99InstanceId) {
+        fn shown_on_system(
+            pane: &LivePane,
+            data: Notification99Data,
+        ) -> (Rig, NotificationInstanceId) {
             let mut rig = Rig::new();
             let instance = route_and_show(&mut rig, &display(pane, data), &system_config());
             assert_eq!(rig.system.shown.len(), 1, "the show reached the backend");
@@ -1404,14 +1311,14 @@ mod tests {
         fn a_failed_system_show_is_fed_back_once_and_ends_the_leg() {
             let pane = LivePane::first();
             let mut rig = Rig::new();
-            rig.system.fail_shows = true;
+            rig.system.show_answer = RecordedShowAnswer::Fail;
 
             let (leftover, _) = rig.run(|registry, icons, sink| {
                 route_requests(
                     [display(&pane, reporting("a"))],
                     &system_config(),
                     WindowFocus::Focused,
-                    Osc99LinuxDaemon::assumed(),
+                    LinuxDaemon::assumed(),
                     icons,
                     registry,
                     sink,
@@ -1459,7 +1366,7 @@ mod tests {
             // The registry asks the service to close; the service cannot even
             // queue it, so no `Closed` event will ever come.
             let effects = rig.registry.close(pane.origin, "a");
-            let mut no_system = NoSystemBackend;
+            let mut no_system = NoTrackedBackend;
             let mut sink =
                 Osc99EffectSink::new(&mut rig.toasts, &mut no_system, &mut rig.untracked);
             apply_and_feed_back(effects, &mut rig.registry, &mut sink);
@@ -1477,9 +1384,9 @@ mod tests {
         /// Deliver `events`, returning the capabilities broadcasts.
         fn deliver(
             rig: &mut Rig,
-            daemon: &Cell<Osc99LinuxDaemon>,
+            daemon: &Cell<LinuxDaemon>,
             config: &Config,
-            events: Vec<Osc99DbusEvent>,
+            events: Vec<SystemNotifyEvent>,
         ) -> (Vec<HostCapabilities>, Vec<Osc99Origin>) {
             let mut broadcasts = Vec::new();
             let ((), focus) = rig.run(|registry, _, sink| {
@@ -1490,8 +1397,8 @@ mod tests {
             (broadcasts, focus)
         }
 
-        fn assumed_daemon() -> Cell<Osc99LinuxDaemon> {
-            Cell::new(Osc99LinuxDaemon::assumed())
+        fn assumed_daemon() -> Cell<LinuxDaemon> {
+            Cell::new(LinuxDaemon::assumed())
         }
 
         #[test]
@@ -1503,7 +1410,7 @@ mod tests {
                 &mut rig,
                 &assumed_daemon(),
                 &config_with(system_config()),
-                vec![Osc99DbusEvent::Closed { instance }],
+                vec![SystemNotifyEvent::Closed { instance }],
             );
 
             assert_eq!(pane.replies(), [closed_report("a")]);
@@ -1520,7 +1427,7 @@ mod tests {
                 &mut rig,
                 &assumed_daemon(),
                 &config_with(system_config()),
-                vec![Osc99DbusEvent::ShowFailed { instance }],
+                vec![SystemNotifyEvent::ShowFailed { instance }],
             );
 
             assert_eq!(pane.replies(), [closed_report("a")]);
@@ -1540,9 +1447,9 @@ mod tests {
                 &mut rig,
                 &assumed_daemon(),
                 &config_with(system_config()),
-                vec![Osc99DbusEvent::Activated {
+                vec![SystemNotifyEvent::Activated {
                     instance,
-                    action: Osc99SystemAction::Default,
+                    action: SystemAction::Default,
                 }],
             );
 
@@ -1558,7 +1465,7 @@ mod tests {
                 &mut rig,
                 &assumed_daemon(),
                 &config_with(system_config()),
-                vec![Osc99DbusEvent::Shown { instance }],
+                vec![SystemNotifyEvent::Shown { instance }],
             );
 
             assert_eq!((broadcasts, focus), (Vec::new(), Vec::new()));
@@ -1570,9 +1477,9 @@ mod tests {
         fn a_capabilities_event_that_changes_what_is_advertised_is_broadcast() {
             let mut rig = Rig::new();
             let daemon = assumed_daemon();
-            let no_actions = Osc99DaemonCapabilities {
-                actions: Osc99DaemonSupport::Unsupported,
-                ..Osc99DaemonCapabilities::ASSUMED
+            let no_actions = DaemonCapabilities {
+                actions: DaemonSupport::Unsupported,
+                ..DaemonCapabilities::ASSUMED
             };
             let config = config_with(system_config());
 
@@ -1580,15 +1487,15 @@ mod tests {
                 &mut rig,
                 &daemon,
                 &config,
-                vec![Osc99DbusEvent::Capabilities(no_actions)],
+                vec![SystemNotifyEvent::Capabilities(no_actions)],
             );
 
-            assert_eq!(daemon.get(), Osc99LinuxDaemon::Available(no_actions));
+            assert_eq!(daemon.get(), LinuxDaemon::Available(no_actions));
             assert_eq!(
                 broadcasts,
                 [crate::gui::host_capabilities::host_capabilities(
                     &config,
-                    Osc99LinuxDaemon::Available(no_actions)
+                    LinuxDaemon::Available(no_actions)
                 )]
             );
         }
@@ -1597,9 +1504,9 @@ mod tests {
         fn a_repeated_capabilities_event_is_not_broadcast_again() {
             let mut rig = Rig::new();
             let daemon = assumed_daemon();
-            let no_actions = Osc99DaemonCapabilities {
-                actions: Osc99DaemonSupport::Unsupported,
-                ..Osc99DaemonCapabilities::ASSUMED
+            let no_actions = DaemonCapabilities {
+                actions: DaemonSupport::Unsupported,
+                ..DaemonCapabilities::ASSUMED
             };
             let config = config_with(system_config());
 
@@ -1608,8 +1515,8 @@ mod tests {
                 &daemon,
                 &config,
                 vec![
-                    Osc99DbusEvent::Capabilities(no_actions),
-                    Osc99DbusEvent::Capabilities(no_actions),
+                    SystemNotifyEvent::Capabilities(no_actions),
+                    SystemNotifyEvent::Capabilities(no_actions),
                 ],
             );
 
@@ -1625,10 +1532,10 @@ mod tests {
                 &mut rig,
                 &daemon,
                 &config_with(system_config()),
-                vec![Osc99DbusEvent::Unavailable],
+                vec![SystemNotifyEvent::Unavailable],
             );
 
-            assert_eq!(daemon.get(), Osc99LinuxDaemon::Unavailable);
+            assert_eq!(daemon.get(), LinuxDaemon::Unavailable);
             assert_eq!(
                 broadcasts.len(),
                 1,
@@ -1645,10 +1552,10 @@ mod tests {
                 &mut rig,
                 &daemon,
                 &config_with(config(NotificationRouting::Toast)),
-                vec![Osc99DbusEvent::Unavailable],
+                vec![SystemNotifyEvent::Unavailable],
             );
 
-            assert_eq!(daemon.get(), Osc99LinuxDaemon::Unavailable);
+            assert_eq!(daemon.get(), LinuxDaemon::Unavailable);
             assert_eq!(broadcasts, Vec::new(), "the toast leg does not read it");
         }
     }
@@ -1906,128 +1813,5 @@ mod tests {
 
         assert_eq!(rig.toasts.len(), 1);
         assert_eq!(rig.registry.instances().len(), 1);
-    }
-
-    // ── resolve_system_notify_sink ──────────────────────────────────────
-
-    /// Route one plain notification through `sink` (System routing, so it
-    /// reaches no toast) and report whether the sink handed it to a service.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn route_through(sink: &SystemNotifySink, queue: &DetachedQueue) -> usize {
-        use crate::gui::notifications::NotificationRequest;
-
-        let notifications = NotificationsConfig {
-            enabled: true,
-            routing_osc_text: NotificationRouting::System,
-            ..NotificationsConfig::default()
-        };
-        let mut toasts = ToastStack::default();
-        NotificationRouter::route(
-            &NotificationRequest::sample(),
-            &notifications,
-            true,
-            &mut toasts,
-            sink,
-        );
-        assert_eq!(toasts.len(), 0, "System routing pushes no toast");
-        queue.take_plain().len()
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn a_busy_handle_cell_gives_an_empty_sink_and_starts_nothing() {
-        let (handle, queue) = detached_handle();
-        let slot = RefCell::new(Some(handle));
-        let spawned = std::cell::Cell::new(0_u32);
-        let _held = slot.borrow_mut();
-
-        let sink = resolve_system_notify_sink(
-            &slot,
-            || true,
-            || {
-                spawned.set(spawned.get() + 1);
-                detached_handle().0
-            },
-        );
-
-        assert_eq!(route_through(&sink, &queue), 0);
-        assert_eq!(spawned.get(), 0);
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn a_running_service_gives_a_carrying_sink_without_asking_or_spawning() {
-        let (handle, queue) = detached_handle();
-        let slot = RefCell::new(Some(handle));
-        let (asked, spawned) = (std::cell::Cell::new(0_u32), std::cell::Cell::new(0_u32));
-
-        let sink = resolve_system_notify_sink(
-            &slot,
-            || {
-                asked.set(asked.get() + 1);
-                false
-            },
-            || {
-                spawned.set(spawned.get() + 1);
-                detached_handle().0
-            },
-        );
-
-        assert_eq!(route_through(&sink, &queue), 1);
-        assert_eq!((asked.get(), spawned.get()), (0, 0));
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn a_service_that_is_not_running_and_not_wanted_is_not_started() {
-        let slot = RefCell::new(None);
-        let (_unused, queue) = detached_handle();
-        let spawned = std::cell::Cell::new(0_u32);
-
-        let sink = resolve_system_notify_sink(
-            &slot,
-            || false,
-            || {
-                spawned.set(spawned.get() + 1);
-                detached_handle().0
-            },
-        );
-
-        assert_eq!(route_through(&sink, &queue), 0);
-        assert_eq!(spawned.get(), 0);
-        assert!(slot.borrow().is_none(), "nothing was stored");
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[test]
-    fn a_wanted_service_is_started_once_and_kept() {
-        let slot = RefCell::new(None);
-        let (spawned_handle, queue) = detached_handle();
-        let spawned = std::cell::Cell::new(0_u32);
-
-        let sink = resolve_system_notify_sink(
-            &slot,
-            || true,
-            || {
-                spawned.set(spawned.get() + 1);
-                spawned_handle
-            },
-        );
-
-        assert_eq!(spawned.get(), 1);
-        assert!(slot.borrow().is_some(), "the cell now holds the handle");
-        assert_eq!(route_through(&sink, &queue), 1, "the sink reaches it");
-
-        // A second call finds it running and does not spawn another.
-        let again = resolve_system_notify_sink(
-            &slot,
-            || true,
-            || {
-                spawned.set(spawned.get() + 1);
-                detached_handle().0
-            },
-        );
-        assert_eq!(spawned.get(), 1);
-        assert_eq!(route_through(&again, &queue), 1);
     }
 }

@@ -14,25 +14,22 @@ use std::time::{Duration, Instant};
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
 use zbus::Connection;
 
-use crate::gui::app_icon::FREMINAL_ICON_PNG;
-use crate::gui::osc99::presentation::{
-    Osc99DecodedIconCache, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint,
-    decode_icon_image, escape_body_markup, sound_hint,
+use super::super::presentation::{
+    DecodedIconCache, IconImage, IconLookup, SoundHint, category_hint, decode_icon_image,
+    escape_body_markup, sound_hint,
 };
-use crate::gui::osc99::{Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId};
-
-use super::plain::PlainNotification;
+use super::super::{DaemonCapabilities, DaemonSupport, NotificationInstanceId, PlainNotification};
 use super::pump::PumpSignal;
 use super::wire::{
     FREMINAL_ICON_NAME, NotifyArgs, NotifyHints, NotifyImage, NotifyReply, is_method_timeout,
     urgency_byte,
 };
-use super::{Osc99DbusEvent, Osc99SystemAction};
+use super::{SystemAction, SystemNotifyEvent};
 
 /// How long the dispatcher leaves a daemon alone after one of its calls timed
 /// out. Every show fails and every close completes without calling it until
 /// this has passed; then the next command tries once more.
-const OSC99_DAEMON_COOLDOWN: Duration = Duration::from_secs(30);
+const DAEMON_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// The `app_name` sent when the notification names no application (`f=`).
 const DEFAULT_APP_NAME: &str = "freminal";
@@ -41,14 +38,14 @@ const DEFAULT_APP_NAME: &str = "freminal";
 /// action keys `"1"`-`"8"` are the only ones mapped back.
 const MAX_BUTTON_ACTIONS: usize = 8;
 
-impl Osc99DaemonCapabilities {
+impl DaemonCapabilities {
     /// The capabilities a daemon advertised in its `GetCapabilities` reply.
     fn from_advertised(advertised: &[String]) -> Self {
         let support = |name: &str| {
             if advertised.iter().any(|capability| capability == name) {
-                Osc99DaemonSupport::Supported
+                DaemonSupport::Supported
             } else {
-                Osc99DaemonSupport::Unsupported
+                DaemonSupport::Unsupported
             }
         };
         Self {
@@ -75,7 +72,7 @@ pub(super) enum CloseTarget {
 /// There is deliberately no `Default`: the one value that believes everyone
 /// ([`Self::Unfiltered`]) must be chosen, never fallen into.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Osc99SignalSender {
+pub(super) enum SignalSender {
     /// There is no bus (a peer-to-peer connection), so there is no sender to
     /// check: every signal is believed.
     Unfiltered,
@@ -87,7 +84,7 @@ pub(super) enum Osc99SignalSender {
     NoOwner,
 }
 
-impl Osc99SignalSender {
+impl SignalSender {
     /// Whether a signal from `sender` is believed.
     fn accepts(&self, sender: Option<&str>) -> bool {
         match self {
@@ -135,11 +132,11 @@ impl OwnerTracking {
 
 /// Whether the daemon answers its calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Osc99DaemonHealth {
+enum DaemonHealth {
     /// The last call was answered (or none was made yet).
     Healthy,
     /// A call timed out at `since`: the daemon is left alone until
-    /// [`OSC99_DAEMON_COOLDOWN`] has passed.
+    /// [`DAEMON_COOLDOWN`] has passed.
     Unresponsive { since: Instant },
 }
 
@@ -165,43 +162,49 @@ struct Mapping {
 /// The dispatcher's bookkeeping, free of any bus or thread.
 pub(super) struct DispatcherState {
     /// Whose notification signals are believed.
-    pub(super) daemon_owner: Osc99SignalSender,
+    pub(super) daemon_owner: SignalSender,
     /// The daemon's id (and answering owner) for each displayed instance.
-    by_instance: HashMap<Osc99InstanceId, Mapping>,
+    by_instance: HashMap<NotificationInstanceId, Mapping>,
     /// The instance behind each of the daemon's ids.
-    by_dbus_id: HashMap<u32, Osc99InstanceId>,
+    by_dbus_id: HashMap<u32, NotificationInstanceId>,
     /// What the daemon can do; assumed until it answers.
-    pub(super) capabilities: Osc99DaemonCapabilities,
+    pub(super) capabilities: DaemonCapabilities,
     /// The owner `GetCapabilities` was last attempted against, so a new owner
     /// is known to need a fresh answer.
     capabilities_asked_of: Option<String>,
     /// Whether the daemon answers.
-    health: Osc99DaemonHealth,
+    health: DaemonHealth,
     /// What the icon and `.desktop` scans know.
-    icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    icon_lookup: Box<dyn IconLookup + Send>,
     /// The icons transmitted recently, already decoded.
-    icon_cache: Osc99DecodedIconCache,
-    /// [`FREMINAL_ICON_PNG`], decoded and downscaled on first use; `None`
-    /// when it did not decode, so that is only logged and tried once.
-    plain_icon: OnceCell<Option<Osc99IconImage>>,
+    icon_cache: DecodedIconCache,
+    /// freminal's application icon, a PNG, as the GUI handed it over.
+    app_icon_png: &'static [u8],
+    /// `app_icon_png`, decoded and downscaled on first use (every plain
+    /// notification then shares its pixel buffer); `None` when it did
+    /// not decode, so that is only logged and tried once.
+    plain_icon: OnceCell<Option<IconImage>>,
 }
 
 impl DispatcherState {
-    /// A state with no instances, the assumed capabilities, and `icon_lookup`
-    /// to resolve icons with.
+    /// A state with no instances, the assumed capabilities, `icon_lookup` to
+    /// resolve icons with, and `app_icon_png` as the picture of plain
+    /// notifications.
     pub(super) fn new(
-        daemon_owner: Osc99SignalSender,
-        icon_lookup: Box<dyn Osc99IconLookup + Send>,
+        daemon_owner: SignalSender,
+        icon_lookup: Box<dyn IconLookup + Send>,
+        app_icon_png: &'static [u8],
     ) -> Self {
         Self {
             daemon_owner,
             by_instance: HashMap::new(),
             by_dbus_id: HashMap::new(),
-            capabilities: Osc99DaemonCapabilities::default(),
+            capabilities: DaemonCapabilities::default(),
             capabilities_asked_of: None,
-            health: Osc99DaemonHealth::Healthy,
+            health: DaemonHealth::Healthy,
             icon_lookup,
-            icon_cache: Osc99DecodedIconCache::default(),
+            icon_cache: DecodedIconCache::default(),
+            app_icon_png,
             plain_icon: OnceCell::new(),
         }
     }
@@ -212,38 +215,38 @@ impl DispatcherState {
     /// fresh connection has no history of timeouts, and the capabilities of
     /// an earlier daemon are forgotten: they are assumed again until the
     /// daemon on this connection answers.
-    pub(super) fn begin_session(&mut self, daemon_owner: Osc99SignalSender) {
+    pub(super) fn begin_session(&mut self, daemon_owner: SignalSender) {
         self.daemon_owner = daemon_owner;
         self.by_instance.clear();
         self.by_dbus_id.clear();
-        self.capabilities = Osc99DaemonCapabilities::default();
+        self.capabilities = DaemonCapabilities::default();
         self.capabilities_asked_of = None;
-        self.health = Osc99DaemonHealth::Healthy;
+        self.health = DaemonHealth::Healthy;
     }
 
     /// Whether the daemon may be called at `now`. After a timeout the answer
-    /// is [`DaemonGate::Skip`] until [`OSC99_DAEMON_COOLDOWN`] has passed; the
+    /// is [`DaemonGate::Skip`] until [`DAEMON_COOLDOWN`] has passed; the
     /// first call after that is a probe, and its outcome (see
     /// [`Self::note_call`]) decides whether the daemon is trusted again.
     pub(super) fn daemon_gate(&self, now: Instant) -> DaemonGate {
         match self.health {
-            Osc99DaemonHealth::Healthy => DaemonGate::Call,
-            Osc99DaemonHealth::Unresponsive { since }
-                if now.saturating_duration_since(since) >= OSC99_DAEMON_COOLDOWN =>
+            DaemonHealth::Healthy => DaemonGate::Call,
+            DaemonHealth::Unresponsive { since }
+                if now.saturating_duration_since(since) >= DAEMON_COOLDOWN =>
             {
                 DaemonGate::Call
             }
-            Osc99DaemonHealth::Unresponsive { .. } => DaemonGate::Skip,
+            DaemonHealth::Unresponsive { .. } => DaemonGate::Skip,
         }
     }
 
     /// Record the outcome of a call to the daemon, made and finished by `now`.
-    /// A timeout makes the daemon [`Osc99DaemonHealth::Unresponsive`]; any
+    /// A timeout makes the daemon [`DaemonHealth::Unresponsive`]; any
     /// other outcome, an error reply included, proves it answers.
     pub(super) fn note_call<T>(&mut self, outcome: &zbus::Result<T>, now: Instant) {
         self.health = match outcome {
-            Err(e) if is_method_timeout(e) => Osc99DaemonHealth::Unresponsive { since: now },
-            Ok(_) | Err(_) => Osc99DaemonHealth::Healthy,
+            Err(e) if is_method_timeout(e) => DaemonHealth::Unresponsive { since: now },
+            Ok(_) | Err(_) => DaemonHealth::Healthy,
         };
     }
 
@@ -263,7 +266,7 @@ impl DispatcherState {
 
     /// Record the daemon's `GetCapabilities` answer.
     pub(super) fn set_capabilities(&mut self, advertised: &[String]) {
-        self.capabilities = Osc99DaemonCapabilities::from_advertised(advertised);
+        self.capabilities = DaemonCapabilities::from_advertised(advertised);
     }
 
     /// Build the `Notify` arguments for `notification`.
@@ -276,11 +279,11 @@ impl DispatcherState {
     /// has the `body-markup` capability.
     pub(super) fn notify_args(
         &mut self,
-        replaces: Option<Osc99InstanceId>,
+        replaces: Option<NotificationInstanceId>,
         notification: &Notification99Data,
     ) -> NotifyArgs {
         let actions = match self.capabilities.actions {
-            Osc99DaemonSupport::Supported => {
+            DaemonSupport::Supported => {
                 let mut actions = vec!["default".to_owned(), String::new()];
                 for (index, label) in notification
                     .buttons
@@ -293,7 +296,7 @@ impl DispatcherState {
                 }
                 actions
             }
-            Osc99DaemonSupport::Unsupported => Vec::new(),
+            DaemonSupport::Unsupported => Vec::new(),
         };
         let expire_timeout = match notification.expiry {
             Osc99Expiry::OsDefault => -1,
@@ -307,8 +310,8 @@ impl DispatcherState {
         );
         let body = notification.body.clone().unwrap_or_default();
         let body = match self.capabilities.body_markup {
-            Osc99DaemonSupport::Supported => escape_body_markup(&body),
-            Osc99DaemonSupport::Unsupported => body,
+            DaemonSupport::Supported => escape_body_markup(&body),
+            DaemonSupport::Unsupported => body,
         };
         NotifyArgs {
             app_name: notification
@@ -345,13 +348,13 @@ impl DispatcherState {
     /// An icon that does not decode is left out (and logged once).
     pub(super) fn plain_notify_args(&self, notification: &PlainNotification) -> NotifyArgs {
         let escape = |text: &str| match self.capabilities.body_markup {
-            Osc99DaemonSupport::Supported => escape_body_markup(text),
-            Osc99DaemonSupport::Unsupported => text.to_owned(),
+            DaemonSupport::Supported => escape_body_markup(text),
+            DaemonSupport::Unsupported => text.to_owned(),
         };
         let image = self
             .plain_icon
             .get_or_init(|| {
-                let decoded = decode_icon_image(FREMINAL_ICON_PNG);
+                let decoded = decode_icon_image(self.app_icon_png);
                 if decoded.is_none() {
                     tracing::warn!("the embedded freminal icon did not decode; sending none");
                 }
@@ -369,7 +372,7 @@ impl DispatcherState {
             hints: NotifyHints {
                 urgency: urgency_byte(notification.urgency),
                 category: None,
-                sound: Osc99SoundHint::None,
+                sound: SoundHint::None,
                 image,
             },
             expire_timeout: -1,
@@ -377,7 +380,7 @@ impl DispatcherState {
     }
 
     /// The daemon's id for `instance`, if the daemon displays it.
-    pub(super) fn dbus_id_of(&self, instance: Osc99InstanceId) -> Option<u32> {
+    pub(super) fn dbus_id_of(&self, instance: NotificationInstanceId) -> Option<u32> {
         self.by_instance
             .get(&instance)
             .map(|mapping| mapping.dbus_id)
@@ -400,10 +403,10 @@ impl DispatcherState {
     /// [`Self::adopt_reply_owner`]).
     pub(super) fn record_shown(
         &mut self,
-        instance: Osc99InstanceId,
-        replaces: Option<Osc99InstanceId>,
+        instance: NotificationInstanceId,
+        replaces: Option<NotificationInstanceId>,
         reply: NotifyReply,
-    ) -> Option<Osc99InstanceId> {
+    ) -> Option<NotificationInstanceId> {
         if let Some(old) = replaces {
             self.forget_instance(old);
         }
@@ -432,18 +435,18 @@ impl DispatcherState {
     /// A new owner makes the capabilities stale (see [`Self::capabilities_stale`]),
     /// so the dispatcher fetches them after the command that adopted it.
     pub(super) fn adopt_reply_owner(&mut self, reply: &NotifyReply) {
-        if matches!(self.daemon_owner, Osc99SignalSender::NoOwner)
+        if matches!(self.daemon_owner, SignalSender::NoOwner)
             && let Some(sender) = &reply.sender
         {
             tracing::debug!(
                 "desktop notifications: adopting the sender of a Notify reply as the daemon's owner"
             );
-            self.daemon_owner = Osc99SignalSender::Owner(sender.clone());
+            self.daemon_owner = SignalSender::Owner(sender.clone());
         }
     }
 
     /// Drop `instance`'s mappings, if it has any.
-    pub(super) fn forget_instance(&mut self, instance: Osc99InstanceId) {
+    pub(super) fn forget_instance(&mut self, instance: NotificationInstanceId) {
         if let Some(mapping) = self.by_instance.remove(&instance) {
             self.by_dbus_id.remove(&mapping.dbus_id);
         }
@@ -451,7 +454,7 @@ impl DispatcherState {
 
     /// What closing `instance` calls for: the daemon's id when it displays
     /// the instance, otherwise [`CloseTarget::AlreadyGone`].
-    pub(super) fn close_target(&self, instance: Osc99InstanceId) -> CloseTarget {
+    pub(super) fn close_target(&self, instance: NotificationInstanceId) -> CloseTarget {
         self.dbus_id_of(instance)
             .map_or(CloseTarget::AlreadyGone, CloseTarget::CallDaemon)
     }
@@ -460,26 +463,26 @@ impl DispatcherState {
     /// service closes the activated notification next, which drops them
     /// (138.C23). `None` for an id with no live
     /// instance or an action freminal never registered.
-    fn on_action(&self, dbus_id: u32, action_key: &str) -> Option<Osc99DbusEvent> {
+    fn on_action(&self, dbus_id: u32, action_key: &str) -> Option<SystemNotifyEvent> {
         let instance = *self.by_dbus_id.get(&dbus_id)?;
-        let action = Osc99SystemAction::from_key(action_key)?;
-        Some(Osc99DbusEvent::Activated { instance, action })
+        let action = SystemAction::from_key(action_key)?;
+        Some(SystemNotifyEvent::Activated { instance, action })
     }
 
     /// The event for a `NotificationClosed` signal, dropping the mappings.
     /// `None` for an id with no live instance (this covers replaced
     /// notifications).
-    fn on_closed(&mut self, dbus_id: u32) -> Option<Osc99DbusEvent> {
+    fn on_closed(&mut self, dbus_id: u32) -> Option<SystemNotifyEvent> {
         let instance = self.by_dbus_id.remove(&dbus_id)?;
         self.by_instance.remove(&instance);
-        Some(Osc99DbusEvent::Closed { instance })
+        Some(SystemNotifyEvent::Closed { instance })
     }
 
     /// The events, if any, a pump signal stands for.
     ///
     /// A notification signal from a sender that is not the daemon's owner is
     /// ignored (logged at debug level, without its payload).
-    pub(super) fn on_signal(&mut self, signal: &PumpSignal) -> Vec<Osc99DbusEvent> {
+    pub(super) fn on_signal(&mut self, signal: &PumpSignal) -> Vec<SystemNotifyEvent> {
         match signal {
             PumpSignal::ActionInvoked {
                 sender,
@@ -523,22 +526,22 @@ impl DispatcherState {
     /// Record who owns `org.freedesktop.Notifications` now.
     ///
     /// The same owner changes nothing. Otherwise every instance recorded
-    /// under a *different* owner is reported [`Osc99DbusEvent::Closed`] and
+    /// under a *different* owner is reported [`SystemNotifyEvent::Closed`] and
     /// forgotten: the daemon that displayed it is gone and will never send
     /// the signals that would end its leg. This is freminal's choice, so the
-    /// registry can finish those legs and send the owed close reports instead
+    /// caller can finish those legs and send the owed close reports instead
     /// of leaving them open forever. An instance recorded under the new owner
     /// stays (a `Notify` that auto-started the daemon can be recorded before
     /// the change is processed), and so does one with no recorded owner,
     /// which is a peer-to-peer instance that owner changes do not concern.
-    fn on_owner_changed(&mut self, new_owner: Option<String>) -> Vec<Osc99DbusEvent> {
-        let new = Osc99SignalSender::from_owner(new_owner);
+    fn on_owner_changed(&mut self, new_owner: Option<String>) -> Vec<SystemNotifyEvent> {
+        let new = SignalSender::from_owner(new_owner);
         if self.daemon_owner == new {
             return Vec::new();
         }
         self.daemon_owner = new;
         let current = self.daemon_owner.owner_name();
-        let mut gone: Vec<Osc99InstanceId> = self
+        let mut gone: Vec<NotificationInstanceId> = self
             .by_instance
             .iter()
             .filter(|(_, mapping)| {
@@ -549,28 +552,28 @@ impl DispatcherState {
             })
             .map(|(instance, _)| *instance)
             .collect();
-        gone.sort_by_key(|instance| instance.0);
+        gone.sort_by_key(|instance| instance.get());
         gone.into_iter()
             .map(|instance| {
                 self.forget_instance(instance);
-                Osc99DbusEvent::Closed { instance }
+                SystemNotifyEvent::Closed { instance }
             })
             .collect()
     }
 
     /// The signals will not arrive any more (a pump ended), so nothing
     /// displayed can be tracked: every mapped instance is reported
-    /// [`Osc99DbusEvent::Closed`], the maps are cleared, and the service
-    /// reports [`Osc99DbusEvent::Unavailable`] last.
-    pub(super) fn on_signals_lost(&mut self) -> Vec<Osc99DbusEvent> {
+    /// [`SystemNotifyEvent::Closed`], the maps are cleared, and the service
+    /// reports [`SystemNotifyEvent::Unavailable`] last.
+    pub(super) fn on_signals_lost(&mut self) -> Vec<SystemNotifyEvent> {
         self.by_dbus_id.clear();
-        let mut instances: Vec<Osc99InstanceId> =
+        let mut instances: Vec<NotificationInstanceId> =
             self.by_instance.drain().map(|(i, _)| i).collect();
-        instances.sort_by_key(|instance| instance.0);
+        instances.sort_by_key(|instance| instance.get());
         instances
             .into_iter()
-            .map(|instance| Osc99DbusEvent::Closed { instance })
-            .chain(std::iter::once(Osc99DbusEvent::Unavailable))
+            .map(|instance| SystemNotifyEvent::Closed { instance })
+            .chain(std::iter::once(SystemNotifyEvent::Unavailable))
             .collect()
     }
 }
@@ -579,8 +582,9 @@ impl DispatcherState {
 impl Default for DispatcherState {
     fn default() -> Self {
         Self::new(
-            Osc99SignalSender::Unfiltered,
+            SignalSender::Unfiltered,
             Box::new(super::test_rig::NoIconLookup),
+            super::super::test_support::test_assets().app_icon_png,
         )
     }
 }
@@ -588,17 +592,20 @@ impl Default for DispatcherState {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use freminal_common::buffer_states::osc99_notification::{
         Notification99Data, NotificationUrgency, Osc99Sound,
     };
 
+    use super::super::super::presentation::SoundHint;
+    use super::super::super::test_support::test_assets;
     use super::super::pump::PumpKind;
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::super::wire::NotifyImage;
     use super::*;
-    use crate::gui::osc99::presentation::Osc99SoundHint;
 
     // ── DispatcherState ─────────────────────────────────────────────────
 
@@ -625,7 +632,7 @@ mod tests {
             NotifyHints {
                 urgency: 2,
                 category: None,
-                sound: Osc99SoundHint::None,
+                sound: SoundHint::None,
                 image: NotifyImage::None,
             }
         );
@@ -657,7 +664,7 @@ mod tests {
         assert_eq!(args.expire_timeout, -1);
         assert_eq!(args.hints.urgency, 2);
         assert_eq!(args.hints.category, None);
-        assert_eq!(args.hints.sound, Osc99SoundHint::None);
+        assert_eq!(args.hints.sound, SoundHint::None);
     }
 
     #[test]
@@ -677,6 +684,20 @@ mod tests {
                 "{urgency:?}"
             );
         }
+    }
+
+    #[test]
+    fn consecutive_plain_notifications_share_one_icon_allocation() {
+        let state = DispatcherState::default();
+        let first = state.plain_notify_args(&plain("a", "b", NotificationUrgency::Normal));
+        let second = state.plain_notify_args(&plain("c", "d", NotificationUrgency::Low));
+
+        let (NotifyImage::Data(first), NotifyImage::Data(second)) =
+            (first.hints.image, second.hints.image)
+        else {
+            panic!("the embedded icon must decode and be sent as image-data");
+        };
+        assert!(Arc::ptr_eq(&first.rgba, &second.rgba));
     }
 
     #[test]
@@ -736,7 +757,7 @@ mod tests {
         desktop: HashMap<String, String>,
     }
 
-    impl Osc99IconLookup for FakeLookup {
+    impl IconLookup for FakeLookup {
         fn matched_icon(&self, name: &str) -> Option<String> {
             self.icons.get(name).cloned()
         }
@@ -748,7 +769,7 @@ mod tests {
 
     fn state_with_icons(icons: &[&str], desktop: &[(&str, &str)]) -> DispatcherState {
         DispatcherState::new(
-            Osc99SignalSender::Unfiltered,
+            SignalSender::Unfiltered,
             Box::new(FakeLookup {
                 icons: icons
                     .iter()
@@ -759,6 +780,7 @@ mod tests {
                     .map(|(app, icon)| ((*app).to_owned(), (*icon).to_owned()))
                     .collect(),
             }),
+            test_assets().app_icon_png,
         )
     }
 
@@ -810,15 +832,15 @@ mod tests {
     fn notify_args_map_sounds_to_hints() {
         let mut state = DispatcherState::default();
         for (sound, expected) in [
-            (Osc99Sound::System, Osc99SoundHint::None),
-            (Osc99Sound::Silent, Osc99SoundHint::Suppress),
+            (Osc99Sound::System, SoundHint::None),
+            (Osc99Sound::Silent, SoundHint::Suppress),
             (
                 Osc99Sound::Named("warn".to_owned()),
-                Osc99SoundHint::Named("dialog-warning".to_owned()),
+                SoundHint::Named("dialog-warning".to_owned()),
             ),
             (
                 Osc99Sound::Named("bell".to_owned()),
-                Osc99SoundHint::Named("bell".to_owned()),
+                SoundHint::Named("bell".to_owned()),
             ),
         ] {
             let args = state.notify_args(
@@ -911,11 +933,12 @@ mod tests {
     #[test]
     fn notify_args_send_the_matched_on_disk_stem() {
         let mut state = DispatcherState::new(
-            Osc99SignalSender::Unfiltered,
+            SignalSender::Unfiltered,
             Box::new(FakeLookup {
                 icons: HashMap::from([("mailicon".to_owned(), "MailIcon".to_owned())]),
                 desktop: HashMap::new(),
             }),
+            test_assets().app_icon_png,
         );
         let args = state.notify_args(
             None,
@@ -1177,11 +1200,11 @@ mod tests {
 
         assert_eq!(
             state.capabilities,
-            Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Supported,
-                body_markup: Osc99DaemonSupport::Supported,
-                sound: Osc99DaemonSupport::Unsupported,
+            DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Supported,
+                body_markup: DaemonSupport::Supported,
+                sound: DaemonSupport::Unsupported,
             }
         );
     }
@@ -1194,11 +1217,11 @@ mod tests {
 
         assert_eq!(
             state.capabilities,
-            Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Unsupported,
-                body_markup: Osc99DaemonSupport::Unsupported,
-                sound: Osc99DaemonSupport::Supported,
+            DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Unsupported,
+                body_markup: DaemonSupport::Unsupported,
+                sound: DaemonSupport::Supported,
             }
         );
     }
@@ -1217,9 +1240,9 @@ mod tests {
 
         assert_eq!(
             state.on_action(7, "default"),
-            Some(Osc99DbusEvent::Activated {
+            Some(SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Default,
+                action: SystemAction::Default,
             })
         );
     }
@@ -1232,9 +1255,9 @@ mod tests {
         for n in 1..=8u8 {
             assert_eq!(
                 state.on_action(7, &n.to_string()),
-                Some(Osc99DbusEvent::Activated {
+                Some(SystemNotifyEvent::Activated {
                     instance: instance(1),
-                    action: Osc99SystemAction::Button(n),
+                    action: SystemAction::Button(n),
                 })
             );
         }
@@ -1257,11 +1280,11 @@ mod tests {
 
         assert!(matches!(
             state.on_action(7, "2"),
-            Some(Osc99DbusEvent::Activated { .. })
+            Some(SystemNotifyEvent::Activated { .. })
         ));
         assert_eq!(
             state.on_closed(7),
-            Some(Osc99DbusEvent::Closed {
+            Some(SystemNotifyEvent::Closed {
                 instance: instance(1)
             })
         );
@@ -1286,7 +1309,7 @@ mod tests {
         assert_eq!(state.on_closed(7), None, "the replaced id is forgotten");
         assert_eq!(
             state.on_closed(8),
-            Some(Osc99DbusEvent::Closed {
+            Some(SystemNotifyEvent::Closed {
                 instance: instance(2)
             })
         );
@@ -1301,7 +1324,7 @@ mod tests {
 
         assert_eq!(
             state.on_closed(7),
-            Some(Osc99DbusEvent::Closed {
+            Some(SystemNotifyEvent::Closed {
                 instance: instance(2)
             })
         );
@@ -1316,14 +1339,14 @@ mod tests {
 
         assert_eq!(
             state.on_signal(&action_from(None, 7, "1")),
-            [Osc99DbusEvent::Activated {
+            [SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Button(1),
+                action: SystemAction::Button(1),
             }]
         );
         assert_eq!(
             state.on_signal(&closed_from(None, 7)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(1)
             }]
         );
@@ -1333,7 +1356,7 @@ mod tests {
 
     /// A state that believes `owner`, with instances 1 and 2 shown as ids 7
     /// and 8 by that owner (or with no recorded owner, when there is none).
-    fn owned_by(owner: Osc99SignalSender) -> DispatcherState {
+    fn owned_by(owner: SignalSender) -> DispatcherState {
         let answered_by = owner.owner_name().map(str::to_owned);
         let reply = |dbus_id| NotifyReply {
             dbus_id,
@@ -1352,13 +1375,13 @@ mod tests {
     fn a_state_believes_everyone_until_it_learns_an_owner() {
         assert_eq!(
             DispatcherState::default().daemon_owner,
-            Osc99SignalSender::Unfiltered
+            SignalSender::Unfiltered
         );
     }
 
     #[test]
     fn an_owned_state_ignores_signals_from_other_senders() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         for sender in [Some(":1.9"), None, Some(""), Some(":1.55")] {
             assert_eq!(
@@ -1381,18 +1404,18 @@ mod tests {
 
     #[test]
     fn an_owned_state_believes_the_owner() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         assert_eq!(
             state.on_signal(&action_from(Some(":1.5"), 7, "default")),
-            [Osc99DbusEvent::Activated {
+            [SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Default,
+                action: SystemAction::Default,
             }]
         );
         assert_eq!(
             state.on_signal(&closed_from(Some(":1.5"), 7)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(1)
             }]
         );
@@ -1400,7 +1423,7 @@ mod tests {
 
     #[test]
     fn a_state_with_no_owner_ignores_every_signal() {
-        let mut state = owned_by(Osc99SignalSender::NoOwner);
+        let mut state = owned_by(SignalSender::NoOwner);
 
         for sender in [Some(":1.5"), None] {
             assert_eq!(state.on_signal(&action_from(sender, 7, "default")), []);
@@ -1410,7 +1433,7 @@ mod tests {
 
     #[test]
     fn an_unfiltered_state_believes_every_sender() {
-        let mut state = owned_by(Osc99SignalSender::Unfiltered);
+        let mut state = owned_by(SignalSender::Unfiltered);
 
         assert_eq!(state.on_signal(&action_from(Some(":1.9"), 7, "1")).len(), 1);
         assert_eq!(state.on_signal(&action_from(None, 7, "1")).len(), 1);
@@ -1420,24 +1443,21 @@ mod tests {
 
     #[test]
     fn a_new_owner_retargets_the_filter_and_closes_the_old_daemons_instances() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         assert_eq!(
             state.on_signal(&owner_changed(Some(":1.6"))),
             [
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(1)
                 },
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(2)
                 },
             ]
         );
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.6".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.6".to_owned()));
         assert!(state.by_instance.is_empty());
         assert!(state.by_dbus_id.is_empty());
         // The new owner is believed, the old one no longer is.
@@ -1445,7 +1465,7 @@ mod tests {
         assert_eq!(state.on_signal(&closed_from(Some(":1.5"), 1)), []);
         assert_eq!(
             state.on_signal(&closed_from(Some(":1.6"), 1)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(3)
             }]
         );
@@ -1453,11 +1473,11 @@ mod tests {
 
     #[test]
     fn losing_the_owner_closes_the_old_daemons_instances_and_ignores_signals() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         assert_eq!(state.on_signal(&owner_changed(None)).len(), 2);
 
-        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert_eq!(state.daemon_owner, SignalSender::NoOwner);
         assert!(state.by_instance.is_empty());
         assert!(state.by_dbus_id.is_empty());
         assert_eq!(state.on_signal(&closed_from(Some(":1.5"), 7)), []);
@@ -1465,14 +1485,11 @@ mod tests {
 
     #[test]
     fn the_same_owner_changes_nothing() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         assert_eq!(state.on_signal(&owner_changed(Some(":1.5"))), []);
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.5".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.5".to_owned()));
         assert_eq!(state.by_instance.len(), 2);
         assert_eq!(state.by_dbus_id.len(), 2);
     }
@@ -1481,18 +1498,15 @@ mod tests {
     fn gaining_an_owner_from_none_keeps_what_was_recorded() {
         // A `Notify` that auto-started the daemon can be recorded before the
         // `NameOwnerChanged` that names the daemon is processed.
-        let mut state = owned_by(Osc99SignalSender::NoOwner);
+        let mut state = owned_by(SignalSender::NoOwner);
 
         assert_eq!(state.on_signal(&owner_changed(Some(":1.5"))), []);
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.5".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.5".to_owned()));
         assert_eq!(state.by_instance.len(), 2);
         assert_eq!(
             state.on_signal(&closed_from(Some(":1.5"), 7)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(1)
             }]
         );
@@ -1500,15 +1514,12 @@ mod tests {
 
     #[test]
     fn losing_the_owner_then_gaining_one_again_ends_up_following_the_new_one() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
         let _ = state.on_signal(&owner_changed(None));
 
         assert_eq!(state.on_signal(&owner_changed(Some(":1.8"))), []);
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.8".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.8".to_owned()));
     }
 
     #[test]
@@ -1580,8 +1591,9 @@ mod tests {
     #[test]
     fn only_instances_answered_by_a_different_owner_are_closed_on_an_owner_change() {
         let mut state = DispatcherState::new(
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(1), None, reply_from(7, ":1.5"));
         // Answered by the new daemon before its `NameOwnerChanged` is handled.
@@ -1591,10 +1603,10 @@ mod tests {
         assert_eq!(
             state.on_signal(&owner_changed(Some(":1.6"))),
             [
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(1)
                 },
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(3)
                 },
             ]
@@ -1605,7 +1617,7 @@ mod tests {
         assert_eq!(state.dbus_id_of(instance(3)), None);
         assert_eq!(
             state.on_signal(&closed_from(Some(":1.6"), 8)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(2)
             }]
         );
@@ -1614,8 +1626,9 @@ mod tests {
     #[test]
     fn an_instance_with_no_recorded_owner_is_never_closed_by_an_owner_change() {
         let mut state = DispatcherState::new(
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(1), None, peer_reply(7));
 
@@ -1628,8 +1641,9 @@ mod tests {
     #[test]
     fn losing_the_owner_closes_every_instance_that_had_one() {
         let mut state = DispatcherState::new(
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(2), None, reply_from(8, ":1.5"));
         state.record_shown(instance(1), None, reply_from(7, ":1.5"));
@@ -1637,31 +1651,32 @@ mod tests {
         assert_eq!(
             state.on_signal(&owner_changed(None)),
             [
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(1)
                 },
-                Osc99DbusEvent::Closed {
+                SystemNotifyEvent::Closed {
                     instance: instance(2)
                 },
             ],
             "in instance order"
         );
-        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert_eq!(state.daemon_owner, SignalSender::NoOwner);
     }
 
     #[test]
     fn a_notify_reply_names_the_owner_when_none_is_known() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
 
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.7".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.7".to_owned()));
         assert_eq!(
             state.on_signal(&closed_from(Some(":1.7"), 7)),
-            [Osc99DbusEvent::Closed {
+            [SystemNotifyEvent::Closed {
                 instance: instance(1)
             }]
         );
@@ -1670,39 +1685,44 @@ mod tests {
     #[test]
     fn a_notify_reply_does_not_replace_a_known_owner_or_a_missing_sender() {
         let mut owned = DispatcherState::new(
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         owned.record_shown(instance(1), None, reply_from(7, ":1.6"));
         assert_eq!(
             owned.daemon_owner,
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             "only a bus-driver answer or NameOwnerChanged moves a known owner"
         );
 
         let mut unfiltered = DispatcherState::default();
         unfiltered.record_shown(instance(1), None, reply_from(7, ":1.6"));
-        assert_eq!(unfiltered.daemon_owner, Osc99SignalSender::Unfiltered);
+        assert_eq!(unfiltered.daemon_owner, SignalSender::Unfiltered);
 
-        let mut senderless =
-            DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut senderless = DispatcherState::new(
+            SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         senderless.record_shown(instance(1), None, peer_reply(7));
-        assert_eq!(senderless.daemon_owner, Osc99SignalSender::NoOwner);
+        assert_eq!(senderless.daemon_owner, SignalSender::NoOwner);
     }
 
     #[test]
     fn adopting_a_reply_owner_tracks_nothing_and_obeys_the_same_rules_as_a_shown_instance() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         state.adopt_reply_owner(&peer_reply(7));
-        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert_eq!(state.daemon_owner, SignalSender::NoOwner);
         assert!(!state.capabilities_stale());
 
         state.adopt_reply_owner(&reply_from(7, ":1.7"));
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.7".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.7".to_owned()));
         assert!(state.capabilities_stale());
         assert!(state.by_instance.is_empty(), "no instance is recorded");
         assert!(state.by_dbus_id.is_empty());
@@ -1710,7 +1730,7 @@ mod tests {
         state.adopt_reply_owner(&reply_from(8, ":1.9"));
         assert_eq!(
             state.daemon_owner,
-            Osc99SignalSender::Owner(":1.7".to_owned()),
+            SignalSender::Owner(":1.7".to_owned()),
             "a known owner is kept"
         );
     }
@@ -1718,7 +1738,11 @@ mod tests {
     #[test]
     fn an_instance_adopted_with_its_owner_survives_the_owner_change_that_names_it() {
         // The adoption and the bus driver's later `NameOwnerChanged` agree.
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 
         assert_eq!(state.on_signal(&owner_changed(Some(":1.7"))), []);
@@ -1740,7 +1764,7 @@ mod tests {
         assert_eq!(state.by_dbus_id.len(), 1);
         assert_eq!(
             state.on_closed(7),
-            Some(Osc99DbusEvent::Closed {
+            Some(SystemNotifyEvent::Closed {
                 instance: instance(2)
             })
         );
@@ -1776,18 +1800,18 @@ mod tests {
     #[test]
     fn an_ended_pump_closes_every_instance_then_reports_unavailable() {
         for kind in [PumpKind::Notifications, PumpKind::OwnerChanges] {
-            let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+            let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
 
             assert_eq!(
                 state.on_signal(&PumpSignal::Ended(kind)),
                 [
-                    Osc99DbusEvent::Closed {
+                    SystemNotifyEvent::Closed {
                         instance: instance(1)
                     },
-                    Osc99DbusEvent::Closed {
+                    SystemNotifyEvent::Closed {
                         instance: instance(2)
                     },
-                    Osc99DbusEvent::Unavailable,
+                    SystemNotifyEvent::Unavailable,
                 ],
                 "{kind:?}"
             );
@@ -1802,7 +1826,7 @@ mod tests {
 
         assert_eq!(
             state.on_signal(&PumpSignal::Ended(PumpKind::Notifications)),
-            [Osc99DbusEvent::Unavailable]
+            [SystemNotifyEvent::Unavailable]
         );
     }
 
@@ -1811,8 +1835,9 @@ mod tests {
     #[test]
     fn capabilities_are_stale_for_an_owner_they_were_not_asked_of() {
         let mut state = DispatcherState::new(
-            Osc99SignalSender::Owner(":1.5".to_owned()),
+            SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         assert!(state.capabilities_stale(), "never asked");
 
@@ -1828,15 +1853,23 @@ mod tests {
 
     #[test]
     fn a_state_with_no_owner_or_an_unfiltered_one_never_wants_a_refresh() {
-        for owner in [Osc99SignalSender::NoOwner, Osc99SignalSender::Unfiltered] {
-            let state = DispatcherState::new(owner.clone(), Box::new(NoIconLookup));
+        for owner in [SignalSender::NoOwner, SignalSender::Unfiltered] {
+            let state = DispatcherState::new(
+                owner.clone(),
+                Box::new(NoIconLookup),
+                test_assets().app_icon_png,
+            );
             assert!(!state.capabilities_stale(), "{owner:?}");
         }
     }
 
     #[test]
     fn an_adopted_owner_makes_the_capabilities_stale() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
 
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 
@@ -1845,31 +1878,28 @@ mod tests {
 
     #[test]
     fn a_new_session_starts_clean() {
-        let mut state = owned_by(Osc99SignalSender::Owner(":1.5".to_owned()));
+        let mut state = owned_by(SignalSender::Owner(":1.5".to_owned()));
         state.note_capabilities_asked();
         state.note_call::<()>(&Err(timeout_error()), Instant::now());
 
-        state.begin_session(Osc99SignalSender::Owner(":1.8".to_owned()));
+        state.begin_session(SignalSender::Owner(":1.8".to_owned()));
 
-        assert_eq!(
-            state.daemon_owner,
-            Osc99SignalSender::Owner(":1.8".to_owned())
-        );
+        assert_eq!(state.daemon_owner, SignalSender::Owner(":1.8".to_owned()));
         assert!(state.by_instance.is_empty());
         assert!(state.by_dbus_id.is_empty());
         assert!(state.capabilities_stale());
-        assert_eq!(state.health, Osc99DaemonHealth::Healthy);
+        assert_eq!(state.health, DaemonHealth::Healthy);
     }
 
     #[test]
     fn a_new_session_assumes_the_capabilities_again() {
         let mut state = DispatcherState::default();
         state.set_capabilities(&strings(&["body", "sound"]));
-        assert_ne!(state.capabilities, Osc99DaemonCapabilities::ASSUMED);
+        assert_ne!(state.capabilities, DaemonCapabilities::ASSUMED);
 
-        state.begin_session(Osc99SignalSender::Unfiltered);
+        state.begin_session(SignalSender::Unfiltered);
 
-        assert_eq!(state.capabilities, Osc99DaemonCapabilities::ASSUMED);
+        assert_eq!(state.capabilities, DaemonCapabilities::ASSUMED);
     }
 
     // ── Circuit breaker (Z6) ────────────────────────────────────────────
@@ -1888,24 +1918,19 @@ mod tests {
 
         state.note_call::<()>(&Err(timeout_error()), start);
 
-        assert_eq!(
-            state.health,
-            Osc99DaemonHealth::Unresponsive { since: start }
-        );
+        assert_eq!(state.health, DaemonHealth::Unresponsive { since: start });
         assert_eq!(state.daemon_gate(start), DaemonGate::Skip);
         assert_eq!(
-            state.daemon_gate(
-                start + OSC99_DAEMON_COOLDOWN.saturating_sub(Duration::from_millis(1))
-            ),
+            state.daemon_gate(start + DAEMON_COOLDOWN.saturating_sub(Duration::from_millis(1))),
             DaemonGate::Skip
         );
         assert_eq!(
-            state.daemon_gate(start + OSC99_DAEMON_COOLDOWN),
+            state.daemon_gate(start + DAEMON_COOLDOWN),
             DaemonGate::Call,
             "the cooldown is over"
         );
         assert_eq!(
-            state.daemon_gate(start + OSC99_DAEMON_COOLDOWN * 3),
+            state.daemon_gate(start + DAEMON_COOLDOWN * 3),
             DaemonGate::Call
         );
     }
@@ -1913,39 +1938,31 @@ mod tests {
     #[test]
     fn a_probe_that_is_answered_makes_the_daemon_healthy_again() {
         let start = Instant::now();
-        let probe = start + OSC99_DAEMON_COOLDOWN;
+        let probe = start + DAEMON_COOLDOWN;
         let mut state = DispatcherState::default();
         state.note_call::<()>(&Err(timeout_error()), start);
 
         state.note_call(&Ok(()), probe);
 
-        assert_eq!(state.health, Osc99DaemonHealth::Healthy);
+        assert_eq!(state.health, DaemonHealth::Healthy);
         assert_eq!(state.daemon_gate(probe), DaemonGate::Call);
     }
 
     #[test]
     fn a_probe_that_times_out_again_restarts_the_cooldown() {
         let start = Instant::now();
-        let probe = start + OSC99_DAEMON_COOLDOWN;
+        let probe = start + DAEMON_COOLDOWN;
         let mut state = DispatcherState::default();
         state.note_call::<()>(&Err(timeout_error()), start);
 
         state.note_call::<()>(&Err(timeout_error()), probe);
 
+        assert_eq!(state.health, DaemonHealth::Unresponsive { since: probe });
         assert_eq!(
-            state.health,
-            Osc99DaemonHealth::Unresponsive { since: probe }
-        );
-        assert_eq!(
-            state.daemon_gate(
-                probe + OSC99_DAEMON_COOLDOWN.saturating_sub(Duration::from_millis(1))
-            ),
+            state.daemon_gate(probe + DAEMON_COOLDOWN.saturating_sub(Duration::from_millis(1))),
             DaemonGate::Skip
         );
-        assert_eq!(
-            state.daemon_gate(probe + OSC99_DAEMON_COOLDOWN),
-            DaemonGate::Call
-        );
+        assert_eq!(state.daemon_gate(probe + DAEMON_COOLDOWN), DaemonGate::Call);
     }
 
     #[test]
@@ -1959,7 +1976,7 @@ mod tests {
             start,
         );
 
-        assert_eq!(state.health, Osc99DaemonHealth::Healthy);
+        assert_eq!(state.health, DaemonHealth::Healthy);
         Ok(())
     }
 }

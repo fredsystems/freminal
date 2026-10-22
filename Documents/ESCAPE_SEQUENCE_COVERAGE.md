@@ -2,6 +2,11 @@
 
 ## Last updated
 
+Last updated: 2026-10-22 — Task 150 (desktop notification backend extraction).
+No status icon moves and no behaviour changes. The notification backends moved
+from `gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and
+the OSC 99 delivery thread is now named `freminal-notify-deliver`.
+
 Last updated: 2026-10-22 — Task 149 (zbus 6 migration and per-platform
 notification backends, #567). No status icon moves. Every system notification
 (OSC 9, OSC 777, OSC 133 `D` command-finished, the Settings "Test
@@ -755,7 +760,7 @@ icon names are covered by the leg notes below.
   nobody can be asked yet), so the daemon state recovers and the capabilities are
   re-broadcast to every pane.
 - **macOS / Windows leg:** fire-and-forget through one delivery thread
-  (`freminal-osc99-deliver`, a queue of 16; a request that finds it full is
+  (`freminal-notify-deliver`, a queue of 16; a request that finds it full is
   dropped). macOS uses `notify-rust`; Windows builds the toast directly with
   `tauri-winrt-notification` (the icon is an `appLogoOverride`, no reminder
   scenario). No buttons are registered; activation and close cannot be observed.

@@ -1,6 +1,6 @@
 ---
 name: freminal-architecture
-description: Use ONLY when working in the freminal repository (the Rust terminal emulator at ~/GitHub/freminal with crates freminal, freminal-terminal-emulator, freminal-buffer, freminal-common, freminal-windowing, xtask). Triggers on architecture-affecting changes: anything touching the GUI/PTY split, the ArcSwap snapshot transport, the channel-based input system, crate dependency boundaries, or `TerminalEmulator` / `TerminalSnapshot` / `ViewState`. Codifies the post-refactor lock-free architecture invariants.
+description: Use ONLY when working in the freminal repository (the Rust terminal emulator at ~/GitHub/freminal with crates freminal, freminal-terminal-emulator, freminal-buffer, freminal-common, freminal-notify, freminal-windowing, xtask). Triggers on architecture-affecting changes: anything touching the GUI/PTY split, the ArcSwap snapshot transport, the channel-based input system, crate dependency boundaries, or `TerminalEmulator` / `TerminalSnapshot` / `ViewState`. Codifies the post-refactor lock-free architecture invariants.
 ---
 
 # Freminal: lock-free architecture invariants
@@ -49,11 +49,15 @@ GUI Thread (eframe update() -- pure render, NO mutation)
 
    ```text
    freminal (binary) -> freminal-terminal-emulator -> freminal-buffer -> freminal-common
+   freminal (binary) -> freminal-notify -> freminal-common
    ```
 
-   plus every crate may depend on `freminal-common`. Upward
+   plus every crate may depend on `freminal-common`. `freminal-notify`
+   is a leaf the GUI binary depends on; it depends only on
+   `freminal-common` and external crates. Upward
    dependencies are forbidden -- `freminal-buffer` may never import
-   from `freminal-terminal-emulator`, etc.
+   from `freminal-terminal-emulator`, `freminal-notify` may never
+   import from `freminal`, etc.
 
 ## Crate responsibilities (no leaks)
 
@@ -85,6 +89,13 @@ GUI Thread (eframe update() -- pure render, NO mutation)
   buffer mutations. Produces `TerminalSnapshot` for the GUI via
   `build_snapshot()`. Owns `FreminalAnsiParser`. Does NOT render,
   interact with egui, or hold GUI state.
+
+- **`freminal-notify`**: showing a notification on the operating
+  system (the Linux/BSD D-Bus service, the macOS/Windows workers, the
+  icon pipeline). Depends only on `freminal-common`; no egui, no
+  `freminal-windowing`, no `freminal-terminal-emulator`. Its test
+  doubles are behind the `test-utils` feature, which only
+  `freminal`'s dev-dependency enables.
 
 - **`freminal` (binary)**: the GUI application using eframe/egui. The
   render loop is a pure read of `TerminalSnapshot`. All input goes

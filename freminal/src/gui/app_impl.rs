@@ -1068,8 +1068,7 @@ impl freminal_windowing::App for FreminalGui {
         // keep the handles to destroy the window's remaining GL state: this
         // call has no GL context current, `on_window_destroying` will.
         // Stop the OSC 99 wake-up targeting the closing window.
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.unregister(window_id);
+        self.notify_wake.unregister(window_id);
         if let Some(win) = self.windows.remove(&window_id) {
             self.closing_window_gl
                 .insert(window_id, win.into_gl_teardown());
@@ -1106,8 +1105,7 @@ impl freminal_windowing::App for FreminalGui {
     ) {
         // Idempotent with `on_close_requested`; this also covers a window that
         // is destroyed without a close request.
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.unregister(window_id);
+        self.notify_wake.unregister(window_id);
         let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
             self.windows
                 .remove(&window_id)
@@ -1558,8 +1556,7 @@ impl freminal_windowing::App for FreminalGui {
 
         // Keep the OSC 99 notification service's wake-up pointed at a window
         // that exists: this one is rendering right now.
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake
+        self.notify_wake
             .retarget(window_id, || handle.event_loop_proxy());
 
         // Start the notification service as soon as the config can route OSC 99
@@ -1569,8 +1566,9 @@ impl freminal_windowing::App for FreminalGui {
         // daemon's `GetCapabilities` answer normally arrives before an
         // application's first OSC 99 `p=?`; an answer that arrives later is
         // broadcast to the panes as a capability change.
+        // Only Linux/BSD has a notification service to start.
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.ensure_osc99_dbus_started();
+        self.ensure_notification_service_started();
 
         // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
         //
@@ -3985,7 +3983,10 @@ impl freminal_windowing::App for FreminalGui {
 
         // Deliver the events the Linux/BSD desktop-notification service queued
         // (activation, close, failed show) to the registry. Like the toast
-        // events below, every window drains the one shared channel.
+        // events below, every window drains the one shared channel. Only
+        // Linux/BSD has a tracked system leg, so only it has these events
+        // (`SystemNotifyEvent` exists only there); a twin that does nothing
+        // elsewhere would exist only to hide this `cfg`.
         #[cfg(all(unix, not(target_os = "macos")))]
         self.route_osc99_system_events(&win);
 
@@ -4673,8 +4674,7 @@ impl FreminalGui {
     /// registered, such as the Settings window, is harmless).
     pub(super) fn insert_terminal_window(&mut self, window_id: WindowId, win: PerWindowState) {
         self.windows.insert(window_id, win);
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.register(window_id);
+        self.notify_wake.register(window_id);
     }
 
     /// Render the fatal-error panel for a window that has no

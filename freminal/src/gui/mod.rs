@@ -58,6 +58,7 @@ mod layout_ops;
 mod link_open;
 mod menu;
 mod notifications;
+mod notify_wake;
 mod osc99;
 pub mod paste_guard;
 mod platform;
@@ -429,33 +430,28 @@ struct FreminalGui {
     /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
     /// by the service-event router, which re-broadcasts the capabilities when
     /// the change alters them. Read on every platform (it is
-    /// [`osc99::Osc99LinuxDaemon::assumed`] throughout where no service
+    /// [`freminal_notify::LinuxDaemon::assumed`] throughout where no service
     /// exists). Single-threaded GUI, so `Cell` suffices.
-    osc99_daemon: std::cell::Cell<osc99::Osc99LinuxDaemon>,
+    osc99_daemon: std::cell::Cell<freminal_notify::LinuxDaemon>,
 
-    /// The Linux/BSD desktop-notification service's handle. It carries every
-    /// Linux/BSD notification, OSC 99 and plain (OSC 9 / 777, command-finished,
-    /// error) alike. It is started the first frame the config can route either
-    /// to the system leg (`FreminalGui::ensure_osc99_dbus_started`), or on
-    /// demand by `FreminalGui::system_notify_sink`, which the Settings "Test
-    /// Notification" button also uses with `enabled = false`. It is kept for the
-    /// rest of the process (dropping it stops the service). `None` until then.
-    /// Single-threaded GUI, so `RefCell` suffices.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
-
-    /// The macOS and Windows fire-and-forget desktop notification, which owns
-    /// the OSC 99 icon temp files and deletes them when it is dropped (the
-    /// application dropping this struct is the shutdown hook: the windowing
-    /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
-    /// Linux/BSD hold the no-op backend, the registry never routing to the
-    /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
-    osc99_untracked: std::cell::RefCell<Box<dyn osc99::Osc99UntrackedBackend>>,
+    /// The one owner of the operating-system notification backends: the
+    /// Linux/BSD desktop-notification service (which carries every Linux/BSD
+    /// notification, OSC 99 and plain (OSC 9 / 777, command-finished, error)
+    /// alike) and the macOS and Windows untracked backend.
+    ///
+    /// The service is started the first frame the config can route either to
+    /// the system leg (`FreminalGui::ensure_notification_service_started`), or
+    /// on demand by `FreminalGui::system_notify_sink`, which the Settings
+    /// "Test Notification" button also uses with `enabled = false`. Dropping
+    /// this struct is the shutdown hook (the windowing layer offers no
+    /// other): it stops the service and joins the untracked worker, which
+    /// deletes the OSC 99 icon temp files. Declared before `notify_wake`, so
+    /// the service stops before its wake-up target goes.
+    notifier: freminal_notify::DesktopNotifier,
 
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_wake: osc99::Osc99Wake,
+    notify_wake: notify_wake::NotifyWake,
 
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
@@ -607,6 +603,8 @@ impl FreminalGui {
             &config.notifications.osc99_filters,
         ));
 
+        let notify_wake = notify_wake::NotifyWake::default();
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
@@ -659,12 +657,12 @@ impl FreminalGui {
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
-            osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
-            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend()),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            osc99_dbus: std::cell::RefCell::new(None),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            osc99_wake: osc99::Osc99Wake::default(),
+            osc99_daemon: std::cell::Cell::new(freminal_notify::LinuxDaemon::assumed()),
+            notifier: freminal_notify::DesktopNotifier::new(app_icon::notify_assets(), {
+                let wake = notify_wake.clone();
+                move || wake.waker()
+            }),
+            notify_wake,
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

@@ -19,54 +19,27 @@
 //!   events and drains focus requests, and the plain-input functions it is
 //!   built from.
 
-mod capabilities;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod dbus_service;
 mod effects;
 mod filter;
 mod glue;
 mod icon_cache;
-#[cfg(any(unix, target_os = "windows", test))]
-mod icon_decode;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod icon_lookup;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-mod icon_raster;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-mod icon_tempfiles;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod markup;
 mod pane_state;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod presentation;
 mod registry;
 mod toast_spec;
-mod untracked;
 
 use std::sync::Weak;
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
+use freminal_notify::NotificationInstanceId;
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_notify::SystemAction;
 use freminal_terminal_emulator::io::InputEvent;
 
 use crate::gui::notifications::Osc99Control;
 use crate::gui::toast::{ToastEventKind, ToastKey};
 
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-pub use capabilities::Osc99DaemonCapabilities;
-pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use dbus_service::{
-    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake, PlainNotification,
-    PlainNotifySender,
-};
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use effects::Osc99SystemDispatch;
-pub use effects::{
-    NoSystemBackend, Osc99Effect, Osc99EffectSink, Osc99SystemBackend, apply_osc99_effects,
-};
-#[cfg(test)]
-pub use effects::{RecordedShow, RecordingSystemBackend};
+pub use effects::{Osc99Effect, Osc99EffectSink, apply_osc99_effects};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub(in crate::gui) use glue::Osc99CellAccess;
 pub use icon_cache::Osc99IconCache;
@@ -76,32 +49,19 @@ pub use pane_state::{
 };
 pub use registry::Osc99Registry;
 pub use toast_spec::{Osc99ToastSpec, osc99_toast_spec};
-#[cfg(test)]
-pub use untracked::RecordingUntrackedBackend;
-pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
 
-/// The registry's identity for one displayed notification.
-///
-/// Unlike the application's `i=` id (which may be absent, reused, or shared
-/// by different panes), an instance id is unique for the process lifetime and
-/// is minted by [`Osc99Registry::register`]. The toast leg uses the raw value
-/// as its [`ToastKey`] (see [`Self::to_toast_key`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Osc99InstanceId(u64);
+/// The [`ToastKey`] an instance's toast is pushed with: the instance's raw
+/// value.
+#[must_use]
+pub const fn instance_toast_key(instance: NotificationInstanceId) -> ToastKey {
+    ToastKey(instance.get())
+}
 
-impl Osc99InstanceId {
-    /// The [`ToastKey`] the instance's toast is pushed with.
-    #[must_use]
-    pub const fn to_toast_key(self) -> ToastKey {
-        ToastKey(self.0)
-    }
-
-    /// The instance a toast event's key refers to (the inverse of
-    /// [`Self::to_toast_key`]).
-    #[must_use]
-    pub const fn from_toast_key(key: ToastKey) -> Self {
-        Self(key.0)
-    }
+/// The instance a toast event's key refers to (the inverse of
+/// [`instance_toast_key`]).
+#[must_use]
+pub const fn instance_from_toast_key(key: ToastKey) -> NotificationInstanceId {
+    NotificationInstanceId::new(key.0)
 }
 
 /// Where a notification was shown.
@@ -114,7 +74,7 @@ pub enum Osc99Leg {
     LinuxSystem,
     /// A desktop notification whose close and activation freminal cannot
     /// observe (macOS and Windows). It is shown and forgotten: see
-    /// [`Osc99UntrackedBackend`].
+    /// [`freminal_notify::UntrackedBackend`].
     UntrackedSystem,
 }
 
@@ -141,6 +101,17 @@ pub enum Osc99SystemLegEvent {
     Closed,
     /// The daemon never displayed the notification.
     ShowFailed,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl From<SystemAction> for Osc99LegActivation {
+    /// The registry's vocabulary for the same activation.
+    fn from(action: SystemAction) -> Self {
+        match action {
+            SystemAction::Default => Self::Body,
+            SystemAction::Button(n) => Self::Button(n),
+        }
+    }
 }
 
 impl Osc99LegActivation {
@@ -220,4 +191,21 @@ pub enum Osc99Request {
     Control(Osc99ControlRequest),
     /// Icon bytes for the `g=` cache.
     PrimeIcon(Osc99IconPrime),
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_actions_map_to_the_registry_activations() {
+        assert_eq!(
+            Osc99LegActivation::from(SystemAction::Default),
+            Osc99LegActivation::Body
+        );
+        assert_eq!(
+            Osc99LegActivation::from(SystemAction::Button(3)),
+            Osc99LegActivation::Button(3)
+        );
+    }
 }

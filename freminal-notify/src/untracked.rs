@@ -1,16 +1,21 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! The OSC 99 *untracked* system leg: a desktop notification freminal shows
 //! and then forgets.
 //!
 //! macOS and Windows give a background thread no way to observe a
 //! notification being activated or closed (the macOS callbacks need the main
 //! run loop), so on those platforms the system leg is fire-and-forget. The
-//! registry models that as [`Osc99Leg::UntrackedSystem`](super::Osc99Leg):
-//! it emits [`Osc99Effect::ShowUntrackedSystem`](super::Osc99Effect), answers
-//! a `c=1` request with `untracked` at once, and never waits for the leg.
+//! caller models that as an untracked leg: it asks for the notification to be
+//! shown, answers a `c=1` request with `untracked` at once, and never waits
+//! for the leg.
 //!
-//! The executor shows the notification through an [`Osc99UntrackedBackend`]:
+//! The caller shows the notification through an [`UntrackedBackend`]:
 //! `PlatformUntrackedBackend` on macOS and Windows, and
-//! [`NoUntrackedBackend`] everywhere else (the registry never routes to the
+//! [`NoUntrackedBackend`] everywhere else (the caller never routes to the
 //! untracked leg on Linux/BSD, whose system leg is the zbus service) and as
 //! the stand-in when the real backend is busy.
 //!
@@ -19,7 +24,7 @@
 //! The GUI thread never touches the disk, an image decoder or an OS
 //! notification API. `PlatformUntrackedBackend::show` only builds a plain
 //! `DeliveryRequest` and `try_send`s it to one long-lived thread,
-//! `freminal-osc99-deliver`, spawned on the first notification. The queue holds
+//! `freminal-notify-deliver`, spawned on the first notification. The queue holds
 //! `QUEUE_CAPACITY` requests; when it is full the new request is dropped (and
 //! logged at debug), so a program that floods notifications cannot grow memory
 //! or stall the GUI. The worker owns the icon temp-file store
@@ -51,6 +56,8 @@ use freminal_common::buffer_states::osc99_notification::{Osc99Expiry, Osc99Sound
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::fmt;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::thread::JoinHandle;
@@ -58,24 +65,29 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender};
 
+use super::NotifyAssets;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_decode::reencode_icon_png;
+use super::StandardIcon;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_raster::rasterize_chrome_icon_png;
+use super::assets::ByteLen;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_tempfiles::IconTempFiles;
+use super::icons::decode::reencode_icon_png;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::icons::raster::rasterize_standard_icon_png;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::icons::tempfiles::IconTempFiles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use super::icon_tempfiles::default_icon_dir;
+use super::icons::tempfiles::default_icon_dir;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use crate::gui::icons::{ChromeIcon, standard_icon_glyph};
+use super::queue::{Offered, offer};
 
 /// Shows a notification on the untracked system leg.
 ///
-/// A trait so the executor and its tests reach no OS notification API and so
-/// every platform compiles the same executor.
-pub trait Osc99UntrackedBackend {
+/// A trait so the caller and its tests reach no OS notification API and so
+/// every platform compiles the same caller.
+pub trait UntrackedBackend {
     /// Display `notification` and forget it. There is no handle, no later
     /// event and no way to close it; a failure to display is logged, not
     /// reported, because the protocol has nothing to report it with. (On
@@ -85,13 +97,13 @@ pub trait Osc99UntrackedBackend {
 
 /// The backend that displays nothing.
 ///
-/// Linux/BSD production builds use it (their registry never produces an
+/// Linux/BSD production builds use it (their caller never produces an
 /// untracked leg), and every platform uses it as the stand-in when the real
 /// backend's cell is busy.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoUntrackedBackend;
 
-impl Osc99UntrackedBackend for NoUntrackedBackend {
+impl UntrackedBackend for NoUntrackedBackend {
     fn show(&mut self, notification: &Notification99Data) {
         tracing::trace!(
             id = ?notification.id,
@@ -101,15 +113,15 @@ impl Osc99UntrackedBackend for NoUntrackedBackend {
 }
 
 /// A backend that records every notification it is handed, for tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Default)]
 pub struct RecordingUntrackedBackend {
     /// Every notification shown, in call order.
     pub shown: Vec<Notification99Data>,
 }
 
-#[cfg(test)]
-impl Osc99UntrackedBackend for RecordingUntrackedBackend {
+#[cfg(any(test, feature = "test-utils"))]
+impl UntrackedBackend for RecordingUntrackedBackend {
     fn show(&mut self, notification: &Notification99Data) {
         self.shown.push(notification.clone());
     }
@@ -150,7 +162,7 @@ const STANDARD_ICON_SIZE_PX: u32 = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UntrackedIcon {
     /// One of the OSC 99 standard icon names, drawn from the bundled glyph.
-    Standard(ChromeIcon),
+    Standard(StandardIcon),
     /// Icon bytes the program transmitted, not yet decoded.
     Transmitted(Vec<u8>),
 }
@@ -159,7 +171,7 @@ enum UntrackedIcon {
 ///
 /// Names come first, as on Linux: the first `n=` name that is one of the OSC 99
 /// standard icon names is drawn from the bundled glyph (see
-/// [`rasterize_chrome_icon_png`]). Neither platform resolves a freedesktop icon
+/// [`rasterize_standard_icon_png`]). Neither platform resolves a freedesktop icon
 /// name itself, so a name that is not a standard one is skipped. If no name is
 /// standard, the transmitted icon data is used; with neither there is no image.
 /// A standard name whose glyph then cannot be drawn gives no image (the glyph
@@ -168,7 +180,7 @@ enum UntrackedIcon {
 fn untracked_icon_choice(data: &Notification99Data) -> Option<UntrackedIcon> {
     data.icon_names
         .iter()
-        .find_map(|name| standard_icon_glyph(name))
+        .find_map(|name| StandardIcon::from_name(name))
         .map(UntrackedIcon::Standard)
         .or_else(|| data.icon_data.clone().map(UntrackedIcon::Transmitted))
 }
@@ -245,15 +257,15 @@ enum Submit {
 /// Offer `request` to `queue` without ever blocking.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn try_enqueue(queue: &Sender<DeliveryRequest>, request: DeliveryRequest) -> Submit {
-    match queue.try_send(request) {
-        Ok(()) => Submit::Queued,
-        Err(TrySendError::Full(_)) => {
+    match offer(queue, request) {
+        Ok(Offered::Queued) => Submit::Queued,
+        Ok(Offered::Full) => {
             tracing::debug!(
                 "OSC 99: untracked delivery queue is full ({QUEUE_CAPACITY}); notification dropped"
             );
             Submit::DroppedFull
         }
-        Err(TrySendError::Disconnected(_)) => {
+        Err(_) => {
             tracing::debug!("OSC 99: untracked delivery worker has stopped; notification dropped");
             Submit::WorkerGone
         }
@@ -263,19 +275,34 @@ fn try_enqueue(queue: &Sender<DeliveryRequest>, request: DeliveryRequest) -> Sub
 /// Turns a request's icon into a file path: the worker's half of the icon
 /// story.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-#[derive(Debug)]
 struct IconPreparer {
+    /// The face the standard icons are drawn from.
+    font: &'static [u8],
     /// The temp files written so far.
     icons: IconTempFiles,
     /// The PNG drawn for each standard icon, computed at most once per
     /// process. `None` records a glyph that could not be drawn.
-    drawn: HashMap<ChromeIcon, Option<Vec<u8>>>,
+    drawn: HashMap<StandardIcon, Option<Vec<u8>>>,
+}
+
+/// `Debug` prints the font's length, not its roughly 2 MB of bytes, and which
+/// standard icons are drawn, not their PNGs.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl fmt::Debug for IconPreparer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IconPreparer")
+            .field("font", &ByteLen(self.font))
+            .field("icons", &self.icons)
+            .field("drawn", &self.drawn.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl IconPreparer {
-    fn new(icons: IconTempFiles) -> Self {
+    fn new(font: &'static [u8], icons: IconTempFiles) -> Self {
         Self {
+            font,
             icons,
             drawn: HashMap::new(),
         }
@@ -287,12 +314,14 @@ impl IconPreparer {
     /// as PNG, so undecodable bytes give no image. Failures are logged at
     /// debug: the notification is shown without the image.
     fn image_path(&mut self, icon: Option<&UntrackedIcon>) -> Option<PathBuf> {
-        let Self { icons, drawn } = self;
+        let Self { font, icons, drawn } = self;
         let written = match icon? {
             UntrackedIcon::Standard(standard) => {
                 let png = drawn
                     .entry(*standard)
-                    .or_insert_with(|| rasterize_chrome_icon_png(*standard, STANDARD_ICON_SIZE_PX))
+                    .or_insert_with(|| {
+                        rasterize_standard_icon_png(font, *standard, STANDARD_ICON_SIZE_PX)
+                    })
                     .as_deref()?;
                 icons.path_for(png)
             }
@@ -321,10 +350,11 @@ impl IconPreparer {
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn deliver_loop(
     queue: &Receiver<DeliveryRequest>,
+    font: &'static [u8],
     icons: IconTempFiles,
     mut show: impl FnMut(&DeliveryRequest, Option<&Path>),
 ) {
-    let mut preparer = IconPreparer::new(icons);
+    let mut preparer = IconPreparer::new(font, icons);
     while let Ok(request) = queue.recv() {
         let image = preparer.image_path(request.icon.as_ref());
         show(&request, image.as_deref());
@@ -345,20 +375,21 @@ struct DeliveryWorker {
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl DeliveryWorker {
-    /// Spawn the `freminal-osc99-deliver` thread. `show` runs on it, once per
+    /// Spawn the `freminal-notify-deliver` thread. `show` runs on it, once per
     /// request, with the path of the request's image if it has one.
     ///
     /// # Errors
     ///
     /// Returns the I/O error if the thread cannot be spawned.
     fn spawn(
+        font: &'static [u8],
         icons: IconTempFiles,
         show: impl FnMut(&DeliveryRequest, Option<&Path>) + Send + 'static,
     ) -> std::io::Result<Self> {
         let (queue, requests) = crossbeam_channel::bounded(QUEUE_CAPACITY);
         let thread = std::thread::Builder::new()
-            .name("freminal-osc99-deliver".to_owned())
-            .spawn(move || deliver_loop(&requests, icons, show))?;
+            .name("freminal-notify-deliver".to_owned())
+            .spawn(move || deliver_loop(&requests, font, icons, show))?;
         Ok(Self {
             queue: Some(queue),
             thread: Some(thread),
@@ -403,17 +434,21 @@ impl Drop for DeliveryWorker {
     }
 }
 
-/// The backend for the platform freminal is running on.
+/// The backend for the platform freminal is running on: the macOS and Windows
+/// delivery worker, which draws the standard icons from `assets.icon_font`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[must_use]
-pub fn platform_untracked_backend() -> Box<dyn Osc99UntrackedBackend> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        Box::<PlatformUntrackedBackend>::default()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Box::new(NoUntrackedBackend)
-    }
+pub fn platform_untracked_backend(assets: NotifyAssets) -> Box<dyn UntrackedBackend> {
+    Box::new(PlatformUntrackedBackend::new(assets.icon_font))
+}
+
+/// The backend for the platform freminal is running on. Linux/BSD has no
+/// untracked leg (the D-Bus service is the one system leg), so it needs no
+/// assets.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[must_use]
+pub fn platform_untracked_backend(_assets: NotifyAssets) -> Box<dyn UntrackedBackend> {
+    Box::new(NoUntrackedBackend)
 }
 
 /// The name the platform's notification API knows its default sound by.
@@ -600,37 +635,103 @@ fn toast_file_path(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(encoded))
 }
 
+/// The image a Windows toast carries.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToastImage {
+    /// No image.
+    None,
+    /// The `appLogoOverride` square logo, at this encoded path
+    /// ([`toast_file_path`]).
+    Logo(PathBuf),
+    /// The worker wrote an image file, but its path cannot be a toast image
+    /// source; carries the original path for the log. The toast has no image.
+    Unusable(PathBuf),
+}
+
+/// What freminal asks Windows to show for one request: everything
+/// [`windows_untracked_toast_fields`] decides, with no dependence on the
+/// presenter.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsUntrackedToastFields {
+    /// The headline.
+    title: String,
+    /// The detail line; `None` when there is none.
+    text1: Option<String>,
+    /// What `w=` maps to.
+    length: ToastLength,
+    /// The sound to play; silent plays nothing.
+    sound: Osc99PlatformSound,
+    /// The image, if the worker wrote a file for the request's image.
+    image: ToastImage,
+}
+
+/// Decide the Windows toast content for `request`.
+///
+/// - The title is the headline, `text1` the detail line
+///   ([`DeliveryRequest::lines`]).
+/// - `w=` becomes the length ([`toast_length`]).
+/// - The sound follows [`untracked_sound`].
+/// - `icon_path`, the file the worker wrote for the request's image, is the
+///   `appLogoOverride` image when [`toast_file_path`] can make a valid URI
+///   path of it; otherwise it is [`ToastImage::Unusable`] and the toast has
+///   no image.
+///
+/// Pure and compiled in test builds on every platform; the conversion to the
+/// presenter's type is `show_on_platform`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_untracked_toast_fields(
+    request: &DeliveryRequest,
+    icon_path: Option<&Path>,
+) -> WindowsUntrackedToastFields {
+    let (headline, detail) = request.lines();
+
+    WindowsUntrackedToastFields {
+        title: headline.to_owned(),
+        text1: detail.map(str::to_owned),
+        length: toast_length(request.expiry),
+        sound: request.sound,
+        image: icon_path.map_or(ToastImage::None, |path| {
+            toast_file_path(path).map_or_else(
+                || ToastImage::Unusable(path.to_path_buf()),
+                ToastImage::Logo,
+            )
+        }),
+    }
+}
+
 /// Show `request` as a Windows toast and forget it.
 ///
-/// Built directly with `tauri-winrt-notification`, attributed to the
-/// PowerShell app id (the only id available without an installed
-/// `AppUserModelID`). The image is the `appLogoOverride` square logo. There is
-/// no scenario: the `Critical` urgency is deliberately not turned into a
-/// persistent "reminder" toast. `show()` returns once the toast has been handed
-/// to Windows.
+/// Built directly with `tauri-winrt-notification` from
+/// [`windows_untracked_toast_fields`], attributed to the PowerShell app id
+/// (the only id available without an installed `AppUserModelID`). The image is
+/// the `appLogoOverride` square logo. There is no scenario: the `Critical`
+/// urgency is deliberately not turned into a persistent "reminder" toast.
+/// `show()` returns once the toast has been handed to Windows.
 #[cfg(target_os = "windows")]
 fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
     use tauri_winrt_notification::{Duration as ToastDuration, IconCrop, Sound, Toast};
 
-    let (headline, detail) = request.lines();
-    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(headline);
-    if let Some(detail) = detail {
-        toast = toast.text1(detail);
+    let fields = windows_untracked_toast_fields(request, icon_path);
+    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&fields.title);
+    if let Some(text1) = &fields.text1 {
+        toast = toast.text1(text1);
     }
     toast = toast
-        .duration(match toast_length(request.expiry) {
+        .duration(match fields.length {
             ToastLength::Short => ToastDuration::Short,
             ToastLength::Long => ToastDuration::Long,
         })
-        .sound(match request.sound {
+        .sound(match fields.sound {
             Osc99PlatformSound::PlatformDefault => Some(Sound::Default),
             Osc99PlatformSound::Silent => None,
         });
 
-    if let Some(path) = icon_path {
-        if let Some(uri_path) = toast_file_path(path) {
-            toast = toast.icon(&uri_path, IconCrop::Square, "");
-        } else {
+    match &fields.image {
+        ToastImage::None => {}
+        ToastImage::Logo(uri_path) => toast = toast.icon(uri_path, IconCrop::Square, ""),
+        ToastImage::Unusable(path) => {
             tracing::debug!(
                 "OSC 99: icon path {} cannot be a toast image source; no image",
                 path.display()
@@ -651,19 +752,41 @@ fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
 /// files. A worker that has died (its thread panicked) is replaced on the next
 /// notification.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[derive(Debug, Default)]
 pub struct PlatformUntrackedBackend {
+    /// The face the standard icons are drawn from.
+    font: &'static [u8],
     /// The delivery worker, once spawned.
     worker: Option<DeliveryWorker>,
 }
 
+/// `Debug` prints the font's length, not its roughly 2 MB of bytes.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-impl Osc99UntrackedBackend for PlatformUntrackedBackend {
+impl fmt::Debug for PlatformUntrackedBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlatformUntrackedBackend")
+            .field("font", &ByteLen(self.font))
+            .field("worker", &self.worker)
+            .finish()
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PlatformUntrackedBackend {
+    /// A backend with no worker yet, drawing standard icons from `font`.
+    #[must_use]
+    pub const fn new(font: &'static [u8]) -> Self {
+        Self { font, worker: None }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl UntrackedBackend for PlatformUntrackedBackend {
     fn show(&mut self, data: &Notification99Data) {
         let request = DeliveryRequest::from_notification(data);
 
         if self.worker.is_none() {
             match DeliveryWorker::spawn(
+                self.font,
                 IconTempFiles::with_dir(default_icon_dir()),
                 show_on_platform,
             ) {
@@ -692,6 +815,8 @@ mod tests {
     use super::*;
 
     use std::num::NonZeroU32;
+
+    use super::super::assets::test_assets;
 
     fn test_notification() -> Notification99Data {
         use freminal_common::buffer_states::osc99_notification::{
@@ -811,7 +936,7 @@ mod tests {
 
         assert_eq!(
             untracked_icon_choice(&data),
-            Some(UntrackedIcon::Standard(ChromeIcon::Info))
+            Some(UntrackedIcon::Standard(StandardIcon::Info))
         );
     }
 
@@ -826,7 +951,7 @@ mod tests {
 
         assert_eq!(
             chosen(&["weather-clear", "error"]),
-            Some(UntrackedIcon::Standard(ChromeIcon::Error))
+            Some(UntrackedIcon::Standard(StandardIcon::Error))
         );
         assert_eq!(chosen(&["error", "info"]), chosen(&["error"]));
         assert_ne!(chosen(&["error", "info"]), chosen(&["info"]));
@@ -892,7 +1017,7 @@ mod tests {
                 body: Some("B".to_owned()),
                 sound: Osc99PlatformSound::Silent,
                 expiry: Osc99Expiry::Never,
-                icon: Some(UntrackedIcon::Standard(ChromeIcon::Warning)),
+                icon: Some(UntrackedIcon::Standard(StandardIcon::Warning)),
             }
         );
     }
@@ -952,13 +1077,14 @@ mod tests {
         let (started_tx, started_rx) = crossbeam_channel::unbounded::<()>();
         let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded::<String>();
-        let mut worker = DeliveryWorker::spawn(store, move |request, _| {
-            let _ = started_tx.send(());
-            // Held here until the test lets go (or drops the sender).
-            let _ = release_rx.recv();
-            let _ = shown_tx.send(request.title.clone());
-        })
-        .unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, move |request, _| {
+                let _ = started_tx.send(());
+                // Held here until the test lets go (or drops the sender).
+                let _ = release_rx.recv();
+                let _ = shown_tx.send(request.title.clone());
+            })
+            .unwrap();
 
         // The first request is taken by the worker, which then blocks.
         assert_eq!(worker.submit(request("first")), Submit::Queued);
@@ -989,18 +1115,19 @@ mod tests {
     fn the_worker_shows_requests_in_order_on_its_own_named_thread() {
         let (_root, store) = private_store();
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded();
-        let mut worker = DeliveryWorker::spawn(store, move |request, image| {
-            let name = std::thread::current().name().map(str::to_owned);
-            let _ = shown_tx.send((request.title.clone(), image.is_some(), name));
-        })
-        .unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, move |request, image| {
+                let name = std::thread::current().name().map(str::to_owned);
+                let _ = shown_tx.send((request.title.clone(), image.is_some(), name));
+            })
+            .unwrap();
 
         assert_eq!(worker.submit(request("one")), Submit::Queued);
         assert_eq!(worker.submit(request("two")), Submit::Queued);
         worker.shutdown(Duration::from_secs(30));
 
         let shown: Vec<_> = shown_rx.try_iter().collect();
-        let name = Some("freminal-osc99-deliver".to_owned());
+        let name = Some("freminal-notify-deliver".to_owned());
         assert_eq!(
             shown,
             [
@@ -1015,14 +1142,14 @@ mod tests {
         let (root, store) = private_store();
         let dir = root.path().join("icons");
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded();
-        let mut worker = DeliveryWorker::spawn(store, move |_, image| {
+        let mut worker = DeliveryWorker::spawn(test_assets().icon_font, store, move |_, image| {
             // The file exists while the notification is being shown.
             let _ = shown_tx.send(image.map(|path| (path.to_path_buf(), path.is_file())));
         })
         .unwrap();
 
         let standard = DeliveryRequest {
-            icon: Some(UntrackedIcon::Standard(ChromeIcon::Error)),
+            icon: Some(UntrackedIcon::Standard(StandardIcon::Error)),
             ..request("standard")
         };
         let transmitted = DeliveryRequest {
@@ -1051,7 +1178,7 @@ mod tests {
     fn dropping_the_worker_stops_it_and_removes_the_files() {
         let (root, store) = private_store();
         let dir = root.path().join("icons");
-        let worker = DeliveryWorker::spawn(store, |_, _| {}).unwrap();
+        let worker = DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| {}).unwrap();
         let transmitted = DeliveryRequest {
             icon: Some(UntrackedIcon::Transmitted(png(4, 4))),
             ..request("t")
@@ -1066,7 +1193,7 @@ mod tests {
     #[test]
     fn a_stopped_worker_reports_itself_gone() {
         let (_root, store) = private_store();
-        let mut worker = DeliveryWorker::spawn(store, |_, _| {}).unwrap();
+        let mut worker = DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| {}).unwrap();
 
         worker.shutdown(Duration::from_secs(30));
 
@@ -1076,7 +1203,9 @@ mod tests {
     #[test]
     fn a_panicking_shower_makes_the_worker_report_gone() {
         let (_root, store) = private_store();
-        let mut worker = DeliveryWorker::spawn(store, |_, _| panic!("show failed")).unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| panic!("show failed"))
+                .unwrap();
         assert_eq!(worker.submit(request("boom")), Submit::Queued);
         // The thread unwinds and drops its receiver; wait for that, then
         // check the sender notices.
@@ -1094,26 +1223,44 @@ mod tests {
     // ── the icon preparer ───────────────────────────────────────────────
 
     #[test]
+    fn the_icon_preparer_debug_prints_the_font_length_not_the_font() {
+        let (_root, store) = private_store();
+        let font = test_assets().icon_font;
+        let preparer = IconPreparer::new(font, store);
+
+        let printed = format!("{preparer:?}");
+
+        assert!(printed.contains(&format!("font: <{} bytes>", font.len())));
+        assert!(printed.len() < 1000, "{} chars", printed.len());
+    }
+
+    #[test]
     fn a_standard_icon_is_drawn_once_and_reuses_one_file() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
-        let icon = UntrackedIcon::Standard(ChromeIcon::Info);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
+        let icon = UntrackedIcon::Standard(StandardIcon::Info);
 
         let first = preparer.image_path(Some(&icon)).unwrap();
-        let drawn_at = preparer.drawn[&ChromeIcon::Info].as_ref().unwrap().as_ptr();
+        let drawn_at = preparer.drawn[&StandardIcon::Info]
+            .as_ref()
+            .unwrap()
+            .as_ptr();
         let second = preparer.image_path(Some(&icon)).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(decoded_size(&first), (256, 256));
         assert_eq!(preparer.drawn.len(), 1);
         assert_eq!(
-            preparer.drawn[&ChromeIcon::Info].as_ref().unwrap().as_ptr(),
+            preparer.drawn[&StandardIcon::Info]
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
             drawn_at,
             "the cached PNG was not drawn again"
         );
 
         let other = preparer
-            .image_path(Some(&UntrackedIcon::Standard(ChromeIcon::Error)))
+            .image_path(Some(&UntrackedIcon::Standard(StandardIcon::Error)))
             .unwrap();
         assert_ne!(first, other);
         assert_eq!(preparer.drawn.len(), 2);
@@ -1122,7 +1269,7 @@ mod tests {
     #[test]
     fn a_transmitted_icon_is_reencoded_and_bounded() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         let path = preparer
             .image_path(Some(&UntrackedIcon::Transmitted(png(1000, 500))))
@@ -1135,7 +1282,7 @@ mod tests {
     #[test]
     fn what_the_os_reads_is_never_the_transmitted_bytes() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
         // A valid image with trailing junk (a polyglot): the file written is
         // the clean re-encode, not the input.
         let mut polyglot = png(4, 4);
@@ -1153,7 +1300,7 @@ mod tests {
     #[test]
     fn undecodable_and_oversized_transmitted_bytes_give_no_image() {
         let (root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         for bytes in [b"not an image".to_vec(), Vec::new(), png(4097, 1)] {
             assert_eq!(
@@ -1170,7 +1317,7 @@ mod tests {
     #[test]
     fn no_icon_means_no_image() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         assert_eq!(preparer.image_path(None), None);
     }
@@ -1180,10 +1327,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("icons");
         std::fs::write(&dir, b"not a directory").unwrap();
-        let mut preparer = IconPreparer::new(IconTempFiles::with_dir(dir));
+        let mut preparer = IconPreparer::new(test_assets().icon_font, IconTempFiles::with_dir(dir));
 
         assert_eq!(
-            preparer.image_path(Some(&UntrackedIcon::Standard(ChromeIcon::Info))),
+            preparer.image_path(Some(&UntrackedIcon::Standard(StandardIcon::Info))),
             None
         );
     }
@@ -1350,5 +1497,106 @@ mod tests {
             toast_file_path(Path::new("c:/Temp/icon.png")),
             Some(PathBuf::from("c:/Temp/icon.png"))
         );
+    }
+
+    // ── Windows toast fields ────────────────────────────────────────────
+
+    #[test]
+    fn the_windows_toast_has_the_headline_and_the_detail() {
+        let titled = windows_untracked_toast_fields(
+            &DeliveryRequest {
+                body: Some("Body".to_owned()),
+                ..request("Title")
+            },
+            None,
+        );
+        assert_eq!(titled.title, "Title");
+        assert_eq!(titled.text1.as_deref(), Some("Body"));
+
+        let untitled = windows_untracked_toast_fields(
+            &DeliveryRequest {
+                body: Some("Body".to_owned()),
+                ..request("")
+            },
+            None,
+        );
+        assert_eq!(untitled.title, "Body");
+        assert_eq!(untitled.text1, None);
+    }
+
+    #[test]
+    fn the_windows_toast_has_no_text1_without_a_detail() {
+        let fields = windows_untracked_toast_fields(&request("Title"), None);
+        assert_eq!(fields.title, "Title");
+        assert_eq!(fields.text1, None);
+    }
+
+    #[test]
+    fn the_windows_toast_maps_expiry_to_the_length() {
+        let length_for = |expiry| {
+            windows_untracked_toast_fields(
+                &DeliveryRequest {
+                    expiry,
+                    ..request("t")
+                },
+                None,
+            )
+            .length
+        };
+        let after = |ms| Osc99Expiry::After(NonZeroU32::new(ms).unwrap());
+
+        assert_eq!(length_for(Osc99Expiry::OsDefault), ToastLength::Short);
+        assert_eq!(length_for(after(5000)), ToastLength::Short);
+        assert_eq!(length_for(after(25_000)), ToastLength::Long);
+        assert_eq!(length_for(Osc99Expiry::Never), ToastLength::Long);
+    }
+
+    #[test]
+    fn the_windows_toast_sound_follows_the_platform_sound() {
+        let sound_for = |sound| {
+            windows_untracked_toast_fields(
+                &DeliveryRequest {
+                    sound,
+                    ..request("t")
+                },
+                None,
+            )
+            .sound
+        };
+
+        assert_eq!(
+            sound_for(Osc99PlatformSound::PlatformDefault),
+            Osc99PlatformSound::PlatformDefault
+        );
+        assert_eq!(
+            sound_for(Osc99PlatformSound::Silent),
+            Osc99PlatformSound::Silent
+        );
+    }
+
+    #[test]
+    fn the_windows_toast_logo_is_the_encoded_drive_path() {
+        let fields = windows_untracked_toast_fields(
+            &request("t"),
+            Some(Path::new(r"C:\Users\John Smith\Temp\ab.png")),
+        );
+        assert_eq!(
+            fields.image,
+            ToastImage::Logo(PathBuf::from("C:/Users/John%20Smith/Temp/ab.png"))
+        );
+    }
+
+    #[test]
+    fn a_windows_toast_icon_path_that_cannot_be_a_uri_is_unusable() {
+        for path in [r"\\server\share\icon.png", r"relative\icon.png"] {
+            let fields = windows_untracked_toast_fields(&request("t"), Some(Path::new(path)));
+            assert_eq!(fields.image, ToastImage::Unusable(PathBuf::from(path)));
+        }
+    }
+
+    #[test]
+    fn the_windows_toast_has_no_image_without_an_icon_path() {
+        let fields = windows_untracked_toast_fields(&request("t"), None);
+        assert_eq!(fields.image, ToastImage::None);
     }
 }

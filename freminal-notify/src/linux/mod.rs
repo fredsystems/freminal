@@ -6,23 +6,23 @@
 //! The Linux/BSD desktop-notification service (Task 138.12).
 //!
 //! It carries every desktop notification freminal shows on Linux/BSD. OSC 99
-//! notifications are tracked: each has a registry entry, actions, and
-//! [`Osc99DbusEvent`]s. OSC 9, OSC 777, OSC 133 `D` command-finished and the
+//! notifications are tracked: each has an instance id, actions, and
+//! [`SystemNotifyEvent`]s. OSC 9, OSC 777, OSC 133 `D` command-finished and the
 //! Settings "Test Notification" button (Task 149.2) are untracked "plain"
 //! notifications: a summary, a body and an urgency, shown with
 //! [`PlainNotifySender`], with no actions and no events back. See `plain`.
 //!
 //! # Threads
 //!
-//! One *dispatcher* thread (`freminal-osc99-dbus`) owns one D-Bus connection
+//! One *dispatcher* thread (`freminal-notify-dbus`) owns one D-Bus connection
 //! and calls `org.freedesktop.Notifications` on it (`GetCapabilities` at start
 //! and after every owner change, `Notify` per show, `CloseNotification` per
 //! close). Up to two *signal pump* threads each read one match rule's
 //! [`MessageStream`] off that connection and forward what they see **into the
 //! dispatcher's input channel**, not to the GUI:
 //!
-//! - `freminal-osc99-signals` forwards `ActionInvoked` / `NotificationClosed`;
-//! - `freminal-osc99-owner` (bus connections only) forwards `NameOwnerChanged`
+//! - `freminal-notify-signals` forwards `ActionInvoked` / `NotificationClosed`;
+//! - `freminal-notify-owner` (bus connections only) forwards `NameOwnerChanged`
 //!   for the daemon's name.
 //!
 //! The dispatcher owns the D-Bus-id to instance map, so a signal that arrives
@@ -30,7 +30,7 @@
 //! recorded its id. That removes the ordering race between the threads.
 //! `GetNameOwner` and `GetCapabilities` go through the async proxy, raced
 //! against a timer on the dispatcher thread, so that they can carry the
-//! `NO_AUTO_START` flag *and* be bounded by [`OSC99_DBUS_METHOD_TIMEOUT`]; see
+//! `NO_AUTO_START` flag *and* be bounded by [`DBUS_METHOD_TIMEOUT`]; see
 //! `wire::call_no_auto_start`.
 //!
 //! zbus 6 has no blocking API, so every zbus operation the dispatcher makes
@@ -50,9 +50,9 @@
 //! empty, runtime and only polls its stream future; the dispatcher's runtime
 //! wakes that future when a message arrives.
 //!
-//! The GUI talks to the service through an [`Osc99DbusHandle`]: commands go in
+//! The GUI talks to the service through a [`LinuxNotifyHandle`]: commands go in
 //! over one bounded crossbeam channel (a command that does not fit fails at
-//! the handle) and [`Osc99DbusEvent`]s come back over another,
+//! the handle) and [`SystemNotifyEvent`]s come back over another,
 //! each event followed by a repaint wake so an idle window still drains it.
 //!
 //! # Shutdown
@@ -62,7 +62,7 @@
 //! while it routes a notification, and drops it at the end of each routing
 //! block), and the dispatcher thread returns the next time it looks at it: at
 //! once when idle, or after the call in flight (at most
-//! [`OSC99_DBUS_METHOD_TIMEOUT`]). On the way out it closes the connection,
+//! [`DBUS_METHOD_TIMEOUT`]). On the way out it closes the connection,
 //! which ends both pumps' streams, so the pumps exit at once; their last word,
 //! to a signal receiver that is already gone, goes nowhere.
 //!
@@ -76,7 +76,7 @@
 //! zbus's client-side match cannot resolve a well-known sender, so the sender
 //! is compared in the dispatcher rather than put in the match rule. A
 //! peer-to-peer connection has no bus, no owner and no sender to check, so it
-//! is [`Osc99SignalSender::Unfiltered`]. Which of the two applies is the
+//! is [`SignalSender::Unfiltered`]. Which of the two applies is the
 //! [`OwnerTracking`] mode, chosen by whoever supplies the connection.
 //!
 //! Each mapping records the unique name that answered its `Notify`. When the
@@ -92,12 +92,12 @@
 //! # Failure handling
 //!
 //! - **Pump loss.** If either pump ends, every mapped instance is reported
-//!   closed, [`Osc99DbusEvent::Unavailable`] is emitted, the connection is
+//!   closed, [`SystemNotifyEvent::Unavailable`] is emitted, the connection is
 //!   closed (so a pump that is still waiting on it ends too), and the service
 //!   is unavailable, as after a failed connect (below).
 //! - **Hung daemon.** A `Notify`, `CloseNotification` or `GetCapabilities`
-//!   that times out puts the daemon in `state::Osc99DaemonHealth::Unresponsive`:
-//!   for `state::OSC99_DAEMON_COOLDOWN` shows fail and closes complete without
+//!   that times out puts the daemon in `state::DaemonHealth::Unresponsive`:
+//!   for `state::DAEMON_COOLDOWN` shows fail and closes complete without
 //!   calling it, then the next command tries again.
 //! - **No daemon at start.** `GetNameOwner` and `GetCapabilities` never
 //!   D-Bus-activate a daemon (`NO_AUTO_START`); the first `Notify` does. A
@@ -105,11 +105,11 @@
 //! - **Reconnecting.** While the service is unavailable (the connect failed at
 //!   start, or the signals were lost), the dispatcher answers every command as
 //!   if the bus were down (a show is `ShowFailed`, a close is `Closed`) and
-//!   tries to connect again every [`OSC99_RECONNECT_INTERVAL`] on its own
+//!   tries to connect again every [`RECONNECT_INTERVAL`] on its own
 //!   timer; no command is needed to trigger an attempt. Only the first failure
-//!   is reported ([`Osc99DbusEvent::Unavailable`]); a failed retry is a debug
+//!   is reported ([`SystemNotifyEvent::Unavailable`]); a failed retry is a debug
 //!   log. A successful reconnect starts a new session, which reports
-//!   [`Osc99DbusEvent::Capabilities`] (the daemon's, or the assumed ones when
+//!   [`SystemNotifyEvent::Capabilities`] (the daemon's, or the assumed ones when
 //!   nobody can be asked yet), so the GUI's daemon state becomes available
 //!   again and the capabilities are re-broadcast.
 //!
@@ -120,14 +120,14 @@
 //! If that `Notify` fails, a best-effort `CloseNotification` for the old id
 //! follows, so the old notification does not stay on screen unmanaged. Close
 //! calls `CloseNotification` and lets the daemon's `NotificationClosed`
-//! signal produce the [`Osc99DbusEvent::Closed`]; an instance with no D-Bus id
+//! signal produce the [`SystemNotifyEvent::Closed`]; an instance with no D-Bus id
 //! (its show failed, or it was replaced) is reported closed at once.
 //!
 //! How a notification is presented (icons, sounds, category, markup) is decided
 //! by the pure functions in `presentation`, and the wire form of the hints is
 //! built in `wire`; this module only carries it. The XDG icon scan behind
 //! `n=` and `f=` starts on the first notification that needs it, not with the
-//! service (see `icon_lookup`).
+//! service (see `icons::lookup`).
 
 #[cfg(test)]
 mod breaker_tests;
@@ -135,13 +135,13 @@ mod plain;
 mod pump;
 mod state;
 #[cfg(test)]
-mod test_rig;
-mod wake;
+mod test_helpers;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_rig;
 mod wire;
 
+pub use plain::PlainNotifySender;
 use plain::{PlainBudget, PlainBudgetSlot};
-pub use plain::{PlainNotification, PlainNotifySender};
-pub use wake::Osc99Wake;
 
 use std::time::{Duration, Instant};
 
@@ -150,17 +150,17 @@ use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
 use zbus::{Connection, MessageStream};
 
-use super::icon_lookup::XdgIconLookup;
-use super::presentation::Osc99IconLookup;
+use super::icons::lookup::XdgIconLookup;
+use super::presentation::IconLookup;
 use super::{
-    Osc99DaemonCapabilities, Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend,
-    Osc99SystemDispatch,
+    DaemonCapabilities, NotificationInstanceId, NotifyAssets, PlainNotification, SystemDispatch,
+    TrackedBackend,
 };
 use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,
     parse_signal, spawn_pump,
 };
-use state::{CloseTarget, DaemonGate, DispatcherState, Osc99SignalSender, OwnerTracking};
+use state::{CloseTarget, DaemonGate, DispatcherState, OwnerTracking, SignalSender};
 use wire::{
     close_notification, fetch_capabilities, fetch_daemon_owner, is_no_daemon, is_no_name_owner,
     notify,
@@ -180,7 +180,7 @@ const BUS_DRIVER_PATH: &str = "/org/freedesktop/DBus";
 const BUS_DRIVER_INTERFACE: &str = "org.freedesktop.DBus";
 
 /// The time between attempts to reconnect while the service is unavailable.
-const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a D-Bus method call waits for its reply before it fails. This is
 /// the libdbus default reply timeout. zbus's calls have no timeout of their
@@ -189,16 +189,16 @@ const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 /// connection carries it as its `method_timeout` (which bounds `Notify` and
 /// `CloseNotification`), and `wire::call_no_auto_start` applies it to the calls zbus
 /// cannot bound itself. A timed-out `Notify` becomes
-/// [`Osc99DbusEvent::ShowFailed`], a timed-out `CloseNotification` falls back
-/// to [`Osc99DbusEvent::Closed`], and any timeout starts the
-/// `state::OSC99_DAEMON_COOLDOWN`.
-const OSC99_DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
+/// [`SystemNotifyEvent::ShowFailed`], a timed-out `CloseNotification` falls back
+/// to [`SystemNotifyEvent::Closed`], and any timeout starts the
+/// `state::DAEMON_COOLDOWN`.
+const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// How many commands may wait for the dispatcher. The dispatcher serves one
 /// at a time, and a hung daemon holds each call for up to
-/// [`OSC99_DBUS_METHOD_TIMEOUT`], so a program flooding OSC 99 must not grow
+/// [`DBUS_METHOD_TIMEOUT`], so a program flooding OSC 99 must not grow
 /// the queue without bound. A command that does not fit fails at the handle
-/// (the registry then ends the leg). Plain notifications (OSC 9 / 777 /
+/// (the caller then ends the leg). Plain notifications (OSC 9 / 777 /
 /// 133 `D`) share this queue but are capped at
 /// `plain::PLAIN_NOTIFICATION_BUDGET` in flight, so a flood of them leaves
 /// the rest of it for OSC 99 `Show` and `Close`.
@@ -208,23 +208,14 @@ const COMMAND_QUEUE_CAPACITY: usize = 256;
 
 /// The action a user invoked on a desktop notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99SystemAction {
+pub enum SystemAction {
     /// The notification itself (action key `"default"`).
     Default,
     /// The 1-based button (action key `"1"` to `"8"`).
     Button(u8),
 }
 
-impl Osc99SystemAction {
-    /// The registry's vocabulary for the same activation.
-    #[must_use]
-    pub const fn to_leg_activation(self) -> Osc99LegActivation {
-        match self {
-            Self::Default => Osc99LegActivation::Body,
-            Self::Button(n) => Osc99LegActivation::Button(n),
-        }
-    }
-
+impl SystemAction {
     /// The action an `ActionInvoked` key stands for, or `None` for a key
     /// freminal never registered.
     fn from_key(key: &str) -> Option<Self> {
@@ -238,31 +229,31 @@ impl Osc99SystemAction {
 
 /// What the service reports to the GUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Osc99DbusEvent {
+pub enum SystemNotifyEvent {
     /// The daemon accepted `instance`.
     Shown {
         /// The instance that was displayed.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
     },
     /// The daemon did not display `instance`.
     ShowFailed {
         /// The instance that was not displayed.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
     },
     /// The user invoked an action on `instance`.
     Activated {
         /// The instance that was activated.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         /// What the user invoked.
-        action: Osc99SystemAction,
+        action: SystemAction,
     },
     /// The daemon closed `instance`.
     Closed {
         /// The instance that was closed.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
     },
     /// The daemon answered `GetCapabilities`.
-    Capabilities(Osc99DaemonCapabilities),
+    Capabilities(DaemonCapabilities),
     /// The session bus (or the signal subscription) could not be set up: the
     /// system leg cannot display or observe anything.
     Unavailable,
@@ -275,14 +266,14 @@ pub enum Osc99DbusEvent {
 enum DbusCommand {
     /// Display `notification` for `instance`, replacing `replaces`'.
     Show {
-        instance: Osc99InstanceId,
-        replaces: Option<Osc99InstanceId>,
+        instance: NotificationInstanceId,
+        replaces: Option<NotificationInstanceId>,
         notification: Box<Notification99Data>,
     },
     /// Close `instance`'s notification. The dispatcher answers with
-    /// [`Osc99DbusEvent::Closed`] (from the daemon's signal, or at once when
+    /// [`SystemNotifyEvent::Closed`] (from the daemon's signal, or at once when
     /// there is nothing to close).
-    Close { instance: Osc99InstanceId },
+    Close { instance: NotificationInstanceId },
     /// Display `notification` and forget it: no instance, no events, no
     /// actions (see `plain`). `slot` is the notification's place in the
     /// plain-notification budget, released when the command is dropped.
@@ -296,11 +287,11 @@ enum DbusCommand {
 ///
 /// Dropping it stops the dispatcher; see the module docs for when each thread
 /// exits.
-pub struct Osc99DbusHandle {
+pub struct LinuxNotifyHandle {
     /// Commands for the dispatcher.
     commands: Sender<DbusCommand>,
     /// Events from the dispatcher.
-    events: Receiver<Osc99DbusEvent>,
+    events: Receiver<SystemNotifyEvent>,
     /// The plain notifications in flight, shared with every
     /// [`PlainNotifySender`] made from this handle.
     plain_budget: PlainBudget,
@@ -310,10 +301,10 @@ pub struct Osc99DbusHandle {
 /// one: the commands sent through it, and through its
 /// [`PlainNotifySender`]s, wait in the returned [`DetachedQueue`].
 #[cfg(test)]
-pub(in crate::gui) fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
+pub fn detached_handle() -> (LinuxNotifyHandle, DetachedQueue) {
     let (commands, queue) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
     let (_events_tx, events) = crossbeam_channel::unbounded();
-    let handle = Osc99DbusHandle {
+    let handle = LinuxNotifyHandle {
         commands,
         events,
         plain_budget: PlainBudget::default(),
@@ -323,7 +314,7 @@ pub(in crate::gui) fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
 
 /// The commands a [`detached_handle`] was given.
 #[cfg(test)]
-pub(in crate::gui) struct DetachedQueue {
+pub struct DetachedQueue {
     queue: Receiver<DbusCommand>,
 }
 
@@ -331,7 +322,7 @@ pub(in crate::gui) struct DetachedQueue {
 impl DetachedQueue {
     /// The plain notifications queued since the last call, oldest first.
     /// Other commands are discarded.
-    pub(in crate::gui) fn take_plain(&self) -> Vec<PlainNotification> {
+    pub fn take_plain(&self) -> Vec<PlainNotification> {
         self.queue
             .try_iter()
             .filter_map(|command| match command {
@@ -342,43 +333,43 @@ impl DetachedQueue {
     }
 }
 
-impl Osc99DbusHandle {
+impl LinuxNotifyHandle {
     /// The events that have arrived since the last call, oldest first. Never
     /// blocks.
-    pub fn try_events(&self) -> impl Iterator<Item = Osc99DbusEvent> + '_ {
+    pub fn try_events(&self) -> impl Iterator<Item = SystemNotifyEvent> + '_ {
         self.events.try_iter()
     }
 }
 
-impl Osc99DbusHandle {
+impl LinuxNotifyHandle {
     /// Queue `command` without blocking. A full queue or a dispatcher that is
     /// gone will never answer, so the caller must end the instance's system
     /// leg itself.
-    fn dispatch(&self, command: DbusCommand, what: &'static str) -> Osc99SystemDispatch {
+    fn dispatch(&self, command: DbusCommand, what: &'static str) -> SystemDispatch {
         match self.commands.try_send(command) {
-            Ok(()) => Osc99SystemDispatch::Queued,
+            Ok(()) => SystemDispatch::Queued,
             Err(TrySendError::Full(_)) => {
                 tracing::debug!(
                     "OSC 99: notification service queue is full ({COMMAND_QUEUE_CAPACITY}); \
                      {what} failed"
                 );
-                Osc99SystemDispatch::Failed
+                SystemDispatch::Failed
             }
             Err(TrySendError::Disconnected(_)) => {
                 tracing::warn!("OSC 99: notification service is gone; {what} failed");
-                Osc99SystemDispatch::Failed
+                SystemDispatch::Failed
             }
         }
     }
 }
 
-impl Osc99SystemBackend for Osc99DbusHandle {
+impl TrackedBackend for LinuxNotifyHandle {
     fn show(
         &mut self,
-        instance: Osc99InstanceId,
-        replaces: Option<Osc99InstanceId>,
+        instance: NotificationInstanceId,
+        replaces: Option<NotificationInstanceId>,
         notification: &Notification99Data,
-    ) -> Osc99SystemDispatch {
+    ) -> SystemDispatch {
         let command = DbusCommand::Show {
             instance,
             replaces,
@@ -387,7 +378,7 @@ impl Osc99SystemBackend for Osc99DbusHandle {
         self.dispatch(command, "show")
     }
 
-    fn close(&mut self, instance: Osc99InstanceId) -> Osc99SystemDispatch {
+    fn close(&mut self, instance: NotificationInstanceId) -> SystemDispatch {
         self.dispatch(DbusCommand::Close { instance }, "close")
     }
 }
@@ -408,13 +399,13 @@ enum StartError {
 /// The dispatcher's way back to the GUI: an event channel plus the repaint
 /// wake that follows every event.
 struct EventSink {
-    events: Sender<Osc99DbusEvent>,
+    events: Sender<SystemNotifyEvent>,
     waker: Box<dyn Fn() + Send>,
 }
 
 impl EventSink {
     /// Send `event` to the GUI, then wake it.
-    fn emit(&self, event: Osc99DbusEvent) {
+    fn emit(&self, event: SystemNotifyEvent) {
         if let Err(e) = self.events.send(event) {
             tracing::debug!("desktop notifications: GUI is gone; dropping a service event: {e}");
             return;
@@ -424,36 +415,40 @@ impl EventSink {
 }
 
 /// Namespace for starting the notification service.
-pub struct Osc99DbusService;
+pub struct LinuxNotifyService;
 
-impl Osc99DbusService {
+impl LinuxNotifyService {
     /// Start the service on the session bus. `waker` is called after every
     /// event so an idle GUI drains it.
     ///
     /// Never blocks: connecting happens on the dispatcher thread. If the bus
-    /// cannot be reached the handle reports [`Osc99DbusEvent::Unavailable`]
+    /// cannot be reached the handle reports [`SystemNotifyEvent::Unavailable`]
     /// once, a single warning is logged, and every show answers
-    /// [`Osc99DbusEvent::ShowFailed`] and every close
-    /// [`Osc99DbusEvent::Closed`], until a reconnect attempt, made every
-    /// [`OSC99_RECONNECT_INTERVAL`], succeeds.
+    /// [`SystemNotifyEvent::ShowFailed`] and every close
+    /// [`SystemNotifyEvent::Closed`], until a reconnect attempt, made every
+    /// [`RECONNECT_INTERVAL`], succeeds.
+    ///
+    /// `assets.app_icon_png` is the picture of plain notifications.
     #[must_use]
-    pub fn spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle {
+    pub fn spawn(waker: Box<dyn Fn() + Send>, assets: NotifyAssets) -> LinuxNotifyHandle {
         start(
             connect_session,
             waker,
             Box::new(XdgIconLookup::from_env()),
-            OSC99_RECONNECT_INTERVAL,
+            assets.app_icon_png,
+            RECONNECT_INTERVAL,
         )
     }
 
     /// Start the service on an existing connection (a peer-to-peer one, in
     /// tests), tracking the daemon's owner as `owner_tracking` says.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     fn spawn_with_connection(
         connection: Connection,
         owner_tracking: OwnerTracking,
         waker: Box<dyn Fn() + Send>,
-    ) -> Osc99DbusHandle {
+        assets: NotifyAssets,
+    ) -> LinuxNotifyHandle {
         start(
             move || {
                 Ok(Link {
@@ -463,7 +458,8 @@ impl Osc99DbusService {
             },
             waker,
             Box::new(test_rig::NoIconLookup),
-            OSC99_RECONNECT_INTERVAL,
+            assets.app_icon_png,
+            RECONNECT_INTERVAL,
         )
     }
 }
@@ -474,12 +470,12 @@ struct Link {
     owner_tracking: OwnerTracking,
 }
 
-/// Connect to the session bus with [`OSC99_DBUS_METHOD_TIMEOUT`] on every
+/// Connect to the session bus with [`DBUS_METHOD_TIMEOUT`] on every
 /// method call.
 fn connect_session() -> zbus::Result<Link> {
     let connection = zbus::block_on(
         zbus::connection::Builder::session()
-            .method_timeout(OSC99_DBUS_METHOD_TIMEOUT)
+            .method_timeout(DBUS_METHOD_TIMEOUT)
             .build(),
     )?;
     Ok(Link {
@@ -491,13 +487,15 @@ fn connect_session() -> zbus::Result<Link> {
 /// Start the dispatcher thread, which obtains its connection from `connect`
 /// (again every `reconnect_interval` while it is unavailable) and resolves
 /// icons with `icon_lookup` (whose scan runs on its own background thread,
-/// started by its first question).
+/// started by its first question). `app_icon_png` is the picture of plain
+/// notifications.
 fn start<C>(
     connect: C,
     waker: Box<dyn Fn() + Send>,
-    icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    icon_lookup: Box<dyn IconLookup + Send>,
+    app_icon_png: &'static [u8],
     reconnect_interval: Duration,
-) -> Osc99DbusHandle
+) -> LinuxNotifyHandle
 where
     C: FnMut() -> zbus::Result<Link> + Send + 'static,
 {
@@ -509,9 +507,16 @@ where
     };
 
     let spawned = std::thread::Builder::new()
-        .name("freminal-osc99-dbus".to_owned())
+        .name("freminal-notify-dbus".to_owned())
         .spawn(move || {
-            run_dispatcher(connect, &command_rx, &sink, icon_lookup, reconnect_interval);
+            run_dispatcher(
+                connect,
+                &command_rx,
+                &sink,
+                icon_lookup,
+                app_icon_png,
+                reconnect_interval,
+            );
         });
     if let Err(e) = spawned {
         // The closure (and the command receiver in it) is dropped, so every
@@ -521,12 +526,12 @@ where
         );
         send_or_log!(
             event_tx,
-            Osc99DbusEvent::Unavailable,
+            SystemNotifyEvent::Unavailable,
             "Failed to report the notification service as unavailable"
         );
     }
 
-    Osc99DbusHandle {
+    LinuxNotifyHandle {
         commands: command_tx,
         events: event_rx,
         plain_budget: PlainBudget::default(),
@@ -557,12 +562,12 @@ enum SessionStart {
     /// The first connection: the GUI assumes a daemon until told otherwise.
     Initial,
     /// A connection made after an outage, which the GUI was told about
-    /// ([`Osc99DbusEvent::Unavailable`]): it needs a
-    /// [`Osc99DbusEvent::Capabilities`] to see the service as available again.
+    /// ([`SystemNotifyEvent::Unavailable`]): it needs a
+    /// [`SystemNotifyEvent::Capabilities`] to see the service as available again.
     Reconnected,
 }
 
-/// Whether [`refresh_capabilities`] sent [`Osc99DbusEvent::Capabilities`].
+/// Whether [`refresh_capabilities`] sent [`SystemNotifyEvent::Capabilities`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapabilitiesReport {
     Sent,
@@ -576,18 +581,19 @@ fn run_dispatcher<C>(
     mut connect: C,
     commands: &Receiver<DbusCommand>,
     sink: &EventSink,
-    icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    icon_lookup: Box<dyn IconLookup + Send>,
+    app_icon_png: &'static [u8],
     reconnect_interval: Duration,
 ) where
     C: FnMut() -> zbus::Result<Link>,
 {
-    let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, icon_lookup);
+    let mut state = DispatcherState::new(SignalSender::NoOwner, icon_lookup, app_icon_png);
     let mut start = SessionStart::Initial;
     let mut first = match connect_and_subscribe(&mut connect) {
         Ok(session) => Some(session),
         Err(e) => {
             tracing::warn!("desktop notifications: system notifications are unavailable: {e}");
-            sink.emit(Osc99DbusEvent::Unavailable);
+            sink.emit(SystemNotifyEvent::Unavailable);
             None
         }
     };
@@ -613,7 +619,7 @@ fn run_dispatcher<C>(
 /// While unavailable: fail every command, and every `interval` try to connect.
 /// Returns the new session, or `None` when the GUI is gone.
 ///
-/// A failed attempt is not reported again ([`Osc99DbusEvent::Unavailable`]
+/// A failed attempt is not reported again ([`SystemNotifyEvent::Unavailable`]
 /// was sent when the service became unavailable); the wait starts over.
 fn reconnect<C>(
     connect: &mut C,
@@ -687,7 +693,7 @@ where
     let spawned = owner_changes
         .map_or(Ok(()), |messages| {
             spawn_pump(
-                "freminal-osc99-owner",
+                "freminal-notify-owner",
                 PumpKind::OwnerChanges,
                 messages,
                 signal_tx.clone(),
@@ -696,7 +702,7 @@ where
         })
         .and_then(|()| {
             spawn_pump(
-                "freminal-osc99-signals",
+                "freminal-notify-signals",
                 PumpKind::Notifications,
                 notifications,
                 signal_tx,
@@ -730,11 +736,11 @@ fn close_connection(connection: &Connection) -> zbus::Result<()> {
 fn report_unserved(sink: &EventSink, command: &DbusCommand) {
     match command {
         DbusCommand::Show { instance, .. } => {
-            sink.emit(Osc99DbusEvent::ShowFailed {
+            sink.emit(SystemNotifyEvent::ShowFailed {
                 instance: *instance,
             });
         }
-        DbusCommand::Close { instance } => sink.emit(Osc99DbusEvent::Closed {
+        DbusCommand::Close { instance } => sink.emit(SystemNotifyEvent::Closed {
             instance: *instance,
         }),
         // Nobody awaits a plain notification, so there is nothing to answer.
@@ -766,13 +772,13 @@ fn serve(
         signals,
     } = session;
     state.begin_session(resolve_daemon_owner(&connection, owner_tracking));
-    let report = if matches!(state.daemon_owner, Osc99SignalSender::NoOwner) {
+    let report = if matches!(state.daemon_owner, SignalSender::NoOwner) {
         CapabilitiesReport::Withheld
     } else {
         refresh_capabilities(&connection, state, sink)
     };
     if start == SessionStart::Reconnected && report == CapabilitiesReport::Withheld {
-        sink.emit(Osc99DbusEvent::Capabilities(state.capabilities));
+        sink.emit(SystemNotifyEvent::Capabilities(state.capabilities));
     }
     loop {
         select! {
@@ -830,7 +836,7 @@ fn handle_signal(
     };
     for event in events {
         let activated = match event {
-            Osc99DbusEvent::Activated { instance, .. } => Some(instance),
+            SystemNotifyEvent::Activated { instance, .. } => Some(instance),
             _ => None,
         };
         sink.emit(event);
@@ -873,8 +879,8 @@ fn show_notification(
     connection: &Connection,
     state: &mut DispatcherState,
     sink: &EventSink,
-    instance: Osc99InstanceId,
-    replaces: Option<Osc99InstanceId>,
+    instance: NotificationInstanceId,
+    replaces: Option<NotificationInstanceId>,
     notification: &Notification99Data,
 ) {
     if state.daemon_gate(Instant::now()) == DaemonGate::Skip {
@@ -888,9 +894,9 @@ fn show_notification(
     match outcome {
         Ok(reply) => {
             if let Some(evicted) = state.record_shown(instance, replaces, reply) {
-                sink.emit(Osc99DbusEvent::Closed { instance: evicted });
+                sink.emit(SystemNotifyEvent::Closed { instance: evicted });
             }
-            sink.emit(Osc99DbusEvent::Shown { instance });
+            sink.emit(SystemNotifyEvent::Shown { instance });
         }
         Err(e) => {
             tracing::warn!("OSC 99: Notify failed: {e}");
@@ -899,7 +905,7 @@ fn show_notification(
     }
 }
 
-/// Report a show as failed. The registry already forgot the replaced
+/// Report a show as failed. The caller already forgot the replaced
 /// instance, so its signals are of no interest either; but the daemon may
 /// still display it, so it gets a best-effort `CloseNotification` rather than
 /// staying on screen with nothing tracking it.
@@ -907,8 +913,8 @@ fn fail_show(
     connection: &Connection,
     state: &mut DispatcherState,
     sink: &EventSink,
-    instance: Osc99InstanceId,
-    replaces: Option<Osc99InstanceId>,
+    instance: NotificationInstanceId,
+    replaces: Option<NotificationInstanceId>,
 ) {
     if let Some(old) = replaces {
         let old_id = state.dbus_id_of(old);
@@ -917,7 +923,7 @@ fn fail_show(
             close_replaced(connection, state, old_id);
         }
     }
-    sink.emit(Osc99DbusEvent::ShowFailed { instance });
+    sink.emit(SystemNotifyEvent::ShowFailed { instance });
 }
 
 /// Ask the daemon to close a notification nobody tracks any more. The outcome
@@ -953,10 +959,10 @@ fn close_instance(
     connection: &Connection,
     state: &mut DispatcherState,
     sink: &EventSink,
-    instance: Osc99InstanceId,
+    instance: NotificationInstanceId,
 ) {
     let CloseTarget::CallDaemon(dbus_id) = state.close_target(instance) else {
-        sink.emit(Osc99DbusEvent::Closed { instance });
+        sink.emit(SystemNotifyEvent::Closed { instance });
         return;
     };
     if state.daemon_gate(Instant::now()) == DaemonGate::Skip {
@@ -969,7 +975,7 @@ fn close_instance(
         }
     }
     state.forget_instance(instance);
-    sink.emit(Osc99DbusEvent::Closed { instance });
+    sink.emit(SystemNotifyEvent::Closed { instance });
 }
 
 /// Fetch the capabilities again if the owner changed since they were fetched.
@@ -1003,7 +1009,7 @@ fn refresh_capabilities(
     match outcome {
         Ok(advertised) => {
             state.set_capabilities(&advertised);
-            sink.emit(Osc99DbusEvent::Capabilities(state.capabilities));
+            sink.emit(SystemNotifyEvent::Capabilities(state.capabilities));
             CapabilitiesReport::Sent
         }
         Err(e) if is_no_daemon(&e) => {
@@ -1022,9 +1028,9 @@ fn refresh_capabilities(
 /// Who owns `org.freedesktop.Notifications` at start.
 ///
 /// A peer-to-peer connection has no bus driver and no sender to check, so it
-/// is [`Osc99SignalSender::Unfiltered`]. On a bus, only `NameHasNoOwner` means
+/// is [`SignalSender::Unfiltered`]. On a bus, only `NameHasNoOwner` means
 /// that nobody owns the name; that and every other failure leave the owner
-/// unknown ([`Osc99SignalSender::NoOwner`]): signals are ignored until a
+/// unknown ([`SignalSender::NoOwner`]): signals are ignored until a
 /// `NameOwnerChanged` names an owner, or the sender of a `Notify` reply is
 /// adopted (see [`DispatcherState::record_shown`]), so a lookup that merely
 /// failed cannot leave the service deaf for good. Only an unexpected failure
@@ -1033,20 +1039,20 @@ fn refresh_capabilities(
 /// start one. The `NameOwnerChanged` subscription was made before this call, so
 /// an owner appearing meanwhile is queued for the dispatcher, and processing
 /// it after a matching answer here is a no-op.
-fn resolve_daemon_owner(connection: &Connection, tracking: OwnerTracking) -> Osc99SignalSender {
+fn resolve_daemon_owner(connection: &Connection, tracking: OwnerTracking) -> SignalSender {
     match tracking {
-        OwnerTracking::Peer => Osc99SignalSender::Unfiltered,
+        OwnerTracking::Peer => SignalSender::Unfiltered,
         OwnerTracking::Bus => match fetch_daemon_owner(connection) {
-            Ok(owner) => Osc99SignalSender::Owner(owner),
+            Ok(owner) => SignalSender::Owner(owner),
             Err(e) if is_no_name_owner(&e) => {
                 tracing::debug!("desktop notifications: no notification daemon owns its name yet");
-                Osc99SignalSender::NoOwner
+                SignalSender::NoOwner
             }
             Err(e) => {
                 tracing::warn!(
                     "desktop notifications: GetNameOwner failed ({e}); the next Notify reply names the daemon"
                 );
-                Osc99SignalSender::NoOwner
+                SignalSender::NoOwner
             }
         },
     }
@@ -1064,21 +1070,11 @@ mod tests {
         NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
 
+    use super::super::DaemonSupport;
+    use super::super::test_support::test_assets;
+    use super::test_helpers::*;
     use super::test_rig::*;
     use super::*;
-    use crate::gui::osc99::Osc99DaemonSupport;
-
-    #[test]
-    fn system_actions_map_to_the_registry_activations() {
-        assert_eq!(
-            Osc99SystemAction::Default.to_leg_activation(),
-            Osc99LegActivation::Body
-        );
-        assert_eq!(
-            Osc99SystemAction::Button(3).to_leg_activation(),
-            Osc99LegActivation::Button(3)
-        );
-    }
 
     #[test]
     fn show_calls_notify_then_activation_and_close_signals_become_events() -> TestResult {
@@ -1087,11 +1083,11 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Supported,
-                body_markup: Osc99DaemonSupport::Unsupported,
-                sound: Osc99DaemonSupport::Unsupported,
+            SystemNotifyEvent::Capabilities(DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Supported,
+                body_markup: DaemonSupport::Unsupported,
+                sound: DaemonSupport::Unsupported,
             })
         );
 
@@ -1106,11 +1102,11 @@ mod tests {
                     ..with_buttons(&["A", "B"])
                 },
             ),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
@@ -1141,14 +1137,14 @@ mod tests {
         rig.emit_closed(dbus_id, 2)?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Activated {
+            SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Button(2),
+                action: SystemAction::Button(2),
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1180,9 +1176,12 @@ mod tests {
                     ..notification()
                 },
             ),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         let recorded = rig.recorded();
         assert_eq!(recorded.len(), 1);
@@ -1218,9 +1217,12 @@ mod tests {
                     ..notification()
                 },
             ),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         assert_eq!(
             rig.recorded()[0].hint_keys,
@@ -1235,11 +1237,11 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(1), None, &with_buttons(&["A"])),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
@@ -1253,9 +1255,12 @@ mod tests {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         // Signals for ids nobody shown, and an unrelated member, then the
         // real close: the close is the first (and only) event, so the
@@ -1273,7 +1278,7 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1285,21 +1290,21 @@ mod tests {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
         let dbus_id = rig.recorded()[0].assigned_id;
 
-        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+        assert_eq!(handle.close(instance(1)), SystemDispatch::Queued);
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1314,12 +1319,15 @@ mod tests {
     fn an_update_replaces_the_old_id_and_the_old_ids_close_produces_no_event() -> TestResult {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         let _ = handle.show(instance(2), Some(instance(1)), &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(2)
             }
         );
@@ -1338,7 +1346,7 @@ mod tests {
         rig.emit_closed(recorded[1].assigned_id, 2)?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
@@ -1349,15 +1357,21 @@ mod tests {
     fn closing_a_replaced_instance_reports_closed_without_calling_the_daemon() -> TestResult {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let _ = handle.show(instance(2), Some(instance(1)), &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         let _ = handle.close(instance(1));
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1378,15 +1392,15 @@ mod tests {
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(1)
             }
         );
 
-        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+        assert_eq!(handle.close(instance(1)), SystemDispatch::Queued);
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1396,7 +1410,7 @@ mod tests {
         let _ = handle.show(instance(2), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(2)
             }
         );
@@ -1412,7 +1426,7 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(9)
             }
         );
@@ -1425,14 +1439,17 @@ mod tests {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         rig.answer_close(CloseAnswer::CloseSilently);
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let dbus_id = rig.recorded()[0].assigned_id;
 
         let _ = handle.close(instance(1));
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1447,21 +1464,24 @@ mod tests {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         rig.answer_close(CloseAnswer::CloseSilently);
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let dbus_id = rig.recorded()[0].assigned_id;
 
         rig.emit_action(dbus_id, "default")?;
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Activated {
+            SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Default,
+                action: SystemAction::Default,
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1480,7 +1500,10 @@ mod tests {
                 ..notification()
             },
         );
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         let notify = &rig.recorded()[0];
         assert_eq!(notify.app_icon, "dialog-warning");
@@ -1496,14 +1519,17 @@ mod tests {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         rig.answer_close(CloseAnswer::Fail);
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let dbus_id = rig.recorded()[0].assigned_id;
 
         let _ = handle.close(instance(1));
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1513,7 +1539,7 @@ mod tests {
         let _ = handle.show(instance(2), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(2)
             }
         );
@@ -1521,7 +1547,7 @@ mod tests {
         rig.emit_closed(rig.recorded()[1].assigned_id, 1)?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
@@ -1532,7 +1558,10 @@ mod tests {
     fn a_failed_replacing_show_closes_the_old_notification() -> TestResult {
         let (rig, mut handle, _woken) = started(&["body", "actions"])?;
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let old_id = rig.recorded()[0].assigned_id;
 
         let _ = handle.show(
@@ -1546,7 +1575,7 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(2)
             }
         );
@@ -1557,7 +1586,7 @@ mod tests {
         let _ = handle.close(instance(1));
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1571,12 +1600,15 @@ mod tests {
         let (mut handle, _woken) = spawn_on(&rig, OwnerTracking::Bus);
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
 
         // `Notify` is the call that is allowed to start a daemon.
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         assert_eq!(
             rig.calls(),
@@ -1592,7 +1624,7 @@ mod tests {
     #[test]
     fn dropping_the_handle_ends_the_dispatcher() -> TestResult {
         let (_rig, handle, _woken) = started(&["body"])?;
-        let Osc99DbusHandle {
+        let LinuxNotifyHandle {
             commands, events, ..
         } = handle;
 
@@ -1629,7 +1661,7 @@ mod tests {
             let _ = handle.show(instance(n), None, &notification());
             assert_eq!(
                 next_event(&handle)?,
-                Osc99DbusEvent::Shown {
+                SystemNotifyEvent::Shown {
                     instance: instance(n)
                 }
             );
@@ -1641,37 +1673,37 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // From now on the service answers as if the bus were down.
         assert_eq!(
             handle.show(instance(3), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(3)
             }
         );
         assert_eq!(
             handle.close(instance(2)),
-            Osc99SystemDispatch::Queued,
+            SystemDispatch::Queued,
             "queued; the dispatcher answers Closed itself"
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
@@ -1690,10 +1722,13 @@ mod tests {
         let (mut handle, _woken) = spawn_on(&rig, OwnerTracking::Bus);
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
         let dbus_id = rig.recorded()[0].assigned_id;
 
         // Forged signals first, then the real one: the real one is the first
@@ -1704,15 +1739,15 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Activated {
+            SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Button(1),
+                action: SystemAction::Button(1),
             }
         );
         // The activation closes the notification (138.C23).
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1730,12 +1765,12 @@ mod tests {
         let (mut handle, _woken) = spawn_on(&rig, OwnerTracking::Bus);
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
         let _ = handle.show(instance(1), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
@@ -1747,7 +1782,7 @@ mod tests {
         let _ = handle.show(instance(2), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(2)
             }
         );
@@ -1757,17 +1792,17 @@ mod tests {
         // asked what it can do.
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Unsupported,
-                body_markup: Osc99DaemonSupport::Unsupported,
-                sound: Osc99DaemonSupport::Supported,
+            SystemNotifyEvent::Capabilities(DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Unsupported,
+                body_markup: DaemonSupport::Unsupported,
+                sound: DaemonSupport::Supported,
             })
         );
 
@@ -1777,7 +1812,7 @@ mod tests {
         rig.emit_closed_from(":1.6", new_id)?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
@@ -1801,13 +1836,13 @@ mod tests {
         let _ = handle.show(instance(1), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
 
         // The adopted owner's signals are believed; others' are not.
@@ -1816,15 +1851,15 @@ mod tests {
         rig.emit_action_from(":1.7", dbus_id, "default")?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Activated {
+            SystemNotifyEvent::Activated {
                 instance: instance(1),
-                action: Osc99SystemAction::Default,
+                action: SystemAction::Default,
             }
         );
         // The activation closes the notification (138.C23).
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
@@ -1844,10 +1879,13 @@ mod tests {
         );
 
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Shown { .. }
+        ));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Capabilities(_)
         ));
         assert_eq!(
             rig.calls(),
@@ -1906,14 +1944,20 @@ mod tests {
         }
         let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let mut handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
 
         // Reported once, for the first failure; the failed retry is silent.
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
         // The third attempt succeeds: the new session reports the daemon.
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
@@ -1921,7 +1965,7 @@ mod tests {
         let _ = handle.show(instance(1), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(1)
             }
         );
@@ -1940,9 +1984,10 @@ mod tests {
             connect,
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         let _ = handle.show(instance(1), None, &notification());
         let _ = handle.close(instance(2));
@@ -1950,19 +1995,19 @@ mod tests {
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(1)
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(2)
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(3)
             }
         );
@@ -1978,39 +2023,48 @@ mod tests {
         scripted.send(Some(link_to(&first, OwnerTracking::Peer)))?;
         let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let mut handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
         assert!(matches!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(_)
+            SystemNotifyEvent::Capabilities(_)
         ));
         let _ = handle.show(instance(1), None, &notification());
-        assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
+        assert!(matches!(
+            next_event(&handle)?,
+            SystemNotifyEvent::Shown { .. }
+        ));
 
         zbus::block_on(first.daemon.clone().close())?;
 
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(1)
             }
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // The next attempt finds a daemon on a new connection.
         scripted.send(Some(link_to(&second, OwnerTracking::Peer)))?;
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Unsupported,
-                body_markup: Osc99DaemonSupport::Unsupported,
-                sound: Osc99DaemonSupport::Supported,
+            SystemNotifyEvent::Capabilities(DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Unsupported,
+                body_markup: DaemonSupport::Unsupported,
+                sound: DaemonSupport::Supported,
             })
         );
         let _ = handle.show(instance(2), None, &notification());
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Shown {
+            SystemNotifyEvent::Shown {
                 instance: instance(2)
             }
         );
@@ -2028,15 +2082,21 @@ mod tests {
         scripted.send(Some(link_to(&rig, OwnerTracking::Bus)))?;
         let (connect, _attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
 
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // Nobody can be asked what it can do, but the GUI must still see the
         // service as available again.
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities::default())
+            SystemNotifyEvent::Capabilities(DaemonCapabilities::default())
         );
         assert_eq!(
             rig.calls(),
@@ -2053,40 +2113,41 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
 
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99SystemDispatch::Queued,
+            SystemDispatch::Queued,
             "queued; the dispatcher answers ShowFailed itself"
         );
         assert_eq!(
             handle.show(instance(2), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(1)
             }
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::ShowFailed {
+            SystemNotifyEvent::ShowFailed {
                 instance: instance(2)
             }
         );
         assert_eq!(
             handle.close(instance(3)),
-            Osc99SystemDispatch::Queued,
+            SystemDispatch::Queued,
             "queued; the dispatcher answers Closed itself"
         );
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Closed {
+            SystemNotifyEvent::Closed {
                 instance: instance(3)
             }
         );
@@ -2103,9 +2164,10 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // Replace the command sender with one whose receiver is already gone,
         // as after a dispatcher exit.
@@ -2115,7 +2177,7 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(5), None, &notification()),
-            Osc99SystemDispatch::Failed
+            SystemDispatch::Failed
         );
         assert_eq!(
             handle.try_events().next(),
@@ -2124,7 +2186,7 @@ mod tests {
         );
         assert_eq!(
             handle.close(instance(5)),
-            Osc99SystemDispatch::Failed,
+            SystemDispatch::Failed,
             "a close fails the same way"
         );
         assert_eq!(handle.try_events().next(), None);
@@ -2138,9 +2200,10 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // A queue nobody drains, filled to its capacity, as when the
         // dispatcher is stuck on a hung daemon.
@@ -2154,9 +2217,9 @@ mod tests {
 
         assert_eq!(
             handle.show(instance(9_000), None, &notification()),
-            Osc99SystemDispatch::Failed
+            SystemDispatch::Failed
         );
-        assert_eq!(handle.close(instance(9_000)), Osc99SystemDispatch::Failed);
+        assert_eq!(handle.close(instance(9_000)), SystemDispatch::Failed);
         assert_eq!(handle.try_events().next(), None, "the caller ends the leg");
         Ok(())
     }

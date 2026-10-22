@@ -45,12 +45,12 @@
 //! grab-bag instead of the one real concept above.
 
 use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
+use freminal_notify::PlainSink;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::recording::RecordingSwap;
 use freminal_windowing::WindowId;
 use tracing::{error, trace};
 
-use super::notifications::SystemNotifySink;
 use super::osc99::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, TabActivity,
     WindowMinimized, ZoomOcclusion,
@@ -125,7 +125,7 @@ pub(super) enum DeadPaneOutcome {
 /// `ctx.input(|i| i.focused)` — is hoisted to the caller and passed in as
 /// `window_focus`.
 ///
-/// `system_notifications` makes the [`SystemNotifySink`] that says where a
+/// `system_notifications` makes the [`PlainSink`] that says where a
 /// system (desktop) notification goes to be shown. It is called at most once,
 /// and only when there is a command-finished notification to route, so a frame
 /// with none never touches the notification service.
@@ -142,7 +142,7 @@ pub(super) fn drain_command_finished_events(
     bell_config: &BellConfig,
     window_focus: WindowFocus,
     toasts: &std::cell::RefCell<toast::ToastStack>,
-    system_notifications: impl FnOnce() -> SystemNotifySink,
+    system_notifications: impl FnOnce() -> PlainSink,
 ) {
     let active_tab_idx = tabs.active_index();
     let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> = Vec::new();
@@ -548,7 +548,6 @@ mod tests {
         DeadPaneOutcome, WindowFocus, drain_command_finished_events,
         drain_window_manipulation_commands, osc99_pane_state,
     };
-    use crate::gui::notifications::SystemNotifySink;
     use crate::gui::osc99::{
         Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
     };
@@ -564,6 +563,7 @@ mod tests {
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
+    use freminal_notify::PlainSink;
     use freminal_terminal_emulator::io::WindowCommand;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_windowing::WindowId;
@@ -729,7 +729,7 @@ mod tests {
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
-            SystemNotifySink::none,
+            PlainSink::nowhere,
         );
 
         let Some(active_tab) = tabs.iter().next() else {
@@ -789,7 +789,7 @@ mod tests {
             &bell_config,
             WindowFocus::Focused,
             &toasts,
-            SystemNotifySink::none,
+            PlainSink::nowhere,
         );
 
         assert_eq!(
@@ -824,7 +824,7 @@ mod tests {
             &toasts,
             || {
                 requests.set(requests.get() + 1);
-                SystemNotifySink::none()
+                PlainSink::nowhere()
             },
         );
         requests.get()
@@ -886,7 +886,7 @@ mod tests {
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
-            SystemNotifySink::none,
+            PlainSink::nowhere,
         );
 
         let Ok(panes) = tabs.active_tab().pane_tree.iter_panes() else {

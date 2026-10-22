@@ -17,14 +17,13 @@ use serde::{Serialize, Serializer};
 use zbus::proxy::MethodFlags;
 use zbus::{Connection, Signature, Type, as_variant};
 
-use crate::gui::osc99::presentation::{
-    Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
-    choose_icon,
+use super::super::presentation::{
+    DecodedIconCache, IconChoice, IconImage, IconLookup, SoundHint, choose_icon,
 };
 
 use super::{
-    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, NOTIFICATIONS_INTERFACE,
-    NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, OSC99_DBUS_METHOD_TIMEOUT,
+    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, DBUS_METHOD_TIMEOUT,
+    NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE,
 };
 
 /// The `urgency` hint's value (`0` low, `1` normal, `2` critical).
@@ -83,7 +82,7 @@ pub(super) enum NotifyImage {
     /// allows a name or a `file://` URI; freminal sends names only).
     Path(String),
     /// The `image-data` hint, for transmitted icon data.
-    Data(Osc99IconImage),
+    Data(IconImage),
 }
 
 /// The `hints` argument of `Notify`, as presentation decided it.
@@ -94,7 +93,7 @@ pub(super) struct NotifyHints {
     /// The `category` hint.
     pub(super) category: Option<String>,
     /// The `suppress-sound` / `sound-name` hint.
-    pub(super) sound: Osc99SoundHint,
+    pub(super) sound: SoundHint,
     /// The `image-path` / `image-data` hint.
     pub(super) image: NotifyImage,
 }
@@ -104,9 +103,9 @@ impl NotifyHints {
     /// those that are set. It borrows from `self`; nothing is copied.
     fn to_wire(&self) -> WireHints<'_> {
         let (suppress_sound, sound_name) = match &self.sound {
-            Osc99SoundHint::None => (None, None),
-            Osc99SoundHint::Suppress => (Some(AlwaysTrue), None),
-            Osc99SoundHint::Named(name) => (None, Some(name.clone())),
+            SoundHint::None => (None, None),
+            SoundHint::Suppress => (Some(AlwaysTrue), None),
+            SoundHint::Named(name) => (None, Some(name.clone())),
         };
         let (image_path, image_data) = match &self.image {
             NotifyImage::None => (None, None),
@@ -139,8 +138,8 @@ struct WireImage<'a> {
     data: &'a [u8],
 }
 
-impl<'a> From<&'a Osc99IconImage> for WireImage<'a> {
-    fn from(image: &'a Osc99IconImage) -> Self {
+impl<'a> From<&'a IconImage> for WireImage<'a> {
+    fn from(image: &'a IconImage) -> Self {
         Self {
             width: image.width,
             height: image.height,
@@ -148,7 +147,7 @@ impl<'a> From<&'a Osc99IconImage> for WireImage<'a> {
             has_alpha: AlwaysTrue,
             bits_per_sample: IMAGE_BITS_PER_SAMPLE,
             channels: IMAGE_CHANNELS,
-            data: &image.rgba,
+            data: &image.rgba[..],
         }
     }
 }
@@ -205,8 +204,8 @@ impl NotifyArgs {
     /// only when there are no names, so a named choice with names present is
     /// always one of them.
     pub(super) fn icon(
-        lookup: &dyn Osc99IconLookup,
-        cache: &mut Osc99DecodedIconCache,
+        lookup: &dyn IconLookup,
+        cache: &mut DecodedIconCache,
         notification: &Notification99Data,
     ) -> (String, NotifyImage) {
         let choose = |data: Option<&[u8]>| {
@@ -219,15 +218,15 @@ impl NotifyArgs {
         };
         let freminal_icon = || (FREMINAL_ICON_NAME.to_owned(), NotifyImage::None);
         let named = |choice| match choice {
-            Some(Osc99IconChoice::Named(name)) if !notification.icon_names.is_empty() => {
+            Some(IconChoice::Named(name)) if !notification.icon_names.is_empty() => {
                 (name.clone(), NotifyImage::Path(name))
             }
-            Some(Osc99IconChoice::Named(name)) => (name, NotifyImage::None),
+            Some(IconChoice::Named(name)) => (name, NotifyImage::None),
             // No rule found an icon: the last one is freminal's own.
-            Some(Osc99IconChoice::Data(_)) | None => freminal_icon(),
+            Some(IconChoice::Data(_)) | None => freminal_icon(),
         };
         match choose(notification.icon_data.as_deref()) {
-            Some(Osc99IconChoice::Data(bytes)) => cache.decode(&bytes).map_or_else(
+            Some(IconChoice::Data(bytes)) => cache.decode(&bytes).map_or_else(
                 || {
                     tracing::debug!("OSC 99: the transmitted icon did not decode");
                     named(choose(None))
@@ -289,7 +288,7 @@ pub(super) fn is_method_timeout(error: &zbus::Error) -> bool {
 }
 
 /// Call `method` with the `NO_AUTO_START` flag and wait at most `timeout`
-/// (in production [`OSC99_DBUS_METHOD_TIMEOUT`]) for the reply.
+/// (in production [`DBUS_METHOD_TIMEOUT`]) for the reply.
 ///
 /// A proxy is the only public way to send a call with message flags, and it
 /// does not apply the connection's `method_timeout` the way
@@ -355,7 +354,7 @@ pub(super) fn fetch_daemon_owner(connection: &Connection) -> zbus::Result<String
         },
         "GetNameOwner",
         &NOTIFICATIONS_SERVICE,
-        OSC99_DBUS_METHOD_TIMEOUT,
+        DBUS_METHOD_TIMEOUT,
     )
 }
 
@@ -371,7 +370,7 @@ pub(super) fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<St
         },
         "GetCapabilities",
         &(),
-        OSC99_DBUS_METHOD_TIMEOUT,
+        DBUS_METHOD_TIMEOUT,
     )
 }
 
@@ -422,6 +421,7 @@ mod tests {
     use zbus::wire::{LE, to_bytes};
     use zbus::{OwnedVariant, Structure, Variant};
 
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::*;
 
@@ -448,7 +448,7 @@ mod tests {
         let hints = NotifyHints {
             urgency: 1,
             category: Some("im".to_owned()),
-            sound: Osc99SoundHint::Suppress,
+            sound: SoundHint::Suppress,
             image: NotifyImage::None,
         };
         assert_eq!(<WireHints<'_> as Type>::SIGNATURE.to_string(), "a{sv}");
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(hint::<String>(&map, "category").as_deref(), Some("im"));
 
         let named = NotifyHints {
-            sound: Osc99SoundHint::Named("dialog-error".to_owned()),
+            sound: SoundHint::Named("dialog-error".to_owned()),
             ..hints
         };
         let map = round_trip(&named.to_wire())?;
@@ -480,7 +480,7 @@ mod tests {
         let hints = NotifyHints {
             urgency: 0,
             category: None,
-            sound: Osc99SoundHint::None,
+            sound: SoundHint::None,
             image: NotifyImage::None,
         };
         let map = round_trip(&hints.to_wire())?;
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn the_image_hint_travels_as_one_byte_array_not_a_value_per_byte() -> TestResult {
-        let image = Osc99IconImage {
+        let image = IconImage {
             width: 256,
             height: 256,
             rowstride: 1024,
@@ -506,7 +506,7 @@ mod tests {
         let hints = NotifyHints {
             urgency: 1,
             category: None,
-            sound: Osc99SoundHint::None,
+            sound: SoundHint::None,
             image: NotifyImage::Data(image.clone()),
         };
 
@@ -530,7 +530,7 @@ mod tests {
             (w, h, stride, alpha, bits, channels),
             (256, 256, 1024, true, 8, 4)
         );
-        assert_eq!(data, image.rgba);
+        assert_eq!(data, image.rgba[..]);
         assert!(!map.contains_key("image-path"));
         Ok(())
     }
@@ -540,7 +540,7 @@ mod tests {
         let hints = NotifyHints {
             urgency: 1,
             category: None,
-            sound: Osc99SoundHint::None,
+            sound: SoundHint::None,
             image: NotifyImage::Path("dialog-error".to_owned()),
         };
         let map = round_trip(&hints.to_wire())?;
@@ -600,7 +600,7 @@ mod tests {
             hints: NotifyHints {
                 urgency: 1,
                 category: None,
-                sound: Osc99SoundHint::None,
+                sound: SoundHint::None,
                 image: NotifyImage::None,
             },
             expire_timeout: -1,

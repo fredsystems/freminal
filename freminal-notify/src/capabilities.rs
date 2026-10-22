@@ -8,13 +8,13 @@
 //!
 //! These types exist on every platform so the capability tables in
 //! `host_capabilities` can be built, and tested, everywhere: the Linux/BSD
-//! daemon's advertised capabilities ([`Osc99DaemonCapabilities`]), whether that
-//! daemon is reachable at all ([`Osc99LinuxDaemon`]), and which platform's
-//! system leg applies ([`Osc99Platform`]).
+//! daemon's advertised capabilities ([`DaemonCapabilities`]), whether that
+//! daemon is reachable at all ([`LinuxDaemon`]), and which platform's
+//! system leg applies ([`NotifyPlatform`]).
 
 /// Whether the notification daemon has a capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99DaemonSupport {
+pub enum DaemonSupport {
     /// The daemon advertises the capability (or it is assumed, before the
     /// daemon has answered).
     Supported,
@@ -24,34 +24,31 @@ pub enum Osc99DaemonSupport {
 
 /// The `GetCapabilities` entries the OSC 99 system leg cares about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Osc99DaemonCapabilities {
+pub struct DaemonCapabilities {
     /// `body`: the daemon shows a notification body.
-    pub body: Osc99DaemonSupport,
+    pub body: DaemonSupport,
     /// `actions`: the daemon shows and reports actions (buttons and the
     /// default action).
-    pub actions: Osc99DaemonSupport,
+    pub actions: DaemonSupport,
     /// `body-markup`: the daemon renders markup in the body. Only the Linux/BSD
-    /// service reads it (to decide whether to escape the body), so the field
-    /// exists only there.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub body_markup: Osc99DaemonSupport,
+    /// service reads it, to decide whether to escape the body.
+    pub body_markup: DaemonSupport,
     /// `sound`: the daemon plays notification sounds.
-    pub sound: Osc99DaemonSupport,
+    pub sound: DaemonSupport,
 }
 
-impl Osc99DaemonCapabilities {
+impl DaemonCapabilities {
     /// What is assumed until the daemon answers `GetCapabilities`: kitty
     /// assumes `body`, `actions` and `body-markup`, and no `sound`.
     pub const ASSUMED: Self = Self {
-        body: Osc99DaemonSupport::Supported,
-        actions: Osc99DaemonSupport::Supported,
-        #[cfg(all(unix, not(target_os = "macos")))]
-        body_markup: Osc99DaemonSupport::Supported,
-        sound: Osc99DaemonSupport::Unsupported,
+        body: DaemonSupport::Supported,
+        actions: DaemonSupport::Supported,
+        body_markup: DaemonSupport::Supported,
+        sound: DaemonSupport::Unsupported,
     };
 }
 
-impl Default for Osc99DaemonCapabilities {
+impl Default for DaemonCapabilities {
     /// [`Self::ASSUMED`].
     fn default() -> Self {
         Self::ASSUMED
@@ -60,28 +57,28 @@ impl Default for Osc99DaemonCapabilities {
 
 /// What is known about the Linux/BSD notification daemon.
 ///
-/// Only meaningful for [`Osc99Platform::LinuxBsd`]; the macOS and Windows
+/// Only meaningful for [`NotifyPlatform::LinuxBsd`]; the macOS and Windows
 /// system legs do not depend on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99LinuxDaemon {
+pub enum LinuxDaemon {
     /// A daemon is (assumed) reachable, with these capabilities.
-    Available(Osc99DaemonCapabilities),
+    Available(DaemonCapabilities),
     /// No daemon is reachable, so the Linux/BSD system leg cannot show
     /// anything.
     Unavailable,
 }
 
-impl Osc99LinuxDaemon {
+impl LinuxDaemon {
     /// What is known before the daemon has answered.
     ///
-    /// On Linux/BSD that is a daemon with [`Osc99DaemonCapabilities::ASSUMED`]
+    /// On Linux/BSD that is a daemon with [`DaemonCapabilities::ASSUMED`]
     /// capabilities. Everywhere else there is no Linux/BSD daemon to assume, so
     /// it is [`Self::Unavailable`] (no platform's table other than Linux/BSD
     /// reads it).
     #[must_use]
     pub const fn assumed() -> Self {
         if cfg!(all(unix, not(target_os = "macos"))) {
-            Self::Available(Osc99DaemonCapabilities::ASSUMED)
+            Self::Available(DaemonCapabilities::ASSUMED)
         } else {
             Self::Unavailable
         }
@@ -90,7 +87,7 @@ impl Osc99LinuxDaemon {
 
 /// Which platform's system-leg capability row applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Osc99Platform {
+pub enum NotifyPlatform {
     /// Linux and the BSDs, via the freedesktop notification daemon.
     LinuxBsd,
     /// macOS.
@@ -99,7 +96,7 @@ pub enum Osc99Platform {
     Windows,
 }
 
-impl Osc99Platform {
+impl NotifyPlatform {
     /// The platform this build runs on. Unix other than macOS is
     /// [`Self::LinuxBsd`], matching the D-Bus service's own gate.
     #[must_use]
@@ -120,21 +117,15 @@ mod tests {
 
     #[test]
     fn default_capabilities_are_the_assumed_constant() {
+        assert_eq!(DaemonCapabilities::default(), DaemonCapabilities::ASSUMED);
+        assert_eq!(DaemonCapabilities::ASSUMED.body, DaemonSupport::Supported);
         assert_eq!(
-            Osc99DaemonCapabilities::default(),
-            Osc99DaemonCapabilities::ASSUMED
+            DaemonCapabilities::ASSUMED.actions,
+            DaemonSupport::Supported
         );
         assert_eq!(
-            Osc99DaemonCapabilities::ASSUMED.body,
-            Osc99DaemonSupport::Supported
-        );
-        assert_eq!(
-            Osc99DaemonCapabilities::ASSUMED.actions,
-            Osc99DaemonSupport::Supported
-        );
-        assert_eq!(
-            Osc99DaemonCapabilities::ASSUMED.sound,
-            Osc99DaemonSupport::Unsupported
+            DaemonCapabilities::ASSUMED.sound,
+            DaemonSupport::Unsupported
         );
     }
 
@@ -142,23 +133,23 @@ mod tests {
     fn assumed_daemon_is_available_on_linux_bsd_only() {
         if cfg!(all(unix, not(target_os = "macos"))) {
             assert_eq!(
-                Osc99LinuxDaemon::assumed(),
-                Osc99LinuxDaemon::Available(Osc99DaemonCapabilities::ASSUMED)
+                LinuxDaemon::assumed(),
+                LinuxDaemon::Available(DaemonCapabilities::ASSUMED)
             );
         } else {
-            assert_eq!(Osc99LinuxDaemon::assumed(), Osc99LinuxDaemon::Unavailable);
+            assert_eq!(LinuxDaemon::assumed(), LinuxDaemon::Unavailable);
         }
     }
 
     #[test]
     fn current_platform_matches_the_build_target() {
         let expected = if cfg!(target_os = "macos") {
-            Osc99Platform::MacOs
+            NotifyPlatform::MacOs
         } else if cfg!(unix) {
-            Osc99Platform::LinuxBsd
+            NotifyPlatform::LinuxBsd
         } else {
-            Osc99Platform::Windows
+            NotifyPlatform::Windows
         };
-        assert_eq!(Osc99Platform::current(), expected);
+        assert_eq!(NotifyPlatform::current(), expected);
     }
 }

@@ -10,7 +10,9 @@ TerminalSnapshot via ArcSwap. GUI thread reads snapshots atomically — no locks
 Input flows through crossbeam channels (InputEvent, PtyWrite).
 
 Crate dependency order: freminal-common < freminal-buffer <
-freminal-terminal-emulator < freminal (GUI binary). Plus xtask for CI.
+freminal-terminal-emulator < freminal (GUI binary). freminal-notify (OS
+desktop-notification backends) depends only on freminal-common and is used by
+freminal. Plus xtask for CI.
 
 ## Key Rules
 

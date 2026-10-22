@@ -73,7 +73,7 @@ reviews:
         - No raw `as` casts between numeric types in production code. Use `conv2` (`ValueFrom` / `ValueInto` for checked, `ApproxFrom` / `ApproxInto` for lossy float conversions).
         - No `bool` fields or `bool` parameters where a named domain enum belongs (e.g. `BlinkState::Enabled`). Flag bare `true` / `false` at call sites and bool pairs that cannot both be true. Terminal modes must use the enums in `freminal-common/src/buffer_states/modes/`, never a raw `bool`.
         - No `#[allow(dead_code)]` in production modules (test-only helpers are acceptable).
-        - Errors must be typed and structured. No `anyhow` / `color-eyre` in library crates (`freminal-common`, `freminal-buffer`, `freminal-terminal-emulator`); they are acceptable only in `xtask`. Error variants describe what went wrong, not what to do.
+        - Errors must be typed and structured. No `anyhow` / `color-eyre` in library crates (`freminal-common`, `freminal-buffer`, `freminal-terminal-emulator`, `freminal-notify`); they are acceptable only in `xtask`. Error variants describe what went wrong, not what to do.
         - Every new public API needs tests; every bug fix needs a regression test.
         - Any `#[allow(clippy::...)]` needs an adjacent justification comment. Flag new `too_many_lines` / `too_many_arguments` / `excessive_bools` allows.
         - No `unsafe` without explicit, documented justification.
@@ -121,11 +121,23 @@ reviews:
         `Cargo.toml`). Flag loosening those pins, or reliance on new egui
         internals, without updating that checklist. Check platform-specific code for correctness on
         Linux, macOS and Windows.
+    - path: "freminal-notify/**"
+      instructions: |
+        OS desktop-notification backends: the Linux/BSD D-Bus service, the
+        macOS and Windows delivery workers, and the icon pipeline. It is a
+        library crate: typed errors, panic-free production code, no `anyhow`.
+        - It may depend only on `freminal-common` and external crates. Flag any dependency on `freminal`, `freminal-windowing`, `freminal-terminal-emulator` or `freminal-buffer`, and any egui, winit or emulator type in its API.
+        - It owns every OS notification backend. Platform `cfg` (`target_os`, `unix`, `windows`) belongs here, not in the GUI binary; flag a backend or OS API call added to `freminal` instead of this crate.
+        - OSC 99 protocol logic, routing and capability policy stay in the `freminal` binary; this crate only shows notifications.
+        - Test doubles (recording backends, the fake notification daemon, test assets) may exist only behind `cfg(test)` or the `test-utils` feature, and a production build must never enable that feature.
+        - Check that new platform-specific code compiles on Linux, macOS and Windows (`cargo xtask check-windows`).
     - path: "**/Cargo.toml"
       instructions: |
         Crate dependency direction is one-way: `freminal` ->
-        `freminal-terminal-emulator` -> `freminal-buffer` -> `freminal-common`
-        (`xtask` is separate build tooling). Flag any reverse or cyclic
+        `freminal-terminal-emulator` -> `freminal-buffer` -> `freminal-common`,
+        and `freminal` -> `freminal-notify` -> `freminal-common`
+        (`freminal-notify` may depend only on `freminal-common`; `xtask` is
+        separate build tooling). Flag any reverse or cyclic
         dependency. Dependencies must be fully pinned to a semver version and
         listed in alphabetical order. Flag new dependencies without clear
         justification, `anyhow` in library crates, and loosened exact pins for

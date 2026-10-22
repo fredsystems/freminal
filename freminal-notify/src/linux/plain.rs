@@ -3,12 +3,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Plain (untracked) notifications through the OSC 99 D-Bus service
+//! Plain (untracked) notifications through the D-Bus notification service
 //! (Task 149.2).
 //!
 //! OSC 9, OSC 777, OSC 133 `D` command-finished and the Settings "Test
 //! Notification" button show a summary and a body and need nothing back: no
-//! actions, no `Shown` / `Closed` / `Activated` events, no registry entry. They
+//! actions, no `Shown` / `Closed` / `Activated` events, no tracked instance. They
 //! are carried as [`DbusCommand::ShowPlain`] so they reuse the dispatcher's
 //! connection, circuit breaker, reconnect loop and the daemon's capabilities,
 //! instead of opening a connection of their own per notification.
@@ -24,12 +24,12 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::{Sender, TrySendError};
-use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 use zbus::Connection;
 
+use super::super::PlainNotification;
 use super::state::{DaemonGate, DispatcherState};
 use super::wire::notify;
-use super::{COMMAND_QUEUE_CAPACITY, DbusCommand, Osc99DbusHandle};
+use super::{COMMAND_QUEUE_CAPACITY, DbusCommand, LinuxNotifyHandle};
 
 /// How many plain notifications may be waiting for the dispatcher (or being
 /// shown by it) at once.
@@ -143,22 +143,9 @@ pub(super) fn log_dropped_plain(reason: PlainDrop) {
     }
 }
 
-/// A notification that has a summary, a body and an urgency, and nothing else.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlainNotification {
-    /// The notification's title. Raw: the dispatcher escapes it as the
-    /// daemon's capabilities call for.
-    pub summary: String,
-    /// The notification's text. Raw, like the summary.
-    pub body: String,
-    /// The urgency hint: `Critical` persists on most daemons and pops as a
-    /// banner.
-    pub urgency: NotificationUrgency,
-}
-
 /// The GUI's way to show a [`PlainNotification`]: a handle on the service's
 /// command queue that can be cloned and kept, and that never blocks. Every
-/// clone made from one [`Osc99DbusHandle`] draws on the same
+/// clone made from one [`LinuxNotifyHandle`] draws on the same
 /// [`PLAIN_NOTIFICATION_BUDGET`].
 #[derive(Debug, Clone)]
 pub struct PlainNotifySender {
@@ -197,7 +184,7 @@ impl PlainNotifySender {
     }
 }
 
-impl Osc99DbusHandle {
+impl LinuxNotifyHandle {
     /// A sender for plain notifications on this service's queue.
     #[must_use]
     pub fn plain_sender(&self) -> PlainNotifySender {
@@ -241,19 +228,15 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crossbeam_channel::Receiver;
-    use freminal_common::buffer_states::osc::OscNotifySource;
-    use freminal_common::buffer_states::window_manipulation::NotificationKind;
-    use freminal_common::config::{NotificationRouting, NotificationsConfig};
+    use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 
+    use super::super::super::test_support::test_assets;
+    use super::super::super::{DaemonCapabilities, DaemonSupport, SystemDispatch, TrackedBackend};
     use super::super::state::OwnerTracking;
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
-    use super::super::{Osc99DbusEvent, start};
+    use super::super::{SystemNotifyEvent, start};
     use super::*;
-    use crate::gui::notifications::{NotificationRequest, NotificationRouter, SystemNotifySink};
-    use crate::gui::osc99::{
-        Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99SystemBackend, Osc99SystemDispatch,
-    };
-    use crate::gui::toast::ToastStack;
 
     fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {
         PlainNotification {
@@ -268,7 +251,7 @@ mod tests {
     /// earlier, so the sentinel's event proves the `ShowPlain` is done, and
     /// that nothing else was emitted.
     fn show_and_settle(
-        handle: &mut Osc99DbusHandle,
+        handle: &mut LinuxNotifyHandle,
         notification: PlainNotification,
     ) -> TestResult {
         handle.plain_sender().send(notification);
@@ -450,9 +433,10 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // Queued ahead of the sentinel, so the dispatcher has already
         // dropped it when the sentinel's `Closed` comes.
@@ -489,130 +473,6 @@ mod tests {
         Ok(())
     }
 
-    // ── End to end: the router, through the sink, to the fake daemon ────
-
-    fn notifications(routing: NotificationRouting) -> NotificationsConfig {
-        NotificationsConfig {
-            enabled: true,
-            routing_osc_text: routing,
-            routing_error: routing,
-            routing_command_finished: routing,
-            ..NotificationsConfig::default()
-        }
-    }
-
-    #[test]
-    fn an_osc_9_request_routed_to_system_is_one_escaped_notify_with_normal_urgency() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body", "body-markup"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::OscText,
-            source: Some(OscNotifySource::Osc9),
-            title: Some("a<b>".to_owned()),
-            body: "x & y".to_owned(),
-        };
-        let mut toasts = ToastStack::default();
-
-        NotificationRouter::route(
-            &request,
-            &notifications(NotificationRouting::System),
-            false,
-            &mut toasts,
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1, "exactly one Notify call");
-        assert_eq!(recorded[0].summary, "a<\u{200c}b>");
-        assert_eq!(recorded[0].body, "x &\u{200c} y");
-        assert_eq!(recorded[0].urgency, Some(1));
-        assert_eq!(toasts.len(), 0, "System routing pushes no toast");
-        Ok(())
-    }
-
-    #[test]
-    fn an_error_request_routed_through_its_category_has_critical_urgency() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::Error,
-            source: None,
-            title: None,
-            body: "exit 2".to_owned(),
-        };
-        let config = NotificationsConfig {
-            routing_error: NotificationRouting::System,
-            routing_osc_text: NotificationRouting::Disabled,
-            ..notifications(NotificationRouting::Disabled)
-        };
-
-        NotificationRouter::route(
-            &request,
-            &config,
-            false,
-            &mut ToastStack::default(),
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].summary, "Error");
-        assert_eq!(recorded[0].body, "exit 2");
-        assert_eq!(recorded[0].urgency, Some(2));
-        Ok(())
-    }
-
-    #[test]
-    fn the_test_button_shows_a_notification_even_with_the_master_switch_off() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let config = NotificationsConfig {
-            enabled: false,
-            ..notifications(NotificationRouting::System)
-        };
-        let sink = SystemNotifySink::through(handle.plain_sender());
-        let request = NotificationRequest::sample();
-
-        // `route` honours the master switch: nothing is shown.
-        NotificationRouter::route(&request, &config, true, &mut ToastStack::default(), &sink);
-        assert_no_queued_events(&mut handle)?;
-        assert_eq!(rig.recorded(), []);
-
-        NotificationRouter::route_test(&request, &config, true, &mut ToastStack::default(), &sink);
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].summary, "Freminal");
-        assert_eq!(recorded[0].body, "Test notification");
-        assert_eq!(recorded[0].urgency, Some(1));
-        Ok(())
-    }
-
-    #[test]
-    fn toast_only_routing_never_reaches_the_daemon() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::OscText,
-            source: Some(OscNotifySource::Osc9),
-            title: Some("Hello".to_owned()),
-            body: "world".to_owned(),
-        };
-        let mut toasts = ToastStack::default();
-
-        NotificationRouter::route(
-            &request,
-            &notifications(NotificationRouting::Toast),
-            false,
-            &mut toasts,
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        assert_eq!(toasts.len(), 1, "the toast leg ran");
-        assert_eq!(rig.recorded(), [], "the system leg did not");
-        Ok(())
-    }
-
     // ── Drop logging ────────────────────────────────────────────────────
 
     #[test]
@@ -638,10 +498,10 @@ mod tests {
 
     /// A handle whose dispatcher never drains its queue, as when it is stuck
     /// on a hung daemon: the commands stay in the returned receiver.
-    fn stalled_handle() -> (Osc99DbusHandle, Receiver<DbusCommand>) {
+    fn stalled_handle() -> (LinuxNotifyHandle, Receiver<DbusCommand>) {
         let (commands, queue) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
         let (_events_tx, events) = crossbeam_channel::unbounded();
-        let handle = Osc99DbusHandle {
+        let handle = LinuxNotifyHandle {
             commands,
             events,
             plain_budget: PlainBudget::default(),
@@ -674,9 +534,9 @@ mod tests {
         // OSC 99 still gets its queue.
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
-        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+        assert_eq!(handle.close(instance(1)), SystemDispatch::Queued);
         assert_eq!(queue.len(), PLAIN_NOTIFICATION_BUDGET + 2);
     }
 
@@ -732,9 +592,10 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         for _ in 0..PLAIN_NOTIFICATION_BUDGET * 2 {
             send_plain(&handle.plain_sender());
@@ -815,11 +676,11 @@ mod tests {
             .send(plain("Title", "Body", NotificationUrgency::Normal));
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Unsupported,
-                body_markup: Osc99DaemonSupport::Supported,
-                sound: Osc99DaemonSupport::Unsupported,
+            SystemNotifyEvent::Capabilities(DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Unsupported,
+                body_markup: DaemonSupport::Supported,
+                sound: DaemonSupport::Unsupported,
             })
         );
         assert_no_queued_events(&mut handle)?;

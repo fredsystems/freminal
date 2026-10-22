@@ -80,13 +80,14 @@ use freminal_common::buffer_states::osc99_notification::{
     Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
     Osc99Expiry,
 };
+use freminal_notify::NotificationInstanceId;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use super::Osc99SystemLegEvent;
 use super::{
-    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99InstanceId, Osc99Leg, Osc99LegActivation,
-    Osc99Origin, osc99_toast_spec,
+    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99Leg, Osc99LegActivation, Osc99Origin,
+    instance_from_toast_key, osc99_toast_spec,
 };
 use crate::gui::panes::PaneId;
 use crate::gui::toast::ToastEvent;
@@ -127,7 +128,7 @@ pub enum Osc99Closing {
 #[derive(Debug, Clone)]
 pub struct Osc99Instance {
     /// The registry-assigned identity, unique for the process lifetime.
-    instance: Osc99InstanceId,
+    instance: NotificationInstanceId,
     /// The application's `i=` id, if the notification carried one.
     id: Option<String>,
     /// The pane the notification came from.
@@ -271,7 +272,7 @@ impl Osc99Instance {
     /// Record in the trace log that this instance left the registry.
     fn log_forgotten(&self, why: &'static str) {
         tracing::trace!(
-            instance = self.instance.0,
+            instance = self.instance.get(),
             id = ?self.id,
             origin = ?self.origin,
             activation_focus = ?self.activation_focus,
@@ -288,7 +289,7 @@ impl Osc99Instance {
 pub struct Osc99Registry {
     /// Instances, oldest first.
     instances: Vec<Osc99Instance>,
-    /// The raw value the next [`Osc99InstanceId`] is built from.
+    /// The raw value the next [`NotificationInstanceId`] is built from.
     next_instance: u64,
     /// The compiled `osc99_filters`. The router consults it through
     /// [`Self::filter_verdict`] before it displays or registers anything.
@@ -356,7 +357,7 @@ impl Osc99Registry {
         let (replaces_toast, replaces_linux) =
             self.forget_replaced(origin, data.id.as_deref(), legs, &mut effects);
 
-        let instance = Osc99InstanceId(self.next_instance);
+        let instance = NotificationInstanceId::new(self.next_instance);
         self.next_instance = self.next_instance.wrapping_add(1);
 
         let mut deduped: Vec<Osc99Leg> = Vec::with_capacity(legs.len());
@@ -467,7 +468,10 @@ impl Osc99Registry {
         id: Option<&str>,
         legs: &[Osc99Leg],
         effects: &mut Vec<Osc99Effect>,
-    ) -> (Option<Osc99InstanceId>, Option<Osc99InstanceId>) {
+    ) -> (
+        Option<NotificationInstanceId>,
+        Option<NotificationInstanceId>,
+    ) {
         let wants_toast = legs.contains(&Osc99Leg::Toast);
         let wants_linux = legs.contains(&Osc99Leg::LinuxSystem);
         let mut replaces_toast = None;
@@ -643,7 +647,7 @@ impl Osc99Registry {
     /// - `Closed` closes the toast leg; once no leg is open the instance is
     ///   forgotten and a close report is sent when owed.
     pub fn on_toast_event(&mut self, event: ToastEvent) -> Vec<Osc99Effect> {
-        let instance = Osc99InstanceId::from_toast_key(event.key);
+        let instance = instance_from_toast_key(event.key);
         match Osc99LegActivation::from_toast_event(event.kind) {
             Some(activation) => self.activate(instance, Osc99Leg::Toast, activation),
             None => self.close_leg(instance, Osc99Leg::Toast),
@@ -660,7 +664,7 @@ impl Osc99Registry {
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn on_system_event(
         &mut self,
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         event: Osc99SystemLegEvent,
     ) -> Vec<Osc99Effect> {
         match event {
@@ -689,7 +693,7 @@ impl Osc99Registry {
     /// normally closes it, but if it stays open, expiry still closes it.
     fn activate(
         &mut self,
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         leg: Osc99Leg,
         activation: Osc99LegActivation,
     ) -> Vec<Osc99Effect> {
@@ -723,7 +727,7 @@ impl Osc99Registry {
     /// Close `leg` of `instance`; once no leg is open the instance is
     /// forgotten and its close report is returned when owed. An unknown
     /// instance yields nothing.
-    fn close_leg(&mut self, instance: Osc99InstanceId, leg: Osc99Leg) -> Vec<Osc99Effect> {
+    fn close_leg(&mut self, instance: NotificationInstanceId, leg: Osc99Leg) -> Vec<Osc99Effect> {
         let Some(pos) = self.position_of(instance) else {
             return Vec::new();
         };
@@ -732,7 +736,7 @@ impl Osc99Registry {
     }
 
     /// The index of `instance`, if it is registered.
-    fn position_of(&self, instance: Osc99InstanceId) -> Option<usize> {
+    fn position_of(&self, instance: NotificationInstanceId) -> Option<usize> {
         self.instances
             .iter()
             .position(|candidate| candidate.instance == instance)
@@ -789,7 +793,7 @@ impl Osc99Instance {
 
     /// The registry-assigned identity. Only the Linux/BSD tests read it.
     #[cfg(all(unix, not(target_os = "macos")))]
-    pub const fn instance(&self) -> Osc99InstanceId {
+    pub const fn instance(&self) -> NotificationInstanceId {
         self.instance
     }
 
@@ -823,14 +827,16 @@ mod tests {
     use freminal_common::buffer_states::osc99_notification::{
         NotificationOccasion, NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
+    use freminal_notify::test_support::{
+        RecordedShow, RecordedShowAnswer, RecordingTrackedBackend, RecordingUntrackedBackend,
+    };
+    use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend};
     use freminal_windowing::WindowId;
 
     use super::*;
     use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
-        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec,
-        Osc99UntrackedBackend, RecordedShow, RecordingSystemBackend, RecordingUntrackedBackend,
-        apply_osc99_effects,
+        Osc99EffectSink, Osc99ToastSpec, apply_osc99_effects, instance_toast_key,
     };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{
@@ -915,25 +921,25 @@ mod tests {
         pane: &TestPane,
         data: &Notification99Data,
         legs: &[Osc99Leg],
-    ) -> (Vec<Osc99Effect>, Osc99InstanceId) {
+    ) -> (Vec<Osc99Effect>, NotificationInstanceId) {
         let effects =
             registry.register(pane.origin, pane.weak(), data.clone(), legs, Instant::now());
         // The registry mints ids in order, whether or not it keeps the
         // instance (a display on the untracked leg alone is not kept).
-        let instance = Osc99InstanceId(registry.next_instance.wrapping_sub(1));
+        let instance = NotificationInstanceId::new(registry.next_instance.wrapping_sub(1));
         (effects, instance)
     }
 
-    fn activated(instance: Osc99InstanceId) -> ToastEvent {
+    fn activated(instance: NotificationInstanceId) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Activated,
         }
     }
 
-    fn closed(instance: Osc99InstanceId) -> ToastEvent {
+    fn closed(instance: NotificationInstanceId) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Closed,
         }
     }
@@ -965,14 +971,18 @@ mod tests {
 
     /// The focus requests and failed system requests one executor run left in
     /// its sink: `(focus_requests, failed_system_shows, failed_system_closes)`.
-    type Executed = (Vec<Osc99Origin>, Vec<Osc99InstanceId>, Vec<Osc99InstanceId>);
+    type Executed = (
+        Vec<Osc99Origin>,
+        Vec<NotificationInstanceId>,
+        Vec<NotificationInstanceId>,
+    );
 
     /// Execute `effects` against `toasts` and `system`, returning what the
     /// sink collected.
     fn execute_all(
         effects: Vec<Osc99Effect>,
         toasts: &mut ToastStack,
-        system: &mut dyn Osc99SystemBackend,
+        system: &mut dyn TrackedBackend,
     ) -> Executed {
         execute_all_with_untracked(effects, toasts, system, &mut NoUntrackedBackend)
     }
@@ -981,8 +991,8 @@ mod tests {
     fn execute_all_with_untracked(
         effects: Vec<Osc99Effect>,
         toasts: &mut ToastStack,
-        system: &mut dyn Osc99SystemBackend,
-        untracked: &mut dyn Osc99UntrackedBackend,
+        system: &mut dyn TrackedBackend,
+        untracked: &mut dyn UntrackedBackend,
     ) -> Executed {
         let mut sink = Osc99EffectSink::new(toasts, system, untracked);
         apply_osc99_effects(effects, &mut sink);
@@ -998,8 +1008,8 @@ mod tests {
     fn execute(
         effects: Vec<Osc99Effect>,
         toasts: &mut ToastStack,
-        system: &mut dyn Osc99SystemBackend,
-    ) -> (Vec<Osc99Origin>, Vec<Osc99InstanceId>) {
+        system: &mut dyn TrackedBackend,
+    ) -> (Vec<Osc99Origin>, Vec<NotificationInstanceId>) {
         let (focus_requests, failed_shows, _) = execute_all(effects, toasts, system);
         (focus_requests, failed_shows)
     }
@@ -1007,7 +1017,7 @@ mod tests {
     /// The close effect of every kind, as `(leg, instance)` pairs, panicking
     /// on any other effect.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn close_targets(effects: &[Osc99Effect]) -> Vec<(Osc99Leg, Osc99InstanceId)> {
+    fn close_targets(effects: &[Osc99Effect]) -> Vec<(Osc99Leg, NotificationInstanceId)> {
         effects
             .iter()
             .map(|effect| match effect {
@@ -1549,9 +1559,9 @@ mod tests {
         assert!(registry.on_toast_event(activated(instance)).is_empty());
     }
 
-    fn button_pressed(instance: Osc99InstanceId, n: u8) -> ToastEvent {
+    fn button_pressed(instance: NotificationInstanceId, n: u8) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Button(n),
         }
     }
@@ -1786,7 +1796,7 @@ mod tests {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let (_, instance) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        let unknown = Osc99InstanceId::from_toast_key(ToastKey(instance.to_toast_key().0 + 1000));
+        let unknown = instance_from_toast_key(ToastKey(instance_toast_key(instance).0 + 1000));
 
         assert!(registry.on_toast_event(closed(unknown)).is_empty());
         assert!(registry.on_toast_event(activated(unknown)).is_empty());
@@ -1883,7 +1893,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     fn linux_activated(
         registry: &mut Osc99Registry,
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         activation: Osc99LegActivation,
     ) -> Vec<Osc99Effect> {
         registry.on_system_event(instance, Osc99SystemLegEvent::Activated(activation))
@@ -2128,7 +2138,7 @@ mod tests {
             &data(Some("n")),
             &[Osc99Leg::LinuxSystem],
         );
-        let unknown = Osc99InstanceId(instance.0 + 1000);
+        let unknown = NotificationInstanceId::new(instance.get() + 1000);
 
         for event in [
             Osc99SystemLegEvent::Closed,
@@ -2490,7 +2500,7 @@ mod tests {
         let (focus, failed_shows, failed_closes) = execute_all_with_untracked(
             effects,
             &mut toasts,
-            &mut RecordingSystemBackend::default(),
+            &mut RecordingTrackedBackend::default(),
             &mut untracked,
         );
 
@@ -2512,7 +2522,7 @@ mod tests {
         registry: &mut Osc99Registry,
         pane: &TestPane,
         close: Osc99CloseReporting,
-    ) -> Osc99InstanceId {
+    ) -> NotificationInstanceId {
         register_with(
             registry,
             pane,
@@ -2948,7 +2958,7 @@ mod tests {
         drop(a.tx);
         let effects = registry.prune_dead_panes();
 
-        let closes: Vec<(Osc99Leg, Osc99InstanceId)> = effects
+        let closes: Vec<(Osc99Leg, NotificationInstanceId)> = effects
             .iter()
             .map(|effect| match effect {
                 Osc99Effect::CloseToast(instance) => (Osc99Leg::Toast, *instance),
@@ -3079,7 +3089,7 @@ mod tests {
         drop(a);
         let mut toasts = ToastStack::default();
 
-        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
+        let _ = execute(effects, &mut toasts, &mut NoTrackedBackend);
     }
 
     // ── executor ────────────────────────────────────────────────────────
@@ -3088,7 +3098,7 @@ mod tests {
     fn the_executor_records_focus_requests_in_order_without_touching_toasts() {
         let (a, b) = two_panes();
         let mut toasts = ToastStack::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
 
         let (focus_requests, failed_shows) = execute(
             vec![
@@ -3117,8 +3127,8 @@ mod tests {
             &[Osc99Leg::LinuxSystem],
         );
 
-        let (_, failed) = execute(effects, &mut toasts, &mut NoSystemBackend);
-        assert_eq!(failed, [instance], "NoSystemBackend fails every show");
+        let (_, failed) = execute(effects, &mut toasts, &mut NoTrackedBackend);
+        assert_eq!(failed, [instance], "NoTrackedBackend fails every show");
 
         let (effects, second) = register_with(
             &mut registry,
@@ -3126,9 +3136,9 @@ mod tests {
             &data(Some("m")),
             &[Osc99Leg::LinuxSystem],
         );
-        let mut failing = RecordingSystemBackend {
-            fail_shows: true,
-            ..RecordingSystemBackend::default()
+        let mut failing = RecordingTrackedBackend {
+            show_answer: RecordedShowAnswer::Fail,
+            ..RecordingTrackedBackend::default()
         };
         let (_, failed) = execute(effects, &mut toasts, &mut failing);
         assert_eq!(failed, [second]);
@@ -3140,7 +3150,11 @@ mod tests {
             &data(Some("k")),
             &[Osc99Leg::LinuxSystem],
         );
-        let (_, failed) = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
+        let (_, failed) = execute(
+            effects,
+            &mut toasts,
+            &mut RecordingTrackedBackend::default(),
+        );
         assert_eq!(failed, Vec::new(), "a queued show is not a failure");
     }
 
@@ -3160,7 +3174,7 @@ mod tests {
             &[Osc99Leg::LinuxSystem],
         );
 
-        let (_, failed) = execute(effects, &mut toasts, &mut NoSystemBackend);
+        let (_, failed) = execute(effects, &mut toasts, &mut NoTrackedBackend);
         assert_eq!(failed, [instance]);
         let reports: Vec<GuiReply> = failed
             .into_iter()
@@ -3182,7 +3196,7 @@ mod tests {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let mut toasts = ToastStack::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
         let (effects, instance) = register_with(
             &mut registry,
             &a,
@@ -3212,16 +3226,20 @@ mod tests {
             &data(Some("n")),
             &[Osc99Leg::LinuxSystem],
         );
-        let _ = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
+        let _ = execute(
+            effects,
+            &mut toasts,
+            &mut RecordingTrackedBackend::default(),
+        );
 
         let effects = registry.close(a.origin, "n");
         let (_, failed_shows, failed_closes) =
-            execute_all(effects, &mut toasts, &mut NoSystemBackend);
+            execute_all(effects, &mut toasts, &mut NoTrackedBackend);
 
         assert_eq!(
             failed_closes,
             [instance],
-            "NoSystemBackend fails every close"
+            "NoTrackedBackend fails every close"
         );
         assert_eq!(failed_shows, Vec::new());
     }
@@ -3240,10 +3258,14 @@ mod tests {
             &reporting_data("n", Osc99CloseReporting::Report),
             &[Osc99Leg::LinuxSystem],
         );
-        let _ = execute(effects, &mut toasts, &mut RecordingSystemBackend::default());
+        let _ = execute(
+            effects,
+            &mut toasts,
+            &mut RecordingTrackedBackend::default(),
+        );
 
         let effects = registry.close(a.origin, "n");
-        let (_, _, failed_closes) = execute_all(effects, &mut toasts, &mut NoSystemBackend);
+        let (_, _, failed_closes) = execute_all(effects, &mut toasts, &mut NoTrackedBackend);
         assert_eq!(failed_closes, [instance]);
         assert_eq!(registry.instances().len(), 1, "still waiting for a Closed");
 
@@ -3266,7 +3288,7 @@ mod tests {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let mut toasts = ToastStack::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
 
         let (effects, first) = register_with(
             &mut registry,
@@ -3309,11 +3331,11 @@ mod tests {
 
         let (effects, first) =
             register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
+        let _ = execute(effects, &mut toasts, &mut NoTrackedBackend);
         assert_eq!(toasts.len(), 1);
 
         let (effects, _) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
+        let _ = execute(effects, &mut toasts, &mut NoTrackedBackend);
         assert_eq!(toasts.len(), 1, "updated in place, not stacked");
         assert!(
             toasts.take_events().is_empty(),
@@ -3321,7 +3343,7 @@ mod tests {
         );
 
         let effects = registry.close(a.origin, "n");
-        let _ = execute(effects, &mut toasts, &mut NoSystemBackend);
+        let _ = execute(effects, &mut toasts, &mut NoTrackedBackend);
         assert_eq!(toasts.len(), 1, "the toast fades out before it leaves");
         assert!(toasts.take_events().is_empty(), "Closed waits for the fade");
         toasts.finish_closing_fades();
@@ -3330,7 +3352,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_ne!(
             events[0].key,
-            first.to_toast_key(),
+            instance_toast_key(first),
             "keyed by the new instance"
         );
         assert_eq!(events[0].kind, ToastEventKind::Closed);
@@ -3365,7 +3387,7 @@ mod tests {
         data: &Notification99Data,
         legs: &[Osc99Leg],
         at: Instant,
-    ) -> Osc99InstanceId {
+    ) -> NotificationInstanceId {
         let _ = registry.register(pane.origin, pane.weak(), data.clone(), legs, at);
         let Some(instance) = registry.instances().last().map(|i| i.instance) else {
             panic!("registration adds an instance");
@@ -3373,7 +3395,7 @@ mod tests {
         instance
     }
 
-    fn close_toast_targets(effects: &[Osc99Effect]) -> Vec<Osc99InstanceId> {
+    fn close_toast_targets(effects: &[Osc99Effect]) -> Vec<NotificationInstanceId> {
         effects
             .iter()
             .map(|effect| match effect {

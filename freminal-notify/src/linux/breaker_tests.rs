@@ -17,13 +17,14 @@ use std::time::Instant;
 use crossbeam_channel::Receiver;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 
+use super::super::TrackedBackend;
 use super::state::{CloseTarget, DaemonGate, DispatcherState};
+use super::test_helpers::*;
 use super::test_rig::*;
 use super::{
-    EventSink, Osc99DbusEvent, close_instance, close_replaced, refresh_capabilities,
+    EventSink, SystemNotifyEvent, close_instance, close_replaced, refresh_capabilities,
     show_notification,
 };
-use crate::gui::osc99::Osc99SystemBackend;
 
 /// A rig, a state whose breaker is open, and a sink with the receiver of what
 /// it emits.
@@ -31,7 +32,7 @@ struct Fixture {
     rig: Rig,
     state: DispatcherState,
     sink: EventSink,
-    events: Receiver<Osc99DbusEvent>,
+    events: Receiver<SystemNotifyEvent>,
 }
 
 fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
@@ -58,7 +59,7 @@ impl Fixture {
         assert_eq!(self.state.daemon_gate(Instant::now()), DaemonGate::Call);
     }
 
-    fn queued(&self) -> Vec<Osc99DbusEvent> {
+    fn queued(&self) -> Vec<SystemNotifyEvent> {
         self.events.try_iter().collect()
     }
 
@@ -85,7 +86,7 @@ fn a_show_with_the_breaker_open_fails_without_calling_notify() -> TestResult {
 
     assert_eq!(
         f.queued(),
-        [Osc99DbusEvent::ShowFailed {
+        [SystemNotifyEvent::ShowFailed {
             instance: instance(1)
         }]
     );
@@ -103,7 +104,7 @@ fn a_show_with_the_breaker_open_fails_without_calling_notify() -> TestResult {
     );
     assert_eq!(
         f.queued(),
-        [Osc99DbusEvent::Shown {
+        [SystemNotifyEvent::Shown {
             instance: instance(2)
         }]
     );
@@ -127,7 +128,7 @@ fn a_replacing_show_with_the_breaker_open_fails_and_does_not_close_the_old_one()
 
     assert_eq!(
         f.queued(),
-        [Osc99DbusEvent::ShowFailed {
+        [SystemNotifyEvent::ShowFailed {
             instance: instance(2)
         }]
     );
@@ -147,7 +148,7 @@ fn a_close_with_the_breaker_open_reports_closed_without_calling_the_daemon() -> 
 
     assert_eq!(
         f.queued(),
-        [Osc99DbusEvent::Closed {
+        [SystemNotifyEvent::Closed {
             instance: instance(1)
         }]
     );
@@ -162,7 +163,7 @@ fn a_close_with_the_breaker_open_reports_closed_without_calling_the_daemon() -> 
     assert_eq!(f.rig.closes(), [8]);
     assert_eq!(
         f.queued(),
-        [Osc99DbusEvent::Closed {
+        [SystemNotifyEvent::Closed {
             instance: instance(2)
         }]
     );
@@ -199,7 +200,7 @@ fn a_capability_refresh_with_the_breaker_open_makes_no_call() -> TestResult {
     refresh_capabilities(&f.rig.client, &mut f.state, &f.sink);
     assert!(matches!(
         f.queued().as_slice(),
-        [Osc99DbusEvent::Capabilities(_)]
+        [SystemNotifyEvent::Capabilities(_)]
     ));
     assert_eq!(
         f.rig.calls(),
@@ -230,7 +231,7 @@ fn a_hung_notify_fails_the_show_and_the_breaker_skips_the_next_one() -> TestResu
     );
     assert_eq!(
         next_event(&handle)?,
-        Osc99DbusEvent::ShowFailed {
+        SystemNotifyEvent::ShowFailed {
             instance: instance(1)
         }
     );
@@ -239,7 +240,7 @@ fn a_hung_notify_fails_the_show_and_the_breaker_skips_the_next_one() -> TestResu
     let _ = handle.show(instance(2), None, &notification());
     assert_eq!(
         next_event(&handle)?,
-        Osc99DbusEvent::ShowFailed {
+        SystemNotifyEvent::ShowFailed {
             instance: instance(2)
         }
     );
