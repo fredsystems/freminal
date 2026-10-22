@@ -1,5 +1,9 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-22 — Task 150 (desktop notification backend extraction).
+No gap row is added or removed and no behaviour changes: the notification
+backends moved from `gui/osc99/` to `gui/desktop_notify/`.
+
 Last updated: 2026-10-22 — Task 149 (zbus 6 migration and per-platform
 notification backends, #567). No gap row is added or removed. OSC 9, OSC 777,
 OSC 133 `D` command-finished and OSC 99 desktop notifications now use one

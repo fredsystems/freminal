@@ -1153,6 +1153,135 @@ a test that agrees with you.
 
 ---
 
+## Desktop Notification Backends (Task 150)
+
+### What `desktop_notify` owns, and what stays a caller
+
+"Show this notification on the operating system" has one owner:
+`freminal/src/gui/desktop_notify/`. It contains the OS backends (the Linux/BSD
+D-Bus service in `linux/`, the macOS/Windows plain worker and the macOS/Windows
+OSC 99 untracked worker), the icon pipeline (`icons/`: decode, raster, temp
+files, lookup), `presentation.rs`, body-markup escaping (`markup.rs`), the
+daemon capability types and the backend interface types.
+
+These stay outside it, as callers:
+
+- `gui/osc99/`: the OSC 99 registry, filter, pane state, effects, glue, toast
+  spec and the `g=` icon cache. They are protocol state, not delivery.
+- `gui/notifications.rs`: routing, and the mapping from a `NotificationRequest`
+  to a `PlainNotification`.
+- `gui/host_capabilities.rs`: capability policy, including the decision whether
+  the service is wanted (`plain_notification_demand`).
+- `gui/notify_wake.rs`: the repaint wake. It uses `freminal_windowing`, so it is
+  the GUI's adapter. The service only takes a `Box<dyn Fn() + Send>` waker.
+
+### Two request kinds
+
+- **Plain**: fire and forget. OSC 9, OSC 777, OSC 133 `D` command-finished and the
+  Settings "Test Notification" button carry a summary, a body and an urgency
+  (read on Linux/BSD only). A caller holds a `PlainSink`, a cloneable value with
+  one `show(PlainNotification)` method on every platform. A notification that
+  cannot be shown is dropped.
+- **Tracked**: OSC 99, where freminal observes the notification afterwards. The
+  registry hands a `NotificationInstanceId` and a `&Notification99Data` to a
+  `TrackedBackend` (the Linux/BSD service), which queues the request and reports
+  `Shown` / `ShowFailed` / `Closed` / `Activated` / capability events back as
+  `SystemNotifyEvent`s. macOS and Windows cannot observe a notification, so their
+  system leg is an `UntrackedBackend`: shown and forgotten, with the same
+  `Notification99Data` payload and no events.
+
+`SYSTEM_LEG` (`Tracked` on Linux/BSD, `Untracked` elsewhere) is a `const` of a
+two-variant enum defined with `cfg!`, so every platform compiles both arms and
+the OSC 99 router picks the registry's leg from it without a `#[cfg]`.
+
+### The one-surface rule
+
+Outside code names only what `desktop_notify/mod.rs` re-exports, plus
+`desktop_notify::test_support` (`#[cfg(test)]`: the recording backends, the
+fake-daemon rig and the test assets). No path such as
+`desktop_notify::linux::state::...` appears outside the module, and nothing
+inside it imports `crate::gui`, egui, `freminal_windowing` or
+`freminal_terminal_emulator`. The module depends only on `freminal_common` and
+external crates, so that it can move into its own crate unchanged.
+
+### `DesktopNotifier` and `ServiceDemand`
+
+`DesktopNotifier` is the single `FreminalGui` field that owns the backends: the
+service (started on first demand, kept for the process) and the untracked
+backend. Its methods exist on every platform (`ensure_started`, `plain_sink`,
+`with_backends`); `is_started` and `drain_events` exist on Linux/BSD only, where
+the events do. Callers never name a platform.
+
+Whether the service is wanted is policy, and the policy stays with the caller:
+it passes a `ServiceDemand { Wanted, NotWanted }` and the notifier only obeys.
+A cell that is borrowed elsewhere never panics. The notifier falls back to a
+sink that drops, or to the failing `NoTrackedBackend`, because showing a
+notification calls nothing back into the GUI, so a busy cell is transient.
+Dropping the notifier drops the service first and the untracked backend second.
+
+### Injected assets
+
+`NotifyAssets { app_icon_png, icon_font }` is built once by the GUI
+(`app_icon::notify_assets()`) and passed to every backend constructor. The
+`include_bytes!` calls stay in the GUI, so the backend never reaches for the
+application icon or the font manager. The eight standard icon names are one
+table, `StandardIcon`, which carries the kitty name, the freedesktop name and the
+glyph codepoint; the GUI's `ChromeIcon` converts from it.
+
+### Two macOS/Windows worker lifecycles, deliberately not merged
+
+| Worker                    | Thread                    | Lifecycle                                                                                                                         |
+| ------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Plain (`plain_worker.rs`) | `freminal-notify`         | Process-wide static. Started on first use, restarted at most every 5 s if it exits, never shut down. Queue of 16.                 |
+| OSC 99 (`untracked.rs`)   | `freminal-notify-deliver` | Owned by the untracked backend, spawned on the first notification, never restarted, joined (bounded at 500 ms) on drop. Queue 16. |
+
+Both are bounded queues that drop on full, so neither can stall the frame
+thread. They were kept apart because each lifecycle is load-bearing: the OSC 99
+worker owns the icon temp-file store and must remove it on exit, and a slow
+macOS delivery for one kind must not stall the other. Only the non-blocking
+offer to a bounded queue is shared (`queue.rs`). The two outcome types differ
+(the plain one reports a suppressed respawn and hands a disconnected item back
+for retry; the untracked one logs inline), so merging them would have changed
+behaviour. On Linux/BSD both kinds go through the one D-Bus service, where plain
+notifications have their own budget of 16 inside the service's shared command
+queue, so a flood of one kind cannot starve the other.
+
+Threads are named `freminal-notify-dbus`, `-owner` and `-signals` (the D-Bus
+service), `freminal-notify-icons` (the icon-theme scan) and the two workers
+above.
+
+### The icon directory keeps its old name
+
+Icon files live in `<temp dir>/freminal-osc99-icons-<pid>`. The constant was
+renamed (`ICON_DIR_PREFIX`) but its value was not: a process that is killed
+leaves its directory behind, and the startup sweep removes siblings by that
+prefix. Renaming the value would orphan every directory left by an earlier build
+for good. The probe file prefix (`freminal-osc99-probe-`) is unchanged for the
+same reason.
+
+### Tests never reach the OS
+
+Only GUI production code constructs a sink that reaches the OS:
+`PlainSink::platform_worker` is called only from `DesktopNotifier::plain_sink`,
+and `PlainSink::through_service` needs a running service's sender. A test uses
+`PlainSink::nowhere` or the `PlainSink::recording` recorder, or runs a service
+against the fake-daemon rig on a private peer-to-peer bus. This is a correctness
+requirement, not tidiness: on macOS `notify-rust`'s `show()` throws an uncatchable
+Objective-C exception from a binary that is not an `.app` bundle, as a
+`cargo test` binary is, and the process aborts during teardown.
+
+### Becoming a crate
+
+The module is built as if it were a crate because it is planned to become the
+`freminal-notify` crate (Task 150.10), depending only on `freminal-common`. That
+is why zbus, `tauri-winrt-notification` and `notify-rust` and their platform
+`cfg`s belong in it rather than in `freminal`. At that step `test_support`
+becomes a `test-support` feature, and the temporary dead-code exceptions on
+items only one platform reads (`NotifyAssets` fields, `StandardIcon` methods)
+go, because an exported item of a library is never dead code.
+
+---
+
 ## Workspace Lint Configuration (issue 552)
 
 ### Where the lints live
