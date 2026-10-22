@@ -14,8 +14,9 @@
 //! - **System leg:** show a desktop notification. On Linux/BSD it is handed to
 //!   freminal's own D-Bus notification service (see `osc99`) through a
 //!   [`SystemNotifySink`], as an untracked "plain" notification. On macOS and
-//!   Windows it is shown by `notify-rust` on a long-lived background worker
-//!   thread.
+//!   Windows it is shown on a long-lived background worker thread: by
+//!   `notify-rust` on macOS, and as a toast built directly with
+//!   `tauri-winrt-notification` on Windows.
 //!   (OSC 99 is the exception: its system leg is driven by the registry through
 //!   the platform's own backend, see `osc99`.)
 //!
@@ -458,12 +459,12 @@ impl NotificationRouter {
     /// Show a desktop notification on the long-lived `freminal-notify` worker
     /// (macOS and Windows).
     ///
-    /// `notify-rust`'s `show()` can block, so it must not run on the egui frame
+    /// Showing a notification can block, so it must not run on the egui frame
     /// thread. Failures are logged and otherwise ignored — a missing
     /// notification daemon is non-fatal.
     ///
     /// Under `cfg(test)` the real OS call is skipped entirely: on macOS,
-    /// `notify-rust`'s `show()` funnels into the Objective-C notification
+    /// `notify-rust`'s macOS `show()` funnels into the Objective-C notification
     /// runtime, which throws an *uncatchable foreign exception* when invoked
     /// from a non-`.app`-bundled binary — exactly what a `cargo test` binary
     /// is. Rust's unwinder cannot catch it, so the process `abort()`s
@@ -485,7 +486,7 @@ impl NotificationRouter {
         if cfg!(test) {
             return;
         }
-        let notification = Self::build_system_notification(req);
+        let notification = system_notification(req);
         match enqueue_with_respawn(
             &NOTIFY_WORKER,
             notification,
@@ -507,70 +508,98 @@ impl NotificationRouter {
             }
         }
     }
+}
 
-    /// Build the `notify-rust` notification for a freminal-derived / OSC 9 /
-    /// OSC 777 / command-finished desktop notification (the [`show_system`]
-    /// path on macOS and Windows — *not* the OSC 99 path, which has its own
-    /// backends and a transmitted icon: see the `osc99` module; and not
-    /// Linux/BSD, where [`NotificationRequest::plain_notification`] feeds
-    /// freminal's own D-Bus service).
-    ///
-    /// Attaches the bundled freminal application icon by icon-theme **name**
-    /// (`.icon("freminal")`), matching `assets/freminal.desktop`'s
-    /// `Icon=freminal`. It covers installed setups whose packaging drops
-    /// `freminal.png` into the hicolor theme.
-    ///
-    /// The OSC 99 path does not go through this builder: its system leg is
-    /// presented by the `osc99` module, which carries a *transmitted* icon,
-    /// and it must not be routed through here.
-    ///
-    /// Split out as a pure builder (rather than inlined in the spawned thread)
-    /// so the icon/appname/summary/body/urgency wiring is unit-testable
-    /// without invoking the real OS `show()` call (which is skipped under
-    /// `cfg(test)`; see [`show_system`]).
-    ///
-    /// [`show_system`]: Self::show_system
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    fn build_system_notification(req: &NotificationRequest) -> notify_rust::Notification {
-        let mut notification = notify_rust::Notification::new();
-        notification
-            .appname("freminal")
-            // Name-based icon (see doc above). `.icon()` is available on every
-            // platform in notify-rust 4.18 (a no-op where unsupported).
-            .icon("freminal")
-            // macOS and Windows have no markup to defuse (escaping would show
-            // the ZWNJ), so they get the raw text.
-            .summary(&daemon_safe_text(req.summary()))
-            .body(&daemon_safe_text(&req.body));
+/// What the macOS / Windows worker shows for a freminal-derived / OSC 9 /
+/// OSC 777 / command-finished notification: a summary and a body, as the
+/// platform presenters take them.
+///
+/// Freminal-owned so the worker queue, its respawn policy and the request
+/// mapping compile and are tested on every platform; only the last step,
+/// [`show_platform_notification`], names a platform API. There is no urgency
+/// or kind: neither platform's presenter reads one.
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemNotification {
+    /// The headline.
+    summary: String,
+    /// The detail text; may be empty.
+    body: String,
+}
 
-        // Error-category notifications use Critical urgency so they persist
-        // and pop as a banner; everything else is Normal.
-        //
-        // `notify_rust`'s `urgency()` exists on Windows but NOT on macOS (the
-        // `Urgency` type is re-exported there but deprecated and the method
-        // is absent), so gate the call on `not(target_os = "macos")`.
-        #[cfg(not(target_os = "macos"))]
-        {
-            let urgency = if matches!(req.kind, NotificationKind::Error) {
-                notify_rust::Urgency::Critical
-            } else {
-                notify_rust::Urgency::Normal
-            };
-            notification.urgency(urgency);
-        }
-
-        notification
+/// Map a request to the [`SystemNotification`] the worker shows (the
+/// [`NotificationRouter::show_system`] path on macOS and Windows -- *not* the
+/// OSC 99 path, which has its own backends and a transmitted icon: see the
+/// `osc99` module; and not Linux/BSD, where
+/// [`NotificationRequest::plain_notification`] feeds freminal's own D-Bus
+/// service).
+///
+/// The summary falls back per kind when the request has no title. The text is
+/// raw: macOS and Windows interpret no markup, so escaping would only show a
+/// stray zero-width character. (Linux/BSD escapes it in the D-Bus service, as
+/// the daemon's capabilities call for: issue #560.)
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
+fn system_notification(req: &NotificationRequest) -> SystemNotification {
+    SystemNotification {
+        summary: req.summary().to_owned(),
+        body: req.body.clone(),
     }
 }
 
-/// Untrusted notification text for the platform's notification presenter:
-/// macOS and Windows do not interpret markup, so the text is passed through
-/// unchanged (escaping would only show a stray zero-width character).
-/// (Linux/BSD escapes it in the D-Bus service, as the daemon's capabilities
-/// call for: issue #560.)
-#[cfg(not(all(unix, not(target_os = "macos"))))]
-fn daemon_safe_text(text: &str) -> String {
-    text.to_owned()
+/// The macOS notification for `notification`: the freminal application icon
+/// by icon-theme **name** (`.icon("freminal")`, matching
+/// `assets/freminal.desktop`'s `Icon=freminal`), no urgency (macOS has none).
+#[cfg(target_os = "macos")]
+fn macos_notification(notification: &SystemNotification) -> notify_rust::Notification {
+    let mut built = notify_rust::Notification::new();
+    built
+        .appname("freminal")
+        .icon("freminal")
+        .summary(&notification.summary)
+        .body(&notification.body);
+    built
+}
+
+/// The Windows toast for `notification`, built directly with
+/// `tauri-winrt-notification` in the same style as the OSC 99 toast
+/// (`osc99::untracked`): the summary as the title and the body as the text,
+/// silent, short, attributed to the PowerShell app id (freminal has no
+/// `AppUserModelID` of its own).
+///
+/// There is no scenario. A "reminder" toast needs buttons (Task 138.C15), and
+/// urgency is not advertised on Windows (138.C17), so an error notification is
+/// an ordinary toast. An empty body adds no text line.
+#[cfg(target_os = "windows")]
+fn windows_toast(notification: &SystemNotification) -> tauri_winrt_notification::Toast {
+    use tauri_winrt_notification::{Duration as ToastDuration, Toast};
+
+    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&notification.summary);
+    if !notification.body.is_empty() {
+        toast = toast.text1(&notification.body);
+    }
+    toast.sound(None).duration(ToastDuration::Short)
+}
+
+/// Show `notification` on this platform, logging a failure.
+///
+/// Called only from the worker thread, never from a test (see
+/// [`NotificationRouter::show_system`]).
+#[cfg(target_os = "windows")]
+fn show_platform_notification(notification: &SystemNotification) {
+    if let Err(e) = windows_toast(notification).show() {
+        tracing::warn!("failed to show desktop notification: {e}");
+    }
+}
+
+/// Show `notification` on this platform, logging a failure.
+///
+/// Called only from the worker thread, never from a test (see
+/// [`NotificationRouter::show_system`]).
+#[cfg(target_os = "macos")]
+fn show_platform_notification(notification: &SystemNotification) {
+    if let Err(e) = macos_notification(notification).show() {
+        tracing::warn!("failed to show desktop notification: {e}");
+    }
 }
 
 /// How many desktop notifications may wait for the notify worker. A program
@@ -748,22 +777,18 @@ fn log_dropped_notification() {
 /// first use, and replaced (rate-limited) if the worker exits; see
 /// [`enqueue_with_respawn`].
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-static NOTIFY_WORKER: ArcSwapOption<Sender<notify_rust::Notification>> =
-    ArcSwapOption::const_empty();
+static NOTIFY_WORKER: ArcSwapOption<Sender<SystemNotification>> = ArcSwapOption::const_empty();
 
 /// Start a `freminal-notify` worker and return its bounded queue. `None` if
 /// the worker thread could not be spawned.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-fn spawn_notify_worker() -> Option<Sender<notify_rust::Notification>> {
-    let (tx, rx) =
-        crossbeam_channel::bounded::<notify_rust::Notification>(SYSTEM_NOTIFICATION_QUEUE);
+fn spawn_notify_worker() -> Option<Sender<SystemNotification>> {
+    let (tx, rx) = crossbeam_channel::bounded::<SystemNotification>(SYSTEM_NOTIFICATION_QUEUE);
     let spawned = std::thread::Builder::new()
         .name("freminal-notify".to_owned())
         .spawn(move || {
             for notification in rx {
-                if let Err(e) = notification.show() {
-                    tracing::warn!("failed to show desktop notification: {e}");
-                }
+                show_platform_notification(&notification);
             }
         });
     match spawned {
@@ -1176,11 +1201,10 @@ mod tests {
         }
     }
 
-    /// On platforms with no markup to defuse (macOS, Windows) the text is
-    /// delivered raw, with no stray zero-width characters.
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    /// The macOS / Windows text is delivered raw, with no stray zero-width
+    /// characters: those platforms have no markup to defuse.
     #[test]
-    fn build_system_notification_leaves_text_raw_without_markup_support() {
+    fn system_notification_leaves_text_raw_without_markup_support() {
         let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
         let req = NotificationRequest {
             kind: NotificationKind::OscText,
@@ -1188,9 +1212,10 @@ mod tests {
             title: Some(text.to_owned()),
             body: text.to_owned(),
         };
-        let notification = NotificationRouter::build_system_notification(&req);
+        let notification = system_notification(&req);
         assert_eq!(notification.summary, text);
         assert_eq!(notification.body, text);
+        assert!(!notification.summary.contains('\u{200c}'));
         assert!(!notification.body.contains('\u{200c}'));
     }
 
@@ -1443,37 +1468,59 @@ mod tests {
         assert_eq!(req.summary(), "Build");
     }
 
-    /// Slice 3 (#433): the `show_system` path attaches the bundled freminal
-    /// application icon by name so desktop notifications show the app icon.
-    /// The name matches `assets/freminal.desktop`'s `Icon=freminal`. (On
-    /// Linux/BSD the D-Bus service sends the same name, plus the icon itself
-    /// as `image-data`; see `dbus_service::plain`.)
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    /// An explicit title and the body are carried through unchanged.
     #[test]
-    fn build_system_notification_sets_freminal_icon() {
+    fn system_notification_carries_the_title_and_body() {
         let req = NotificationRequest {
             kind: NotificationKind::OscText,
             source: Some(OscNotifySource::Osc9),
             title: Some("Hello".to_owned()),
             body: "world".to_owned(),
         };
-        let notification = NotificationRouter::build_system_notification(&req);
+        assert_eq!(
+            system_notification(&req),
+            SystemNotification {
+                summary: "Hello".to_owned(),
+                body: "world".to_owned(),
+            }
+        );
+    }
+
+    /// The mapping applies the per-kind summary fallback when the request
+    /// carries no explicit title.
+    #[test]
+    fn system_notification_uses_the_per_kind_summary_fallback() {
+        for (kind, summary) in [
+            (NotificationKind::OscText, "Notification"),
+            (NotificationKind::CommandFinished, "Command finished"),
+            (NotificationKind::Error, "Error"),
+        ] {
+            let req = NotificationRequest {
+                kind,
+                ..osc_req("body text")
+            };
+            let notification = system_notification(&req);
+            assert_eq!(notification.summary, summary, "{kind:?}");
+            assert_eq!(notification.body, "body text");
+        }
+    }
+
+    /// Slice 3 (#433): on macOS the worker attaches the bundled freminal
+    /// application icon by name so desktop notifications show the app icon.
+    /// The name matches `assets/freminal.desktop`'s `Icon=freminal`. (On
+    /// Linux/BSD the D-Bus service sends the same name, plus the icon itself
+    /// as `image-data`; see `dbus_service::plain`.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_notification_sets_freminal_icon() {
+        let notification = macos_notification(&SystemNotification {
+            summary: "Hello".to_owned(),
+            body: "world".to_owned(),
+        });
         assert_eq!(notification.icon, "freminal");
         assert_eq!(notification.appname, "freminal");
         assert_eq!(notification.summary, "Hello");
         assert_eq!(notification.body, "world");
-    }
-
-    /// The builder still applies the per-kind summary fallback when the
-    /// request carries no explicit title.
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    #[test]
-    fn build_system_notification_uses_summary_fallback() {
-        let req = osc_req("body text");
-        let notification = NotificationRouter::build_system_notification(&req);
-        // `OscText` with no title falls back to the kind-derived default.
-        assert_eq!(notification.summary, "Notification");
-        assert_eq!(notification.icon, "freminal");
     }
 
     #[test]

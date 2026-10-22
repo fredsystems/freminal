@@ -424,45 +424,96 @@ pub fn platform_untracked_backend() -> Box<dyn Osc99UntrackedBackend> {
 #[cfg(any(target_os = "macos", test))]
 const MACOS_DEFAULT_SOUND_NAME: &str = "NSUserNotificationDefaultSoundName";
 
-/// Build the `notify-rust` notification for `request` (macOS).
+/// How long a macOS notification asks to stay up. A freminal-owned mirror of
+/// the timeout the macOS presenter takes, so the mapping from `w=` is tested on
+/// every platform without naming the presenter's type.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosTimeout {
+    /// The OS default.
+    Default,
+    /// Never expire.
+    Never,
+    /// Expire after this many milliseconds.
+    Milliseconds(u32),
+}
+
+/// What freminal asks macOS to show for one request: everything
+/// [`macos_notification_fields`] decides, with no dependence on the presenter.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosNotificationFields {
+    /// The headline.
+    summary: String,
+    /// The detail line; empty when there is none.
+    body: String,
+    /// The sound to play; `None` is silent.
+    sound_name: Option<&'static str>,
+    /// What `w=` maps to; macOS ignores it.
+    timeout: MacosTimeout,
+    /// The content image, if the worker wrote a file for the request's image.
+    image_path: Option<String>,
+}
+
+/// Decide the macOS notification content for `request`.
 ///
 /// - The summary is the headline, the body the detail line
 ///   ([`DeliveryRequest::lines`]).
-/// - No action buttons are registered: their activation cannot be observed.
-/// - The sound follows [`untracked_sound`]. Setting no sound name is silent.
+/// - The sound follows [`untracked_sound`]. No sound name is silent.
 /// - `w=` becomes the timeout, which macOS ignores.
 /// - `icon_path`, the file the worker wrote for the request's image, is the
 ///   notification's content image. `notify-rust` cannot set an icon on macOS,
 ///   so a transmitted icon *name* has nowhere to go and is not used.
 ///
-/// Built in test builds on every platform so its logic is tested where the
-/// suite runs; `notify-rust`'s `Notification` has the same public fields and
-/// builder methods used here everywhere.
+/// Pure and compiled in test builds on every platform, so its logic is tested
+/// where the suite runs; the conversion to the presenter's type is
+/// [`macos_notification`].
 #[cfg(any(target_os = "macos", test))]
-fn build_macos_notification(
+fn macos_notification_fields(
+    request: &DeliveryRequest,
+    icon_path: Option<&Path>,
+) -> MacosNotificationFields {
+    let (headline, detail) = request.lines();
+
+    MacosNotificationFields {
+        summary: headline.to_owned(),
+        body: detail.unwrap_or_default().to_owned(),
+        sound_name: match request.sound {
+            Osc99PlatformSound::PlatformDefault => Some(MACOS_DEFAULT_SOUND_NAME),
+            Osc99PlatformSound::Silent => None,
+        },
+        timeout: match request.expiry {
+            Osc99Expiry::OsDefault => MacosTimeout::Default,
+            Osc99Expiry::Never => MacosTimeout::Never,
+            Osc99Expiry::After(ms) => MacosTimeout::Milliseconds(ms.get()),
+        },
+        image_path: icon_path.and_then(Path::to_str).map(str::to_owned),
+    }
+}
+
+/// Build the `notify-rust` notification for `request` (macOS).
+///
+/// No action buttons are registered: their activation cannot be observed.
+#[cfg(target_os = "macos")]
+fn macos_notification(
     request: &DeliveryRequest,
     icon_path: Option<&Path>,
 ) -> notify_rust::Notification {
-    let (headline, detail) = request.lines();
+    let fields = macos_notification_fields(request, icon_path);
     let mut notification = notify_rust::Notification::new();
-    notification
-        .summary(headline)
-        .body(detail.unwrap_or_default());
+    notification.summary(&fields.summary).body(&fields.body);
 
-    match request.sound {
-        Osc99PlatformSound::PlatformDefault => {
-            notification.sound_name(MACOS_DEFAULT_SOUND_NAME);
-        }
-        Osc99PlatformSound::Silent => {}
+    if let Some(sound_name) = fields.sound_name {
+        notification.sound_name(sound_name);
     }
 
-    notification.timeout(match request.expiry {
-        Osc99Expiry::OsDefault => notify_rust::Timeout::Default,
-        Osc99Expiry::Never => notify_rust::Timeout::Never,
-        Osc99Expiry::After(ms) => notify_rust::Timeout::Milliseconds(ms.get()),
+    notification.timeout(match fields.timeout {
+        MacosTimeout::Default => notify_rust::Timeout::Default,
+        MacosTimeout::Never => notify_rust::Timeout::Never,
+        MacosTimeout::Milliseconds(ms) => notify_rust::Timeout::Milliseconds(ms),
     });
 
-    if let Some(path) = icon_path.and_then(Path::to_str) {
+    if let Some(path) = &fields.image_path {
         notification.image_path(path);
     }
 
@@ -479,7 +530,7 @@ fn build_macos_notification(
 /// send, so a delivery failure is not observable here.
 #[cfg(target_os = "macos")]
 fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
-    match build_macos_notification(request, icon_path).show() {
+    match macos_notification(request, icon_path).show() {
         Ok(handle) => drop(handle),
         Err(e) => tracing::warn!("failed to show OSC 99 desktop notification: {e}"),
     }
@@ -1142,7 +1193,7 @@ mod tests {
     #[test]
     fn the_macos_notification_maps_expiry_to_the_timeout() {
         let timeout_for = |expiry| {
-            build_macos_notification(
+            macos_notification_fields(
                 &DeliveryRequest {
                     expiry,
                     ..request("t")
@@ -1152,20 +1203,17 @@ mod tests {
             .timeout
         };
 
-        assert_eq!(
-            timeout_for(Osc99Expiry::OsDefault),
-            notify_rust::Timeout::Default
-        );
-        assert_eq!(timeout_for(Osc99Expiry::Never), notify_rust::Timeout::Never);
+        assert_eq!(timeout_for(Osc99Expiry::OsDefault), MacosTimeout::Default);
+        assert_eq!(timeout_for(Osc99Expiry::Never), MacosTimeout::Never);
         assert_eq!(
             timeout_for(Osc99Expiry::After(NonZeroU32::new(5000).unwrap())),
-            notify_rust::Timeout::Milliseconds(5000)
+            MacosTimeout::Milliseconds(5000)
         );
     }
 
     #[test]
-    fn the_macos_notification_has_the_headline_the_detail_and_no_buttons() {
-        let titled = build_macos_notification(
+    fn the_macos_notification_has_the_headline_and_the_detail() {
+        let titled = macos_notification_fields(
             &DeliveryRequest {
                 body: Some("Body".to_owned()),
                 ..request("Title")
@@ -1174,9 +1222,8 @@ mod tests {
         );
         assert_eq!(titled.summary, "Title");
         assert_eq!(titled.body, "Body");
-        assert_eq!(titled.actions, Vec::<String>::new());
 
-        let untitled = build_macos_notification(
+        let untitled = macos_notification_fields(
             &DeliveryRequest {
                 body: Some("Body".to_owned()),
                 ..request("")
@@ -1185,6 +1232,57 @@ mod tests {
         );
         assert_eq!(untitled.summary, "Body");
         assert_eq!(untitled.body, "");
+    }
+
+    #[test]
+    fn the_macos_notification_sound_follows_the_platform_sound() {
+        let sound_for = |sound| {
+            macos_notification_fields(
+                &DeliveryRequest {
+                    sound,
+                    ..request("t")
+                },
+                None,
+            )
+            .sound_name
+        };
+
+        assert_eq!(
+            sound_for(Osc99PlatformSound::PlatformDefault),
+            Some(MACOS_DEFAULT_SOUND_NAME)
+        );
+        assert_eq!(sound_for(Osc99PlatformSound::Silent), None);
+    }
+
+    #[test]
+    fn the_macos_notification_image_is_the_worker_written_file() {
+        let none = macos_notification_fields(&request("t"), None);
+        assert_eq!(none.image_path, None);
+
+        let some = macos_notification_fields(&request("t"), Some(Path::new("/tmp/icon.png")));
+        assert_eq!(some.image_path.as_deref(), Some("/tmp/icon.png"));
+    }
+
+    /// The conversion to the presenter's type carries every field and
+    /// registers no action buttons.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_notification_has_no_buttons() {
+        let notification = macos_notification(
+            &DeliveryRequest {
+                body: Some("Body".to_owned()),
+                expiry: Osc99Expiry::After(NonZeroU32::new(5000).unwrap()),
+                ..request("Title")
+            },
+            None,
+        );
+        assert_eq!(notification.summary, "Title");
+        assert_eq!(notification.body, "Body");
+        assert_eq!(
+            notification.timeout,
+            notify_rust::Timeout::Milliseconds(5000)
+        );
+        assert_eq!(notification.actions, Vec::<String>::new());
     }
 
     // ── Windows toast ───────────────────────────────────────────────────

@@ -9051,6 +9051,16 @@ as a numbered `149.Cn` cleanup entry before the PR opens.
   - `drain_command_finished_events` takes `&TabTitleConfig` instead of two fields, to stay
     under the argument limit.
   - End-to-end tests run `NotificationRouter::route` / `route_test` into the fake daemon.
+- **149.3 (done):** the macOS/Windows worker carries a freminal-owned `SystemNotification`
+  (summary, body; no kind, as neither platform reads one).
+  - **Windows:** `windows_toast` builds the OSC 99-style toast: title, `text1` (skipped when
+    the body is empty), silent, short, no scenario.
+  - **macOS:** `macos_notification` keeps today's content.
+  - **OSC 99 macOS builder:** in `untracked.rs` it is split into a pure
+    `macos_notification_fields` (tested everywhere) and a thin macOS-only conversion.
+  - `notify_rust` now appears only under `cfg(target_os = "macos")`. Its macOS APIs were
+    checked against notify-rust 4.18.2's source: every field and method used is public on
+    macOS. That code is not compiled locally; the macOS CI job compiles it.
 
 ### 149 Cleanup entries
 
