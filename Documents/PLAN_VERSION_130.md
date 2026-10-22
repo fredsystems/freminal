@@ -9793,6 +9793,13 @@ What:
   production builds never enable it. Rig dev-dependencies, such as `zbus`'s `p2p` feature,
   move with it.
 - Nothing else changes: the diff outside manifests and docs is paths and visibility only.
+- Remove the temporary module-stage dead-code workarounds. An exported item of a library is
+  never dead code:
+  - the `cfg` gates on `StandardIcon::{ALL, codepoint, freedesktop_name}` (150.1);
+  - the `cfg_attr(…, expect(dead_code))` on the `NotifyAssets` fields (150.2);
+  - any other `TODO(150.10)`.
+
+  A grep for `TODO(150.10)` is empty afterwards.
 
 Deliverable:
 
@@ -9803,7 +9810,42 @@ Deliverable:
 
 ### 150 Status notes
 
-(none yet)
+- **150.1 (done, `21ad3f3d`).** `StandardIcon` is the one table. `standard_icon_glyph` and
+  `standard_icon_name` delegate to it, and pin tests passed against the old tables first.
+  `ALL`, `codepoint` and `freedesktop_name` are `cfg`-gated to their callers, because in the
+  binary crate an unused item is dead code. The gates go at 150.10.
+- **150.2 (done, `14c6de74`).** `NotifyAssets` is built once by `app_icon::notify_assets()`
+  and passed to the D-Bus service and the untracked backend. `bundled_regular_font_bytes` is
+  ungated.
+  - Each field is read on one platform only, so each carries a
+    `cfg_attr(…, expect(dead_code, reason = "…TODO(150.10)…"))`. This is the documented
+    temporary-refactor exception, and it goes at 150.10.
+  - The Linux/BSD `platform_untracked_backend` is its own definition with an `_assets`
+    parameter.
+  - Backend tests use `test_support::test_assets()`, which embeds the same repository files.
+- **150.3 (done, `742395ff`).** `Osc99IconImage.rgba` is `Arc<[u8]>`, so the plain icon and
+  the decoded-icon cache hand out shared buffers. The wire bytes are unchanged.
+- **150.4a (done, `4e3d5fc5`).** A pure move. The sorted-line diffs show only paths, and the
+  test count is unchanged (9536). Two module-doc links from `untracked.rs` into `osc99` were
+  rewritten in 150.4b.
+- **150.4b (done, `8a9b16c9`).** A pure move. Test count unchanged (9536), rustdoc warnings
+  unchanged (69).
+  - `Osc99InstanceId::{new, get}` replace the tuple field outside `backend.rs`.
+  - The toast-key conversions are `osc99::{instance_toast_key, instance_from_toast_key}`.
+  - `From<Osc99SystemAction> for Osc99LegActivation` replaces `to_leg_activation`.
+  - The four router-to-fake-daemon tests moved to a `fake_daemon` module in
+    `notifications.rs`.
+  - Backend docs no longer link to GUI items.
+  - `grep crate::gui:: desktop_notify/` is empty.
+  - Test-rig items re-exported through `test_support` became `pub` (test-only).
+- **150.5 (done, `2a8685c1`).** The plain worker and its respawn machinery moved to
+  `plain_worker.rs`, behind `show_plain(SystemNotification)`.
+  - **Deviation:** `EnqueueOutcome` and `Submit` are not equivalent. `EnqueueOutcome` has
+    `RespawnSuppressed` and hands a disconnected item back, while `Submit` logs inline. So
+    only their shared non-blocking offer moved to `queue.rs` (`offer` → `Offered`), and each
+    worker keeps its own outcome type and logs.
+  - In review the orchestrator caught that a test doc comment had been split by the move and
+    restored it. A doc-line multiset check then showed nothing lost.
 
 ### 150 Cleanup entries
 
