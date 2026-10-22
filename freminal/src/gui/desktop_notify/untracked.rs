@@ -614,37 +614,103 @@ fn toast_file_path(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(encoded))
 }
 
+/// The image a Windows toast carries.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToastImage {
+    /// No image.
+    None,
+    /// The `appLogoOverride` square logo, at this encoded path
+    /// ([`toast_file_path`]).
+    Logo(PathBuf),
+    /// The worker wrote an image file, but its path cannot be a toast image
+    /// source; carries the original path for the log. The toast has no image.
+    Unusable(PathBuf),
+}
+
+/// What freminal asks Windows to show for one request: everything
+/// [`windows_untracked_toast_fields`] decides, with no dependence on the
+/// presenter.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsUntrackedToastFields {
+    /// The headline.
+    title: String,
+    /// The detail line; `None` when there is none.
+    text1: Option<String>,
+    /// What `w=` maps to.
+    length: ToastLength,
+    /// The sound to play; silent plays nothing.
+    sound: Osc99PlatformSound,
+    /// The image, if the worker wrote a file for the request's image.
+    image: ToastImage,
+}
+
+/// Decide the Windows toast content for `request`.
+///
+/// - The title is the headline, `text1` the detail line
+///   ([`DeliveryRequest::lines`]).
+/// - `w=` becomes the length ([`toast_length`]).
+/// - The sound follows [`untracked_sound`].
+/// - `icon_path`, the file the worker wrote for the request's image, is the
+///   `appLogoOverride` image when [`toast_file_path`] can make a valid URI
+///   path of it; otherwise it is [`ToastImage::Unusable`] and the toast has
+///   no image.
+///
+/// Pure and compiled in test builds on every platform; the conversion to the
+/// presenter's type is `show_on_platform`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_untracked_toast_fields(
+    request: &DeliveryRequest,
+    icon_path: Option<&Path>,
+) -> WindowsUntrackedToastFields {
+    let (headline, detail) = request.lines();
+
+    WindowsUntrackedToastFields {
+        title: headline.to_owned(),
+        text1: detail.map(str::to_owned),
+        length: toast_length(request.expiry),
+        sound: request.sound,
+        image: icon_path.map_or(ToastImage::None, |path| {
+            toast_file_path(path).map_or_else(
+                || ToastImage::Unusable(path.to_path_buf()),
+                ToastImage::Logo,
+            )
+        }),
+    }
+}
+
 /// Show `request` as a Windows toast and forget it.
 ///
-/// Built directly with `tauri-winrt-notification`, attributed to the
-/// PowerShell app id (the only id available without an installed
-/// `AppUserModelID`). The image is the `appLogoOverride` square logo. There is
-/// no scenario: the `Critical` urgency is deliberately not turned into a
-/// persistent "reminder" toast. `show()` returns once the toast has been handed
-/// to Windows.
+/// Built directly with `tauri-winrt-notification` from
+/// [`windows_untracked_toast_fields`], attributed to the PowerShell app id
+/// (the only id available without an installed `AppUserModelID`). The image is
+/// the `appLogoOverride` square logo. There is no scenario: the `Critical`
+/// urgency is deliberately not turned into a persistent "reminder" toast.
+/// `show()` returns once the toast has been handed to Windows.
 #[cfg(target_os = "windows")]
 fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
     use tauri_winrt_notification::{Duration as ToastDuration, IconCrop, Sound, Toast};
 
-    let (headline, detail) = request.lines();
-    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(headline);
-    if let Some(detail) = detail {
-        toast = toast.text1(detail);
+    let fields = windows_untracked_toast_fields(request, icon_path);
+    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&fields.title);
+    if let Some(text1) = &fields.text1 {
+        toast = toast.text1(text1);
     }
     toast = toast
-        .duration(match toast_length(request.expiry) {
+        .duration(match fields.length {
             ToastLength::Short => ToastDuration::Short,
             ToastLength::Long => ToastDuration::Long,
         })
-        .sound(match request.sound {
+        .sound(match fields.sound {
             Osc99PlatformSound::PlatformDefault => Some(Sound::Default),
             Osc99PlatformSound::Silent => None,
         });
 
-    if let Some(path) = icon_path {
-        if let Some(uri_path) = toast_file_path(path) {
-            toast = toast.icon(&uri_path, IconCrop::Square, "");
-        } else {
+    match &fields.image {
+        ToastImage::None => {}
+        ToastImage::Logo(uri_path) => toast = toast.icon(uri_path, IconCrop::Square, ""),
+        ToastImage::Unusable(path) => {
             tracing::debug!(
                 "OSC 99: icon path {} cannot be a toast image source; no image",
                 path.display()
@@ -1388,5 +1454,106 @@ mod tests {
             toast_file_path(Path::new("c:/Temp/icon.png")),
             Some(PathBuf::from("c:/Temp/icon.png"))
         );
+    }
+
+    // ── Windows toast fields ────────────────────────────────────────────
+
+    #[test]
+    fn the_windows_toast_has_the_headline_and_the_detail() {
+        let titled = windows_untracked_toast_fields(
+            &DeliveryRequest {
+                body: Some("Body".to_owned()),
+                ..request("Title")
+            },
+            None,
+        );
+        assert_eq!(titled.title, "Title");
+        assert_eq!(titled.text1.as_deref(), Some("Body"));
+
+        let untitled = windows_untracked_toast_fields(
+            &DeliveryRequest {
+                body: Some("Body".to_owned()),
+                ..request("")
+            },
+            None,
+        );
+        assert_eq!(untitled.title, "Body");
+        assert_eq!(untitled.text1, None);
+    }
+
+    #[test]
+    fn the_windows_toast_has_no_text1_without_a_detail() {
+        let fields = windows_untracked_toast_fields(&request("Title"), None);
+        assert_eq!(fields.title, "Title");
+        assert_eq!(fields.text1, None);
+    }
+
+    #[test]
+    fn the_windows_toast_maps_expiry_to_the_length() {
+        let length_for = |expiry| {
+            windows_untracked_toast_fields(
+                &DeliveryRequest {
+                    expiry,
+                    ..request("t")
+                },
+                None,
+            )
+            .length
+        };
+        let after = |ms| Osc99Expiry::After(NonZeroU32::new(ms).unwrap());
+
+        assert_eq!(length_for(Osc99Expiry::OsDefault), ToastLength::Short);
+        assert_eq!(length_for(after(5000)), ToastLength::Short);
+        assert_eq!(length_for(after(25_000)), ToastLength::Long);
+        assert_eq!(length_for(Osc99Expiry::Never), ToastLength::Long);
+    }
+
+    #[test]
+    fn the_windows_toast_sound_follows_the_platform_sound() {
+        let sound_for = |sound| {
+            windows_untracked_toast_fields(
+                &DeliveryRequest {
+                    sound,
+                    ..request("t")
+                },
+                None,
+            )
+            .sound
+        };
+
+        assert_eq!(
+            sound_for(Osc99PlatformSound::PlatformDefault),
+            Osc99PlatformSound::PlatformDefault
+        );
+        assert_eq!(
+            sound_for(Osc99PlatformSound::Silent),
+            Osc99PlatformSound::Silent
+        );
+    }
+
+    #[test]
+    fn the_windows_toast_logo_is_the_encoded_drive_path() {
+        let fields = windows_untracked_toast_fields(
+            &request("t"),
+            Some(Path::new(r"C:\Users\John Smith\Temp\ab.png")),
+        );
+        assert_eq!(
+            fields.image,
+            ToastImage::Logo(PathBuf::from("C:/Users/John%20Smith/Temp/ab.png"))
+        );
+    }
+
+    #[test]
+    fn a_windows_toast_icon_path_that_cannot_be_a_uri_is_unusable() {
+        for path in [r"\\server\share\icon.png", r"relative\icon.png"] {
+            let fields = windows_untracked_toast_fields(&request("t"), Some(Path::new(path)));
+            assert_eq!(fields.image, ToastImage::Unusable(PathBuf::from(path)));
+        }
+    }
+
+    #[test]
+    fn the_windows_toast_has_no_image_without_an_icon_path() {
+        let fields = windows_untracked_toast_fields(&request("t"), None);
+        assert_eq!(fields.image, ToastImage::None);
     }
 }

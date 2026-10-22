@@ -15,42 +15,140 @@ use std::{sync::OnceLock, time::Instant};
 use arc_swap::ArcSwapOption;
 use crossbeam_channel::Sender;
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 use super::plain_sink::PlainNotification;
 use super::queue::{Offered, offer};
 
-/// The macOS notification for `notification`: the freminal application icon
-/// by icon-theme **name** (`.icon("freminal")`, matching
+/// What freminal asks macOS to show for one plain notification: everything
+/// [`macos_plain_fields`] decides, with no dependence on the presenter.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosPlainFields {
+    /// The application name.
+    appname: &'static str,
+    /// The icon-theme name of the application icon.
+    icon: &'static str,
+    /// The notification's title.
+    summary: String,
+    /// The notification's text.
+    body: String,
+}
+
+/// Decide the macOS notification content for `notification`: the freminal
+/// application icon by icon-theme **name** (`"freminal"`, matching
 /// `assets/freminal.desktop`'s `Icon=freminal`), no urgency (macOS has none).
+///
+/// Pure and compiled in test builds on every platform; the conversion to the
+/// presenter's type is `macos_notification`.
+#[cfg(any(target_os = "macos", test))]
+fn macos_plain_fields(notification: &PlainNotification) -> MacosPlainFields {
+    MacosPlainFields {
+        appname: "freminal",
+        icon: "freminal",
+        summary: notification.summary.clone(),
+        body: notification.body.clone(),
+    }
+}
+
+/// The macOS notification for `notification`: [`macos_plain_fields`], copied
+/// into the presenter's type.
 #[cfg(target_os = "macos")]
 fn macos_notification(notification: &PlainNotification) -> notify_rust::Notification {
+    let fields = macos_plain_fields(notification);
     let mut built = notify_rust::Notification::new();
     built
-        .appname("freminal")
-        .icon("freminal")
-        .summary(&notification.summary)
-        .body(&notification.body);
+        .appname(fields.appname)
+        .icon(fields.icon)
+        .summary(&fields.summary)
+        .body(&fields.body);
     built
 }
 
-/// The Windows toast for `notification`, built directly with
-/// `tauri-winrt-notification` in the same style as the OSC 99 toast
-/// (`osc99::untracked`): the summary as the title and the body as the text,
-/// silent, short, attributed to the PowerShell app id (freminal has no
-/// `AppUserModelID` of its own).
+/// The application id a Windows toast is attributed to.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastAppId {
+    /// The PowerShell app id: freminal has no `AppUserModelID` of its own.
+    PowerShell,
+}
+
+/// The sound a plain Windows toast plays.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainToastSound {
+    /// No sound.
+    Silent,
+}
+
+/// How long a plain Windows toast stays up.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainToastDuration {
+    /// The short toast (about 7 s).
+    Short,
+}
+
+/// What freminal asks Windows to show for one plain notification: everything
+/// [`windows_plain_toast_fields`] decides, with no dependence on the
+/// presenter.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsPlainToastFields {
+    /// The application id the toast is attributed to.
+    app_id: ToastAppId,
+    /// The toast's title.
+    title: String,
+    /// The text line; `None` for an empty body.
+    text1: Option<String>,
+    /// The sound to play.
+    sound: PlainToastSound,
+    /// How long the toast stays up.
+    duration: PlainToastDuration,
+}
+
+/// Decide the Windows toast content for `notification`: the summary as the
+/// title and the body as the text, silent, short, attributed to the
+/// PowerShell app id (freminal has no `AppUserModelID` of its own).
 ///
 /// There is no scenario. A "reminder" toast needs buttons (Task 138.C15), and
 /// urgency is not advertised on Windows (138.C17), so an error notification is
 /// an ordinary toast. An empty body adds no text line.
+///
+/// Pure and compiled in test builds on every platform; the conversion to the
+/// presenter's type is `windows_toast`.
+#[cfg(any(target_os = "windows", test))]
+fn windows_plain_toast_fields(notification: &PlainNotification) -> WindowsPlainToastFields {
+    WindowsPlainToastFields {
+        app_id: ToastAppId::PowerShell,
+        title: notification.summary.clone(),
+        text1: (!notification.body.is_empty()).then(|| notification.body.clone()),
+        sound: PlainToastSound::Silent,
+        duration: PlainToastDuration::Short,
+    }
+}
+
+/// The Windows toast for `notification`: [`windows_plain_toast_fields`],
+/// copied into a `tauri-winrt-notification` toast, built directly in the same
+/// style as the OSC 99 toast (`desktop_notify::untracked`).
 #[cfg(target_os = "windows")]
 fn windows_toast(notification: &PlainNotification) -> tauri_winrt_notification::Toast {
     use tauri_winrt_notification::{Duration as ToastDuration, Toast};
 
-    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&notification.summary);
-    if !notification.body.is_empty() {
-        toast = toast.text1(&notification.body);
+    let fields = windows_plain_toast_fields(notification);
+    let app_id = match fields.app_id {
+        ToastAppId::PowerShell => Toast::POWERSHELL_APP_ID,
+    };
+    let mut toast = Toast::new(app_id).title(&fields.title);
+    if let Some(text1) = &fields.text1 {
+        toast = toast.text1(text1);
     }
-    toast.sound(None).duration(ToastDuration::Short)
+    toast
+        .sound(match fields.sound {
+            PlainToastSound::Silent => None,
+        })
+        .duration(match fields.duration {
+            PlainToastDuration::Short => ToastDuration::Short,
+        })
 }
 
 /// Show `notification` on this platform, logging a failure.
@@ -311,7 +409,6 @@ pub fn show_plain(notification: PlainNotification) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
     use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 
     /// The queueing policy never blocks and never spawns: against a queue
@@ -469,21 +566,78 @@ mod tests {
         assert!(loser_rx.try_recv().is_err());
     }
 
+    fn plain(summary: &str, body: &str) -> PlainNotification {
+        PlainNotification {
+            summary: summary.to_owned(),
+            body: body.to_owned(),
+            urgency: NotificationUrgency::Normal,
+        }
+    }
+
     /// Slice 3 (#433): on macOS the worker attaches the bundled freminal
     /// application icon by name so desktop notifications show the app icon.
     /// The name matches `assets/freminal.desktop`'s `Icon=freminal`. (On
     /// Linux/BSD the D-Bus service sends the same name, plus the icon itself
     /// as `image-data`; see the notification service's `plain` module.)
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_notification_sets_freminal_icon() {
-        let notification = macos_notification(&PlainNotification {
-            summary: "Hello".to_owned(),
-            body: "world".to_owned(),
-        });
-        assert_eq!(notification.icon, "freminal");
-        assert_eq!(notification.appname, "freminal");
-        assert_eq!(notification.summary, "Hello");
-        assert_eq!(notification.body, "world");
+    fn macos_plain_fields_set_the_freminal_icon() {
+        let fields = macos_plain_fields(&plain("Hello", "world"));
+        assert_eq!(fields.icon, "freminal");
+        assert_eq!(fields.appname, "freminal");
+        assert_eq!(fields.summary, "Hello");
+        assert_eq!(fields.body, "world");
+    }
+
+    #[test]
+    fn macos_plain_fields_copy_an_empty_body_as_empty() {
+        let fields = macos_plain_fields(&plain("Hello", ""));
+        assert_eq!(fields.summary, "Hello");
+        assert_eq!(fields.body, "");
+    }
+
+    #[test]
+    fn macos_plain_fields_ignore_the_urgency() {
+        let critical = PlainNotification {
+            urgency: NotificationUrgency::Critical,
+            ..plain("Hello", "world")
+        };
+        assert_eq!(
+            macos_plain_fields(&critical),
+            macos_plain_fields(&plain("Hello", "world"))
+        );
+    }
+
+    #[test]
+    fn windows_plain_toast_fields_copy_the_summary_and_body() {
+        let fields = windows_plain_toast_fields(&plain("Hello", "world"));
+        assert_eq!(fields.title, "Hello");
+        assert_eq!(fields.text1.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn windows_plain_toast_fields_leave_out_text1_for_an_empty_body() {
+        let fields = windows_plain_toast_fields(&plain("Hello", ""));
+        assert_eq!(fields.title, "Hello");
+        assert_eq!(fields.text1, None);
+    }
+
+    #[test]
+    fn windows_plain_toast_fields_are_silent_short_and_powershell() {
+        let fields = windows_plain_toast_fields(&plain("Hello", "world"));
+        assert_eq!(fields.sound, PlainToastSound::Silent);
+        assert_eq!(fields.duration, PlainToastDuration::Short);
+        assert_eq!(fields.app_id, ToastAppId::PowerShell);
+    }
+
+    #[test]
+    fn windows_plain_toast_fields_ignore_the_urgency() {
+        let critical = PlainNotification {
+            urgency: NotificationUrgency::Critical,
+            ..plain("Hello", "world")
+        };
+        assert_eq!(
+            windows_plain_toast_fields(&critical),
+            windows_plain_toast_fields(&plain("Hello", "world"))
+        );
     }
 }
