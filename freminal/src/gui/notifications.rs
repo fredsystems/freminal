@@ -387,7 +387,7 @@ impl NotificationRouter {
     }
 
     /// Select the routing policy for a notification category.
-    const fn routing_for(
+    pub(super) const fn routing_for(
         kind: NotificationKind,
         config: &NotificationsConfig,
     ) -> NotificationRouting {
@@ -1675,8 +1675,8 @@ mod tests {
             ..NotificationsConfig::default()
         };
         let mut toasts = ToastStack::default();
-        // System-only routing never pushes a toast (the thread is best-effort
-        // and not asserted here).
+        // System-only routing never pushes a toast. The sink has nowhere to
+        // send the system notification, so it is dropped.
         NotificationRouter::route(
             &osc_req("hello"),
             &config,

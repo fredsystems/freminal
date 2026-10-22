@@ -23,6 +23,10 @@ anyhow = "1.0.104"
 arboard = "3.6.1"
 arc-swap = "1.9.2"
 assert_cmd = "2.2.2"
+# Direct dependency for the Linux/BSD notification service: `Timer` bounds its
+# `NO_AUTO_START` calls. Its timer runs on async-io's own reactor thread, so
+# it works inside `zbus::block_on`.
+async-io = "2.6.0"
 bitflags = "2.13.2"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -53,6 +57,9 @@ filedescriptor = "0.8.3"
 flate2 = "1.1.10"
 fontdb = "0.24.0"
 futures = "0.3.34"
+# `StreamExt` (the signal pumps) and `FutureExt::or` (the call deadline) for the
+# Linux/BSD notification service.
+futures-lite = "2.6.1"
 # Held at 0.17 deliberately: `egui_glow` 0.36.2 declares `glow = "0.17.0"`, and
 # upstream cannot move to 0.18 because wgpu 30's `wgpu-hal` pins glow 0.17 (a
 # bump would split glow into two versions in egui's own graph). We hand
@@ -125,15 +132,19 @@ winapi = "0.3.9"
 # off (see its entry above); re-enabling its defaults reintroduces ttf-parser.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita-notitle", "wayland-dlopen", "x11"] }
 winreg = "0.56.0"
-# Direct dependency for the Linux/BSD OSC 99 notification service (Task 138.12):
-# one D-Bus connection owns `Notify` / `CloseNotification` / `GetCapabilities`
-# and observes `ActionInvoked` / `NotificationClosed`. zbus 6 has no blocking
-# API, so the service's dispatcher and signal-pump threads drive the async API
-# with `zbus::block_on`. `default-rt` is zbus's own runtime (zruntime), which
+# Direct dependency for the Linux/BSD notification service (Tasks 138.12 and
+# 149): one D-Bus connection carries every Linux/BSD notification (OSC 99, OSC 9
+# / 777, OSC 133 D and the Settings "Test Notification" button). It owns
+# `Notify` / `CloseNotification` / `GetCapabilities` and observes
+# `ActionInvoked` / `NotificationClosed`. zbus 6 has no blocking API, so the
+# service's dispatcher and signal-pump threads drive the async API with
+# `zbus::block_on`. `default-rt` is zbus's own runtime (zruntime), which
 # `block_on` needs; `proxy` is the `Proxy` the `NO_AUTO_START` calls go
-# through. Listed with `default-features = false` so the choice is explicit and
-# a future default (for example `tokio`) cannot slip in.
-zbus = { version = "6.0.0", default-features = false, features = ["default-rt", "proxy"] }
+# through. `tracing` is what makes zbus log at all (zbus 6 logs only through
+# `tracing`, with no `log` fallback), so the `zbus=warn` filters in `main.rs`
+# only have an effect with it. Listed with `default-features = false` so the
+# choice is explicit and a future default (for example `tokio`) cannot slip in.
+zbus = { version = "6.0.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint

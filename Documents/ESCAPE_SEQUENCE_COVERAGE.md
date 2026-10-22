@@ -788,9 +788,15 @@ icon names are covered by the leg notes below.
     `Critical` urgency for an error and `Normal` otherwise, and freminal's icon
     as `image-data` (downscaled to fit 256x256). The summary and body get a
     U+200C after `<` and `&` when the daemon has `body-markup` (assumed until
-    `GetCapabilities` answers). A notification is dropped when the service is
-    reconnecting, when its command queue is full, or while the daemon is in its
-    30 s cooldown after a timeout.
+    `GetCapabilities` answers). The escaping follows that capability, so a
+    daemon that formats text without advertising `body-markup` gets raw text
+    (accepted: OSC 99's body behaves the same). At most 16 plain notifications
+    are in flight at once, a separate budget inside the service's shared command
+    queue so OSC 99 keeps its slots. A notification is dropped when that budget
+    or the queue is full, while the daemon is in its 30 s cooldown after a
+    timeout, and while the service is reconnecting (up to 30 s after a failed
+    connect or a lost connection). Before Task 149 every notification opened its
+    own connection, so none was dropped for that reason.
   - **Windows:** a toast built directly with `tauri-winrt-notification`, in the
     same style as the OSC 99 toast: the summary as the title, the body as the
     text, silent, short, no scenario (an error is an ordinary toast).

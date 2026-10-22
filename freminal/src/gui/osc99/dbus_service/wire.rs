@@ -311,7 +311,7 @@ where
     B: Serialize + zbus::DynamicType,
     R: for<'d> zbus::wire::DynamicDeserialize<'d>,
 {
-    use smol::future::FutureExt;
+    use futures_lite::future::FutureExt;
 
     let call = async {
         zbus::Proxy::new(
@@ -326,7 +326,7 @@ where
         .ok_or(zbus::Error::InvalidReply)
     };
     let timer = async {
-        smol::Timer::after(timeout).await;
+        async_io::Timer::after(timeout).await;
         Err(zbus::Error::from(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "timed out",

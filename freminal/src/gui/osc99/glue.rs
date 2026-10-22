@@ -298,8 +298,8 @@ fn record_daemon_state(
     }
     if matches!(new, Osc99LinuxDaemon::Unavailable) {
         tracing::warn!(
-            "OSC 99: the desktop-notification service is unavailable; System routing \
-             stops advertising OSC 99, and Both and SystemWhenUnfocused fall back to \
+            "the desktop-notification service is unavailable; OSC 99 with System routing \
+             stops being advertised, and Both and SystemWhenUnfocused fall back to \
              the toast leg"
         );
     }
@@ -344,7 +344,7 @@ fn deliver_system_events(
                     actions = ?capabilities.actions,
                     body_markup = ?capabilities.body_markup,
                     sound = ?capabilities.sound,
-                    "OSC 99: notification daemon capabilities"
+                    "notification daemon capabilities"
                 );
                 if let Some(changed) =
                     record_daemon_state(daemon, Osc99LinuxDaemon::Available(capabilities), config)
@@ -670,12 +670,7 @@ impl FreminalGui {
     /// and until then effects are applied against [`NoSystemBackend`].
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn ensure_osc99_dbus_started(&self) {
-        let needed = crate::gui::host_capabilities::osc99_may_use_system_leg(&self.config)
-            || crate::gui::host_capabilities::plain_notifications_may_use_system_leg(
-                &self.config.notifications,
-                PlainNotifyEntry::Routed,
-            );
-        if !needed {
+        if !crate::gui::host_capabilities::notification_service_wanted(&self.config) {
             return;
         }
         let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
@@ -700,9 +695,11 @@ impl FreminalGui {
     /// when `config` can route to the system leg through `entry` (the Test
     /// button ignores `notifications.enabled`, so it must be able to start the
     /// service when the master switch is off) and already running otherwise.
-    /// A busy handle cell, or a service that is neither running nor wanted,
-    /// gives a sink that drops system notifications. Cheap enough to call every
-    /// frame: one cell borrow and, when the service is up, one `Sender` clone.
+    /// A busy handle cell (logged at debug), or a service that is neither
+    /// running nor wanted, gives a sink that drops system notifications.
+    /// Callers build the sink only when they have a notification to route. A
+    /// running service costs a shared borrow of the handle cell and one
+    /// `Sender` clone; the cell is borrowed mutably only to start the service.
     ///
     /// Elsewhere the sink carries nothing and the platform worker is used.
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -711,17 +708,28 @@ impl FreminalGui {
         config: &NotificationsConfig,
         entry: PlainNotifyEntry,
     ) -> SystemNotifySink {
-        let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
-            return SystemNotifySink::none();
+        let busy = || {
+            tracing::debug!(
+                "desktop-notification service handle busy; system notifications dropped"
+            );
+            SystemNotifySink::none()
         };
-        if slot.is_none()
-            && crate::gui::host_capabilities::plain_notifications_may_use_system_leg(config, entry)
-        {
-            *slot = Some(self.spawn_osc99_dbus());
+        match self.osc99_dbus.try_borrow() {
+            Ok(slot) => {
+                if let Some(handle) = slot.as_ref() {
+                    return SystemNotifySink::through(handle.plain_sender());
+                }
+            }
+            Err(_) => return busy(),
         }
-        slot.as_ref().map_or_else(SystemNotifySink::none, |handle| {
-            SystemNotifySink::through(handle.plain_sender())
-        })
+        if !crate::gui::host_capabilities::plain_notifications_may_use_system_leg(config, entry) {
+            return SystemNotifySink::none();
+        }
+        let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
+            return busy();
+        };
+        let handle = slot.get_or_insert_with(|| self.spawn_osc99_dbus());
+        SystemNotifySink::through(handle.plain_sender())
     }
 
     /// [`Self::system_notify_sink`] where there is no desktop-notification

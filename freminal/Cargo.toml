@@ -208,16 +208,18 @@ notify-rust.workspace = true
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification.workspace = true
 
-# Linux/BSD OSC 99 notification service (Task 138.12). The `p2p` feature is
-# only needed by the in-process fake notification server in the service's
+# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
+# Linux/BSD notification, OSC 99 and legacy alike. The `p2p` feature is only
+# needed by the in-process fake notification server in the service's
 # integration test, so it is enabled for tests alone.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-serde.workspace = true
 # Times out the service's `NO_AUTO_START` calls without a helper thread
-# (138.C26) and supplies `StreamExt` for the signal pumps. Its timer is
-# driven by async-io's own reactor thread, so it works inside
-# `zbus::block_on`.
-smol.workspace = true
+# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
+# thread, so it works inside `zbus::block_on`.
+async-io.workspace = true
+# `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
+futures-lite.workspace = true
+serde.workspace = true
 zbus.workspace = true
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]

@@ -12,13 +12,8 @@ use freminal_common::config::Config;
 use freminal_windowing::{RepaintProxy, WindowId};
 use renderer::WindowPostRenderer;
 
+use super::app_icon::FREMINAL_ICON_PNG;
 use super::{FreminalGui, renderer};
-
-/// freminal's application icon, the one PNG embedded in the binary. It is the
-/// OS window icon ([`run`]) and, on Linux/BSD, the picture of every plain
-/// desktop notification (`osc99::dbus_service`). Defined here, beside the
-/// window-icon use that came first, so it is embedded once.
-pub(in crate::gui) static FREMINAL_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
 
 /// Launch the Freminal GUI application.
 ///

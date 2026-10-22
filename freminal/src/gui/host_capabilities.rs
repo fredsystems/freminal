@@ -145,6 +145,20 @@ pub(super) const fn plain_notifications_may_use_system_leg(
     }
 }
 
+/// Whether `config` can route any notification, OSC 99 or plain, to the
+/// system (desktop-notification) leg through the normal routed path: the
+/// condition for starting the Linux/BSD notification service from
+/// `FreminalGui::ensure_osc99_dbus_started`.
+///
+/// The Settings "Test Notification" button has its own entry
+/// ([`PlainNotifyEntry::SettingsTest`]) and starts the service itself.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub(super) const fn notification_service_wanted(config: &Config) -> bool {
+    osc99_may_use_system_leg(config)
+        || plain_notifications_may_use_system_leg(&config.notifications, PlainNotifyEntry::Routed)
+}
+
 /// The capabilities to re-broadcast when the Linux/BSD daemon's state goes
 /// from `old` to `new` under `config`: `Some` exactly when the resulting
 /// [`HostCapabilities`] differ.
@@ -1336,6 +1350,127 @@ mod tests {
                 !plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::SettingsTest),
                 "{routing:?}"
             );
+        }
+    }
+
+    /// A config with notifications on and every routing toast-only, OSC 99
+    /// included, so a test turns on exactly the legs it is about.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn all_toast_config() -> Config {
+        Config {
+            notifications: NotificationsConfig {
+                osc_99: true,
+                routing_osc99: NotificationRouting::Toast,
+                ..toast_only_notifications()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_service_is_wanted_when_any_routed_notification_can_use_the_system_leg() {
+        assert!(!notification_service_wanted(&Config::default()));
+        assert!(!notification_service_wanted(&all_toast_config()));
+
+        // OSC 99 is off, but the error category can show a system notification.
+        let mut osc_99_off = all_toast_config();
+        osc_99_off.notifications.osc_99 = false;
+        osc_99_off.notifications.routing_osc99 = NotificationRouting::Toast;
+        osc_99_off.notifications.routing_error = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_99_off));
+
+        // OSC 99 is toast-only, but OSC 9 / 777 text can show a system one.
+        let mut osc_text = all_toast_config();
+        osc_text.notifications.routing_osc_text = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_text));
+
+        // Only OSC 99 uses the system leg.
+        let mut osc_99_alone = all_toast_config();
+        osc_99_alone.notifications.routing_osc99 = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_99_alone));
+
+        // The master switch off silences every one of them.
+        for mut config in [osc_99_off, osc_text, osc_99_alone] {
+            config.notifications.enabled = false;
+            assert!(!notification_service_wanted(&config));
+        }
+        let everything_system = Config {
+            notifications: NotificationsConfig {
+                enabled: false,
+                osc_99: true,
+                routing_osc99: NotificationRouting::System,
+                routing_osc_text: NotificationRouting::System,
+                routing_command_finished: NotificationRouting::System,
+                routing_error: NotificationRouting::System,
+                ..NotificationsConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(!notification_service_wanted(&everything_system));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_plain_gate_reads_the_routing_the_router_uses_for_every_kind() {
+        use crate::gui::notifications::NotificationRouter;
+        use freminal_common::buffer_states::window_manipulation::NotificationKind;
+
+        type Setter = fn(&mut NotificationsConfig, NotificationRouting);
+
+        /// The only place that names every kind: adding a variant to
+        /// `NotificationKind` stops this from compiling, which is the cue to
+        /// add it to `ALL_KINDS` and to teach `plain_notifications_may_use_system_leg`
+        /// its routing.
+        const fn position(kind: NotificationKind) -> usize {
+            match kind {
+                NotificationKind::OscText => 0,
+                NotificationKind::CommandFinished => 1,
+                NotificationKind::Error => 2,
+            }
+        }
+        const ALL_KINDS: [NotificationKind; 3] = [
+            NotificationKind::OscText,
+            NotificationKind::CommandFinished,
+            NotificationKind::Error,
+        ];
+        let setters: [Setter; 3] = [
+            |config, routing| config.routing_osc_text = routing,
+            |config, routing| config.routing_command_finished = routing,
+            |config, routing| config.routing_error = routing,
+        ];
+
+        for (index, kind) in ALL_KINDS.into_iter().enumerate() {
+            assert_eq!(position(kind), index, "ALL_KINDS is out of order");
+        }
+
+        for kind in ALL_KINDS {
+            // Which `routing_*` field the router reads for `kind`: the one that,
+            // set to `System` with the others toast-only, it returns.
+            let reads: Vec<Setter> = setters
+                .into_iter()
+                .filter(|set| {
+                    let mut config = toast_only_notifications();
+                    set(&mut config, NotificationRouting::System);
+                    NotificationRouter::routing_for(kind, &config) == NotificationRouting::System
+                })
+                .collect();
+            assert_eq!(reads.len(), 1, "{kind:?} must read exactly one routing");
+
+            for routing in ALL_ROUTINGS {
+                let mut config = toast_only_notifications();
+                reads[0](&mut config, routing);
+                assert_eq!(
+                    NotificationRouter::routing_for(kind, &config),
+                    routing,
+                    "{kind:?}"
+                );
+                assert_eq!(
+                    plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::Routed),
+                    routing_has_system_leg(routing),
+                    "{kind:?} routed {routing:?}"
+                );
+            }
         }
     }
 

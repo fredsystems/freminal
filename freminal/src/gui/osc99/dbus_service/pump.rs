@@ -12,7 +12,7 @@
 //! never blocks the thread it is driven on.
 
 use crossbeam_channel::Sender;
-use smol::stream::StreamExt;
+use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{MatchRule, MessageStream};
 

@@ -125,8 +125,10 @@ pub(super) enum DeadPaneOutcome {
 /// `ctx.input(|i| i.focused)` — is hoisted to the caller and passed in as
 /// `window_focus`.
 ///
-/// `system_notifications` is where a system (desktop) notification goes to be
-/// shown; see [`SystemNotifySink`].
+/// `system_notifications` makes the [`SystemNotifySink`] that says where a
+/// system (desktop) notification goes to be shown. It is called at most once,
+/// and only when there is a command-finished notification to route, so a frame
+/// with none never touches the notification service.
 ///
 /// The notification routing pass deliberately stays inside this function,
 /// running *after* the per-tab drain loop over `tabs` and never
@@ -140,7 +142,7 @@ pub(super) fn drain_command_finished_events(
     bell_config: &BellConfig,
     window_focus: WindowFocus,
     toasts: &std::cell::RefCell<toast::ToastStack>,
-    system_notifications: &SystemNotifySink,
+    system_notifications: impl FnOnce() -> SystemNotifySink,
 ) {
     let active_tab_idx = tabs.active_index();
     let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> = Vec::new();
@@ -214,13 +216,14 @@ pub(super) fn drain_command_finished_events(
     if !command_notifications.is_empty()
         && let Ok(mut toasts) = toasts.try_borrow_mut()
     {
+        let system_notifications = system_notifications();
         for req in &command_notifications {
             crate::gui::notifications::NotificationRouter::route(
                 req,
                 notifications_config,
                 window_focus.is_focused(),
                 &mut toasts,
-                system_notifications,
+                &system_notifications,
             );
         }
     }
@@ -726,7 +729,7 @@ mod tests {
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
-            &SystemNotifySink::none(),
+            SystemNotifySink::none,
         );
 
         let Some(active_tab) = tabs.iter().next() else {
@@ -786,7 +789,7 @@ mod tests {
             &bell_config,
             WindowFocus::Focused,
             &toasts,
-            &SystemNotifySink::none(),
+            SystemNotifySink::none,
         );
 
         assert_eq!(
@@ -794,6 +797,63 @@ mod tests {
             Some(crate::gui::toast::ToastKind::Info),
             "a successful command-finished notification must land as an Info toast"
         );
+    }
+
+    /// Drain one finished command under `notifications_config` and return how
+    /// many times the sink provider was called.
+    fn sink_requests_for_one_finished_command(notifications_config: &NotificationsConfig) -> usize {
+        let mut ids = PaneIdGenerator::new(0);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let pane = test_pane(ids.next_id(), rx);
+        let mut tabs = TabManager::new(Tab::new(TabId::first(), pane));
+        if let Err(e) = tx.send(CommandFinishedEvent {
+            pane_id: 0,
+            block: finished_block(Some(0), 30),
+        }) {
+            panic!("send finished event: {e}");
+        }
+        let toasts = std::cell::RefCell::new(crate::gui::toast::ToastStack::default());
+        let requests = std::cell::Cell::new(0_usize);
+
+        drain_command_finished_events(
+            &mut tabs,
+            &TabTitleConfig::default(),
+            notifications_config,
+            &BellConfig::default(),
+            WindowFocus::Focused,
+            &toasts,
+            || {
+                requests.set(requests.get() + 1);
+                SystemNotifySink::none()
+            },
+        );
+        requests.get()
+    }
+
+    #[test]
+    fn drain_command_finished_events_requests_no_sink_without_a_notification_to_route() {
+        let disabled = NotificationsConfig::default();
+        assert_eq!(sink_requests_for_one_finished_command(&disabled), 0);
+
+        // Enabled, but the command ran for less than the threshold.
+        let below_threshold = NotificationsConfig {
+            enabled: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 3600.0,
+            ..NotificationsConfig::default()
+        };
+        assert_eq!(sink_requests_for_one_finished_command(&below_threshold), 0);
+    }
+
+    #[test]
+    fn drain_command_finished_events_requests_the_sink_once_for_a_notification() {
+        let enabled = NotificationsConfig {
+            enabled: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 1.0,
+            ..NotificationsConfig::default()
+        };
+        assert_eq!(sink_requests_for_one_finished_command(&enabled), 1);
     }
 
     #[test]
@@ -826,7 +886,7 @@ mod tests {
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
-            &SystemNotifySink::none(),
+            SystemNotifySink::none,
         );
 
         let Ok(panes) = tabs.active_tab().pane_tree.iter_panes() else {

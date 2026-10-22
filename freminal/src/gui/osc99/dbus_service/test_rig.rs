@@ -18,7 +18,7 @@ use freminal_common::buffer_states::osc99_notification::{
     Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
     Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
 };
-use smol::stream::StreamExt;
+use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 

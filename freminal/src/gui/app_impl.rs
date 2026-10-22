@@ -1563,10 +1563,11 @@ impl freminal_windowing::App for FreminalGui {
             .retarget(window_id, || handle.event_loop_proxy());
 
         // Start the notification service as soon as the config can route OSC 99
-        // to the system leg, before any OSC 99 is routed this frame. Starting
+        // or a plain category (OSC 9 / 777, command-finished, error) to the
+        // system leg, before any notification is routed this frame. Starting
         // here (rather than at the first desktop notification) means the
         // daemon's `GetCapabilities` answer normally arrives before an
-        // application's first `p=?`; an answer that arrives later is
+        // application's first OSC 99 `p=?`; an answer that arrives later is
         // broadcast to the panes as a capability change.
         #[cfg(all(unix, not(target_os = "macos")))]
         self.ensure_osc99_dbus_started();
@@ -1782,10 +1783,6 @@ impl freminal_windowing::App for FreminalGui {
         // it goes permanently stale for every other pane (regression that
         // left the visual bell overlay stuck; see `paint_bell_flash`).
         let window_focus = WindowFocus::from_bool(ctx.input(|i| i.focused));
-        let system_notifications = self.system_notify_sink(
-            &self.config.notifications,
-            super::host_capabilities::PlainNotifyEntry::Routed,
-        );
         drain_command_finished_events(
             &mut win.tabs,
             &self.config.tab_title,
@@ -1793,7 +1790,12 @@ impl freminal_windowing::App for FreminalGui {
             &self.config.bell,
             window_focus,
             &self.toasts,
-            &system_notifications,
+            || {
+                self.system_notify_sink(
+                    &self.config.notifications,
+                    super::host_capabilities::PlainNotifyEntry::Routed,
+                )
+            },
         );
 
         // ── Poll all tabs for PTY death signals ───────────────────────────────
