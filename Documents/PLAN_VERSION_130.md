@@ -9934,7 +9934,83 @@ Deliverable:
 
 ### 150 Cleanup entries
 
-(none yet)
+These come from the adversarial review of 2026-10-22: two parallel CODE-REVIEW passes over
+`main...HEAD`, (A) on the crate and (B) on the GUI and docs. Neither found a blocker. (A)
+confirmed by diffing against `main` that the moved code changes no behaviour.
+
+- **150.C1 (major; A1, B1): the crate's tests did not build on their own.**
+  - `zbus/p2p` was reachable only through the `test-utils` feature, so
+    `cargo test -p freminal-notify` and `cargo clippy -p freminal-notify --all-targets`
+    failed. The workspace run passed only through feature unification.
+  - Fix: a Linux/BSD target dev-dependency `zbus = { workspace = true, features = ["p2p"] }`.
+  - Verify: both per-package commands pass.
+- **150.C2 (A2, B5): `PlainSink::platform_worker` was `pub`.** It becomes `pub(crate)`, so
+  the "tests never reach the OS" invariant is enforced by the compiler.
+- **150.C3 (A3): `PlainRecorder` could not be named.** Re-export it from `test_support`.
+- **150.C4 (A4, B2): the public API varied by platform and feature.** These were the
+  binary-crate dead-code gates that 150.10 should have removed:
+  - `SystemDispatch::Queued`;
+  - the `NoTrackedBackend`, `NoUntrackedBackend` and `DaemonCapabilities` exports;
+  - `DaemonCapabilities::body_markup`.
+
+  All become unconditional, except where a `cfg` removes a real platform dependency.
+- **150.C5 (A5): `linux/test_rig.rs` had about 25 scattered `#[cfg(test)]` attributes.**
+  Split it into a feature-visible rig and a `#[cfg(test)]` sibling of crate-only helpers.
+- **150.C6 (A6, B6): `freminal-notify` was missing from repo-level lists.** Add it to
+  `.coderabbit.yaml` (a path block, the dependency-direction text, the no-`anyhow` list) and
+  to `agents.md` (the no-`anyhow` rule and "Crate-specific guidance").
+- **150.C7 (A7): the crate had the generic workspace description.** It gets its own.
+- **150.C8 (A8): crate files without a licence header.** Add the header every other crate's
+  files carry.
+- **150.C9 (A9, B7): crate docs named GUI-internal types.** Reword them in the crate's own
+  terms.
+- **150.C10 (A10): derived `Debug` printed the 2 MB font.** On `NotifyAssets`,
+  `PlatformUntrackedBackend` and `IconPreparer`, `Debug` is written by hand and prints byte
+  counts.
+- **150.C11 (A11): typo.** "an [`LinuxNotifyHandle`]" becomes "a [`LinuxNotifyHandle`]".
+- **150.C12 (A12): redundant per-item `cfg`s in `plain_worker.rs` and `queue.rs`.** Their
+  module is already gated by the same expression, so the per-item gates are removed.
+- **150.C13 (A13): one-variant enums in the 150.8 fields types** (`ToastAppId`,
+  `PlainToastSound`, `PlainToastDuration`). They are not decisions, so they are removed and
+  the constants live in the conversion. The tests lose only assertions that checked those
+  constants.
+- **150.C14 (A14): two tests asserted nothing real.** The `nowhere` sink drop and the
+  not-wanted `plain_sink` now assert that nothing was delivered or queued.
+- **150.C15 (A15, A16): stale and task-citing comments.** The "Slice 3 (#433)" test doc, and
+  the "maintainer decision, Task 150" comments in `tempfiles.rs`, keep only the reason.
+- **150.C16 (A17): reviewed, not a defect.** `presentation::sound_hint` maps the five OSC 99
+  standard sound names (`error`, `warn`, `warning`, `info`, `question`). That is a different
+  set from the eight icon names. Routing it through `StandardIcon` would add sounds for
+  `help` and the others, which would change behaviour.
+- **150.C17 (B2): three new rustdoc warnings in `freminal` (private items).** They are in
+  `notifications.rs` (`PlainSink::recording`), `osc99/mod.rs` (`UntrackedBackend`) and
+  `glue.rs` (a redundant link target).
+- **150.C18 (B3): the R10 shape remained in two places.**
+  - The non-Linux `feed_back_failed_legs` twin goes. The one call in `apply_and_feed_back`
+    is `cfg`-gated instead.
+  - The non-Linux `ensure_started` existed only to emit a `trace!` that dodged a lint.
+    `DesktopNotifier::ensure_started` and `ensure_notification_service_started` become
+    Linux/BSD-only, and their two call sites carry one `#[cfg]` each, with a reason. This
+    reverses the 150.7b acceptance.
+  - `NotifyWake` running on macOS/Windows is kept. It does real work there, its state is
+    consistent though unread, and it has no dead code. Gating it would put four `cfg`s back
+    at call sites. The reason is recorded in `notify_wake.rs`.
+- **150.C19 (B4): the new policy wrappers were untested.** Add tests for
+  `notification_service_demand` and `plain_notification_demand`. The pure-policy tests in
+  `notifications.rs` and `host_capabilities.rs` lose their Linux-only `cfg`.
+- **150.C20 (B7): stale comments.**
+  - `notifications.rs:15-16` says the service is in `osc99`.
+  - `notifications.rs:387-389` confuses the crate name with the thread name.
+  - `presentation.rs:448` names `icon_decode`.
+  - The Task 150 stub's "Wake-up integration" bullet names `Osc99Wake`.
+- **150.C21 (B8): doc formatting.**
+  - Ragged wraps in the new "Last updated" blocks (COVERAGE, the kitty reference) and in
+    `DESIGN_DECISIONS.md`.
+  - `MASTER_PLAN.md` tables need re-padding to pass `prettier --check`, as they did on
+    `main`.
+- **150.C22 (B9): import grouping.** `freminal_notify` imports join the external-crate group.
+- **150.C23 (B10): verified, nothing to fix.** `test-utils = ["zbus/p2p"]` on Windows is
+  covered by `cargo xtask check-windows`, which runs `--all-features` and passed.
 
 ---
 
