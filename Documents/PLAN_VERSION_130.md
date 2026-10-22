@@ -32,7 +32,7 @@ one plan document, grouped into milestones that ship as point releases:
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
 **138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
-2026-10-22). **150** (created 2026-10-22) is an enriched stub.
+2026-10-22), and **150** (activated 2026-10-22).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -57,8 +57,8 @@ enriched stubs again and get re-decomposed at activation.
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
-| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Pending merge | 138                                |
-| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Stub          | 149                                |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
+| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | In progress   | 149                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -235,7 +235,8 @@ Two seams were considered and **not** made separate tasks:
   126–131 left unscheduled; see "147 Execution model". Task 148 fixes the #553 fuzzing and
   security-audit findings; see "148 Execution model". Its high-severity subtasks should land
   first, ahead of the rest of Task 147 if the two are not run in parallel. Task 149 (#567,
-  the zbus 6 migration) is independent of all of them; see "149 Execution model".
+  the zbus 6 migration) is independent of all of them; see "149 Execution model". Task 150
+  follows Task 149; see "150 Execution model".
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
@@ -9188,14 +9189,16 @@ Task 150 (structural ones; see "150 Evidence").
     to the maintainer's manual checks below);
   - Z12 (the plain icon is cloned, 256 KiB, per notification; the OSC 99 path does the same,
     and the icon pipeline moves in Task 150).
+- **Merged** 2026-10-22 via PR #575 (`fd3c7ede`).
 
-## Task 150 — Desktop Notification Backend Extraction (stub)
+## Task 150 — Desktop Notification Backend Extraction
 
 ### 150 Summary
 
 Give the "show this notification on the OS" side of freminal one owner. Created as an
 enriched stub on 2026-10-22, from the Task 149 adversarial review and a maintainer
-discussion. **Not decomposed**: activate it against the code as it is after Task 149 merges.
+discussion. Activated and decomposed on 2026-10-22 on branch
+`task-150/notification-backend-extraction`, from `main` at `fd3c7ede` (after PR #575).
 
 After Task 149, every system notification has exactly one native backend per platform, but
 the backends have no home of their own. They are spread across:
@@ -9239,7 +9242,7 @@ own change; the structural part is this task's.
   macOS CI. 149.3 split the OSC 99 macOS builder into pure fields plus a thin conversion. The
   same pattern is wanted for every platform builder.
 
-### 150 Proposed shape (decisions to confirm at activation)
+### 150 Shape (from the stub; confirmed at activation, 2026-10-22)
 
 - **One interface, two request kinds.**
   - **Plain** (fire-and-forget): summary, body, urgency. Used by OSC 9, OSC 777,
@@ -9250,13 +9253,14 @@ own change; the structural part is this task's.
   Callers never name a platform. The backend owns the OS connection, worker threads, queue
   budgets (per request kind), icon decoding and temp files, and markup escaping.
 - **Two steps (maintainer decision, 2026-10-22):**
-  1. **A module first.** `freminal/src/gui/desktop_notify/` (name to confirm), designed as if
+  1. **A module first.** `freminal/src/gui/desktop_notify/`, designed as if
      it were a crate: an explicit public surface, nothing reaching into its internals, and no
      behaviour change. The OSC 99 protocol logic (registry, filter, pane state, effects,
      glue) stays in `osc99/` and becomes a caller.
   2. **Then a mechanical move into a `freminal-notify` crate.** The maintainer approved the
-     crate in principle on 2026-10-22; confirm at activation that step 1's surface still
-     supports it. The crate may depend on `freminal-common` only (`freminal-architecture`):
+     crate in principle on 2026-10-22 and confirmed it at activation, as the final subtask
+     of this task (same branch and PR). The crate may depend on `freminal-common` only
+     (`freminal-architecture`):
      - `icon_raster.rs` reads the bundled font through `crate::gui::font_manager`, so it
        must take the font bytes as input instead;
      - toast / glyph types from `crate::gui::icons` / `crate::gui::toast` must stay on the
@@ -9267,22 +9271,543 @@ own change; the structural part is this task's.
 - **Wake-up integration.** The D-Bus service wakes idle windows through a
   `Box<dyn Fn() + Send>` waker (`Osc99Wake`). That is already crate-safe; keep it.
 
-### 150 Open questions (resolve at activation)
-
-| Question                                                                            | Leaning                                    |
-| ----------------------------------------------------------------------------------- | ------------------------------------------ |
-| Module / crate name                                                                 | `desktop_notify` / `freminal-notify`       |
-| Does markup escaping (#560) belong to the backend or to the caller?                 | Backend: it depends on daemon capabilities |
-| Does the OSC 99 icon pipeline (decode, raster, temp files, lookup) move whole?      | Yes; it is platform presentation           |
-| One worker per platform for both kinds, or separate plain/tracked workers?          | One, with per-kind queue budgets           |
-| Rename `Osc99DbusEvent` / `Osc99SystemAction` etc. to backend-neutral names?        | Yes, in step 1                             |
-
 ### 150 Scope limits
 
 - No behaviour change in either step: notification content, routing, gates, `p=?` answers
   and capability broadcasts stay identical, and the existing tests prove it.
 - Out of scope: new notification features, and any change to which notifications are shown
   or when.
+
+### 150 Activation recon (2026-10-22)
+
+Two read-only passes mapped every backend file's imports, its public items and their outside
+users, and every caller. Findings:
+
+- **Most of the backend already needs only `freminal-common`.** Everything under
+  `osc99/dbus_service/` except `wake.rs`, plus `icon_decode.rs`, `icon_tempfiles.rs`,
+  `icon_lookup.rs`, `presentation.rs`, `markup.rs` and `capabilities.rs`, imports only
+  `freminal_common`, external crates and sibling backend files. No backend file imports
+  `freminal_terminal_emulator`.
+- **The upward dependencies to invert are four:**
+  - `dbus_service/wake.rs` uses `freminal_windowing::{RepaintProxy, WindowId}`. It is the GUI's
+    adapter. The service itself only takes `Box<dyn Fn() + Send>`
+    (`Osc99DbusService::spawn`), so `wake.rs` stays in the GUI.
+  - `icon_raster.rs` reads the font through `crate::gui::font_manager::bundled_regular_font_bytes`
+    and takes a `crate::gui::icons::ChromeIcon`. `icons.rs` imports `egui`.
+  - `untracked.rs` uses `ChromeIcon` (as a `HashMap` key) and `crate::gui::icons::standard_icon_glyph`.
+  - `dbus_service/state.rs` uses `crate::gui::app_icon::FREMINAL_ICON_PNG`.
+- **Interface types live on the GUI side today.** `Osc99InstanceId` (private `u64`, read as
+  `.0` by `state.rs` and `effects.rs`), `Osc99SystemBackend` / `Osc99SystemDispatch` /
+  `NoSystemBackend` / `RecordingSystemBackend` (`osc99/effects.rs`) and
+  `Osc99SystemAction::to_leg_activation` (which returns the registry's `Osc99LegActivation`).
+- **Two tables of the eight standard icon names:** `presentation::standard_icon_name` (the
+  freedesktop names) and `icons::standard_icon_glyph` (the glyphs).
+- **Two macOS/Windows delivery workers with different lifecycles:**
+  - `freminal-notify` (`notifications.rs`, plain): a process-wide `ArcSwapOption` static,
+    started lazily and restarted at most every 5 s if it dies. It has no shutdown.
+  - `freminal-osc99-deliver` (`untracked.rs`, OSC 99): owned by the GUI, never restarted, and
+    joined (bounded wait) on drop, which also removes its icon temp files.
+
+  Each has its own enqueue outcome type (`EnqueueOutcome`, `Submit`).
+- **Platform `cfg` reaches callers:**
+  - `FreminalGui` fields `osc99_dbus` and `osc99_wake`;
+  - wake register/retarget/unregister and `ensure_osc99_dbus_started` in `app_impl.rs` and
+    `settings_dispatch.rs`;
+  - about 15 Linux-only items in `osc99/glue.rs`, including two copies of
+    `apply_and_feed_back` and of `system_notify_sink`;
+  - 34 attribute gates in `notifications.rs` production code, 16 of them the
+    `cfg(any(test, not(all(unix, not(target_os = "macos")))))` expression;
+  - a `cfg!(test)` early return in the macOS/Windows `show_system`;
+  - a `cfg!` leg choice in `route_osc99`.
+- **Z12 confirmed.** `plain_notify_args` decodes the app icon once (`OnceLock`) but clones the
+  decoded RGBA `Vec` (256 KiB) into every notification.
+- **Tests that cross the boundary:**
+  - four router-to-fake-daemon tests in `dbus_service/plain.rs` import
+    `gui::notifications` and `gui::toast`;
+  - `glue.rs` tests use `dbus_service::{detached_handle, DetachedQueue}`;
+  - `registry.rs`, `notifications.rs` and `glue.rs` tests use the recording backends.
+- The flake builds from `cleanSource ./.`, so a new crate directory needs no flake change.
+  The workspace `members` / `default-members` lists do.
+
+### 150 Decisions (maintainer, 2026-10-22)
+
+1. **Names.**
+   - Module `freminal/src/gui/desktop_notify/`; crate `freminal-notify`.
+   - Backend-neutral names replace the `Osc99` ones on items that serve every notification
+     (table in 150.6).
+   - Thread names `freminal-osc99-*` become `freminal-notify-*`.
+   - `"OSC 99:"` log prefixes on paths that serve every notification become
+     `"desktop notifications:"`.
+   - OSC 99 registry and protocol types keep their names.
+2. **Two macOS/Windows workers under one owner.** Both move into the backend. Each keeps its
+   lifecycle exactly (plain: static plus respawn; OSC 99: owned plus shutdown join), so a
+   slow macOS delivery for one kind cannot stall the other. Only the duplicated bounded-enqueue
+   outcome type is merged.
+3. **The on-disk icon directory prefix stays `freminal-osc99-icons-`.** The startup sweep then
+   keeps cleaning directories left by earlier builds. The code constant is renamed; its
+   value is not.
+4. **The crate move is the final subtask of this task**, on the same branch and PR.
+5. **The tracked payload stays `&Notification99Data`.** It is in `freminal-common`, the only
+   crate the backend may depend on.
+
+### 150 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **Already settled by the code:**
+  - Markup escaping (#560) belongs to the backend. It already lives in `state.rs` and depends
+    on the daemon's `body-markup` capability.
+  - The icon pipeline (decode, raster, temp files, lookup, presentation) moves whole.
+  - The OSC 99 `g=` cache (`icon_cache.rs`) is protocol state and stays in `osc99/`.
+- **Boundary.** `desktop_notify` contains the OS backends (Linux D-Bus service; the
+  macOS/Windows OSC 99 worker and plain worker), the icon pipeline, markup escaping, daemon
+  capability types and the backend interface types. These stay in the GUI as callers:
+  - OSC 99 registry, glue, effects, filter, pane state and toast spec;
+  - routing (`notifications.rs`);
+  - capability policy (`host_capabilities.rs`);
+  - the wake adapter.
+- **One surface.** Outside code names only items re-exported from `desktop_notify/mod.rs`.
+  No path such as `desktop_notify::linux::state::…` appears outside the module. Test doubles
+  and the fake-daemon rig are re-exported from `desktop_notify::test_support`
+  (`#[cfg(test)]`). It becomes a `test-support` feature at the crate step.
+- **Assets are injected.** `NotifyAssets { app_icon_png: &'static [u8], icon_font: &'static [u8] }`
+  is built once by the GUI and passed to every backend constructor. The `include_bytes!`
+  calls stay in the GUI.
+- **Standard icon names have one table.** A backend-side `StandardIcon` enum (the eight names)
+  carries the kitty name, the freedesktop name and the glyph codepoint. `ChromeIcon` gains
+  `From<StandardIcon>`. The GUI's `standard_icon_glyph` and the backend's
+  `standard_icon_name` both read it.
+- **Interface types move to the backend** as plain data:
+  - `Osc99InstanceId`, with `const fn new(u64)` and `const fn get(self)`;
+  - the tracked and untracked backend traits, the dispatch result and the no-op and
+    recording doubles;
+  - the system action enum.
+
+  The GUI-only conversions (`to_toast_key` / `from_toast_key`, action to
+  `Osc99LegActivation`) become GUI-side functions or `From` impls in `osc99/`.
+- **The wake adapter** (`dbus_service/wake.rs`) moves to `gui/notify_wake.rs`, outside the
+  backend. In 150.7 it is made to compile on every platform, so its callers lose their
+  `cfg`.
+- **Moves are pure moves.** Renames happen only in 150.6, and behaviour changes only where a
+  subtask says so. Each move is verified with a sorted-line-multiset diff and an unchanged
+  test count.
+
+### 150 Execution model
+
+Serial, on one checkout (`task-150/notification-backend-extraction`): the subtasks move the
+same files, so worktrees would only add merge work. Each subtask runs as follows:
+
+1. A sub-agent implements it.
+2. The orchestrator reviews the whole diff against the subtask text, line by line, including
+   every new file in full.
+3. The orchestrator reruns the verification suite.
+4. The orchestrator commits.
+
+A sub-agent that ends without a report is treated as unverified.
+
+Order: 150.1, 150.2, 150.3, 150.4a, 150.4b, 150.5, 150.6, 150.7a, 150.7b, 150.8, 150.9,
+150.10. After 150.10 an adversarial CODE-REVIEW pass covers `main...HEAD`. Every finding, nit
+through blocker, becomes a numbered `150.Cn` entry and is fixed before the PR opens, followed
+by a confirmation review.
+
+No benchmarks: nothing here is on a `freminal-bench-table` path.
+
+### 150 Subtasks
+
+Every subtask's verification is `cargo xtask test`,
+`cargo clippy --all-targets --all-features -- -D warnings` and `cargo xtask check-windows`.
+Every subtask touches platform-gated code; macOS-only code is checked by the macOS CI job.
+
+Every subtask's prohibitions include:
+
+- do NOT touch files outside scope;
+- do NOT commit;
+- do NOT update plan documents;
+- do NOT proceed to the next subtask;
+- no behaviour change unless the subtask names one;
+- no `unwrap`/`expect` outside tests, no raw numeric `as` casts, no new `bool` fields or
+  parameters, no `#[allow(dead_code)]`;
+- no deleted or weakened test assertion (tests may only move or change paths and names).
+
+The stop condition is the same for all: report files changed, the test count before and
+after, and verification results; then await review.
+
+#### 150.1 — The module, and one standard-icon table
+
+Scope:
+
+- `freminal/src/gui/desktop_notify/mod.rs` (new: module docs stating the boundary and the
+  one-surface rule, plus the declarations below);
+- `freminal/src/gui/desktop_notify/standard_icon.rs` (new);
+- `freminal/src/gui/mod.rs` (module declaration);
+- `freminal/src/gui/icons.rs` (`standard_icon_glyph`, `From<StandardIcon> for ChromeIcon`);
+- `freminal/src/gui/osc99/presentation.rs` (`standard_icon_name`);
+- `freminal/src/gui/osc99/icon_raster.rs` and `osc99/untracked.rs` (take `StandardIcon`);
+- `freminal/src/gui/osc99/toast_spec.rs` (only if `standard_icon_glyph`'s signature changes).
+
+What:
+
+- `pub enum StandardIcon { Error, Warning, Info, Question, Help, FileManager, SystemMonitor, TextEditor }`
+  with these methods:
+  - `from_name(&str) -> Option<Self>`, accepting the kitty names, including both `warn` and
+    `warning`;
+  - `freedesktop_name(self) -> &'static str`;
+  - `codepoint(self) -> char`.
+
+  The values are exactly today's: the freedesktop names from `standard_icon_name`, the
+  codepoints from the matching `ChromeIcon` variants.
+- `standard_icon_name` and `standard_icon_glyph` become one-line delegations.
+- `rasterize_chrome_icon_png` and the untracked `IconPreparer` key on `StandardIcon`, not
+  `ChromeIcon`. Rename the function `rasterize_standard_icon_png`.
+- **Pin first:** before changing the two tables, add tests asserting today's full mapping for
+  every name (name to freedesktop name, name to `ChromeIcon`). The tests must pass both before
+  and after.
+- Also add a test that `ChromeIcon::from(icon).codepoint() == icon.codepoint()` for all eight.
+
+Deliverable: the enum, the delegations, the pin tests. `icon_raster.rs` and `untracked.rs` no
+longer import `crate::gui::icons`.
+
+#### 150.2 — Inject the backend's assets
+
+Scope:
+
+- `freminal/src/gui/desktop_notify/assets.rs` (new) and `desktop_notify/mod.rs`;
+- `freminal/src/gui/font_manager.rs` (accessor gate only);
+- `freminal/src/gui/osc99/icon_raster.rs`, `osc99/untracked.rs`;
+- `freminal/src/gui/osc99/dbus_service/{mod.rs,state.rs,plain.rs,test_rig.rs}`;
+- `freminal/src/gui/osc99/glue.rs` (`spawn_osc99_dbus`);
+- `freminal/src/gui/mod.rs` (where `platform_untracked_backend()` is built).
+
+What:
+
+- Add `#[derive(Clone, Copy)] pub struct NotifyAssets { pub app_icon_png: &'static [u8], pub icon_font: &'static [u8] }`.
+- The GUI builds it once, from `app_icon::FREMINAL_ICON_PNG` and
+  `font_manager::bundled_regular_font_bytes()`. Ungate that accessor (today
+  `cfg(any(macos, windows, test))`); the static it returns already exists on every platform.
+- `Osc99DbusService::spawn(waker, assets)` passes it on to `DispatcherState`.
+- `platform_untracked_backend(assets)` and `rasterize_standard_icon_png(font, icon, size)`
+  receive it.
+- Test constructors use a test helper that builds `NotifyAssets` from the same statics.
+- Backend files no longer import `crate::gui::app_icon` or `crate::gui::font_manager`.
+
+Deliverable: the injection, with output unchanged. The existing icon, raster and `Notify`
+content tests pass unchanged.
+
+#### 150.3 — Share decoded icons instead of cloning them (Z12)
+
+Scope: `freminal/src/gui/osc99/presentation.rs` (`Osc99IconImage`, `Osc99DecodedIconCache`),
+`freminal/src/gui/osc99/dbus_service/{state.rs,wire.rs,plain.rs}` and their tests.
+
+What:
+
+- The decoded RGBA moves into an `Arc<[u8]>` (or the image into an `Arc`), so the plain icon
+  `OnceLock` and the decoded-icon cache hand out reference-counted handles.
+- `wire.rs` keeps serialising the bytes borrowed, so the bytes on the wire are unchanged.
+
+Deliverable:
+
+- the change;
+- a test that two consecutive `plain_notify_args` calls share one allocation (`Arc::ptr_eq`
+  or equal data pointers);
+- a test that a cached transmitted icon is not copied per notification;
+- the existing wire-format tests, unchanged.
+
+#### 150.4a — Move the leaf backend files (pure move)
+
+Scope: these files move with `git mv`, and the `use` paths of their users are updated:
+
+| From                                        | To                                     |
+| ------------------------------------------- | -------------------------------------- |
+| `osc99/icon_decode.rs`                      | `desktop_notify/icons/decode.rs`       |
+| `osc99/icon_raster.rs`                      | `desktop_notify/icons/raster.rs`       |
+| `osc99/icon_tempfiles.rs`                   | `desktop_notify/icons/tempfiles.rs`    |
+| `osc99/icon_lookup.rs`                      | `desktop_notify/icons/lookup.rs`       |
+| `osc99/presentation.rs`                     | `desktop_notify/presentation.rs`       |
+| `osc99/markup.rs`                           | `desktop_notify/markup.rs`             |
+| `osc99/capabilities.rs`                     | `desktop_notify/capabilities.rs`       |
+| `osc99/untracked.rs`                        | `desktop_notify/untracked.rs`          |
+
+The users to update are `osc99/mod.rs`, `osc99/{effects,glue,registry,toast_spec}.rs`,
+`osc99/dbus_service/*`, `notifications.rs`, `host_capabilities.rs` and `gui/mod.rs`.
+
+What:
+
+- Every `cfg` gate travels with its module declaration.
+- Outside users import through `desktop_notify::` re-exports only. Visibility within the
+  directory is the narrowest that compiles.
+- The test doubles (`RecordingUntrackedBackend`, `NoUntrackedBackend`) are reached through
+  `desktop_notify::test_support` where they are test-only.
+- No item is renamed.
+
+Deliverable:
+
+- the move;
+- a sorted-line-multiset diff of the moved files showing only `use` paths, visibility
+  prefixes and `rustfmt` re-wraps;
+- an identical test count.
+
+#### 150.4b — Move the D-Bus service and the interface types (pure move)
+
+Scope:
+
+- `osc99/dbus_service/{mod,plain,pump,state,wire,test_rig,breaker_tests}.rs` move to
+  `desktop_notify/linux/` with the same names;
+- `osc99/dbus_service/wake.rs` moves to `gui/notify_wake.rs`;
+- `Osc99InstanceId` (from `osc99/mod.rs`), and `Osc99SystemBackend`, `Osc99SystemDispatch`,
+  `NoSystemBackend`, `RecordingSystemBackend` and `RecordedShow` (from `osc99/effects.rs`),
+  move to `desktop_notify/backend.rs`;
+- the `use` sites in `osc99/*`, `notifications.rs`, `host_capabilities.rs`, `gui/mod.rs`,
+  `app_impl.rs` and `settings_dispatch.rs`.
+
+What:
+
+- `Osc99InstanceId` gets `pub const fn new(u64) -> Self` and `pub const fn get(self) -> u64`.
+  Its `.0` reads and constructions go through them.
+- `to_toast_key` and `from_toast_key` become GUI-side free functions in `osc99/`.
+- `Osc99SystemAction::to_leg_activation` becomes `impl From<Osc99SystemAction> for Osc99LegActivation`
+  in `osc99/mod.rs`.
+- `detached_handle` and `DetachedQueue`, the fake-daemon rig helpers, and the recording
+  backends are re-exported only through `desktop_notify::test_support`.
+- The four router-to-fake-daemon tests in `dbus_service/plain.rs` move into the
+  `notifications.rs` test module, using the rig through `test_support`. The backend no longer
+  imports `gui::notifications` or `gui::toast`, even in tests.
+- No item is renamed.
+
+Deliverable: as in 150.4a. Also, outside `desktop_notify`, a grep shows no path through
+`desktop_notify::linux::` or `desktop_notify::icons::`.
+
+#### 150.5 — Move the macOS/Windows plain worker into the backend
+
+Scope: `freminal/src/gui/notifications.rs`, `freminal/src/gui/desktop_notify/plain_worker.rs`
+(new), `desktop_notify/untracked.rs` and `desktop_notify/mod.rs`.
+
+What:
+
+- These move into `plain_worker.rs`:
+  - `SystemNotification`;
+  - `macos_notification`, `windows_toast`, `show_platform_notification`;
+  - `SYSTEM_NOTIFICATION_QUEUE`, `EnqueueOutcome`, `enqueue_bounded`;
+  - the respawn machinery (`RespawnDecision`, `respawn_decision`, `claim_respawn`,
+    `claim_notify_worker_respawn`, `enqueue_with_respawn`, `same_queue`);
+  - `log_dropped_notification`, `NOTIFY_WORKER`, `spawn_notify_worker`;
+  - their tests.
+- It exposes one entry point, `pub fn show_plain(notification: SystemNotification)`.
+  `notifications.rs` keeps the routing-side mapping `system_notification(req)` from a
+  `NotificationRequest`.
+- `EnqueueOutcome` and untracked's `Submit` merge into one `desktop_notify::queue` type,
+  provided their variants and logging are equivalent. If they are not, stop and report.
+- Each worker's lifecycle is unchanged: static plus respawn for plain, owned plus shutdown for
+  OSC 99.
+
+Deliverable:
+
+- the move;
+- `notifications.rs` production code no longer names `notify_rust`, `tauri_winrt_notification`,
+  `ArcSwapOption` or the worker;
+- the queue and respawn tests unchanged in content, at their new path;
+- an identical test count.
+
+#### 150.6 — Backend-neutral names
+
+Scope: `freminal/src/gui/desktop_notify/**`, `gui/notify_wake.rs`, and the users of renamed
+items in `gui/` (the same file list as 150.4a and 150.4b).
+
+What: rename exactly this set:
+
+| Old                                              | New                                           |
+| ------------------------------------------------ | --------------------------------------------- |
+| `Osc99DbusService` / `Osc99DbusHandle`           | `LinuxNotifyService` / `LinuxNotifyHandle`    |
+| `Osc99DbusEvent`                                 | `SystemNotifyEvent`                           |
+| `Osc99SystemAction`                              | `SystemAction`                                |
+| `Osc99SystemBackend` / `Osc99SystemDispatch`     | `TrackedBackend` / `SystemDispatch`           |
+| `NoSystemBackend` / `RecordingSystemBackend`     | `NoTrackedBackend` / `RecordingTrackedBackend`|
+| `Osc99UntrackedBackend`                          | `UntrackedBackend`                            |
+| `Osc99InstanceId`                                | `NotificationInstanceId`                      |
+| `Osc99DaemonSupport` / `Osc99DaemonCapabilities` | `DaemonSupport` / `DaemonCapabilities`        |
+| `Osc99LinuxDaemon` / `Osc99Platform`             | `LinuxDaemon` / `NotifyPlatform`              |
+| `Osc99IconLookup` / `Osc99IconChoice`            | `IconLookup` / `IconChoice`                   |
+| `Osc99IconImage` / `Osc99DecodedIconCache`       | `IconImage` / `DecodedIconCache`              |
+| `Osc99SoundHint`                                 | `SoundHint`                                   |
+| `Osc99SignalSender` / `Osc99DaemonHealth`        | `SignalSender` / `DaemonHealth`               |
+| `Osc99Wake`                                      | `NotifyWake`                                  |
+| `OSC99_RECONNECT_INTERVAL` etc.                  | `RECONNECT_INTERVAL` etc. (drop the prefix)   |
+| threads `freminal-osc99-{dbus,owner,signals}`    | `freminal-notify-{dbus,owner,signals}`        |
+| threads `freminal-osc99-{icons,deliver}`         | `freminal-notify-{icons,deliver}`             |
+| `FreminalGui::osc99_dbus` / `osc99_wake`         | `notify_service` / `notify_wake`              |
+
+- `"OSC 99:"` log prefixes in backend files become `"desktop notifications:"`, except where
+  the path serves only OSC 99. Each kept one is listed in the report.
+- The icon directory constant is renamed, but its value stays `"freminal-osc99-icons-"`.
+  The probe-file prefix is unchanged too. A comment on the constant records why
+  (maintainer decision 3).
+- `Osc99PlatformSound` / `untracked_sound` stay: they map OSC 99's `s=`.
+- OSC 99 protocol and registry types keep their names.
+
+Deliverable:
+
+- the renames;
+- a grep proving no listed old name remains;
+- a test asserting the icon directory prefix value;
+- an identical test count.
+
+#### 150.7a — One plain-notification sink for every platform
+
+Scope: `freminal/src/gui/desktop_notify/{plain_sink.rs (new),mod.rs,linux/plain.rs,plain_worker.rs}`,
+`freminal/src/gui/notifications.rs`, `freminal/src/gui/osc99/glue.rs`,
+`freminal/src/gui/frame_drain.rs` (the sink type in `drain_command_finished_events` and its
+tests), and the `system_notify_sink` call sites in `freminal/src/gui/app_impl.rs` and
+`freminal/src/gui/settings_dispatch.rs`.
+
+What:
+
+- The backend provides `PlainSink`, a cloneable value with one method on every platform,
+  `show(&self, PlainNotification)`.
+  - Its private enum holds the Linux `PlainNotifySender`, the macOS/Windows plain worker, a
+    "no service" variant (today's `none()`, with its debug log), and a test recorder
+    (`#[cfg(test)]`).
+  - `PlainNotification` becomes the request on every platform. On macOS and Windows, urgency
+    is not read, as today.
+- `SystemNotifySink` and both `show_system` copies are replaced. The router calls `sink.show`.
+- Delete:
+  - the `cfg!(test)` early return (tests pass a recorder instead);
+  - the non-Linux `system_notify_sink` with its `let _ = self;`;
+  - the platform split of `resolve_system_notify_sink`.
+- The service-start policy (`plain_notifications_may_use_system_leg`) stays in the GUI and is
+  passed in, as now.
+- Tests that relied on the `cfg!(test)` guard use the recorder, and assert what was sent.
+
+Deliverable:
+
+- no platform `cfg` in `notifications.rs` production code outside the request mapping, with
+  any that remain listed and justified;
+- the router tests and the plain fake-daemon tests unchanged in content;
+- `check-windows` clean.
+
+#### 150.7b — The `DesktopNotifier` facade
+
+Scope: `freminal/src/gui/desktop_notify/{notifier.rs (new),mod.rs}`, `gui/notify_wake.rs`,
+`freminal/src/gui/mod.rs` (fields), `freminal/src/gui/osc99/glue.rs`, `osc99/effects.rs`,
+`freminal/src/gui/app_impl.rs`, `freminal/src/gui/settings_dispatch.rs` and
+`freminal/src/gui/notifications.rs` (the `route_osc99` leg choice).
+
+What:
+
+- `DesktopNotifier` is the one `FreminalGui` field that owns the backends. It replaces
+  `notify_service` (`RefCell<Option<LinuxNotifyHandle>>`) and `osc99_untracked`. It is
+  constructed with `NotifyAssets` and the waker, and has these methods on every platform:
+
+  - `ensure_started(ServiceDemand)`: today's `ensure_osc99_dbus_started`; a no-op off
+    Linux/BSD.
+  - `plain_sink(impl FnOnce() -> ServiceDemand) -> PlainSink`: today's resolution, including
+    the busy-cell fallback.
+  - `with_backends(f)`: calls `f(&mut dyn TrackedBackend, &mut dyn UntrackedBackend)`,
+    falling back to the no-op backends when a cell is busy, exactly as `with_osc99_sink`
+    does.
+  - `drain_events() -> Vec<SystemNotifyEvent>`: empty off Linux/BSD.
+
+  `ServiceDemand { Wanted, NotWanted }` is a named enum: the policy stays in
+  `host_capabilities.rs`, and the notifier only obeys.
+- `desktop_notify::SYSTEM_LEG` is a `const` of a two-variant enum (`Tracked` on Linux/BSD,
+  `Untracked` elsewhere). It replaces the `cfg!` in `route_osc99`. The registry's `Osc99Leg`
+  is chosen from it.
+- `NotifyWake` compiles on every platform, so its register/retarget/unregister calls in
+  `app_impl.rs` lose their `cfg`.
+- The two `apply_and_feed_back` copies in `glue.rs` merge into one. `glue.rs`, `app_impl.rs`
+  and `settings_dispatch.rs` keep no backend platform `cfg`. Policy `cfg`s in
+  `host_capabilities.rs` are left alone and listed.
+- The shutdown order is unchanged: dropping `FreminalGui` drops the untracked worker (joining
+  it and removing temp files) and the service handle.
+
+Deliverable:
+
+- the facade;
+- unit tests for each method's fallback (busy, not started, not wanted) moved or ported from
+  the `resolve_system_notify_sink` and `with_osc99_sink` tests;
+- a list of every remaining platform `cfg` outside `desktop_notify`, each with its reason.
+
+#### 150.8 — Testable platform builders (R13)
+
+Scope: `freminal/src/gui/desktop_notify/{plain_worker.rs,untracked.rs}`.
+
+What:
+
+- Every platform builder becomes a pure fields function, compiled and tested on every
+  platform, plus a thin conversion compiled only on its platform. This is the pattern 149.3
+  used for `macos_notification_fields`.
+  - **Windows plain toast:** title, `text1` (left out for an empty body), silent, short
+    duration, app id.
+  - **macOS plain notification:** appname, icon, summary, body.
+  - **Windows untracked toast** (OSC 99): including the `appLogoOverride` image URI and sound.
+- The conversions only copy fields; no decision remains in them.
+
+Deliverable: fields tests for each builder, run on Linux CI. The conversions are byte-for-byte
+the old builders, which review checks by reading them.
+
+#### 150.9 — Documentation
+
+Scope:
+
+- `Documents/DESIGN_DECISIONS.md` (a "Desktop notification backends" section: the boundary,
+  the two request kinds, the one-surface rule, injected assets, worker lifecycles, why the
+  icon directory prefix is kept);
+- `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `ESCAPE_SEQUENCE_GAPS.md`,
+  `KITTY_PROTOCOL_REFERENCE.md` (paths, type and thread names only; no behaviour claims
+  change);
+- the `.opencode/skills/` files that name `osc99/dbus_service`, `untracked.rs` or the renamed
+  types (find them with grep);
+- module docs in `desktop_notify/mod.rs`.
+
+What: every reference to a moved path, a renamed type or a renamed thread is updated. Every
+doc claim about notification behaviour is checked against the code and left unchanged.
+
+Verification: markdownlint and `prettier --check` on the named files only.
+
+#### 150.10 — The `freminal-notify` crate
+
+Scope:
+
+- `freminal/src/gui/desktop_notify/**` moves with `git mv` to `freminal-notify/src/**`;
+- `freminal-notify/Cargo.toml` (new);
+- the root `Cargo.toml` (`members`, `default-members`, workspace dependency entries);
+- `freminal/Cargo.toml`;
+- `Cargo.lock`;
+- the `use` sites in `freminal/src/gui/`;
+- `agents.md` (workspace layout block), the `freminal-architecture` skill (crate list and
+  dependency direction), `DESIGN_DECISIONS.md` (the 150.9 section);
+- `xtask/src/**`, `.github/workflows/*.yml`, `deny.toml` and `codecov.yml`, but only where
+  they list crates by name.
+
+What:
+
+- `freminal-notify` depends on `freminal-common` and external crates only. It inherits the
+  workspace lints, and its package metadata matches its siblings.
+- Its target-specific dependencies move out of `freminal/Cargo.toml`:
+  - `zbus`, `async-io`, `futures-lite`, `serde` and the `image` use on Linux/BSD;
+  - `notify-rust` on macOS;
+  - `tauri-winrt-notification` on Windows;
+  - `swash` and `conv2` where the raster path needs them;
+  - `crossbeam-channel`, `arc-swap`, `thiserror` and `tracing`.
+
+  `freminal` keeps each one only if it still uses it itself (`cargo machete` decides).
+- `pub(in crate::gui)` becomes `pub` on the surface `mod.rs` re-exports. Internals stay
+  private.
+- `test_support` becomes a `test-support` feature that `freminal`'s dev-dependency enables;
+  production builds never enable it. Rig dev-dependencies, such as `zbus`'s `p2p` feature,
+  move with it.
+- Nothing else changes: the diff outside manifests and docs is paths and visibility only.
+
+Deliverable:
+
+- the crate;
+- `cargo tree -p freminal-notify` shows no workspace crate except `freminal-common`;
+- `cargo machete`, `cargo deny check` and `cargo xtask ci` pass;
+- an identical test count across the workspace.
+
+### 150 Status notes
+
+(none yet)
+
+### 150 Cleanup entries
+
+(none yet)
 
 ---
 

@@ -249,8 +249,8 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
 | 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
-| 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Pending merge | Task 138                      |
-| 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Stub          | Task 149                      |
+| 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
+| 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | In progress   | Task 149                      |
 
 ---
 
@@ -506,7 +506,7 @@ was reverted and is tracked separately. All target stable kitty specs; v0.11.0 k
 
 **Tasks 102–105 and 126–150 (v0.13.x, kitty compliance):** see `PLAN_VERSION_130.md`. It has
 the audit, the common-work analysis, the milestone split, and the per-task stubs. Tasks
-126–132, 138, 147, 148 and 149 are fully decomposed; 150 is an enriched stub. Task 126 lands first (safety gate). Then Task 127 (#531) and
+126–132, 138, 147, 148, 149 and 150 are fully decomposed. Task 126 lands first (safety gate). Then Task 127 (#531) and
 Task 128 (CSI dispatch foundation) run in parallel worktrees. The earlier breakdowns of
 Tasks 102–104 were superseded by enriched stubs after the audit found factual errors in them.
 Tasks 102 and 103 were originally planned for v0.12.0 and moved to v0.13.0 when v0.12.0 was
@@ -841,7 +841,8 @@ Update this section as tasks complete:
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
-| 149  | 2026-10-22 |            | 149.1-149.4, C1-C17, two review passes; PR #575 pending                            |
+| 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
+| 150  | 2026-10-22 |            | 150.1-150.10 decomposed; in progress on task-150 branch                            |
 
 ---
 
@@ -864,7 +865,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
 - `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, merged via PR #526)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
-- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–150; audit + 126–132, 138, 147, 148, 149 decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0–v0.13.4 "Kitty: Full Protocol Compliance" (Tasks 102–105, 126–150; audit + 126–132, 138, 147–150 decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)
