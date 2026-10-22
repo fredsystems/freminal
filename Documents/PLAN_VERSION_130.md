@@ -9863,6 +9863,36 @@ Deliverable:
     `let _ = self;`) needs the facade to own the service cell, so it moved to 150.7b.
   - `Route::Nowhere` / `nowhere()` are gated `any(test, Linux/BSD)`: macOS/Windows
     production never builds one.
+- **150.7b (done, `d294c454`).** `DesktopNotifier` (`desktop_notify/notifier.rs`) is the one
+  `FreminalGui` field that owns the backends. Its methods on every platform are
+  `ensure_started(ServiceDemand)`, `plain_sink(…)` and `with_backends(…)`. `is_started` and
+  `drain_events` exist on Linux/BSD only, where the events exist.
+  - It takes a waker factory, so the service gets its waker when it first starts.
+  - The platform split is a private `platform` module of free functions.
+  - `SYSTEM_LEG` replaces the `cfg!` leg choice in `route_osc99`.
+  - `NotifyWake` and its calls are ungated.
+  - The `system_notify_sink` and `apply_and_feed_back` pairs are one definition each.
+  - The four `resolve_system_notify_sink` tests moved to `notifier.rs` (17 notifier tests in
+    all).
+  - **Review changes by the orchestrator:**
+    - The sub-agent made the system-event entry point cfg-free with a macOS/Windows twin
+      whose only body was a `debug_assert`, there to read `self`. That is the shape Task 149
+      flagged (R10), so the twin was removed. The single `route_osc99_system_events` call in
+      `app_impl.rs` keeps one `#[cfg]`, with a comment giving the reason: the event types
+      exist only where a tracked leg does.
+  - **Accepted, with reasons:**
+    - Off Linux/BSD, `ensure_started` emits one `trace!` line. Otherwise clippy's
+      `missing_const_for_fn` would propagate a platform-only `const` up to the GUI caller.
+    - The ported `route_through` helper no longer asserts that System routing pushes no
+      toast. That is a router property, and it is asserted by the router tests in
+      `notifications.rs`.
+    - The non-Linux `feed_back_failed_legs` keeps the old `debug_assert` that nothing failed.
+  - **Remaining platform `cfg`s outside `desktop_notify`:**
+    - `glue.rs`: the event chain that consumes `SystemNotifyEvent`, and the feed-back pair;
+    - `host_capabilities.rs`: `daemon_state_change`;
+    - `osc99/mod.rs` and `registry.rs`: the Linux tracked-leg types and methods;
+    - the one call in `app_impl.rs` described above;
+    - test modules.
 
 ### 150 Cleanup entries
 
