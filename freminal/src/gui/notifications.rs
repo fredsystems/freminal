@@ -11,12 +11,12 @@
 //! the per-category routing policy from the `[notifications]` config:
 //!
 //! - **Toast leg:** push an entry onto the in-app [`ToastStack`].
-//! - **System leg:** show a desktop notification. On Linux/BSD it is handed to
-//!   freminal's own D-Bus notification service (see `osc99`) through a
-//!   [`SystemNotifySink`], as an untracked "plain" notification. On macOS and
-//!   Windows it is shown on a long-lived background worker thread: by
-//!   `notify-rust` on macOS, and as a toast built directly with
-//!   `tauri-winrt-notification` on Windows.
+//! - **System leg:** show a desktop notification, as an untracked "plain"
+//!   notification handed to a [`PlainSink`]. On Linux/BSD the sink reaches
+//!   freminal's own D-Bus notification service (see `osc99`). On macOS and
+//!   Windows it reaches a long-lived background worker thread: `notify-rust`
+//!   on macOS, and a toast built directly with `tauri-winrt-notification` on
+//!   Windows.
 //!   (OSC 99 is the exception: its system leg is driven by the registry through
 //!   the platform's own backend, see `osc99`.)
 //!
@@ -31,10 +31,8 @@ use std::time::Instant;
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use freminal_common::buffer_states::osc::OscNotifySource;
-#[cfg(all(unix, not(target_os = "macos")))]
-use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 use freminal_common::buffer_states::osc99_notification::{
-    Notification99Data, NotificationOccasion, Osc99ControlKind,
+    Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ControlKind,
 };
 use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
@@ -42,11 +40,7 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
-use super::desktop_notify::LinuxDaemon;
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
-use super::desktop_notify::SystemNotification;
-#[cfg(all(unix, not(target_os = "macos")))]
-use super::desktop_notify::{PlainNotification, PlainNotifySender};
+use super::desktop_notify::{LinuxDaemon, PlainNotification, PlainSink};
 use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
@@ -101,16 +95,19 @@ impl NotificationRequest {
         })
     }
 
-    /// This request as the Linux/BSD notification service takes it: the
-    /// summary (with its per-kind fallback) and the body, raw (the service
-    /// escapes them as the daemon's capabilities call for), and `Critical`
+    /// This request as a [`PlainNotification`], on every platform: the
+    /// summary (with its per-kind fallback) and the body, raw, and `Critical`
     /// urgency for [`NotificationKind::Error`], `Normal` for everything else.
+    ///
+    /// The text is raw because what to do about markup depends on the
+    /// platform: the Linux/BSD service escapes it as the daemon's capabilities
+    /// call for (issue #560), while macOS and Windows interpret none, so
+    /// escaping there would only show a stray zero-width character.
     ///
     /// Error-category notifications use `Critical` so they persist and pop as
     /// a banner. Many Linux notification daemons only raise a banner (rather
     /// than silently filing the notification in the tray) when an urgency
-    /// hint is set.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// hint is set. macOS and Windows do not read the urgency.
     fn plain_notification(&self) -> PlainNotification {
         PlainNotification {
             summary: self.summary().to_owned(),
@@ -120,52 +117,6 @@ impl NotificationRequest {
             } else {
                 NotificationUrgency::Normal
             },
-        }
-    }
-}
-
-/// Where a system (desktop) notification for a request goes to be shown.
-///
-/// Platform-neutral so every caller of [`NotificationRouter::route`] passes
-/// one. On Linux/BSD it is a [`PlainNotifySender`] on freminal's own D-Bus
-/// notification service, which is a long-lived resource the GUI owns
-/// (`FreminalGui::system_notify_sink` makes the sink for one routing call);
-/// on macOS and Windows it carries nothing, because the platform worker is a
-/// process-wide queue. A sink with no sender, as the GUI makes while the
-/// service is neither running nor wanted, drops system notifications.
-#[derive(Debug, Clone, Default)]
-pub(super) struct SystemNotifySink {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    sender: Option<PlainNotifySender>,
-}
-
-impl SystemNotifySink {
-    /// A sink with nowhere to send a system notification: for tests, and for
-    /// when the notification service is not available.
-    pub(super) const fn none() -> Self {
-        Self {
-            #[cfg(all(unix, not(target_os = "macos")))]
-            sender: None,
-        }
-    }
-
-    /// A sink that shows system notifications through `sender`.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub(super) const fn through(sender: PlainNotifySender) -> Self {
-        Self {
-            sender: Some(sender),
-        }
-    }
-
-    /// Hand `notification` to the service, or drop it (with a debug log) when
-    /// there is no service to hand it to.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn show(&self, notification: PlainNotification) {
-        match &self.sender {
-            Some(sender) => sender.send(notification),
-            None => {
-                tracing::debug!("no desktop notification service to show a notification; dropped");
-            }
         }
     }
 }
@@ -318,7 +269,7 @@ impl NotificationRouter {
         config: &NotificationsConfig,
         focused: bool,
         toasts: &mut ToastStack,
-        system: &SystemNotifySink,
+        system: &PlainSink,
     ) {
         if !config.enabled {
             return;
@@ -355,7 +306,7 @@ impl NotificationRouter {
         config: &NotificationsConfig,
         focused: bool,
         toasts: &mut ToastStack,
-        system: &SystemNotifySink,
+        system: &PlainSink,
     ) {
         // Same per-source enable-toggle gate as `route`. The Test button's
         // sample request always has `source: None`, so this is a no-op in
@@ -430,74 +381,19 @@ impl NotificationRouter {
         toasts.push_positioned(kind, title, detail, placement);
     }
 
-    /// Show a desktop notification through freminal's own D-Bus notification
-    /// service (Linux/BSD).
+    /// Show a desktop notification: the request is mapped to a
+    /// [`PlainNotification`] and handed to `system` without blocking.
     ///
-    /// The request is mapped to a [`PlainNotification`] and queued on `system`
-    /// without blocking; the service's dispatcher thread makes the D-Bus call,
-    /// so the egui frame thread never waits on the daemon. When `system` has no
-    /// service to queue on, or the service is busy or gone, the notification is
-    /// dropped and a debug line says so: a missing notification daemon is
+    /// Where it goes is the sink's business (the D-Bus service on Linux/BSD,
+    /// the `freminal-notify` worker on macOS and Windows), and a notification
+    /// that cannot be shown is dropped: a missing notification daemon is
     /// non-fatal.
     ///
     /// There is no test guard: the sink is explicit, so a test that passes
-    /// [`SystemNotifySink::none`] reaches no desktop session, and one that
-    /// passes a sink on a fake daemon observes exactly what would be sent.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn show_system(req: &NotificationRequest, system: &SystemNotifySink) {
+    /// [`PlainSink::nowhere`] reaches no desktop session, and one that passes
+    /// [`PlainSink::recording`] observes exactly what would be sent.
+    fn show_system(req: &NotificationRequest, system: &PlainSink) {
         system.show(req.plain_notification());
-    }
-
-    /// Show a desktop notification on the long-lived `freminal-notify` worker
-    /// (macOS and Windows).
-    ///
-    /// Showing a notification can block, so it must not run on the egui frame
-    /// thread. Failures are logged and otherwise ignored — a missing
-    /// notification daemon is non-fatal.
-    ///
-    /// Under `cfg(test)` the real OS call is skipped entirely: on macOS,
-    /// `notify-rust`'s macOS `show()` funnels into the Objective-C notification
-    /// runtime, which throws an *uncatchable foreign exception* when invoked
-    /// from a non-`.app`-bundled binary — exactly what a `cargo test` binary
-    /// is. Rust's unwinder cannot catch it, so the process `abort()`s
-    /// (`SIGABRT`). Because the notification runs on a detached, best-effort
-    /// thread, the abort lands nondeterministically during test teardown and
-    /// takes the whole harness down after every test has already passed. The
-    /// routing policy that these unit tests exercise is fully evaluated before
-    /// this point, so skipping the worker under test loses no coverage. The
-    /// queueing policy is covered separately in the `desktop_notify` module.
-    ///
-    /// Notifications go to one long-lived worker through a bounded queue
-    /// (`SYSTEM_NOTIFICATION_QUEUE`); when it is full the notification is
-    /// dropped, never blocking the frame loop and never spawning a thread.
-    /// `_system` is unused: the worker is a process-wide queue.
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    fn show_system(req: &NotificationRequest, _system: &SystemNotifySink) {
-        // See the doc comment: the OS notification call aborts in test
-        // binaries on macOS (foreign ObjC exception). Never reach the worker here.
-        if cfg!(test) {
-            return;
-        }
-        super::desktop_notify::show_plain(system_notification(req));
-    }
-}
-
-/// Map a request to the [`SystemNotification`] the worker shows (the
-/// [`NotificationRouter::show_system`] path on macOS and Windows -- *not* the
-/// OSC 99 path, which has its own backends and a transmitted icon: see the
-/// `osc99` module; and not Linux/BSD, where
-/// [`NotificationRequest::plain_notification`] feeds freminal's own D-Bus
-/// service).
-///
-/// The summary falls back per kind when the request has no title. The text is
-/// raw: macOS and Windows interpret no markup, so escaping would only show a
-/// stray zero-width character. (Linux/BSD escapes it in the D-Bus service, as
-/// the daemon's capabilities call for: issue #560.)
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
-fn system_notification(req: &NotificationRequest) -> SystemNotification {
-    SystemNotification {
-        summary: req.summary().to_owned(),
-        body: req.body.clone(),
     }
 }
 
@@ -904,25 +800,10 @@ mod tests {
         }
     }
 
-    /// The macOS / Windows text is delivered raw, with no stray zero-width
-    /// characters: those platforms have no markup to defuse.
-    #[test]
-    fn system_notification_leaves_text_raw_without_markup_support() {
-        let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
-        let req = NotificationRequest {
-            kind: NotificationKind::OscText,
-            source: Some(OscNotifySource::Osc777),
-            title: Some(text.to_owned()),
-            body: text.to_owned(),
-        };
-        let notification = system_notification(&req);
-        assert_eq!(notification.summary, text);
-        assert_eq!(notification.body, text);
-        assert!(!notification.summary.contains('\u{200c}'));
-        assert!(!notification.body.contains('\u{200c}'));
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// The text is carried raw, with no stray zero-width characters: macOS and
+    /// Windows have no markup to defuse, and on Linux/BSD escaping depends on
+    /// the daemon's capabilities, so the service does it (see the notification
+    /// service's `state` module) and the mapping must not.
     #[test]
     fn plain_notification_carries_the_raw_summary_and_body() {
         let text = r#"<b>x</b> & <a href="http://e">y</a>"#;
@@ -933,9 +814,6 @@ mod tests {
             body: text.to_owned(),
         };
 
-        // Escaping depends on the daemon's capabilities, so the service does
-        // it (see the notification service's `state` module); the mapping must
-        // not.
         let plain = req.plain_notification();
         assert_eq!(plain.summary, text);
         assert_eq!(plain.body, text);
@@ -943,7 +821,8 @@ mod tests {
         assert!(!plain.body.contains('\u{200c}'));
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// The mapping applies the per-kind summary fallback when the request
+    /// carries no explicit title.
     #[test]
     fn plain_notification_falls_back_to_the_per_kind_summary() {
         for (kind, summary) in [
@@ -969,7 +848,6 @@ mod tests {
 
     /// Error-category notifications carry Critical urgency; everything else is
     /// Normal.
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn plain_notification_urgency_by_kind() {
         for (kind, urgency) in [
@@ -990,10 +868,9 @@ mod tests {
 
     /// A sink with no service drops a system notification without panicking
     /// or blocking.
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_sink_without_a_service_drops_the_notification() {
-        SystemNotifySink::none().show(osc_req("hello").plain_notification());
+        PlainSink::nowhere().show(osc_req("hello").plain_notification());
     }
 
     #[test]
@@ -1019,7 +896,7 @@ mod tests {
 
     /// An explicit title and the body are carried through unchanged.
     #[test]
-    fn system_notification_carries_the_title_and_body() {
+    fn plain_notification_carries_the_title_and_body() {
         let req = NotificationRequest {
             kind: NotificationKind::OscText,
             source: Some(OscNotifySource::Osc9),
@@ -1027,31 +904,13 @@ mod tests {
             body: "world".to_owned(),
         };
         assert_eq!(
-            system_notification(&req),
-            SystemNotification {
+            req.plain_notification(),
+            PlainNotification {
                 summary: "Hello".to_owned(),
                 body: "world".to_owned(),
+                urgency: NotificationUrgency::Normal,
             }
         );
-    }
-
-    /// The mapping applies the per-kind summary fallback when the request
-    /// carries no explicit title.
-    #[test]
-    fn system_notification_uses_the_per_kind_summary_fallback() {
-        for (kind, summary) in [
-            (NotificationKind::OscText, "Notification"),
-            (NotificationKind::CommandFinished, "Command finished"),
-            (NotificationKind::Error, "Error"),
-        ] {
-            let req = NotificationRequest {
-                kind,
-                ..osc_req("body text")
-            };
-            let notification = system_notification(&req);
-            assert_eq!(notification.summary, summary, "{kind:?}");
-            assert_eq!(notification.body, "body text");
-        }
     }
 
     #[test]
@@ -1241,7 +1100,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 0);
     }
@@ -1261,7 +1120,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 1);
     }
@@ -1287,7 +1146,7 @@ mod tests {
             &config,
             false,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 1);
     }
@@ -1307,7 +1166,7 @@ mod tests {
             &config,
             false,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 0);
     }
@@ -1339,7 +1198,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(
             toasts.len(),
@@ -1362,7 +1221,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(
             toasts.len(),
@@ -1387,7 +1246,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 1, "osc_9 = true must still route");
 
@@ -1397,7 +1256,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 1, "osc_777 = true must still route");
     }
@@ -1417,7 +1276,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(
             toasts.len(),
@@ -1443,7 +1302,7 @@ mod tests {
             &config,
             true,
             &mut toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(toasts.len(), 1);
     }
@@ -1674,7 +1533,7 @@ mod tests {
             &config,
             true,
             &mut focused_toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(focused_toasts.len(), 1, "focused -> toast");
 
@@ -1684,7 +1543,7 @@ mod tests {
             &config,
             false,
             &mut unfocused_toasts,
-            &SystemNotifySink::none(),
+            &PlainSink::nowhere(),
         );
         assert_eq!(unfocused_toasts.len(), 0, "unfocused -> system, no toast");
     }
@@ -3111,6 +2970,119 @@ mod tests {
         assert!(weak.upgrade().is_none());
     }
 
+    /// A config with the notification system on and every category routed by
+    /// `routing`.
+    fn notifications(routing: NotificationRouting) -> NotificationsConfig {
+        NotificationsConfig {
+            enabled: true,
+            routing_osc_text: routing,
+            routing_error: routing,
+            routing_command_finished: routing,
+            ..NotificationsConfig::default()
+        }
+    }
+
+    #[test]
+    fn an_osc_9_request_routed_to_system_reaches_the_sink_once_with_normal_urgency() {
+        let (sink, recorder) = PlainSink::recording();
+        let request = NotificationRequest {
+            kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc9),
+            title: Some("a<b>".to_owned()),
+            body: "x & y".to_owned(),
+        };
+        let mut toasts = ToastStack::default();
+
+        NotificationRouter::route(
+            &request,
+            &notifications(NotificationRouting::System),
+            false,
+            &mut toasts,
+            &sink,
+        );
+
+        assert_eq!(
+            recorder.taken(),
+            [PlainNotification {
+                summary: "a<b>".to_owned(),
+                body: "x & y".to_owned(),
+                urgency: NotificationUrgency::Normal,
+            }],
+            "exactly one notification, raw"
+        );
+        assert_eq!(toasts.len(), 0, "System routing pushes no toast");
+    }
+
+    #[test]
+    fn an_error_request_routed_to_system_reaches_the_sink_with_critical_urgency() {
+        let (sink, recorder) = PlainSink::recording();
+        let request = NotificationRequest {
+            kind: NotificationKind::Error,
+            source: None,
+            title: None,
+            body: "exit 2".to_owned(),
+        };
+
+        NotificationRouter::route(
+            &request,
+            &notifications(NotificationRouting::System),
+            false,
+            &mut ToastStack::default(),
+            &sink,
+        );
+
+        assert_eq!(
+            recorder.taken(),
+            [PlainNotification {
+                summary: "Error".to_owned(),
+                body: "exit 2".to_owned(),
+                urgency: NotificationUrgency::Critical,
+            }]
+        );
+    }
+
+    #[test]
+    fn toast_only_routing_delivers_nothing_to_the_sink() {
+        let (sink, recorder) = PlainSink::recording();
+        let mut toasts = ToastStack::default();
+
+        NotificationRouter::route(
+            &osc_req("world"),
+            &notifications(NotificationRouting::Toast),
+            false,
+            &mut toasts,
+            &sink,
+        );
+
+        assert_eq!(toasts.len(), 1, "the toast leg ran");
+        assert_eq!(recorder.taken(), [], "the system leg did not");
+    }
+
+    #[test]
+    fn the_test_button_delivers_one_notification_even_with_the_master_switch_off() {
+        let (sink, recorder) = PlainSink::recording();
+        let config = NotificationsConfig {
+            enabled: false,
+            ..notifications(NotificationRouting::System)
+        };
+        let request = NotificationRequest::sample();
+
+        // `route` honours the master switch: nothing is shown.
+        NotificationRouter::route(&request, &config, true, &mut ToastStack::default(), &sink);
+        assert_eq!(recorder.taken(), []);
+
+        NotificationRouter::route_test(&request, &config, true, &mut ToastStack::default(), &sink);
+
+        assert_eq!(
+            recorder.taken(),
+            [PlainNotification {
+                summary: "Freminal".to_owned(),
+                body: "Test notification".to_owned(),
+                urgency: NotificationUrgency::Normal,
+            }]
+        );
+    }
+
     /// End to end: the router, through the sink, to the fake daemon.
     #[cfg(all(unix, not(target_os = "macos")))]
     mod fake_daemon {
@@ -3118,16 +3090,6 @@ mod tests {
         use crate::gui::desktop_notify::test_support::{
             TestResult, assert_no_queued_events, started,
         };
-
-        fn notifications(routing: NotificationRouting) -> NotificationsConfig {
-            NotificationsConfig {
-                enabled: true,
-                routing_osc_text: routing,
-                routing_error: routing,
-                routing_command_finished: routing,
-                ..NotificationsConfig::default()
-            }
-        }
 
         #[test]
         fn an_osc_9_request_routed_to_system_is_one_escaped_notify_with_normal_urgency()
@@ -3146,7 +3108,7 @@ mod tests {
                 &notifications(NotificationRouting::System),
                 false,
                 &mut toasts,
-                &SystemNotifySink::through(handle.plain_sender()),
+                &PlainSink::through_service(handle.plain_sender()),
             );
             assert_no_queued_events(&mut handle)?;
 
@@ -3179,7 +3141,7 @@ mod tests {
                 &config,
                 false,
                 &mut ToastStack::default(),
-                &SystemNotifySink::through(handle.plain_sender()),
+                &PlainSink::through_service(handle.plain_sender()),
             );
             assert_no_queued_events(&mut handle)?;
 
@@ -3198,7 +3160,7 @@ mod tests {
                 enabled: false,
                 ..notifications(NotificationRouting::System)
             };
-            let sink = SystemNotifySink::through(handle.plain_sender());
+            let sink = PlainSink::through_service(handle.plain_sender());
             let request = NotificationRequest::sample();
 
             // `route` honours the master switch: nothing is shown.
@@ -3239,7 +3201,7 @@ mod tests {
                 &notifications(NotificationRouting::Toast),
                 false,
                 &mut toasts,
-                &SystemNotifySink::through(handle.plain_sender()),
+                &PlainSink::through_service(handle.plain_sender()),
             );
             assert_no_queued_events(&mut handle)?;
 

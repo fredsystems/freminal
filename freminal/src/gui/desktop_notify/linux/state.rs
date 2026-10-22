@@ -18,8 +18,7 @@ use super::super::presentation::{
     DecodedIconCache, IconImage, IconLookup, SoundHint, category_hint, decode_icon_image,
     escape_body_markup, sound_hint,
 };
-use super::super::{DaemonCapabilities, DaemonSupport, NotificationInstanceId};
-use super::plain::PlainNotification;
+use super::super::{DaemonCapabilities, DaemonSupport, NotificationInstanceId, PlainNotification};
 use super::pump::PumpSignal;
 use super::wire::{
     FREMINAL_ICON_NAME, NotifyArgs, NotifyHints, NotifyImage, NotifyReply, is_method_timeout,

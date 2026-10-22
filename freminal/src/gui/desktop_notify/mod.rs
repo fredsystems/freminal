@@ -20,6 +20,7 @@ mod icons;
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod markup;
+mod plain_sink;
 #[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 mod plain_worker;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -35,14 +36,8 @@ pub use backend::{NoTrackedBackend, NotificationInstanceId, SystemDispatch, Trac
 pub use capabilities::DaemonCapabilities;
 pub use capabilities::{DaemonSupport, LinuxDaemon, NotifyPlatform};
 #[cfg(all(unix, not(target_os = "macos")))]
-pub use linux::{
-    LinuxNotifyHandle, LinuxNotifyService, PlainNotification, PlainNotifySender, SystemAction,
-    SystemNotifyEvent,
-};
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
-pub use plain_worker::SystemNotification;
-#[cfg(not(all(unix, not(target_os = "macos"))))]
-pub use plain_worker::show_plain;
+pub use linux::{LinuxNotifyHandle, LinuxNotifyService, SystemAction, SystemNotifyEvent};
+pub use plain_sink::{PlainNotification, PlainSink};
 pub use standard_icon::StandardIcon;
 pub use untracked::{NoUntrackedBackend, UntrackedBackend, platform_untracked_backend};
 

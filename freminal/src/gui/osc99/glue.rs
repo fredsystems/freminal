@@ -34,13 +34,13 @@ use super::{
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
 use crate::gui::desktop_notify::{
-    LinuxDaemon, NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend,
+    LinuxDaemon, NoTrackedBackend, NoUntrackedBackend, PlainSink, TrackedBackend, UntrackedBackend,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use crate::gui::desktop_notify::{LinuxNotifyHandle, LinuxNotifyService, SystemNotifyEvent};
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::host_capabilities::PlainNotifyEntry;
-use crate::gui::notifications::{NotificationRouter, SystemNotifySink};
+use crate::gui::notifications::NotificationRouter;
 use crate::gui::toast::ToastStack;
 use crate::gui::window::PerWindowState;
 
@@ -388,27 +388,27 @@ fn resolve_system_notify_sink(
     slot: &RefCell<Option<LinuxNotifyHandle>>,
     wanted: impl FnOnce() -> bool,
     spawn: impl FnOnce() -> LinuxNotifyHandle,
-) -> SystemNotifySink {
+) -> PlainSink {
     let busy = || {
         tracing::debug!("desktop-notification service handle busy; system notifications dropped");
-        SystemNotifySink::none()
+        PlainSink::nowhere()
     };
     match slot.try_borrow() {
         Ok(running) => {
             if let Some(handle) = running.as_ref() {
-                return SystemNotifySink::through(handle.plain_sender());
+                return PlainSink::through_service(handle.plain_sender());
             }
         }
         Err(_) => return busy(),
     }
     if !wanted() {
-        return SystemNotifySink::none();
+        return PlainSink::nowhere();
     }
     let Ok(mut running) = slot.try_borrow_mut() else {
         return busy();
     };
     let handle = running.get_or_insert_with(spawn);
-    SystemNotifySink::through(handle.plain_sender())
+    PlainSink::through_service(handle.plain_sender())
 }
 
 /// Whether `queue` holds work for the next frame. A busy queue counts as
@@ -744,13 +744,13 @@ impl FreminalGui {
     /// running service costs a shared borrow of the handle cell and one
     /// `Sender` clone; the cell is borrowed mutably only to start the service.
     ///
-    /// Elsewhere the sink carries nothing and the platform worker is used.
+    /// Elsewhere the sink is the platform worker.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn system_notify_sink(
         &self,
         config: &NotificationsConfig,
         entry: PlainNotifyEntry,
-    ) -> SystemNotifySink {
+    ) -> PlainSink {
         resolve_system_notify_sink(
             &self.notify_service,
             || crate::gui::host_capabilities::plain_notifications_may_use_system_leg(config, entry),
@@ -759,18 +759,17 @@ impl FreminalGui {
     }
 
     /// [`Self::system_notify_sink`] where there is no desktop-notification
-    /// service (macOS and Windows): the platform worker shows the
-    /// notification, and the sink has nothing to carry.
+    /// service (macOS and Windows): the sink is the platform worker.
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     pub(in crate::gui) const fn system_notify_sink(
         &self,
         _config: &NotificationsConfig,
         _entry: PlainNotifyEntry,
-    ) -> SystemNotifySink {
+    ) -> PlainSink {
         // The same signature as Linux/BSD's, which reads the service from
         // `self`; the worker here is a process-wide queue.
         let _ = self;
-        SystemNotifySink::none()
+        PlainSink::platform_worker()
     }
 
     /// Run `f` with an [`Osc99EffectSink`] over `toasts` and the live
@@ -1923,7 +1922,7 @@ mod tests {
     /// Route one plain notification through `sink` (System routing, so it
     /// reaches no toast) and report whether the sink handed it to a service.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn route_through(sink: &SystemNotifySink, queue: &DetachedQueue) -> usize {
+    fn route_through(sink: &PlainSink, queue: &DetachedQueue) -> usize {
         use crate::gui::notifications::NotificationRequest;
 
         let notifications = NotificationsConfig {

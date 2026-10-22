@@ -138,8 +138,8 @@ mod state;
 pub(super) mod test_rig;
 mod wire;
 
+pub use plain::PlainNotifySender;
 use plain::{PlainBudget, PlainBudgetSlot};
-pub use plain::{PlainNotification, PlainNotifySender};
 
 use std::time::{Duration, Instant};
 
@@ -151,7 +151,8 @@ use zbus::{Connection, MessageStream};
 use super::icons::lookup::XdgIconLookup;
 use super::presentation::IconLookup;
 use super::{
-    DaemonCapabilities, NotificationInstanceId, NotifyAssets, SystemDispatch, TrackedBackend,
+    DaemonCapabilities, NotificationInstanceId, NotifyAssets, PlainNotification, SystemDispatch,
+    TrackedBackend,
 };
 use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,

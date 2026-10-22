@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crossbeam_channel::{Sender, TrySendError};
-use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 use zbus::Connection;
 
+use super::super::PlainNotification;
 use super::state::{DaemonGate, DispatcherState};
 use super::wire::notify;
 use super::{COMMAND_QUEUE_CAPACITY, DbusCommand, LinuxNotifyHandle};
@@ -143,19 +143,6 @@ pub(super) fn log_dropped_plain(reason: PlainDrop) {
     }
 }
 
-/// A notification that has a summary, a body and an urgency, and nothing else.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlainNotification {
-    /// The notification's title. Raw: the dispatcher escapes it as the
-    /// daemon's capabilities call for.
-    pub summary: String,
-    /// The notification's text. Raw, like the summary.
-    pub body: String,
-    /// The urgency hint: `Critical` persists on most daemons and pops as a
-    /// banner.
-    pub urgency: NotificationUrgency,
-}
-
 /// The GUI's way to show a [`PlainNotification`]: a handle on the service's
 /// command queue that can be cloned and kept, and that never blocks. Every
 /// clone made from one [`LinuxNotifyHandle`] draws on the same
@@ -241,6 +228,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crossbeam_channel::Receiver;
+    use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 
     use super::super::super::test_support::test_assets;
     use super::super::super::{DaemonCapabilities, DaemonSupport, SystemDispatch, TrackedBackend};

@@ -1,10 +1,11 @@
 //! The macOS and Windows delivery worker for freminal's own notifications.
 //!
 //! Showing a notification can block, so it never runs on the egui frame thread:
-//! [`show_plain`] hands a [`SystemNotification`] to one long-lived
+//! [`show_plain`] hands a [`PlainNotification`](super::PlainNotification) to one
 //! `freminal-notify` thread through a bounded queue, and starts a replacement
 //! (rate-limited) if that thread has exited. Linux and BSD have no such worker;
-//! their notifications go through the D-Bus service.
+//! their notifications go through the D-Bus service. Neither platform's
+//! presenter reads the notification's urgency.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -14,30 +15,15 @@ use std::{sync::OnceLock, time::Instant};
 use arc_swap::ArcSwapOption;
 use crossbeam_channel::Sender;
 
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+use super::plain_sink::PlainNotification;
 use super::queue::{Offered, offer};
-
-/// What the macOS / Windows worker shows for a freminal-derived / OSC 9 /
-/// OSC 777 / command-finished notification: a summary and a body, as the
-/// platform presenters take them.
-///
-/// Freminal-owned so the worker queue, its respawn policy and the request
-/// mapping compile and are tested on every platform; only the last step,
-/// [`show_platform_notification`], names a platform API. There is no urgency
-/// or kind: neither platform's presenter reads one.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SystemNotification {
-    /// The headline.
-    pub summary: String,
-    /// The detail text; may be empty.
-    pub body: String,
-}
 
 /// The macOS notification for `notification`: the freminal application icon
 /// by icon-theme **name** (`.icon("freminal")`, matching
 /// `assets/freminal.desktop`'s `Icon=freminal`), no urgency (macOS has none).
 #[cfg(target_os = "macos")]
-fn macos_notification(notification: &SystemNotification) -> notify_rust::Notification {
+fn macos_notification(notification: &PlainNotification) -> notify_rust::Notification {
     let mut built = notify_rust::Notification::new();
     built
         .appname("freminal")
@@ -57,7 +43,7 @@ fn macos_notification(notification: &SystemNotification) -> notify_rust::Notific
 /// urgency is not advertised on Windows (138.C17), so an error notification is
 /// an ordinary toast. An empty body adds no text line.
 #[cfg(target_os = "windows")]
-fn windows_toast(notification: &SystemNotification) -> tauri_winrt_notification::Toast {
+fn windows_toast(notification: &PlainNotification) -> tauri_winrt_notification::Toast {
     use tauri_winrt_notification::{Duration as ToastDuration, Toast};
 
     let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&notification.summary);
@@ -69,10 +55,10 @@ fn windows_toast(notification: &SystemNotification) -> tauri_winrt_notification:
 
 /// Show `notification` on this platform, logging a failure.
 ///
-/// Called only from the worker thread, never from a test (see
-/// `NotificationRouter::show_system`).
+/// Called only from the worker thread, which only `PlainSink::platform_worker`
+/// feeds: never from a test.
 #[cfg(target_os = "windows")]
-fn show_platform_notification(notification: &SystemNotification) {
+fn show_platform_notification(notification: &PlainNotification) {
     if let Err(e) = windows_toast(notification).show() {
         tracing::warn!("failed to show desktop notification: {e}");
     }
@@ -80,10 +66,10 @@ fn show_platform_notification(notification: &SystemNotification) {
 
 /// Show `notification` on this platform, logging a failure.
 ///
-/// Called only from the worker thread, never from a test (see
-/// `NotificationRouter::show_system`).
+/// Called only from the worker thread, which only `PlainSink::platform_worker`
+/// feeds: never from a test.
 #[cfg(target_os = "macos")]
-fn show_platform_notification(notification: &SystemNotification) {
+fn show_platform_notification(notification: &PlainNotification) {
     if let Err(e) = macos_notification(notification).show() {
         tracing::warn!("failed to show desktop notification: {e}");
     }
@@ -263,13 +249,13 @@ fn log_dropped_notification() {
 /// first use, and replaced (rate-limited) if the worker exits; see
 /// [`enqueue_with_respawn`].
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-static NOTIFY_WORKER: ArcSwapOption<Sender<SystemNotification>> = ArcSwapOption::const_empty();
+static NOTIFY_WORKER: ArcSwapOption<Sender<PlainNotification>> = ArcSwapOption::const_empty();
 
 /// Start a `freminal-notify` worker and return its bounded queue. `None` if
 /// the worker thread could not be spawned.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-fn spawn_notify_worker() -> Option<Sender<SystemNotification>> {
-    let (tx, rx) = crossbeam_channel::bounded::<SystemNotification>(SYSTEM_NOTIFICATION_QUEUE);
+fn spawn_notify_worker() -> Option<Sender<PlainNotification>> {
+    let (tx, rx) = crossbeam_channel::bounded::<PlainNotification>(SYSTEM_NOTIFICATION_QUEUE);
     let spawned = std::thread::Builder::new()
         .name("freminal-notify".to_owned())
         .spawn(move || {
@@ -299,7 +285,7 @@ fn spawn_notify_worker() -> Option<Sender<SystemNotification>> {
 /// worker is a process-wide queue. The queueing policy is covered separately
 /// through [`enqueue_bounded`].
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-pub fn show_plain(notification: SystemNotification) {
+pub fn show_plain(notification: PlainNotification) {
     match enqueue_with_respawn(
         &NOTIFY_WORKER,
         notification,
@@ -325,6 +311,8 @@ pub fn show_plain(notification: SystemNotification) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
 
     /// The queueing policy never blocks and never spawns: against a queue
     /// nobody drains, exactly its capacity is accepted and the rest dropped.
@@ -489,7 +477,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_notification_sets_freminal_icon() {
-        let notification = macos_notification(&SystemNotification {
+        let notification = macos_notification(&PlainNotification {
             summary: "Hello".to_owned(),
             body: "world".to_owned(),
         });
