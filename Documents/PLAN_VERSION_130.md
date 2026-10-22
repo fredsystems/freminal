@@ -9710,9 +9710,10 @@ What:
   is chosen from it.
 - `NotifyWake` compiles on every platform, so its register/retarget/unregister calls in
   `app_impl.rs` lose their `cfg`.
-- The two `apply_and_feed_back` copies in `glue.rs` merge into one. `glue.rs`, `app_impl.rs`
-  and `settings_dispatch.rs` keep no backend platform `cfg`. Policy `cfg`s in
-  `host_capabilities.rs` are left alone and listed.
+- The two `apply_and_feed_back` copies in `glue.rs` merge into one. So do the two
+  `FreminalGui::system_notify_sink` copies, which also removes the non-Linux `let _ = self;`
+  (moved here from 150.7a). `glue.rs`, `app_impl.rs` and `settings_dispatch.rs` keep no
+  backend platform `cfg`. Policy `cfg`s in `host_capabilities.rs` are left alone and listed.
 - The shutdown order is unchanged: dropping `FreminalGui` drops the untracked worker (joining
   it and removing temp files) and the service handle.
 
@@ -9846,6 +9847,22 @@ Deliverable:
     worker keeps its own outcome type and logs.
   - In review the orchestrator caught that a test doc comment had been split by the move and
     restored it. A doc-line multiset check then showed nothing lost.
+- **150.6 (done, `2d2f6a6c`).** Renames as tabled. Assertion counts per file are unchanged
+  apart from the new `ICON_DIR_PREFIX` value test. No log line needed changing: every
+  `"OSC 99:"` line left in the backend sits on an OSC-99-only path (the tracked show and
+  close, the untracked worker, icon lookup, raster, temp files and transmitted-icon decode).
+  Every log on a shared path already said `"desktop notifications:"`.
+- **150.7a (done, `87107bd4`).** `PlainSink` (`nowhere`, `through_service`,
+  `platform_worker`, plus the test-only `recording`) and an all-platform `PlainNotification`
+  replace `SystemNotifySink` and `SystemNotification`.
+  - The router has one `show_system`, and the `cfg!(test)` guard is gone.
+  - The macOS-abort reason for the guard moved into the `PlainSink` module docs as the
+    invariant: only GUI production code constructs an OS-reaching sink.
+  - Four new router tests cover the system leg on every platform through the recorder.
+  - **Amendment:** merging the two `FreminalGui::system_notify_sink` copies (and removing
+    `let _ = self;`) needs the facade to own the service cell, so it moved to 150.7b.
+  - `Route::Nowhere` / `nowhere()` are gated `any(test, Linux/BSD)`: macOS/Windows
+    production never builds one.
 
 ### 150 Cleanup entries
 
