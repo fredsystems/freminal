@@ -18,9 +18,9 @@ use freminal_common::buffer_states::osc99_notification::{
     Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
     Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
 };
-use zbus::blocking::{Connection, MessageIterator};
+use smol::stream::StreamExt;
 use zbus::message::{Message, Type as MessageType};
-use zbus::zvariant::{OwnedValue, Structure, Value};
+use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 
 use crate::gui::osc99::presentation::Osc99IconLookup;
 use crate::gui::osc99::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
@@ -30,8 +30,8 @@ use super::state::OwnerTracking;
 use super::wire::NotifyReply;
 use super::{
     BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, ERROR_NAME_HAS_NO_OWNER,
-    NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, Osc99DbusEvent,
-    Osc99DbusHandle, Osc99DbusService,
+    ERROR_SERVICE_UNKNOWN, NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE,
+    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService,
 };
 
 /// How long a test waits for something that must happen. Generous so a
@@ -133,13 +133,13 @@ pub(super) fn timeout_error() -> zbus::Error {
 
 /// An error reply named `name`, as a daemon or the bus sends it.
 pub(super) fn error_reply(name: &str) -> Result<zbus::Error, Box<dyn Error>> {
-    let call = Message::method_call("/", "Ping")?.build(&())?;
-    let reply = Message::error(&call.header(), name.to_owned())?.build(&"details")?;
+    let call = Message::method_call("/", "Ping").build(&())?;
+    let reply = Message::error(&call.header(), name.to_owned()).build(&"details")?;
     Ok(zbus::Error::from(reply))
 }
 
 /// A signal message from the notification daemon, awaiting its body.
-pub(super) fn signal(member: &str) -> zbus::Result<zbus::message::Builder<'_>> {
+pub(super) fn signal(member: &str) -> zbus::message::Builder<'_> {
     Message::signal(NOTIFICATIONS_PATH, NOTIFICATIONS_INTERFACE, member)
 }
 
@@ -149,8 +149,8 @@ pub(super) fn name_owner_changed(
     name: &str,
     new_owner: &str,
 ) -> zbus::Result<Message> {
-    Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
-        .sender(sender)?
+    Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")
+        .sender(sender)
         .build(&(name, "", new_owner))
 }
 
@@ -179,8 +179,8 @@ pub(super) struct RecordedNotify {
 /// The `image-data` hint's `(iiibiiay)` structure, summarised.
 pub(super) type RecordedImage = (i32, i32, i32, bool, i32, i32, usize);
 
-pub(super) fn recorded_image(value: &OwnedValue) -> Option<RecordedImage> {
-    let structure = Structure::try_from(Value::from(value.try_clone().ok()?)).ok()?;
+pub(super) fn recorded_image(value: &OwnedVariant) -> Option<RecordedImage> {
+    let structure = Structure::try_from(Variant::from(value.try_clone().ok()?)).ok()?;
     let (w, h, stride, alpha, bits, channels, data) =
         <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(structure).ok()?;
     Some((w, h, stride, alpha, bits, channels, data.len()))
@@ -194,7 +194,7 @@ pub(super) type NotifyBody = (
     String,
     String,
     Vec<String>,
-    HashMap<String, OwnedValue>,
+    HashMap<String, OwnedVariant>,
     i32,
 );
 
@@ -209,6 +209,9 @@ pub(super) enum NameOwnerAnswer {
     /// Nobody does (`NameHasNoOwner`).
     #[default]
     Nobody,
+    /// The bus knows no service file that could start the name
+    /// (`ServiceUnknown`).
+    ServiceUnknown,
     /// The lookup fails with an unrelated error.
     Broken,
 }
@@ -256,7 +259,7 @@ pub(super) struct DaemonLog {
 
 /// Reply to the call `header` belongs to, with the body `build` makes,
 /// stamped with `sender` (as a bus would) when there is one.
-pub(super) fn reply_with<F>(
+pub(super) async fn reply_with<F>(
     daemon: &Connection,
     header: &zbus::message::Header<'_>,
     sender: Option<&str>,
@@ -265,26 +268,29 @@ pub(super) fn reply_with<F>(
 where
     F: FnOnce(zbus::message::Builder<'static>) -> zbus::Result<Message>,
 {
-    let mut builder = Message::method_return(header)?;
+    let mut builder = Message::method_return(header);
     if let Some(sender) = sender {
-        builder = builder.sender(sender.to_owned())?;
+        builder = builder.sender(sender.to_owned());
     }
-    daemon.send(&build(builder)?)
+    daemon.send(&build(builder)?).await
 }
 
-/// Serve one `Notify` call: record it and answer with the next id, or
-/// refuse it when its summary is [`REJECTED_SUMMARY`].
-pub(super) fn fake_notify(
-    daemon: &Connection,
-    log: &DaemonLog,
-    message: &Message,
-    stamp: Option<&str>,
-) -> zbus::Result<()> {
-    let header = message.header();
+/// What the fake daemon decided about a `Notify` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotifyVerdict {
+    /// It was recorded and got this id.
+    Accepted(u32),
+    /// Its summary is [`REJECTED_SUMMARY`].
+    Rejected,
+}
+
+/// Record a `Notify` call in the log, unless its summary is
+/// [`REJECTED_SUMMARY`]. Synchronous, so that no lock is held across an await.
+fn record_notify(log: &DaemonLog, message: &Message) -> zbus::Result<NotifyVerdict> {
     let (app_name, replaces_id, app_icon, summary, body, actions, hints, timeout) =
         message.body().deserialize::<NotifyBody>()?;
     if summary == REJECTED_SUMMARY {
-        return daemon.reply_error(&header, "org.freedesktop.DBus.Error.Failed", &"rejected");
+        return Ok(NotifyVerdict::Rejected);
     }
     let mut notifies = log.notifies.lock().unwrap_or_else(PoisonError::into_inner);
     let assigned_id = u32::try_from(notifies.len()).map_or(u32::MAX, |n| n + 1);
@@ -315,7 +321,143 @@ pub(super) fn fake_notify(
         assigned_id,
     });
     drop(notifies);
-    reply_with(daemon, &header, stamp, |reply| reply.build(&assigned_id))
+    Ok(NotifyVerdict::Accepted(assigned_id))
+}
+
+/// Serve one `Notify` call: record it and answer with the next id, or
+/// refuse it when its summary is [`REJECTED_SUMMARY`].
+pub(super) async fn fake_notify(
+    daemon: &Connection,
+    log: &DaemonLog,
+    message: &Message,
+    stamp: Option<&str>,
+) -> zbus::Result<()> {
+    let header = message.header();
+    match record_notify(log, message)? {
+        NotifyVerdict::Rejected => {
+            daemon
+                .reply_error(&header, "org.freedesktop.DBus.Error.Failed", &"rejected")
+                .await
+        }
+        NotifyVerdict::Accepted(assigned_id) => {
+            reply_with(daemon, &header, stamp, |reply| reply.build(&assigned_id)).await
+        }
+    }
+}
+
+/// Answer the bus driver's `GetNameOwner` as the log's [`NameOwnerAnswer`]
+/// says.
+async fn fake_get_name_owner(
+    daemon: &Connection,
+    log: &DaemonLog,
+    header: &zbus::message::Header<'_>,
+) -> zbus::Result<()> {
+    let answer = log
+        .name_owner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match answer {
+        NameOwnerAnswer::Owner(owner) => {
+            reply_with(daemon, header, None, |reply| reply.build(&owner)).await
+        }
+        NameOwnerAnswer::Nobody => {
+            daemon
+                .reply_error(header, ERROR_NAME_HAS_NO_OWNER, &"the name has no owner")
+                .await
+        }
+        NameOwnerAnswer::ServiceUnknown => {
+            daemon
+                .reply_error(header, ERROR_SERVICE_UNKNOWN, &"no such service")
+                .await
+        }
+        NameOwnerAnswer::Broken => {
+            daemon
+                .reply_error(
+                    header,
+                    "org.freedesktop.DBus.Error.Failed",
+                    &"lookup failed",
+                )
+                .await
+        }
+    }
+}
+
+/// Serve one `CloseNotification` call: record the id, then answer as the
+/// log's [`CloseAnswer`] says.
+async fn fake_close_notification(
+    daemon: &Connection,
+    log: &DaemonLog,
+    message: &Message,
+    stamp: Option<&str>,
+) -> zbus::Result<()> {
+    let header = message.header();
+    let dbus_id = message.body().deserialize::<u32>()?;
+    log.closes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(dbus_id);
+    let answer = *log
+        .close_answer
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match answer {
+        CloseAnswer::Fail => {
+            daemon
+                .reply_error(
+                    &header,
+                    "org.freedesktop.DBus.Error.Failed",
+                    &"cannot close",
+                )
+                .await
+        }
+        CloseAnswer::CloseSilently => {
+            reply_with(daemon, &header, stamp, |reply| reply.build(&())).await
+        }
+        CloseAnswer::CloseAndSignal => {
+            reply_with(daemon, &header, stamp, |reply| reply.build(&())).await?;
+            daemon
+                .emit_signal(
+                    None::<&str>,
+                    NOTIFICATIONS_PATH,
+                    NOTIFICATIONS_INTERFACE,
+                    "NotificationClosed",
+                    &(dbus_id, 3u32),
+                )
+                .await
+        }
+    }
+}
+
+/// Serve one method call `message`, named `member`, stamping replies with
+/// `stamp`.
+async fn answer_call(
+    daemon: &Connection,
+    log: &DaemonLog,
+    message: &Message,
+    member: &str,
+    stamp: Option<&str>,
+) -> zbus::Result<()> {
+    let header = message.header();
+    match member {
+        "Notify" => fake_notify(daemon, log, message, stamp).await,
+        "GetCapabilities" => {
+            let capabilities = log
+                .capabilities
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            reply_with(daemon, &header, stamp, |reply| reply.build(&capabilities)).await
+        }
+        "GetNameOwner" => fake_get_name_owner(daemon, log, &header).await,
+        "CloseNotification" => fake_close_notification(daemon, log, message, stamp).await,
+        "GetServerInformation" => {
+            daemon
+                .reply(&header, &("fake", "freminal-tests", "0", "1.2"))
+                .await
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Serve `org.freedesktop.Notifications` (and the bus driver's
@@ -333,27 +475,30 @@ pub(super) fn fake_notify(
 /// created before the client could send its first call: a message stream
 /// only sees messages that arrive after it exists.
 ///
+/// An `async fn`: the daemon thread drives it with one [`zbus::block_on`], as a
+/// signal pump does, so none of the zbus calls in it may call `block_on`
+/// themselves.
+///
 /// Hand-written rather than a `#[zbus::interface]`: the macro's expansion
 /// of the eight-argument `Notify` trips pedantic lints that cannot be
 /// silenced without an `allow`.
-pub(super) fn serve_fake_daemon(
+pub(super) async fn serve_fake_daemon(
     daemon: &Connection,
-    messages: MessageIterator,
+    mut messages: MessageStream,
     log: &DaemonLog,
 ) -> zbus::Result<()> {
-    for message in messages {
+    while let Some(message) = messages.next().await {
         let message = message?;
         if message.message_type() != MessageType::MethodCall {
             continue;
         }
-        let header = message.header();
-        let Some(member) = header.member() else {
+        let Some(member) = message.header().member().map(ToString::to_string) else {
             continue;
         };
         let activation = if message
             .primary_header()
             .flags()
-            .contains(zbus::message::Flags::NoAutoStart)
+            .contains(zbus::message::Flags::NO_AUTO_START)
         {
             Activation::Suppressed
         } else {
@@ -362,82 +507,13 @@ pub(super) fn serve_fake_daemon(
         log.calls
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((member.to_string(), activation));
+            .push((member.clone(), activation));
         let stamp = log
             .reply_sender
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        match member.as_str() {
-            "Notify" => fake_notify(daemon, log, &message, stamp.as_deref())?,
-            "GetCapabilities" => {
-                let capabilities = log
-                    .capabilities
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                reply_with(daemon, &header, stamp.as_deref(), |reply| {
-                    reply.build(&capabilities)
-                })?;
-            }
-            "GetNameOwner" => {
-                let answer = log
-                    .name_owner
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                match answer {
-                    NameOwnerAnswer::Owner(owner) => {
-                        reply_with(daemon, &header, None, |reply| reply.build(&owner))?;
-                    }
-                    NameOwnerAnswer::Nobody => daemon.reply_error(
-                        &header,
-                        ERROR_NAME_HAS_NO_OWNER,
-                        &"the name has no owner",
-                    )?,
-                    NameOwnerAnswer::Broken => daemon.reply_error(
-                        &header,
-                        "org.freedesktop.DBus.Error.Failed",
-                        &"lookup failed",
-                    )?,
-                }
-            }
-            "CloseNotification" => {
-                let dbus_id = message.body().deserialize::<u32>()?;
-                log.closes
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(dbus_id);
-                let answer = *log
-                    .close_answer
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                match answer {
-                    CloseAnswer::Fail => daemon.reply_error(
-                        &header,
-                        "org.freedesktop.DBus.Error.Failed",
-                        &"cannot close",
-                    )?,
-                    CloseAnswer::CloseSilently => {
-                        reply_with(daemon, &header, stamp.as_deref(), |reply| reply.build(&()))?;
-                    }
-                    CloseAnswer::CloseAndSignal => {
-                        reply_with(daemon, &header, stamp.as_deref(), |reply| reply.build(&()))?;
-                        daemon.emit_signal(
-                            None::<&str>,
-                            NOTIFICATIONS_PATH,
-                            NOTIFICATIONS_INTERFACE,
-                            "NotificationClosed",
-                            &(dbus_id, 3u32),
-                        )?;
-                    }
-                }
-            }
-            "GetServerInformation" => {
-                daemon.reply(&header, &("fake", "freminal-tests", "0", "1.2"))?;
-            }
-            _ => {}
-        }
+        answer_call(daemon, log, &message, &member, stamp.as_deref()).await?;
     }
     Ok(())
 }
@@ -456,14 +532,18 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
 
     // The handshake needs both ends running at once.
     let server = std::thread::spawn(move || {
-        zbus::blocking::connection::Builder::async_io_unix_stream(server_stream)
-            .server(guid)?
-            .p2p()
-            .build()
+        zbus::block_on(
+            zbus::connection::Builder::unix_stream(server_stream)
+                .server(guid)
+                .p2p()
+                .build(),
+        )
     });
-    let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_stream)
-        .p2p()
-        .build()?;
+    let client = zbus::block_on(
+        zbus::connection::Builder::unix_stream(client_stream)
+            .p2p()
+            .build(),
+    )?;
     let daemon = server
         .join()
         .map_err(|_| "the fake daemon thread panicked")??;
@@ -471,7 +551,7 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
     // once the service is spawned, after this function returns, and a
     // stream created later (say, on the daemon thread) would miss a call
     // that arrived first, leaving the client waiting forever.
-    let messages = MessageIterator::from(&daemon);
+    let messages = MessageStream::from(&daemon);
 
     let log = Arc::new(DaemonLog {
         capabilities: Mutex::new(strings(advertised)),
@@ -482,7 +562,7 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
     std::thread::Builder::new()
         .name("fake-notification-daemon".to_owned())
         .spawn(move || {
-            if let Err(e) = serve_fake_daemon(&daemon_side, messages, &record) {
+            if let Err(e) = zbus::block_on(serve_fake_daemon(&daemon_side, messages, &record)) {
                 tracing::debug!("fake notification daemon stopped: {e}");
             }
         })?;
@@ -567,33 +647,33 @@ impl Rig {
     }
 
     pub(super) fn emit_action(&self, dbus_id: u32, key: &str) -> zbus::Result<()> {
-        self.daemon.emit_signal(
+        zbus::block_on(self.daemon.emit_signal(
             None::<&str>,
             NOTIFICATIONS_PATH,
             NOTIFICATIONS_INTERFACE,
             "ActionInvoked",
             &(dbus_id, key),
-        )
+        ))
     }
 
     pub(super) fn emit_closed(&self, dbus_id: u32, reason: u32) -> zbus::Result<()> {
-        self.daemon.emit_signal(
+        zbus::block_on(self.daemon.emit_signal(
             None::<&str>,
             NOTIFICATIONS_PATH,
             NOTIFICATIONS_INTERFACE,
             "NotificationClosed",
             &(dbus_id, reason),
-        )
+        ))
     }
 
     /// A `NotificationClosed` signal stamped as sent by `sender`: what a
     /// bus delivers, which `emit_signal` over a peer-to-peer connection
     /// cannot produce.
     pub(super) fn emit_closed_from(&self, sender: &str, dbus_id: u32) -> zbus::Result<()> {
-        let message = signal("NotificationClosed")?
-            .sender(sender.to_owned())?
+        let message = signal("NotificationClosed")
+            .sender(sender.to_owned())
             .build(&(dbus_id, 1u32))?;
-        self.daemon.send(&message)
+        zbus::block_on(self.daemon.send(&message))
     }
 
     /// An `ActionInvoked` signal stamped as sent by `sender`.
@@ -603,16 +683,16 @@ impl Rig {
         dbus_id: u32,
         key: &str,
     ) -> zbus::Result<()> {
-        let message = signal("ActionInvoked")?
-            .sender(sender.to_owned())?
+        let message = signal("ActionInvoked")
+            .sender(sender.to_owned())
             .build(&(dbus_id, key))?;
-        self.daemon.send(&message)
+        zbus::block_on(self.daemon.send(&message))
     }
 
     /// The bus driver's `NameOwnerChanged` for the daemon's name.
     pub(super) fn emit_owner_changed(&self, new_owner: &str) -> zbus::Result<()> {
         let message = name_owner_changed(BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE, new_owner)?;
-        self.daemon.send(&message)
+        zbus::block_on(self.daemon.send(&message))
     }
 }
 

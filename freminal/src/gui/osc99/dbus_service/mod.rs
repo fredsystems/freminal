@@ -10,9 +10,9 @@
 //! One *dispatcher* thread (`freminal-osc99-dbus`) owns one D-Bus connection
 //! and calls `org.freedesktop.Notifications` on it (`GetCapabilities` at start
 //! and after every owner change, `Notify` per show, `CloseNotification` per
-//! close). Up to two *signal pump* threads iterate one match rule each over
-//! that connection and forward what they see **into the dispatcher's input
-//! channel**, not to the GUI:
+//! close). Up to two *signal pump* threads each read one match rule's
+//! [`MessageStream`] off that connection and forward what they see **into the
+//! dispatcher's input channel**, not to the GUI:
 //!
 //! - `freminal-osc99-signals` forwards `ActionInvoked` / `NotificationClosed`;
 //! - `freminal-osc99-owner` (bus connections only) forwards `NameOwnerChanged`
@@ -26,6 +26,17 @@
 //! `NO_AUTO_START` flag *and* be bounded by [`OSC99_DBUS_METHOD_TIMEOUT`]; see
 //! `wire::call_no_auto_start`.
 //!
+//! zbus 6 has no blocking API, so every zbus operation the dispatcher makes
+//! is one [`zbus::block_on`] around the async call, and each pump is one
+//! [`zbus::block_on`] around a loop over its stream. The threads are the
+//! dispatcher's `crossbeam` `select!` loop (never inside a `block_on`) and the
+//! pumps; a pump only ever sends on an unbounded channel, so no thread blocks
+//! inside a `block_on` waiting for another. Several threads each calling
+//! `block_on` on futures of the same connection is what zruntime's driver
+//! seat hand-off supports: the connection's tasks run on the thread that built
+//! it (or a helper thread while none is inside `block_on`), and the other
+//! threads poll their own futures when those tasks wake them.
+//!
 //! The GUI talks to the service through an [`Osc99DbusHandle`]: commands go in
 //! over one bounded crossbeam channel (a command that does not fit fails at
 //! the handle) and [`Osc99DbusEvent`]s come back over another,
@@ -36,11 +47,12 @@
 //! Dropping the handle closes the command channel, and the dispatcher thread
 //! returns the next time it looks at it: at once when idle, or after the call
 //! in flight (at most [`OSC99_DBUS_METHOD_TIMEOUT`]). Returning drops the
-//! event sender and the signal receiver. A signal pump is blocked reading the
-//! bus and notices only when it next has something to forward: it exits when
-//! that send fails, or when the connection ends. Until then it is idle and
-//! holds a clone of the connection. Neither pump does any work after the
-//! dispatcher is gone, and both end with the process.
+//! event sender and the signal receiver. A signal pump is waiting on its
+//! stream and notices only when it next has something to forward: it exits
+//! when that send fails, or when the connection ends (a connection's streams
+//! end once it is closed). Until then it is idle and holds a clone of the
+//! connection. Neither pump does any work after the dispatcher is gone, and
+//! both end with the process.
 //!
 //! # Owner tracking
 //!
@@ -69,7 +81,7 @@
 //!
 //! - **Pump loss.** If either pump ends, every mapped instance is reported
 //!   closed, [`Osc99DbusEvent::Unavailable`] is emitted, the connection is
-//!   closed (so a pump that is still blocked on it ends too), and the service
+//!   closed (so a pump that is still waiting on it ends too), and the service
 //!   is unavailable, as after a failed connect (below).
 //! - **Hung daemon.** A `Notify`, `CloseNotification` or `GetCapabilities`
 //!   that times out puts the daemon in `state::Osc99DaemonHealth::Unresponsive`:
@@ -121,7 +133,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, select};
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
-use zbus::blocking::{Connection, MessageIterator};
+use zbus::{Connection, MessageStream};
 
 use super::icon_lookup::XdgIconLookup;
 use super::presentation::Osc99IconLookup;
@@ -135,7 +147,7 @@ use pump::{
 };
 use state::{CloseTarget, DaemonGate, DispatcherState, Osc99SignalSender, OwnerTracking};
 use wire::{
-    close_notification, fetch_capabilities, fetch_daemon_owner, is_method_error, is_no_daemon,
+    close_notification, fetch_capabilities, fetch_daemon_owner, is_no_daemon, is_no_name_owner,
     notify,
 };
 
@@ -152,18 +164,22 @@ const BUS_DRIVER_PATH: &str = "/org/freedesktop/DBus";
 /// The bus driver's interface.
 const BUS_DRIVER_INTERFACE: &str = "org.freedesktop.DBus";
 /// The error the bus driver answers `GetNameOwner` with when nobody owns the
-/// name.
+/// name. Production code matches `fdo::Error::NameHasNoOwner`; the name is for
+/// the tests' fake daemon.
+#[cfg(test)]
 const ERROR_NAME_HAS_NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner";
 /// The error the bus answers a `NO_AUTO_START` call to a name that nobody owns
-/// and that no service file can start.
+/// and that no service file can start. Production code matches
+/// `fdo::Error::ServiceUnknown`; the name is for the tests' fake daemon.
+#[cfg(test)]
 const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
 /// The time between attempts to reconnect while the service is unavailable.
 const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a D-Bus method call waits for its reply before it fails. This is
-/// the libdbus default reply timeout. zbus's blocking calls have no timeout of
-/// their own, so without it a daemon that never answers would block the
+/// the libdbus default reply timeout. zbus's calls have no timeout of their
+/// own by default, so without it a daemon that never answers would block the
 /// dispatcher thread forever and silently end the Linux leg. The bus
 /// connection carries it as its `method_timeout` (which bounds `Notify` and
 /// `CloseNotification`), and `wire::call_no_auto_start` applies it to the calls zbus
@@ -408,9 +424,11 @@ struct Link {
 /// Connect to the session bus with [`OSC99_DBUS_METHOD_TIMEOUT`] on every
 /// method call.
 fn connect_session() -> zbus::Result<Link> {
-    let connection = zbus::blocking::connection::Builder::session()?
-        .method_timeout(OSC99_DBUS_METHOD_TIMEOUT)
-        .build()?;
+    let connection = zbus::block_on(
+        zbus::connection::Builder::session()
+            .method_timeout(OSC99_DBUS_METHOD_TIMEOUT)
+            .build(),
+    )?;
     Ok(Link {
         owner_tracking: OwnerTracking::of(&connection),
         connection,
@@ -573,8 +591,9 @@ where
 /// The subscriptions are made here, before any pump thread starts and before
 /// the first `Notify` or `GetNameOwner`, so no signal can be missed. With
 /// [`OwnerTracking::Bus`] there is a second subscription, to `NameOwnerChanged`
-/// for the daemon's name, with its own pump: a blocking iterator reads one
-/// stream, and match rules cannot be OR-ed, so two streams need two threads.
+/// for the daemon's name, with its own pump: a pump drives one stream inside
+/// one `block_on`, and match rules cannot be OR-ed, so two streams need two
+/// threads.
 /// Both pumps feed the one signal channel. [`OwnerTracking::Peer`] has no bus
 /// driver to ask, so it gets only the first.
 ///
@@ -592,14 +611,17 @@ where
         connection,
         owner_tracking,
     } = connect()?;
-    let notifications =
-        MessageIterator::for_match_rule(notification_signals_rule()?, &connection, None)?;
+    let notifications = zbus::block_on(MessageStream::for_match_rule(
+        notification_signals_rule()?,
+        &connection,
+        None,
+    ))?;
     let owner_changes = match owner_tracking {
-        OwnerTracking::Bus => Some(MessageIterator::for_match_rule(
+        OwnerTracking::Bus => Some(zbus::block_on(MessageStream::for_match_rule(
             owner_changed_rule()?,
             &connection,
             None,
-        )?),
+        ))?),
         OwnerTracking::Peer => None,
     };
 
@@ -624,7 +646,7 @@ where
             )
         });
     if let Err(e) = spawned {
-        if let Err(close_error) = connection.close() {
+        if let Err(close_error) = close_connection(&connection) {
             tracing::debug!("OSC 99: closing the unused connection failed: {close_error}");
         }
         return Err(e);
@@ -634,6 +656,12 @@ where
         owner_tracking,
         signals,
     })
+}
+
+/// Close `connection` (every clone of it: they share one socket), which ends
+/// the pumps' streams.
+fn close_connection(connection: &Connection) -> zbus::Result<()> {
+    zbus::block_on(connection.clone().close())
 }
 
 /// Answer a command that nothing will serve: a show fails and a close
@@ -689,7 +717,7 @@ fn serve(
             },
             recv(signals) -> signal => {
                 if let Some(end) = handle_signal(&connection, state, sink, signal.ok()) {
-                    if let Err(e) = connection.close() {
+                    if let Err(e) = close_connection(&connection) {
                         tracing::debug!("OSC 99: closing the lost connection failed: {e}");
                     }
                     return end;
@@ -926,7 +954,7 @@ fn resolve_daemon_owner(connection: &Connection, tracking: OwnerTracking) -> Osc
         OwnerTracking::Peer => Osc99SignalSender::Unfiltered,
         OwnerTracking::Bus => match fetch_daemon_owner(connection) {
             Ok(owner) => Osc99SignalSender::Owner(owner),
-            Err(e) if is_method_error(&e, ERROR_NAME_HAS_NO_OWNER) => {
+            Err(e) if is_no_name_owner(&e) => {
                 tracing::debug!("OSC 99: no notification daemon owns its name yet");
                 Osc99SignalSender::NoOwner
             }
@@ -1150,13 +1178,13 @@ mod tests {
         // earlier signals were ignored, in order, by the same dispatcher.
         rig.emit_action(999, "default")?;
         rig.emit_closed(999, 1)?;
-        rig.daemon.emit_signal(
+        zbus::block_on(rig.daemon.emit_signal(
             None::<&str>,
             NOTIFICATIONS_PATH,
             NOTIFICATIONS_INTERFACE,
             "ActivationToken",
             &(1u32, "token"),
-        )?;
+        ))?;
         rig.emit_closed(rig.recorded()[0].assigned_id, 1)?;
 
         assert_eq!(
@@ -1508,7 +1536,7 @@ mod tests {
 
         // The daemon's end of the socket goes away: the client's pump sees the
         // stream end.
-        rig.daemon.close()?;
+        zbus::block_on(rig.daemon.close())?;
 
         assert_eq!(
             next_event(&handle)?,
@@ -1857,7 +1885,7 @@ mod tests {
         let _ = handle.show(instance(1), None, &notification());
         assert!(matches!(next_event(&handle)?, Osc99DbusEvent::Shown { .. }));
 
-        first.daemon.clone().close()?;
+        zbus::block_on(first.daemon.clone().close())?;
 
         assert_eq!(
             next_event(&handle)?,

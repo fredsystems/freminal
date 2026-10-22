@@ -6,14 +6,16 @@
 //! The `org.freedesktop.Notifications` wire format and the method calls that
 //! carry it: the `Notify` arguments and hints, the typed replies, and the
 //! bounded calls to the daemon and the bus driver.
+//!
+//! The calls are synchronous functions: each one drives its zbus future to
+//! completion with [`zbus::block_on`] on the dispatcher thread.
 
 use std::time::Duration;
 
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, NotificationUrgency};
 use serde::{Serialize, Serializer};
-use zbus::blocking::Connection;
 use zbus::proxy::MethodFlags;
-use zbus::zvariant::{Signature, Type, as_value};
+use zbus::{Connection, Signature, Type, as_variant};
 
 use crate::gui::osc99::presentation::{
     Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
@@ -21,9 +23,8 @@ use crate::gui::osc99::presentation::{
 };
 
 use super::{
-    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, ERROR_NAME_HAS_NO_OWNER,
-    ERROR_SERVICE_UNKNOWN, NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE,
-    OSC99_DBUS_METHOD_TIMEOUT,
+    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, NOTIFICATIONS_INTERFACE,
+    NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, OSC99_DBUS_METHOD_TIMEOUT,
 };
 
 /// The `urgency` hint's value (`0` low, `1` normal, `2` critical).
@@ -155,22 +156,22 @@ impl<'a> From<&'a Osc99IconImage> for WireImage<'a> {
 /// not set is left out of the dictionary; each present value is a variant
 /// holding its own natural type.
 #[derive(Debug, PartialEq, Eq, Serialize, Type)]
-#[zvariant(signature = "a{sv}")]
+#[zbus(signature = "a{sv}")]
 #[serde(rename_all = "kebab-case")]
 struct WireHints<'a> {
-    #[serde(with = "as_value")]
+    #[serde(with = "as_variant")]
     urgency: u8,
-    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    #[serde(with = "as_variant::optional", skip_serializing_if = "Option::is_none")]
     category: Option<String>,
-    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    #[serde(with = "as_variant::optional", skip_serializing_if = "Option::is_none")]
     suppress_sound: Option<AlwaysTrue>,
-    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    #[serde(with = "as_variant::optional", skip_serializing_if = "Option::is_none")]
     sound_name: Option<String>,
-    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    #[serde(with = "as_variant::optional", skip_serializing_if = "Option::is_none")]
     image_path: Option<String>,
-    #[serde(with = "as_value::optional", skip_serializing_if = "Option::is_none")]
+    #[serde(with = "as_variant::optional", skip_serializing_if = "Option::is_none")]
     image_data: Option<WireImage<'a>>,
-    #[serde(with = "as_value")]
+    #[serde(with = "as_variant")]
     desktop_entry: &'static str,
 }
 
@@ -249,22 +250,39 @@ pub(super) struct NotifyReply {
     pub(super) sender: Option<String>,
 }
 
-/// Whether `error` is the D-Bus error reply named `name`.
-pub(super) fn is_method_error(error: &zbus::Error, name: &str) -> bool {
-    matches!(error, zbus::Error::MethodError(error_name, _, _) if error_name.as_str() == name)
+/// The `org.freedesktop.DBus.Error.*` reply `error` carries, if it is one.
+///
+/// zbus 6 turns every error reply into an `fdo::Error` first, and a name that
+/// `fdo::Error` defines (`NameHasNoOwner`, `ServiceUnknown`, `Failed`,
+/// `NoReply`, ...) reaches the caller as [`zbus::Error::FDO`], never as
+/// [`zbus::Error::MethodError`] (zbus 6.0, `error.rs`, `From<Message>`). Only
+/// a name outside that set stays a `MethodError`, and neither name freminal
+/// looks for is outside it.
+fn fdo_error(error: &zbus::Error) -> Option<&zbus::fdo::Error> {
+    match error {
+        zbus::Error::FDO(fdo) => Some(fdo),
+        _ => None,
+    }
+}
+
+/// Whether `error` is the bus driver's `NameHasNoOwner` reply: nobody owns
+/// the name.
+pub(super) fn is_no_name_owner(error: &zbus::Error) -> bool {
+    matches!(fdo_error(error), Some(zbus::fdo::Error::NameHasNoOwner(_)))
 }
 
 /// Whether `error` says that there is no daemon to call: nobody owns the
 /// name and (for a `NO_AUTO_START` call) nothing may start one.
 pub(super) fn is_no_daemon(error: &zbus::Error) -> bool {
-    is_method_error(error, ERROR_NAME_HAS_NO_OWNER) || is_method_error(error, ERROR_SERVICE_UNKNOWN)
+    is_no_name_owner(error) || matches!(fdo_error(error), Some(zbus::fdo::Error::ServiceUnknown(_)))
 }
 
 /// Whether `error` is a method-call timeout.
 ///
 /// zbus has no variant for it: its `method_timeout` (and [`call_no_auto_start`])
 /// fail with `Error::InputOutput` carrying an [`std::io::ErrorKind::TimedOut`]
-/// `io::Error` (zbus 5.19, `abstractions/timeout.rs`).
+/// `io::Error` (zbus 6.0, `runtime/timeout.rs`). Only `Connection::call_method`
+/// applies `method_timeout`; `Proxy::call_with_flags` does not.
 pub(super) fn is_method_timeout(error: &zbus::Error) -> bool {
     matches!(error, zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut)
 }
@@ -275,9 +293,9 @@ pub(super) fn is_method_timeout(error: &zbus::Error) -> bool {
 /// A proxy is the only public way to send a call with message flags, and it
 /// does not apply the connection's `method_timeout` the way
 /// `Connection::call_method` does, so a daemon that never answers would block
-/// the caller for good. The call is therefore made with the async proxy and
-/// raced against a timer on the calling thread. On a timeout the pending call
-/// is dropped, which ends the wait for its reply: nothing is left behind (an
+/// the caller for good. The call is therefore raced against a timer inside one
+/// [`zbus::block_on`] on the calling thread. On a timeout the pending call is
+/// dropped, which ends the wait for its reply: nothing is left behind (an
 /// earlier version waited on a detached helper thread, which leaked one thread
 /// per timed-out probe while the daemon stayed hung; 138.C26). The error is
 /// the one zbus itself uses for a timeout, see [`is_method_timeout`].
@@ -289,20 +307,20 @@ fn call_no_auto_start<B, R>(
     timeout: Duration,
 ) -> zbus::Result<R>
 where
-    B: Serialize + zbus::zvariant::DynamicType,
-    R: for<'d> zbus::zvariant::DynamicDeserialize<'d>,
+    B: Serialize + zbus::DynamicType,
+    R: for<'d> zbus::wire::DynamicDeserialize<'d>,
 {
     use smol::future::FutureExt;
 
     let call = async {
         zbus::Proxy::new(
-            connection.inner(),
+            connection,
             target.destination,
             target.path,
             target.interface,
         )
         .await?
-        .call_with_flags::<_, _, R>(method, MethodFlags::NoAutoStart.into(), body)
+        .call_with_flags::<_, _, R>(method, MethodFlags::NO_AUTO_START, body)
         .await?
         .ok_or(zbus::Error::InvalidReply)
     };
@@ -313,7 +331,7 @@ where
             "timed out",
         )))
     };
-    smol::block_on(call.or(timer))
+    zbus::block_on(call.or(timer))
 }
 
 /// Where a [`call_no_auto_start`] call goes.
@@ -358,20 +376,20 @@ pub(super) fn fetch_capabilities(connection: &Connection) -> zbus::Result<Vec<St
 
 /// Call `CloseNotification` for the daemon's `dbus_id`.
 pub(super) fn close_notification(connection: &Connection, dbus_id: u32) -> zbus::Result<()> {
-    connection.call_method(
+    zbus::block_on(connection.call_method(
         Some(NOTIFICATIONS_SERVICE),
         NOTIFICATIONS_PATH,
         Some(NOTIFICATIONS_INTERFACE),
         "CloseNotification",
         &dbus_id,
-    )?;
+    ))?;
     Ok(())
 }
 
 /// Call `Notify`, returning the daemon's id for the notification and the
 /// unique name that sent the reply.
 pub(super) fn notify(connection: &Connection, args: &NotifyArgs) -> zbus::Result<NotifyReply> {
-    let reply = connection.call_method(
+    let reply = zbus::block_on(connection.call_method(
         Some(NOTIFICATIONS_SERVICE),
         NOTIFICATIONS_PATH,
         Some(NOTIFICATIONS_INTERFACE),
@@ -386,7 +404,7 @@ pub(super) fn notify(connection: &Connection, args: &NotifyArgs) -> zbus::Result
             args.hints.to_wire(),
             args.expire_timeout,
         ),
-    )?;
+    ))?;
     let dbus_id = reply.body().deserialize::<u32>()?;
     Ok(NotifyReply {
         dbus_id,
@@ -399,25 +417,27 @@ mod tests {
     use std::collections::HashMap;
     use std::error::Error;
 
-    use zbus::zvariant::{OwnedValue, Structure, Value};
+    use zbus::wire::serialized::Context;
+    use zbus::wire::{LE, to_bytes};
+    use zbus::{OwnedVariant, Structure, Variant};
 
     use super::super::test_rig::*;
+    use super::super::{ERROR_NAME_HAS_NO_OWNER, ERROR_SERVICE_UNKNOWN};
     use super::*;
 
     /// `hints` serialised as a D-Bus message body would carry them, and read
     /// back as the receiving daemon reads them.
-    fn round_trip(hints: &WireHints<'_>) -> Result<HashMap<String, OwnedValue>, Box<dyn Error>> {
-        let context = zbus::zvariant::serialized::Context::new_dbus(zbus::zvariant::LE, 0);
-        let data = zbus::zvariant::to_bytes(context, hints)?;
-        Ok(data.deserialize::<HashMap<String, OwnedValue>>()?.0)
+    fn round_trip(hints: &WireHints<'_>) -> Result<HashMap<String, OwnedVariant>, Box<dyn Error>> {
+        let data = to_bytes(Context::new(LE, 0), hints)?;
+        Ok(data.deserialize::<HashMap<String, OwnedVariant>>()?.0)
     }
 
     /// The hint `key` as a `T`, when it is present and is one.
-    fn hint<T: TryFrom<OwnedValue>>(map: &HashMap<String, OwnedValue>, key: &str) -> Option<T> {
+    fn hint<T: TryFrom<OwnedVariant>>(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<T> {
         T::try_from(map.get(key)?.try_clone().ok()?).ok()
     }
 
-    fn sorted_keys(map: &HashMap<String, OwnedValue>) -> Vec<&str> {
+    fn sorted_keys(map: &HashMap<String, OwnedVariant>) -> Vec<&str> {
         let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
         keys.sort_unstable();
         keys
@@ -491,7 +511,7 @@ mod tests {
         };
 
         // Structurally: the wire hints borrow the pixel buffer. They hold no
-        // `Value` (and no copy) for it, so nothing per byte is built.
+        // `Variant` (and no copy) for it, so nothing per byte is built.
         let wire = hints.to_wire();
         let wire_image = wire.image_data.as_ref().ok_or("no image on the wire")?;
         let NotifyImage::Data(held) = &hints.image else {
@@ -503,7 +523,7 @@ mod tests {
         // On the wire: the same pixels, in the `(iiibiiay)` structure.
         let map = round_trip(&wire)?;
         let value = map.get("image-data").ok_or("no image-data hint")?;
-        let structure = Structure::try_from(Value::from(value.try_clone()?))?;
+        let structure = Structure::try_from(Variant::from(value.try_clone()?))?;
         let (w, h, stride, alpha, bits, channels, data) =
             <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(structure)?;
         assert_eq!(
@@ -592,14 +612,63 @@ mod tests {
         let unknown = error_reply(ERROR_SERVICE_UNKNOWN)?;
         let failed = error_reply("org.freedesktop.DBus.Error.Failed")?;
 
-        assert!(is_method_error(&no_owner, ERROR_NAME_HAS_NO_OWNER));
-        assert!(!is_method_error(&failed, ERROR_NAME_HAS_NO_OWNER));
-        assert!(!is_method_error(&timeout_error(), ERROR_NAME_HAS_NO_OWNER));
+        assert!(is_no_name_owner(&no_owner));
+        assert!(!is_no_name_owner(&unknown));
+        assert!(!is_no_name_owner(&failed));
+        assert!(!is_no_name_owner(&timeout_error()));
 
         assert!(is_no_daemon(&no_owner));
         assert!(is_no_daemon(&unknown));
         assert!(!is_no_daemon(&failed));
         assert!(!is_no_daemon(&timeout_error()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_reply_named_by_the_fdo_set_arrives_as_an_fdo_error_not_a_method_error() -> TestResult {
+        // zbus 6 classifies through `fdo::Error`; the matching in
+        // `is_no_daemon` depends on it, so pin it.
+        for name in [ERROR_NAME_HAS_NO_OWNER, ERROR_SERVICE_UNKNOWN] {
+            let error = error_reply(name)?;
+            assert!(matches!(error, zbus::Error::FDO(_)), "{name}: {error:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn name_has_no_owner_and_service_unknown_replies_from_a_daemon_are_no_daemon() -> TestResult {
+        let rig = rig(&["body"])?;
+
+        *rig.log
+            .name_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NameOwnerAnswer::Nobody;
+        let no_owner = fetch_daemon_owner(&rig.client)
+            .err()
+            .ok_or("NameHasNoOwner did not fail the call")?;
+        assert!(matches!(no_owner, zbus::Error::FDO(_)), "{no_owner:?}");
+        assert!(is_no_name_owner(&no_owner), "{no_owner:?}");
+        assert!(is_no_daemon(&no_owner), "{no_owner:?}");
+
+        *rig.log
+            .name_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NameOwnerAnswer::ServiceUnknown;
+        let unknown = fetch_daemon_owner(&rig.client)
+            .err()
+            .ok_or("ServiceUnknown did not fail the call")?;
+        assert!(matches!(unknown, zbus::Error::FDO(_)), "{unknown:?}");
+        assert!(!is_no_name_owner(&unknown), "{unknown:?}");
+        assert!(is_no_daemon(&unknown), "{unknown:?}");
+
+        *rig.log
+            .name_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NameOwnerAnswer::Broken;
+        let broken = fetch_daemon_owner(&rig.client)
+            .err()
+            .ok_or("a failed lookup did not fail the call")?;
+        assert!(!is_no_daemon(&broken), "{broken:?}");
         Ok(())
     }
 }

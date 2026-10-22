@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
-use zbus::blocking::Connection;
+use zbus::Connection;
 
 use crate::gui::osc99::presentation::{
     Osc99DecodedIconCache, Osc99IconLookup, category_hint, escape_body_markup, sound_hint,

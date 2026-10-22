@@ -128,13 +128,14 @@ winapi = "0.3.9"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-csd-adwaita-notitle", "wayland-dlopen", "x11"] }
 winreg = "0.56.0"
 # Direct dependency for the Linux/BSD OSC 99 notification service (Task 138.12):
-# one blocking-API D-Bus connection owns `Notify` / `CloseNotification` /
-# `GetCapabilities` and observes `ActionInvoked` / `NotificationClosed`.
-# `async-io` + `blocking-api` are zbus's own default set, which is the same
-# executor `notify-rust`'s `z` backend already resolves, so the lock file keeps
-# a single zbus copy. Listed with `default-features = false` so the choice is
-# explicit and a future default (for example `tokio`) cannot slip in.
-zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+# one D-Bus connection owns `Notify` / `CloseNotification` / `GetCapabilities`
+# and observes `ActionInvoked` / `NotificationClosed`. zbus 6 has no blocking
+# API, so the service's dispatcher and signal-pump threads drive the async API
+# with `zbus::block_on`. `default-rt` is zbus's own runtime (zruntime), which
+# `block_on` needs; `proxy` is the `Proxy` the `NO_AUTO_START` calls go
+# through. Listed with `default-features = false` so the choice is explicit and
+# a future default (for example `tokio`) cannot slip in.
+zbus = { version = "6.0.0", default-features = false, features = ["default-rt", "proxy"] }
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint

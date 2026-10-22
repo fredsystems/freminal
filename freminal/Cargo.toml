@@ -209,7 +209,9 @@ tauri-winrt-notification.workspace = true
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 serde.workspace = true
 # Times out the service's `NO_AUTO_START` calls without a helper thread
-# (138.C26). The same async-io runtime zbus already runs on.
+# (138.C26) and supplies `StreamExt` for the signal pumps. Its timer is
+# driven by async-io's own reactor thread, so it works inside
+# `zbus::block_on`.
 smol.workspace = true
 zbus.workspace = true
 
