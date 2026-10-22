@@ -1208,9 +1208,12 @@ external crates.
 
 `DesktopNotifier` is the single `FreminalGui` field that owns the backends: the
 service (started on first demand, kept for the process) and the untracked
-backend. Its methods exist on every platform (`ensure_started`, `plain_sink`,
-`with_backends`); `is_started` and `drain_events` exist on Linux/BSD only, where
-the events do. Callers never name a platform.
+backend. `plain_sink` and `with_backends` exist on every platform.
+`ensure_started`, `is_started` and `drain_events` exist on Linux/BSD only: only
+there is a service to start or events to drain. The GUI's two `ensure_started`
+call sites (one per frame, one after a settings apply) and its per-frame
+event-delivery call are each gated with one `#[cfg]` that says why; nothing else
+in the GUI names a platform.
 
 Whether the service is wanted is policy, and the policy stays with the caller:
 it passes a `ServiceDemand { Wanted, NotWanted }` and the notifier only obeys.
@@ -1230,10 +1233,10 @@ glyph codepoint; the GUI's `ChromeIcon` converts from it.
 
 ### Two macOS/Windows worker lifecycles, deliberately not merged
 
-| Worker                    | Thread                    | Lifecycle                                                                                                                         |
-| ------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Plain (`plain_worker.rs`) | `freminal-notify`         | Process-wide static. Started on first use, restarted at most every 5 s if it exits, never shut down. Queue of 16.                 |
-| OSC 99 (`untracked.rs`)   | `freminal-notify-deliver` | Owned by the untracked backend, spawned on the first notification, never restarted, joined (bounded at 500 ms) on drop. Queue 16. |
+| Worker                    | Thread                    | Lifecycle                                                                                                                                                                                                                                  |
+| ------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Plain (`plain_worker.rs`) | `freminal-notify`         | Process-wide static. Started on first use, restarted at most every 5 s if it exits, never shut down. Queue of 16.                                                                                                                          |
+| OSC 99 (`untracked.rs`)   | `freminal-notify-deliver` | Owned by the untracked backend, spawned on the first notification. If it has exited, the notification that finds it gone is dropped and the next one spawns a new worker (no rate limit). Joined (bounded at 500 ms) on drop. Queue of 16. |
 
 Both are bounded queues that drop on full, so neither can stall the frame
 thread. They were kept apart because each lifecycle is load-bearing: the OSC 99

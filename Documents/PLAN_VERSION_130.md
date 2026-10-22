@@ -9306,8 +9306,10 @@ users, and every caller. Findings:
 - **Two macOS/Windows delivery workers with different lifecycles:**
   - `freminal-notify` (`notifications.rs`, plain): a process-wide `ArcSwapOption` static,
     started lazily and restarted at most every 5 s if it dies. It has no shutdown.
-  - `freminal-osc99-deliver` (`untracked.rs`, OSC 99): owned by the GUI, never restarted, and
-    joined (bounded wait) on drop, which also removes its icon temp files.
+  - `freminal-osc99-deliver` (`untracked.rs`, OSC 99): owned by the GUI and joined (bounded
+    wait) on drop, which also removes its icon temp files. If it has exited, the request
+    that finds it gone is dropped and the next one spawns a new worker, with no rate limit.
+    (Corrected at PR #576 review: this line first said "never restarted".)
 
   Each has its own enqueue outcome type (`EnqueueOutcome`, `Submit`).
 - **Platform `cfg` reaches callers:**
@@ -10061,6 +10063,18 @@ confirmed by diffing against `main` that the moved code changes no behaviour.
 
   Items 7 and 10 needed no change: the nowhere test is structural by design, and the
   prettier results on `agents.md` and this plan already fail on `main`.
+- **PR #576 review (Copilot, CodeRabbit), 2026-10-22.** All three findings were valid:
+  - **150.C24 (Copilot):** `DESIGN_DECISIONS.md` still listed `ensure_started` among the
+    all-platform methods after 150.C18 made it Linux/BSD-only. The doc now lists it with
+    `is_started` and `drain_events` and names the three gated GUI call sites.
+  - **150.C25 (Copilot):** the OSC 99 untracked worker was documented as "never restarted",
+    both in this plan (recon and decision 2) and in `DESIGN_DECISIONS.md`. In fact
+    `PlatformUntrackedBackend::show` drops a worker that reports `WorkerGone`, and the next
+    notification spawns a new one, with no rate limit. The code's own doc comment was
+    correct. Both documents now describe the real behaviour; no code change.
+  - **150.C26 (CodeRabbit):** `RecordingTrackedBackend::fail_shows: bool` is public
+    test-utils API. It becomes `show_answer: RecordedShowAnswer { Queue, Fail }`, and the
+    test usages are updated with no assertion change.
 - **Manual-test finding, 2026-10-22: not a freminal defect.** The maintainer ran
   `test-scripts/osc99_notifications.py` against wayle 0.1.3.
   - **Step 6** (`[0001][0002]…`) is the intended numbered long body.
