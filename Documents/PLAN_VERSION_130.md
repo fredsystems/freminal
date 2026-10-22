@@ -9912,6 +9912,25 @@ Deliverable:
   `DESIGN_DECISIONS.md`. Moved paths and renamed threads are updated in the kitty reference
   and COVERAGE, and COVERAGE, GAPS and the kitty reference each got a "Last updated" entry.
   No skill named a moved item. No behaviour claim was found false.
+- **150.10 (done, `b879b0ae`).** `freminal-notify` is a workspace member and a default member.
+  It depends only on `freminal-common` plus external crates (`cargo tree` checked).
+  - **Feature name:** `test-utils`, not `test-support`. `clippy::cargo` rejects the
+    `-support` suffix, and `freminal-windowing`'s `test-utils` (138.5) is the precedent.
+    `freminal` enables it in its dev-dependency only. The module keeps the name
+    `test_support`.
+  - **Gates:** items the GUI's tests use moved from `#[cfg(test)]` to
+    `any(test, feature = "test-utils")`. Rig helpers only the crate's own tests use stay
+    `#[cfg(test)]`, so nothing extra is compiled under the feature.
+  - **Workarounds removed:** every `TODO(150.10)` dead-code workaround is gone (the
+    `StandardIcon` gates and the `NotifyAssets` `expect`s).
+  - **Dependencies:** `zbus`, `async-io`, `futures-lite`, `serde`, `notify-rust` and
+    `tauri-winrt-notification` left `freminal`. In review, the orchestrator moved `swash`,
+    `conv2` and `arc-swap` to a macOS/Windows table (plus dev-dependencies), because only
+    macOS/Windows code uses them.
+  - **Docs:** `agents.md`, the architecture skill, `.github/` docs and the reference docs
+    are updated.
+  - **Verification:** rustdoc `-D warnings` is clean for the crate, with and without
+    private items and the feature. Test count unchanged (9571).
 
 ### 150 Cleanup entries
 
