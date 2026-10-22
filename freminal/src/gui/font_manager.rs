@@ -6,9 +6,10 @@
 //! Font loading, face management, and fallback chain.
 //!
 //! [`FontManager`] is the single authoritative source of font metrics and cell size
-//! for the terminal renderer. It loads fonts via `swash`, provides `rustybuzz::Face`
-//! references for the shaping pipeline, and resolves glyphs through a tiered
-//! fallback chain: primary face -> bundled fallback -> emoji -> system -> tofu.
+//! for the terminal renderer. It loads fonts via `swash`, caches per-face
+//! `harfrust` shaping data for the shaping pipeline, and resolves glyphs
+//! through a tiered fallback chain: primary face -> bundled fallback -> emoji
+//! -> system -> tofu.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,6 +21,8 @@ use fontdb::Database;
 use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
 use freminal_common::config::Config;
 use rustc_hash::FxHashMap;
+
+use super::ligature_shaping::LigatureShaping;
 
 // ---------------------------------------------------------------------------
 //  Bundled font data (compiled into the binary via include_bytes!)
@@ -77,6 +80,22 @@ const EMOJI_BLOCKS: &[(u32, u32)] = &[
 #[must_use]
 pub(crate) const fn bundled_regular_font_bytes() -> &'static [u8] {
     CASKAYDIA_REGULAR
+}
+
+/// Bundled font bytes backing `face`, for tests asserting a face is the
+/// bundled one. `None` for faces that are not bundled-backed by default
+/// (the `Bundled*` fallbacks and `System`).
+#[cfg(test)]
+#[must_use]
+pub(crate) fn bundled_face_bytes(face: FaceId) -> Option<&'static [u8]> {
+    match face {
+        FaceId::PrimaryRegular => Some(CASKAYDIA_REGULAR),
+        FaceId::PrimaryBold => Some(CASKAYDIA_BOLD),
+        FaceId::PrimaryItalic => Some(CASKAYDIA_ITALIC),
+        FaceId::PrimaryBoldItalic => Some(CASKAYDIA_BOLD_ITALIC),
+        FaceId::Emoji => Some(NOTO_COLOR_EMOJI),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,9 +204,9 @@ struct LoadedFace {
 /// (`&'static`) fonts are copied into an `Arc` exactly once at load time
 /// (`from_static`), heap-loaded fonts move their `Vec<u8>` into the `Arc`
 /// (`from_owned`). Holding a single owner type means [`LoadedFace::arc_bytes`]
-/// is *always* a cheap `Arc::clone` (refcount bump), so constructing a cached,
-/// self-referential `rustybuzz::Face` ([`CachedFace`]) on a cache miss never
-/// copies the font bytes — not even for bundled fonts (Task #430).
+/// is *always* a cheap `Arc::clone` (refcount bump), so constructing a
+/// [`CachedShaper`] on a cache miss never copies the font bytes — not even for
+/// bundled fonts (Task #430).
 #[derive(Debug)]
 struct FontData(Arc<[u8]>);
 
@@ -201,7 +220,7 @@ impl LoadedFace {
     /// Load from static (bundled) font data.
     ///
     /// The `&'static` bytes are copied into an `Arc<[u8]>` exactly once here,
-    /// at load time, so that later face-cache misses reuse the same allocation
+    /// at load time, so that later shaper-cache misses reuse the same allocation
     /// via a cheap `Arc::clone` rather than re-copying the (multi-MB) bundled
     /// font on every miss (Task #430).
     fn from_static(data: &'static [u8]) -> Option<Self> {
@@ -242,8 +261,7 @@ impl LoadedFace {
     }
 
     /// Return this face's bytes as a stable, cheaply-cloneable `Arc<[u8]>`
-    /// owner, suitable for constructing a cached self-referential
-    /// `rustybuzz::Face` ([`CachedFace`]) (Task #430).
+    /// owner, suitable for constructing a [`CachedShaper`] (Task #430).
     ///
     /// Always a cheap `Arc::clone` (refcount bump) — the one-time copy of any
     /// `&'static` bundled bytes into the `Arc` happened at load time in
@@ -304,39 +322,38 @@ impl LoadedFace {
     }
 }
 
-/// Type alias so `self_cell!` can reference `rustybuzz::Face` by a bare
-/// identifier — the macro requires an `ident`, not a path (`rustybuzz::Face`
-/// itself does not work as the `dependent` type).
-type RustybuzzFace<'a> = rustybuzz::Face<'a>;
-
-self_cell::self_cell!(
-    /// A parsed `rustybuzz::Face` bundled together with the `Arc<[u8]>` byte
-    /// buffer it borrows from (Task #430).
-    ///
-    /// `rustybuzz::Face<'a>` borrows the font bytes, so it cannot be stored
-    /// directly as a field on [`FontManager`] alongside the owning
-    /// [`LoadedFace`] — that would be self-referential. `self_cell` ties the
-    /// owner (a cheaply-cloneable, stable `Arc<[u8]>`; see
-    /// [`LoadedFace::arc_bytes`]) and the dependent (the parsed
-    /// `rustybuzz::Face`) together in one heap-allocated, movable struct.
-    /// This lets [`FontManager`] cache the parsed face per [`FaceId`]
-    /// instead of re-parsing the font tables on every shape call.
-    struct CachedFace {
-        owner: Arc<[u8]>,
-
-        #[covariant]
-        dependent: RustybuzzFace,
-    }
-);
-
-/// Cache key for a compiled `rustybuzz::ShapePlan` (Task #430).
+/// Per-face shaping state cached across shape calls (Task #430, issue #530).
 ///
-/// Distinguishes plans by face, the ligature-feature-set identity
-/// (`shaping_features(ligatures)` only ever varies on this bool), and the
-/// buffer's guessed script/direction. `rustybuzz::Script` and
-/// `rustybuzz::Direction` already implement `Copy + Eq + Hash`, so no
-/// synthetic hashable representation is needed.
-type PlanKey = (FaceId, bool, rustybuzz::Script, rustybuzz::Direction);
+/// Holds the expensive, owned `harfrust::ShaperData` (the per-font OpenType
+/// caches and table ranges) together with the `Arc<[u8]>` font bytes it was
+/// built from. The cheap borrowing views — `harfrust::FontRef` and
+/// `harfrust::Shaper` — are rebuilt from `bytes` on every shape call
+/// ([`FontManager::shape_cached`]); building them allocates nothing and only
+/// slices precomputed table ranges. `ShaperData` itself carries no lifetime, so
+/// no self-referential storage is needed to cache it.
+struct CachedShaper {
+    /// The font bytes `data` was built from. The same allocation as the
+    /// owning [`LoadedFace`] (a refcount bump, not a copy).
+    bytes: Arc<[u8]>,
+    /// The collection index `data` was built for.
+    index: u32,
+    /// The expensive, reusable per-face shaping data.
+    data: harfrust::ShaperData,
+}
+
+/// Cache key for a compiled `harfrust::ShapePlan` (Task #430).
+///
+/// Distinguishes plans by face, ligature mode (which fully determines the
+/// feature list, see [`LigatureShaping::features`]), and the buffer's guessed
+/// script/direction. `harfrust::Script` and `harfrust::Direction` already
+/// implement `Copy + Eq + Hash`, so no synthetic hashable representation is
+/// needed.
+type PlanKey = (
+    FaceId,
+    LigatureShaping,
+    harfrust::Script,
+    harfrust::Direction,
+);
 
 /// The four style variants of a single font family.
 struct PrimaryFaces {
@@ -450,21 +467,36 @@ pub struct FontManager {
     /// through a shared `&FontManager` while still caching.
     fallback_metrics_cache: RefCell<FxHashMap<FaceId, Option<FallbackCellMetrics>>>,
 
-    /// Per-face cache of parsed `rustybuzz::Face` instances (Task #430).
-    /// Populated lazily by [`Self::build_cached_face`] (invoked from
-    /// [`Self::shape_cached`]) and cleared whenever the underlying font
-    /// bytes may have changed (`rebuild`) or for consistency on a
-    /// size/DPI change (`set_font_size`, `update_pixels_per_point`), even
-    /// though the bytes themselves are unaffected by those. `None` means the
-    /// face is not loaded or failed to parse as a rustybuzz `Face`.
-    face_cache: RefCell<FxHashMap<FaceId, Option<CachedFace>>>,
+    /// Per-face cache of `harfrust` shaping data (Task #430).
+    /// Populated lazily by [`Self::build_cached_shaper`] (invoked from
+    /// [`Self::shape_cached`]). A cached `ShaperData` is tied to the exact
+    /// bytes and collection index it was built from, so an entry must be
+    /// dropped whenever its `FaceId` may start naming different bytes:
+    ///
+    /// - `rebuild` clears the whole cache (the font family may change).
+    /// - `set_font_size` and `update_pixels_per_point` evict only the
+    ///   `FaceId::System(_)` entries (see
+    ///   [`Self::evict_system_face_shaping_caches`]). They drop `system_faces`,
+    ///   which `FaceId::System(idx)` indexes into, so the same id can name a
+    ///   different font afterwards. Every other entry survives: those faces'
+    ///   bytes are not touched by a size or DPI change, and `ShaperData` is
+    ///   independent of size (shaping sets no scale, so positions are in font
+    ///   units).
+    ///
+    /// `None` means the face is not loaded, its collection index does not fit
+    /// in `u32`, or it failed to parse as a `harfrust::FontRef`.
+    shaper_cache: RefCell<FxHashMap<FaceId, Option<CachedShaper>>>,
 
     /// Per-`(face, ligatures, script, direction)` cache of compiled
-    /// `rustybuzz::ShapePlan`s (Task #430). Plan compilation is the
-    /// second-most expensive part of cold shaping after face parsing;
-    /// caching it avoids recompiling an identical plan on every shape call.
-    /// Cleared alongside `face_cache`.
-    plan_cache: RefCell<FxHashMap<PlanKey, Arc<rustybuzz::ShapePlan>>>,
+    /// `harfrust::ShapePlan`s (Task #430). Plan compilation is the
+    /// second-most expensive part of cold shaping after shaper-data
+    /// construction; caching it avoids recompiling an identical plan on every
+    /// shape call. Invalidated together with `shaper_cache` and for the same
+    /// reason: a plan is compiled against a specific face's bytes, so `rebuild`
+    /// clears it and `set_font_size` / `update_pixels_per_point` evict only the
+    /// entries whose `FaceId` is `System(_)`. A plan does not depend on size
+    /// or DPI, so the remaining entries stay valid.
+    plan_cache: RefCell<FxHashMap<PlanKey, Arc<harfrust::ShapePlan>>>,
 
     /// Authoritative cell width in integer pixels.
     cell_width: u32,
@@ -582,7 +614,7 @@ impl FontManager {
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
             fallback_metrics_cache: RefCell::new(FxHashMap::default()),
-            face_cache: RefCell::new(FxHashMap::default()),
+            shaper_cache: RefCell::new(FxHashMap::default()),
             plan_cache: RefCell::new(FxHashMap::default()),
             cell_width,
             cell_height,
@@ -716,39 +748,53 @@ impl FontManager {
         self.loaded_face(face_id).map(|f| f.index)
     }
 
-    /// Shape `buffer` for `face_id` using a cached parsed `rustybuzz::Face`
-    /// and a cached compiled `rustybuzz::ShapePlan` (Task #430), instead of
-    /// re-parsing the font tables and recompiling the plan on every call.
+    /// Shape `text` for `face_id` using cached `harfrust::ShaperData` and a
+    /// cached compiled `harfrust::ShapePlan` (Task #430), instead of
+    /// rebuilding the per-font shaping data and recompiling the plan on every
+    /// call.
     ///
-    /// The caller must have already called
-    /// `buffer.guess_segment_properties()` so `buffer.script()` /
-    /// `buffer.direction()` reflect the buffer's actual (guessed)
-    /// properties — the plan is built to match exactly, mirroring what
-    /// `rustybuzz::shape()` does internally (it also calls
-    /// `guess_segment_properties()` and builds its one-shot plan from the
-    /// resulting `direction`/`script`/`language`), except both the face
-    /// parse and the plan compilation are cached here instead of repeated.
+    /// The input `harfrust::UnicodeBuffer` is built here (`new`, `push_str`,
+    /// `guess_segment_properties`) rather than supplied by the caller. harfrust
+    /// does not guess segment properties on its own, and both are required:
+    /// `ShapePlan::new` asserts the direction is not `Invalid`, and shaping
+    /// with a plan requires the plan's script/direction to equal the buffer's
+    /// (in harfrust 0.12 this is an always-on `assert_eq!` in
+    /// `shape_with_plan`; the crate's rustdoc describes it as debug-only, so a
+    /// harfrust bump must re-check which it is).
+    ///
+    /// The plan key `(FaceId, LigatureShaping, Script, Direction)` captures
+    /// every plan input: the buffer is built here with no language set
+    /// (language is always `None`), and script and direction are guessed here,
+    /// so a caller cannot shape with a language, script or direction the key
+    /// does not record. The plan's features come from `ligatures.features()`,
+    /// which is also passed to `ShapeOptions::features`.
     ///
     /// Returns `None` if the face is not loaded or fails to parse as a
-    /// rustybuzz `Face` — callers must fall back to tofu glyphs in that
-    /// case, matching the previous `rustybuzz_face`-based behavior.
+    /// `harfrust::FontRef` — callers must fall back to tofu glyphs in that
+    /// case.
     #[must_use]
     pub(crate) fn shape_cached(
         &self,
         face_id: FaceId,
-        ligatures: bool,
-        features: &[rustybuzz::Feature],
-        buffer: rustybuzz::UnicodeBuffer,
-    ) -> Option<rustybuzz::GlyphBuffer> {
-        if !self.face_cache.borrow().contains_key(&face_id) {
-            let built = self.build_cached_face(face_id);
-            self.face_cache.borrow_mut().insert(face_id, built);
+        ligatures: LigatureShaping,
+        text: &str,
+    ) -> Option<harfrust::GlyphBuffer> {
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+
+        if !self.shaper_cache.borrow().contains_key(&face_id) {
+            let built = self.build_cached_shaper(face_id);
+            self.shaper_cache.borrow_mut().insert(face_id, built);
         }
 
-        let face_cache = self.face_cache.borrow();
-        let cached = face_cache.get(&face_id)?.as_ref()?;
-        let face = cached.borrow_dependent();
+        let shaper_cache = self.shaper_cache.borrow();
+        let cached = shaper_cache.get(&face_id)?.as_ref()?;
+        // Cheap per-call borrow views over the cached bytes and shaper data.
+        let font_ref = harfrust::FontRef::from_index(&cached.bytes, cached.index).ok()?;
+        let shaper = cached.data.shaper(&font_ref).build();
 
+        let features = ligatures.features();
         let script = buffer.script();
         let direction = buffer.direction();
         let plan_key: PlanKey = (face_id, ligatures, script, direction);
@@ -758,23 +804,29 @@ impl FontManager {
         // — holding the `Ref` across that call would panic at runtime.
         let cached_plan = self.plan_cache.borrow().get(&plan_key).cloned();
         let plan = cached_plan.unwrap_or_else(|| {
-            // We pass `Some(script)` where the internal `rustybuzz::shape()`
-            // passes the buffer's raw `Option<Script>` (which is `None` for a
-            // run whose every char is Common/Inherited/Unknown, e.g. pure ASCII
-            // punctuation). We cannot reach that raw `Option` through
-            // rustybuzz's public API — `UnicodeBuffer::script()` collapses
-            // `None` to `script::UNKNOWN` — and reimplementing the guesser to
-            // recover it would risk drifting from rustybuzz. This collapse is
-            // provably safe: `shape_with_plan` matches a plan to a buffer by
-            // comparing `buffer.script.unwrap_or(UNKNOWN)` against
-            // `plan.script.unwrap_or(UNKNOWN)` (see its `debug_assert_eq!`), so
-            // rustybuzz itself treats `None` and `Some(UNKNOWN)` as equivalent
-            // for plan selection, and no real font registers a `zzzz` (UNKNOWN)
-            // OpenType script tag, so the compiled plan is identical either
-            // way. The output-identity test shapes pure-Common-script runs
-            // (`->`, `!=`) against the old `shape()` path to guard this.
-            let plan = Arc::new(rustybuzz::ShapePlan::new(
-                face,
+            // We pass `Some(script)` where an uncached `Shaper::shape` (no
+            // plan supplied) passes the buffer's raw `Option<Script>` (which
+            // is `None` for a run whose every char is Common/Inherited/Unknown,
+            // e.g. pure ASCII punctuation). We cannot reach that raw `Option`
+            // through harfrust's public API — `UnicodeBuffer::script()`
+            // collapses `None` to `script::UNKNOWN` — and reimplementing the
+            // guesser to recover it would risk drifting from harfrust. This
+            // collapse is safe: when a plan is supplied, `Shaper::shape`
+            // matches it to the buffer with an `assert_eq!` (always-on in
+            // harfrust 0.12, not a `debug_assert`; its rustdoc calls it
+            // debug-only, so re-check on a harfrust bump) of
+            // `buffer.script.unwrap_or(UNKNOWN)` against
+            // `plan.script.unwrap_or(UNKNOWN)`, so harfrust itself treats
+            // `None` and `Some(UNKNOWN)` as equivalent for plan selection, and
+            // no real font registers a `zzzz` (UNKNOWN) OpenType script tag,
+            // so the compiled plan is identical either way. That same assert
+            // also guarantees that a mismatch between `PlanKey` and the buffer
+            // would panic rather than silently mis-shape; the key's
+            // script/direction are taken from this very buffer, so it cannot
+            // fire. The output-identity test shapes pure-Common-script runs
+            // (`->`, `!=`) against the uncached path to guard this.
+            let plan = Arc::new(harfrust::ShapePlan::new(
+                &shaper,
                 direction,
                 Some(script),
                 None,
@@ -786,28 +838,55 @@ impl FontManager {
             plan
         });
 
-        Some(rustybuzz::shape_with_plan(face, &plan, buffer))
+        let options = harfrust::ShapeOptions::new()
+            .plan(Some(&plan))
+            .features(features);
+        Some(shaper.shape(buffer, options))
     }
 
-    /// Build (but do not cache) a [`CachedFace`] for `face_id`. Called from
-    /// [`Self::shape_cached`] on a face-cache miss.
-    fn build_cached_face(&self, face_id: FaceId) -> Option<CachedFace> {
+    /// Drop every cached shaper and shape plan whose `FaceId` is
+    /// `FaceId::System(_)`.
+    ///
+    /// Called when `system_faces` has just been cleared (`set_font_size`,
+    /// `update_pixels_per_point`): `FaceId::System(idx)` indexes into that
+    /// vector, so after repopulation the same id can name a different font and
+    /// a cached `ShaperData` / `ShapePlan` for it would shape with the wrong
+    /// one. Primary, bundled and emoji entries are kept: those faces are only
+    /// replaced in `rebuild`, and their shaping data and plans do not depend
+    /// on size or DPI.
+    fn evict_system_face_shaping_caches(&self) {
+        self.shaper_cache
+            .borrow_mut()
+            .retain(|face_id, _| !matches!(face_id, FaceId::System(_)));
+        self.plan_cache
+            .borrow_mut()
+            .retain(|(face_id, ..), _| !matches!(face_id, FaceId::System(_)));
+    }
+
+    /// Build (but do not cache) a [`CachedShaper`] for `face_id`. Called from
+    /// [`Self::shape_cached`] on a shaper-cache miss.
+    ///
+    /// Parses the font once (to validate it and build the `ShaperData`) and
+    /// returns `None` if the face is not loaded, its collection index does not
+    /// fit in `u32`, or it fails to parse. An index that does not fit is a
+    /// failure rather than silently falling back to index 0, which would shape
+    /// with a different face than the one requested.
+    fn build_cached_shaper(&self, face_id: FaceId) -> Option<CachedShaper> {
         let loaded = self.loaded_face(face_id)?;
-        let index = u32::value_from(loaded.index).unwrap_or(0);
-        let owner = loaded.arc_bytes();
-        CachedFace::try_new(owner, |bytes| {
-            rustybuzz::Face::from_slice(bytes, index).ok_or(())
-        })
-        .ok()
+        let index = u32::value_from(loaded.index).ok()?;
+        let bytes = loaded.arc_bytes();
+        let font_ref = harfrust::FontRef::from_index(&bytes, index).ok()?;
+        let data = harfrust::ShaperData::new(&font_ref);
+        Some(CachedShaper { bytes, index, data })
     }
 
-    /// Number of faces currently cached in [`Self::face_cache`].
+    /// Number of shaper-data entries currently cached in [`Self::shaper_cache`].
     ///
     /// Test-only: exposes cache population without leaking internals into
     /// the production API.
     #[cfg(test)]
-    pub(crate) fn face_cache_len(&self) -> usize {
-        self.face_cache.borrow().len()
+    pub(crate) fn shaper_cache_len(&self) -> usize {
+        self.shaper_cache.borrow().len()
     }
 
     /// Number of shape plans currently cached in [`Self::plan_cache`].
@@ -966,12 +1045,12 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
-        // The font family may have changed, so a cached rustybuzz `Face`
-        // (which borrows a specific `FaceId`'s byte buffer) or `ShapePlan`
-        // (compiled against a specific `Face`) may now reference the wrong
+        // The font family may have changed, so a cached `harfrust::ShaperData`
+        // (built from a specific `FaceId`'s byte buffer) or `ShapePlan`
+        // (compiled against a specific face) may now reference the wrong
         // font entirely — this clear is required for correctness, not just
         // consistency (Task #430).
-        self.face_cache.borrow_mut().clear();
+        self.shaper_cache.borrow_mut().clear();
         self.plan_cache.borrow_mut().clear();
 
         if effective_family_changed {
@@ -990,7 +1069,9 @@ impl FontManager {
     ///
     /// Used by font zoom (Ctrl+Plus/Minus/0) to apply a per-tab effective
     /// font size that differs from the config's base size.  Returns `Ok(true)`
-    /// if the size actually changed and caches were invalidated.
+    /// if the size actually changed and caches were invalidated (system-face
+    /// shaping caches are evicted; see
+    /// `evict_system_face_shaping_caches`).
     ///
     /// # Errors
     ///
@@ -1013,11 +1094,14 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
-        // The underlying font bytes are unchanged by a size-only change, so
-        // this is not strictly required for correctness, but it is cleared
-        // for consistency with the other per-face caches above (Task #430).
-        self.face_cache.borrow_mut().clear();
-        self.plan_cache.borrow_mut().clear();
+        // `system_faces` was just cleared and `FaceId::System(idx)` indexes
+        // into it, so cached shaping data for a `System` id may name a
+        // different font once the vector is repopulated: evict those entries.
+        // A size change does not touch the primary, bundled or emoji faces'
+        // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
+        // are independent of size (no scale is set; positions are font
+        // units), so the other entries stay valid (Task #430).
+        self.evict_system_face_shaping_caches();
 
         Ok(true)
     }
@@ -1060,11 +1144,14 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
-        // The underlying font bytes are unchanged by a DPI-only change, so
-        // this is not strictly required for correctness, but it is cleared
-        // for consistency with the other per-face caches above (Task #430).
-        self.face_cache.borrow_mut().clear();
-        self.plan_cache.borrow_mut().clear();
+        // `system_faces` was just cleared and `FaceId::System(idx)` indexes
+        // into it, so cached shaping data for a `System` id may name a
+        // different font once the vector is repopulated: evict those entries.
+        // A DPI change does not touch the primary, bundled or emoji faces'
+        // bytes (only `rebuild` replaces them), and `ShaperData` / `ShapePlan`
+        // are independent of DPI (no scale is set; positions are font units),
+        // so the other entries stay valid (Task #430).
+        self.evict_system_face_shaping_caches();
 
         Ok(true)
     }
@@ -2364,38 +2451,166 @@ mod tests {
         assert!(!style.italic);
     }
 
-    // --- Test 14: cached rustybuzz Face construction (Task #430) ---
+    // --- Test 14: cached harfrust shaper construction (Task #430) ---
 
     #[test]
-    fn build_cached_face_creation() {
+    fn build_cached_shaper_creation() {
         let fm = default_manager();
-        let cached = fm.build_cached_face(FaceId::PrimaryRegular);
+        let cached = fm.build_cached_shaper(FaceId::PrimaryRegular);
         assert!(
             cached.is_some(),
-            "Should be able to build a cached rustybuzz Face from primary regular"
+            "Should be able to build a cached harfrust shaper from primary regular"
         );
     }
 
-    // --- Task #430: shape_cached reuses the Face + ShapePlan caches ---
+    /// Shape `text` through an uncached harfrust reference built directly from
+    /// the face bytes, with a guessed buffer and no plan, and flatten the
+    /// result like [`shape_flat`].
+    fn shape_reference_flat(
+        fm: &FontManager,
+        face_id: FaceId,
+        text: &str,
+        ligatures: LigatureShaping,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let bytes = fm.face_data(face_id).expect("face must be loaded");
+        let index = u32::value_from(fm.face_index(face_id).expect("face must be loaded"))
+            .expect("face index must fit in u32");
+        let font_ref = harfrust::FontRef::from_index(bytes, index).expect("face must parse");
+        let shaper_data = harfrust::ShaperData::new(&font_ref);
+        let shaper = shaper_data.shaper(&font_ref).build();
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let output = shaper.shape(
+            buffer,
+            harfrust::ShapeOptions::new().features(ligatures.features()),
+        );
+        flatten_glyph_buffer(&output)
+    }
+
+    /// Flatten a shaped buffer to
+    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
+    fn flatten_glyph_buffer(output: &harfrust::GlyphBuffer) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        output
+            .glyph_infos()
+            .iter()
+            .zip(output.glyph_positions())
+            .map(|(info, pos)| {
+                (
+                    info.glyph_id,
+                    info.cluster,
+                    pos.x_advance,
+                    pos.y_advance,
+                    pos.x_offset,
+                    pos.y_offset,
+                )
+            })
+            .collect()
+    }
+
+    /// `shape_cached` builds and guesses the buffer itself, so a right-to-left
+    /// run (non-default direction, plan key differs from LTR) must shape
+    /// without tripping harfrust's plan-construction / plan-match asserts and
+    /// must equal an uncached reference built with `guess_segment_properties`.
+    /// Hebrew is absent from the bundled face, so it shapes to `.notdef`
+    /// (one glyph per character). This test exercises the RTL
+    /// direction / plan-key path only; real shaping output across scripts is
+    /// pinned by `golden_extended_bundled_shaping_matches_rustybuzz`.
+    #[test]
+    fn shape_cached_handles_rtl_direction_without_panicking() {
+        let fm = default_manager();
+        let text = "\u{05D0}\u{05D1}";
+
+        let cached = fm
+            .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, text)
+            .expect("RTL text must shape");
+        assert_eq!(
+            cached.glyph_infos().len(),
+            2,
+            "two characters must shape to two glyphs"
+        );
+        assert_eq!(
+            flatten_glyph_buffer(&cached),
+            shape_reference_flat(&fm, FaceId::PrimaryRegular, text, LigatureShaping::Disabled),
+            "cached output must equal the uncached reference"
+        );
+    }
 
     #[test]
-    fn shape_cached_reuses_face_and_plan_across_calls() {
+    fn shape_cached_handles_empty_text() {
         let fm = default_manager();
-        let features = [rustybuzz::Feature::new(
-            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
-            1,
-            ..,
-        )];
+        let output = fm
+            .shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "")
+            .expect("empty text must still shape on a loaded face");
+        assert_eq!(output.glyph_infos().len(), 0);
+    }
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str("AB");
-        buffer.guess_segment_properties();
-        let first = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+    /// Shape `text` on `PrimaryRegular` and flatten the result to
+    /// `(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)` tuples.
+    fn shape_flat(
+        fm: &FontManager,
+        text: &str,
+        ligatures: LigatureShaping,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let output = fm
+            .shape_cached(FaceId::PrimaryRegular, ligatures, text)
+            .expect("the bundled regular face must shape");
+        flatten_glyph_buffer(&output)
+    }
+
+    /// The plan cache is keyed on the ligature mode, so whichever mode shapes
+    /// first on a given manager must not decide the plan used by the other.
+    #[test]
+    fn plan_cache_ligature_modes_do_not_contaminate_each_other() {
+        let enabled_first = default_manager();
+        let enabled_a = shape_flat(&enabled_first, "->", LigatureShaping::Enabled);
+        let disabled_a = shape_flat(&enabled_first, "->", LigatureShaping::Disabled);
+
+        let disabled_first = default_manager();
+        let disabled_b = shape_flat(&disabled_first, "->", LigatureShaping::Disabled);
+        let enabled_b = shape_flat(&disabled_first, "->", LigatureShaping::Enabled);
+
+        assert_eq!(
+            disabled_a, disabled_b,
+            "Disabled output must not depend on which mode shaped first"
+        );
+        assert_eq!(
+            enabled_a, enabled_b,
+            "Enabled output must not depend on which mode shaped first"
+        );
+
+        let ids = |v: &[(u32, u32, i32, i32, i32, i32)]| v.iter().map(|g| g.0).collect::<Vec<_>>();
+        assert_ne!(
+            ids(&disabled_a),
+            ids(&enabled_a),
+            "the bundled face ligates `->`, so the two modes must shape differently"
+        );
+
+        // With ligatures off, each character shapes to its own cmap glyph; the
+        // expected ids come from the face itself rather than being hard-coded.
+        let charmap = enabled_first
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("the bundled regular face must be loaded")
+            .charmap();
+        assert_eq!(
+            ids(&disabled_a),
+            [u32::from(charmap.map('-')), u32::from(charmap.map('>'))],
+            "Disabled must shape `->` to the per-character cmap glyphs"
+        );
+    }
+
+    // --- Task #430: shape_cached reuses the ShaperData + ShapePlan caches ---
+
+    #[test]
+    fn shape_cached_reuses_shaper_and_plan_across_calls() {
+        let fm = default_manager();
+
+        let first = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "AB");
         assert!(first.is_some(), "first shape_cached call should succeed");
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             1,
-            "face cache should have one entry after the first call"
+            "shaper cache should have one entry after the first call"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2403,15 +2618,12 @@ mod tests {
             "plan cache should have one entry after the first call"
         );
 
-        let mut buffer2 = rustybuzz::UnicodeBuffer::new();
-        buffer2.push_str("CD");
-        buffer2.guess_segment_properties();
-        let second = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer2);
+        let second = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "CD");
         assert!(second.is_some(), "second shape_cached call should succeed");
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             1,
-            "face cache must not grow on a cache hit for the same face"
+            "shaper cache must not grow on a cache hit for the same face"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2424,26 +2636,15 @@ mod tests {
     #[test]
     fn shape_cached_misses_on_face_change() {
         let fm = default_manager();
-        let features = [rustybuzz::Feature::new(
-            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
-            1,
-            ..,
-        )];
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str("A");
-        buffer.guess_segment_properties();
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "A");
 
-        let mut buffer2 = rustybuzz::UnicodeBuffer::new();
-        buffer2.push_str("B");
-        buffer2.guess_segment_properties();
-        let _ = fm.shape_cached(FaceId::PrimaryBold, false, &features, buffer2);
+        let _ = fm.shape_cached(FaceId::PrimaryBold, LigatureShaping::Disabled, "B");
 
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             2,
-            "a different FaceId must populate a separate face-cache entry"
+            "a different FaceId must populate a separate shaper-cache entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2453,20 +2654,12 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_clears_face_and_plan_caches() {
+    fn rebuild_clears_shaper_and_plan_caches() {
         let config = Config::default();
         let mut fm = FontManager::new(&config, 1.0).unwrap();
-        let features = [rustybuzz::Feature::new(
-            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
-            1,
-            ..,
-        )];
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str("A");
-        buffer.guess_segment_properties();
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, LigatureShaping::Disabled, "A");
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let mut new_config = config;
@@ -2474,9 +2667,9 @@ mod tests {
         let _ = fm.rebuild(&new_config, 1.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
+            fm.shaper_cache_len(),
             0,
-            "face cache must be cleared by rebuild()"
+            "shaper cache must be cleared by rebuild()"
         );
         assert_eq!(
             fm.plan_cache_len(),
@@ -2485,63 +2678,207 @@ mod tests {
         );
     }
 
+    /// Primary, bundled and emoji faces keep their cached shaper and plan
+    /// across a size/DPI change: their bytes are untouched and shaping is
+    /// size-independent (positions are in font units).
     #[test]
-    fn set_font_size_clears_face_and_plan_caches() {
+    fn set_font_size_keeps_non_system_shaping_caches() {
         let mut fm = default_manager();
-        let features = [rustybuzz::Feature::new(
-            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
-            1,
-            ..,
-        )];
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str("A");
-        buffer.guess_segment_properties();
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let before = shape_flat(&fm, "->", LigatureShaping::Enabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
-            0,
-            "face cache must be cleared by set_font_size()"
+            fm.shaper_cache_len(),
+            1,
+            "set_font_size() must keep the PrimaryRegular shaper entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
-            0,
-            "plan cache must be cleared by set_font_size()"
+            1,
+            "set_font_size() must keep the PrimaryRegular plan entry"
+        );
+        assert_eq!(
+            shape_flat(&fm, "->", LigatureShaping::Enabled),
+            before,
+            "re-shaping the primary face after set_font_size() must be unchanged"
         );
     }
 
+    /// Primary, bundled and emoji faces keep their cached shaper and plan
+    /// across a size/DPI change: their bytes are untouched and shaping is
+    /// size-independent (positions are in font units).
     #[test]
-    fn update_ppp_changed_clears_face_and_plan_caches() {
+    fn update_ppp_changed_keeps_non_system_shaping_caches() {
         let mut fm = default_manager();
-        let features = [rustybuzz::Feature::new(
-            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
-            1,
-            ..,
-        )];
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str("A");
-        buffer.guess_segment_properties();
-        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
-        assert_eq!(fm.face_cache_len(), 1);
+        let before = shape_flat(&fm, "->", LigatureShaping::Enabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
         assert_eq!(fm.plan_cache_len(), 1);
 
         let _ = fm.update_pixels_per_point(2.0).unwrap();
 
         assert_eq!(
-            fm.face_cache_len(),
-            0,
-            "face cache must be cleared by update_pixels_per_point()"
+            fm.shaper_cache_len(),
+            1,
+            "update_pixels_per_point() must keep the PrimaryRegular shaper entry"
         );
         assert_eq!(
             fm.plan_cache_len(),
-            0,
-            "plan cache must be cleared by update_pixels_per_point()"
+            1,
+            "update_pixels_per_point() must keep the PrimaryRegular plan entry"
+        );
+        assert_eq!(
+            shape_flat(&fm, "->", LigatureShaping::Enabled),
+            before,
+            "re-shaping the primary face after update_pixels_per_point() must be unchanged"
+        );
+    }
+
+    /// Seed the caches with a `FaceId::System(0)` entry alongside the real
+    /// `PrimaryRegular` ones. The `System(0)` shaper entry is a cached failure
+    /// and the plan is borrowed from the primary shaper: both are only cache
+    /// values here, the point is which keys survive.
+    fn seed_system_face_shaping_caches(fm: &FontManager) {
+        let _ = shape_flat(fm, "->", LigatureShaping::Disabled);
+        assert_eq!(fm.shaper_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let plan = {
+            let loaded = fm
+                .loaded_face(FaceId::PrimaryRegular)
+                .expect("primary regular must be loaded");
+            let bytes = loaded.arc_bytes();
+            let font_ref = harfrust::FontRef::from_index(&bytes, 0).expect("face must parse");
+            let data = harfrust::ShaperData::new(&font_ref);
+            let shaper = data.shaper(&font_ref).build();
+            Arc::new(harfrust::ShapePlan::new(
+                &shaper,
+                harfrust::Direction::LeftToRight,
+                Some(harfrust::script::LATIN),
+                None,
+                LigatureShaping::Disabled.features(),
+            ))
+        };
+        fm.shaper_cache.borrow_mut().insert(FaceId::System(0), None);
+        fm.plan_cache.borrow_mut().insert(
+            (
+                FaceId::System(0),
+                LigatureShaping::Disabled,
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+            ),
+            plan,
+        );
+        assert_eq!(fm.shaper_cache_len(), 2);
+        assert_eq!(fm.plan_cache_len(), 2);
+    }
+
+    /// Assert that exactly the `System(_)` cache entries are gone and the
+    /// `PrimaryRegular` ones remain.
+    fn assert_only_system_shaping_caches_evicted(fm: &FontManager, what: &str) {
+        assert_eq!(fm.shaper_cache_len(), 1, "{what}: shaper cache size");
+        assert!(
+            fm.shaper_cache
+                .borrow()
+                .contains_key(&FaceId::PrimaryRegular),
+            "{what}: PrimaryRegular shaper entry must remain"
+        );
+        assert!(
+            !fm.shaper_cache.borrow().contains_key(&FaceId::System(0)),
+            "{what}: System(0) shaper entry must be evicted"
+        );
+        assert_eq!(fm.plan_cache_len(), 1, "{what}: plan cache size");
+        assert!(
+            fm.plan_cache
+                .borrow()
+                .keys()
+                .all(|(face_id, ..)| *face_id == FaceId::PrimaryRegular),
+            "{what}: only PrimaryRegular plan entries may remain"
+        );
+    }
+
+    /// `FaceId::System(idx)` indexes into `system_faces`, which a size or DPI
+    /// change drops, so cached shaping data keyed on a system face must go.
+    /// This pins the retain predicate on both caches; see
+    /// `system_face_replaced_after_size_change_is_shaped_with_new_bytes` for
+    /// the end-to-end behaviour.
+    #[test]
+    fn size_and_dpi_changes_evict_system_face_shaping_caches() {
+        let mut sized = default_manager();
+        seed_system_face_shaping_caches(&sized);
+        let _ = sized.set_font_size(sized.font_size_pt() + 4.0).unwrap();
+        assert_only_system_shaping_caches_evicted(&sized, "set_font_size()");
+
+        let mut scaled = default_manager();
+        seed_system_face_shaping_caches(&scaled);
+        let _ = scaled.update_pixels_per_point(2.0).unwrap();
+        assert_only_system_shaping_caches_evicted(&scaled, "update_pixels_per_point()");
+    }
+
+    /// Shape `"->"` on `face_id` with ligatures enabled and flatten the result.
+    fn shape_arrow_enabled(
+        fm: &FontManager,
+        face_id: FaceId,
+    ) -> Vec<(u32, u32, i32, i32, i32, i32)> {
+        let output = fm
+            .shape_cached(face_id, LigatureShaping::Enabled, "->")
+            .expect("face must shape");
+        flatten_glyph_buffer(&output)
+    }
+
+    /// After `change` drops `system_faces`, `FaceId::System(0)` can name a
+    /// different font. Shaping it must use the new font's bytes, not a stale
+    /// cached `ShaperData` built from the previous occupant of index 0.
+    fn assert_system_face_reshaped_after(change: impl FnOnce(&mut FontManager), what: &str) {
+        let mut fm = default_manager();
+
+        fm.system_faces
+            .push(LoadedFace::from_static(CASKAYDIA_BOLD).expect("bundled bold loads"));
+        let bold_on_system = shape_arrow_enabled(&fm, FaceId::System(0));
+        let bold_reference = shape_arrow_enabled(&fm, FaceId::PrimaryBold);
+        assert_eq!(
+            bold_on_system, bold_reference,
+            "{what}: System(0) holding the bold bytes must shape like PrimaryBold"
+        );
+
+        change(&mut fm);
+        assert!(
+            fm.system_faces.is_empty(),
+            "{what}: the change must drop system_faces"
+        );
+        fm.system_faces
+            .push(LoadedFace::from_static(CASKAYDIA_ITALIC).expect("bundled italic loads"));
+
+        let italic_on_system = shape_arrow_enabled(&fm, FaceId::System(0));
+        let italic_reference = shape_arrow_enabled(&fm, FaceId::PrimaryItalic);
+        assert_eq!(
+            italic_on_system, italic_reference,
+            "{what}: System(0) must be shaped with the new (italic) bytes"
+        );
+        assert_ne!(
+            italic_on_system, bold_on_system,
+            "{what}: bold and italic must ligate `->` differently, otherwise this test \
+             cannot detect a stale ShaperData"
+        );
+    }
+
+    #[test]
+    fn system_face_replaced_after_size_change_is_shaped_with_new_bytes() {
+        assert_system_face_reshaped_after(
+            |fm| {
+                let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
+            },
+            "set_font_size()",
+        );
+        assert_system_face_reshaped_after(
+            |fm| {
+                let _ = fm.update_pixels_per_point(2.0).unwrap();
+            },
+            "update_pixels_per_point()",
         );
     }
 

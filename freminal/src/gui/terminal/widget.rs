@@ -40,6 +40,7 @@ use super::{
         colors::cursor_f,
         font_manager::FontManager,
         frame_drain::WindowFocus,
+        ligature_shaping::LigatureShaping,
         renderer::{
             BackgroundFrame, CursorBlinkPhase, CursorDrawParams, CursorVertRange, FgRenderOptions,
             GlRetireQueue, ImageDrawEntry, MatchHighlight, PaneBackground, TerminalRenderer,
@@ -2718,21 +2719,22 @@ pub struct FreminalTerminalWidget {
     egui_fonts_dirty: bool,
 }
 
-/// Hot-reloadable single-bool feature toggles [`FreminalTerminalWidget`]
-/// caches from config and reads every frame in `show()`.
+/// Hot-reloadable feature toggles [`FreminalTerminalWidget`] caches from
+/// config and reads every frame in `show()`.
 ///
-/// Each field is independently a TOML config toggle -- one of the three
-/// cases `freminal-state-representation` names as still correctly a
-/// `bool` rather than an enum -- so grouping them here is purely to keep
-/// [`FreminalTerminalWidget`]'s own field count under clippy's
-/// `struct_excessive_bools` limit; it carries no combined meaning of its
-/// own (unlike, say, `PaneRenderCache`'s bools, which are genuinely
-/// per-pane dirty-tracking flags and are grouped under an explicit
-/// `#[allow(clippy::struct_excessive_bools)]` instead).
+/// `ligatures` is classified into its domain enum ([`LigatureShaping`]) at
+/// the config boundary. Each `bool` field is independently a TOML config
+/// toggle -- one of the three cases `freminal-state-representation` names
+/// as still correctly a `bool` rather than an enum -- so grouping them
+/// here is purely to keep [`FreminalTerminalWidget`]'s own field count
+/// under clippy's `struct_excessive_bools` limit; it carries no combined
+/// meaning of its own (unlike, say, `PaneRenderCache`'s bools, which are
+/// genuinely per-pane dirty-tracking flags and are grouped under an
+/// explicit `#[allow(clippy::struct_excessive_bools)]` instead).
 #[derive(Debug, Clone, Copy)]
 struct WidgetDisplayToggles {
     /// Whether OpenType ligatures are enabled for text shaping.
-    ligatures: bool,
+    ligatures: LigatureShaping,
     /// Whether cursor trail animation is enabled (cursor glides to new position).
     cursor_trail: bool,
     /// Whether the per-pane OSC 9;4 progress indicator is drawn
@@ -2788,7 +2790,7 @@ impl FreminalTerminalWidget {
         Ok(Self {
             font_manager: FontManager::new(config, pixels_per_point)?,
             toggles: WidgetDisplayToggles {
-                ligatures: config.font.ligatures,
+                ligatures: LigatureShaping::from_config(&config.font),
                 cursor_trail: config.cursor.trail,
                 progress_enabled: config.progress.enabled,
             },
@@ -5085,7 +5087,7 @@ impl FreminalTerminalWidget {
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.toggles = WidgetDisplayToggles {
-            ligatures: new_config.font.ligatures,
+            ligatures: LigatureShaping::from_config(&new_config.font),
             cursor_trail: new_config.cursor.trail,
             progress_enabled: new_config.progress.enabled,
         };
@@ -5132,7 +5134,7 @@ impl FreminalTerminalWidget {
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
         self.toggles = WidgetDisplayToggles {
-            ligatures: new_config.font.ligatures,
+            ligatures: LigatureShaping::from_config(&new_config.font),
             cursor_trail: new_config.cursor.trail,
             progress_enabled: new_config.progress.enabled,
         };
@@ -5211,7 +5213,7 @@ impl FreminalTerminalWidget {
     /// Live-preview the OpenType ligature toggle (issue #452 phase B)
     /// without a full [`FontManager::rebuild`].
     ///
-    /// Ligatures only change which shaping features `rustybuzz` applies --
+    /// Ligatures only change which shaping features `harfrust` applies --
     /// no new fonts are loaded and no metrics change -- so calling the full
     /// config-apply path (which reparses font files) would be wasted work on
     /// every preview edit. This only flips the cached toggle `show()` reads
@@ -5219,11 +5221,11 @@ impl FreminalTerminalWidget {
     /// caller knows whether to invalidate the pane atlases: a ligature
     /// change alters shaping output, so previously-shaped lines must
     /// re-shape to be visible.
-    pub const fn set_ligatures_preview(&mut self, enabled: bool) -> bool {
-        if self.toggles.ligatures == enabled {
+    pub fn set_ligatures_preview(&mut self, ligatures: LigatureShaping) -> bool {
+        if self.toggles.ligatures == ligatures {
             return false;
         }
-        self.toggles.ligatures = enabled;
+        self.toggles.ligatures = ligatures;
         true
     }
 
@@ -5288,7 +5290,7 @@ mod visual_preview_tests {
     //! expensive counterpart applied only once the debounce in
     //! `visual_preview::DebouncedPreview` settles.
 
-    use super::FreminalTerminalWidget;
+    use super::{FreminalTerminalWidget, LigatureShaping};
     use freminal_common::config::Config;
     use std::time::Duration;
 
@@ -5301,19 +5303,23 @@ mod visual_preview_tests {
     #[test]
     fn set_ligatures_preview_updates_toggle_and_reports_change() {
         let mut widget = widget();
-        assert!(widget.toggles.ligatures, "default config enables ligatures");
+        assert_eq!(
+            widget.toggles.ligatures,
+            LigatureShaping::Enabled,
+            "default config enables ligatures"
+        );
 
         assert!(
-            !widget.set_ligatures_preview(true),
+            !widget.set_ligatures_preview(LigatureShaping::Enabled),
             "setting to the already-active value must report no change"
         );
-        assert!(widget.toggles.ligatures);
+        assert_eq!(widget.toggles.ligatures, LigatureShaping::Enabled);
 
         assert!(
-            widget.set_ligatures_preview(false),
+            widget.set_ligatures_preview(LigatureShaping::Disabled),
             "setting to a different value must report a change"
         );
-        assert!(!widget.toggles.ligatures);
+        assert_eq!(widget.toggles.ligatures, LigatureShaping::Disabled);
     }
 
     #[test]

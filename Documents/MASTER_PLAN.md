@@ -516,7 +516,9 @@ fixes ship** (maintainer decision, 2026-10-18; the public fuzz targets rediscove
 within seconds, so withholding them kept nothing confidential), plus issues #556–#564, #566 and #568. Three advisories are high severity and are triggered by benign command output, so the
 task ships in v0.13.0 ahead of the protocol work that adds parser surface. Each fix lands with
 its fuzz reproducer in `fuzz/regressions/` and a regression test. #567 and #530 (unmaintained
-dependencies) are deliberately out of scope and handled afterwards. `.github/SECURITY.md`
+dependencies) are deliberately out of scope and handled afterwards (#530 has since been
+resolved on branch `task-530/harfrust-migration`: `rustybuzz` replaced by `harfrust` and
+`ttf-parser` removed from the graph). `.github/SECURITY.md`
 records the disclosure policy. See `PLAN_VERSION_130.md`.
 
 **Tasks 118–120 (v0.12.0, scrollback memory):** the whole three-phase scrollback-memory

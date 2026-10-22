@@ -22,8 +22,6 @@ version = 2
 # Every ignore must reference a tracking issue and be removed once the
 # underlying advisory is resolved. Any advisory not listed here fails CI.
 ignore = [
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is unmaintained, no safe upgrade available; tracked in #530" },
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained, no safe upgrade available; tracked in #530" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained (merged into zbus 6), no safe upgrade; tracked in #567" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained (merged into zbus 6), no safe upgrade; tracked in #567" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained (merged into zbus 6), no safe upgrade; tracked in #567" },

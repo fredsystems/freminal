@@ -49,6 +49,7 @@ use super::vertex::{
 use crate::gui::atlas::GlyphAtlas;
 use crate::gui::colors::cursor_f;
 use crate::gui::font_manager::FontManager;
+use crate::gui::ligature_shaping::LigatureShaping;
 use crate::gui::shaping::ShapingCache;
 use crate::gui::terminal::cursor_appearance::CursorAppearance;
 use freminal_common::buffer_states::format_tag::FormatTag;
@@ -336,7 +337,7 @@ impl HeadlessRenderer {
             frame.cols,
             font_manager,
             cell_width_f32,
-            false,
+            LigatureShaping::Disabled,
             &[],
         );
 

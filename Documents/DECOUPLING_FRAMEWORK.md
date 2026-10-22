@@ -319,9 +319,9 @@ With scheduling largely handled, the remaining cost is per-frame work, and
 issue #459's unactioned candidate list is the roadmap. Highest-value first, per
 the maintainer:
 
-1. **Font/text pipeline** — unicode width, rustybuzz shaping (#459 item 4's
-   ASCII/simple-text fast path), and `build_foreground_instances`. Judged the
-   most logical next target.
+1. **Font/text pipeline** — unicode width, rustybuzz (now harfrust, #530)
+   shaping (#459 item 4's ASCII/simple-text fast path), and
+   `build_foreground_instances`. Judged the most logical next target.
 2. **Non-incremental vertex-instance build** (#459 item 3) — both
    `build_background_instances` and `build_foreground_instances` clear and walk
    every visible row unconditionally; there is no per-row incremental vertex
@@ -422,7 +422,7 @@ Do not rebuild these. They exist, they work, and they are egui-free or nearly so
 | ---------------------------------- | -------------------------------------------------- | --------------------------------- |
 | SDF rounded-rect + shadow shader   | `freminal/src/gui/renderer/toast_pass.rs`          | Chrome surfaces, tabs, popups     |
 | Proportional text-run rendering    | `freminal/src/gui/renderer/toast_text_pass.rs`     | All chrome text                   |
-| Glyph atlas, rustybuzz, swash      | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping                      |
+| Glyph atlas, harfrust, swash       | `freminal/src/gui/{atlas,font_manager,shaping}.rs` | Text shaping                      |
 | EGL partial present, buffer age    | `freminal-windowing/src/gl_context.rs`             | Keep verbatim, egui-free          |
 | Toast stack (fully bespoke chrome) | `freminal/src/gui/toast.rs`                        | Working precedent for the pattern |
 | Keybinding model (`BindingMap`)    | `freminal-common/src/keybindings.rs`               | Toolkit-neutral already           |

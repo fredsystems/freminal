@@ -8,13 +8,59 @@ be recovered from reading the current code.
 
 ## Renderer Architecture (Tasks 1, 34)
 
-### Why rustybuzz + swash (not cosmic-text)
+### Why harfrust + swash (not cosmic-text)
 
 `cosmic-text` bundles layout logic a terminal doesn't need (paragraph reflow, line-breaking) and
-had a hard version conflict with `swash` via `skrifa`. The modular `rustybuzz` + `swash` stack
+had a hard version conflict with `swash` via `skrifa`. The modular `harfrust` + `swash` stack
 gives direct control over OpenType feature flags (needed for ligatures) without pulling in an
-opinionated layout engine. rustybuzz handles shaping; swash handles rasterisation (including color
+opinionated layout engine. harfrust handles shaping; swash handles rasterisation (including color
 emoji) and font metrics.
+
+harfrust (the HarfBuzz project's Rust port, built on the fontations `read-fonts` crate) replaced
+`rustybuzz` in #530, after rustybuzz was archived and left unmaintained (RUSTSEC-2026-0206). It is
+held to the 0.12 line that `epaint` declares, so that `read-fonts` / `font-types` are shared with
+egui's text layout and with swash's `skrifa` rather than duplicated. It is therefore bumped
+together with the egui stack; `renovate.json` enforces `<0.13`.
+
+`FontManager` caches the owned `harfrust::ShaperData` per face and rebuilds the cheap
+`FontRef` / `Shaper` borrow views on every shape call, which avoids self-referential storage.
+Compiled shape plans are cached under `(FaceId, LigatureShaping, Script, Direction)`.
+`LigatureShaping` owns the full OpenType feature list for each mode, so the key fully determines
+the plan's inputs and one caller (for example toast text) can never decide the plan another
+caller (the terminal grid) gets. `shape_cached` takes the text and builds the harfrust buffer
+itself (no language set; script and direction guessed), so the plan key captures every input to
+the plan. `FontManager::rebuild` clears both caches; a font size or DPI change evicts only the
+`FaceId::System` entries (system face ids are reassigned), because shaping data and plans are
+size-independent and every other entry stays valid.
+
+Toast text deliberately shapes with ligatures disabled (`TOAST_LIGATURE_SHAPING`, one constant
+shared by measurement and drawing), so the shared plan cache never mixes feature sets. Until the
+fix in #530 the plan key ignored the feature list, so a toast could switch ligatures on in the
+terminal.
+
+Two pinned golden tests in `freminal/src/gui/shaping.rs` are the output-identity guard across the
+shaping-library change, both captured from rustybuzz 0.20.1 before the migration:
+`golden_bundled_shaping_output_is_pinned` covers the regular face with a Latin and ligature
+corpus, and `golden_extended_bundled_shaping_matches_rustybuzz` covers every bundled face (bold,
+italic and bold-italic CaskaydiaCove; Noto Color Emoji including ZWJ, VS16 and flags) plus CJK,
+RTL and Indic text on the regular face.
+
+### Why winit and egui-winit build without default features
+
+`winit` and `egui-winit` are both declared with `default-features = false` in the workspace
+`Cargo.toml`, each with an explicit feature list. winit's list is its own default set with
+`wayland-csd-adwaita` swapped for `wayland-csd-adwaita-notitle`: the default feature draws
+client-side decorations with `ab_glyph`, which pulls `ttf-parser` (unmaintained,
+RUSTSEC-2026-0192; #530), while the `-notitle` variant keeps the decorations but drops the title
+font dependency. egui-winit's list is its own default set minus `winit/default`, because
+enabling its defaults would turn winit's defaults back on.
+
+The tradeoff: on Wayland compositors that require client-side decorations (GNOME), the window
+title text is not drawn; the border, buttons and drag area remain. winit 0.31's
+`wayland-csd-adwaita-skrifa` restores titles using `skrifa`, which is already in the tree, and
+becomes available once `egui-winit` moves to winit 0.31. Re-enabling the default features on
+either crate (egui-winit forwards `winit/default`) reintroduces `ttf-parser`, so both must stay
+opted out together.
 
 ### Why full glow bypass (not egui Shape::mesh)
 
@@ -1173,9 +1219,8 @@ most one open issue and it reflects the current state.
 
 Every `ignore` entry in `deny.toml` must carry a reason that references a
 tracking issue, and is removed when the advisory is resolved. Each entry's
-reason names its issue (at the time of writing #530 for `rustybuzz` /
-`ttf-parser`, and #567 for the zbus 5 crates merged into zbus 6); `deny.toml`
-is the authoritative list.
+reason names its issue (at the time of writing only #567, for the zbus 5
+crates merged into zbus 6); `deny.toml` is the authoritative list.
 
 `cargo-audit` is deliberately **not** used. It reads the same RustSec advisory
 database as cargo-deny, so running both would report the same findings twice

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Run segmentation and text shaping via `rustybuzz`.
+//! Run segmentation and text shaping via `harfrust`.
 //!
 //! Splits visible terminal content into [`TextRun`] spans based on format changes
 //! and font-face boundaries, then shapes each run to produce glyph IDs and advances.
@@ -25,13 +25,14 @@ use freminal_common::buffer_states::{
 use freminal_terminal_emulator::LineWidth;
 
 use super::font_manager::{FaceId, FontManager, GlyphStyle};
+use super::ligature_shaping::LigatureShaping;
 
 // ---------------------------------------------------------------------------
 //  Public types
 // ---------------------------------------------------------------------------
 
 /// A contiguous span of characters that share the same format and font face,
-/// suitable for a single `rustybuzz::shape()` call.
+/// suitable for a single `harfrust` shape call.
 #[derive(Debug, Clone)]
 pub struct TextRun {
     /// Column index of the first character in this run (within a single line).
@@ -63,7 +64,7 @@ pub struct TextRun {
 /// The output of shaping a single [`TextRun`].
 ///
 /// Contains glyph IDs, x-advances, y-offsets, and cluster→character mapping
-/// produced by `rustybuzz`.
+/// produced by `harfrust`.
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
     /// Glyph ID in the font.
@@ -142,24 +143,6 @@ pub struct ShapingCache {
     run_cache: RunCache,
 }
 
-/// Named ligature-shaping mode, used only as the `ligatures` component of
-/// [`RunCacheKey`].
-///
-/// The `ligatures: bool` flag threaded through every shaping function
-/// (`shape_visible`, `shape_runs`, `shape_single_run`, ...) predates subtask
-/// 124.6 and is grandfathered as-is at every existing call site. This type
-/// exists so that the run-cache *key* — new in 124.6 — never carries a bare
-/// `bool`: the pre-existing flag is classified into a named domain value
-/// inline at the one point it crosses into the new cache key, rather than
-/// threading another bool parameter through new code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum LigatureShaping {
-    /// `calt`/`liga` were enabled for this run.
-    Enabled,
-    /// `calt`/`liga` were disabled for this run.
-    Disabled,
-}
-
 /// Content-addressed key for [`RunCache`].
 ///
 /// Equality is structural over all four fields — deliberately not a
@@ -185,7 +168,7 @@ enum LigatureShaping {
 struct RunCacheKey {
     /// The font face the run resolved to.
     face_id: FaceId,
-    /// Whether ligature features were enabled for this run. Part of the key
+    /// The ligature mode this run was shaped in. Part of the key
     /// because the same text shapes to different glyphs with `calt`/`liga`
     /// on versus off.
     ligatures: LigatureShaping,
@@ -269,15 +252,15 @@ impl RunCache {
 pub struct ShapingCacheStats {
     /// Lines served by an `Arc` refcount bump.
     pub hits: u64,
-    /// Lines re-segmented and re-shaped through rustybuzz.
+    /// Lines re-segmented and re-shaped through harfrust.
     pub misses: u64,
     /// Subtask 124.6: runs served from [`RunCache`] (current or previous
-    /// generation) as a template clone, without a `rustybuzz` shape call.
+    /// generation) as a template clone, without a `harfrust` shape call.
     /// Only counted for runs belonging to a line that missed the line-level
     /// cache — a line hit never touches the run cache at all.
     pub run_hits: u64,
     /// Subtask 124.6: runs that missed [`RunCache`] entirely and were shaped
-    /// fresh through `rustybuzz`.
+    /// fresh through `harfrust`.
     pub run_misses: u64,
 }
 
@@ -402,7 +385,7 @@ impl ShapingCache {
         term_width: usize,
         font_manager: &mut FontManager,
         cell_width: f32,
-        ligatures: bool,
+        ligatures: LigatureShaping,
         visible_line_widths: &[LineWidth],
     ) -> Vec<Arc<ShapedLine>> {
         let lines = split_into_lines(visible_chars);
@@ -413,10 +396,6 @@ impl ShapingCache {
         if self.entries.len() > line_count {
             self.entries.truncate(line_count);
         }
-
-        // Built once per call rather than once per line: the feature list is
-        // identical for every run sharing this `ligatures` setting.
-        let features = shaping_features(ligatures);
 
         let mut result = Vec::with_capacity(line_count);
 
@@ -468,13 +447,8 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = self.shape_runs_via_run_cache(
-                    &runs,
-                    font_manager,
-                    cell_width,
-                    ligatures,
-                    &features,
-                );
+                let shaped_runs =
+                    self.shape_runs_via_run_cache(&runs, font_manager, cell_width, ligatures);
                 let shaped_line = Arc::new(ShapedLine {
                     runs: shaped_runs,
                     line_width: lw,
@@ -504,33 +478,25 @@ impl ShapingCache {
         runs: &[TextRun],
         font_manager: &FontManager,
         cell_width: f32,
-        ligatures: bool,
-        features: &[rustybuzz::Feature],
+        ligatures: LigatureShaping,
     ) -> Vec<ShapedRun> {
         runs.iter()
-            .map(|run| {
-                self.shape_run_via_run_cache(run, font_manager, cell_width, ligatures, features)
-            })
+            .map(|run| self.shape_run_via_run_cache(run, font_manager, cell_width, ligatures))
             .collect()
     }
 
     /// Shape a single run via [`Self::run_cache`], falling back to a fresh
-    /// `rustybuzz` shape on a genuine miss.
+    /// `harfrust` shape on a genuine miss.
     fn shape_run_via_run_cache(
         &mut self,
         run: &TextRun,
         font_manager: &FontManager,
         cell_width: f32,
-        ligatures: bool,
-        features: &[rustybuzz::Feature],
+        ligatures: LigatureShaping,
     ) -> ShapedRun {
         let key = RunCacheKey {
             face_id: run.face_id,
-            ligatures: if ligatures {
-                LigatureShaping::Enabled
-            } else {
-                LigatureShaping::Disabled
-            },
+            ligatures,
             text: run.text.clone(),
             char_widths: run.char_widths.clone(),
         };
@@ -539,7 +505,7 @@ impl ShapingCache {
             template
         } else {
             self.stats.run_misses = self.stats.run_misses.saturating_add(1);
-            let glyphs = shape_run_canonical(run, font_manager, ligatures, features);
+            let glyphs = shape_run_canonical(run, font_manager, ligatures);
             let template: GlyphTemplate = Arc::from(glyphs);
             self.run_cache.current.insert(key, Arc::clone(&template));
             template
@@ -557,8 +523,7 @@ impl ShapingCache {
     ///
     /// Returns `None` on a genuine miss in both generations; the caller is
     /// responsible for shaping and inserting in that case (kept out of this
-    /// method so it doesn't need `font_manager`/`features` just to record a
-    /// hit).
+    /// method so it doesn't need `font_manager` just to record a hit).
     fn run_cache_lookup(&mut self, key: &RunCacheKey) -> Option<GlyphTemplate> {
         if let Some(template) = self.run_cache.current.get(key) {
             self.stats.run_hits = self.stats.run_hits.saturating_add(1);
@@ -821,45 +786,15 @@ fn push_char_to_run(text: &mut String, ch: char) {
 //  Shaping
 // ---------------------------------------------------------------------------
 
-/// Build the rustybuzz OpenType feature list.
-///
-/// When `ligatures` is `true`, `liga` and `calt` are enabled (value 1) so the
-/// font's standard and contextual ligatures are applied during shaping.
-/// When `false`, all three ligature tags (`liga`, `calt`, `dlig`) are
-/// explicitly disabled (value 0) to prevent ligature formation even in fonts
-/// that enable them by default.
-///
-/// `kern` (kerning) is always enabled.
-fn shaping_features(ligatures: bool) -> Vec<rustybuzz::Feature> {
-    use rustybuzz::ttf_parser::Tag;
-    let lig_value = u32::from(ligatures);
-    vec![
-        // Enable kerning.
-        rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 1, ..),
-        // Standard ligatures — controlled by config.
-        rustybuzz::Feature::new(Tag::from_bytes(b"liga"), lig_value, ..),
-        // Contextual alternates — controlled by config.
-        rustybuzz::Feature::new(Tag::from_bytes(b"calt"), lig_value, ..),
-        // Discretionary ligatures — always disabled (too aggressive for
-        // terminal use; can be revisited later).
-        rustybuzz::Feature::new(Tag::from_bytes(b"dlig"), 0, ..),
-    ]
-}
-
 /// Shape a set of `TextRun`s into `ShapedRun`s.
-///
-/// `features` is built once by the caller (see [`ShapingCache::shape_visible`])
-/// rather than once per run, since it is identical for every run sharing the
-/// same `ligatures` setting.
 fn shape_runs(
     runs: &[TextRun],
     font_manager: &FontManager,
     cell_width: f32,
-    ligatures: bool,
-    features: &[rustybuzz::Feature],
+    ligatures: LigatureShaping,
 ) -> Vec<ShapedRun> {
     runs.iter()
-        .map(|run| shape_single_run(run, font_manager, cell_width, ligatures, features))
+        .map(|run| shape_single_run(run, font_manager, cell_width, ligatures))
         .collect()
 }
 
@@ -886,7 +821,7 @@ pub fn shape_placeholder_line(
     fg: freminal_common::colors::TerminalColor,
     font_manager: &mut FontManager,
     cell_width: f32,
-    ligatures: bool,
+    ligatures: LigatureShaping,
 ) -> ShapedLine {
     use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
 
@@ -968,17 +903,16 @@ pub fn shape_placeholder_line(
         });
     }
 
-    let features = shaping_features(ligatures);
-    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures, &features);
+    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
     ShapedLine {
         runs: shaped_runs,
         line_width: LineWidth::Normal,
     }
 }
 
-/// Shape a single `TextRun` via `rustybuzz`.
+/// Shape a single `TextRun` via `harfrust`.
 ///
-/// Composed from [`shape_run_canonical`] (the actual `rustybuzz` call, at
+/// Composed from [`shape_run_canonical`] (the actual `harfrust` call, at
 /// the canonical `col_start = 0` / pixel `cell_width = 1.0` position) and
 /// [`build_shaped_run_from_template`] (rebasing to `run`'s real position and
 /// attaching its metadata). This is the same composition
@@ -991,14 +925,13 @@ fn shape_single_run(
     run: &TextRun,
     font_manager: &FontManager,
     cell_width: f32,
-    ligatures: bool,
-    features: &[rustybuzz::Feature],
+    ligatures: LigatureShaping,
 ) -> ShapedRun {
-    let template = shape_run_canonical(run, font_manager, ligatures, features);
+    let template = shape_run_canonical(run, font_manager, ligatures);
     build_shaped_run_from_template(run, &template, cell_width)
 }
 
-/// Shape `run` via `rustybuzz` at the canonical position `col_start = 0` and
+/// Shape `run` via `harfrust` at the canonical position `col_start = 0` and
 /// canonical pixel cell width `1.0`, producing glyph identity data whose
 /// `x_px` is exactly the glyph's column offset *within the run*, independent
 /// of where the run actually sits or how wide a cell is in pixels.
@@ -1017,23 +950,16 @@ fn shape_single_run(
 fn shape_run_canonical(
     run: &TextRun,
     font_manager: &FontManager,
-    ligatures: bool,
-    features: &[rustybuzz::Feature],
+    ligatures: LigatureShaping,
 ) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
-    // Build the input buffer and guess its segment properties (script,
-    // direction) exactly as `rustybuzz::shape()` does internally — this is
-    // required up front because `shape_cached` needs a concrete
-    // script/direction to look up (or build) the matching cached
-    // `ShapePlan` before it can shape.
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(&run.text);
-    buffer.guess_segment_properties();
-
-    // Try to shape via the cached Face + ShapePlan (Task #430).
+    // Try to shape via the cached shaper data + ShapePlan (Task #430).
+    // `shape_cached` builds the buffer and guesses its segment properties
+    // (script, direction) itself before looking up or building the matching
+    // cached `ShapePlan`.
     font_manager
-        .shape_cached(run.face_id, ligatures, features, buffer)
+        .shape_cached(run.face_id, ligatures, &run.text)
         .map_or_else(
             || {
                 // No face available — produce tofu (glyph_id=0) per character.
@@ -1093,14 +1019,14 @@ fn build_shaped_run_from_template(
     }
 }
 
-/// Build `ShapedGlyph`s from `rustybuzz` output, snapping to the cell grid.
+/// Build `ShapedGlyph`s from `harfrust` output, snapping to the cell grid.
 ///
 /// The cell grid is authoritative: glyph positions are snapped to column
 /// boundaries.  When ligatures are active, a single glyph may cover multiple
 /// input characters.  Its `cell_width` is the sum of those characters'
 /// individual widths so it spans the correct number of terminal cells.
 fn build_shaped_glyphs(
-    infos: &[rustybuzz::GlyphInfo],
+    infos: &[harfrust::GlyphInfo],
     run_text: &str,
     char_widths: &[usize],
     col_start: usize,
@@ -1110,7 +1036,7 @@ fn build_shaped_glyphs(
 ) -> Vec<ShapedGlyph> {
     let mut glyphs = Vec::with_capacity(infos.len());
 
-    // Build a byte-offset → char-index lookup table.  `rustybuzz` cluster
+    // Build a byte-offset → char-index lookup table.  `harfrust` cluster
     // values are byte offsets into the UTF-8 input string.  We need char
     // indices to index into `char_widths`.
     let byte_to_char: Vec<(usize, usize)> = run_text
@@ -1245,18 +1171,6 @@ mod tests {
         FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
-    /// Helper: shape `runs`, building the feature list internally (mirroring
-    /// what `ShapingCache::shape_visible` does once per call in production).
-    fn shape_runs_test(
-        runs: &[TextRun],
-        fm: &FontManager,
-        cell_w: f32,
-        ligatures: bool,
-    ) -> Vec<ShapedRun> {
-        let features = shaping_features(ligatures);
-        shape_runs(runs, fm, cell_w, ligatures, &features)
-    }
-
     /// Helper: create a simple format tag covering a range.
     fn make_tag(start: usize, end: usize) -> FormatTag {
         FormatTag {
@@ -1382,7 +1296,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 3);
@@ -1414,7 +1328,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 1);
@@ -1441,7 +1355,7 @@ mod tests {
             "emoji must resolve to FaceId::Emoji (bundled Noto floor guarantees one)"
         );
 
-        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
+        let shaped = shape_runs(&runs, &fm, cell_w, LigatureShaping::Disabled);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());
     }
@@ -1476,11 +1390,27 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         // First call — cache miss.
-        let r1 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r1 = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         assert_eq!(r1.len(), 1);
 
         // Second call with identical input — cache hit.
-        let r2 = cache.shape_visible(&chars, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r2 = cache.shape_visible(
+            &chars,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         assert_eq!(r2.len(), 1);
 
         // Results should be identical (same glyph count).
@@ -1497,11 +1427,27 @@ mod tests {
         let chars1 = vec![TChar::Ascii(b'X')];
         let tags = vec![make_tag(0, 10)];
 
-        let _ = cache.shape_visible(&chars1, &tags, 80, &mut fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            &chars1,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         // Change content.
         let chars2 = vec![TChar::Ascii(b'Y')];
-        let r2 = cache.shape_visible(&chars2, &tags, 80, &mut fm, cell_w, false, &[]);
+        let r2 = cache.shape_visible(
+            &chars2,
+            &tags,
+            80,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         // Should still produce valid output (cache miss, re-shaped).
         assert_eq!(r2.len(), 1);
@@ -1521,15 +1467,14 @@ mod tests {
     #[test]
     fn run_cache_hits_on_identical_key() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
         assert_eq!(cache.stats().run_hits, 0);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1541,14 +1486,13 @@ mod tests {
     #[test]
     fn run_cache_misses_when_face_id_differs() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
         let run_b = make_run("hello", 0, FaceId::PrimaryBold);
 
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1561,19 +1505,17 @@ mod tests {
     #[test]
     fn run_cache_misses_when_ligatures_differs() {
         let fm = test_font_manager();
-        let features_off = shaping_features(false);
-        let features_on = shaping_features(true);
         let mut cache = ShapingCache::new();
 
         let run = make_run("->", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features_off);
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, true, &features_on);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Enabled);
 
         let stats = cache.stats();
         assert_eq!(
             stats.run_misses, 2,
-            "the ligatures flag must be part of the run-cache key"
+            "the ligature mode must be part of the run-cache key"
         );
         assert_eq!(stats.run_hits, 0);
     }
@@ -1581,14 +1523,13 @@ mod tests {
     #[test]
     fn run_cache_misses_when_text_differs() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
         let run_b = make_run("world", 0, FaceId::PrimaryRegular);
 
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(stats.run_misses, 2, "different run text must not hit");
@@ -1615,7 +1556,6 @@ mod tests {
     #[test]
     fn run_cache_misses_when_char_widths_differ_for_identical_text() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("e", 0, FaceId::PrimaryRegular);
@@ -1626,10 +1566,10 @@ mod tests {
             ..make_run("e", 0, FaceId::PrimaryRegular)
         };
 
-        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
-        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_misses, 2,
@@ -1656,12 +1596,11 @@ mod tests {
         use freminal_common::buffer_states::fonts::FontDecorations;
 
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let cell_w = 10.0;
 
         let run_a = make_run("hi", 0, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, cell_w, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, cell_w, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         // Same (face_id, ligatures, text) as `run_a`, but every field NOT
@@ -1687,7 +1626,8 @@ mod tests {
             ..make_run("hi", 7, FaceId::PrimaryRegular)
         };
 
-        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, cell_w, false, &features);
+        let shaped_b =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1695,7 +1635,7 @@ mod tests {
         );
         assert_eq!(
             stats.run_misses, 1,
-            "a run-cache hit must not call rustybuzz again"
+            "a run-cache hit must not call harfrust again"
         );
 
         // The hit must carry run_b's OWN metadata, never run_a's.
@@ -1784,54 +1724,52 @@ mod tests {
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_ascii_at_nonzero_position() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         // Populate the cache from a run at one position and pixel cell width...
         let run_a = make_run("hello world", 2, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 8.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 8.0, LigatureShaping::Disabled);
 
         // ...then hit it from a DIFFERENT run (same face/ligatures/text) at a
         // different col_start and a different (non-1.0) pixel cell_width.
         let run_b = make_run("hello world", 17, FaceId::PrimaryRegular);
         let cell_w_b = 13.5;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        let actual =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_shaped_runs_eq(&actual, &expected, "ascii nonzero col_start/cell_width");
     }
 
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_ligature_text() {
         let fm = test_font_manager();
-        let features = shaping_features(true);
         let mut cache = ShapingCache::new();
 
         let run_a = make_run("->", 0, FaceId::PrimaryRegular);
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, true, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, LigatureShaping::Enabled);
 
         let run_b = make_run("->", 4, FaceId::PrimaryRegular);
         let cell_w_b = 12.0;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, true, &features);
+        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Enabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached ligature template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, true, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Enabled);
         assert_shaped_runs_eq(&actual, &expected, "ligature text with ligatures enabled");
     }
 
     #[test]
     fn run_cache_hit_matches_uncached_shape_for_wide_unicode_text() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
 
         // U+4E2D (中): a single wide CJK character, display_width = 2. The
@@ -1842,7 +1780,7 @@ mod tests {
             col_count: 2,
             ..make_run("中", 3, FaceId::PrimaryRegular)
         };
-        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 9.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 9.0, LigatureShaping::Disabled);
 
         let run_b = TextRun {
             char_widths: vec![2],
@@ -1850,14 +1788,15 @@ mod tests {
             ..make_run("中", 11, FaceId::PrimaryRegular)
         };
         let cell_w_b = 14.25;
-        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        let actual =
+            cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_hits,
             1,
             "run_b must hit run_a's cached wide-glyph template"
         );
 
-        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, LigatureShaping::Disabled);
         assert_shaped_runs_eq(&actual, &expected, "wide unicode cluster/cell widths");
 
         // Sanity: this genuinely exercises the wide-glyph path (not a
@@ -1872,14 +1811,13 @@ mod tests {
     #[test]
     fn run_cache_quiet_lookups_do_not_evict_prior_generation() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("alpha", 0, FaceId::PrimaryRegular);
 
         // "Call 1": miss-bearing — rotates once, then shapes `run` into the
         // new current generation.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         // "Call 2": quiet. A quiet `shape_visible` call never touches
@@ -1890,7 +1828,7 @@ mod tests {
         // template must still be reachable: it becomes `previous` when call
         // 3 rotates `current` (still holding it from call 1).
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -1902,25 +1840,24 @@ mod tests {
     #[test]
     fn run_cache_third_miss_bearing_generation_evicts_the_first() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("alpha", 0, FaceId::PrimaryRegular);
         let other = make_run("beta", 0, FaceId::PrimaryRegular);
 
         // Generation 1: shape `run`.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
 
         // Generation 2: shape something else. `run` is not looked up here,
         // so it survives only as the (now) `previous` generation.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&other, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&other, &fm, 10.0, LigatureShaping::Disabled);
 
         // Generation 3: rotates again. Generation 1 (which held `run`) is now
         // neither `current` nor `previous` — bounded to two generations, it
         // must be gone.
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1933,14 +1870,13 @@ mod tests {
     #[test]
     fn run_cache_duplicate_runs_in_the_same_call_hit_the_current_generation() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run_row1 = make_run("same text", 0, FaceId::PrimaryRegular);
         let run_row2 = make_run("same text", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run_row1, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run_row2, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_row1, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run_row2, &fm, 10.0, LigatureShaping::Disabled);
 
         let stats = cache.stats();
         assert_eq!(
@@ -1954,13 +1890,12 @@ mod tests {
     #[test]
     fn clear_invalidates_run_cache() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_hits, 1);
 
         cache.clear();
@@ -1968,7 +1903,7 @@ mod tests {
         // Subtask 124.6: `clear()` must drop both run-cache generations, not
         // just the line cache — a font rebuild can reuse a `FaceId` for
         // entirely different font data.
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(
             cache.stats().run_misses,
             2,
@@ -1979,12 +1914,11 @@ mod tests {
     #[test]
     fn reset_stats_preserves_run_cache_entries() {
         let fm = test_font_manager();
-        let features = shaping_features(false);
         let mut cache = ShapingCache::new();
         let run = make_run("hello", 0, FaceId::PrimaryRegular);
 
         cache.run_cache.rotate();
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         assert_eq!(cache.stats().run_misses, 1);
 
         cache.reset_stats();
@@ -1992,7 +1926,7 @@ mod tests {
 
         // The cached template must still be there — reset_stats zeroes only
         // the tally, per its own contract (mirroring the line cache).
-        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, LigatureShaping::Disabled);
         let stats = cache.stats();
         assert_eq!(
             stats.run_hits, 1,
@@ -2081,8 +2015,8 @@ mod tests {
     // -- build_shaped_glyphs: ligature-aware cluster mapping --
 
     /// Helper: construct a `GlyphInfo` with just the fields we need.
-    fn make_glyph_info(glyph_id: u32, cluster: u32) -> rustybuzz::GlyphInfo {
-        let mut info = rustybuzz::GlyphInfo::default();
+    fn make_glyph_info(glyph_id: u32, cluster: u32) -> harfrust::GlyphInfo {
+        let mut info = harfrust::GlyphInfo::default();
         info.glyph_id = glyph_id;
         info.cluster = cluster;
         info
@@ -2291,7 +2225,7 @@ mod tests {
     /// fixtures), this drives the actual shaping pipeline against the bundled
     /// default face, so it observes whether the font's `calt` table actually
     /// rewrites glyphs for ligating sequences.
-    fn bundled_glyph_ids(text: &str, ligatures: bool) -> Vec<u16> {
+    fn bundled_glyph_ids(text: &str, ligatures: LigatureShaping) -> Vec<u16> {
         let mut fm = test_font_manager();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
@@ -2303,13 +2237,13 @@ mod tests {
         // A same-format ASCII run must stay a single run so a ligature can form.
         assert_eq!(runs.len(), 1, "`{text}` should be one run");
 
-        let shaped = shape_runs_test(&runs, &fm, cell_w, ligatures);
+        let shaped = shape_runs(&runs, &fm, cell_w, ligatures);
         assert_eq!(shaped.len(), 1);
         shaped[0].glyphs.iter().map(|g| g.glyph_id).collect()
     }
 
     /// Regression guard: the bundled default font must actually form ligatures
-    /// when `ligatures = true`.
+    /// under `LigatureShaping::Enabled`.
     ///
     /// This is the test that would have caught the `MesloLGS`
     /// "ligature-feature-on-but-font-has-no-ligatures" bug that motivated the
@@ -2328,12 +2262,12 @@ mod tests {
     /// It fails if the bundled font is ever swapped back to a non-ligating face
     /// such as `MesloLGS`, or to the `CaskaydiaMono` variant (which strips
     /// `calt`): in those fonts the glyphs are identical regardless of the
-    /// ligature feature flag.
+    /// ligature mode.
     #[test]
     fn bundled_font_forms_ligatures() {
         for seq in ["->", "=>", "==="] {
-            let with_lig = bundled_glyph_ids(seq, true);
-            let without_lig = bundled_glyph_ids(seq, false);
+            let with_lig = bundled_glyph_ids(seq, LigatureShaping::Enabled);
+            let without_lig = bundled_glyph_ids(seq, LigatureShaping::Disabled);
 
             // The ligature feature must have changed the shaping output. If the
             // bundled font has no `calt` coverage (Meslo, CaskaydiaMono), the
@@ -2375,7 +2309,7 @@ mod tests {
         assert!(glyphs[0].x_px.abs() < f32::EPSILON);
     }
 
-    // --- Task #430: shape_with_plan output-identity vs the old shape() path ---
+    // --- Task #430: cached-plan output-identity vs an uncached one-shot shape ---
 
     /// One shaped glyph's full identity: glyph id, source cluster, and the
     /// positional data (advances + offsets). Positions are included because
@@ -2386,7 +2320,7 @@ mod tests {
 
     /// Collect the full per-glyph identity (id, cluster, x/y advance, x/y
     /// offset) from a shaped `GlyphBuffer`.
-    fn glyph_identities(output: &rustybuzz::GlyphBuffer) -> Vec<GlyphIdentity> {
+    fn glyph_identities(output: &harfrust::GlyphBuffer) -> Vec<GlyphIdentity> {
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
         infos
@@ -2405,91 +2339,806 @@ mod tests {
             .collect()
     }
 
-    /// Shape `text` as a single same-format run via the OLD `rustybuzz::shape()`
-    /// entry point — bypassing `FontManager`'s face/plan cache entirely, by
-    /// parsing the face directly from the raw bytes — for comparison against
-    /// the new cached `shape_cached` path.
-    fn shape_via_old_api(
+    /// Shape `text` as a single same-format run via an uncached, one-shot
+    /// harfrust reference path — bypassing `FontManager`'s shaper/plan
+    /// caches entirely by building the `FontRef`, `ShaperData` and `Shaper`
+    /// directly from the raw bytes and letting harfrust compile a throwaway
+    /// plan — for comparison against the cached `shape_cached` path.
+    fn shape_uncached_reference(
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
-        ligatures: bool,
+        ligatures: LigatureShaping,
     ) -> Vec<GlyphIdentity> {
         let bytes = fm.face_data(face_id).expect("face must be loaded");
         let index: u32 = fm
             .face_index(face_id)
             .and_then(|i| u32::value_from(i).ok())
             .expect("face index must be loaded and fit in u32");
-        let face = rustybuzz::Face::from_slice(bytes, index).expect("face must parse");
+        let font_ref = harfrust::FontRef::from_index(bytes, index).expect("face must parse");
+        let shaper_data = harfrust::ShaperData::new(&font_ref);
+        let shaper = shaper_data.shaper(&font_ref).build();
 
-        let features = shaping_features(ligatures);
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
-        let output = rustybuzz::shape(&face, &features, buffer);
+        buffer.guess_segment_properties();
+        let output = shaper.shape(
+            buffer,
+            harfrust::ShapeOptions::new().features(ligatures.features()),
+        );
         glyph_identities(&output)
     }
 
-    /// Shape `text` through the NEW cached `shape_cached` path (the same
+    /// Shape `text` through the cached `shape_cached` path (the same
     /// entry point `shape_single_run` uses in production), returning the
     /// same per-glyph identity sequence for comparison.
-    fn shape_via_new_api(
+    fn shape_via_cached_path(
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
-        ligatures: bool,
+        ligatures: LigatureShaping,
     ) -> Vec<GlyphIdentity> {
-        let features = shaping_features(ligatures);
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        buffer.guess_segment_properties();
         let output = fm
-            .shape_cached(face_id, ligatures, &features, buffer)
+            .shape_cached(face_id, ligatures, text)
             .expect("shape_cached must succeed for a loaded face");
         glyph_identities(&output)
     }
 
-    /// Regression guard for the core claim of Task #430: caching the parsed
-    /// `Face` and the compiled `ShapePlan` and shaping via
-    /// `shape_with_plan` must produce IDENTICAL output — glyph ids, source
-    /// clusters, AND positional data (advances + offsets) — to the previous
-    /// `rustybuzz::shape()` call for every kind of content the terminal
-    /// renderer shapes: plain Latin text, ligating/contextual sequences, a
-    /// CJK (wide) character, and an emoji (routed to a different face
-    /// entirely). Positions are asserted because `kern` is always enabled,
+    /// Regression guard for the core claim of Task #430: caching the
+    /// `ShaperData` and the compiled `ShapePlan` and shaping with the cached
+    /// plan must produce IDENTICAL output — glyph ids, source clusters, AND
+    /// positional data (advances + offsets) — to an uncached one-shot shape
+    /// (see `shape_uncached_reference`) for every kind of content the
+    /// terminal renderer shapes: plain Latin text, ligating/contextual
+    /// sequences, a CJK (wide) character, and an emoji (routed to a different
+    /// face entirely). Positions are asserted because `kern` is always enabled,
     /// so a plan-caching regression could shift advances without touching
     /// glyph ids. If this test ever fails, the perf change altered
     /// rendering, which is the one thing it must never do.
     #[test]
-    fn shape_with_plan_matches_old_shape_for_mixed_content() {
+    fn cached_plan_shape_matches_uncached_shape_for_mixed_content() {
         let fm = test_font_manager();
 
-        let samples: &[(&str, FaceId, bool)] = &[
-            ("Hello, world!", FaceId::PrimaryRegular, false),
-            ("->", FaceId::PrimaryRegular, true),
-            ("!=", FaceId::PrimaryRegular, true),
-            ("中", FaceId::PrimaryRegular, false),
+        let samples: &[(&str, FaceId, LigatureShaping)] = &[
+            (
+                "Hello, world!",
+                FaceId::PrimaryRegular,
+                LigatureShaping::Disabled,
+            ),
+            ("->", FaceId::PrimaryRegular, LigatureShaping::Enabled),
+            ("!=", FaceId::PrimaryRegular, LigatureShaping::Enabled),
+            ("中", FaceId::PrimaryRegular, LigatureShaping::Disabled),
         ];
 
         for &(text, face_id, ligatures) in samples {
-            let old = shape_via_old_api(text, face_id, &fm, ligatures);
-            let new = shape_via_new_api(text, face_id, &fm, ligatures);
+            let uncached = shape_uncached_reference(text, face_id, &fm, ligatures);
+            let cached = shape_via_cached_path(text, face_id, &fm, ligatures);
             assert_eq!(
-                old, new,
-                "`{text}` (ligatures={ligatures}): shape_with_plan output \
-                 must match the old rustybuzz::shape() output exactly"
+                uncached, cached,
+                "`{text}` ({ligatures:?}): cached-plan shape output \
+                 must match the uncached one-shot shape output exactly"
             );
         }
 
         // Emoji routes to a different face (FaceId::Emoji) entirely — the
         // bundled Noto Color Emoji floor (Task #402) guarantees one is
         // always loaded, so this is deterministic across hosts.
-        let old_emoji = shape_via_old_api("😀", FaceId::Emoji, &fm, false);
-        let new_emoji = shape_via_new_api("😀", FaceId::Emoji, &fm, false);
+        let uncached_emoji =
+            shape_uncached_reference("😀", FaceId::Emoji, &fm, LigatureShaping::Disabled);
+        let cached_emoji =
+            shape_via_cached_path("😀", FaceId::Emoji, &fm, LigatureShaping::Disabled);
         assert_eq!(
-            old_emoji, new_emoji,
-            "emoji: shape_with_plan output must match the old rustybuzz::shape() \
-             output exactly"
+            uncached_emoji, cached_emoji,
+            "emoji: cached-plan shape output must match the uncached one-shot \
+             shape output exactly"
         );
+    }
+
+    /// One golden corpus entry: the exact shaped output for `text` with
+    /// ligatures OFF and ON.
+    struct GoldenCase {
+        text: &'static str,
+        off: &'static [GlyphIdentity],
+        on: &'static [GlyphIdentity],
+    }
+
+    /// Golden shaping output for the bundled `CaskaydiaCove` regular face.
+    /// Tuples are `(glyph_id, cluster, x_advance, y_advance, x_offset,
+    /// y_offset)`.
+    const GOLDEN_BUNDLED_SHAPING: &[GoldenCase] = &[
+        GoldenCase {
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13760, 0, 1200, 0, 0, 0), (14040, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(13730, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (13977, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "<=>",
+            off: &[
+                (32, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (34, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (14046, 0, 1200, 0, 0, 0),
+                (14026, 1, 1200, 0, 0, 0),
+                (14034, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "www",
+            off: &[
+                (91, 0, 1200, 0, 0, 0),
+                (91, 1, 1200, 0, 0, 0),
+                (91, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12848, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "|>",
+            off: &[(96, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13971, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "/**/",
+            off: &[
+                (19, 0, 1200, 0, 0, 0),
+                (14, 1, 1200, 0, 0, 0),
+                (14, 2, 1200, 0, 0, 0),
+                (19, 3, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (19, 0, 1200, 0, 0, 0),
+                (14, 1, 1200, 0, 0, 0),
+                (14, 2, 1200, 0, 0, 0),
+                (19, 3, 1200, 0, 0, 0),
+            ],
+        },
+        GoldenCase {
+            text: "e\u{301}",
+            off: &[(172, 0, 1200, 0, 0, 0)],
+            on: &[(172, 0, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "a\u{308}",
+            off: &[(167, 0, 1200, 0, 0, 0)],
+            on: &[(167, 0, 1200, 0, 0, 0)],
+        },
+        GoldenCase {
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1140, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1140, 0)],
+        },
+    ];
+
+    /// Golden regression test: pins the full shaped output (glyph id, cluster,
+    /// advances and offsets, for every glyph) of the production
+    /// `FontManager::shape_cached` path against the bundled regular face, with
+    /// ligatures off and on.
+    ///
+    /// The literals were captured from rustybuzz 0.20.1 before the harfrust
+    /// migration (issue #530). Any change to these numbers means shaping output
+    /// changed and must be explained, not re-pinned.
+    ///
+    /// The corpus covers plain Latin, ligating/contextual sequences (`calt`),
+    /// precomposed combining sequences (`e` + U+0301, `a` + U+0308), and one
+    /// combining mark with no precomposed form (`x` + U+0301) so that mark
+    /// positioning (`x_offset`) is pinned too.
+    #[test]
+    fn golden_bundled_shaping_output_is_pinned() {
+        // `Config::default()` has no user font family, so the primary regular
+        // face is the bundled CaskaydiaCove regardless of installed fonts.
+        let fm = test_font_manager();
+        assert_eq!(
+            fm.face_data(FaceId::PrimaryRegular),
+            Some(crate::gui::font_manager::bundled_regular_font_bytes()),
+            "PrimaryRegular must be the bundled CaskaydiaCove face"
+        );
+
+        // The combining-mark cases are only meaningful if the face covers them.
+        let charmap = fm
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("bundled face must be loaded")
+            .charmap();
+        assert_ne!(charmap.map('\u{301}'), 0, "bundled face must cover U+0301");
+        assert_ne!(charmap.map('\u{308}'), 0, "bundled face must cover U+0308");
+
+        for case in GOLDEN_BUNDLED_SHAPING {
+            for (ligatures, expected) in [
+                (LigatureShaping::Disabled, case.off),
+                (LigatureShaping::Enabled, case.on),
+            ] {
+                let actual =
+                    shape_via_cached_path(case.text, FaceId::PrimaryRegular, &fm, ligatures);
+                assert_eq!(
+                    actual.as_slice(),
+                    expected,
+                    "`{:?}` ({ligatures:?}): shaped output no longer matches the \
+                     pinned golden values",
+                    case.text
+                );
+            }
+        }
+
+        // Sanity: the ligature path must actually be exercised by the bundled
+        // font, otherwise the `on` column pins nothing interesting.
+        let ligature_changed = ["->", "!=", "==="].iter().any(|text| {
+            shape_via_cached_path(text, FaceId::PrimaryRegular, &fm, LigatureShaping::Enabled)
+                != shape_via_cached_path(
+                    text,
+                    FaceId::PrimaryRegular,
+                    &fm,
+                    LigatureShaping::Disabled,
+                )
+        });
+        assert!(
+            ligature_changed,
+            "ligatures ON must change the shaping of at least one of `->`, `!=`, `===`"
+        );
+    }
+
+    /// One extended golden corpus entry: like [`GoldenCase`], but for an
+    /// explicit bundled face.
+    struct ExtendedGoldenCase {
+        face: FaceId,
+        text: &'static str,
+        off: &'static [GlyphIdentity],
+        on: &'static [GlyphIdentity],
+    }
+
+    /// Golden shaping output across every bundled face and a wider script
+    /// range than [`GOLDEN_BUNDLED_SHAPING`]: bold, italic and bold-italic
+    /// `CaskaydiaCove`, the bundled Noto Color Emoji face (ZWJ, VS16, flags,
+    /// skin tones, keycaps), and non-Latin scripts (CJK, Hebrew, Arabic,
+    /// Devanagari) plus variation selector, empty, space and tab inputs on
+    /// the regular face. Tuples are `(glyph_id, cluster, x_advance,
+    /// y_advance, x_offset, y_offset)`.
+    ///
+    /// The bundled faces carry no CJK coverage, so the CJK entry shapes to
+    /// `.notdef` (glyph 0); that still pins cluster and advance behaviour.
+    ///
+    /// Values captured from rustybuzz 0.20.1 at commit 602af317 (the
+    /// pre-migration tree) for issue #530 review finding M1. A difference
+    /// means harfrust shapes differently and must be explained, not
+    /// re-pinned.
+    const GOLDEN_BUNDLED_SHAPING_EXTENDED: &[ExtendedGoldenCase] = &[
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(13760, 0, 1200, 0, 0, 0), (14040, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(13730, 0, 1200, 0, 0, 0), (14096, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (13977, 0, 1200, 0, 0, 0),
+                (14096, 1, 1200, 0, 0, 0),
+                (14096, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBold,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1139, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1139, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(12602, 0, 1200, 0, 0, 0), (12881, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(12572, 0, 1200, 0, 0, 0), (13466, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12818, 0, 1200, 0, 0, 0),
+                (13466, 1, 1200, 0, 0, 0),
+                (13466, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryItalic,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "hello world",
+            off: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (76, 0, 1200, 0, 0, 0),
+                (73, 1, 1200, 0, 0, 0),
+                (80, 2, 1200, 0, 0, 0),
+                (80, 3, 1200, 0, 0, 0),
+                (83, 4, 1200, 0, 0, 0),
+                (4, 5, 1200, 0, 0, 0),
+                (91, 6, 1200, 0, 0, 0),
+                (83, 7, 1200, 0, 0, 0),
+                (86, 8, 1200, 0, 0, 0),
+                (80, 9, 1200, 0, 0, 0),
+                (72, 10, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "->",
+            off: &[(17, 0, 1200, 0, 0, 0), (34, 1, 1200, 0, 0, 0)],
+            on: &[(12602, 0, 1200, 0, 0, 0), (12881, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "!=",
+            off: &[(5, 0, 1200, 0, 0, 0), (33, 1, 1200, 0, 0, 0)],
+            on: &[(12572, 0, 1200, 0, 0, 0), (13466, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "===",
+            off: &[
+                (33, 0, 1200, 0, 0, 0),
+                (33, 1, 1200, 0, 0, 0),
+                (33, 2, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12818, 0, 1200, 0, 0, 0),
+                (13466, 1, 1200, 0, 0, 0),
+                (13466, 2, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "fn main() {}",
+            off: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (74, 0, 1200, 0, 0, 0),
+                (82, 1, 1200, 0, 0, 0),
+                (4, 2, 1200, 0, 0, 0),
+                (81, 3, 1200, 0, 0, 0),
+                (69, 4, 1200, 0, 0, 0),
+                (77, 5, 1200, 0, 0, 0),
+                (82, 6, 1200, 0, 0, 0),
+                (12, 7, 1200, 0, 0, 0),
+                (13, 8, 1200, 0, 0, 0),
+                (4, 9, 1200, 0, 0, 0),
+                (95, 10, 1200, 0, 0, 0),
+                (97, 11, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryBoldItalic,
+            text: "x\u{301}",
+            off: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+            on: &[(92, 0, 1200, 0, 0, 0), (410, 0, 0, 0, -1200, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F600}",
+            off: &[(883, 0, 2550, 0, 0, 0)],
+            on: &[(883, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            off: &[(2022, 0, 2550, 0, 0, 0)],
+            on: &[(2022, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{2764}\u{FE0F}",
+            off: &[(168, 0, 2550, 0, 0, 0)],
+            on: &[(168, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F1FA}\u{1F1F8}",
+            off: &[(1772, 0, 2550, 0, 0, 0)],
+            on: &[(1772, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "\u{1F44D}\u{1F3FD}",
+            off: &[(1969, 0, 2550, 0, 0, 0)],
+            on: &[(1969, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::Emoji,
+            text: "1\u{FE0F}\u{20E3}",
+            off: &[(1485, 0, 2550, 0, 0, 0)],
+            on: &[(1485, 0, 2550, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{4E2D}\u{6587}",
+            off: &[(0, 0, 1200, 0, 0, 0), (0, 3, 1200, 0, 0, 0)],
+            on: &[(0, 0, 1200, 0, 0, 0), (0, 3, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{5E9}\u{5DC}\u{5D5}\u{5DD}",
+            off: &[
+                (661, 6, 1200, 0, 0, 0),
+                (653, 4, 1200, 0, 0, 0),
+                (660, 2, 1200, 0, 0, 0),
+                (673, 0, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (661, 6, 1200, 0, 0, 0),
+                (653, 4, 1200, 0, 0, 0),
+                (660, 2, 1200, 0, 0, 0),
+                (673, 0, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{645}\u{631}\u{62D}\u{628}\u{627}",
+            off: &[
+                (12872, 8, 1200, 0, 0, 0),
+                (12909, 6, 1200, 0, 0, 0),
+                (13048, 4, 1200, 0, 0, 0),
+                (13094, 2, 1200, 0, 0, 0),
+                (13354, 0, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (12872, 8, 1200, 0, 0, 0),
+                (12909, 6, 1200, 0, 0, 0),
+                (13048, 4, 1200, 0, 0, 0),
+                (13094, 2, 1200, 0, 0, 0),
+                (13354, 0, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947}",
+            off: &[
+                (0, 0, 1200, 0, 0, 0),
+                (0, 3, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+            ],
+            on: &[
+                (0, 0, 1200, 0, 0, 0),
+                (0, 3, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 6, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+                (0, 12, 1200, 0, 0, 0),
+            ],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "a\u{FE0E}",
+            off: &[(69, 0, 1200, 0, 0, 0), (4, 0, 0, 0, 0, 0)],
+            on: &[(69, 0, 1200, 0, 0, 0), (4, 0, 0, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "",
+            off: &[],
+            on: &[],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "  ",
+            off: &[(4, 0, 1200, 0, 0, 0), (4, 1, 1200, 0, 0, 0)],
+            on: &[(4, 0, 1200, 0, 0, 0), (4, 1, 1200, 0, 0, 0)],
+        },
+        ExtendedGoldenCase {
+            face: FaceId::PrimaryRegular,
+            text: "\t",
+            off: &[(0, 0, 1200, 0, 0, 0)],
+            on: &[(0, 0, 1200, 0, 0, 0)],
+        },
+    ];
+
+    /// Pins the full shaped output of the production `shape_cached` path for
+    /// every bundled face (see [`GOLDEN_BUNDLED_SHAPING_EXTENDED`]), with
+    /// ligatures off and on.
+    #[test]
+    fn golden_extended_bundled_shaping_matches_rustybuzz() {
+        // `Config::default()` has no user font family, so every primary face
+        // is the bundled CaskaydiaCove and the emoji face is the bundled Noto
+        // Color Emoji, regardless of installed fonts.
+        let fm = test_font_manager();
+        for face in [
+            FaceId::PrimaryRegular,
+            FaceId::PrimaryBold,
+            FaceId::PrimaryItalic,
+            FaceId::PrimaryBoldItalic,
+            FaceId::Emoji,
+        ] {
+            let bundled = crate::gui::font_manager::bundled_face_bytes(face);
+            assert!(bundled.is_some(), "{face:?} must have bundled font bytes");
+            assert_eq!(
+                fm.face_data(face),
+                bundled,
+                "{face:?} must be the bundled face"
+            );
+        }
+
+        // The CJK case is pinned as `.notdef`; make that premise explicit.
+        let charmap = fm
+            .swash_font_ref(FaceId::PrimaryRegular)
+            .expect("bundled face must be loaded")
+            .charmap();
+        assert_eq!(
+            charmap.map('\u{4E2D}'),
+            0,
+            "bundled regular face is expected to have no CJK coverage"
+        );
+
+        for case in GOLDEN_BUNDLED_SHAPING_EXTENDED {
+            for (ligatures, expected) in [
+                (LigatureShaping::Disabled, case.off),
+                (LigatureShaping::Enabled, case.on),
+            ] {
+                let actual = shape_via_cached_path(case.text, case.face, &fm, ligatures);
+                assert_eq!(
+                    actual.as_slice(),
+                    expected,
+                    "{:?} `{:?}` ({ligatures:?}): shaped output differs from the \
+                     rustybuzz 0.20.1 reference",
+                    case.face,
+                    case.text
+                );
+            }
+        }
     }
 }
 
@@ -2506,10 +3155,10 @@ mod tests {
 #[cfg(test)]
 mod shaping_cache_hit_rate {
     use super::{FormatTag, ShapingCache, ShapingCacheStats};
+    use crate::gui::font_manager::FontManager;
+    use crate::gui::ligature_shaping::LigatureShaping;
     use freminal_common::buffer_states::tchar::TChar;
     use freminal_common::config::Config;
-
-    use crate::gui::font_manager::FontManager;
 
     /// A `width` x `height` grid of newline-separated ASCII, generated from
     /// cell coordinates so every row is distinct and the content is
@@ -2547,7 +3196,15 @@ mod shaping_cache_hit_rate {
         cache.reset_stats();
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
-        let _ = cache.shape_visible(chars, &tags, width, fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            chars,
+            &tags,
+            width,
+            fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
         cache.stats()
     }
 
@@ -2624,7 +3281,7 @@ mod shaping_cache_hit_rate {
     /// one run, so at the RUN layer the 23 rows that are byte-identical to a
     /// row shaped a moment ago (just at a different line index and thus a
     /// different `RunCacheKey`-irrelevant position) now hit the
-    /// content-addressed run cache instead of paying a fresh `rustybuzz`
+    /// content-addressed run cache instead of paying a fresh `harfrust`
     /// call. Only the one genuinely new bottom row misses.
     #[test]
     fn a_scroll_by_one_line_reuses_unchanged_runs() {

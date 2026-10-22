@@ -77,7 +77,20 @@
     {
       "groupName": "font shaping stack",
       "matchManagers": ["cargo"],
-      "matchPackageNames": ["rustybuzz", "swash", "fontdb", "ttf-parser"]
+      "description": "harfrust, swash and fontdb are direct dependencies. skrifa and read-fonts are listed only so lockfile updates of the shared fontations stack are grouped with them.",
+      "matchPackageNames": [
+        "harfrust",
+        "skrifa",
+        "read-fonts",
+        "swash",
+        "fontdb"
+      ]
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["harfrust"],
+      "description": "harfrust is held below 0.13 because epaint (egui 0.36) declares the 0.12 line, and harfrust 0.13+ requires a newer read-fonts, which would duplicate the read-fonts/font-types stack (our shaping and egui's text layout must share one copy). Bump it together with the egui stack. Remove or raise once epaint's own declared harfrust requirement moves.",
+      "allowedVersions": "<0.13"
     },
     {
       "groupName": "clap",

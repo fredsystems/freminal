@@ -24,6 +24,7 @@ pub mod folding;
 pub mod font_manager;
 pub mod fonts;
 pub mod history_file_reader;
+pub mod ligature_shaping;
 pub mod mouse;
 pub mod panes;
 pub mod pty;

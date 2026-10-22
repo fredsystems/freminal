@@ -37,6 +37,7 @@ use criterion::{
 use freminal::gui::atlas::GlyphAtlas;
 use freminal::gui::colors::cursor_f;
 use freminal::gui::font_manager::FontManager;
+use freminal::gui::ligature_shaping::LigatureShaping;
 use freminal::gui::renderer::{
     BackgroundFrame, CursorBlinkPhase, CursorDrawParams, FgRenderOptions,
     build_background_instances, build_foreground_instances,
@@ -390,7 +391,7 @@ fn ligature_heavy_visible_chars(
 
 /// Partial-dirty path (issue #405 Part B): prime the cache, then change a
 /// single visible row's content each sample and re-shape. `ShapingCache` is
-/// per-row content-hashed, so only the one changed row re-shapes (rustybuzz)
+/// per-row content-hashed, so only the one changed row re-shapes (harfrust)
 /// while every other row is an `Arc::clone` hit. This isolates the shaping
 /// stage's genuinely-incremental behaviour — in contrast to the downstream
 /// vertex builders (`build_bg_instances`/`build_fg_instances`), which are
@@ -406,7 +407,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("shape_visible_partial_dirty_200x50", |b| {
         // `iter_batched_ref` (not `iter_batched`): the routine takes the
         // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
-        // (freeing the cached parsed `Face` and compiled `ShapePlan`,
+        // (freeing the cached `ShaperData` and compiled `ShapePlan`,
         // Task #430) happens OUTSIDE the timed region. In production the
         // `FontManager` lives for the whole session and is never dropped
         // per frame, so timing its `Drop` here would measure a cost that
@@ -425,7 +426,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 );
                 // Produce a variant with exactly one row changed. Rows are
@@ -458,7 +459,7 @@ fn bench_shape_partial_dirty(group: &mut BenchmarkGroup<'_, WallTime>) {
                     width,
                     fm,
                     *cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             },
@@ -476,12 +477,10 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
     let mut group = c.benchmark_group("shaping_ligatures");
     group.throughput(Throughput::Elements(total_chars));
 
-    for ligatures in [false, true] {
-        let label = if ligatures {
-            "ligatures_on"
-        } else {
-            "ligatures_off"
-        };
+    for (ligatures, label) in [
+        (LigatureShaping::Disabled, "ligatures_off"),
+        (LigatureShaping::Enabled, "ligatures_on"),
+    ] {
         group.bench_function(BenchmarkId::new("shape_visible", label), |b| {
             b.iter_batched(
                 || {
@@ -514,7 +513,15 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
         // Prime the cache.
-        let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+        let _ = cache.shape_visible(
+            &chars,
+            &tags,
+            width,
+            &mut fm,
+            cell_w,
+            LigatureShaping::Disabled,
+            &[],
+        );
 
         b.iter(|| {
             std::hint::black_box(cache.shape_visible(
@@ -523,7 +530,7 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
                 width,
                 &mut fm,
                 cell_w,
-                false,
+                LigatureShaping::Disabled,
                 &[],
             ));
         });
@@ -596,12 +603,13 @@ fn crossframe_shaping_frames(
 /// btop that rewrites most cells every frame.
 ///
 /// Because the `FontManager` persists across frames, this benchmark exercises
-/// the cross-frame Face/`ShapePlan` cache (Task #430): the parsed
-/// `rustybuzz::Face` and compiled `ShapePlan` are reused across every frame,
-/// so a changed row re-shapes via `shape_with_plan` without re-parsing the
-/// face or recompiling the plan. It is the faithful cross-frame model of the
-/// production render loop, in contrast to `shape_visible_partial_dirty_200x50`
-/// (which rebuilds the manager per iteration) — see that bench's note.
+/// the cross-frame shaper/`ShapePlan` cache (Task #430): the cached
+/// `harfrust::ShaperData` and compiled `ShapePlan` are reused across every
+/// frame, so a changed row re-shapes via the cached plan without rebuilding
+/// the shaper data or recompiling the plan. It is the faithful cross-frame
+/// model of the production render loop, in contrast to
+/// `shape_visible_partial_dirty_200x50` (which rebuilds the manager per
+/// iteration) — see that bench's note.
 fn bench_shaping_crossframe(c: &mut Criterion) {
     let width = 200usize;
     let height = 50usize;
@@ -629,7 +637,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                 width,
                 &mut fm,
                 cell_w,
-                false,
+                LigatureShaping::Disabled,
                 &[],
             ));
         });
@@ -659,7 +667,15 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
             let mut cache = ShapingCache::new();
             #[allow(clippy::cast_precision_loss)]
             let cell_w = fm.cell_width() as f32;
-            let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+            let _ = cache.shape_visible(
+                &chars,
+                &tags,
+                width,
+                &mut fm,
+                cell_w,
+                LigatureShaping::Disabled,
+                &[],
+            );
 
             b.iter(|| {
                 std::hint::black_box(cache.shape_visible(
@@ -668,7 +684,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             });
@@ -720,7 +736,7 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
                     width,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                     &[],
                 ));
             });
@@ -750,7 +766,15 @@ fn build_shaped_lines_for_size(
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
-    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+    let lines = cache.shape_visible(
+        &chars,
+        &tags,
+        width,
+        &mut fm,
+        cell_w,
+        LigatureShaping::Disabled,
+        &[],
+    );
     (lines, fm)
 }
 
@@ -824,7 +848,15 @@ fn build_shaped_lines_for_background_corpus(
     let mut cache = ShapingCache::new();
     #[allow(clippy::cast_precision_loss)]
     let cell_w = fm.cell_width() as f32;
-    let lines = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+    let lines = cache.shape_visible(
+        &chars,
+        &tags,
+        width,
+        &mut fm,
+        cell_w,
+        LigatureShaping::Disabled,
+        &[],
+    );
     (lines, fm)
 }
 
@@ -858,7 +890,7 @@ fn build_shaped_lines_for_indexed_size(
         width,
         &mut fm,
         cell_w,
-        false,
+        LigatureShaping::Disabled,
         &[],
     );
     (lines, fm)
@@ -1370,7 +1402,7 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
                     TerminalColor::BrightBlack,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                 ));
             },
             BatchSize::SmallInput,
@@ -1390,7 +1422,7 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
                     TerminalColor::BrightBlack,
                     &mut fm,
                     cell_w,
-                    false,
+                    LigatureShaping::Disabled,
                 ));
             },
             BatchSize::SmallInput,

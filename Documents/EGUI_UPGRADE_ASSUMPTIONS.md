@@ -420,6 +420,45 @@ focus event.
   blink) until the window manager sends a focus change. Cosmetic; no test
   catches it end to end (the unit tests cover only the seeding helper).
 
+### A15 — the workspace `egui-winit` / `winit` feature lists are hand-copied defaults
+
+Both crates are declared with `default-features = false` and an explicit feature
+list in the workspace `Cargo.toml` (#530), because `egui-winit`'s defaults
+forward `winit/default`, which enables `wayland-csd-adwaita` -> `ab_glyph` ->
+`ttf-parser` (unmaintained, RUSTSEC-2026-0192). `egui-winit`'s list is its
+`[features] default` set minus `winit/default`; `winit`'s list is its
+`[features] default` set with `wayland-csd-adwaita` swapped for
+`wayland-csd-adwaita-notitle`. Cargo does not warn when a bump adds a feature to
+either upstream default set, so a newly-default feature is silently dropped
+until someone notices the missing behaviour.
+
+- **On every `egui-winit` or `winit` bump:** re-diff the new version's
+  `[features] default` lists against the workspace `Cargo.toml` explicit lists
+  and carry any newly-default feature over. The only deliberate omissions are
+  `winit/default` and `wayland-csd-adwaita`, which reintroduce `ttf-parser`
+  (#530). Confirm with `cargo tree -i ttf-parser` that it is still absent from
+  the graph.
+- **`harfrust` rides with this stack.** It is held to the 0.12 line `epaint`
+  declares (`renovate.json` constrains it to `<0.13`) so `read-fonts` and
+  `font-types` stay a single copy shared with egui's text layout. On an egui
+  bump, read the new `epaint`'s declared `harfrust` requirement and bump the
+  workspace `harfrust` in lockstep, then re-run the shaping golden tests
+  (`golden_bundled_shaping_output_is_pinned` and
+  `golden_extended_bundled_shaping_matches_rustybuzz` in
+  `freminal/src/gui/shaping.rs`). Lift the `<0.13` constraint only when
+  `epaint`'s own requirement moves.
+- **Our code:** workspace `Cargo.toml` (`egui-winit` and `winit` entries and
+  their comments); `renovate.json` (`harfrust` `allowedVersions`);
+  `freminal/src/gui/shaping.rs` (golden tests).
+- **Upstream (0.36.2):** `egui-winit/Cargo.toml` `[features] default`;
+  `winit/Cargo.toml` `[features] default` (winit 0.30.x); `epaint/Cargo.toml`
+  `harfrust` dependency.
+- **Symptom if broken:** a dropped default feature disables behaviour with no
+  compile error (for example X11 or Wayland support, clipboard or link
+  handling); re-adding `winit/default` or `wayland-csd-adwaita` silently
+  restores `ttf-parser` to the graph and fails `cargo deny`; a `harfrust` bump
+  past `epaint`'s line duplicates `read-fonts` or changes shaping output.
+
 ## What is NOT covered here
 
 Behaviours that _are_ part of a stable public API (e.g. `Context::run_ui`,

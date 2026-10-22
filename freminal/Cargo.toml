@@ -161,13 +161,12 @@ freminal-common = { path = "../freminal-common" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 freminal-windowing = { path = "../freminal-windowing" }
 glow.workspace = true
+harfrust.workspace = true
 image.workspace = true
 notify-rust.workspace = true
 open.workspace = true
 regex.workspace = true
 rustc-hash.workspace = true
-rustybuzz.workspace = true
-self_cell.workspace = true
 swash.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
