@@ -9155,6 +9155,20 @@ Task 150 (structural ones; see "150 Evidence").
 - **149.C17 — A plain `Notify` never adopts the reply's sender as the daemon owner (Z13).**
   With bus tracking and a failed `GetNameOwner`, plain-only use never refreshes the
   capabilities. Fix: `show_plain` adopts the owner as `record_shown` does, with a test.
+- **Status (2026-10-22):** C1–C17 are done in commits `7b304012` (C11, C13, C14),
+  `ed8db385` (C1, C2, C5, C6, C10, C16, C17 and the service side of C8 and C12) and
+  `d6fe5bbe` (C3, C4, C7, C9, C15 and the GUI and docs side of C8, C10 and C12).
+  - A confirmation review verified every entry and found no blocker or major. Its five
+    follow-ups are done in the next commit:
+    - the shutdown doc's sender-lifetime sentence;
+    - `routing_for` is private again, and its tie-in test moved to `notifications.rs`;
+    - a tested `DropLogLevel` for the warn-once drop log;
+    - `resolve_system_notify_sink`, with tests for the busy, running, unwanted and spawn
+      cases;
+    - an implicit slot drop.
+  - Enabling zbus's `tracing` feature moved `tokio` 1.53.2 → 1.53.3 in the lock file and
+    added `mio` / `wasi` entries. No target builds them (`cargo tree -e normal,build -i tokio`
+    is empty on Linux, Windows, macOS and FreeBSD).
 - **Scheduled into Task 150, not fixed here:**
   - R10 / Z14 (`let _ = self;` in the non-Linux `system_notify_sink`);
   - R11 (the repeated platform `cfg`);

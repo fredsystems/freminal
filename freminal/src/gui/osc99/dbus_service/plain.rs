@@ -95,9 +95,33 @@ pub(super) enum PlainDrop {
     OverBudget,
 }
 
+/// How loudly a dropped plain notification is logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropLogLevel {
+    /// The first drop for a cause in this process.
+    Warn,
+    /// Every later drop for that cause.
+    Debug,
+}
+
+/// The level for the next drop counted by `counter`: [`DropLogLevel::Warn`]
+/// for the first, [`DropLogLevel::Debug`] for every one after it.
+fn drop_log_level(counter: &AtomicU64) -> DropLogLevel {
+    if counter.fetch_add(1, Ordering::Relaxed) == 0 {
+        DropLogLevel::Warn
+    } else {
+        DropLogLevel::Debug
+    }
+}
+
 /// Log a dropped plain notification: a warning for the first one dropped for
 /// `reason` in this process, debug afterwards, so a flood cannot also flood the
 /// log.
+///
+/// The warning is once per process per cause, deliberately: the counters are
+/// never reset, so a flood that follows a recovery (the service reconnects,
+/// then drops again) is logged at debug level and does not flood the log a
+/// second time.
 pub(super) fn log_dropped_plain(reason: PlainDrop) {
     static UNAVAILABLE: AtomicU64 = AtomicU64::new(0);
     static OVER_BUDGET: AtomicU64 = AtomicU64::new(0);
@@ -108,13 +132,14 @@ pub(super) fn log_dropped_plain(reason: PlainDrop) {
             "too many notifications are waiting for the notification service",
         ),
     };
-    if counter.fetch_add(1, Ordering::Relaxed) == 0 {
-        tracing::warn!(
+    match drop_log_level(counter) {
+        DropLogLevel::Warn => tracing::warn!(
             "desktop notifications: {why}; dropping notifications \
              (further drops are logged at debug level)"
-        );
-    } else {
-        tracing::debug!("desktop notifications: {why}; notification dropped");
+        ),
+        DropLogLevel::Debug => {
+            tracing::debug!("desktop notifications: {why}; notification dropped");
+        }
     }
 }
 
@@ -586,6 +611,27 @@ mod tests {
         assert_eq!(toasts.len(), 1, "the toast leg ran");
         assert_eq!(rig.recorded(), [], "the system leg did not");
         Ok(())
+    }
+
+    // ── Drop logging ────────────────────────────────────────────────────
+
+    #[test]
+    fn only_the_first_drop_for_a_cause_is_a_warning() {
+        let counter = AtomicU64::new(0);
+
+        assert_eq!(drop_log_level(&counter), DropLogLevel::Warn);
+        for _ in 0..3 {
+            assert_eq!(drop_log_level(&counter), DropLogLevel::Debug);
+        }
+    }
+
+    #[test]
+    fn each_cause_counts_its_own_drops() {
+        let (unavailable, over_budget) = (AtomicU64::new(0), AtomicU64::new(0));
+
+        assert_eq!(drop_log_level(&unavailable), DropLogLevel::Warn);
+        assert_eq!(drop_log_level(&unavailable), DropLogLevel::Debug);
+        assert_eq!(drop_log_level(&over_budget), DropLogLevel::Warn);
     }
 
     // ── The queue and the budget ────────────────────────────────────────

@@ -58,13 +58,13 @@
 //! # Shutdown
 //!
 //! Dropping the handle closes the command channel (once every
-//! [`PlainNotifySender`] cloned from it is dropped too: the GUI holds one per
-//! frame at most, and drops it at the end of that frame's update), and the
-//! dispatcher thread returns the next time it looks at it: at once when idle,
-//! or after the call in flight (at most [`OSC99_DBUS_METHOD_TIMEOUT`]). On the
-//! way out it closes the connection, which ends both pumps' streams, so the
-//! pumps exit at once; their last word, to a signal receiver that is already
-//! gone, goes nowhere.
+//! [`PlainNotifySender`] cloned from it is dropped too: the GUI holds one only
+//! while it routes a notification, and drops it at the end of each routing
+//! block), and the dispatcher thread returns the next time it looks at it: at
+//! once when idle, or after the call in flight (at most
+//! [`OSC99_DBUS_METHOD_TIMEOUT`]). On the way out it closes the connection,
+//! which ends both pumps' streams, so the pumps exit at once; their last word,
+//! to a signal receiver that is already gone, goes nowhere.
 //!
 //! # Owner tracking
 //!
@@ -304,6 +304,42 @@ pub struct Osc99DbusHandle {
     /// The plain notifications in flight, shared with every
     /// [`PlainNotifySender`] made from this handle.
     plain_budget: PlainBudget,
+}
+
+/// A handle with no dispatcher behind it, for testing the code that holds
+/// one: the commands sent through it, and through its
+/// [`PlainNotifySender`]s, wait in the returned [`DetachedQueue`].
+#[cfg(test)]
+pub(in crate::gui) fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
+    let (commands, queue) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
+    let (_events_tx, events) = crossbeam_channel::unbounded();
+    let handle = Osc99DbusHandle {
+        commands,
+        events,
+        plain_budget: PlainBudget::default(),
+    };
+    (handle, DetachedQueue { queue })
+}
+
+/// The commands a [`detached_handle`] was given.
+#[cfg(test)]
+pub(in crate::gui) struct DetachedQueue {
+    queue: Receiver<DbusCommand>,
+}
+
+#[cfg(test)]
+impl DetachedQueue {
+    /// The plain notifications queued since the last call, oldest first.
+    /// Other commands are discarded.
+    pub(in crate::gui) fn take_plain(&self) -> Vec<PlainNotification> {
+        self.queue
+            .try_iter()
+            .filter_map(|command| match command {
+                DbusCommand::ShowPlain { notification, .. } => Some(*notification),
+                DbusCommand::Show { .. } | DbusCommand::Close { .. } => None,
+            })
+            .collect()
+    }
 }
 
 impl Osc99DbusHandle {
@@ -819,9 +855,13 @@ fn handle_command(
             notification,
         } => show_notification(connection, state, sink, instance, replaces, &notification),
         DbusCommand::Close { instance } => close_instance(connection, state, sink, instance),
-        DbusCommand::ShowPlain { notification, slot } => {
+        DbusCommand::ShowPlain {
+            notification,
+            slot: _slot,
+        } => {
+            // `_slot` (unlike `_`) is kept until the end of the arm, so the
+            // budget slot is released only once the notification is handled.
             plain::show_plain(connection, state, &notification);
-            drop(slot);
         }
     }
 }
