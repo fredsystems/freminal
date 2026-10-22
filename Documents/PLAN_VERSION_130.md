@@ -7645,6 +7645,18 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   clean.
 - **Depends on:** nothing.
 
+#### 147.32 — Unused `RowStore` import in a `freminal-buffer` test module
+
+- **Source:** Task 149 final verification (2026-10-22). Predates Task 149 (the file is
+  unchanged on `task-149/zbus-6`); reproduces on `main`.
+- **Defect today:** `cargo bench --no-run --all` warns `unused import: RowStore` at
+  `freminal-buffer/src/buffer/screen_switch_tests.rs:26`. Clippy with `-D warnings` does not
+  see it, because the import is only unused in the bench-profile test build.
+- **Scope:** that one import (or its `cfg`), nothing else.
+- **Fix:** drop `RowStore` from the `use`, or gate it to the configuration that uses it.
+- **Tests / verification:** `cargo bench --no-run --all` emits no warnings.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
