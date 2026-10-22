@@ -27,11 +27,10 @@ use crate::gui::osc99::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch
 
 use super::pump::PumpSignal;
 use super::state::OwnerTracking;
-use super::wire::NotifyReply;
+use super::wire::{NotifyReply, fetch_capabilities};
 use super::{
-    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, ERROR_NAME_HAS_NO_OWNER,
-    ERROR_SERVICE_UNKNOWN, NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE,
-    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService,
+    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, NOTIFICATIONS_INTERFACE,
+    NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService,
 };
 
 /// How long a test waits for something that must happen. Generous so a
@@ -39,6 +38,22 @@ use super::{
 pub(super) const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(super) type TestResult = Result<(), Box<dyn Error>>;
+
+/// The error the bus driver answers `GetNameOwner` with when nobody owns the
+/// name. Production code matches `fdo::Error::NameHasNoOwner`; the name is for
+/// the fake daemon and the error fixtures.
+pub(super) const ERROR_NAME_HAS_NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner";
+/// The error the bus answers a `NO_AUTO_START` call to a name that nobody owns
+/// and that no service file can start. Production code matches
+/// `fdo::Error::ServiceUnknown`; the name is for the fake daemon and the error
+/// fixtures.
+pub(super) const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
+
+/// How long a client built by [`rig_with_method_timeout`] waits for a reply in
+/// the timeout tests. Only calls that are never answered ever wait it out, and
+/// they must: a shorter value cannot make such a test flaky, it only shortens
+/// it. It is not used for any call the daemon does answer.
+pub(super) const SHORT_METHOD_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub(super) fn instance(n: u64) -> Osc99InstanceId {
     Osc99InstanceId(n)
@@ -201,6 +216,10 @@ pub(super) type NotifyBody = (
 /// The summary the fake daemon refuses to display (`Notify` errors).
 pub(super) const REJECTED_SUMMARY: &str = "rejected";
 
+/// The summary whose `Notify` the fake daemon records and never answers, as a
+/// hung daemon does.
+pub(super) const UNANSWERED_SUMMARY: &str = "unanswered";
+
 /// How the fake bus driver answers `GetNameOwner`.
 #[derive(Debug, Clone, Default)]
 pub(super) enum NameOwnerAnswer {
@@ -228,6 +247,8 @@ pub(super) enum CloseAnswer {
     CloseSilently,
     /// Answer with an error instead of closing.
     Fail,
+    /// Record the call and never reply, as a hung daemon does.
+    Never,
 }
 
 /// Whether a call carried the `NO_AUTO_START` flag.
@@ -282,16 +303,21 @@ enum NotifyVerdict {
     Accepted(u32),
     /// Its summary is [`REJECTED_SUMMARY`].
     Rejected,
+    /// It was recorded, and its summary is [`UNANSWERED_SUMMARY`]: it gets no
+    /// reply.
+    Unanswered(u32),
 }
 
 /// Record a `Notify` call in the log, unless its summary is
 /// [`REJECTED_SUMMARY`]. Synchronous, so that no lock is held across an await.
+/// A call with the summary [`UNANSWERED_SUMMARY`] is recorded like any other.
 fn record_notify(log: &DaemonLog, message: &Message) -> zbus::Result<NotifyVerdict> {
     let (app_name, replaces_id, app_icon, summary, body, actions, hints, timeout) =
         message.body().deserialize::<NotifyBody>()?;
     if summary == REJECTED_SUMMARY {
         return Ok(NotifyVerdict::Rejected);
     }
+    let is_unanswered = summary == UNANSWERED_SUMMARY;
     let mut notifies = log.notifies.lock().unwrap_or_else(PoisonError::into_inner);
     let assigned_id = u32::try_from(notifies.len()).map_or(u32::MAX, |n| n + 1);
     let mut hint_keys: Vec<String> = hints.keys().cloned().collect();
@@ -321,11 +347,15 @@ fn record_notify(log: &DaemonLog, message: &Message) -> zbus::Result<NotifyVerdi
         assigned_id,
     });
     drop(notifies);
+    if is_unanswered {
+        return Ok(NotifyVerdict::Unanswered(assigned_id));
+    }
     Ok(NotifyVerdict::Accepted(assigned_id))
 }
 
-/// Serve one `Notify` call: record it and answer with the next id, or
-/// refuse it when its summary is [`REJECTED_SUMMARY`].
+/// Serve one `Notify` call: record it and answer with the next id, refuse it
+/// when its summary is [`REJECTED_SUMMARY`], or stay silent when it is
+/// [`UNANSWERED_SUMMARY`].
 pub(super) async fn fake_notify(
     daemon: &Connection,
     log: &DaemonLog,
@@ -342,6 +372,7 @@ pub(super) async fn fake_notify(
         NotifyVerdict::Accepted(assigned_id) => {
             reply_with(daemon, &header, stamp, |reply| reply.build(&assigned_id)).await
         }
+        NotifyVerdict::Unanswered(_) => Ok(()),
     }
 }
 
@@ -402,6 +433,7 @@ async fn fake_close_notification(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     match answer {
+        CloseAnswer::Never => Ok(()),
         CloseAnswer::Fail => {
             daemon
                 .reply_error(
@@ -464,10 +496,11 @@ async fn answer_call(
 /// `GetNameOwner`) on `daemon` until its connection closes.
 ///
 /// - `Notify` records the call and returns a fresh, incrementing id (even
-///   for a replacement), and errors for [`REJECTED_SUMMARY`].
+///   for a replacement), errors for [`REJECTED_SUMMARY`], and never replies
+///   for [`UNANSWERED_SUMMARY`].
 /// - `CloseNotification` records the id, then replies and emits
 ///   `NotificationClosed(id, 3)` as a real daemon does, unless the log's
-///   [`CloseAnswer`] says to stay silent or to fail.
+///   [`CloseAnswer`] says to stay silent, to fail or to never reply.
 /// - `GetCapabilities` answers the log's capabilities.
 /// - `GetNameOwner` answers as the log's [`NameOwnerAnswer`] says.
 ///
@@ -524,9 +557,25 @@ pub(super) struct Rig {
     pub(super) client: Connection,
     pub(super) daemon: Connection,
     pub(super) log: Arc<DaemonLog>,
+    /// Receives one `()` when the fake daemon's serve loop has returned, which
+    /// it does once the client's end of the connection is closed.
+    pub(super) daemon_stopped: Receiver<()>,
 }
 
 pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
+    rig_with(advertised, None)
+}
+
+/// A rig whose client gives up on a method call after `timeout`, as the
+/// production connection does after `OSC99_DBUS_METHOD_TIMEOUT`.
+pub(super) fn rig_with_method_timeout(
+    advertised: &[&str],
+    timeout: Duration,
+) -> Result<Rig, Box<dyn Error>> {
+    rig_with(advertised, Some(timeout))
+}
+
+fn rig_with(advertised: &[&str], method_timeout: Option<Duration>) -> Result<Rig, Box<dyn Error>> {
     let (server_stream, client_stream) = UnixStream::pair()?;
     let guid = zbus::Guid::generate();
 
@@ -539,11 +588,11 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
                 .build(),
         )
     });
-    let client = zbus::block_on(
-        zbus::connection::Builder::unix_stream(client_stream)
-            .p2p()
-            .build(),
-    )?;
+    let mut client_builder = zbus::connection::Builder::unix_stream(client_stream).p2p();
+    if let Some(timeout) = method_timeout {
+        client_builder = client_builder.method_timeout(timeout);
+    }
+    let client = zbus::block_on(client_builder.build())?;
     let daemon = server
         .join()
         .map_err(|_| "the fake daemon thread panicked")??;
@@ -559,17 +608,20 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
     });
     let daemon_side = daemon.clone();
     let record = Arc::clone(&log);
+    let (stopped_tx, daemon_stopped) = crossbeam_channel::bounded(1);
     std::thread::Builder::new()
         .name("fake-notification-daemon".to_owned())
         .spawn(move || {
             if let Err(e) = zbus::block_on(serve_fake_daemon(&daemon_side, messages, &record)) {
                 tracing::debug!("fake notification daemon stopped: {e}");
             }
+            let _ = stopped_tx.send(());
         })?;
     Ok(Rig {
         client,
         daemon,
         log,
+        daemon_stopped,
     })
 }
 
@@ -599,6 +651,14 @@ impl Rig {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Wait until the daemon has handled every call sent before this one. It
+    /// serves calls in order, so once it answers a `GetCapabilities` (which
+    /// the client's `method_timeout` does not bound) the log holds everything
+    /// sent earlier, including calls it never answered.
+    pub(super) fn settle(&self) -> zbus::Result<()> {
+        fetch_capabilities(&self.client).map(|_| ())
     }
 
     /// Set how the daemon answers `CloseNotification` from now on.
@@ -694,6 +754,23 @@ impl Rig {
         let message = name_owner_changed(BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE, new_owner)?;
         zbus::block_on(self.daemon.send(&message))
     }
+}
+
+/// Run `work` on its own thread and return its result, failing the test if it
+/// has not finished in [`EVENT_TIMEOUT`], so a call that is meant to time out
+/// but does not fails the test instead of hanging it.
+pub(super) fn within_deadline<T, F>(work: F) -> Result<T, Box<dyn Error>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    std::thread::Builder::new()
+        .name("test-deadline".to_owned())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })?;
+    Ok(rx.recv_timeout(EVENT_TIMEOUT)?)
 }
 
 /// The next event, failing the test if none arrives in [`EVENT_TIMEOUT`].

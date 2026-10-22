@@ -396,10 +396,8 @@ impl DispatcherState {
     /// leg. An `instance` that was already mapped under another id keeps only
     /// the new one.
     ///
-    /// With no known owner (the lookup failed, or nobody owned the name) the
-    /// sender of the reply is adopted as the owner: it is whoever the bus
-    /// routed the call to, and only the owner of the name can have answered
-    /// it.
+    /// The reply's sender is adopted as the owner when none is known (see
+    /// [`Self::adopt_reply_owner`]).
     pub(super) fn record_shown(
         &mut self,
         instance: Osc99InstanceId,
@@ -414,12 +412,7 @@ impl DispatcherState {
         if let Some(previous) = evicted {
             self.by_instance.remove(&previous);
         }
-        if matches!(self.daemon_owner, Osc99SignalSender::NoOwner)
-            && let Some(sender) = &reply.sender
-        {
-            tracing::debug!("OSC 99: adopting the sender of a Notify reply as the daemon's owner");
-            self.daemon_owner = Osc99SignalSender::Owner(sender.clone());
-        }
+        self.adopt_reply_owner(&reply);
         self.by_instance.insert(
             instance,
             Mapping {
@@ -428,6 +421,25 @@ impl DispatcherState {
             },
         );
         evicted
+    }
+
+    /// With no known owner (the lookup failed, or nobody owned the name),
+    /// adopt the sender of a successful `Notify` `reply` as the owner: it is
+    /// whoever the bus routed the call to, and only the owner of the name can
+    /// have answered it. A known owner, an unfiltered connection and a reply
+    /// with no sender (peer-to-peer) change nothing.
+    ///
+    /// A new owner makes the capabilities stale (see [`Self::capabilities_stale`]),
+    /// so the dispatcher fetches them after the command that adopted it.
+    pub(super) fn adopt_reply_owner(&mut self, reply: &NotifyReply) {
+        if matches!(self.daemon_owner, Osc99SignalSender::NoOwner)
+            && let Some(sender) = &reply.sender
+        {
+            tracing::debug!(
+                "desktop notifications: adopting the sender of a Notify reply as the daemon's owner"
+            );
+            self.daemon_owner = Osc99SignalSender::Owner(sender.clone());
+        }
     }
 
     /// Drop `instance`'s mappings, if it has any.
@@ -489,7 +501,9 @@ impl DispatcherState {
             }
             PumpSignal::OwnerChanged { new_owner } => self.on_owner_changed(new_owner.clone()),
             PumpSignal::Ended(kind) => {
-                tracing::warn!("OSC 99: the {kind:?} signal pump ended; no more signals");
+                tracing::warn!(
+                    "desktop notifications: the {kind:?} signal pump ended; no more signals"
+                );
                 self.on_signals_lost()
             }
         }
@@ -500,7 +514,7 @@ impl DispatcherState {
         let believed = self.daemon_owner.accepts(sender);
         if !believed {
             tracing::debug!(
-                "OSC 99: ignoring a {member} signal from a sender that is not the daemon"
+                "desktop notifications: ignoring a {member} signal from a sender that is not the daemon"
             );
         }
         believed
@@ -1674,6 +1688,31 @@ mod tests {
             DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
         senderless.record_shown(instance(1), None, peer_reply(7));
         assert_eq!(senderless.daemon_owner, Osc99SignalSender::NoOwner);
+    }
+
+    #[test]
+    fn adopting_a_reply_owner_tracks_nothing_and_obeys_the_same_rules_as_a_shown_instance() {
+        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        state.adopt_reply_owner(&peer_reply(7));
+        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert!(!state.capabilities_stale());
+
+        state.adopt_reply_owner(&reply_from(7, ":1.7"));
+
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.7".to_owned())
+        );
+        assert!(state.capabilities_stale());
+        assert!(state.by_instance.is_empty(), "no instance is recorded");
+        assert!(state.by_dbus_id.is_empty());
+
+        state.adopt_reply_owner(&reply_from(8, ":1.9"));
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.7".to_owned()),
+            "a known owner is kept"
+        );
     }
 
     #[test]

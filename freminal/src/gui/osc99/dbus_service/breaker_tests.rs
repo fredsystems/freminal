@@ -15,6 +15,7 @@
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
+use freminal_common::buffer_states::osc99_notification::Notification99Data;
 
 use super::state::{CloseTarget, DaemonGate, DispatcherState};
 use super::test_rig::*;
@@ -22,6 +23,7 @@ use super::{
     EventSink, Osc99DbusEvent, close_instance, close_replaced, refresh_capabilities,
     show_notification,
 };
+use crate::gui::osc99::Osc99SystemBackend;
 
 /// A rig, a state whose breaker is open, and a sink with the receiver of what
 /// it emits.
@@ -202,6 +204,60 @@ fn a_capability_refresh_with_the_breaker_open_makes_no_call() -> TestResult {
     assert_eq!(
         f.rig.calls(),
         [("GetCapabilities".to_owned(), Activation::Suppressed)]
+    );
+    Ok(())
+}
+
+// ── The real timeout path (149.C2) ──────────────────────────────────────────
+//
+// The tests above feed the breaker a synthetic timeout error. This one lets a
+// daemon really stay silent, against a client whose `method_timeout` is short,
+// so the whole chain is covered: zbus's timeout error, `is_method_timeout`,
+// `note_call`, and the gate.
+
+#[test]
+fn a_hung_notify_fails_the_show_and_the_breaker_skips_the_next_one() -> TestResult {
+    let rig = rig_with_method_timeout(&["body", "actions"], SHORT_METHOD_TIMEOUT)?;
+    let (rig, mut handle, _woken) = started_with(rig)?;
+
+    let _ = handle.show(
+        instance(1),
+        None,
+        &Notification99Data {
+            title: UNANSWERED_SUMMARY.to_owned(),
+            ..notification()
+        },
+    );
+    assert_eq!(
+        next_event(&handle)?,
+        Osc99DbusEvent::ShowFailed {
+            instance: instance(1)
+        }
+    );
+
+    // The daemon would accept this one, but it is in its cooldown.
+    let _ = handle.show(instance(2), None, &notification());
+    assert_eq!(
+        next_event(&handle)?,
+        Osc99DbusEvent::ShowFailed {
+            instance: instance(2)
+        }
+    );
+
+    rig.settle()?;
+    assert_eq!(
+        rig.recorded().len(),
+        1,
+        "only the unanswered Notify was sent"
+    );
+    assert_eq!(rig.recorded()[0].summary, UNANSWERED_SUMMARY);
+    assert_eq!(
+        rig.calls(),
+        [
+            ("GetCapabilities".to_owned(), Activation::Suppressed),
+            ("Notify".to_owned(), Activation::Allowed),
+            ("GetCapabilities".to_owned(), Activation::Suppressed),
+        ]
     );
     Ok(())
 }

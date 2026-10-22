@@ -423,7 +423,6 @@ mod tests {
     use zbus::{OwnedVariant, Structure, Variant};
 
     use super::super::test_rig::*;
-    use super::super::{ERROR_NAME_HAS_NO_OWNER, ERROR_SERVICE_UNKNOWN};
     use super::*;
 
     /// `hints` serialised as a D-Bus message body would carry them, and read
@@ -586,6 +585,58 @@ mod tests {
             Duration::from_secs(5),
         )?;
         assert_eq!(advertised, ["body"]);
+        Ok(())
+    }
+
+    /// `Notify` arguments whose summary the fake daemon never answers.
+    fn unanswered_notify_args() -> NotifyArgs {
+        NotifyArgs {
+            app_name: "freminal".to_owned(),
+            replaces_id: 0,
+            app_icon: String::new(),
+            summary: UNANSWERED_SUMMARY.to_owned(),
+            body: String::new(),
+            actions: Vec::new(),
+            hints: NotifyHints {
+                urgency: 1,
+                category: None,
+                sound: Osc99SoundHint::None,
+                image: NotifyImage::None,
+            },
+            expire_timeout: -1,
+        }
+    }
+
+    #[test]
+    fn an_unanswered_notify_fails_with_the_connections_method_timeout() -> TestResult {
+        let rig = rig_with_method_timeout(&["body"], SHORT_METHOD_TIMEOUT)?;
+        let client = rig.client.clone();
+
+        let outcome = within_deadline(move || notify(&client, &unanswered_notify_args()))?;
+
+        let error = outcome.err().ok_or("the call did not time out")?;
+        assert!(is_method_timeout(&error), "{error:?}");
+        rig.settle()?;
+        assert_eq!(
+            rig.recorded().len(),
+            1,
+            "the daemon did receive the call it never answered"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unanswered_close_notification_fails_with_the_connections_method_timeout() -> TestResult {
+        let rig = rig_with_method_timeout(&["body"], SHORT_METHOD_TIMEOUT)?;
+        rig.answer_close(CloseAnswer::Never);
+        let client = rig.client.clone();
+
+        let outcome = within_deadline(move || close_notification(&client, 7))?;
+
+        let error = outcome.err().ok_or("the call did not time out")?;
+        assert!(is_method_timeout(&error), "{error:?}");
+        rig.settle()?;
+        assert_eq!(rig.closes(), [7], "the daemon did receive the call");
         Ok(())
     }
 

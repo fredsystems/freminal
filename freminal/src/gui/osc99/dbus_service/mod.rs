@@ -35,14 +35,20 @@
 //!
 //! zbus 6 has no blocking API, so every zbus operation the dispatcher makes
 //! is one [`zbus::block_on`] around the async call, and each pump is one
-//! [`zbus::block_on`] around a loop over its stream. The threads are the
-//! dispatcher's `crossbeam` `select!` loop (never inside a `block_on`) and the
-//! pumps; a pump only ever sends on an unbounded channel, so no thread blocks
-//! inside a `block_on` waiting for another. Several threads each calling
-//! `block_on` on futures of the same connection is what zruntime's driver
-//! seat hand-off supports: the connection's tasks run on the thread that built
-//! it (or a helper thread while none is inside `block_on`), and the other
-//! threads poll their own futures when those tasks wake them.
+//! [`zbus::block_on`] around a loop over its stream. The dispatcher's
+//! `crossbeam` `select!` loop is never inside a `block_on`, and a pump only
+//! ever sends on an unbounded channel, so no thread blocks inside a `block_on`
+//! waiting for another.
+//!
+//! zbus's `block_on` is zruntime's free `block_on`, which drives *the calling
+//! thread's own runtime* (`zruntime-0.2.0/src/driver.rs`). The connection is
+//! built inside the dispatcher's `block_on`, so it and its tasks (the socket
+//! reader among them) live on the dispatcher's runtime. That reader runs on
+//! the dispatcher thread while the dispatcher is inside a `block_on`, and on
+//! zruntime's helper thread whenever it is not (the seat is free and work is
+//! left to run). A pump's `block_on` drives the pump thread's own, otherwise
+//! empty, runtime and only polls its stream future; the dispatcher's runtime
+//! wakes that future when a message arrives.
 //!
 //! The GUI talks to the service through an [`Osc99DbusHandle`]: commands go in
 //! over one bounded crossbeam channel (a command that does not fit fails at
@@ -52,16 +58,13 @@
 //! # Shutdown
 //!
 //! Dropping the handle closes the command channel (once every
-//! [`PlainNotifySender`] cloned from it is dropped too, which the GUI only
-//! holds for the duration of one routing call), and the dispatcher thread
-//! returns the next time it looks at it: at once when idle, or after the call
-//! in flight (at most [`OSC99_DBUS_METHOD_TIMEOUT`]). Returning drops the
-//! event sender and the signal receiver. A signal pump is waiting on its
-//! stream and notices only when it next has something to forward: it exits
-//! when that send fails, or when the connection ends (a connection's streams
-//! end once it is closed). Until then it is idle and holds a clone of the
-//! connection. Neither pump does any work after the dispatcher is gone, and
-//! both end with the process.
+//! [`PlainNotifySender`] cloned from it is dropped too: the GUI holds one per
+//! frame at most, and drops it at the end of that frame's update), and the
+//! dispatcher thread returns the next time it looks at it: at once when idle,
+//! or after the call in flight (at most [`OSC99_DBUS_METHOD_TIMEOUT`]). On the
+//! way out it closes the connection, which ends both pumps' streams, so the
+//! pumps exit at once; their last word, to a signal receiver that is already
+//! gone, goes nowhere.
 //!
 //! # Owner tracking
 //!
@@ -136,6 +139,7 @@ mod test_rig;
 mod wake;
 mod wire;
 
+use plain::{PlainBudget, PlainBudgetSlot};
 pub use plain::{PlainNotification, PlainNotifySender};
 pub use wake::Osc99Wake;
 
@@ -174,16 +178,6 @@ const BUS_DRIVER_NAME: &str = "org.freedesktop.DBus";
 const BUS_DRIVER_PATH: &str = "/org/freedesktop/DBus";
 /// The bus driver's interface.
 const BUS_DRIVER_INTERFACE: &str = "org.freedesktop.DBus";
-/// The error the bus driver answers `GetNameOwner` with when nobody owns the
-/// name. Production code matches `fdo::Error::NameHasNoOwner`; the name is for
-/// the tests' fake daemon.
-#[cfg(test)]
-const ERROR_NAME_HAS_NO_OWNER: &str = "org.freedesktop.DBus.Error.NameHasNoOwner";
-/// The error the bus answers a `NO_AUTO_START` call to a name that nobody owns
-/// and that no service file can start. Production code matches
-/// `fdo::Error::ServiceUnknown`; the name is for the tests' fake daemon.
-#[cfg(test)]
-const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
 /// The time between attempts to reconnect while the service is unavailable.
 const OSC99_RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
@@ -204,8 +198,10 @@ const OSC99_DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 /// at a time, and a hung daemon holds each call for up to
 /// [`OSC99_DBUS_METHOD_TIMEOUT`], so a program flooding OSC 99 must not grow
 /// the queue without bound. A command that does not fit fails at the handle
-/// (the registry then ends the leg), as the untracked leg drops what does not
-/// fit its queue (138.C25).
+/// (the registry then ends the leg). Plain notifications (OSC 9 / 777 /
+/// 133 `D`) share this queue but are capped at
+/// `plain::PLAIN_NOTIFICATION_BUDGET` in flight, so a flood of them leaves
+/// the rest of it for OSC 99 `Show` and `Close`.
 const COMMAND_QUEUE_CAPACITY: usize = 256;
 
 // ── Public vocabulary ──────────────────────────────────────────────────────
@@ -288,9 +284,11 @@ enum DbusCommand {
     /// there is nothing to close).
     Close { instance: Osc99InstanceId },
     /// Display `notification` and forget it: no instance, no events, no
-    /// actions (see `plain`).
+    /// actions (see `plain`). `slot` is the notification's place in the
+    /// plain-notification budget, released when the command is dropped.
     ShowPlain {
         notification: Box<PlainNotification>,
+        slot: PlainBudgetSlot,
     },
 }
 
@@ -303,6 +301,9 @@ pub struct Osc99DbusHandle {
     commands: Sender<DbusCommand>,
     /// Events from the dispatcher.
     events: Receiver<Osc99DbusEvent>,
+    /// The plain notifications in flight, shared with every
+    /// [`PlainNotifySender`] made from this handle.
+    plain_budget: PlainBudget,
 }
 
 impl Osc99DbusHandle {
@@ -379,7 +380,7 @@ impl EventSink {
     /// Send `event` to the GUI, then wake it.
     fn emit(&self, event: Osc99DbusEvent) {
         if let Err(e) = self.events.send(event) {
-            tracing::debug!("OSC 99: GUI is gone; dropping a notification event: {e}");
+            tracing::debug!("desktop notifications: GUI is gone; dropping a service event: {e}");
             return;
         }
         (self.waker)();
@@ -479,17 +480,20 @@ where
     if let Err(e) = spawned {
         // The closure (and the command receiver in it) is dropped, so every
         // later show fails at the handle.
-        tracing::warn!("OSC 99: could not spawn the notification service thread: {e}");
+        tracing::warn!(
+            "desktop notifications: could not spawn the notification service thread: {e}"
+        );
         send_or_log!(
             event_tx,
             Osc99DbusEvent::Unavailable,
-            "Failed to report the OSC 99 service as unavailable"
+            "Failed to report the notification service as unavailable"
         );
     }
 
     Osc99DbusHandle {
         commands: command_tx,
         events: event_rx,
+        plain_budget: PlainBudget::default(),
     }
 }
 
@@ -546,7 +550,7 @@ fn run_dispatcher<C>(
     let mut first = match connect_and_subscribe(&mut connect) {
         Ok(session) => Some(session),
         Err(e) => {
-            tracing::warn!("OSC 99: system notifications are unavailable: {e}");
+            tracing::warn!("desktop notifications: system notifications are unavailable: {e}");
             sink.emit(Osc99DbusEvent::Unavailable);
             None
         }
@@ -596,7 +600,9 @@ where
         match connect_and_subscribe(connect) {
             Ok(session) => return Some(session),
             Err(e) => {
-                tracing::debug!("OSC 99: reconnecting to the notification service failed: {e}");
+                tracing::debug!(
+                    "desktop notifications: reconnecting to the notification service failed: {e}"
+                );
             }
         }
     }
@@ -663,7 +669,9 @@ where
         });
     if let Err(e) = spawned {
         if let Err(close_error) = close_connection(&connection) {
-            tracing::debug!("OSC 99: closing the unused connection failed: {close_error}");
+            tracing::debug!(
+                "desktop notifications: closing the unused connection failed: {close_error}"
+            );
         }
         return Err(e);
     }
@@ -695,14 +703,14 @@ fn report_unserved(sink: &EventSink, command: &DbusCommand) {
         }),
         // Nobody awaits a plain notification, so there is nothing to answer.
         DbusCommand::ShowPlain { .. } => {
-            tracing::debug!("the notification service is unavailable; dropping a notification");
+            plain::log_dropped_plain(plain::PlainDrop::ServiceUnavailable);
         }
     }
 }
 
 /// Serve `commands` and the pumps' signals until the GUI drops its command
-/// sender or a pump ends (in which case the connection is closed, so a pump
-/// that is still blocked on it ends too).
+/// sender or a pump ends. Either way the connection is closed on the way out,
+/// so a pump that is still blocked on it ends too.
 ///
 /// The capabilities are fetched when serving starts (unless nobody owns the
 /// name) and again whenever the owner changes to a name they were not
@@ -732,14 +740,21 @@ fn serve(
     }
     loop {
         select! {
-            recv(commands) -> command => match command {
-                Ok(command) => handle_command(&connection, state, sink, command),
-                Err(_) => return ServeEnd::GuiGone,
+            recv(commands) -> command => {
+                let Ok(command) = command else {
+                    if let Err(e) = close_connection(&connection) {
+                        tracing::debug!(
+                            "desktop notifications: closing the connection failed: {e}"
+                        );
+                    }
+                    return ServeEnd::GuiGone;
+                };
+                handle_command(&connection, state, sink, command);
             },
             recv(signals) -> signal => {
                 if let Some(end) = handle_signal(&connection, state, sink, signal.ok()) {
                     if let Err(e) = close_connection(&connection) {
-                        tracing::debug!("OSC 99: closing the lost connection failed: {e}");
+                        tracing::debug!("desktop notifications: closing the lost connection failed: {e}");
                     }
                     return end;
                 }
@@ -773,7 +788,7 @@ fn handle_signal(
         }
         Some(signal) => (state.on_signal(&signal), None),
         None => {
-            tracing::warn!("OSC 99: every signal pump is gone; no more signals");
+            tracing::warn!("desktop notifications: every signal pump is gone; no more signals");
             (state.on_signals_lost(), Some(ServeEnd::SignalsLost))
         }
     };
@@ -804,8 +819,9 @@ fn handle_command(
             notification,
         } => show_notification(connection, state, sink, instance, replaces, &notification),
         DbusCommand::Close { instance } => close_instance(connection, state, sink, instance),
-        DbusCommand::ShowPlain { notification } => {
+        DbusCommand::ShowPlain { notification, slot } => {
             plain::show_plain(connection, state, &notification);
+            drop(slot);
         }
     }
 }
@@ -936,7 +952,9 @@ fn refresh_capabilities(
     sink: &EventSink,
 ) -> CapabilitiesReport {
     if state.daemon_gate(Instant::now()) == DaemonGate::Skip {
-        tracing::debug!("OSC 99: the notification daemon is unresponsive; not asking it");
+        tracing::debug!(
+            "desktop notifications: the notification daemon is unresponsive; not asking it"
+        );
         return CapabilitiesReport::Withheld;
     }
     state.note_capabilities_asked();
@@ -949,11 +967,13 @@ fn refresh_capabilities(
             CapabilitiesReport::Sent
         }
         Err(e) if is_no_daemon(&e) => {
-            tracing::debug!("OSC 99: no notification daemon to ask for its capabilities: {e}");
+            tracing::debug!(
+                "desktop notifications: no notification daemon to ask for its capabilities: {e}"
+            );
             CapabilitiesReport::Withheld
         }
         Err(e) => {
-            tracing::warn!("OSC 99: GetCapabilities failed; assuming defaults: {e}");
+            tracing::warn!("desktop notifications: GetCapabilities failed; assuming defaults: {e}");
             CapabilitiesReport::Withheld
         }
     }
@@ -979,12 +999,12 @@ fn resolve_daemon_owner(connection: &Connection, tracking: OwnerTracking) -> Osc
         OwnerTracking::Bus => match fetch_daemon_owner(connection) {
             Ok(owner) => Osc99SignalSender::Owner(owner),
             Err(e) if is_no_name_owner(&e) => {
-                tracing::debug!("OSC 99: no notification daemon owns its name yet");
+                tracing::debug!("desktop notifications: no notification daemon owns its name yet");
                 Osc99SignalSender::NoOwner
             }
             Err(e) => {
                 tracing::warn!(
-                    "OSC 99: GetNameOwner failed ({e}); the next Notify reply names the daemon"
+                    "desktop notifications: GetNameOwner failed ({e}); the next Notify reply names the daemon"
                 );
                 Osc99SignalSender::NoOwner
             }
@@ -1532,7 +1552,9 @@ mod tests {
     #[test]
     fn dropping_the_handle_ends_the_dispatcher() -> TestResult {
         let (_rig, handle, _woken) = started(&["body"])?;
-        let Osc99DbusHandle { commands, events } = handle;
+        let Osc99DbusHandle {
+            commands, events, ..
+        } = handle;
 
         drop(commands);
 
@@ -1542,6 +1564,21 @@ mod tests {
             events.recv_timeout(EVENT_TIMEOUT),
             Err(RecvTimeoutError::Disconnected)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_the_handle_closes_the_connection_so_the_pumps_end() -> TestResult {
+        let (rig, handle, _woken) = started(&["body"])?;
+
+        // `rig.client` is another clone of the connection, so the socket stays
+        // open unless the dispatcher closes the connection itself. The pumps
+        // hold clones too, and only end once it is closed.
+        drop(handle);
+
+        // The fake daemon's serve loop ends when its stream does, which is
+        // when the client's end of the socket closes.
+        rig.daemon_stopped.recv_timeout(EVENT_TIMEOUT)?;
         Ok(())
     }
 

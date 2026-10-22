@@ -106,7 +106,9 @@ fn run_pump(
 ) {
     forward_signals(messages, signals, parse);
     if signals.send(PumpSignal::Ended(kind)).is_err() {
-        tracing::debug!("OSC 99: the dispatcher is gone; the {kind:?} pump exits quietly");
+        tracing::debug!(
+            "desktop notifications: the dispatcher is gone; the {kind:?} pump exits quietly"
+        );
     }
 }
 
@@ -122,7 +124,7 @@ fn forward_signals(
             let message = match message {
                 Ok(message) => message,
                 Err(e) => {
-                    tracing::warn!("OSC 99: notification signal stream failed: {e}");
+                    tracing::warn!("desktop notifications: notification signal stream failed: {e}");
                     return;
                 }
             };
