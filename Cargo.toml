@@ -71,17 +71,15 @@ libc = "0.2.190"
 log = "0.4.34"
 lz4_flex = "0.14.0"
 nix = "0.31.3"
-# `images_no_default_features` enables the inline `image-data` D-Bus hint
-# (`Notification::image_data` / `Image::from_rgba`) so freminal can attach its
-# app icon to desktop notifications as raw bytes -- working even when freminal
-# is not installed into the system icon theme (dev / cargo-run / AppImage),
-# the way Discord & co. do. `z` is notify-rust's default feature (the zbus
-# backend + serde); it is listed only for documentation -- this entry does
-# NOT set `default-features = false`, so the default set is retained
-# regardless. We decode the PNG ourselves via the workspace `image` crate, so
-# notify-rust's heavier `images` feature (its own codecs + rayon) is
-# deliberately NOT used.
-notify-rust = { version = "4.18.1", features = ["images_no_default_features", "z"] }
+# macOS-only backend (`mac-notification-sys`) for the legacy OSC 9 / 777 /
+# 133 D / Settings "Test Notification" system notifications and the OSC 99
+# untracked leg. Linux/BSD shows them through freminal's own zbus service and
+# Windows through `tauri-winrt-notification`, so `freminal` depends on this
+# crate under `cfg(target_os = "macos")` only. No features: the `z` / `d`
+# D-Bus backends would pull the unmaintained zbus 5 crates (RUSTSEC-2026-0370
+# to -0372, #567), and the `images` features are unused (icons are decoded
+# with the workspace `image` crate).
+notify-rust = { version = "4.18.2", default-features = false }
 open = "5.4.4"
 predicates = "3.1.4"
 proptest = "1.11.0"
@@ -99,10 +97,10 @@ swash = "0.2.10"
 sys-locale = "0.3.2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tar = "0.4.46"
-# Direct dependency for the Windows OSC 99 untracked leg (Task 138.C15): the
-# toast is built with its own image (`appLogoOverride`) instead of through
-# `notify-rust`, which only offers an inline image. Same version `notify-rust`
-# already resolves, so the lock file keeps a single copy.
+# Direct dependency for every Windows notification: the OSC 99 untracked leg
+# (Task 138.C15, built directly so its image is an `appLogoOverride`) and
+# OSC 9 / 777 / 133 D / Test Notification (Task 149.3, the same toast style).
+# `notify-rust` is not built on Windows.
 tauri-winrt-notification = "0.8.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }

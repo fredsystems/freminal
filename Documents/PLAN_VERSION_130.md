@@ -9061,6 +9061,16 @@ as a numbered `149.Cn` cleanup entry before the PR opens.
   - `notify_rust` now appears only under `cfg(target_os = "macos")`. Its macOS APIs were
     checked against notify-rust 4.18.2's source: every field and method used is public on
     macOS. That code is not compiled locally; the macOS CI job compiles it.
+- **149.4 (done):** `notify-rust` 4.18.2 is a `cfg(target_os = "macos")` dependency with
+  `default-features = false`. The three RUSTSEC ignores are gone (`ignore = []`).
+  - `cargo tree --target all --all-features -i zvariant` (and `zbus_names`,
+    `zvariant_derive`) matches nothing.
+  - zbus 6.0.0 is the only zbus, used by freminal alone.
+  - `cargo deny check` passes all four sections. The lock file drops zbus 5, zbus_macros 5,
+    zbus_names, zvariant, zvariant_derive, zvariant_utils, async-broadcast, async-recursion
+    and enumflags2.
+  - Docs: `ESCAPE_SEQUENCE_COVERAGE.md` (a new "Legacy notifications" note),
+    `KITTY_PROTOCOL_REFERENCE.md` and `DESIGN_DECISIONS.md`.
 
 ### 149 Cleanup entries
 

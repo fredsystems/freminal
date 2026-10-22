@@ -163,7 +163,6 @@ freminal-windowing = { path = "../freminal-windowing" }
 glow.workspace = true
 harfrust.workspace = true
 image.workspace = true
-notify-rust.workspace = true
 open.workspace = true
 regex.workspace = true
 rustc-hash.workspace = true
@@ -197,9 +196,15 @@ sysinfo.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# Windows OSC 99 untracked leg (Task 138.C15): the toast is built directly so
-# its image is an `appLogoOverride`. Same version `notify-rust` already pulls
-# in, so there is one copy.
+# macOS system notifications (OSC 9 / 777 / 133 D / Test Notification and the
+# OSC 99 untracked leg) go through `notify-rust`'s `mac-notification-sys`
+# backend. Linux/BSD and Windows have their own backends (below).
+[target.'cfg(target_os = "macos")'.dependencies]
+notify-rust.workspace = true
+
+# Windows system notifications (OSC 9 / 777 / 133 D / Test Notification and the
+# OSC 99 untracked leg, Tasks 138.C15 and 149.3) are toasts built directly; the
+# OSC 99 one carries its image as an `appLogoOverride`.
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification.workspace = true
 
