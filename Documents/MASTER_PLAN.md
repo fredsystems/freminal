@@ -24,7 +24,7 @@ and plan document maintenance rules.
 | v0.11.0 | Kitty: Notifications & Graphics          | `PLAN_VERSION_110.md`                                                 | 99–101, 114               | Complete    |
 | v0.11.1 | Correctness Fixes                        | `PLAN_VERSION_111.md`                                                 | 115–117                   | Complete    |
 | v0.12.0 | Scrollback Memory & Performance          | `PLAN_VERSION_120.md`                                                 | 118–125                   | Complete    |
-| v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140, 147–148 | In progress |
+| v0.13.0 | Kitty: Foundations & Safety              | `PLAN_VERSION_130.md`                                                 | 126–132, 138–140, 147–149 | In progress |
 | v0.13.1 | Kitty: Shipped-Protocol Conformance      | `PLAN_VERSION_130.md`                                                 | 134–137                   | Planned     |
 | v0.13.2 | Kitty: Small & Medium New Protocols      | `PLAN_VERSION_130.md`                                                 | 103, 141–145              | Planned     |
 | v0.13.3 | Kitty: Text Sizing, Transfer & Clipboard | `PLAN_VERSION_130.md`                                                 | 102, 104, 133, 146        | Planned     |
@@ -249,6 +249,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
 | 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
+| 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | In progress   | Task 138                      |
 
 ---
 
@@ -516,7 +517,8 @@ fixes ship** (maintainer decision, 2026-10-18; the public fuzz targets rediscove
 within seconds, so withholding them kept nothing confidential), plus issues #556–#564, #566 and #568. Three advisories are high severity and are triggered by benign command output, so the
 task ships in v0.13.0 ahead of the protocol work that adds parser surface. Each fix lands with
 its fuzz reproducer in `fuzz/regressions/` and a regression test. #567 and #530 (unmaintained
-dependencies) are deliberately out of scope and handled afterwards (#530 has since been
+dependencies) are deliberately out of scope and handled afterwards (#567 is Task 149, the
+zbus 6 migration; #530 has since been
 resolved on branch `task-530/harfrust-migration`: `rustybuzz` replaced by `harfrust` and
 `ttf-parser` removed from the graph). `.github/SECURITY.md`
 records the disclosure policy. See `PLAN_VERSION_130.md`.
@@ -838,6 +840,7 @@ Update this section as tasks complete:
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
+| 149  | 2026-10-22 |            | 149.1-149.4 on task-149/zbus-6 (#567)                                              |
 
 ---
 

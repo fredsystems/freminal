@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147, 148   |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–149    |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -31,7 +31,8 @@ one plan document, grouped into milestones that ship as point releases:
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
-**138** (activated 2026-10-12), and **148** (created 2026-10-18).
+**138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
+2026-10-22).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -42,35 +43,36 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete    | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete    | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete    | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete    | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete    | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete    | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete    | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete    | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned     | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned     | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned     | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete    | None                               |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | In progress | 138                                |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -231,7 +233,8 @@ Two seams were considered and **not** made separate tasks:
 - **Then 138, 139, 140, 147 and 148**, which close out v0.13.0. Task 147 fixes everything Tasks
   126–131 left unscheduled; see "147 Execution model". Task 148 fixes the #553 fuzzing and
   security-audit findings; see "148 Execution model". Its high-severity subtasks should land
-  first, ahead of the rest of Task 147 if the two are not run in parallel.
+  first, ahead of the rest of Task 147 if the two are not run in parallel. Task 149 (#567,
+  the zbus 6 migration) is independent of all of them; see "149 Execution model".
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
@@ -8426,7 +8429,7 @@ Group F — Hygiene:
   `[security] allow_clipboard_write = "active_pane" | "all" | "off"` (`ClipboardWritePolicy`),
   with the full config wiring (Settings combo box, `config_example.toml`, Nix enum option,
   tests). `handle_window_manipulation` writes only when `clipboard_write_permitted(policy,
-  is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
+is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
   shows no toast and is logged at debug with the byte count only. The decoded OSC 52 write
   cap is `MAX_OSC52_WRITE_BYTES` = 1 MiB (`osc_clipboard.rs`), and the parser gives OSC 52
   its own accumulation limit, `MAX_OSC_CLIPBOARD_BYTES` (the base64 size of the cap plus 256
@@ -8518,6 +8521,7 @@ Group F — Hygiene:
     That is +5.4% cov and +9.9% ft for `terminal_state`; `ansi_parser` is −1.2% / −2.9% (one run
     each, so within likely noise; the seeds probably already carry most tokens). The mapping
     keeps both targets for now; 148.C6 revisits it with nightly data.
+
   - **CI comment:** the `fuzz-smoke` comment in `ci.yml` no longer lists the fixed crashes.
   - **Corpus:** not published (maintainer-only).
 - **148.26 (done):** `ESCAPE_SEQUENCE_COVERAGE.md` rows updated for BS, DECDWL, REP,
@@ -8555,6 +8559,7 @@ Group F — Hygiene:
   (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
   (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
   still need a maintainer run on Windows.
+
 - **148.23 (done):** removed `CARGO_BUILD_FEATURES = "playback"` and its comment from
   `mkFreminalShell`, plus the fuzz-shell sentence about it (cargo never reads that variable,
   and no crate declares `playback`). xtask's `run_cargo_no_features` existed only to strip it
@@ -8789,6 +8794,7 @@ Group F — Hygiene:
     `is_dir`) and fall back to the default directory instead of failing the pane
     (`LAYOUT_FORMAT.md` says so). An existing but hostile directory saved by an old build
     cannot be told apart; layouts are trusted input (148.22).
+
 - **148.C11 — Notification worker is never restarted.** Review finding R11a. If the
   `freminal-notify` worker thread exits (panic), `OnceLock` keeps the dead sender and system
   notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
@@ -8810,6 +8816,225 @@ Group F — Hygiene:
   `scroll_slice_up_confined`; full-width margins or DECLRMM off still scroll whole rows.
   `landing_row_span_for_wrap` predicts the cursor's own row in that case. Tests: buffer and
   full-pipeline margin-confinement tests (both fail on the old code) and both pins.
+
+## Task 149 — zbus 6 Migration and Per-Platform Notification Backends
+
+### 149 Summary
+
+Close issue #567. `cargo deny check advisories` reports RUSTSEC-2026-0370 (`zvariant`),
+RUSTSEC-2026-0371 (`zbus_names`) and RUSTSEC-2026-0372 (`zvariant_derive`) as unmaintained:
+zbus 6.0.0 merged them into `zbus::wire`. The three are ignored in `deny.toml` until this task
+lands. Created and decomposed on 2026-10-22 on branch `task-149/zbus-6`.
+
+Two crates pull zbus 5 (`cargo tree -i zbus --target all --all-features`): freminal itself
+(the OSC 99 D-Bus service, Task 138) and `notify-rust` 4.18.2. notify-rust's zbus 6 bump
+(upstream PR #294) is unmerged, and dropping notify-rust alone would not clear the advisories,
+because freminal's own `zbus = 5.19.0` pulls the same three crates. Waiting for notify-rust
+would only save the Linux rerouting (149.2), so this task does not wait.
+
+notify-rust is needed only for its zbus backend on Linux/BSD and its `mac-notification-sys`
+backend on macOS. On Windows it wraps `tauri-winrt-notification`, which freminal already calls
+directly for OSC 99 (Task 138.C15). On Linux/BSD it refuses to build without a D-Bus backend
+(`compile_error!` in `xdg/mod.rs` unless `z` or `d` is on). So the end state is one native
+backend per platform, used by every notification source (OSC 9, OSC 777, OSC 133 `D`
+command-finished, the Settings "Test Notification" button, and OSC 99):
+
+| Platform  | Backend                                                |
+| --------- | ------------------------------------------------------ |
+| Linux/BSD | freminal's own D-Bus service (`osc99/dbus_service/`)   |
+| Windows   | `tauri-winrt-notification`, called directly            |
+| macOS     | `notify-rust` (`mac-notification-sys`), macOS-only dep |
+
+Out of scope: moving or renaming `osc99/dbus_service/` (see decisions), and any change to
+which notifications are shown or when (routing, gates and focus rules are untouched).
+
+### 149 Maintainer decisions (2026-10-22)
+
+- **Migrate now**, without waiting for a zbus-6 notify-rust.
+- **Windows goes direct to `tauri-winrt-notification`** for every notification source, for
+  consistency with OSC 99.
+- **notify-rust becomes a `cfg(target_os = "macos")` dependency** with
+  `default-features = false`. Without `z`, its optional zbus 5 never enters the graph.
+
+### 149 Orchestrator decisions (2026-10-22)
+
+These were made at decomposition. Each is a deliberate behaviour choice, listed so review can
+check the code against it.
+
+- **Linux legacy notifications ride the existing dispatcher**, as a new fire-and-forget
+  `DbusCommand` variant. They reuse its connection, circuit breaker, reconnect loop and daemon
+  capabilities. A separate one-shot `wire.rs` path was rejected: it would duplicate the
+  breaker and open a connection per notification, as notify-rust does today.
+- **Legacy notifications are not tracked.** They have no registry entry, no `Shown` /
+  `Closed` / `Activated` events and no actions (as today). When the service is reconnecting,
+  a legacy command is dropped with a `debug` log, as `report_unserved` does for `Close`.
+- **Linux legacy wire content changes in three small ways**, all toward what OSC 99 already
+  sends:
+  - the `desktop-entry` hint is now sent (the daemon can group by app);
+  - the icon is sent through the dispatcher's existing image path (the `image-data` key,
+    downscaled to at most 256 px) instead of a full-resolution `image_data` whose key notify-rust
+    chose from the server's spec version;
+  - body markup is escaped only when the daemon advertises `body-markup` (`state.rs`), instead
+    of always. The escape (#560) is kept wherever the daemon would parse markup.
+
+  Unchanged: app name `freminal`, app icon `freminal`, summary fallback, `Critical` urgency for
+  `Error` and `Normal` otherwise, expire timeout `-1`, no actions.
+
+- **Windows legacy toasts match freminal's OSC 99 toast, not notify-rust's.** That means
+  `title(summary)`, `text1(body)`, silent, short duration, the PowerShell app id, and **no
+  `Scenario::Reminder` for `Error`**. Task 138.C15 dropped the reminder scenario because a
+  reminder needs buttons, and 138.C17 stopped advertising urgency on Windows for that reason.
+  Today's `text1("")` / `text2(body)` layout is notify-rust's, not a freminal choice.
+- **macOS is unchanged.** The worker thread and queue stay for macOS and Windows, but carry a
+  freminal-owned payload instead of `notify_rust::Notification`, so the queue, respawn and
+  policy tests compile on every platform.
+- **`osc99/dbus_service/` keeps its path and names.** Moving it to a platform-neutral module
+  would make the diff mostly renames and hide the port. The module docs gain a paragraph
+  stating that the service also carries OSC 9 / 777 / 133 `D` notifications on Linux/BSD.
+- **Threading model under zbus 6:** keep the dispatcher thread and the pump threads. Each
+  zbus call becomes `zbus::block_on(...)`. Each pump becomes one
+  `zbus::block_on(async { while let Some(m) = stream.next().await { ... } })` loop. This is
+  safe because the pumps forward over **unbounded** crossbeam channels (`mod.rs:606`), so a
+  pump never blocks a thread inside `block_on`. 149.1 must confirm the multi-thread driver
+  hand-off in `zruntime` source and cite it in its status note. If that check fails, stop and
+  return to the orchestrator; collapsing into one async loop is a redesign, not a fallback.
+
+### 149 Subtasks
+
+Every subtask leaves `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings` green, and runs
+`cargo xtask check-windows`. macOS cannot be cross-checked locally (`mac-notification-sys`
+compiles Objective-C), so macOS-gated code is kept minimal and is verified by the macOS CI
+job. No benchmarks: nothing here is on a `freminal-bench-table` path.
+
+#### 149.1 — Port the D-Bus service to zbus 6
+
+- **Defect:** `osc99/dbus_service/` is written against zbus 5's blocking API
+  (`zbus::blocking::{Connection, MessageIterator}`), which zbus 6 removes. It also uses
+  `zvariant`, which is now `zbus::wire` and pulls the unmaintained crates.
+- **Scope:** `Cargo.toml` (workspace `zbus` entry: `6.0.0`, `default-features = false`,
+  features `default-rt` and `proxy`, comment updated), `freminal/Cargo.toml` (the dev-only
+  `p2p` feature), and every file under `freminal/src/gui/osc99/dbus_service/`
+  (`mod.rs`, `wire.rs`, `pump.rs`, `state.rs`, `test_rig.rs`, `breaker_tests.rs`, `wake.rs`
+  if touched). notify-rust is untouched, so zbus 5 stays in the lock file through it until
+  149.4.
+  - Blocking calls become async calls under `zbus::block_on`. The threading model is as
+    decided above.
+  - `MessageIterator` becomes `MessageStream`. `MatchRule::builder()` setters lose their `?`,
+    and `build()` gains one.
+  - `MethodFlags::NoAutoStart.into()` becomes `MethodFlags::NO_AUTO_START`. `Proxy::new`
+    takes the async connection.
+  - `zvariant` paths move to `zbus::{Type, Signature, wire, as_variant}`; `Value` /
+    `OwnedValue` become `Variant` / `OwnedVariant`. No deprecated `zbus::zvariant` alias may
+    remain.
+  - **Error classification (behaviour-critical).** zbus 6 converts every error reply through
+    `fdo::Error`, so `org.freedesktop.DBus.Error.NameHasNoOwner` and `ServiceUnknown` now
+    arrive as `zbus::Error::FDO(..)`, not `MethodError`. `is_method_error` / `is_no_daemon`
+    must match the `FDO` variants, or "no daemon" silently becomes a warning. Method timeouts
+    still surface as `Error::InputOutput` of kind `TimedOut` (`runtime/timeout.rs`), but only
+    from `Connection::call_method`, so `call_no_auto_start` keeps its own deadline.
+  - `Connection::close` is async. The test rig's p2p connection uses
+    `connection::Builder::unix_stream(std::os::unix::net::UnixStream)`.
+- **Deliverable:** the service behaves exactly as before. Every existing test passes, ported
+  but not weakened: no deleted assertions, no loosened timeouts. A new test proves that a
+  `NameHasNoOwner` and a `ServiceUnknown` reply are each classified as "no daemon" under
+  zbus 6.
+
+#### 149.2 — Route Linux/BSD legacy notifications through the D-Bus service
+
+- **Scope:** `freminal/src/gui/notifications.rs`, `freminal/src/gui/osc99/dbus_service/`
+  (`mod.rs`, `state.rs`, `wire.rs`), `freminal/src/gui/osc99/mod.rs` (re-exports),
+  `freminal/src/gui/osc99/glue.rs` and `host_capabilities.rs` (service start gating), and the
+  three callers: `app_impl.rs` (OSC 9 / 777), `frame_drain.rs` (OSC 133 `D`) and
+  `settings_dispatch.rs` (Test Notification).
+  - Add `DbusCommand::ShowPlain { notification: Box<PlainNotification> }`.
+    `PlainNotification` carries `summary`, `body` and `urgency` and lives in `dbus_service`.
+  - Add a pure builder `DispatcherState::plain_notify_args(&PlainNotification) -> NotifyArgs`
+    beside `notify_args`. It has no actions, `replaces_id` 0, expire `-1` and the embedded
+    freminal icon. Escaping follows `body-markup`.
+  - The dispatcher sends it under `daemon_gate` / `note_call`, without `record_shown` or any
+    `Osc99DbusEvent`. `report_unserved` drops it with a `debug` log.
+  - Add a cloneable `PlainNotifySender` (wraps the command `Sender`). `Osc99DbusHandle`
+    exposes it, and the three callers receive it explicitly. **No new process-wide static.**
+  - The service starts when either OSC 99 may use the system leg (as now) or any legacy
+    category's routing can use the system leg. Add a helper beside `osc99_may_use_system_leg`
+    and test it.
+  - On Linux/BSD, `NotificationRouter::show_system` hands the request to the sender and no
+    longer touches notify-rust or the worker. On macOS and Windows it is unchanged in this
+    subtask.
+- **Deliverable:** with the fake daemon in `test_rig.rs`, an OSC 9 / command-finished request
+  produces one `Notify` call whose hints and arguments match the decisions above, including
+  `Critical` urgency for `Error`, no actions, and escaping only when the daemon advertises
+  `body-markup`. Further tests: a legacy command while reconnecting is dropped and never
+  answered; a legacy show while the breaker is open does not call `Notify`; the start-gating
+  helper's truth table.
+
+#### 149.3 — Windows legacy notifications go direct to `tauri-winrt-notification`
+
+- **Scope:** `freminal/src/gui/notifications.rs` and `freminal/src/gui/osc99/untracked.rs`
+  (only to share the toast-building helper, if one is extracted).
+  - The worker queue's payload becomes a freminal-owned `SystemNotification` (summary, body,
+    kind) instead of `notify_rust::Notification`. On Windows the worker builds a `Toast`
+    exactly as decided above. On macOS it builds the same `notify_rust::Notification` as today
+    (appname, icon, summary, body; no urgency).
+  - The queue, respawn and policy tests stay platform-neutral. Tests that inspected a
+    `notify_rust::Notification` are replaced by tests of a pure mapping from request to
+    platform fields that compiles everywhere. Assertions are kept: summary fallback, the #560
+    escaping rule and urgency by kind. Only the type they inspect changes.
+  - In `untracked.rs`, the `build_macos_notification` tests that compile on Linux through
+    `cfg(any(target_os = "macos", test))` are re-gated or rewritten the same way, so nothing
+    outside macOS names `notify_rust`.
+- **Deliverable:** `notify_rust` is referenced only under `cfg(target_os = "macos")`. Windows
+  OSC 9 / 777 / 133 `D` toasts are built by the same path style as OSC 99.
+  `cargo xtask check-windows` is clean.
+
+#### 149.4 — Make notify-rust macOS-only and drop the advisory ignores
+
+- **Scope:** `Cargo.toml`, `freminal/Cargo.toml`, `Cargo.lock`, `deny.toml`, and the
+  documentation that names notify-rust or zbus for these paths:
+  - `Documents/ESCAPE_SEQUENCE_COVERAGE.md`
+  - `Documents/ESCAPE_SEQUENCE_GAPS.md`
+  - `Documents/KITTY_PROTOCOL_REFERENCE.md`
+  - `Documents/DESIGN_DECISIONS.md`
+  - stale comments in `main.rs` (the `zbus=warn` filter stays)
+  - the workspace comments at the `notify-rust` and `zbus` entries
+
+  The changes:
+
+  - notify-rust moves to `[target.'cfg(target_os = "macos")'.dependencies]` with
+    `default-features = false` and no features (`images_no_default_features` and `z` go).
+  - Remove the three RUSTSEC ignores.
+
+- **Deliverable:** `cargo tree --target all --all-features -i zvariant` finds nothing, and the
+  lock file has no zbus 5, `zvariant`, `zbus_names` or `zvariant_derive`.
+  `cargo deny check` passes with no ignores for #567. `cargo machete` is clean.
+
+### 149 Execution model
+
+Strictly sequential: 149.1, then 149.2, then 149.3, then 149.4. 149.2 and 149.3 both edit
+`notifications.rs`, and 149.2 depends on 149.1's port. Each subtask is one IMPLEMENTATION
+sub-agent pass followed by the orchestrator's full-diff review against this section. Then
+comes the verification suite, then a commit. When 149.4 is green, an adversarial CODE-REVIEW
+pass covers the whole `main...HEAD` diff. Every finding, nit through blocker, is remediated
+as a numbered `149.Cn` cleanup entry before the PR opens.
+
+### 149 Verification
+
+- `cargo xtask test`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, `cargo machete`, `cargo deny check`,
+  `cargo xtask check-windows`, `cargo xtask lint-markdown`.
+- Not covered by tests, and checked by the maintainer before merge: a real Linux desktop shows
+  OSC 9, command-finished, Test Notification and OSC 99 notifications with the freminal icon;
+  a Windows toast for OSC 9 and the Test Notification button; macOS unchanged (CI build plus a
+  manual check).
+
+### 149 Status notes
+
+(none yet)
+
+### 149 Cleanup entries
+
+(none yet)
 
 ---
 
