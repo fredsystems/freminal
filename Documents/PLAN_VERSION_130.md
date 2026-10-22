@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–149    |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–150    |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -32,7 +32,7 @@ one plan document, grouped into milestones that ship as point releases:
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
 **138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
-2026-10-22).
+2026-10-22). **150** (created 2026-10-22) is an enriched stub.
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -43,36 +43,37 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete    | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete    | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete    | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete    | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete    | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete    | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete    | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete    | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned     | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned     | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned     | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete    | None                               |
-| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | In progress | 138                                |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Planned       | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | In progress   | 138                                |
+| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Stub          | 149                                |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -8429,7 +8430,7 @@ Group F — Hygiene:
   `[security] allow_clipboard_write = "active_pane" | "all" | "off"` (`ClipboardWritePolicy`),
   with the full config wiring (Settings combo box, `config_example.toml`, Nix enum option,
   tests). `handle_window_manipulation` writes only when `clipboard_write_permitted(policy,
-is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
+  is_active)`, i.e. only from the active pane of the active tab by default; a dropped write
   shows no toast and is logged at debug with the byte count only. The decoded OSC 52 write
   cap is `MAX_OSC52_WRITE_BYTES` = 1 MiB (`osc_clipboard.rs`), and the parser gives OSC 52
   its own accumulation limit, `MAX_OSC_CLIPBOARD_BYTES` (the base64 size of the cap plus 256
@@ -8521,7 +8522,6 @@ is_active)`, i.e. only from the active pane of the active tab by default; a drop
     That is +5.4% cov and +9.9% ft for `terminal_state`; `ansi_parser` is −1.2% / −2.9% (one run
     each, so within likely noise; the seeds probably already carry most tokens). The mapping
     keeps both targets for now; 148.C6 revisits it with nightly data.
-
   - **CI comment:** the `fuzz-smoke` comment in `ci.yml` no longer lists the fixed crashes.
   - **Corpus:** not published (maintainer-only).
 - **148.26 (done):** `ESCAPE_SEQUENCE_COVERAGE.md` rows updated for BS, DECDWL, REP,
@@ -8559,7 +8559,6 @@ is_active)`, i.e. only from the active pane of the active tab by default; a drop
   (148.19), #561 (148.20), #562 (148.22), #563 (148.21), #564 (148.23), #566 (148.24), and #568
   (148.3 and 148.7). The windows-only checks for 148.13 (size cap) and 148.14 (UNC refusal)
   still need a maintainer run on Windows.
-
 - **148.23 (done):** removed `CARGO_BUILD_FEATURES = "playback"` and its comment from
   `mkFreminalShell`, plus the fuzz-shell sentence about it (cargo never reads that variable,
   and no crate declares `playback`). xtask's `run_cargo_no_features` existed only to strip it
@@ -8794,7 +8793,6 @@ is_active)`, i.e. only from the active pane of the active tab by default; a drop
     `is_dir`) and fall back to the default directory instead of failing the pane
     (`LAYOUT_FORMAT.md` says so). An existing but hostile directory saved by an old build
     cannot be told apart; layouts are trusted input (148.22).
-
 - **148.C11 — Notification worker is never restarted.** Review finding R11a. If the
   `freminal-notify` worker thread exits (panic), `OnceLock` keeps the dead sender and system
   notifications stay off until freminal restarts; each attempt logs `WorkerGone`. Scope:
@@ -8874,14 +8872,16 @@ check the code against it.
   - the icon is sent through the dispatcher's existing image path (the `image-data` key,
     downscaled to at most 256 px) instead of a full-resolution `image_data` whose key notify-rust
     chose from the server's spec version;
-  - body markup is escaped only when the daemon advertises `body-markup` (`state.rs`), instead
-    of always. The escape (#560) is kept wherever the daemon would parse markup.
+  - the summary and body are escaped only when the daemon advertises `body-markup`
+    (`state.rs`), instead of always. Both are escaped, as before, because some daemons format
+    the summary too (#560). The escape is kept wherever the daemon would parse markup.
 
   Unchanged: app name `freminal`, app icon `freminal`, summary fallback, `Critical` urgency for
   `Error` and `Normal` otherwise, expire timeout `-1`, no actions.
 
 - **Windows legacy toasts match freminal's OSC 99 toast, not notify-rust's.** That means
-  `title(summary)`, `text1(body)`, silent, short duration, the PowerShell app id, and **no
+  `title(summary)`, `text1(body)` (left out for an empty body), silent, short duration, the
+  PowerShell app id, and **no
   `Scenario::Reminder` for `Error`**. Task 138.C15 dropped the reminder scenario because a
   reminder needs buttons, and 138.C17 stopped advertising urgency on Windows for that reason.
   Today's `text1("")` / `text2(body)` layout is notify-rust's, not a freminal choice.
@@ -8951,7 +8951,7 @@ job. No benchmarks: nothing here is on a `freminal-bench-table` path.
     `PlainNotification` carries `summary`, `body` and `urgency` and lives in `dbus_service`.
   - Add a pure builder `DispatcherState::plain_notify_args(&PlainNotification) -> NotifyArgs`
     beside `notify_args`. It has no actions, `replaces_id` 0, expire `-1` and the embedded
-    freminal icon. Escaping follows `body-markup`.
+    freminal icon. Escaping of summary and body follows `body-markup`.
   - The dispatcher sends it under `daemon_gate` / `note_call`, without `record_shown` or any
     `Osc99DbusEvent`. `report_unserved` drops it with a `debug` log.
   - Add a cloneable `PlainNotifySender` (wraps the command `Sender`). `Osc99DbusHandle`
@@ -8973,9 +8973,9 @@ job. No benchmarks: nothing here is on a `freminal-bench-table` path.
 
 - **Scope:** `freminal/src/gui/notifications.rs` and `freminal/src/gui/osc99/untracked.rs`
   (only to share the toast-building helper, if one is extracted).
-  - The worker queue's payload becomes a freminal-owned `SystemNotification` (summary, body,
-    kind) instead of `notify_rust::Notification`. On Windows the worker builds a `Toast`
-    exactly as decided above. On macOS it builds the same `notify_rust::Notification` as today
+  - The worker queue's payload becomes a freminal-owned `SystemNotification` (summary and
+    body; no kind, which neither platform reads) instead of `notify_rust::Notification`. On
+    Windows the worker builds a `Toast` exactly as decided above. On macOS it builds the same `notify_rust::Notification` as today
     (appname, icon, summary, body; no urgency).
   - The queue, respawn and policy tests stay platform-neutral. Tests that inspected a
     `notify_rust::Notification` are replaced by tests of a pure mapping from request to
@@ -9025,7 +9025,8 @@ as a numbered `149.Cn` cleanup entry before the PR opens.
   `cargo xtask check-windows`, `cargo xtask lint-markdown`.
 - Not covered by tests, and checked by the maintainer before merge: a real Linux desktop shows
   OSC 9, command-finished, Test Notification and OSC 99 notifications with the freminal icon;
-  a Windows toast for OSC 9 and the Test Notification button; macOS unchanged (CI build plus a
+  a Windows toast for OSC 9 and the Test Notification button, and an `Error`-kind toast that
+  is now an ordinary toast rather than a reminder; macOS unchanged (CI build plus a
   manual check).
 
 ### 149 Status notes
@@ -9074,7 +9075,188 @@ as a numbered `149.Cn` cleanup entry before the PR opens.
 
 ### 149 Cleanup entries
 
-(none yet)
+From the adversarial review of 2026-10-22. Two parallel CODE-REVIEW passes covered the
+`main...HEAD` diff: one on the zbus port (Z1–Z14) and one on routing, platforms, dependencies
+and docs (R1–R14). Neither found a blocker. Every finding is fixed here or scheduled into
+Task 150 (structural ones; see "150 Evidence").
+
+- **149.C1 — Plain notifications share the OSC 99 command queue (R1, Z2; major).** Before,
+  OSC 9 / 777 / 133 `D` had their own 16-slot queue. Now a loop on OSC 9 can queue 256
+  `Notify` calls and starve OSC 99 `Show` / `Close`.
+  - Fix: `PlainNotifySender` shares an in-flight counter capped at 16
+    (`PLAIN_NOTIFICATION_BUDGET`). It is incremented on send and decremented when the
+    dispatcher handles or drops the command.
+  - Test: a full plain budget still lets an OSC 99 `Show` queue.
+  - Docs: `COMMAND_QUEUE_CAPACITY`, `plain.rs` and `ESCAPE_SEQUENCE_COVERAGE.md`.
+- **149.C2 — The `method_timeout` → `is_method_timeout` path is never exercised (Z1;
+  major).** Every breaker test feeds a synthetic timeout error. Fix: a rig variant whose
+  client sets a short `method_timeout`, and a fake-daemon summary that is never answered.
+  - Tests: `notify` and `close_notification` fail with `is_method_timeout`; at service level,
+    a hung `Notify` gives `ShowFailed`, then the gate skips.
+- **149.C3 — zbus 6 logs nothing (Z3).** Without its `tracing` feature, the `zbus=warn`
+  filters in `main.rs` are dead. Fix: enable zbus's `tracing` feature and keep the filters.
+- **149.C4 — `smol` is a second async stack kept for three small uses (Z4).** Fix: depend
+  on `async-io` (`Timer`) and `futures-lite` (`StreamExt`, `FutureExt::or`) directly, and
+  drop `smol`. Reword the comment: async-io drives its timers on its own process-wide thread.
+- **149.C5 — `serve` does not close the connection when the GUI is gone (Z5).** Fix: call
+  `close_connection` before returning `GuiGone`, so the pumps end, and shorten the shutdown
+  doc.
+- **149.C6 — Test-only error-name constants in production `mod.rs` (Z6).** Fix: move them
+  into `test_rig.rs`.
+- **149.C7 — The service imports the app icon from `gui::run` (R12, Z7).** Fix: a small
+  `gui::app_icon` module owns `FREMINAL_ICON_PNG`; `run.rs` and the service import it.
+- **149.C8 — Logging (R2, Z9).**
+  - Service-wide log lines no longer say "OSC 99:" on paths that serve every notification.
+  - A busy handle cell in `system_notify_sink` logs at debug instead of dropping silently.
+  - A plain notification dropped because the service is unavailable warns once, then logs
+    at debug.
+  - `ESCAPE_SEQUENCE_COVERAGE.md` records that notifications are dropped during the up-to-30 s
+    reconnect window. Before this task, each notification made its own connection.
+- **149.C9 — The service-start gate is untested as a whole (R3).** Fix: extract
+  `notification_service_wanted(&Config)` in `host_capabilities.rs` and use it from
+  `ensure_osc99_dbus_started`.
+  - Truth-table test, including `Config::default()`.
+  - A test that ties `plain_notifications_may_use_system_leg` to
+    `NotificationRouter::routing_for` for every `NotificationKind`, so a new kind cannot be
+    missed.
+- **149.C10 — The plain-path escape test lost the richer #560 input (R4).** Fix: restore the
+  `<a href=…>` input with per-character ZWNJ checks.
+  - Record in `ESCAPE_SEQUENCE_COVERAGE.md` that escaping follows the daemon's `body-markup`
+    capability. A daemon that formats text without advertising `body-markup` gets raw text.
+    This is accepted, because OSC 99's body already works this way.
+- **149.C11 — `MASTER_PLAN.md` mentions that stop at 148 (R5).** Fix: the dependency notes
+  and the reference list include 149 and 150.
+- **149.C12 — Stale comments and docs (R6, R14, Z10, Z11).**
+  - Code comments:
+    - `app_impl.rs` service-start comment;
+    - the `osc99_dbus` field doc in `gui/mod.rs`;
+    - the "thread is best-effort" test comment in `notifications.rs`;
+    - the zbus / Linux-section comments in both `Cargo.toml` files;
+    - the zruntime seat-hand-off sentence in `dbus_service/mod.rs` (each thread drives its own
+      runtime; the socket reader runs on the dispatcher's or the helper thread);
+    - "held for one routing call" (it is held for the rest of `update()`).
+  - `DESIGN_DECISIONS.md` wording.
+- **149.C13 — Plan text contradicts the shipped code (R7).** Fix: the 149 decisions and
+  subtask text are corrected:
+  - summary and body are both escaped;
+  - the worker payload has no `kind`;
+  - a Windows toast skips `text1` for an empty body.
+
+  The deviation notes stay.
+- **149.C14 — Unrelated reformatting of Task 148 status notes (R8).** It came from
+  `prettier --write` on the whole file; `main`'s copy already fails prettier, and the hook
+  skips markdown. Fix: revert those hunks.
+- **149.C15 — The notification sink is built every frame (R9).** Fix: build it only when
+  `drain_command_finished_events` has a notification to route. Take a shared borrow when the
+  service is already running.
+- **149.C16 — A test with no assertions (Z8).** Fix:
+  `sending_to_a_full_queue_or_a_gone_dispatcher_does_not_block_or_panic` asserts the queue
+  length and the dropped extra send.
+- **149.C17 — A plain `Notify` never adopts the reply's sender as the daemon owner (Z13).**
+  With bus tracking and a failed `GetNameOwner`, plain-only use never refreshes the
+  capabilities. Fix: `show_plain` adopts the owner as `record_shown` does, with a test.
+- **Scheduled into Task 150, not fixed here:**
+  - R10 / Z14 (`let _ = self;` in the non-Linux `system_notify_sink`);
+  - R11 (the repeated platform `cfg`);
+  - R13 (the untestable Windows toast builder; the dropped `Error` reminder scenario is added
+    to the maintainer's manual checks below);
+  - Z12 (the plain icon is cloned, 256 KiB, per notification; the OSC 99 path does the same,
+    and the icon pipeline moves in Task 150).
+
+## Task 150 — Desktop Notification Backend Extraction (stub)
+
+### 150 Summary
+
+Give the "show this notification on the OS" side of freminal one owner. Created as an
+enriched stub on 2026-10-22, from the Task 149 adversarial review and a maintainer
+discussion. **Not decomposed**: activate it against the code as it is after Task 149 merges.
+
+After Task 149, every system notification has exactly one native backend per platform, but
+the backends have no home of their own. They are spread across:
+
+- `freminal/src/gui/notifications.rs` (3,488 lines). It holds routing, plus the macOS/Windows
+  `freminal-notify` worker, its bounded queue and respawn policy, and the per-platform
+  builders.
+- `freminal/src/gui/osc99/` (about 18,000 lines). It holds the OSC 99 registry and protocol
+  logic, mixed with the Linux/BSD D-Bus service (`dbus_service/`). That service also carries
+  OSC 9 / 777 / 133 `D` since Task 149.2. The same directory holds the macOS/Windows
+  untracked backend (`untracked.rs`) and icon handling (`icon_decode.rs`, `icon_raster.rs`,
+  `icon_tempfiles.rs`, `icon_lookup.rs`, `presentation.rs`, `markup.rs`).
+
+Each backend was added where its first caller happened to be. That is the
+`freminal-extend-or-extract` trigger: the concept has no owner. The size of the files is only
+a symptom.
+
+### 150 Evidence (Task 149 adversarial review, 2026-10-22)
+
+Every one of these is a symptom of the missing owner. 149 fixed only what was a defect of its
+own change; the structural part is this task's.
+
+- **Shared queue.** Plain notifications (OSC 9 / 777 / 133 `D`) were put on the OSC 99
+  command queue, so a flood of one could starve the other. 149 added a separate cap (see the
+  149 cleanup entries). A backend that owns its queues would have made the budget explicit.
+- **Wrong names.** The service is named and logged as "OSC 99" (`Osc99DbusService`,
+  `Osc99DbusHandle`, `osc99_dbus` field, "OSC 99: …" log lines) although it carries every
+  Linux/BSD notification. 149 decided not to rename it, to keep the port reviewable.
+- **Repeated platform `cfg`s.** In `notifications.rs` the expression
+  `cfg(any(test, not(all(unix, not(target_os = "macos")))))` is repeated about 20 times around
+  the worker, queue and respawn machinery.
+- **Platform-shaped call sites.** `FreminalGui::system_notify_sink` has a non-Linux
+  `const fn` that does `let _ = self;` only so every platform has the same call site.
+  `SystemNotifySink` is a struct whose field exists on one platform only.
+- **Shared assets.** The app icon PNG was first put in `gui/run.rs` and imported by the D-Bus
+  service (149.C7 moved it to `gui::app_icon`). The plain icon is also cloned (256 KiB) per
+  notification, as the OSC 99 path clones its icons (review finding Z12). The icon pipeline
+  should share decoded images (`Arc`).
+- **Untestable builders.** The Windows toast builder cannot be unit-tested
+  (`tauri-winrt-notification`'s `Toast` has no getters). The macOS builders only compile on
+  macOS CI. 149.3 split the OSC 99 macOS builder into pure fields plus a thin conversion. The
+  same pattern is wanted for every platform builder.
+
+### 150 Proposed shape (decisions to confirm at activation)
+
+- **One interface, two request kinds.**
+  - **Plain** (fire-and-forget): summary, body, urgency. Used by OSC 9, OSC 777,
+    command-finished and the Settings Test button.
+  - **Tracked:** an instance id, with `Shown` / `ShowFailed` / `Closed` / `Activated` /
+    capability events coming back. Used by the OSC 99 registry.
+
+  Callers never name a platform. The backend owns the OS connection, worker threads, queue
+  budgets (per request kind), icon decoding and temp files, and markup escaping.
+- **Two steps (maintainer decision, 2026-10-22):**
+  1. **A module first.** `freminal/src/gui/desktop_notify/` (name to confirm), designed as if
+     it were a crate: an explicit public surface, nothing reaching into its internals, and no
+     behaviour change. The OSC 99 protocol logic (registry, filter, pane state, effects,
+     glue) stays in `osc99/` and becomes a caller.
+  2. **Then a mechanical move into a `freminal-notify` crate.** The maintainer approved the
+     crate in principle on 2026-10-22; confirm at activation that step 1's surface still
+     supports it. The crate may depend on `freminal-common` only (`freminal-architecture`):
+     - `icon_raster.rs` reads the bundled font through `crate::gui::font_manager`, so it
+       must take the font bytes as input instead;
+     - toast / glyph types from `crate::gui::icons` / `crate::gui::toast` must stay on the
+       caller's side.
+
+  The point of the crate is that zbus, `tauri-winrt-notification`, `notify-rust` and their
+  platform `cfg`s leave the `freminal` crate entirely.
+- **Wake-up integration.** The D-Bus service wakes idle windows through a
+  `Box<dyn Fn() + Send>` waker (`Osc99Wake`). That is already crate-safe; keep it.
+
+### 150 Open questions (resolve at activation)
+
+| Question                                                                            | Leaning                                    |
+| ----------------------------------------------------------------------------------- | ------------------------------------------ |
+| Module / crate name                                                                 | `desktop_notify` / `freminal-notify`       |
+| Does markup escaping (#560) belong to the backend or to the caller?                 | Backend: it depends on daemon capabilities |
+| Does the OSC 99 icon pipeline (decode, raster, temp files, lookup) move whole?      | Yes; it is platform presentation           |
+| One worker per platform for both kinds, or separate plain/tracked workers?          | One, with per-kind queue budgets           |
+| Rename `Osc99DbusEvent` / `Osc99SystemAction` etc. to backend-neutral names?        | Yes, in step 1                             |
+
+### 150 Scope limits
+
+- No behaviour change in either step: notification content, routing, gates, `p=?` answers
+  and capability broadcasts stay identical, and the existing tests prove it.
+- Out of scope: new notification features, and any change to which notifications are shown
+  or when.
 
 ---
 
