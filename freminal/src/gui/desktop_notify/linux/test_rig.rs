@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Test support for the OSC 99 D-Bus service: shared fixtures, a hand-written
+//! Test support for the D-Bus notification service: shared fixtures, a hand-written
 //! fake notification daemon, and the rig that connects a client to it over a
 //! socket pair.
 
@@ -22,15 +22,15 @@ use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 
-use super::super::presentation::Osc99IconLookup;
+use super::super::presentation::IconLookup;
 use super::super::test_support::test_assets;
-use super::super::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
+use super::super::{NotificationInstanceId, SystemDispatch, TrackedBackend};
 use super::pump::PumpSignal;
 use super::state::OwnerTracking;
 use super::wire::{NotifyReply, fetch_capabilities};
 use super::{
-    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, NOTIFICATIONS_INTERFACE,
-    NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService,
+    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, LinuxNotifyHandle, LinuxNotifyService,
+    NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, SystemNotifyEvent,
 };
 
 /// How long a test waits for something that must happen. Generous so a
@@ -55,8 +55,8 @@ pub(super) const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.Servi
 /// it. It is not used for any call the daemon does answer.
 pub(super) const SHORT_METHOD_TIMEOUT: Duration = Duration::from_millis(200);
 
-pub(super) fn instance(n: u64) -> Osc99InstanceId {
-    Osc99InstanceId::new(n)
+pub(super) fn instance(n: u64) -> NotificationInstanceId {
+    NotificationInstanceId::new(n)
 }
 
 pub(super) fn notification() -> Notification99Data {
@@ -567,7 +567,7 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
 }
 
 /// A rig whose client gives up on a method call after `timeout`, as the
-/// production connection does after `OSC99_DBUS_METHOD_TIMEOUT`.
+/// production connection does after `DBUS_METHOD_TIMEOUT`.
 pub(super) fn rig_with_method_timeout(
     advertised: &[&str],
     timeout: Duration,
@@ -774,12 +774,12 @@ where
 }
 
 /// The next event, failing the test if none arrives in [`EVENT_TIMEOUT`].
-pub(super) fn next_event(handle: &Osc99DbusHandle) -> Result<Osc99DbusEvent, Box<dyn Error>> {
+pub(super) fn next_event(handle: &LinuxNotifyHandle) -> Result<SystemNotifyEvent, Box<dyn Error>> {
     Ok(handle.events.recv_timeout(EVENT_TIMEOUT)?)
 }
 
 /// The instance a test closes to prove nothing else is queued.
-pub(super) const SENTINEL: Osc99InstanceId = Osc99InstanceId::new(u64::MAX);
+pub(super) const SENTINEL: NotificationInstanceId = NotificationInstanceId::new(u64::MAX);
 
 /// Prove that no event is queued behind the last one received.
 ///
@@ -789,11 +789,11 @@ pub(super) const SENTINEL: Osc99InstanceId = Osc99InstanceId::new(u64::MAX);
 /// if the next event is the sentinel's, nothing was queued before it. A
 /// signal still travelling through a pump is not covered, so a test that
 /// ignores signals orders a later, observable signal behind them instead.
-pub fn assert_no_queued_events(handle: &mut Osc99DbusHandle) -> TestResult {
-    assert_eq!(handle.close(SENTINEL), Osc99SystemDispatch::Queued);
+pub fn assert_no_queued_events(handle: &mut LinuxNotifyHandle) -> TestResult {
+    assert_eq!(handle.close(SENTINEL), SystemDispatch::Queued);
     assert_eq!(
         next_event(handle)?,
-        Osc99DbusEvent::Closed { instance: SENTINEL }
+        SystemNotifyEvent::Closed { instance: SENTINEL }
     );
     Ok(())
 }
@@ -814,9 +814,9 @@ pub(super) fn counting_waker() -> (Box<dyn Fn() + Send>, Receiver<()>) {
 pub(super) fn spawn_on(
     rig: &Rig,
     owner_tracking: OwnerTracking,
-) -> (Osc99DbusHandle, Receiver<()>) {
+) -> (LinuxNotifyHandle, Receiver<()>) {
     let (waker, woken) = counting_waker();
-    let handle = Osc99DbusService::spawn_with_connection(
+    let handle = LinuxNotifyService::spawn_with_connection(
         rig.client.clone(),
         owner_tracking,
         waker,
@@ -829,18 +829,18 @@ pub(super) fn spawn_on(
 /// `Capabilities` event, so a test begins with an empty event queue.
 pub fn started(
     advertised: &[&str],
-) -> Result<(Rig, Osc99DbusHandle, Receiver<()>), Box<dyn Error>> {
+) -> Result<(Rig, LinuxNotifyHandle, Receiver<()>), Box<dyn Error>> {
     started_with(rig(advertised)?)
 }
 
 /// [`started`] for an existing rig.
 pub(super) fn started_with(
     rig: Rig,
-) -> Result<(Rig, Osc99DbusHandle, Receiver<()>), Box<dyn Error>> {
+) -> Result<(Rig, LinuxNotifyHandle, Receiver<()>), Box<dyn Error>> {
     let (handle, woken) = spawn_on(&rig, OwnerTracking::Peer);
     assert!(matches!(
         next_event(&handle)?,
-        Osc99DbusEvent::Capabilities(_)
+        SystemNotifyEvent::Capabilities(_)
     ));
     Ok((rig, handle, woken))
 }
@@ -850,7 +850,7 @@ pub(super) fn started_with(
 pub(super) struct NoIconLookup;
 
 #[cfg(test)]
-impl Osc99IconLookup for NoIconLookup {
+impl IconLookup for NoIconLookup {
     fn matched_icon(&self, _name: &str) -> Option<String> {
         None
     }

@@ -33,9 +33,9 @@ use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_terminal_emulator::io::InputEvent;
 
-use crate::gui::desktop_notify::Osc99InstanceId;
+use crate::gui::desktop_notify::NotificationInstanceId;
 #[cfg(all(unix, not(target_os = "macos")))]
-use crate::gui::desktop_notify::Osc99SystemAction;
+use crate::gui::desktop_notify::SystemAction;
 use crate::gui::notifications::Osc99Control;
 use crate::gui::toast::{ToastEventKind, ToastKey};
 
@@ -53,15 +53,15 @@ pub use toast_spec::{Osc99ToastSpec, osc99_toast_spec};
 /// The [`ToastKey`] an instance's toast is pushed with: the instance's raw
 /// value.
 #[must_use]
-pub const fn instance_toast_key(instance: Osc99InstanceId) -> ToastKey {
+pub const fn instance_toast_key(instance: NotificationInstanceId) -> ToastKey {
     ToastKey(instance.get())
 }
 
 /// The instance a toast event's key refers to (the inverse of
 /// [`instance_toast_key`]).
 #[must_use]
-pub const fn instance_from_toast_key(key: ToastKey) -> Osc99InstanceId {
-    Osc99InstanceId::new(key.0)
+pub const fn instance_from_toast_key(key: ToastKey) -> NotificationInstanceId {
+    NotificationInstanceId::new(key.0)
 }
 
 /// Where a notification was shown.
@@ -74,7 +74,7 @@ pub enum Osc99Leg {
     LinuxSystem,
     /// A desktop notification whose close and activation freminal cannot
     /// observe (macOS and Windows). It is shown and forgotten: see
-    /// [`Osc99UntrackedBackend`].
+    /// [`UntrackedBackend`].
     UntrackedSystem,
 }
 
@@ -104,12 +104,12 @@ pub enum Osc99SystemLegEvent {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-impl From<Osc99SystemAction> for Osc99LegActivation {
+impl From<SystemAction> for Osc99LegActivation {
     /// The registry's vocabulary for the same activation.
-    fn from(action: Osc99SystemAction) -> Self {
+    fn from(action: SystemAction) -> Self {
         match action {
-            Osc99SystemAction::Default => Self::Body,
-            Osc99SystemAction::Button(n) => Self::Button(n),
+            SystemAction::Default => Self::Body,
+            SystemAction::Button(n) => Self::Button(n),
         }
     }
 }
@@ -200,11 +200,11 @@ mod tests {
     #[test]
     fn system_actions_map_to_the_registry_activations() {
         assert_eq!(
-            Osc99LegActivation::from(Osc99SystemAction::Default),
+            Osc99LegActivation::from(SystemAction::Default),
             Osc99LegActivation::Body
         );
         assert_eq!(
-            Osc99LegActivation::from(Osc99SystemAction::Button(3)),
+            Osc99LegActivation::from(SystemAction::Button(3)),
             Osc99LegActivation::Button(3)
         );
     }

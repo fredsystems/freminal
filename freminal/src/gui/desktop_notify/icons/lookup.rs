@@ -10,9 +10,9 @@
 //! two questions kitty asks:
 //!
 //! - does an icon called `name` exist anywhere in the icon directories, and
-//!   under which on-disk name? ([`Osc99IconLookup::matched_icon`]), and
+//!   under which on-disk name? ([`IconLookup::matched_icon`]), and
 //! - which icon does the application called `f=` use?
-//!   ([`Osc99IconLookup::desktop_icon`], through its `.desktop` file).
+//!   ([`IconLookup::desktop_icon`], through its `.desktop` file).
 //!
 //! Both scans run once, together, on a background thread. The thread is
 //! started by the first question the lookup is asked, which is the first
@@ -34,10 +34,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use super::super::presentation::Osc99IconLookup;
+use super::super::presentation::IconLookup;
 
 /// The name of the thread that runs the scans.
-const SCAN_THREAD_NAME: &str = "freminal-osc99-icons";
+const SCAN_THREAD_NAME: &str = "freminal-notify-icons";
 
 /// The deepest a scan descends: a file `MAX_SCAN_DEPTH` path components below
 /// a root is found, one further down is not. `hicolor/48x48/apps/x.png` is
@@ -165,7 +165,7 @@ impl XdgIconLookup {
     }
 }
 
-impl Osc99IconLookup for XdgIconLookup {
+impl IconLookup for XdgIconLookup {
     fn matched_icon(&self, name: &str) -> Option<String> {
         self.scans()?.icons.get(&name.to_lowercase()).cloned()
     }

@@ -22,11 +22,11 @@ use freminal_windowing::{RepaintProxy, WindowId};
 /// else to any live window, else nowhere ([`select_wake_target`]): closing the
 /// preferred window never leaves the service unable to wake an idle GUI.
 #[derive(Clone, Default)]
-pub struct Osc99Wake {
+pub struct NotifyWake {
     shared: Arc<WakeShared>,
 }
 
-/// The state [`Osc99Wake`] shares with the service's waker.
+/// The state [`NotifyWake`] shares with the service's waker.
 #[derive(Default)]
 struct WakeShared {
     /// The event-loop proxy, set once by the first frame.
@@ -74,7 +74,7 @@ fn select_wake_target(live: &[WindowId], preferred: Option<WindowId>) -> Option<
         .or_else(|| live.first().copied())
 }
 
-impl Osc99Wake {
+impl NotifyWake {
     fn lock_targets(&self) -> std::sync::MutexGuard<'_, WakeTargets> {
         self.shared
             .targets
@@ -99,7 +99,7 @@ impl Osc99Wake {
         self.lock_targets().preferred = Some(window);
     }
 
-    /// A waker for [`Osc99DbusService::spawn`](crate::gui::desktop_notify::Osc99DbusService::spawn).
+    /// A waker for [`LinuxNotifyService::spawn`](crate::gui::desktop_notify::LinuxNotifyService::spawn).
     pub fn waker(&self) -> Box<dyn Fn() + Send> {
         let shared = Arc::clone(&self.shared);
         Box::new(move || shared.wake())

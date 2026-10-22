@@ -1069,7 +1069,7 @@ impl freminal_windowing::App for FreminalGui {
         // call has no GL context current, `on_window_destroying` will.
         // Stop the OSC 99 wake-up targeting the closing window.
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.unregister(window_id);
+        self.notify_wake.unregister(window_id);
         if let Some(win) = self.windows.remove(&window_id) {
             self.closing_window_gl
                 .insert(window_id, win.into_gl_teardown());
@@ -1107,7 +1107,7 @@ impl freminal_windowing::App for FreminalGui {
         // Idempotent with `on_close_requested`; this also covers a window that
         // is destroyed without a close request.
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.unregister(window_id);
+        self.notify_wake.unregister(window_id);
         let teardown = self.closing_window_gl.remove(&window_id).or_else(|| {
             self.windows
                 .remove(&window_id)
@@ -1559,7 +1559,7 @@ impl freminal_windowing::App for FreminalGui {
         // Keep the OSC 99 notification service's wake-up pointed at a window
         // that exists: this one is rendering right now.
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake
+        self.notify_wake
             .retarget(window_id, || handle.event_loop_proxy());
 
         // Start the notification service as soon as the config can route OSC 99
@@ -4674,7 +4674,7 @@ impl FreminalGui {
     pub(super) fn insert_terminal_window(&mut self, window_id: WindowId, win: PerWindowState) {
         self.windows.insert(window_id, win);
         #[cfg(all(unix, not(target_os = "macos")))]
-        self.osc99_wake.register(window_id);
+        self.notify_wake.register(window_id);
     }
 
     /// Render the fatal-error panel for a window that has no

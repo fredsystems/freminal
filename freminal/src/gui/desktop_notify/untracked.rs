@@ -8,7 +8,7 @@
 //! it emits `Osc99Effect::ShowUntrackedSystem`, answers
 //! a `c=1` request with `untracked` at once, and never waits for the leg.
 //!
-//! The executor shows the notification through an [`Osc99UntrackedBackend`]:
+//! The executor shows the notification through an [`UntrackedBackend`]:
 //! `PlatformUntrackedBackend` on macOS and Windows, and
 //! [`NoUntrackedBackend`] everywhere else (the registry never routes to the
 //! untracked leg on Linux/BSD, whose system leg is the zbus service) and as
@@ -19,7 +19,7 @@
 //! The GUI thread never touches the disk, an image decoder or an OS
 //! notification API. `PlatformUntrackedBackend::show` only builds a plain
 //! `DeliveryRequest` and `try_send`s it to one long-lived thread,
-//! `freminal-osc99-deliver`, spawned on the first notification. The queue holds
+//! `freminal-notify-deliver`, spawned on the first notification. The queue holds
 //! `QUEUE_CAPACITY` requests; when it is full the new request is dropped (and
 //! logged at debug), so a program that floods notifications cannot grow memory
 //! or stall the GUI. The worker owns the icon temp-file store
@@ -78,7 +78,7 @@ use super::queue::{Offered, offer};
 ///
 /// A trait so the executor and its tests reach no OS notification API and so
 /// every platform compiles the same executor.
-pub trait Osc99UntrackedBackend {
+pub trait UntrackedBackend {
     /// Display `notification` and forget it. There is no handle, no later
     /// event and no way to close it; a failure to display is logged, not
     /// reported, because the protocol has nothing to report it with. (On
@@ -94,7 +94,7 @@ pub trait Osc99UntrackedBackend {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoUntrackedBackend;
 
-impl Osc99UntrackedBackend for NoUntrackedBackend {
+impl UntrackedBackend for NoUntrackedBackend {
     fn show(&mut self, notification: &Notification99Data) {
         tracing::trace!(
             id = ?notification.id,
@@ -112,7 +112,7 @@ pub struct RecordingUntrackedBackend {
 }
 
 #[cfg(test)]
-impl Osc99UntrackedBackend for RecordingUntrackedBackend {
+impl UntrackedBackend for RecordingUntrackedBackend {
     fn show(&mut self, notification: &Notification99Data) {
         self.shown.push(notification.clone());
     }
@@ -354,7 +354,7 @@ struct DeliveryWorker {
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl DeliveryWorker {
-    /// Spawn the `freminal-osc99-deliver` thread. `show` runs on it, once per
+    /// Spawn the `freminal-notify-deliver` thread. `show` runs on it, once per
     /// request, with the path of the request's image if it has one.
     ///
     /// # Errors
@@ -367,7 +367,7 @@ impl DeliveryWorker {
     ) -> std::io::Result<Self> {
         let (queue, requests) = crossbeam_channel::bounded(QUEUE_CAPACITY);
         let thread = std::thread::Builder::new()
-            .name("freminal-osc99-deliver".to_owned())
+            .name("freminal-notify-deliver".to_owned())
             .spawn(move || deliver_loop(&requests, font, icons, show))?;
         Ok(Self {
             queue: Some(queue),
@@ -417,7 +417,7 @@ impl Drop for DeliveryWorker {
 /// delivery worker, which draws the standard icons from `assets.icon_font`.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[must_use]
-pub fn platform_untracked_backend(assets: NotifyAssets) -> Box<dyn Osc99UntrackedBackend> {
+pub fn platform_untracked_backend(assets: NotifyAssets) -> Box<dyn UntrackedBackend> {
     Box::new(PlatformUntrackedBackend::new(assets.icon_font))
 }
 
@@ -426,7 +426,7 @@ pub fn platform_untracked_backend(assets: NotifyAssets) -> Box<dyn Osc99Untracke
 /// assets.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[must_use]
-pub fn platform_untracked_backend(_assets: NotifyAssets) -> Box<dyn Osc99UntrackedBackend> {
+pub fn platform_untracked_backend(_assets: NotifyAssets) -> Box<dyn UntrackedBackend> {
     Box::new(NoUntrackedBackend)
 }
 
@@ -683,7 +683,7 @@ impl PlatformUntrackedBackend {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-impl Osc99UntrackedBackend for PlatformUntrackedBackend {
+impl UntrackedBackend for PlatformUntrackedBackend {
     fn show(&mut self, data: &Notification99Data) {
         let request = DeliveryRequest::from_notification(data);
 
@@ -1030,7 +1030,7 @@ mod tests {
         worker.shutdown(Duration::from_secs(30));
 
         let shown: Vec<_> = shown_rx.try_iter().collect();
-        let name = Some("freminal-osc99-deliver".to_owned());
+        let name = Some("freminal-notify-deliver".to_owned());
         assert_eq!(
             shown,
             [

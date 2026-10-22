@@ -42,7 +42,7 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
-use super::desktop_notify::Osc99LinuxDaemon;
+use super::desktop_notify::LinuxDaemon;
 #[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 use super::desktop_notify::SystemNotification;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -553,13 +553,13 @@ pub(super) struct Osc99DisplayContext {
     /// system leg the daemon cannot show falls back to the toast leg
     /// ([`resolve_osc99_legs`]). Ignored on macOS and Windows, whose system
     /// leg does not use the daemon.
-    pub daemon: Osc99LinuxDaemon,
+    pub daemon: LinuxDaemon,
 }
 
 /// The legs an OSC 99 notification is displayed on: the toast and/or system
 /// legs `routing` picks for `window_focus`, with the Linux/BSD system leg
 /// replaced by the toast leg when `daemon` is
-/// [`Osc99LinuxDaemon::Unavailable`] (no daemon could show it, and the
+/// [`LinuxDaemon::Unavailable`] (no daemon could show it, and the
 /// capability advertisement already promises the toast leg only), without
 /// listing the toast leg twice.
 ///
@@ -569,7 +569,7 @@ fn resolve_osc99_legs(
     routing: NotificationRouting,
     window_focus: WindowFocus,
     system_leg: Osc99Leg,
-    daemon: Osc99LinuxDaemon,
+    daemon: LinuxDaemon,
 ) -> Vec<Osc99Leg> {
     let focused = window_focus.is_focused();
     let mut legs = Vec::with_capacity(2);
@@ -577,8 +577,7 @@ fn resolve_osc99_legs(
         legs.push(Osc99Leg::Toast);
     }
     if routing.wants_system(focused) {
-        let leg = if system_leg == Osc99Leg::LinuxSystem && daemon == Osc99LinuxDaemon::Unavailable
-        {
+        let leg = if system_leg == Osc99Leg::LinuxSystem && daemon == LinuxDaemon::Unavailable {
             Osc99Leg::Toast
         } else {
             system_leg
@@ -765,7 +764,7 @@ impl NotificationRouter {
         request: Osc99Request,
         config: &NotificationsConfig,
         window_focus: WindowFocus,
-        daemon: Osc99LinuxDaemon,
+        daemon: LinuxDaemon,
         icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
     ) -> Vec<Osc99Effect> {
@@ -840,7 +839,7 @@ impl NotificationRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::desktop_notify::{NoSystemBackend, NoUntrackedBackend, Osc99SystemBackend};
+    use crate::gui::desktop_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::host_capabilities::{PlainNotifyEntry, plain_notifications_may_use_system_leg};
     use crate::gui::osc99::{
@@ -873,7 +872,7 @@ mod tests {
             toasts,
             icon_cache,
             registry,
-            &mut NoSystemBackend,
+            &mut NoTrackedBackend,
         );
     }
 
@@ -886,7 +885,7 @@ mod tests {
         toasts: &mut ToastStack,
         icon_cache: &mut Osc99IconCache,
         registry: &mut Osc99Registry,
-        system: &mut dyn Osc99SystemBackend,
+        system: &mut dyn TrackedBackend,
     ) {
         let effects =
             NotificationRouter::route_osc99(request.clone(), config, ctx, icon_cache, registry);
@@ -1819,7 +1818,7 @@ mod tests {
             window_focus,
             pane,
             now: Instant::now(),
-            daemon: Osc99LinuxDaemon::assumed(),
+            daemon: LinuxDaemon::assumed(),
         }
     }
 
@@ -2569,13 +2568,12 @@ mod tests {
         assert_eq!(entry.shown_legs(), [Osc99Leg::Toast, system_leg]);
     }
 
-    const NO_DAEMON: Osc99LinuxDaemon = Osc99LinuxDaemon::Unavailable;
+    const NO_DAEMON: LinuxDaemon = LinuxDaemon::Unavailable;
 
     #[test]
     fn legs_follow_routing_when_the_daemon_is_available() {
-        let daemon = Osc99LinuxDaemon::Available(
-            crate::gui::desktop_notify::Osc99DaemonCapabilities::ASSUMED,
-        );
+        let daemon =
+            LinuxDaemon::Available(crate::gui::desktop_notify::DaemonCapabilities::ASSUMED);
         let legs =
             |routing, focus| resolve_osc99_legs(routing, focus, Osc99Leg::LinuxSystem, daemon);
         assert_eq!(
@@ -2665,7 +2663,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_with_the_bus_down_registers_and_shows_the_toast_leg_only() {
-        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::SystemWhenUnfocused,
@@ -2674,7 +2672,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
         let data = Notification99Data {
             id: Some("down".to_owned()),
             ..default_n99()
@@ -2719,7 +2717,7 @@ mod tests {
                 request.clone(),
                 config,
                 WindowFocus::Focused,
-                Osc99LinuxDaemon::assumed(),
+                LinuxDaemon::assumed(),
                 icon_cache,
                 registry,
             ));
@@ -2928,7 +2926,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_system_routing_shows_through_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -2937,7 +2935,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
         let data = Notification99Data {
             id: Some("sys".to_owned()),
             ..default_n99()
@@ -2972,7 +2970,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_hands_resolved_icon_bytes_to_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -2981,7 +2979,7 @@ mod tests {
         let mut toasts = ToastStack::default();
         let mut icon_cache = Osc99IconCache::default();
         let mut registry = Osc99Registry::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
         let transmitted = Notification99Data {
             icon_data: Some(vec![1, 2, 3]),
             icon_cache_key: Some("k".to_owned()),
@@ -3020,7 +3018,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_toast_routing_does_not_touch_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::Toast,
@@ -3028,7 +3026,7 @@ mod tests {
         };
         let mut toasts = ToastStack::default();
         let mut registry = Osc99Registry::default();
-        let mut system = RecordingSystemBackend::default();
+        let mut system = RecordingTrackedBackend::default();
 
         route_osc99_with_system(
             &osc99_request(&default_n99()),

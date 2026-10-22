@@ -432,9 +432,9 @@ struct FreminalGui {
     /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
     /// by the service-event router, which re-broadcasts the capabilities when
     /// the change alters them. Read on every platform (it is
-    /// [`desktop_notify::Osc99LinuxDaemon::assumed`] throughout where no service
+    /// [`desktop_notify::LinuxDaemon::assumed`] throughout where no service
     /// exists). Single-threaded GUI, so `Cell` suffices.
-    osc99_daemon: std::cell::Cell<desktop_notify::Osc99LinuxDaemon>,
+    osc99_daemon: std::cell::Cell<desktop_notify::LinuxDaemon>,
 
     /// The Linux/BSD desktop-notification service's handle. It carries every
     /// Linux/BSD notification, OSC 99 and plain (OSC 9 / 777, command-finished,
@@ -445,7 +445,7 @@ struct FreminalGui {
     /// rest of the process (dropping it stops the service). `None` until then.
     /// Single-threaded GUI, so `RefCell` suffices.
     #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_dbus: std::cell::RefCell<Option<desktop_notify::Osc99DbusHandle>>,
+    notify_service: std::cell::RefCell<Option<desktop_notify::LinuxNotifyHandle>>,
 
     /// The macOS and Windows fire-and-forget desktop notification, which owns
     /// the OSC 99 icon temp files and deletes them when it is dropped (the
@@ -453,12 +453,12 @@ struct FreminalGui {
     /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
     /// Linux/BSD hold the no-op backend, the registry never routing to the
     /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
-    osc99_untracked: std::cell::RefCell<Box<dyn desktop_notify::Osc99UntrackedBackend>>,
+    osc99_untracked: std::cell::RefCell<Box<dyn desktop_notify::UntrackedBackend>>,
 
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
     #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_wake: notify_wake::Osc99Wake,
+    notify_wake: notify_wake::NotifyWake,
 
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
@@ -662,14 +662,14 @@ impl FreminalGui {
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
-            osc99_daemon: std::cell::Cell::new(desktop_notify::Osc99LinuxDaemon::assumed()),
+            osc99_daemon: std::cell::Cell::new(desktop_notify::LinuxDaemon::assumed()),
             osc99_untracked: std::cell::RefCell::new(desktop_notify::platform_untracked_backend(
                 app_icon::notify_assets(),
             )),
             #[cfg(all(unix, not(target_os = "macos")))]
-            osc99_dbus: std::cell::RefCell::new(None),
+            notify_service: std::cell::RefCell::new(None),
             #[cfg(all(unix, not(target_os = "macos")))]
-            osc99_wake: notify_wake::Osc99Wake::default(),
+            notify_wake: notify_wake::NotifyWake::default(),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

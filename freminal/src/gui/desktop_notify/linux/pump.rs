@@ -24,9 +24,9 @@ use super::{
 /// Which of the two signal pumps a [`PumpSignal::Ended`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PumpKind {
-    /// `freminal-osc99-signals`: `ActionInvoked` / `NotificationClosed`.
+    /// `freminal-notify-signals`: `ActionInvoked` / `NotificationClosed`.
     Notifications,
-    /// `freminal-osc99-owner`: `NameOwnerChanged`.
+    /// `freminal-notify-owner`: `NameOwnerChanged`.
     OwnerChanges,
 }
 
@@ -59,7 +59,7 @@ pub(super) enum PumpSignal {
 }
 
 /// The match rule for the daemon's `ActionInvoked` / `NotificationClosed`
-/// signals. It names no sender: see [`Osc99SignalSender`](super::state::Osc99SignalSender).
+/// signals. It names no sender: see [`SignalSender`](super::state::SignalSender).
 pub(super) fn notification_signals_rule() -> zbus::Result<MatchRule<'static>> {
     MatchRule::builder()
         .msg_type(MessageType::Signal)

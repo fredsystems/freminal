@@ -30,27 +30,27 @@ mod standard_icon;
 mod untracked;
 
 pub use assets::NotifyAssets;
-pub use backend::{NoSystemBackend, Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
+pub use backend::{NoTrackedBackend, NotificationInstanceId, SystemDispatch, TrackedBackend};
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
-pub use capabilities::Osc99DaemonCapabilities;
-pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+pub use capabilities::DaemonCapabilities;
+pub use capabilities::{DaemonSupport, LinuxDaemon, NotifyPlatform};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux::{
-    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99SystemAction, PlainNotification,
-    PlainNotifySender,
+    LinuxNotifyHandle, LinuxNotifyService, PlainNotification, PlainNotifySender, SystemAction,
+    SystemNotifyEvent,
 };
 #[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 pub use plain_worker::SystemNotification;
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 pub use plain_worker::show_plain;
 pub use standard_icon::StandardIcon;
-pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
+pub use untracked::{NoUntrackedBackend, UntrackedBackend, platform_untracked_backend};
 
 /// Test doubles and fixtures for the callers' tests.
 #[cfg(test)]
 pub mod test_support {
     pub use super::assets::test_assets;
-    pub use super::backend::{RecordedShow, RecordingSystemBackend};
+    pub use super::backend::{RecordedShow, RecordingTrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     pub use super::linux::test_rig::{TestResult, assert_no_queued_events, started};
     #[cfg(all(unix, not(target_os = "macos")))]

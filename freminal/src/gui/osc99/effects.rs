@@ -10,7 +10,7 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::{Osc99Origin, Osc99ToastSpec, instance_toast_key};
 use crate::gui::desktop_notify::{
-    Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch, Osc99UntrackedBackend,
+    NotificationInstanceId, SystemDispatch, TrackedBackend, UntrackedBackend,
 };
 use crate::gui::notifications::send_reply_weak;
 use crate::gui::toast::{ToastContent, ToastPlacement, ToastStack};
@@ -32,14 +32,14 @@ pub enum Osc99Effect {
     /// that is set.
     ShowToast {
         /// The instance the toast belongs to.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         /// The instance whose toast this one takes over, if any.
-        replaces: Option<Osc99InstanceId>,
+        replaces: Option<NotificationInstanceId>,
         /// What to show.
         spec: Osc99ToastSpec,
     },
     /// Remove `instance`'s toast (a no-op if it is already gone).
-    CloseToast(Osc99InstanceId),
+    CloseToast(NotificationInstanceId),
     /// Ask the desktop-notification service to close `instance`'s desktop
     /// notification. Its `Closed` event arrives later; a close that cannot be
     /// queued is fed back as one by the caller (see
@@ -47,15 +47,15 @@ pub enum Osc99Effect {
     ///
     /// Only the Linux/BSD service ever produces the leg this closes, but the
     /// registry is platform-independent, so the variant exists everywhere.
-    CloseLinuxSystem(Osc99InstanceId),
+    CloseLinuxSystem(NotificationInstanceId),
     /// Show `instance` on the Linux/BSD system leg, updating `replaces`'
     /// notification in place when that is set.
     ShowLinuxSystem {
         /// The instance the desktop notification belongs to.
-        instance: Osc99InstanceId,
+        instance: NotificationInstanceId,
         /// The instance whose desktop notification this one takes over, if
         /// any.
-        replaces: Option<Osc99InstanceId>,
+        replaces: Option<NotificationInstanceId>,
         /// What to show. Shared: it is far larger than every other effect,
         /// and the registry hands the same allocation to every system leg.
         notification: Arc<Notification99Data>,
@@ -81,9 +81,9 @@ pub struct Osc99EffectSink<'a> {
     /// The shared toast stack.
     pub toasts: &'a mut ToastStack,
     /// The Linux/BSD desktop-notification service.
-    pub system: &'a mut dyn Osc99SystemBackend,
+    pub system: &'a mut dyn TrackedBackend,
     /// The macOS and Windows fire-and-forget desktop notification.
-    pub untracked: &'a mut dyn Osc99UntrackedBackend,
+    pub untracked: &'a mut dyn UntrackedBackend,
     /// Panes to focus, collected in effect order.
     ///
     /// The executor has no window access, so [`Osc99Effect::FocusPane`] is
@@ -95,12 +95,12 @@ pub struct Osc99EffectSink<'a> {
     /// registry as a failed show. Always empty on macOS and Windows, which never produce
     /// that effect (the field exists there only because the executor is
     /// shared).
-    pub failed_system_shows: Vec<Osc99InstanceId>,
+    pub failed_system_shows: Vec<NotificationInstanceId>,
     /// Instances whose [`Osc99Effect::CloseLinuxSystem`] the backend could not
     /// queue, in effect order. `glue::apply_and_feed_back` feeds each back to the
     /// registry as a `Closed` event, because no real one will come. Always empty on macOS and
     /// Windows, as for [`Self::failed_system_shows`].
-    pub failed_system_closes: Vec<Osc99InstanceId>,
+    pub failed_system_closes: Vec<NotificationInstanceId>,
 }
 
 impl<'a> Osc99EffectSink<'a> {
@@ -109,8 +109,8 @@ impl<'a> Osc99EffectSink<'a> {
     #[must_use]
     pub fn new(
         toasts: &'a mut ToastStack,
-        system: &'a mut dyn Osc99SystemBackend,
-        untracked: &'a mut dyn Osc99UntrackedBackend,
+        system: &'a mut dyn TrackedBackend,
+        untracked: &'a mut dyn UntrackedBackend,
     ) -> Self {
         Self {
             toasts,
@@ -169,14 +169,12 @@ pub fn apply_osc99_effects(effects: Vec<Osc99Effect>, sink: &mut Osc99EffectSink
                 replaces,
                 notification,
             } => {
-                if sink.system.show(instance, replaces, &notification)
-                    == Osc99SystemDispatch::Failed
-                {
+                if sink.system.show(instance, replaces, &notification) == SystemDispatch::Failed {
                     sink.failed_system_shows.push(instance);
                 }
             }
             Osc99Effect::CloseLinuxSystem(instance) => {
-                if sink.system.close(instance) == Osc99SystemDispatch::Failed {
+                if sink.system.close(instance) == SystemDispatch::Failed {
                     sink.failed_system_closes.push(instance);
                 }
             }

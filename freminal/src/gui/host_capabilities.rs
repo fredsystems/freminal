@@ -24,7 +24,7 @@ use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
 use super::FreminalGui;
-use super::desktop_notify::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+use super::desktop_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 
@@ -40,7 +40,7 @@ use super::window::PerWindowState;
 /// (`notifications.osc_99`) are both on. Otherwise the features follow
 /// [`combine`]: each leg the `routing_osc99` setting uses has a capability
 /// table, and the routing decides how the legs' tables combine.
-pub(super) fn host_capabilities(config: &Config, daemon: Osc99LinuxDaemon) -> HostCapabilities {
+pub(super) fn host_capabilities(config: &Config, daemon: LinuxDaemon) -> HostCapabilities {
     HostCapabilities {
         osc99: osc99_support(config, daemon),
         kitty_file_transmission: kitty_file_transmission(config),
@@ -48,14 +48,14 @@ pub(super) fn host_capabilities(config: &Config, daemon: Osc99LinuxDaemon) -> Ho
 }
 
 /// The OSC 99 facet of [`host_capabilities`].
-fn osc99_support(config: &Config, daemon: Osc99LinuxDaemon) -> Osc99Support {
+fn osc99_support(config: &Config, daemon: LinuxDaemon) -> Osc99Support {
     let notifications = &config.notifications;
     if !(notifications.enabled && notifications.osc_99) {
         return Osc99Support::Unsupported;
     }
     combine(
         notifications.routing_osc99,
-        Osc99Platform::current(),
+        NotifyPlatform::current(),
         daemon,
     )
 }
@@ -169,8 +169,8 @@ pub(super) const fn notification_service_wanted(config: &Config) -> bool {
 #[must_use]
 pub(super) fn daemon_state_change(
     config: &Config,
-    old: Osc99LinuxDaemon,
-    new: Osc99LinuxDaemon,
+    old: LinuxDaemon,
+    new: LinuxDaemon,
 ) -> Option<HostCapabilities> {
     let before = host_capabilities(config, old);
     let after = host_capabilities(config, new);
@@ -271,17 +271,17 @@ pub(super) const fn toast_leg() -> Osc99Features {
 ///   "reminder" scenario needs buttons, which this leg cannot report), so
 ///   urgency is not advertised (138.C17).
 ///
-/// `daemon` is read only for [`Osc99Platform::LinuxBsd`].
+/// `daemon` is read only for [`NotifyPlatform::LinuxBsd`].
 #[must_use]
 pub(super) const fn system_leg(
-    platform: Osc99Platform,
-    daemon: Osc99LinuxDaemon,
+    platform: NotifyPlatform,
+    daemon: LinuxDaemon,
 ) -> Option<Osc99Features> {
     match platform {
-        Osc99Platform::LinuxBsd => match daemon {
-            Osc99LinuxDaemon::Unavailable => None,
-            Osc99LinuxDaemon::Available(caps) => {
-                let has_actions = matches!(caps.actions, Osc99DaemonSupport::Supported);
+        NotifyPlatform::LinuxBsd => match daemon {
+            LinuxDaemon::Unavailable => None,
+            LinuxDaemon::Available(caps) => {
+                let has_actions = matches!(caps.actions, DaemonSupport::Supported);
                 Some(Osc99Features {
                     activation_report: if has_actions {
                         Osc99ActivationReport::Reported
@@ -297,12 +297,12 @@ pub(super) const fn system_leg(
                     auto_expiry: Osc99AutoExpiry::Supported,
                     urgency: Osc99UrgencySupport::Supported,
                     sound_names: match caps.sound {
-                        Osc99DaemonSupport::Supported => Osc99SoundNames::Standard,
-                        Osc99DaemonSupport::Unsupported => Osc99SoundNames::SystemAndSilent,
+                        DaemonSupport::Supported => Osc99SoundNames::Standard,
+                        DaemonSupport::Unsupported => Osc99SoundNames::SystemAndSilent,
                     },
                     body: match caps.body {
-                        Osc99DaemonSupport::Supported => Osc99BodySupport::Supported,
-                        Osc99DaemonSupport::Unsupported => Osc99BodySupport::Unsupported,
+                        DaemonSupport::Supported => Osc99BodySupport::Supported,
+                        DaemonSupport::Unsupported => Osc99BodySupport::Unsupported,
                     },
                     buttons: if has_actions {
                         Osc99ButtonSupport::Supported
@@ -313,7 +313,7 @@ pub(super) const fn system_leg(
                 })
             }
         },
-        Osc99Platform::MacOs | Osc99Platform::Windows => Some(untracked_system_leg()),
+        NotifyPlatform::MacOs | NotifyPlatform::Windows => Some(untracked_system_leg()),
     }
 }
 
@@ -490,8 +490,8 @@ fn intersection(a: Osc99Features, b: Osc99Features) -> Osc99Features {
 #[must_use]
 pub(super) fn combine(
     routing: NotificationRouting,
-    platform: Osc99Platform,
-    daemon: Osc99LinuxDaemon,
+    platform: NotifyPlatform,
+    daemon: LinuxDaemon,
 ) -> Osc99Support {
     // No wildcard: a new routing variant must be classified here.
     match routing {
@@ -541,7 +541,7 @@ mod tests {
         }
     }
 
-    use crate::gui::desktop_notify::Osc99DaemonCapabilities;
+    use crate::gui::desktop_notify::DaemonCapabilities;
     use crate::gui::panes::{Pane, PaneId};
     use crate::gui::pty::WindowCommandBudget;
     use crate::gui::tabs::{Tab, TabId};
@@ -562,39 +562,39 @@ mod tests {
         NotificationRouting::SystemWhenUnfocused,
         NotificationRouting::Disabled,
     ];
-    const ALL_PLATFORMS: [Osc99Platform; 3] = [
-        Osc99Platform::LinuxBsd,
-        Osc99Platform::MacOs,
-        Osc99Platform::Windows,
+    const ALL_PLATFORMS: [NotifyPlatform; 3] = [
+        NotifyPlatform::LinuxBsd,
+        NotifyPlatform::MacOs,
+        NotifyPlatform::Windows,
     ];
 
     /// A daemon advertising `["body", "actions", "body-markup", "sound"]`.
-    fn full_daemon() -> Osc99LinuxDaemon {
-        Osc99LinuxDaemon::Available(Osc99DaemonCapabilities {
-            sound: Osc99DaemonSupport::Supported,
-            ..Osc99DaemonCapabilities::ASSUMED
+    fn full_daemon() -> LinuxDaemon {
+        LinuxDaemon::Available(DaemonCapabilities {
+            sound: DaemonSupport::Supported,
+            ..DaemonCapabilities::ASSUMED
         })
     }
 
     /// The assumed daemon: `body` and `actions`, no `sound`.
-    fn assumed_daemon() -> Osc99LinuxDaemon {
-        Osc99LinuxDaemon::Available(Osc99DaemonCapabilities::ASSUMED)
+    fn assumed_daemon() -> LinuxDaemon {
+        LinuxDaemon::Available(DaemonCapabilities::ASSUMED)
     }
 
     /// A daemon advertising `body` only: no `actions`, no `sound`.
-    fn body_only_daemon() -> Osc99LinuxDaemon {
-        Osc99LinuxDaemon::Available(Osc99DaemonCapabilities {
-            actions: Osc99DaemonSupport::Unsupported,
-            ..Osc99DaemonCapabilities::ASSUMED
+    fn body_only_daemon() -> LinuxDaemon {
+        LinuxDaemon::Available(DaemonCapabilities {
+            actions: DaemonSupport::Unsupported,
+            ..DaemonCapabilities::ASSUMED
         })
     }
 
-    fn all_daemons() -> [Osc99LinuxDaemon; 4] {
+    fn all_daemons() -> [LinuxDaemon; 4] {
         [
             full_daemon(),
             assumed_daemon(),
             body_only_daemon(),
-            Osc99LinuxDaemon::Unavailable,
+            LinuxDaemon::Unavailable,
         ]
     }
 
@@ -622,7 +622,7 @@ mod tests {
             let mut config = config_with(routing);
             config.notifications.enabled = false;
             assert_eq!(
-                host_capabilities(&config, Osc99LinuxDaemon::assumed()).osc99,
+                host_capabilities(&config, LinuxDaemon::assumed()).osc99,
                 Osc99Support::Unsupported
             );
         }
@@ -647,7 +647,7 @@ mod tests {
     fn host_capabilities_default_config_is_unsupported() {
         // `notifications.enabled` defaults to false (opt-in).
         assert_eq!(
-            host_capabilities(&Config::default(), Osc99LinuxDaemon::assumed()),
+            host_capabilities(&Config::default(), LinuxDaemon::assumed()),
             HostCapabilities::default()
         );
     }
@@ -655,8 +655,7 @@ mod tests {
     #[test]
     fn kitty_file_transmission_is_refused_by_default() {
         assert_eq!(
-            host_capabilities(&Config::default(), Osc99LinuxDaemon::assumed())
-                .kitty_file_transmission,
+            host_capabilities(&Config::default(), LinuxDaemon::assumed()).kitty_file_transmission,
             KittyFileTransmission::Refused
         );
     }
@@ -686,11 +685,11 @@ mod tests {
             let mut config = config_with(routing);
             config.security.allow_kitty_file_transfer = true;
             assert_eq!(
-                host_capabilities(&config, Osc99LinuxDaemon::assumed()).kitty_file_transmission,
+                host_capabilities(&config, LinuxDaemon::assumed()).kitty_file_transmission,
                 KittyFileTransmission::Allowed
             );
             config.notifications.enabled = false;
-            let caps = host_capabilities(&config, Osc99LinuxDaemon::assumed());
+            let caps = host_capabilities(&config, LinuxDaemon::assumed());
             assert_eq!(caps.osc99, Osc99Support::Unsupported);
             assert_eq!(caps.kitty_file_transmission, KittyFileTransmission::Allowed);
         }
@@ -702,7 +701,7 @@ mod tests {
         // differs, so the toggle must change it.
         let mut on = Config::default();
         on.security.allow_kitty_file_transfer = true;
-        let daemon = Osc99LinuxDaemon::assumed();
+        let daemon = LinuxDaemon::assumed();
         assert_ne!(
             host_capabilities(&on, daemon),
             host_capabilities(&Config::default(), daemon)
@@ -715,17 +714,13 @@ mod tests {
             for daemon in all_daemons() {
                 assert_eq!(
                     host_capabilities(&config_with(routing), daemon).osc99,
-                    combine(routing, Osc99Platform::current(), daemon),
+                    combine(routing, NotifyPlatform::current(), daemon),
                     "routing {routing:?}, daemon {daemon:?}"
                 );
             }
             assert_eq!(
-                host_capabilities(&config_with(routing), Osc99LinuxDaemon::assumed()).osc99,
-                combine(
-                    routing,
-                    Osc99Platform::current(),
-                    Osc99LinuxDaemon::assumed()
-                ),
+                host_capabilities(&config_with(routing), LinuxDaemon::assumed()).osc99,
+                combine(routing, NotifyPlatform::current(), LinuxDaemon::assumed()),
                 "routing {routing:?}, assumed daemon"
             );
         }
@@ -777,7 +772,7 @@ mod tests {
 
     #[test]
     fn macos_and_windows_ignore_the_linux_daemon() {
-        for platform in [Osc99Platform::MacOs, Osc99Platform::Windows] {
+        for platform in [NotifyPlatform::MacOs, NotifyPlatform::Windows] {
             for routing in ALL_ROUTINGS {
                 let reference = combine(routing, platform, assumed_daemon());
                 for daemon in all_daemons() {
@@ -798,7 +793,7 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::Both,
-                Osc99Platform::LinuxBsd,
+                NotifyPlatform::LinuxBsd,
                 full_daemon()
             ),
             Osc99Support::Supported(Osc99Features {
@@ -819,7 +814,7 @@ mod tests {
     fn both_on_linux_without_standard_sounds_keeps_system_and_silent() {
         let Osc99Support::Supported(features) = combine(
             NotificationRouting::Both,
-            Osc99Platform::LinuxBsd,
+            NotifyPlatform::LinuxBsd,
             assumed_daemon(),
         ) else {
             panic!("expected Supported");
@@ -832,7 +827,7 @@ mod tests {
         // Either leg suffices for report, focus, urgency and buttons (the toast
         // has them) and icons (the system leg has them); close events and
         // expiry need both legs, and the desktop leg has neither.
-        for platform in [Osc99Platform::MacOs, Osc99Platform::Windows] {
+        for platform in [NotifyPlatform::MacOs, NotifyPlatform::Windows] {
             assert_eq!(
                 combine(NotificationRouting::Both, platform, assumed_daemon()),
                 Osc99Support::Supported(Osc99Features {
@@ -859,7 +854,7 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
-                Osc99Platform::MacOs,
+                NotifyPlatform::MacOs,
                 assumed_daemon()
             ),
             Osc99Support::Supported(Osc99Features {
@@ -883,7 +878,7 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
-                Osc99Platform::LinuxBsd,
+                NotifyPlatform::LinuxBsd,
                 full_daemon()
             ),
             Osc99Support::Supported(Osc99Features {
@@ -907,8 +902,8 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::System,
-                Osc99Platform::Windows,
-                Osc99LinuxDaemon::Unavailable
+                NotifyPlatform::Windows,
+                LinuxDaemon::Unavailable
             ),
             Osc99Support::Supported(Osc99Features {
                 activation_report: Osc99ActivationReport::NotReported,
@@ -928,8 +923,8 @@ mod tests {
     fn system_on_macos_honours_no_urgency() {
         let Osc99Support::Supported(features) = combine(
             NotificationRouting::System,
-            Osc99Platform::MacOs,
-            Osc99LinuxDaemon::Unavailable,
+            NotifyPlatform::MacOs,
+            LinuxDaemon::Unavailable,
         ) else {
             panic!("expected Supported");
         };
@@ -943,7 +938,7 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::System,
-                Osc99Platform::LinuxBsd,
+                NotifyPlatform::LinuxBsd,
                 body_only_daemon()
             ),
             Osc99Support::Supported(Osc99Features {
@@ -962,11 +957,11 @@ mod tests {
 
     #[test]
     fn system_on_linux_without_body_drops_the_body() {
-        let daemon = Osc99LinuxDaemon::Available(Osc99DaemonCapabilities {
-            body: Osc99DaemonSupport::Unsupported,
-            ..Osc99DaemonCapabilities::ASSUMED
+        let daemon = LinuxDaemon::Available(DaemonCapabilities {
+            body: DaemonSupport::Unsupported,
+            ..DaemonCapabilities::ASSUMED
         });
-        let Some(features) = system_leg(Osc99Platform::LinuxBsd, daemon) else {
+        let Some(features) = system_leg(NotifyPlatform::LinuxBsd, daemon) else {
             panic!("expected a system leg");
         };
         assert_eq!(features.body, Osc99BodySupport::Unsupported);
@@ -976,7 +971,7 @@ mod tests {
     #[test]
     fn standard_sound_names_need_the_daemon_sound_capability() {
         let sound_names = |daemon| {
-            system_leg(Osc99Platform::LinuxBsd, daemon).map(|features| features.sound_names)
+            system_leg(NotifyPlatform::LinuxBsd, daemon).map(|features| features.sound_names)
         };
         assert_eq!(sound_names(full_daemon()), Some(Osc99SoundNames::Standard));
         assert_eq!(
@@ -988,14 +983,14 @@ mod tests {
     #[test]
     fn linux_without_a_daemon_has_no_system_leg() {
         assert_eq!(
-            system_leg(Osc99Platform::LinuxBsd, Osc99LinuxDaemon::Unavailable),
+            system_leg(NotifyPlatform::LinuxBsd, LinuxDaemon::Unavailable),
             None
         );
         assert_eq!(
             combine(
                 NotificationRouting::System,
-                Osc99Platform::LinuxBsd,
-                Osc99LinuxDaemon::Unavailable
+                NotifyPlatform::LinuxBsd,
+                LinuxDaemon::Unavailable
             ),
             Osc99Support::Unsupported
         );
@@ -1006,8 +1001,8 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::Both,
-                Osc99Platform::LinuxBsd,
-                Osc99LinuxDaemon::Unavailable
+                NotifyPlatform::LinuxBsd,
+                LinuxDaemon::Unavailable
             ),
             Osc99Support::Supported(toast_leg())
         );
@@ -1020,8 +1015,8 @@ mod tests {
         assert_eq!(
             combine(
                 NotificationRouting::SystemWhenUnfocused,
-                Osc99Platform::LinuxBsd,
-                Osc99LinuxDaemon::Unavailable
+                NotifyPlatform::LinuxBsd,
+                LinuxDaemon::Unavailable
             ),
             Osc99Support::Supported(toast_leg())
         );
@@ -1071,13 +1066,13 @@ mod tests {
     }
     // ── Daemon state changes (Task 138.15) ──────────────────────────────
 
-    /// A daemon reply that differs from [`Osc99DaemonCapabilities::ASSUMED`]
+    /// A daemon reply that differs from [`DaemonCapabilities::ASSUMED`]
     /// only in lacking `actions`.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn no_actions_caps() -> Osc99DaemonCapabilities {
-        Osc99DaemonCapabilities {
-            actions: Osc99DaemonSupport::Unsupported,
-            ..Osc99DaemonCapabilities::ASSUMED
+    fn no_actions_caps() -> DaemonCapabilities {
+        DaemonCapabilities {
+            actions: DaemonSupport::Unsupported,
+            ..DaemonCapabilities::ASSUMED
         }
     }
 
@@ -1138,9 +1133,9 @@ mod tests {
     fn a_reply_differing_only_in_unadvertised_capabilities_changes_nothing() {
         // `body-markup` only decides whether the service escapes the body; it
         // is not a feature the `p=?` reply carries.
-        let markup_less = Osc99LinuxDaemon::Available(Osc99DaemonCapabilities {
-            body_markup: Osc99DaemonSupport::Unsupported,
-            ..Osc99DaemonCapabilities::ASSUMED
+        let markup_less = LinuxDaemon::Available(DaemonCapabilities {
+            body_markup: DaemonSupport::Unsupported,
+            ..DaemonCapabilities::ASSUMED
         });
         for routing in ALL_ROUTINGS {
             assert_eq!(
@@ -1155,7 +1150,7 @@ mod tests {
     #[test]
     fn system_routing_without_actions_drops_report_focus_and_buttons() {
         let config = config_with(NotificationRouting::System);
-        let reply = Osc99LinuxDaemon::Available(no_actions_caps());
+        let reply = LinuxDaemon::Available(no_actions_caps());
         let Some(HostCapabilities {
             osc99: Osc99Support::Supported(features),
             ..
@@ -1179,7 +1174,7 @@ mod tests {
     fn system_routing_with_the_bus_down_is_unsupported() {
         let config = config_with(NotificationRouting::System);
         assert_eq!(
-            daemon_state_change(&config, assumed_daemon(), Osc99LinuxDaemon::Unavailable),
+            daemon_state_change(&config, assumed_daemon(), LinuxDaemon::Unavailable),
             Some(HostCapabilities {
                 osc99: Osc99Support::Unsupported,
                 ..HostCapabilities::default()
@@ -1192,7 +1187,7 @@ mod tests {
     fn both_routing_with_the_bus_down_is_the_toast_leg_only() {
         let config = config_with(NotificationRouting::Both);
         assert_eq!(
-            daemon_state_change(&config, full_daemon(), Osc99LinuxDaemon::Unavailable),
+            daemon_state_change(&config, full_daemon(), LinuxDaemon::Unavailable),
             Some(HostCapabilities {
                 osc99: Osc99Support::Supported(toast_leg()),
                 ..HostCapabilities::default()
@@ -1207,7 +1202,7 @@ mod tests {
         // A daemon without `actions` advertises less than the toast leg, so
         // losing it (the toast then shows at every focus state) is a change.
         assert_eq!(
-            daemon_state_change(&config, body_only_daemon(), Osc99LinuxDaemon::Unavailable),
+            daemon_state_change(&config, body_only_daemon(), LinuxDaemon::Unavailable),
             Some(HostCapabilities {
                 osc99: Osc99Support::Supported(toast_leg()),
                 ..HostCapabilities::default()
@@ -1220,7 +1215,7 @@ mod tests {
     fn the_bus_coming_back_restores_the_capabilities() {
         let config = config_with(NotificationRouting::System);
         assert_eq!(
-            daemon_state_change(&config, Osc99LinuxDaemon::Unavailable, assumed_daemon()),
+            daemon_state_change(&config, LinuxDaemon::Unavailable, assumed_daemon()),
             Some(host_capabilities(&config, assumed_daemon()))
         );
     }
@@ -1230,7 +1225,7 @@ mod tests {
         // `daemon_state_change` is `host_capabilities` before and after, and
         // `host_capabilities` follows `combine`, which ignores the daemon off
         // Linux/BSD, so no change can ever be reported there.
-        for platform in [Osc99Platform::MacOs, Osc99Platform::Windows] {
+        for platform in [NotifyPlatform::MacOs, NotifyPlatform::Windows] {
             for routing in ALL_ROUTINGS {
                 for old in all_daemons() {
                     for new in all_daemons() {
@@ -1436,12 +1431,9 @@ mod tests {
     }
 
     /// The Linux/BSD capabilities of `routing` with `daemon`, on any host.
-    fn linux_capabilities(
-        routing: NotificationRouting,
-        daemon: Osc99LinuxDaemon,
-    ) -> HostCapabilities {
+    fn linux_capabilities(routing: NotificationRouting, daemon: LinuxDaemon) -> HostCapabilities {
         HostCapabilities {
-            osc99: combine(routing, Osc99Platform::LinuxBsd, daemon),
+            osc99: combine(routing, NotifyPlatform::LinuxBsd, daemon),
             ..HostCapabilities::default()
         }
     }
@@ -1480,7 +1472,7 @@ mod tests {
 
         state
             .handler
-            .set_host_capabilities(linux_capabilities(routing, Osc99LinuxDaemon::Unavailable));
+            .set_host_capabilities(linux_capabilities(routing, LinuxDaemon::Unavailable));
 
         assert_eq!(query(&mut state, &rx), "");
     }
@@ -1496,7 +1488,7 @@ mod tests {
 
         state
             .handler
-            .set_host_capabilities(linux_capabilities(routing, Osc99LinuxDaemon::Unavailable));
+            .set_host_capabilities(linux_capabilities(routing, LinuxDaemon::Unavailable));
 
         // The toast leg: focus and report, buttons, no icons, `system`/`silent`
         // sounds only.

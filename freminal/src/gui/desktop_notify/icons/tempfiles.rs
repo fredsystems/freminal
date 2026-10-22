@@ -83,6 +83,10 @@ pub const MAX_ICON_AGE: Duration = Duration::from_mins(10);
 pub const STALE_DIR_AGE: Duration = Duration::from_hours(24);
 
 /// The start of every icon directory's name; the process id follows.
+///
+/// The value deliberately keeps "osc99" so the startup sweep
+/// ([`sweep_stale_dirs`]) still removes directories left by builds before
+/// Task 150 (maintainer decision, Task 150).
 const ICON_DIR_PREFIX: &str = "freminal-osc99-icons-";
 
 /// The directory the icons of process `pid` live in, under `base`:
@@ -341,6 +345,9 @@ fn current_uid(parent: &Path) -> io::Result<u32> {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
+    // The "osc99" in the probe name is kept for the same reason as in
+    // `ICON_DIR_PREFIX`: a probe left by a build before Task 150 stays
+    // recognisable.
     let probe = parent.join(format!(
         "freminal-osc99-probe-{}-{}-{nanos}",
         std::process::id(),
@@ -538,6 +545,11 @@ mod tests {
     /// `base` plus `minutes` minutes: a clock the tests move by hand.
     fn at(base: Instant, minutes: u64) -> Instant {
         base + Duration::from_secs(minutes * 60)
+    }
+
+    #[test]
+    fn the_icon_directory_prefix_keeps_its_pre_task_150_value() {
+        assert_eq!(ICON_DIR_PREFIX, "freminal-osc99-icons-");
     }
 
     #[test]

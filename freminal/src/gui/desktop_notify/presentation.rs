@@ -8,7 +8,7 @@
 //! Pure functions that turn what the program asked for (`n=` icon names,
 //! transmitted icon data, `s=` sound, `t=` types, the body text) into what the
 //! freedesktop notification spec has a place for. The filesystem is reached
-//! only through [`Osc99IconLookup`], which tests replace with a fake.
+//! only through [`IconLookup`], which tests replace with a fake.
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hasher};
@@ -20,11 +20,11 @@ use super::StandardIcon;
 use super::icons::decode::decode_icon_rgba;
 pub use super::markup::escape_body_markup;
 
-/// How many decoded icons [`Osc99DecodedIconCache`] keeps.
+/// How many decoded icons [`DecodedIconCache`] keeps.
 const DECODED_ICON_CACHE_ENTRIES: usize = 8;
 
 /// What the icon scan and the `.desktop` scan know about the system.
-pub trait Osc99IconLookup {
+pub trait IconLookup {
     /// The icon the icon scan found for `name` (case-insensitive), as the
     /// icon file's stem is spelled on disk, or `None` when there is no such
     /// icon. The on-disk spelling is what the daemon must be sent: icon lookup
@@ -38,7 +38,7 @@ pub trait Osc99IconLookup {
 
 /// The icon the notification is shown with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Osc99IconChoice {
+pub enum IconChoice {
     /// A freedesktop icon name, sent as the `app_icon` argument (and, when it
     /// came from the notification's own `n=` names, as the `image-path` hint).
     Named(String),
@@ -48,7 +48,7 @@ pub enum Osc99IconChoice {
 
 /// The sound hint a notification gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Osc99SoundHint {
+pub enum SoundHint {
     /// No sound hint: the daemon decides.
     None,
     /// `suppress-sound`.
@@ -63,7 +63,7 @@ pub enum Osc99SoundHint {
 /// same decoded icon to many notifications shares one allocation (up to
 /// 256 KiB) rather than copying it each time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Osc99IconImage {
+pub struct IconImage {
     /// Width in pixels.
     pub width: i32,
     /// Height in pixels.
@@ -96,25 +96,25 @@ pub fn choose_icon(
     names: &[String],
     data: Option<&[u8]>,
     app_name: Option<&str>,
-    lookup: &dyn Osc99IconLookup,
-) -> Option<Osc99IconChoice> {
+    lookup: &dyn IconLookup,
+) -> Option<IconChoice> {
     for name in names {
         if let Some(standard) = standard_icon_name(name) {
-            return Some(Osc99IconChoice::Named(standard.to_owned()));
+            return Some(IconChoice::Named(standard.to_owned()));
         }
         if let Some(matched) = lookup.matched_icon(name) {
-            return Some(Osc99IconChoice::Named(matched));
+            return Some(IconChoice::Named(matched));
         }
     }
     if let Some(data) = data {
-        return Some(Osc99IconChoice::Data(data.to_vec()));
+        return Some(IconChoice::Data(data.to_vec()));
     }
     if let Some(first) = names.first() {
-        return Some(Osc99IconChoice::Named(first.clone()));
+        return Some(IconChoice::Named(first.clone()));
     }
     app_name
         .and_then(|app| lookup.desktop_icon(app))
-        .map(Osc99IconChoice::Named)
+        .map(IconChoice::Named)
 }
 
 /// The sound hint for `sound`.
@@ -123,11 +123,11 @@ pub fn choose_icon(
 /// library and uses the freedesktop hints instead, so the standard names map
 /// to the freedesktop sound names and any other name is sent verbatim.
 #[must_use]
-pub fn sound_hint(sound: &Osc99Sound) -> Osc99SoundHint {
+pub fn sound_hint(sound: &Osc99Sound) -> SoundHint {
     match sound {
-        Osc99Sound::System => Osc99SoundHint::None,
-        Osc99Sound::Silent => Osc99SoundHint::Suppress,
-        Osc99Sound::Named(name) => Osc99SoundHint::Named(match name.as_str() {
+        Osc99Sound::System => SoundHint::None,
+        Osc99Sound::Silent => SoundHint::Suppress,
+        Osc99Sound::Named(name) => SoundHint::Named(match name.as_str() {
             "error" => "dialog-error".to_owned(),
             "warn" | "warning" => "dialog-warning".to_owned(),
             "info" => "dialog-information".to_owned(),
@@ -146,11 +146,11 @@ pub fn sound_hint(sound: &Osc99Sound) -> Osc99SoundHint {
 /// hint's `i32` fields; the caller falls back to the next icon source. Each
 /// call allocates a fresh pixel buffer; share the result by cloning it.
 #[must_use]
-pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
+pub fn decode_icon_image(bytes: &[u8]) -> Option<IconImage> {
     let rgba = decode_icon_rgba(bytes)?;
     let (width, height) = rgba.dimensions();
     let rowstride = width.checked_mul(4)?;
-    Some(Osc99IconImage {
+    Some(IconImage {
         width: i32::try_from(width).ok()?,
         height: i32::try_from(height).ok()?,
         rowstride: i32::try_from(rowstride).ok()?,
@@ -190,16 +190,16 @@ impl IconKey {
 /// is owned by one thread (the dispatcher), so there is no locking. A decode
 /// failure is not remembered: it is cheap, and bounded by the decode limits.
 #[derive(Debug, Default)]
-pub struct Osc99DecodedIconCache {
+pub struct DecodedIconCache {
     /// Least recently used at the front.
-    entries: VecDeque<(IconKey, Osc99IconImage)>,
+    entries: VecDeque<(IconKey, IconImage)>,
 }
 
-impl Osc99DecodedIconCache {
+impl DecodedIconCache {
     /// [`decode_icon_image`] of `bytes`, from the cache when it holds them.
     ///
     /// A cache hit shares the cached pixel buffer rather than copying it.
-    pub fn decode(&mut self, bytes: &[u8]) -> Option<Osc99IconImage> {
+    pub fn decode(&mut self, bytes: &[u8]) -> Option<IconImage> {
         let key = IconKey::of(bytes);
         if let Some(position) = self.entries.iter().position(|(cached, _)| *cached == key)
             && let Some(entry) = self.entries.remove(position)
@@ -253,7 +253,7 @@ mod tests {
         desktop: HashMap<String, String>,
     }
 
-    impl Osc99IconLookup for FakeLookup {
+    impl IconLookup for FakeLookup {
         fn matched_icon(&self, name: &str) -> Option<String> {
             self.icons.get(name).cloned()
         }
@@ -316,10 +316,7 @@ mod tests {
     fn a_standard_name_is_chosen_without_asking_the_lookup() {
         let choice = choose_icon(&names(&["warn"]), None, None, &FakeLookup::default());
 
-        assert_eq!(
-            choice,
-            Some(Osc99IconChoice::Named("dialog-warning".to_owned()))
-        );
+        assert_eq!(choice, Some(IconChoice::Named("dialog-warning".to_owned())));
     }
 
     #[test]
@@ -331,10 +328,7 @@ mod tests {
             &lookup_with_icons(&["mail-unread"]),
         );
 
-        assert_eq!(
-            choice,
-            Some(Osc99IconChoice::Named("mail-unread".to_owned()))
-        );
+        assert_eq!(choice, Some(IconChoice::Named("mail-unread".to_owned())));
     }
 
     #[test]
@@ -346,7 +340,7 @@ mod tests {
 
         let choice = choose_icon(&names(&["mailicon"]), None, None, &lookup);
 
-        assert_eq!(choice, Some(Osc99IconChoice::Named("MailIcon".to_owned())));
+        assert_eq!(choice, Some(IconChoice::Named("MailIcon".to_owned())));
     }
 
     #[test]
@@ -358,7 +352,7 @@ mod tests {
             &lookup_with_icons(&["third", "second"]),
         );
 
-        assert_eq!(choice, Some(Osc99IconChoice::Named("second".to_owned())));
+        assert_eq!(choice, Some(IconChoice::Named("second".to_owned())));
     }
 
     #[test]
@@ -370,7 +364,7 @@ mod tests {
             &FakeLookup::default(),
         );
 
-        assert_eq!(choice, Some(Osc99IconChoice::Data(vec![1, 2, 3])));
+        assert_eq!(choice, Some(IconChoice::Data(vec![1, 2, 3])));
     }
 
     #[test]
@@ -382,17 +376,14 @@ mod tests {
             &FakeLookup::default(),
         );
 
-        assert_eq!(
-            choice,
-            Some(Osc99IconChoice::Named("nonexistent".to_owned()))
-        );
+        assert_eq!(choice, Some(IconChoice::Named("nonexistent".to_owned())));
     }
 
     #[test]
     fn no_names_and_data_chooses_the_data() {
         let choice = choose_icon(&[], Some(&[7]), Some("app"), &FakeLookup::default());
 
-        assert_eq!(choice, Some(Osc99IconChoice::Data(vec![7])));
+        assert_eq!(choice, Some(IconChoice::Data(vec![7])));
     }
 
     #[test]
@@ -404,7 +395,7 @@ mod tests {
 
         let choice = choose_icon(&[], None, Some("myapp"), &lookup);
 
-        assert_eq!(choice, Some(Osc99IconChoice::Named("myicon".to_owned())));
+        assert_eq!(choice, Some(IconChoice::Named("myicon".to_owned())));
     }
 
     #[test]
@@ -417,8 +408,8 @@ mod tests {
 
     #[test]
     fn sounds_map_to_hints() {
-        assert_eq!(sound_hint(&Osc99Sound::System), Osc99SoundHint::None);
-        assert_eq!(sound_hint(&Osc99Sound::Silent), Osc99SoundHint::Suppress);
+        assert_eq!(sound_hint(&Osc99Sound::System), SoundHint::None);
+        assert_eq!(sound_hint(&Osc99Sound::Silent), SoundHint::Suppress);
         for (name, expected) in [
             ("error", "dialog-error"),
             ("warn", "dialog-warning"),
@@ -429,7 +420,7 @@ mod tests {
         ] {
             assert_eq!(
                 sound_hint(&Osc99Sound::Named(name.to_owned())),
-                Osc99SoundHint::Named(expected.to_owned()),
+                SoundHint::Named(expected.to_owned()),
                 "{name}"
             );
         }
@@ -515,7 +506,7 @@ mod tests {
     #[test]
     fn the_cache_decodes_the_same_as_the_function() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = shaded_png(9)?;
-        let mut cache = Osc99DecodedIconCache::default();
+        let mut cache = DecodedIconCache::default();
 
         let first = cache.decode(&bytes);
         let second = cache.decode(&bytes);
@@ -535,7 +526,7 @@ mod tests {
     fn a_cache_hit_shares_the_decoded_pixels_instead_of_copying_them()
     -> Result<(), Box<dyn std::error::Error>> {
         let bytes = shaded_png(9)?;
-        let mut cache = Osc99DecodedIconCache::default();
+        let mut cache = DecodedIconCache::default();
 
         let first = cache.decode(&bytes).ok_or("did not decode")?;
         let second = cache.decode(&bytes).ok_or("did not decode")?;
@@ -560,7 +551,7 @@ mod tests {
 
     #[test]
     fn the_cache_does_not_remember_a_decode_failure() {
-        let mut cache = Osc99DecodedIconCache::default();
+        let mut cache = DecodedIconCache::default();
 
         assert_eq!(cache.decode(b"not an image"), None);
         assert_eq!(cache.len(), 0);
@@ -570,7 +561,7 @@ mod tests {
     fn the_cache_evicts_the_least_recently_used_icon_past_eight()
     -> Result<(), Box<dyn std::error::Error>> {
         let icons = (0..10).map(shaded_png).collect::<Result<Vec<_>, _>>()?;
-        let mut cache = Osc99DecodedIconCache::default();
+        let mut cache = DecodedIconCache::default();
         for icon in &icons[..8] {
             cache.decode(icon).ok_or("did not decode")?;
         }

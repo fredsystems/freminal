@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Plain (untracked) notifications through the OSC 99 D-Bus service
+//! Plain (untracked) notifications through the D-Bus notification service
 //! (Task 149.2).
 //!
 //! OSC 9, OSC 777, OSC 133 `D` command-finished and the Settings "Test
@@ -29,7 +29,7 @@ use zbus::Connection;
 
 use super::state::{DaemonGate, DispatcherState};
 use super::wire::notify;
-use super::{COMMAND_QUEUE_CAPACITY, DbusCommand, Osc99DbusHandle};
+use super::{COMMAND_QUEUE_CAPACITY, DbusCommand, LinuxNotifyHandle};
 
 /// How many plain notifications may be waiting for the dispatcher (or being
 /// shown by it) at once.
@@ -158,7 +158,7 @@ pub struct PlainNotification {
 
 /// The GUI's way to show a [`PlainNotification`]: a handle on the service's
 /// command queue that can be cloned and kept, and that never blocks. Every
-/// clone made from one [`Osc99DbusHandle`] draws on the same
+/// clone made from one [`LinuxNotifyHandle`] draws on the same
 /// [`PLAIN_NOTIFICATION_BUDGET`].
 #[derive(Debug, Clone)]
 pub struct PlainNotifySender {
@@ -197,7 +197,7 @@ impl PlainNotifySender {
     }
 }
 
-impl Osc99DbusHandle {
+impl LinuxNotifyHandle {
     /// A sender for plain notifications on this service's queue.
     #[must_use]
     pub fn plain_sender(&self) -> PlainNotifySender {
@@ -243,12 +243,10 @@ mod tests {
     use crossbeam_channel::Receiver;
 
     use super::super::super::test_support::test_assets;
-    use super::super::super::{
-        Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99SystemBackend, Osc99SystemDispatch,
-    };
+    use super::super::super::{DaemonCapabilities, DaemonSupport, SystemDispatch, TrackedBackend};
     use super::super::state::OwnerTracking;
     use super::super::test_rig::*;
-    use super::super::{Osc99DbusEvent, start};
+    use super::super::{SystemNotifyEvent, start};
     use super::*;
 
     fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {
@@ -264,7 +262,7 @@ mod tests {
     /// earlier, so the sentinel's event proves the `ShowPlain` is done, and
     /// that nothing else was emitted.
     fn show_and_settle(
-        handle: &mut Osc99DbusHandle,
+        handle: &mut LinuxNotifyHandle,
         notification: PlainNotification,
     ) -> TestResult {
         handle.plain_sender().send(notification);
@@ -449,7 +447,7 @@ mod tests {
             test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         // Queued ahead of the sentinel, so the dispatcher has already
         // dropped it when the sentinel's `Closed` comes.
@@ -511,10 +509,10 @@ mod tests {
 
     /// A handle whose dispatcher never drains its queue, as when it is stuck
     /// on a hung daemon: the commands stay in the returned receiver.
-    fn stalled_handle() -> (Osc99DbusHandle, Receiver<DbusCommand>) {
+    fn stalled_handle() -> (LinuxNotifyHandle, Receiver<DbusCommand>) {
         let (commands, queue) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
         let (_events_tx, events) = crossbeam_channel::unbounded();
-        let handle = Osc99DbusHandle {
+        let handle = LinuxNotifyHandle {
             commands,
             events,
             plain_budget: PlainBudget::default(),
@@ -547,9 +545,9 @@ mod tests {
         // OSC 99 still gets its queue.
         assert_eq!(
             handle.show(instance(1), None, &notification()),
-            Osc99SystemDispatch::Queued
+            SystemDispatch::Queued
         );
-        assert_eq!(handle.close(instance(1)), Osc99SystemDispatch::Queued);
+        assert_eq!(handle.close(instance(1)), SystemDispatch::Queued);
         assert_eq!(queue.len(), PLAIN_NOTIFICATION_BUDGET + 2);
     }
 
@@ -608,7 +606,7 @@ mod tests {
             test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
-        assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
+        assert_eq!(next_event(&handle)?, SystemNotifyEvent::Unavailable);
 
         for _ in 0..PLAIN_NOTIFICATION_BUDGET * 2 {
             send_plain(&handle.plain_sender());
@@ -689,11 +687,11 @@ mod tests {
             .send(plain("Title", "Body", NotificationUrgency::Normal));
         assert_eq!(
             next_event(&handle)?,
-            Osc99DbusEvent::Capabilities(Osc99DaemonCapabilities {
-                body: Osc99DaemonSupport::Supported,
-                actions: Osc99DaemonSupport::Unsupported,
-                body_markup: Osc99DaemonSupport::Supported,
-                sound: Osc99DaemonSupport::Unsupported,
+            SystemNotifyEvent::Capabilities(DaemonCapabilities {
+                body: DaemonSupport::Supported,
+                actions: DaemonSupport::Unsupported,
+                body_markup: DaemonSupport::Supported,
+                sound: DaemonSupport::Unsupported,
             })
         );
         assert_no_queued_events(&mut handle)?;
