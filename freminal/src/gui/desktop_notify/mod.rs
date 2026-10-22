@@ -12,6 +12,10 @@
 //! `freminal_common` and external crates: no `crate::gui::...`, no egui, no
 //! `freminal_windowing` and no `freminal_terminal_emulator`.
 
+mod assets;
 mod standard_icon;
 
+pub use assets::NotifyAssets;
+#[cfg(test)]
+pub use assets::test_assets;
 pub use standard_icon::StandardIcon;

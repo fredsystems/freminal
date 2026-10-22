@@ -73,10 +73,9 @@ const EMOJI_BLOCKS: &[(u32, u32)] = &[
 /// Exposed for callers that need to inspect the bundled face directly rather
 /// than going through the egui font registry — notably the chrome-icon
 /// regression test, which verifies every [`crate::gui::icons::ChromeIcon`]
-/// codepoint resolves to a glyph in this exact face, and the OSC 99 icon
-/// rasteriser, which draws the standard icon glyphs for the macOS and Windows
-/// system notification leg.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+/// codepoint resolves to a glyph in this exact face, and the desktop
+/// notification assets (`app_icon::notify_assets`), which hand it to the OSC 99
+/// icon rasteriser for the macOS and Windows system notification leg.
 #[must_use]
 pub(crate) const fn bundled_regular_font_bytes() -> &'static [u8] {
     CASKAYDIA_REGULAR

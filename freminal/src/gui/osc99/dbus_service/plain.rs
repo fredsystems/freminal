@@ -249,6 +249,7 @@ mod tests {
     use super::super::test_rig::*;
     use super::super::{Osc99DbusEvent, start};
     use super::*;
+    use crate::gui::desktop_notify::test_assets;
     use crate::gui::notifications::{NotificationRequest, NotificationRouter, SystemNotifySink};
     use crate::gui::osc99::{
         Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99SystemBackend, Osc99SystemDispatch,
@@ -450,6 +451,7 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
@@ -732,6 +734,7 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);

@@ -156,6 +156,7 @@ use super::{
     Osc99DaemonCapabilities, Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend,
     Osc99SystemDispatch,
 };
+use crate::gui::desktop_notify::NotifyAssets;
 use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,
     parse_signal, spawn_pump,
@@ -436,12 +437,15 @@ impl Osc99DbusService {
     /// [`Osc99DbusEvent::ShowFailed`] and every close
     /// [`Osc99DbusEvent::Closed`], until a reconnect attempt, made every
     /// [`OSC99_RECONNECT_INTERVAL`], succeeds.
+    ///
+    /// `assets.app_icon_png` is the picture of plain notifications.
     #[must_use]
-    pub fn spawn(waker: Box<dyn Fn() + Send>) -> Osc99DbusHandle {
+    pub fn spawn(waker: Box<dyn Fn() + Send>, assets: NotifyAssets) -> Osc99DbusHandle {
         start(
             connect_session,
             waker,
             Box::new(XdgIconLookup::from_env()),
+            assets.app_icon_png,
             OSC99_RECONNECT_INTERVAL,
         )
     }
@@ -453,6 +457,7 @@ impl Osc99DbusService {
         connection: Connection,
         owner_tracking: OwnerTracking,
         waker: Box<dyn Fn() + Send>,
+        assets: NotifyAssets,
     ) -> Osc99DbusHandle {
         start(
             move || {
@@ -463,6 +468,7 @@ impl Osc99DbusService {
             },
             waker,
             Box::new(test_rig::NoIconLookup),
+            assets.app_icon_png,
             OSC99_RECONNECT_INTERVAL,
         )
     }
@@ -491,11 +497,13 @@ fn connect_session() -> zbus::Result<Link> {
 /// Start the dispatcher thread, which obtains its connection from `connect`
 /// (again every `reconnect_interval` while it is unavailable) and resolves
 /// icons with `icon_lookup` (whose scan runs on its own background thread,
-/// started by its first question).
+/// started by its first question). `app_icon_png` is the picture of plain
+/// notifications.
 fn start<C>(
     connect: C,
     waker: Box<dyn Fn() + Send>,
     icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    app_icon_png: &'static [u8],
     reconnect_interval: Duration,
 ) -> Osc99DbusHandle
 where
@@ -511,7 +519,14 @@ where
     let spawned = std::thread::Builder::new()
         .name("freminal-osc99-dbus".to_owned())
         .spawn(move || {
-            run_dispatcher(connect, &command_rx, &sink, icon_lookup, reconnect_interval);
+            run_dispatcher(
+                connect,
+                &command_rx,
+                &sink,
+                icon_lookup,
+                app_icon_png,
+                reconnect_interval,
+            );
         });
     if let Err(e) = spawned {
         // The closure (and the command receiver in it) is dropped, so every
@@ -577,11 +592,12 @@ fn run_dispatcher<C>(
     commands: &Receiver<DbusCommand>,
     sink: &EventSink,
     icon_lookup: Box<dyn Osc99IconLookup + Send>,
+    app_icon_png: &'static [u8],
     reconnect_interval: Duration,
 ) where
     C: FnMut() -> zbus::Result<Link>,
 {
-    let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, icon_lookup);
+    let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, icon_lookup, app_icon_png);
     let mut start = SessionStart::Initial;
     let mut first = match connect_and_subscribe(&mut connect) {
         Ok(session) => Some(session),
@@ -1066,6 +1082,7 @@ mod tests {
 
     use super::test_rig::*;
     use super::*;
+    use crate::gui::desktop_notify::test_assets;
     use crate::gui::osc99::Osc99DaemonSupport;
 
     #[test]
@@ -1906,7 +1923,13 @@ mod tests {
         }
         let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let mut handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
 
         // Reported once, for the first failure; the failed retry is silent.
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
@@ -1940,6 +1963,7 @@ mod tests {
             connect,
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
@@ -1978,7 +2002,13 @@ mod tests {
         scripted.send(Some(link_to(&first, OwnerTracking::Peer)))?;
         let (connect, attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let mut handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let mut handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
         assert!(matches!(
             next_event(&handle)?,
             Osc99DbusEvent::Capabilities(_)
@@ -2028,7 +2058,13 @@ mod tests {
         scripted.send(Some(link_to(&rig, OwnerTracking::Bus)))?;
         let (connect, _attempts) = scripted_connect(script);
         let (waker, _woken) = counting_waker();
-        let handle = start(connect, waker, Box::new(NoIconLookup), FAST_RECONNECT);
+        let handle = start(
+            connect,
+            waker,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+            FAST_RECONNECT,
+        );
 
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
 
@@ -2053,6 +2089,7 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
 
@@ -2103,6 +2140,7 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);
@@ -2138,6 +2176,7 @@ mod tests {
             || Err(zbus::Error::Failure("no bus".to_owned())),
             waker,
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
             Duration::from_secs(3600),
         );
         assert_eq!(next_event(&handle)?, Osc99DbusEvent::Unavailable);

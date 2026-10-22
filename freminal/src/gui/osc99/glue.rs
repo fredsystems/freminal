@@ -722,7 +722,10 @@ impl FreminalGui {
     #[cfg(all(unix, not(target_os = "macos")))]
     fn spawn_osc99_dbus(&self) -> super::Osc99DbusHandle {
         tracing::debug!("starting the desktop-notification service");
-        super::Osc99DbusService::spawn(self.osc99_wake.waker())
+        super::Osc99DbusService::spawn(
+            self.osc99_wake.waker(),
+            crate::gui::app_icon::notify_assets(),
+        )
     }
 
     /// Where a plain notification (OSC 9 / OSC 777 / command-finished / the

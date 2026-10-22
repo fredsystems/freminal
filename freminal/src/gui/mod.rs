@@ -661,7 +661,9 @@ impl FreminalGui {
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
             osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
-            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend()),
+            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend(
+                app_icon::notify_assets(),
+            )),
             #[cfg(all(unix, not(target_os = "macos")))]
             osc99_dbus: std::cell::RefCell::new(None),
             #[cfg(all(unix, not(target_os = "macos")))]

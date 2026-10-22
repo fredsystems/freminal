@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
 use zbus::Connection;
 
-use crate::gui::app_icon::FREMINAL_ICON_PNG;
 use crate::gui::osc99::presentation::{
     Osc99DecodedIconCache, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint,
     decode_icon_image, escape_body_markup, sound_hint,
@@ -181,17 +180,21 @@ pub(super) struct DispatcherState {
     icon_lookup: Box<dyn Osc99IconLookup + Send>,
     /// The icons transmitted recently, already decoded.
     icon_cache: Osc99DecodedIconCache,
-    /// [`FREMINAL_ICON_PNG`], decoded and downscaled on first use; `None`
-    /// when it did not decode, so that is only logged and tried once.
+    /// freminal's application icon, a PNG, as the GUI handed it over.
+    app_icon_png: &'static [u8],
+    /// `app_icon_png`, decoded and downscaled on first use; `None` when it did
+    /// not decode, so that is only logged and tried once.
     plain_icon: OnceCell<Option<Osc99IconImage>>,
 }
 
 impl DispatcherState {
-    /// A state with no instances, the assumed capabilities, and `icon_lookup`
-    /// to resolve icons with.
+    /// A state with no instances, the assumed capabilities, `icon_lookup` to
+    /// resolve icons with, and `app_icon_png` as the picture of plain
+    /// notifications.
     pub(super) fn new(
         daemon_owner: Osc99SignalSender,
         icon_lookup: Box<dyn Osc99IconLookup + Send>,
+        app_icon_png: &'static [u8],
     ) -> Self {
         Self {
             daemon_owner,
@@ -202,6 +205,7 @@ impl DispatcherState {
             health: Osc99DaemonHealth::Healthy,
             icon_lookup,
             icon_cache: Osc99DecodedIconCache::default(),
+            app_icon_png,
             plain_icon: OnceCell::new(),
         }
     }
@@ -351,7 +355,7 @@ impl DispatcherState {
         let image = self
             .plain_icon
             .get_or_init(|| {
-                let decoded = decode_icon_image(FREMINAL_ICON_PNG);
+                let decoded = decode_icon_image(self.app_icon_png);
                 if decoded.is_none() {
                     tracing::warn!("the embedded freminal icon did not decode; sending none");
                 }
@@ -581,6 +585,7 @@ impl Default for DispatcherState {
         Self::new(
             Osc99SignalSender::Unfiltered,
             Box::new(super::test_rig::NoIconLookup),
+            crate::gui::desktop_notify::test_assets().app_icon_png,
         )
     }
 }
@@ -598,6 +603,7 @@ mod tests {
     use super::super::test_rig::*;
     use super::super::wire::NotifyImage;
     use super::*;
+    use crate::gui::desktop_notify::test_assets;
     use crate::gui::osc99::presentation::Osc99SoundHint;
 
     // ── DispatcherState ─────────────────────────────────────────────────
@@ -759,6 +765,7 @@ mod tests {
                     .map(|(app, icon)| ((*app).to_owned(), (*icon).to_owned()))
                     .collect(),
             }),
+            test_assets().app_icon_png,
         )
     }
 
@@ -916,6 +923,7 @@ mod tests {
                 icons: HashMap::from([("mailicon".to_owned(), "MailIcon".to_owned())]),
                 desktop: HashMap::new(),
             }),
+            test_assets().app_icon_png,
         );
         let args = state.notify_args(
             None,
@@ -1582,6 +1590,7 @@ mod tests {
         let mut state = DispatcherState::new(
             Osc99SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(1), None, reply_from(7, ":1.5"));
         // Answered by the new daemon before its `NameOwnerChanged` is handled.
@@ -1616,6 +1625,7 @@ mod tests {
         let mut state = DispatcherState::new(
             Osc99SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(1), None, peer_reply(7));
 
@@ -1630,6 +1640,7 @@ mod tests {
         let mut state = DispatcherState::new(
             Osc99SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         state.record_shown(instance(2), None, reply_from(8, ":1.5"));
         state.record_shown(instance(1), None, reply_from(7, ":1.5"));
@@ -1651,7 +1662,11 @@ mod tests {
 
     #[test]
     fn a_notify_reply_names_the_owner_when_none_is_known() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            Osc99SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
 
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 
@@ -1672,6 +1687,7 @@ mod tests {
         let mut owned = DispatcherState::new(
             Osc99SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         owned.record_shown(instance(1), None, reply_from(7, ":1.6"));
         assert_eq!(
@@ -1684,15 +1700,22 @@ mod tests {
         unfiltered.record_shown(instance(1), None, reply_from(7, ":1.6"));
         assert_eq!(unfiltered.daemon_owner, Osc99SignalSender::Unfiltered);
 
-        let mut senderless =
-            DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut senderless = DispatcherState::new(
+            Osc99SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         senderless.record_shown(instance(1), None, peer_reply(7));
         assert_eq!(senderless.daemon_owner, Osc99SignalSender::NoOwner);
     }
 
     #[test]
     fn adopting_a_reply_owner_tracks_nothing_and_obeys_the_same_rules_as_a_shown_instance() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            Osc99SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         state.adopt_reply_owner(&peer_reply(7));
         assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
         assert!(!state.capabilities_stale());
@@ -1718,7 +1741,11 @@ mod tests {
     #[test]
     fn an_instance_adopted_with_its_owner_survives_the_owner_change_that_names_it() {
         // The adoption and the bus driver's later `NameOwnerChanged` agree.
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            Osc99SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 
         assert_eq!(state.on_signal(&owner_changed(Some(":1.7"))), []);
@@ -1813,6 +1840,7 @@ mod tests {
         let mut state = DispatcherState::new(
             Osc99SignalSender::Owner(":1.5".to_owned()),
             Box::new(NoIconLookup),
+            test_assets().app_icon_png,
         );
         assert!(state.capabilities_stale(), "never asked");
 
@@ -1829,14 +1857,22 @@ mod tests {
     #[test]
     fn a_state_with_no_owner_or_an_unfiltered_one_never_wants_a_refresh() {
         for owner in [Osc99SignalSender::NoOwner, Osc99SignalSender::Unfiltered] {
-            let state = DispatcherState::new(owner.clone(), Box::new(NoIconLookup));
+            let state = DispatcherState::new(
+                owner.clone(),
+                Box::new(NoIconLookup),
+                test_assets().app_icon_png,
+            );
             assert!(!state.capabilities_stale(), "{owner:?}");
         }
     }
 
     #[test]
     fn an_adopted_owner_makes_the_capabilities_stale() {
-        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        let mut state = DispatcherState::new(
+            Osc99SignalSender::NoOwner,
+            Box::new(NoIconLookup),
+            test_assets().app_icon_png,
+        );
 
         state.record_shown(instance(1), None, reply_from(7, ":1.7"));
 

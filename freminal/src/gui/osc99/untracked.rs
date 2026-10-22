@@ -68,6 +68,7 @@ use super::icon_raster::rasterize_standard_icon_png;
 use super::icon_tempfiles::IconTempFiles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::icon_tempfiles::default_icon_dir;
+use crate::gui::desktop_notify::NotifyAssets;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use crate::gui::desktop_notify::StandardIcon;
 
@@ -265,6 +266,8 @@ fn try_enqueue(queue: &Sender<DeliveryRequest>, request: DeliveryRequest) -> Sub
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Debug)]
 struct IconPreparer {
+    /// The face the standard icons are drawn from.
+    font: &'static [u8],
     /// The temp files written so far.
     icons: IconTempFiles,
     /// The PNG drawn for each standard icon, computed at most once per
@@ -274,8 +277,9 @@ struct IconPreparer {
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl IconPreparer {
-    fn new(icons: IconTempFiles) -> Self {
+    fn new(font: &'static [u8], icons: IconTempFiles) -> Self {
         Self {
+            font,
             icons,
             drawn: HashMap::new(),
         }
@@ -287,13 +291,13 @@ impl IconPreparer {
     /// as PNG, so undecodable bytes give no image. Failures are logged at
     /// debug: the notification is shown without the image.
     fn image_path(&mut self, icon: Option<&UntrackedIcon>) -> Option<PathBuf> {
-        let Self { icons, drawn } = self;
+        let Self { font, icons, drawn } = self;
         let written = match icon? {
             UntrackedIcon::Standard(standard) => {
                 let png = drawn
                     .entry(*standard)
                     .or_insert_with(|| {
-                        rasterize_standard_icon_png(*standard, STANDARD_ICON_SIZE_PX)
+                        rasterize_standard_icon_png(font, *standard, STANDARD_ICON_SIZE_PX)
                     })
                     .as_deref()?;
                 icons.path_for(png)
@@ -323,10 +327,11 @@ impl IconPreparer {
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn deliver_loop(
     queue: &Receiver<DeliveryRequest>,
+    font: &'static [u8],
     icons: IconTempFiles,
     mut show: impl FnMut(&DeliveryRequest, Option<&Path>),
 ) {
-    let mut preparer = IconPreparer::new(icons);
+    let mut preparer = IconPreparer::new(font, icons);
     while let Ok(request) = queue.recv() {
         let image = preparer.image_path(request.icon.as_ref());
         show(&request, image.as_deref());
@@ -354,13 +359,14 @@ impl DeliveryWorker {
     ///
     /// Returns the I/O error if the thread cannot be spawned.
     fn spawn(
+        font: &'static [u8],
         icons: IconTempFiles,
         show: impl FnMut(&DeliveryRequest, Option<&Path>) + Send + 'static,
     ) -> std::io::Result<Self> {
         let (queue, requests) = crossbeam_channel::bounded(QUEUE_CAPACITY);
         let thread = std::thread::Builder::new()
             .name("freminal-osc99-deliver".to_owned())
-            .spawn(move || deliver_loop(&requests, icons, show))?;
+            .spawn(move || deliver_loop(&requests, font, icons, show))?;
         Ok(Self {
             queue: Some(queue),
             thread: Some(thread),
@@ -405,17 +411,21 @@ impl Drop for DeliveryWorker {
     }
 }
 
-/// The backend for the platform freminal is running on.
+/// The backend for the platform freminal is running on: the macOS and Windows
+/// delivery worker, which draws the standard icons from `assets.icon_font`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[must_use]
-pub fn platform_untracked_backend() -> Box<dyn Osc99UntrackedBackend> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        Box::<PlatformUntrackedBackend>::default()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Box::new(NoUntrackedBackend)
-    }
+pub fn platform_untracked_backend(assets: NotifyAssets) -> Box<dyn Osc99UntrackedBackend> {
+    Box::new(PlatformUntrackedBackend::new(assets.icon_font))
+}
+
+/// The backend for the platform freminal is running on. Linux/BSD has no
+/// untracked leg (the D-Bus service is the one system leg), so it needs no
+/// assets.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[must_use]
+pub fn platform_untracked_backend(_assets: NotifyAssets) -> Box<dyn Osc99UntrackedBackend> {
+    Box::new(NoUntrackedBackend)
 }
 
 /// The name the platform's notification API knows its default sound by.
@@ -653,10 +663,21 @@ fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
 /// files. A worker that has died (its thread panicked) is replaced on the next
 /// notification.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PlatformUntrackedBackend {
+    /// The face the standard icons are drawn from.
+    font: &'static [u8],
     /// The delivery worker, once spawned.
     worker: Option<DeliveryWorker>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl PlatformUntrackedBackend {
+    /// A backend with no worker yet, drawing standard icons from `font`.
+    #[must_use]
+    pub const fn new(font: &'static [u8]) -> Self {
+        Self { font, worker: None }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -666,6 +687,7 @@ impl Osc99UntrackedBackend for PlatformUntrackedBackend {
 
         if self.worker.is_none() {
             match DeliveryWorker::spawn(
+                self.font,
                 IconTempFiles::with_dir(default_icon_dir()),
                 show_on_platform,
             ) {
@@ -694,6 +716,8 @@ mod tests {
     use super::*;
 
     use std::num::NonZeroU32;
+
+    use crate::gui::desktop_notify::test_assets;
 
     fn test_notification() -> Notification99Data {
         use freminal_common::buffer_states::osc99_notification::{
@@ -954,13 +978,14 @@ mod tests {
         let (started_tx, started_rx) = crossbeam_channel::unbounded::<()>();
         let (release_tx, release_rx) = crossbeam_channel::unbounded::<()>();
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded::<String>();
-        let mut worker = DeliveryWorker::spawn(store, move |request, _| {
-            let _ = started_tx.send(());
-            // Held here until the test lets go (or drops the sender).
-            let _ = release_rx.recv();
-            let _ = shown_tx.send(request.title.clone());
-        })
-        .unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, move |request, _| {
+                let _ = started_tx.send(());
+                // Held here until the test lets go (or drops the sender).
+                let _ = release_rx.recv();
+                let _ = shown_tx.send(request.title.clone());
+            })
+            .unwrap();
 
         // The first request is taken by the worker, which then blocks.
         assert_eq!(worker.submit(request("first")), Submit::Queued);
@@ -991,11 +1016,12 @@ mod tests {
     fn the_worker_shows_requests_in_order_on_its_own_named_thread() {
         let (_root, store) = private_store();
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded();
-        let mut worker = DeliveryWorker::spawn(store, move |request, image| {
-            let name = std::thread::current().name().map(str::to_owned);
-            let _ = shown_tx.send((request.title.clone(), image.is_some(), name));
-        })
-        .unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, move |request, image| {
+                let name = std::thread::current().name().map(str::to_owned);
+                let _ = shown_tx.send((request.title.clone(), image.is_some(), name));
+            })
+            .unwrap();
 
         assert_eq!(worker.submit(request("one")), Submit::Queued);
         assert_eq!(worker.submit(request("two")), Submit::Queued);
@@ -1017,7 +1043,7 @@ mod tests {
         let (root, store) = private_store();
         let dir = root.path().join("icons");
         let (shown_tx, shown_rx) = crossbeam_channel::unbounded();
-        let mut worker = DeliveryWorker::spawn(store, move |_, image| {
+        let mut worker = DeliveryWorker::spawn(test_assets().icon_font, store, move |_, image| {
             // The file exists while the notification is being shown.
             let _ = shown_tx.send(image.map(|path| (path.to_path_buf(), path.is_file())));
         })
@@ -1053,7 +1079,7 @@ mod tests {
     fn dropping_the_worker_stops_it_and_removes_the_files() {
         let (root, store) = private_store();
         let dir = root.path().join("icons");
-        let worker = DeliveryWorker::spawn(store, |_, _| {}).unwrap();
+        let worker = DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| {}).unwrap();
         let transmitted = DeliveryRequest {
             icon: Some(UntrackedIcon::Transmitted(png(4, 4))),
             ..request("t")
@@ -1068,7 +1094,7 @@ mod tests {
     #[test]
     fn a_stopped_worker_reports_itself_gone() {
         let (_root, store) = private_store();
-        let mut worker = DeliveryWorker::spawn(store, |_, _| {}).unwrap();
+        let mut worker = DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| {}).unwrap();
 
         worker.shutdown(Duration::from_secs(30));
 
@@ -1078,7 +1104,9 @@ mod tests {
     #[test]
     fn a_panicking_shower_makes_the_worker_report_gone() {
         let (_root, store) = private_store();
-        let mut worker = DeliveryWorker::spawn(store, |_, _| panic!("show failed")).unwrap();
+        let mut worker =
+            DeliveryWorker::spawn(test_assets().icon_font, store, |_, _| panic!("show failed"))
+                .unwrap();
         assert_eq!(worker.submit(request("boom")), Submit::Queued);
         // The thread unwinds and drops its receiver; wait for that, then
         // check the sender notices.
@@ -1098,7 +1126,7 @@ mod tests {
     #[test]
     fn a_standard_icon_is_drawn_once_and_reuses_one_file() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
         let icon = UntrackedIcon::Standard(StandardIcon::Info);
 
         let first = preparer.image_path(Some(&icon)).unwrap();
@@ -1130,7 +1158,7 @@ mod tests {
     #[test]
     fn a_transmitted_icon_is_reencoded_and_bounded() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         let path = preparer
             .image_path(Some(&UntrackedIcon::Transmitted(png(1000, 500))))
@@ -1143,7 +1171,7 @@ mod tests {
     #[test]
     fn what_the_os_reads_is_never_the_transmitted_bytes() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
         // A valid image with trailing junk (a polyglot): the file written is
         // the clean re-encode, not the input.
         let mut polyglot = png(4, 4);
@@ -1161,7 +1189,7 @@ mod tests {
     #[test]
     fn undecodable_and_oversized_transmitted_bytes_give_no_image() {
         let (root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         for bytes in [b"not an image".to_vec(), Vec::new(), png(4097, 1)] {
             assert_eq!(
@@ -1178,7 +1206,7 @@ mod tests {
     #[test]
     fn no_icon_means_no_image() {
         let (_root, store) = private_store();
-        let mut preparer = IconPreparer::new(store);
+        let mut preparer = IconPreparer::new(test_assets().icon_font, store);
 
         assert_eq!(preparer.image_path(None), None);
     }
@@ -1188,7 +1216,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("icons");
         std::fs::write(&dir, b"not a directory").unwrap();
-        let mut preparer = IconPreparer::new(IconTempFiles::with_dir(dir));
+        let mut preparer = IconPreparer::new(test_assets().icon_font, IconTempFiles::with_dir(dir));
 
         assert_eq!(
             preparer.image_path(Some(&UntrackedIcon::Standard(StandardIcon::Info))),

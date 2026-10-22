@@ -22,6 +22,7 @@ use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 
+use crate::gui::desktop_notify::test_assets;
 use crate::gui::osc99::presentation::Osc99IconLookup;
 use crate::gui::osc99::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
 
@@ -816,7 +817,12 @@ pub(super) fn spawn_on(
     owner_tracking: OwnerTracking,
 ) -> (Osc99DbusHandle, Receiver<()>) {
     let (waker, woken) = counting_waker();
-    let handle = Osc99DbusService::spawn_with_connection(rig.client.clone(), owner_tracking, waker);
+    let handle = Osc99DbusService::spawn_with_connection(
+        rig.client.clone(),
+        owner_tracking,
+        waker,
+        test_assets(),
+    );
     (handle, woken)
 }
 
