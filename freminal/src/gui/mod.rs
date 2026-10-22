@@ -47,6 +47,7 @@ pub mod chrome_style;
 mod close_guard;
 mod command_blocks;
 mod command_history;
+mod desktop_notify;
 mod frame_damage;
 mod frame_drain;
 mod geometry_interop;

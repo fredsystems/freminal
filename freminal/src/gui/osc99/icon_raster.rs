@@ -1,4 +1,4 @@
-//! Rasterises a [`ChromeIcon`] glyph to a PNG (macOS and Windows).
+//! Rasterises a [`StandardIcon`] glyph to a PNG (macOS and Windows).
 //!
 //! The macOS and Windows notification APIs take an icon as an image file, and
 //! have no notion of a freedesktop icon name. The OSC 99 standard icon names
@@ -19,8 +19,8 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::Format;
 
+use crate::gui::desktop_notify::StandardIcon;
 use crate::gui::font_manager::bundled_regular_font_bytes;
-use crate::gui::icons::ChromeIcon;
 
 /// The tile colour. The tile is fully opaque inside its rounded outline.
 const TILE_RGB: [u8; 3] = [0x5A, 0x5A, 0x5A];
@@ -40,7 +40,7 @@ const CORNER_DIVISOR: u32 = 6;
 /// side: `tile_side / GLYPH_PADDING_DIVISOR`.
 const GLYPH_PADDING_DIVISOR: u32 = 8;
 
-/// The largest image [`rasterize_chrome_icon_png`] will draw, in pixels per
+/// The largest image [`rasterize_standard_icon_png`] will draw, in pixels per
 /// side. The only callers ask for 256; the cap keeps a future caller from
 /// allocating an unbounded canvas.
 pub const MAX_RASTER_SIZE_PX: u32 = 1024;
@@ -54,7 +54,7 @@ pub const MAX_RASTER_SIZE_PX: u32 = 1024;
 /// [`MAX_RASTER_SIZE_PX`], the bundled face has no glyph for the icon, or
 /// rendering or encoding fails; the reason is logged at debug level.
 #[must_use]
-pub fn rasterize_chrome_icon_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u8>> {
+pub fn rasterize_standard_icon_png(icon: StandardIcon, size_px: u32) -> Option<Vec<u8>> {
     let result = render_png(icon, size_px);
     if result.is_none() {
         tracing::debug!("OSC 99: could not rasterise {icon:?} at {size_px} px");
@@ -62,8 +62,8 @@ pub fn rasterize_chrome_icon_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u
     result
 }
 
-/// [`rasterize_chrome_icon_png`] without the logging.
-fn render_png(icon: ChromeIcon, size_px: u32) -> Option<Vec<u8>> {
+/// [`rasterize_standard_icon_png`] without the logging.
+fn render_png(icon: StandardIcon, size_px: u32) -> Option<Vec<u8>> {
     if size_px == 0 || size_px > MAX_RASTER_SIZE_PX {
         return None;
     }
@@ -173,17 +173,6 @@ impl TileShape {
 mod tests {
     use super::*;
 
-    const STANDARD_ICONS: [ChromeIcon; 8] = [
-        ChromeIcon::Error,
-        ChromeIcon::Warning,
-        ChromeIcon::Info,
-        ChromeIcon::Question,
-        ChromeIcon::Help,
-        ChromeIcon::FileManager,
-        ChromeIcon::SystemMonitor,
-        ChromeIcon::TextEditor,
-    ];
-
     fn decode(png: &[u8]) -> image::RgbaImage {
         image::load_from_memory_with_format(png, ImageFormat::Png)
             .unwrap()
@@ -192,8 +181,8 @@ mod tests {
 
     #[test]
     fn every_standard_icon_rasterises_to_a_256_px_png() {
-        for icon in STANDARD_ICONS {
-            let png = rasterize_chrome_icon_png(icon, 256)
+        for icon in StandardIcon::ALL {
+            let png = rasterize_standard_icon_png(icon, 256)
                 .unwrap_or_else(|| panic!("{icon:?} did not rasterise"));
             let image = decode(&png);
             assert_eq!(image.dimensions(), (256, 256), "{icon:?}");
@@ -206,8 +195,8 @@ mod tests {
 
     #[test]
     fn pixels_outside_the_tile_are_transparent() {
-        for icon in STANDARD_ICONS {
-            let image = decode(&rasterize_chrome_icon_png(icon, 256).unwrap());
+        for icon in StandardIcon::ALL {
+            let image = decode(&rasterize_standard_icon_png(icon, 256).unwrap());
             for (x, y, pixel) in image.enumerate_pixels() {
                 let in_margin = x < 16 || y < 16 || x >= 240 || y >= 240;
                 if in_margin {
@@ -222,8 +211,8 @@ mod tests {
 
     #[test]
     fn the_tile_is_opaque_grey_wherever_the_glyph_is_absent() {
-        for icon in STANDARD_ICONS {
-            let image = decode(&rasterize_chrome_icon_png(icon, 256).unwrap());
+        for icon in StandardIcon::ALL {
+            let image = decode(&rasterize_standard_icon_png(icon, 256).unwrap());
             // Inside the tile and outside the glyph's padded box, straight
             // along each edge's midpoint and at the curve's start.
             for (x, y) in [(16, 128), (239, 128), (128, 16), (128, 239), (60, 20)] {
@@ -246,8 +235,8 @@ mod tests {
 
     #[test]
     fn the_glyph_is_lighter_than_the_tile() {
-        for icon in STANDARD_ICONS {
-            let image = decode(&rasterize_chrome_icon_png(icon, 256).unwrap());
+        for icon in StandardIcon::ALL {
+            let image = decode(&rasterize_standard_icon_png(icon, 256).unwrap());
             assert!(
                 image.pixels().any(|pixel| pixel.0[0] > 0xC0),
                 "{icon:?} has no light glyph pixels"
@@ -263,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_glyph_is_centred_and_padded_inside_the_tile() {
-        let image = decode(&rasterize_chrome_icon_png(ChromeIcon::Info, 256).unwrap());
+        let image = decode(&rasterize_standard_icon_png(StandardIcon::Info, 256).unwrap());
         let lit: Vec<(u32, u32)> = image
             .enumerate_pixels()
             .filter(|(_, _, pixel)| pixel.0[0] > TILE_RGB[0])
@@ -285,24 +274,27 @@ mod tests {
 
     #[test]
     fn the_size_is_honoured() {
-        let image = decode(&rasterize_chrome_icon_png(ChromeIcon::Warning, 64).unwrap());
+        let image = decode(&rasterize_standard_icon_png(StandardIcon::Warning, 64).unwrap());
         assert_eq!(image.dimensions(), (64, 64));
         assert!(image.pixels().any(|pixel| pixel.0[3] > 0));
     }
 
     #[test]
     fn a_zero_size_has_no_image() {
-        assert_eq!(rasterize_chrome_icon_png(ChromeIcon::Info, 0), None);
+        assert_eq!(rasterize_standard_icon_png(StandardIcon::Info, 0), None);
     }
 
     #[test]
     fn a_size_over_the_cap_has_no_image_and_the_cap_itself_is_drawn() {
         assert_eq!(
-            rasterize_chrome_icon_png(ChromeIcon::Info, MAX_RASTER_SIZE_PX + 1),
+            rasterize_standard_icon_png(StandardIcon::Info, MAX_RASTER_SIZE_PX + 1),
             None
         );
-        assert_eq!(rasterize_chrome_icon_png(ChromeIcon::Info, u32::MAX), None);
-        let at_cap = rasterize_chrome_icon_png(ChromeIcon::Info, MAX_RASTER_SIZE_PX).unwrap();
+        assert_eq!(
+            rasterize_standard_icon_png(StandardIcon::Info, u32::MAX),
+            None
+        );
+        let at_cap = rasterize_standard_icon_png(StandardIcon::Info, MAX_RASTER_SIZE_PX).unwrap();
         assert_eq!(
             decode(&at_cap).dimensions(),
             (MAX_RASTER_SIZE_PX, MAX_RASTER_SIZE_PX)

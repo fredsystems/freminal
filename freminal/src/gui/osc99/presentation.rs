@@ -17,6 +17,7 @@ use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 
 use super::icon_decode::decode_icon_rgba;
 pub use super::markup::escape_body_markup;
+use crate::gui::desktop_notify::StandardIcon;
 
 /// How many decoded icons [`Osc99DecodedIconCache`] keeps.
 const DECODED_ICON_CACHE_ENTRIES: usize = 8;
@@ -71,17 +72,7 @@ pub struct Osc99IconImage {
 /// The freedesktop icon name for kitty's standard icon `name`, if it is one.
 #[must_use]
 pub fn standard_icon_name(name: &str) -> Option<&'static str> {
-    match name {
-        "error" => Some("dialog-error"),
-        "warn" | "warning" => Some("dialog-warning"),
-        "info" => Some("dialog-information"),
-        "question" => Some("dialog-question"),
-        "help" => Some("system-help"),
-        "file-manager" => Some("system-file-manager"),
-        "system-monitor" => Some("utilities-system-monitor"),
-        "text-editor" => Some("utilities-text-editor"),
-        _ => None,
-    }
+    StandardIcon::from_name(name).map(StandardIcon::freedesktop_name)
 }
 
 /// Pick the icon, in kitty's order.
@@ -295,6 +286,22 @@ mod tests {
         }
         assert_eq!(standard_icon_name("firefox"), None);
         assert_eq!(standard_icon_name("Error"), None);
+    }
+
+    #[test]
+    fn non_standard_names_have_no_freedesktop_name() {
+        for name in [
+            "",
+            "WARN",
+            "Warning",
+            "Info",
+            "file_manager",
+            "folder",
+            "error ",
+            "dialog-error",
+        ] {
+            assert_eq!(standard_icon_name(name), None, "name {name:?}");
+        }
     }
 
     #[test]

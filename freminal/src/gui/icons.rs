@@ -36,6 +36,8 @@
 
 use egui::{Color32, FontFamily, RichText};
 
+use crate::gui::desktop_notify::StandardIcon;
+
 /// A chrome action symbol, decoupled from its underlying glyph codepoint.
 ///
 /// Chrome code requests an icon by name; the concrete Nerd Font codepoint is an
@@ -174,6 +176,21 @@ impl ChromeIcon {
     }
 }
 
+impl From<StandardIcon> for ChromeIcon {
+    fn from(icon: StandardIcon) -> Self {
+        match icon {
+            StandardIcon::Error => Self::Error,
+            StandardIcon::Warning => Self::Warning,
+            StandardIcon::Info => Self::Info,
+            StandardIcon::Question => Self::Question,
+            StandardIcon::Help => Self::Help,
+            StandardIcon::FileManager => Self::FileManager,
+            StandardIcon::SystemMonitor => Self::SystemMonitor,
+            StandardIcon::TextEditor => Self::TextEditor,
+        }
+    }
+}
+
 /// The bundled glyph for one of the OSC 99 standard icon names (`n=`), or
 /// `None` when `name` is not one of them.
 ///
@@ -182,17 +199,7 @@ impl ChromeIcon {
 /// case-sensitive, as in kitty's own table.
 #[must_use]
 pub fn standard_icon_glyph(name: &str) -> Option<ChromeIcon> {
-    match name {
-        "error" => Some(ChromeIcon::Error),
-        "warn" | "warning" => Some(ChromeIcon::Warning),
-        "info" => Some(ChromeIcon::Info),
-        "question" => Some(ChromeIcon::Question),
-        "help" => Some(ChromeIcon::Help),
-        "file-manager" => Some(ChromeIcon::FileManager),
-        "system-monitor" => Some(ChromeIcon::SystemMonitor),
-        "text-editor" => Some(ChromeIcon::TextEditor),
-        _ => None,
-    }
+    StandardIcon::from_name(name).map(ChromeIcon::from)
 }
 
 #[cfg(test)]
@@ -264,6 +271,13 @@ mod tests {
         ];
         for (name, icon) in cases {
             assert_eq!(standard_icon_glyph(name), Some(icon), "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn every_standard_icon_converts_to_the_chrome_icon_with_its_codepoint() {
+        for icon in StandardIcon::ALL {
+            assert_eq!(ChromeIcon::from(icon).codepoint(), icon.codepoint());
         }
     }
 

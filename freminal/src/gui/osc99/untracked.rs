@@ -63,13 +63,13 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::icon_decode::reencode_icon_png;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_raster::rasterize_chrome_icon_png;
+use super::icon_raster::rasterize_standard_icon_png;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::icon_tempfiles::IconTempFiles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::icon_tempfiles::default_icon_dir;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use crate::gui::icons::{ChromeIcon, standard_icon_glyph};
+use crate::gui::desktop_notify::StandardIcon;
 
 /// Shows a notification on the untracked system leg.
 ///
@@ -150,7 +150,7 @@ const STANDARD_ICON_SIZE_PX: u32 = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UntrackedIcon {
     /// One of the OSC 99 standard icon names, drawn from the bundled glyph.
-    Standard(ChromeIcon),
+    Standard(StandardIcon),
     /// Icon bytes the program transmitted, not yet decoded.
     Transmitted(Vec<u8>),
 }
@@ -159,7 +159,7 @@ enum UntrackedIcon {
 ///
 /// Names come first, as on Linux: the first `n=` name that is one of the OSC 99
 /// standard icon names is drawn from the bundled glyph (see
-/// [`rasterize_chrome_icon_png`]). Neither platform resolves a freedesktop icon
+/// [`rasterize_standard_icon_png`]). Neither platform resolves a freedesktop icon
 /// name itself, so a name that is not a standard one is skipped. If no name is
 /// standard, the transmitted icon data is used; with neither there is no image.
 /// A standard name whose glyph then cannot be drawn gives no image (the glyph
@@ -168,7 +168,7 @@ enum UntrackedIcon {
 fn untracked_icon_choice(data: &Notification99Data) -> Option<UntrackedIcon> {
     data.icon_names
         .iter()
-        .find_map(|name| standard_icon_glyph(name))
+        .find_map(|name| StandardIcon::from_name(name))
         .map(UntrackedIcon::Standard)
         .or_else(|| data.icon_data.clone().map(UntrackedIcon::Transmitted))
 }
@@ -269,7 +269,7 @@ struct IconPreparer {
     icons: IconTempFiles,
     /// The PNG drawn for each standard icon, computed at most once per
     /// process. `None` records a glyph that could not be drawn.
-    drawn: HashMap<ChromeIcon, Option<Vec<u8>>>,
+    drawn: HashMap<StandardIcon, Option<Vec<u8>>>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -292,7 +292,9 @@ impl IconPreparer {
             UntrackedIcon::Standard(standard) => {
                 let png = drawn
                     .entry(*standard)
-                    .or_insert_with(|| rasterize_chrome_icon_png(*standard, STANDARD_ICON_SIZE_PX))
+                    .or_insert_with(|| {
+                        rasterize_standard_icon_png(*standard, STANDARD_ICON_SIZE_PX)
+                    })
                     .as_deref()?;
                 icons.path_for(png)
             }
@@ -811,7 +813,7 @@ mod tests {
 
         assert_eq!(
             untracked_icon_choice(&data),
-            Some(UntrackedIcon::Standard(ChromeIcon::Info))
+            Some(UntrackedIcon::Standard(StandardIcon::Info))
         );
     }
 
@@ -826,7 +828,7 @@ mod tests {
 
         assert_eq!(
             chosen(&["weather-clear", "error"]),
-            Some(UntrackedIcon::Standard(ChromeIcon::Error))
+            Some(UntrackedIcon::Standard(StandardIcon::Error))
         );
         assert_eq!(chosen(&["error", "info"]), chosen(&["error"]));
         assert_ne!(chosen(&["error", "info"]), chosen(&["info"]));
@@ -892,7 +894,7 @@ mod tests {
                 body: Some("B".to_owned()),
                 sound: Osc99PlatformSound::Silent,
                 expiry: Osc99Expiry::Never,
-                icon: Some(UntrackedIcon::Standard(ChromeIcon::Warning)),
+                icon: Some(UntrackedIcon::Standard(StandardIcon::Warning)),
             }
         );
     }
@@ -1022,7 +1024,7 @@ mod tests {
         .unwrap();
 
         let standard = DeliveryRequest {
-            icon: Some(UntrackedIcon::Standard(ChromeIcon::Error)),
+            icon: Some(UntrackedIcon::Standard(StandardIcon::Error)),
             ..request("standard")
         };
         let transmitted = DeliveryRequest {
@@ -1097,23 +1099,29 @@ mod tests {
     fn a_standard_icon_is_drawn_once_and_reuses_one_file() {
         let (_root, store) = private_store();
         let mut preparer = IconPreparer::new(store);
-        let icon = UntrackedIcon::Standard(ChromeIcon::Info);
+        let icon = UntrackedIcon::Standard(StandardIcon::Info);
 
         let first = preparer.image_path(Some(&icon)).unwrap();
-        let drawn_at = preparer.drawn[&ChromeIcon::Info].as_ref().unwrap().as_ptr();
+        let drawn_at = preparer.drawn[&StandardIcon::Info]
+            .as_ref()
+            .unwrap()
+            .as_ptr();
         let second = preparer.image_path(Some(&icon)).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(decoded_size(&first), (256, 256));
         assert_eq!(preparer.drawn.len(), 1);
         assert_eq!(
-            preparer.drawn[&ChromeIcon::Info].as_ref().unwrap().as_ptr(),
+            preparer.drawn[&StandardIcon::Info]
+                .as_ref()
+                .unwrap()
+                .as_ptr(),
             drawn_at,
             "the cached PNG was not drawn again"
         );
 
         let other = preparer
-            .image_path(Some(&UntrackedIcon::Standard(ChromeIcon::Error)))
+            .image_path(Some(&UntrackedIcon::Standard(StandardIcon::Error)))
             .unwrap();
         assert_ne!(first, other);
         assert_eq!(preparer.drawn.len(), 2);
@@ -1183,7 +1191,7 @@ mod tests {
         let mut preparer = IconPreparer::new(IconTempFiles::with_dir(dir));
 
         assert_eq!(
-            preparer.image_path(Some(&UntrackedIcon::Standard(ChromeIcon::Info))),
+            preparer.image_path(Some(&UntrackedIcon::Standard(StandardIcon::Info))),
             None
         );
     }
