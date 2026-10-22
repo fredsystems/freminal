@@ -135,13 +135,11 @@ mod plain;
 mod pump;
 mod state;
 #[cfg(test)]
-mod test_rig;
-mod wake;
+pub(super) mod test_rig;
 mod wire;
 
 use plain::{PlainBudget, PlainBudgetSlot};
 pub use plain::{PlainNotification, PlainNotifySender};
-pub use wake::Osc99Wake;
 
 use std::time::{Duration, Instant};
 
@@ -150,9 +148,10 @@ use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
 use zbus::{Connection, MessageStream};
 
-use super::{Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend, Osc99SystemDispatch};
-use crate::gui::desktop_notify::{
-    NotifyAssets, Osc99DaemonCapabilities, Osc99IconLookup, XdgIconLookup,
+use super::icons::lookup::XdgIconLookup;
+use super::presentation::Osc99IconLookup;
+use super::{
+    NotifyAssets, Osc99DaemonCapabilities, Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch,
 };
 use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,
@@ -214,15 +213,6 @@ pub enum Osc99SystemAction {
 }
 
 impl Osc99SystemAction {
-    /// The registry's vocabulary for the same activation.
-    #[must_use]
-    pub const fn to_leg_activation(self) -> Osc99LegActivation {
-        match self {
-            Self::Default => Osc99LegActivation::Body,
-            Self::Button(n) => Osc99LegActivation::Button(n),
-        }
-    }
-
     /// The action an `ActionInvoked` key stands for, or `None` for a key
     /// freminal never registered.
     fn from_key(key: &str) -> Option<Self> {
@@ -308,7 +298,7 @@ pub struct Osc99DbusHandle {
 /// one: the commands sent through it, and through its
 /// [`PlainNotifySender`]s, wait in the returned [`DetachedQueue`].
 #[cfg(test)]
-pub(in crate::gui) fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
+pub fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
     let (commands, queue) = crossbeam_channel::bounded(COMMAND_QUEUE_CAPACITY);
     let (_events_tx, events) = crossbeam_channel::unbounded();
     let handle = Osc99DbusHandle {
@@ -321,7 +311,7 @@ pub(in crate::gui) fn detached_handle() -> (Osc99DbusHandle, DetachedQueue) {
 
 /// The commands a [`detached_handle`] was given.
 #[cfg(test)]
-pub(in crate::gui) struct DetachedQueue {
+pub struct DetachedQueue {
     queue: Receiver<DbusCommand>,
 }
 
@@ -329,7 +319,7 @@ pub(in crate::gui) struct DetachedQueue {
 impl DetachedQueue {
     /// The plain notifications queued since the last call, oldest first.
     /// Other commands are discarded.
-    pub(in crate::gui) fn take_plain(&self) -> Vec<PlainNotification> {
+    pub fn take_plain(&self) -> Vec<PlainNotification> {
         self.queue
             .try_iter()
             .filter_map(|command| match command {
@@ -1077,22 +1067,10 @@ mod tests {
         NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
 
+    use super::super::Osc99DaemonSupport;
+    use super::super::test_support::test_assets;
     use super::test_rig::*;
     use super::*;
-    use crate::gui::desktop_notify::Osc99DaemonSupport;
-    use crate::gui::desktop_notify::test_support::test_assets;
-
-    #[test]
-    fn system_actions_map_to_the_registry_activations() {
-        assert_eq!(
-            Osc99SystemAction::Default.to_leg_activation(),
-            Osc99LegActivation::Body
-        );
-        assert_eq!(
-            Osc99SystemAction::Button(3).to_leg_activation(),
-            Osc99LegActivation::Button(3)
-        );
-    }
 
     #[test]
     fn show_calls_notify_then_activation_and_close_signals_become_events() -> TestResult {

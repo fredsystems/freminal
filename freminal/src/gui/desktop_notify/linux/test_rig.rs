@@ -22,10 +22,9 @@ use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 
-use crate::gui::desktop_notify::Osc99IconLookup;
-use crate::gui::desktop_notify::test_support::test_assets;
-use crate::gui::osc99::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
-
+use super::super::presentation::Osc99IconLookup;
+use super::super::test_support::test_assets;
+use super::super::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
 use super::pump::PumpSignal;
 use super::state::OwnerTracking;
 use super::wire::{NotifyReply, fetch_capabilities};
@@ -38,7 +37,7 @@ use super::{
 /// loaded CI machine never trips it; a healthy run never waits it out.
 pub(super) const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub(super) type TestResult = Result<(), Box<dyn Error>>;
+pub type TestResult = Result<(), Box<dyn Error>>;
 
 /// The error the bus driver answers `GetNameOwner` with when nobody owns the
 /// name. Production code matches `fdo::Error::NameHasNoOwner`; the name is for
@@ -57,7 +56,7 @@ pub(super) const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.Servi
 pub(super) const SHORT_METHOD_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub(super) fn instance(n: u64) -> Osc99InstanceId {
-    Osc99InstanceId(n)
+    Osc99InstanceId::new(n)
 }
 
 pub(super) fn notification() -> Notification99Data {
@@ -172,24 +171,24 @@ pub(super) fn name_owner_changed(
 
 /// What the fake daemon saw in one `Notify` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RecordedNotify {
-    pub(super) app_name: String,
-    pub(super) replaces_id: u32,
-    pub(super) app_icon: String,
-    pub(super) summary: String,
-    pub(super) body: String,
-    pub(super) actions: Vec<String>,
-    pub(super) urgency: Option<u8>,
+pub struct RecordedNotify {
+    pub app_name: String,
+    pub replaces_id: u32,
+    pub app_icon: String,
+    pub summary: String,
+    pub body: String,
+    pub actions: Vec<String>,
+    pub urgency: Option<u8>,
     /// The key of every hint, sorted.
-    pub(super) hint_keys: Vec<String>,
-    pub(super) category: Option<String>,
-    pub(super) desktop_entry: Option<String>,
-    pub(super) sound_name: Option<String>,
+    pub hint_keys: Vec<String>,
+    pub category: Option<String>,
+    pub desktop_entry: Option<String>,
+    pub sound_name: Option<String>,
     /// `(width, height, rowstride, has_alpha, bits_per_sample, channels,
     /// data length)` of the `image-data` hint.
-    pub(super) image: Option<RecordedImage>,
-    pub(super) expire_timeout: i32,
-    pub(super) assigned_id: u32,
+    pub image: Option<RecordedImage>,
+    pub expire_timeout: i32,
+    pub assigned_id: u32,
 }
 
 /// The `image-data` hint's `(iiibiiay)` structure, summarised.
@@ -554,7 +553,7 @@ pub(super) async fn serve_fake_daemon(
 
 /// A connected client and fake-daemon pair over a socket pair, plus the
 /// daemon's record of the calls it served.
-pub(super) struct Rig {
+pub struct Rig {
     pub(super) client: Connection,
     pub(super) daemon: Connection,
     pub(super) log: Arc<DaemonLog>,
@@ -646,7 +645,7 @@ pub(super) fn bus_rig(
 }
 
 impl Rig {
-    pub(super) fn recorded(&self) -> Vec<RecordedNotify> {
+    pub fn recorded(&self) -> Vec<RecordedNotify> {
         self.log
             .notifies
             .lock()
@@ -780,7 +779,7 @@ pub(super) fn next_event(handle: &Osc99DbusHandle) -> Result<Osc99DbusEvent, Box
 }
 
 /// The instance a test closes to prove nothing else is queued.
-pub(super) const SENTINEL: Osc99InstanceId = Osc99InstanceId(u64::MAX);
+pub(super) const SENTINEL: Osc99InstanceId = Osc99InstanceId::new(u64::MAX);
 
 /// Prove that no event is queued behind the last one received.
 ///
@@ -790,7 +789,7 @@ pub(super) const SENTINEL: Osc99InstanceId = Osc99InstanceId(u64::MAX);
 /// if the next event is the sentinel's, nothing was queued before it. A
 /// signal still travelling through a pump is not covered, so a test that
 /// ignores signals orders a later, observable signal behind them instead.
-pub(super) fn assert_no_queued_events(handle: &mut Osc99DbusHandle) -> TestResult {
+pub fn assert_no_queued_events(handle: &mut Osc99DbusHandle) -> TestResult {
     assert_eq!(handle.close(SENTINEL), Osc99SystemDispatch::Queued);
     assert_eq!(
         next_event(handle)?,
@@ -828,7 +827,7 @@ pub(super) fn spawn_on(
 
 /// Start the service against a fresh peer-to-peer rig and consume the
 /// `Capabilities` event, so a test begins with an empty event queue.
-pub(super) fn started(
+pub fn started(
     advertised: &[&str],
 ) -> Result<(Rig, Osc99DbusHandle, Receiver<()>), Box<dyn Error>> {
     started_with(rig(advertised)?)

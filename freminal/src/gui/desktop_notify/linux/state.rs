@@ -14,13 +14,11 @@ use std::time::{Duration, Instant};
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
 use zbus::Connection;
 
-use crate::gui::desktop_notify::{
-    Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99DecodedIconCache, Osc99IconImage,
-    Osc99IconLookup, Osc99SoundHint, category_hint, decode_icon_image, escape_body_markup,
-    sound_hint,
+use super::super::presentation::{
+    Osc99DecodedIconCache, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint,
+    decode_icon_image, escape_body_markup, sound_hint,
 };
-use crate::gui::osc99::Osc99InstanceId;
-
+use super::super::{Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId};
 use super::plain::PlainNotification;
 use super::pump::PumpSignal;
 use super::wire::{
@@ -555,7 +553,7 @@ impl DispatcherState {
             })
             .map(|(instance, _)| *instance)
             .collect();
-        gone.sort_by_key(|instance| instance.0);
+        gone.sort_by_key(|instance| instance.get());
         gone.into_iter()
             .map(|instance| {
                 self.forget_instance(instance);
@@ -572,7 +570,7 @@ impl DispatcherState {
         self.by_dbus_id.clear();
         let mut instances: Vec<Osc99InstanceId> =
             self.by_instance.drain().map(|(i, _)| i).collect();
-        instances.sort_by_key(|instance| instance.0);
+        instances.sort_by_key(|instance| instance.get());
         instances
             .into_iter()
             .map(|instance| Osc99DbusEvent::Closed { instance })
@@ -587,7 +585,7 @@ impl Default for DispatcherState {
         Self::new(
             Osc99SignalSender::Unfiltered,
             Box::new(super::test_rig::NoIconLookup),
-            crate::gui::desktop_notify::test_support::test_assets().app_icon_png,
+            super::super::test_support::test_assets().app_icon_png,
         )
     }
 }
@@ -602,12 +600,12 @@ mod tests {
         Notification99Data, NotificationUrgency, Osc99Sound,
     };
 
+    use super::super::super::presentation::Osc99SoundHint;
+    use super::super::super::test_support::test_assets;
     use super::super::pump::PumpKind;
     use super::super::test_rig::*;
     use super::super::wire::NotifyImage;
     use super::*;
-    use crate::gui::desktop_notify::Osc99SoundHint;
-    use crate::gui::desktop_notify::test_support::test_assets;
 
     // ── DispatcherState ─────────────────────────────────────────────────
 

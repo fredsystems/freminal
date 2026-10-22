@@ -99,7 +99,7 @@ impl Osc99Wake {
         self.lock_targets().preferred = Some(window);
     }
 
-    /// A waker for [`Osc99DbusService::spawn`](super::Osc99DbusService::spawn).
+    /// A waker for [`Osc99DbusService::spawn`](crate::gui::desktop_notify::Osc99DbusService::spawn).
     pub fn waker(&self) -> Box<dyn Fn() + Send> {
         let shared = Arc::clone(&self.shared);
         Box::new(move || shared.wake())

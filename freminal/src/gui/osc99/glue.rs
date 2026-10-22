@@ -27,15 +27,18 @@ use freminal_common::config::NotificationsConfig;
 use freminal_windowing::WindowId;
 use tracing::trace;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use super::Osc99DbusHandle;
 use super::{
-    NoSystemBackend, Osc99Effect, Osc99EffectSink, Osc99IconCache, Osc99Origin, Osc99Registry,
-    Osc99Request, Osc99SystemBackend, apply_osc99_effects,
+    Osc99Effect, Osc99EffectSink, Osc99IconCache, Osc99Origin, Osc99Registry, Osc99Request,
+    apply_osc99_effects,
 };
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
-use crate::gui::desktop_notify::{NoUntrackedBackend, Osc99LinuxDaemon, Osc99UntrackedBackend};
+use crate::gui::desktop_notify::{
+    NoSystemBackend, NoUntrackedBackend, Osc99LinuxDaemon, Osc99SystemBackend,
+    Osc99UntrackedBackend,
+};
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::gui::desktop_notify::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService};
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::host_capabilities::PlainNotifyEntry;
 use crate::gui::notifications::{NotificationRouter, SystemNotifySink};
@@ -318,14 +321,14 @@ fn record_daemon_state(
 /// the caller holds.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn deliver_system_events(
-    events: Vec<super::Osc99DbusEvent>,
+    events: Vec<Osc99DbusEvent>,
     daemon: &std::cell::Cell<Osc99LinuxDaemon>,
     config: &freminal_common::config::Config,
     registry: &mut Osc99Registry,
     sink: &mut Osc99EffectSink<'_>,
     mut broadcast: impl FnMut(freminal_common::host_capabilities::HostCapabilities),
 ) {
-    use super::{Osc99DbusEvent, Osc99SystemLegEvent};
+    use super::Osc99SystemLegEvent;
 
     let mut effects = Vec::new();
     for event in events {
@@ -335,10 +338,9 @@ fn deliver_system_events(
                 continue;
             }
             Osc99DbusEvent::ShowFailed { instance } => (instance, Osc99SystemLegEvent::ShowFailed),
-            Osc99DbusEvent::Activated { instance, action } => (
-                instance,
-                Osc99SystemLegEvent::Activated(action.to_leg_activation()),
-            ),
+            Osc99DbusEvent::Activated { instance, action } => {
+                (instance, Osc99SystemLegEvent::Activated(action.into()))
+            }
             Osc99DbusEvent::Closed { instance } => (instance, Osc99SystemLegEvent::Closed),
             Osc99DbusEvent::Capabilities(capabilities) => {
                 tracing::debug!(
@@ -676,7 +678,7 @@ impl FreminalGui {
             tracing::warn!("OSC 99: toast stack or registry busy; system events deferred");
             return;
         };
-        let events: Vec<super::Osc99DbusEvent> = match self.osc99_dbus.try_borrow() {
+        let events: Vec<Osc99DbusEvent> = match self.osc99_dbus.try_borrow() {
             Ok(slot) => slot
                 .as_ref()
                 .map_or_else(Vec::new, |handle| handle.try_events().collect()),
@@ -720,9 +722,9 @@ impl FreminalGui {
     /// Start the service, whose events are drained by the frame loop and whose
     /// every event wakes an idle window.
     #[cfg(all(unix, not(target_os = "macos")))]
-    fn spawn_osc99_dbus(&self) -> super::Osc99DbusHandle {
+    fn spawn_osc99_dbus(&self) -> Osc99DbusHandle {
         tracing::debug!("starting the desktop-notification service");
-        super::Osc99DbusService::spawn(
+        Osc99DbusService::spawn(
             self.osc99_wake.waker(),
             crate::gui::app_icon::notify_assets(),
         )
@@ -882,13 +884,15 @@ mod tests {
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
     use super::*;
+    use crate::gui::desktop_notify::Osc99InstanceId;
+    use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
     use crate::gui::desktop_notify::test_support::RecordingUntrackedBackend;
-    use crate::gui::notifications::Osc99Control;
     #[cfg(all(unix, not(target_os = "macos")))]
-    use crate::gui::osc99::dbus_service::{DetachedQueue, detached_handle};
+    use crate::gui::desktop_notify::test_support::{DetachedQueue, detached_handle};
+    use crate::gui::notifications::Osc99Control;
     use crate::gui::osc99::{
-        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99InstanceId, Osc99PaneState,
-        PaneKeyboardFocus, PaneVisibility, RecordingSystemBackend,
+        Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneState,
+        PaneKeyboardFocus, PaneVisibility, instance_toast_key,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
 
@@ -1183,11 +1187,11 @@ mod tests {
         // `Closed`, which the next delivery hands to the registry.
         let toast_events = vec![
             crate::gui::toast::ToastEvent {
-                key: instance.to_toast_key(),
+                key: instance_toast_key(instance),
                 kind: crate::gui::toast::ToastEventKind::Activated,
             },
             crate::gui::toast::ToastEvent {
-                key: instance.to_toast_key(),
+                key: instance_toast_key(instance),
                 kind: crate::gui::toast::ToastEventKind::Closed,
             },
         ];
@@ -1313,7 +1317,7 @@ mod tests {
         let notifications = config(NotificationRouting::Toast);
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
 
-        rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.close_keyed(instance_toast_key(instance));
         rig.toasts.finish_closing_fades();
         rig.deliver_toast_events();
 
@@ -1336,7 +1340,7 @@ mod tests {
         let mut rig = Rig::new();
         let notifications = config(NotificationRouting::Toast);
         let instance = route_and_show(&mut rig, &display(&pane, reporting("a")), &notifications);
-        rig.toasts.close_keyed(instance.to_toast_key());
+        rig.toasts.close_keyed(instance_toast_key(instance));
         rig.toasts.finish_closing_fades();
 
         rig.deliver_toast_events();
@@ -1369,8 +1373,10 @@ mod tests {
         use freminal_common::config::Config;
 
         use super::*;
-        use crate::gui::desktop_notify::{Osc99DaemonCapabilities, Osc99DaemonSupport};
-        use crate::gui::osc99::{Osc99DbusEvent, Osc99Leg, dbus_service::Osc99SystemAction};
+        use crate::gui::desktop_notify::{
+            Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99DbusEvent, Osc99SystemAction,
+        };
+        use crate::gui::osc99::Osc99Leg;
         use freminal_common::host_capabilities::HostCapabilities;
 
         fn system_config() -> NotificationsConfig {

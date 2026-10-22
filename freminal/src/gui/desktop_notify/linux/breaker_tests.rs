@@ -17,13 +17,13 @@ use std::time::Instant;
 use crossbeam_channel::Receiver;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 
+use super::super::Osc99SystemBackend;
 use super::state::{CloseTarget, DaemonGate, DispatcherState};
 use super::test_rig::*;
 use super::{
     EventSink, Osc99DbusEvent, close_instance, close_replaced, refresh_capabilities,
     show_notification,
 };
-use crate::gui::osc99::Osc99SystemBackend;
 
 /// A rig, a state whose breaker is open, and a sink with the receiver of what
 /// it emits.

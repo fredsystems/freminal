@@ -53,13 +53,13 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
 use super::desktop_notify::Osc99LinuxDaemon;
+#[cfg(all(unix, not(target_os = "macos")))]
+use super::desktop_notify::{PlainNotification, PlainNotifySender};
 use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
     Osc99Registry, Osc99Request, PaneKeyboardFocus, PaneVisibility,
 };
-#[cfg(all(unix, not(target_os = "macos")))]
-use super::osc99::{PlainNotification, PlainNotifySender};
 use super::toast::{ToastKind, ToastStack};
 
 /// A fully-formed notification ready to be routed.
@@ -1139,12 +1139,12 @@ impl NotificationRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::desktop_notify::NoUntrackedBackend;
+    use crate::gui::desktop_notify::{NoSystemBackend, NoUntrackedBackend, Osc99SystemBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::host_capabilities::{PlainNotifyEntry, plain_notifications_may_use_system_leg};
     use crate::gui::osc99::{
-        NoSystemBackend, Osc99ControlRequest, Osc99EffectSink, Osc99Filter, Osc99IconPrime,
-        Osc99Origin, Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
+        Osc99ControlRequest, Osc99EffectSink, Osc99Filter, Osc99IconPrime, Osc99Origin,
+        apply_osc99_effects, osc99_toast_spec,
     };
     use freminal_common::buffer_states::osc99_notification::{
         NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
@@ -1389,7 +1389,8 @@ mod tests {
         };
 
         // Escaping depends on the daemon's capabilities, so the service does
-        // it (see `dbus_service::state`); the mapping must not.
+        // it (see the notification service's `state` module); the mapping must
+        // not.
         let plain = req.plain_notification();
         assert_eq!(plain.summary, text);
         assert_eq!(plain.body, text);
@@ -1512,7 +1513,7 @@ mod tests {
     /// application icon by name so desktop notifications show the app icon.
     /// The name matches `assets/freminal.desktop`'s `Icon=freminal`. (On
     /// Linux/BSD the D-Bus service sends the same name, plus the icon itself
-    /// as `image-data`; see `dbus_service::plain`.)
+    /// as `image-data`; see the notification service's `plain` module.)
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_notification_sets_freminal_icon() {
@@ -3136,7 +3137,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_with_the_bus_down_registers_and_shows_the_toast_leg_only() {
-        use crate::gui::osc99::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::SystemWhenUnfocused,
@@ -3399,7 +3400,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_system_routing_shows_through_the_system_backend() {
-        use crate::gui::osc99::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -3443,7 +3444,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_hands_resolved_icon_bytes_to_the_system_backend() {
-        use crate::gui::osc99::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -3491,7 +3492,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_toast_routing_does_not_touch_the_system_backend() {
-        use crate::gui::osc99::RecordingSystemBackend;
+        use crate::gui::desktop_notify::test_support::RecordingSystemBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::Toast,
@@ -3582,5 +3583,143 @@ mod tests {
             Err(crossbeam_channel::RecvTimeoutError::Disconnected)
         ));
         assert!(weak.upgrade().is_none());
+    }
+
+    /// End to end: the router, through the sink, to the fake daemon.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    mod fake_daemon {
+        use super::*;
+        use crate::gui::desktop_notify::test_support::{
+            TestResult, assert_no_queued_events, started,
+        };
+
+        fn notifications(routing: NotificationRouting) -> NotificationsConfig {
+            NotificationsConfig {
+                enabled: true,
+                routing_osc_text: routing,
+                routing_error: routing,
+                routing_command_finished: routing,
+                ..NotificationsConfig::default()
+            }
+        }
+
+        #[test]
+        fn an_osc_9_request_routed_to_system_is_one_escaped_notify_with_normal_urgency()
+        -> TestResult {
+            let (rig, mut handle, _woken) = started(&["body", "body-markup"])?;
+            let request = NotificationRequest {
+                kind: NotificationKind::OscText,
+                source: Some(OscNotifySource::Osc9),
+                title: Some("a<b>".to_owned()),
+                body: "x & y".to_owned(),
+            };
+            let mut toasts = ToastStack::default();
+
+            NotificationRouter::route(
+                &request,
+                &notifications(NotificationRouting::System),
+                false,
+                &mut toasts,
+                &SystemNotifySink::through(handle.plain_sender()),
+            );
+            assert_no_queued_events(&mut handle)?;
+
+            let recorded = rig.recorded();
+            assert_eq!(recorded.len(), 1, "exactly one Notify call");
+            assert_eq!(recorded[0].summary, "a<\u{200c}b>");
+            assert_eq!(recorded[0].body, "x &\u{200c} y");
+            assert_eq!(recorded[0].urgency, Some(1));
+            assert_eq!(toasts.len(), 0, "System routing pushes no toast");
+            Ok(())
+        }
+
+        #[test]
+        fn an_error_request_routed_through_its_category_has_critical_urgency() -> TestResult {
+            let (rig, mut handle, _woken) = started(&["body"])?;
+            let request = NotificationRequest {
+                kind: NotificationKind::Error,
+                source: None,
+                title: None,
+                body: "exit 2".to_owned(),
+            };
+            let config = NotificationsConfig {
+                routing_error: NotificationRouting::System,
+                routing_osc_text: NotificationRouting::Disabled,
+                ..notifications(NotificationRouting::Disabled)
+            };
+
+            NotificationRouter::route(
+                &request,
+                &config,
+                false,
+                &mut ToastStack::default(),
+                &SystemNotifySink::through(handle.plain_sender()),
+            );
+            assert_no_queued_events(&mut handle)?;
+
+            let recorded = rig.recorded();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].summary, "Error");
+            assert_eq!(recorded[0].body, "exit 2");
+            assert_eq!(recorded[0].urgency, Some(2));
+            Ok(())
+        }
+
+        #[test]
+        fn the_test_button_shows_a_notification_even_with_the_master_switch_off() -> TestResult {
+            let (rig, mut handle, _woken) = started(&["body"])?;
+            let config = NotificationsConfig {
+                enabled: false,
+                ..notifications(NotificationRouting::System)
+            };
+            let sink = SystemNotifySink::through(handle.plain_sender());
+            let request = NotificationRequest::sample();
+
+            // `route` honours the master switch: nothing is shown.
+            NotificationRouter::route(&request, &config, true, &mut ToastStack::default(), &sink);
+            assert_no_queued_events(&mut handle)?;
+            assert_eq!(rig.recorded(), []);
+
+            NotificationRouter::route_test(
+                &request,
+                &config,
+                true,
+                &mut ToastStack::default(),
+                &sink,
+            );
+            assert_no_queued_events(&mut handle)?;
+
+            let recorded = rig.recorded();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].summary, "Freminal");
+            assert_eq!(recorded[0].body, "Test notification");
+            assert_eq!(recorded[0].urgency, Some(1));
+            Ok(())
+        }
+
+        #[test]
+        fn toast_only_routing_never_reaches_the_daemon() -> TestResult {
+            let (rig, mut handle, _woken) = started(&["body"])?;
+            let request = NotificationRequest {
+                kind: NotificationKind::OscText,
+                source: Some(OscNotifySource::Osc9),
+                title: Some("Hello".to_owned()),
+                body: "world".to_owned(),
+            };
+            let mut toasts = ToastStack::default();
+
+            NotificationRouter::route(
+                &request,
+                &notifications(NotificationRouting::Toast),
+                false,
+                &mut toasts,
+                &SystemNotifySink::through(handle.plain_sender()),
+            );
+            assert_no_queued_events(&mut handle)?;
+
+            assert_eq!(toasts.len(), 1, "the toast leg ran");
+            assert_eq!(rig.recorded(), [], "the system leg did not");
+            Ok(())
+        }
     }
 }

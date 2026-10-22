@@ -8,7 +8,7 @@ use crate::gui::font_manager::bundled_regular_font_bytes;
 
 /// freminal's application icon, the one PNG embedded in the binary. It is the
 /// OS window icon (`run`) and, on Linux/BSD, the picture of every plain
-/// desktop notification (`osc99::dbus_service`).
+/// desktop notification (through `notify_assets`).
 pub(in crate::gui) static FREMINAL_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
 
 /// The bytes the desktop-notification backends draw with: the application icon

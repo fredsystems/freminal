@@ -241,19 +241,15 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crossbeam_channel::Receiver;
-    use freminal_common::buffer_states::osc::OscNotifySource;
-    use freminal_common::buffer_states::window_manipulation::NotificationKind;
-    use freminal_common::config::{NotificationRouting, NotificationsConfig};
 
+    use super::super::super::test_support::test_assets;
+    use super::super::super::{
+        Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99SystemBackend, Osc99SystemDispatch,
+    };
     use super::super::state::OwnerTracking;
     use super::super::test_rig::*;
     use super::super::{Osc99DbusEvent, start};
     use super::*;
-    use crate::gui::desktop_notify::test_support::test_assets;
-    use crate::gui::desktop_notify::{Osc99DaemonCapabilities, Osc99DaemonSupport};
-    use crate::gui::notifications::{NotificationRequest, NotificationRouter, SystemNotifySink};
-    use crate::gui::osc99::{Osc99SystemBackend, Osc99SystemDispatch};
-    use crate::gui::toast::ToastStack;
 
     fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {
         PlainNotification {
@@ -487,130 +483,6 @@ mod tests {
         state.note_call(&Ok::<(), zbus::Error>(()), Instant::now());
         show_plain(&rig.client, &mut state, &notification);
         assert_eq!(rig.recorded().len(), 1);
-        Ok(())
-    }
-
-    // ── End to end: the router, through the sink, to the fake daemon ────
-
-    fn notifications(routing: NotificationRouting) -> NotificationsConfig {
-        NotificationsConfig {
-            enabled: true,
-            routing_osc_text: routing,
-            routing_error: routing,
-            routing_command_finished: routing,
-            ..NotificationsConfig::default()
-        }
-    }
-
-    #[test]
-    fn an_osc_9_request_routed_to_system_is_one_escaped_notify_with_normal_urgency() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body", "body-markup"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::OscText,
-            source: Some(OscNotifySource::Osc9),
-            title: Some("a<b>".to_owned()),
-            body: "x & y".to_owned(),
-        };
-        let mut toasts = ToastStack::default();
-
-        NotificationRouter::route(
-            &request,
-            &notifications(NotificationRouting::System),
-            false,
-            &mut toasts,
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1, "exactly one Notify call");
-        assert_eq!(recorded[0].summary, "a<\u{200c}b>");
-        assert_eq!(recorded[0].body, "x &\u{200c} y");
-        assert_eq!(recorded[0].urgency, Some(1));
-        assert_eq!(toasts.len(), 0, "System routing pushes no toast");
-        Ok(())
-    }
-
-    #[test]
-    fn an_error_request_routed_through_its_category_has_critical_urgency() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::Error,
-            source: None,
-            title: None,
-            body: "exit 2".to_owned(),
-        };
-        let config = NotificationsConfig {
-            routing_error: NotificationRouting::System,
-            routing_osc_text: NotificationRouting::Disabled,
-            ..notifications(NotificationRouting::Disabled)
-        };
-
-        NotificationRouter::route(
-            &request,
-            &config,
-            false,
-            &mut ToastStack::default(),
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].summary, "Error");
-        assert_eq!(recorded[0].body, "exit 2");
-        assert_eq!(recorded[0].urgency, Some(2));
-        Ok(())
-    }
-
-    #[test]
-    fn the_test_button_shows_a_notification_even_with_the_master_switch_off() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let config = NotificationsConfig {
-            enabled: false,
-            ..notifications(NotificationRouting::System)
-        };
-        let sink = SystemNotifySink::through(handle.plain_sender());
-        let request = NotificationRequest::sample();
-
-        // `route` honours the master switch: nothing is shown.
-        NotificationRouter::route(&request, &config, true, &mut ToastStack::default(), &sink);
-        assert_no_queued_events(&mut handle)?;
-        assert_eq!(rig.recorded(), []);
-
-        NotificationRouter::route_test(&request, &config, true, &mut ToastStack::default(), &sink);
-        assert_no_queued_events(&mut handle)?;
-
-        let recorded = rig.recorded();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].summary, "Freminal");
-        assert_eq!(recorded[0].body, "Test notification");
-        assert_eq!(recorded[0].urgency, Some(1));
-        Ok(())
-    }
-
-    #[test]
-    fn toast_only_routing_never_reaches_the_daemon() -> TestResult {
-        let (rig, mut handle, _woken) = started(&["body"])?;
-        let request = NotificationRequest {
-            kind: NotificationKind::OscText,
-            source: Some(OscNotifySource::Osc9),
-            title: Some("Hello".to_owned()),
-            body: "world".to_owned(),
-        };
-        let mut toasts = ToastStack::default();
-
-        NotificationRouter::route(
-            &request,
-            &notifications(NotificationRouting::Toast),
-            false,
-            &mut toasts,
-            &SystemNotifySink::through(handle.plain_sender()),
-        );
-        assert_no_queued_events(&mut handle)?;
-
-        assert_eq!(toasts.len(), 1, "the toast leg ran");
-        assert_eq!(rig.recorded(), [], "the system leg did not");
         Ok(())
     }
 

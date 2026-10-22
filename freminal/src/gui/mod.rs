@@ -59,6 +59,8 @@ mod layout_ops;
 mod link_open;
 mod menu;
 mod notifications;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod notify_wake;
 mod osc99;
 pub mod paste_guard;
 mod platform;
@@ -443,7 +445,7 @@ struct FreminalGui {
     /// rest of the process (dropping it stops the service). `None` until then.
     /// Single-threaded GUI, so `RefCell` suffices.
     #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,
+    osc99_dbus: std::cell::RefCell<Option<desktop_notify::Osc99DbusHandle>>,
 
     /// The macOS and Windows fire-and-forget desktop notification, which owns
     /// the OSC 99 icon temp files and deletes them when it is dropped (the
@@ -456,7 +458,7 @@ struct FreminalGui {
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
     #[cfg(all(unix, not(target_os = "macos")))]
-    osc99_wake: osc99::Osc99Wake,
+    osc99_wake: notify_wake::Osc99Wake,
 
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
@@ -667,7 +669,7 @@ impl FreminalGui {
             #[cfg(all(unix, not(target_os = "macos")))]
             osc99_dbus: std::cell::RefCell::new(None),
             #[cfg(all(unix, not(target_os = "macos")))]
-            osc99_wake: osc99::Osc99Wake::default(),
+            osc99_wake: notify_wake::Osc99Wake::default(),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

@@ -19,8 +19,6 @@
 //!   events and drains focus requests, and the plain-input functions it is
 //!   built from.
 
-#[cfg(all(unix, not(target_os = "macos")))]
-mod dbus_service;
 mod effects;
 mod filter;
 mod glue;
@@ -35,21 +33,13 @@ use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_terminal_emulator::io::InputEvent;
 
+use crate::gui::desktop_notify::Osc99InstanceId;
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::gui::desktop_notify::Osc99SystemAction;
 use crate::gui::notifications::Osc99Control;
 use crate::gui::toast::{ToastEventKind, ToastKey};
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use dbus_service::{
-    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake, PlainNotification,
-    PlainNotifySender,
-};
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use effects::Osc99SystemDispatch;
-pub use effects::{
-    NoSystemBackend, Osc99Effect, Osc99EffectSink, Osc99SystemBackend, apply_osc99_effects,
-};
-#[cfg(test)]
-pub use effects::{RecordedShow, RecordingSystemBackend};
+pub use effects::{Osc99Effect, Osc99EffectSink, apply_osc99_effects};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub(in crate::gui) use glue::Osc99CellAccess;
 pub use icon_cache::Osc99IconCache;
@@ -60,28 +50,18 @@ pub use pane_state::{
 pub use registry::Osc99Registry;
 pub use toast_spec::{Osc99ToastSpec, osc99_toast_spec};
 
-/// The registry's identity for one displayed notification.
-///
-/// Unlike the application's `i=` id (which may be absent, reused, or shared
-/// by different panes), an instance id is unique for the process lifetime and
-/// is minted by [`Osc99Registry::register`]. The toast leg uses the raw value
-/// as its [`ToastKey`] (see [`Self::to_toast_key`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Osc99InstanceId(u64);
+/// The [`ToastKey`] an instance's toast is pushed with: the instance's raw
+/// value.
+#[must_use]
+pub const fn instance_toast_key(instance: Osc99InstanceId) -> ToastKey {
+    ToastKey(instance.get())
+}
 
-impl Osc99InstanceId {
-    /// The [`ToastKey`] the instance's toast is pushed with.
-    #[must_use]
-    pub const fn to_toast_key(self) -> ToastKey {
-        ToastKey(self.0)
-    }
-
-    /// The instance a toast event's key refers to (the inverse of
-    /// [`Self::to_toast_key`]).
-    #[must_use]
-    pub const fn from_toast_key(key: ToastKey) -> Self {
-        Self(key.0)
-    }
+/// The instance a toast event's key refers to (the inverse of
+/// [`instance_toast_key`]).
+#[must_use]
+pub const fn instance_from_toast_key(key: ToastKey) -> Osc99InstanceId {
+    Osc99InstanceId::new(key.0)
 }
 
 /// Where a notification was shown.
@@ -121,6 +101,17 @@ pub enum Osc99SystemLegEvent {
     Closed,
     /// The daemon never displayed the notification.
     ShowFailed,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl From<Osc99SystemAction> for Osc99LegActivation {
+    /// The registry's vocabulary for the same activation.
+    fn from(action: Osc99SystemAction) -> Self {
+        match action {
+            Osc99SystemAction::Default => Self::Body,
+            Osc99SystemAction::Button(n) => Self::Button(n),
+        }
+    }
 }
 
 impl Osc99LegActivation {
@@ -200,4 +191,21 @@ pub enum Osc99Request {
     Control(Osc99ControlRequest),
     /// Icon bytes for the `g=` cache.
     PrimeIcon(Osc99IconPrime),
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_actions_map_to_the_registry_activations() {
+        assert_eq!(
+            Osc99LegActivation::from(Osc99SystemAction::Default),
+            Osc99LegActivation::Body
+        );
+        assert_eq!(
+            Osc99LegActivation::from(Osc99SystemAction::Button(3)),
+            Osc99LegActivation::Button(3)
+        );
+    }
 }

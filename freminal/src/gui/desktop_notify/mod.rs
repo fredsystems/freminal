@@ -9,12 +9,15 @@
 //! The module is designed as if it were a crate. Outside code uses only the
 //! items re-exported from this file, and nothing reaches into a submodule. It
 //! is planned to become the `freminal-notify` crate, so it may depend only on
-//! `freminal_common` and external crates: no `crate::gui::...`, no egui, no
+//! `freminal_common` and external crates: nothing from the rest of `gui`, no egui, no
 //! `freminal_windowing` and no `freminal_terminal_emulator`.
 
 mod assets;
+mod backend;
 mod capabilities;
 mod icons;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod markup;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -23,24 +26,26 @@ mod standard_icon;
 mod untracked;
 
 pub use assets::NotifyAssets;
+pub use backend::{NoSystemBackend, Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub use capabilities::Osc99DaemonCapabilities;
 pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use linux::{
+    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99SystemAction, PlainNotification,
+    PlainNotifySender,
+};
 pub use standard_icon::StandardIcon;
 pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
-
-// Used by osc99::dbus_service until it moves here (150.4b).
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use icons::lookup::XdgIconLookup;
-#[cfg(all(unix, not(target_os = "macos")))]
-pub use presentation::{
-    Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
-    category_hint, choose_icon, decode_icon_image, escape_body_markup, sound_hint,
-};
 
 /// Test doubles and fixtures for the callers' tests.
 #[cfg(test)]
 pub mod test_support {
     pub use super::assets::test_assets;
+    pub use super::backend::{RecordedShow, RecordingSystemBackend};
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub use super::linux::test_rig::{TestResult, assert_no_queued_events, started};
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub use super::linux::{DetachedQueue, detached_handle};
     pub use super::untracked::RecordingUntrackedBackend;
 }

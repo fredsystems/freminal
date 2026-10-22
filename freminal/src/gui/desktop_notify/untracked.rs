@@ -4,8 +4,8 @@
 //! macOS and Windows give a background thread no way to observe a
 //! notification being activated or closed (the macOS callbacks need the main
 //! run loop), so on those platforms the system leg is fire-and-forget. The
-//! registry models that as [`Osc99Leg::UntrackedSystem`](crate::gui::osc99::Osc99Leg):
-//! it emits [`Osc99Effect::ShowUntrackedSystem`](crate::gui::osc99::Osc99Effect), answers
+//! registry models that as `Osc99Leg::UntrackedSystem`:
+//! it emits `Osc99Effect::ShowUntrackedSystem`, answers
 //! a `c=1` request with `untracked` at once, and never waits for the leg.
 //!
 //! The executor shows the notification through an [`Osc99UntrackedBackend`]:

@@ -85,9 +85,10 @@ use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 #[cfg(all(unix, not(target_os = "macos")))]
 use super::Osc99SystemLegEvent;
 use super::{
-    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99InstanceId, Osc99Leg, Osc99LegActivation,
-    Osc99Origin, osc99_toast_spec,
+    Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99Leg, Osc99LegActivation, Osc99Origin,
+    instance_from_toast_key, osc99_toast_spec,
 };
+use crate::gui::desktop_notify::Osc99InstanceId;
 use crate::gui::panes::PaneId;
 use crate::gui::toast::ToastEvent;
 
@@ -271,7 +272,7 @@ impl Osc99Instance {
     /// Record in the trace log that this instance left the registry.
     fn log_forgotten(&self, why: &'static str) {
         tracing::trace!(
-            instance = self.instance.0,
+            instance = self.instance.get(),
             id = ?self.id,
             origin = ?self.origin,
             activation_focus = ?self.activation_focus,
@@ -356,7 +357,7 @@ impl Osc99Registry {
         let (replaces_toast, replaces_linux) =
             self.forget_replaced(origin, data.id.as_deref(), legs, &mut effects);
 
-        let instance = Osc99InstanceId(self.next_instance);
+        let instance = Osc99InstanceId::new(self.next_instance);
         self.next_instance = self.next_instance.wrapping_add(1);
 
         let mut deduped: Vec<Osc99Leg> = Vec::with_capacity(legs.len());
@@ -643,7 +644,7 @@ impl Osc99Registry {
     /// - `Closed` closes the toast leg; once no leg is open the instance is
     ///   forgotten and a close report is sent when owed.
     pub fn on_toast_event(&mut self, event: ToastEvent) -> Vec<Osc99Effect> {
-        let instance = Osc99InstanceId::from_toast_key(event.key);
+        let instance = instance_from_toast_key(event.key);
         match Osc99LegActivation::from_toast_event(event.kind) {
             Some(activation) => self.activate(instance, Osc99Leg::Toast, activation),
             None => self.close_leg(instance, Osc99Leg::Toast),
@@ -826,12 +827,15 @@ mod tests {
     use freminal_windowing::WindowId;
 
     use super::*;
-    use crate::gui::desktop_notify::test_support::RecordingUntrackedBackend;
-    use crate::gui::desktop_notify::{NoUntrackedBackend, Osc99UntrackedBackend};
+    use crate::gui::desktop_notify::test_support::{
+        RecordedShow, RecordingSystemBackend, RecordingUntrackedBackend,
+    };
+    use crate::gui::desktop_notify::{
+        NoSystemBackend, NoUntrackedBackend, Osc99SystemBackend, Osc99UntrackedBackend,
+    };
     use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
-        NoSystemBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec, RecordedShow,
-        RecordingSystemBackend, apply_osc99_effects,
+        Osc99EffectSink, Osc99ToastSpec, apply_osc99_effects, instance_toast_key,
     };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{
@@ -921,20 +925,20 @@ mod tests {
             registry.register(pane.origin, pane.weak(), data.clone(), legs, Instant::now());
         // The registry mints ids in order, whether or not it keeps the
         // instance (a display on the untracked leg alone is not kept).
-        let instance = Osc99InstanceId(registry.next_instance.wrapping_sub(1));
+        let instance = Osc99InstanceId::new(registry.next_instance.wrapping_sub(1));
         (effects, instance)
     }
 
     fn activated(instance: Osc99InstanceId) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Activated,
         }
     }
 
     fn closed(instance: Osc99InstanceId) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Closed,
         }
     }
@@ -1552,7 +1556,7 @@ mod tests {
 
     fn button_pressed(instance: Osc99InstanceId, n: u8) -> ToastEvent {
         ToastEvent {
-            key: instance.to_toast_key(),
+            key: instance_toast_key(instance),
             kind: ToastEventKind::Button(n),
         }
     }
@@ -1787,7 +1791,7 @@ mod tests {
         let (a, _b) = two_panes();
         let mut registry = Osc99Registry::default();
         let (_, instance) = register_with(&mut registry, &a, &data(Some("n")), &[Osc99Leg::Toast]);
-        let unknown = Osc99InstanceId::from_toast_key(ToastKey(instance.to_toast_key().0 + 1000));
+        let unknown = instance_from_toast_key(ToastKey(instance_toast_key(instance).0 + 1000));
 
         assert!(registry.on_toast_event(closed(unknown)).is_empty());
         assert!(registry.on_toast_event(activated(unknown)).is_empty());
@@ -2129,7 +2133,7 @@ mod tests {
             &data(Some("n")),
             &[Osc99Leg::LinuxSystem],
         );
-        let unknown = Osc99InstanceId(instance.0 + 1000);
+        let unknown = Osc99InstanceId::new(instance.get() + 1000);
 
         for event in [
             Osc99SystemLegEvent::Closed,
@@ -3331,7 +3335,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_ne!(
             events[0].key,
-            first.to_toast_key(),
+            instance_toast_key(first),
             "keyed by the new instance"
         );
         assert_eq!(events[0].kind, ToastEventKind::Closed);
