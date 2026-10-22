@@ -12,6 +12,7 @@ use freminal_common::config::Config;
 use freminal_windowing::{RepaintProxy, WindowId};
 use renderer::WindowPostRenderer;
 
+use super::app_icon::FREMINAL_ICON_PNG;
 use super::{FreminalGui, renderer};
 
 /// Launch the Freminal GUI application.
@@ -28,8 +29,7 @@ pub fn run(
     window_post: Arc<Mutex<WindowPostRenderer>>,
     recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
 ) -> Result<()> {
-    let icon_bytes = include_bytes!("../../../assets/icon.png");
-    let image = image::load_from_memory(icon_bytes)
+    let image = image::load_from_memory(FREMINAL_ICON_PNG)
         .map_err(|e| anyhow::anyhow!("Failed to load window icon: {e}"))?;
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();

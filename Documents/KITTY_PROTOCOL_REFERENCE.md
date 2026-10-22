@@ -1,6 +1,10 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
-Last updated: 2026-10-12 — Task 138 — the "Desktop notifications (OSC 99)"
+Last updated: 2026-10-22 — Task 149 — the OSC 99 "Legs" note records that the
+legacy OSC 9 / 777 / 133 `D` notifications share each platform's native
+backend, and that `notify-rust` is now macOS-only. No OSC 99 behaviour changes.
+
+Earlier: 2026-10-12 — Task 138 — the "Desktop notifications (OSC 99)"
 section is re-distilled from the kitty 0.49.2 page and rewritten to the shipped
 behaviour, which is conformant: the per-key and per-payload behaviour, the reply
 formats, the `p=?` answer per routing, platform and daemon, the leg capability
@@ -594,7 +598,10 @@ The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
   service (`osc99/dbus_service/`, `presentation.rs`, `icon_lookup.rs`,
   `icon_decode.rs`), and the untracked macOS/Windows backend
   (`osc99/untracked.rs`, `icon_raster.rs`, `icon_tempfiles.rs`,
-  `icon_decode.rs`).
+  `icon_decode.rs`). The Linux/BSD service and the macOS/Windows backends also
+  show the legacy OSC 9 / 777 / 133 `D` notifications (Task 149): macOS uses
+  `notify-rust` (a macOS-only dependency), Windows `tauri-winrt-notification`
+  and Linux/BSD the zbus service, so no other platform builds `notify-rust`.
 - **Routing and capabilities:** `route_osc99` in `freminal/src/gui/notifications.rs`
   applies the `o=` gate, the filters and `routing_osc99`; a frame's requests
   (displays, controls and icon primings) are routed strictly in arrival order by

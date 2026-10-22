@@ -1256,12 +1256,20 @@ impl FreminalGui {
                 // button is clicked, so route as focused.
                 let config = self.settings_modal.draft_notifications().clone();
                 let request = crate::gui::notifications::NotificationRequest::sample();
+                // The draft config decides whether the system leg is wanted, and
+                // the button ignores its master switch, so the notification
+                // service starts for the test even while `enabled` is off.
+                let system_notifications = self.system_notify_sink(
+                    &config,
+                    super::host_capabilities::PlainNotifyEntry::SettingsTest,
+                );
                 if let Ok(mut toasts) = self.toasts.try_borrow_mut() {
                     crate::gui::notifications::NotificationRouter::route_test(
                         &request,
                         &config,
                         true,
                         &mut toasts,
+                        &system_notifications,
                     );
                 }
             }

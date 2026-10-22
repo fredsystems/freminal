@@ -1,5 +1,15 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-22 — Task 149 (zbus 6 migration and per-platform
+notification backends, #567). No gap row is added or removed. OSC 9, OSC 777,
+OSC 133 `D` command-finished and OSC 99 desktop notifications now use one
+native backend per platform: freminal's own zbus 6 service on Linux/BSD,
+`tauri-winrt-notification` on Windows, and `notify-rust` on macOS only. The
+changes to their presentation (the Linux/BSD hints, escaping that follows the
+daemon's `body-markup` capability, a cap of 16 OSC 9 / 777 / 133 `D`
+notifications in flight, and Windows `Error` notifications as ordinary toasts)
+are recorded in `ESCAPE_SEQUENCE_COVERAGE.md`.
+
 Last updated: 2026-10-19 — Task 148 (security and fuzz findings remediation).
 No gap row is added or removed: every Task 148 change is a limit, policy or
 crash fix on an implemented sequence, recorded in `ESCAPE_SEQUENCE_COVERAGE.md`

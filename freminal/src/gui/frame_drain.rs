@@ -44,12 +44,13 @@
 //! per-frame `central_body` helpers would turn this module into a
 //! grab-bag instead of the one real concept above.
 
-use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
+use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::recording::RecordingSwap;
 use freminal_windowing::WindowId;
 use tracing::{error, trace};
 
+use super::notifications::SystemNotifySink;
 use super::osc99::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, TabActivity,
     WindowMinimized, ZoomOcclusion,
@@ -66,7 +67,7 @@ use super::{rendering, toast};
 /// boundary into [`drain_command_finished_events`], so a bare `bool`
 /// parameter is disallowed even though the value has exactly two states.
 /// [`crate::gui::notifications::NotificationRouter::route`] itself still
-/// takes a `bool` (that file is out of scope here), so call sites inside
+/// takes a `bool`, so call sites inside
 /// `drain_command_finished_events` and (across the module boundary)
 /// `FreminalGui::route_window_manipulation_events` convert back via
 /// [`Self::is_focused`].
@@ -124,6 +125,11 @@ pub(super) enum DeadPaneOutcome {
 /// `ctx.input(|i| i.focused)` — is hoisted to the caller and passed in as
 /// `window_focus`.
 ///
+/// `system_notifications` makes the [`SystemNotifySink`] that says where a
+/// system (desktop) notification goes to be shown. It is called at most once,
+/// and only when there is a command-finished notification to route, so a frame
+/// with none never touches the notification service.
+///
 /// The notification routing pass deliberately stays inside this function,
 /// running *after* the per-tab drain loop over `tabs` and never
 /// interleaved with it: `toasts` needs a mutable borrow that must not
@@ -131,12 +137,12 @@ pub(super) enum DeadPaneOutcome {
 /// phases or interleave routing into the loop.
 pub(super) fn drain_command_finished_events(
     tabs: &mut TabManager,
-    tab_title_policy: TabTitlePolicy,
-    tab_title_separator: &str,
+    tab_title: &TabTitleConfig,
     notifications_config: &NotificationsConfig,
     bell_config: &BellConfig,
     window_focus: WindowFocus,
     toasts: &std::cell::RefCell<toast::ToastStack>,
+    system_notifications: impl FnOnce() -> SystemNotifySink,
 ) {
     let active_tab_idx = tabs.active_index();
     let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> = Vec::new();
@@ -148,7 +154,7 @@ pub(super) fn drain_command_finished_events(
         // inner loop. Used for the `{tab_name}` notification template
         // token (Task 76.5).
         let tab_name = tab
-            .display_name(tab_title_policy, tab_title_separator)
+            .display_name(tab_title.policy, &tab_title.separator)
             .into_owned();
         if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
             for pane in panes {
@@ -210,12 +216,14 @@ pub(super) fn drain_command_finished_events(
     if !command_notifications.is_empty()
         && let Ok(mut toasts) = toasts.try_borrow_mut()
     {
+        let system_notifications = system_notifications();
         for req in &command_notifications {
             crate::gui::notifications::NotificationRouter::route(
                 req,
                 notifications_config,
                 window_focus.is_focused(),
                 &mut toasts,
+                &system_notifications,
             );
         }
     }
@@ -540,6 +548,7 @@ mod tests {
         DeadPaneOutcome, WindowFocus, drain_command_finished_events,
         drain_window_manipulation_commands, osc99_pane_state,
     };
+    use crate::gui::notifications::SystemNotifySink;
     use crate::gui::osc99::{
         Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
     };
@@ -554,7 +563,7 @@ mod tests {
     };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-    use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
+    use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
     use freminal_terminal_emulator::io::WindowCommand;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_windowing::WindowId;
@@ -715,12 +724,12 @@ mod tests {
 
         drain_command_finished_events(
             &mut tabs,
-            TabTitlePolicy::default(),
-            "",
+            &TabTitleConfig::default(),
             &notifications_config,
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
+            SystemNotifySink::none,
         );
 
         let Some(active_tab) = tabs.iter().next() else {
@@ -775,12 +784,12 @@ mod tests {
         // rather than also overriding the routing policy.
         drain_command_finished_events(
             &mut tabs,
-            TabTitlePolicy::default(),
-            "",
+            &TabTitleConfig::default(),
             &notifications_config,
             &bell_config,
             WindowFocus::Focused,
             &toasts,
+            SystemNotifySink::none,
         );
 
         assert_eq!(
@@ -788,6 +797,63 @@ mod tests {
             Some(crate::gui::toast::ToastKind::Info),
             "a successful command-finished notification must land as an Info toast"
         );
+    }
+
+    /// Drain one finished command under `notifications_config` and return how
+    /// many times the sink provider was called.
+    fn sink_requests_for_one_finished_command(notifications_config: &NotificationsConfig) -> usize {
+        let mut ids = PaneIdGenerator::new(0);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let pane = test_pane(ids.next_id(), rx);
+        let mut tabs = TabManager::new(Tab::new(TabId::first(), pane));
+        if let Err(e) = tx.send(CommandFinishedEvent {
+            pane_id: 0,
+            block: finished_block(Some(0), 30),
+        }) {
+            panic!("send finished event: {e}");
+        }
+        let toasts = std::cell::RefCell::new(crate::gui::toast::ToastStack::default());
+        let requests = std::cell::Cell::new(0_usize);
+
+        drain_command_finished_events(
+            &mut tabs,
+            &TabTitleConfig::default(),
+            notifications_config,
+            &BellConfig::default(),
+            WindowFocus::Focused,
+            &toasts,
+            || {
+                requests.set(requests.get() + 1);
+                SystemNotifySink::none()
+            },
+        );
+        requests.get()
+    }
+
+    #[test]
+    fn drain_command_finished_events_requests_no_sink_without_a_notification_to_route() {
+        let disabled = NotificationsConfig::default();
+        assert_eq!(sink_requests_for_one_finished_command(&disabled), 0);
+
+        // Enabled, but the command ran for less than the threshold.
+        let below_threshold = NotificationsConfig {
+            enabled: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 3600.0,
+            ..NotificationsConfig::default()
+        };
+        assert_eq!(sink_requests_for_one_finished_command(&below_threshold), 0);
+    }
+
+    #[test]
+    fn drain_command_finished_events_requests_the_sink_once_for_a_notification() {
+        let enabled = NotificationsConfig {
+            enabled: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 1.0,
+            ..NotificationsConfig::default()
+        };
+        assert_eq!(sink_requests_for_one_finished_command(&enabled), 1);
     }
 
     #[test]
@@ -815,12 +881,12 @@ mod tests {
 
         drain_command_finished_events(
             &mut tabs,
-            TabTitlePolicy::default(),
-            "",
+            &TabTitleConfig::default(),
             &notifications_config,
             &bell_config,
             WindowFocus::Unfocused,
             &toasts,
+            SystemNotifySink::none,
         );
 
         let Ok(panes) = tabs.active_tab().pane_tree.iter_panes() else {

@@ -39,6 +39,7 @@ pub mod title_stack;
 pub mod view_state;
 
 mod actions;
+mod app_icon;
 mod app_impl;
 mod broadcast_guard;
 mod chrome_damage;
@@ -432,10 +433,13 @@ struct FreminalGui {
     /// exists). Single-threaded GUI, so `Cell` suffices.
     osc99_daemon: std::cell::Cell<osc99::Osc99LinuxDaemon>,
 
-    /// The Linux/BSD desktop-notification service's handle, started the first
-    /// frame the config can route OSC 99 to the system leg
-    /// (`FreminalGui::ensure_osc99_dbus_started`) and kept for the rest of the
-    /// process (dropping it stops the service). `None` until then.
+    /// The Linux/BSD desktop-notification service's handle. It carries every
+    /// Linux/BSD notification, OSC 99 and plain (OSC 9 / 777, command-finished,
+    /// error) alike. It is started the first frame the config can route either
+    /// to the system leg (`FreminalGui::ensure_osc99_dbus_started`), or on
+    /// demand by `FreminalGui::system_notify_sink`, which the Settings "Test
+    /// Notification" button also uses with `enabled = false`. It is kept for the
+    /// rest of the process (dropping it stops the service). `None` until then.
     /// Single-threaded GUI, so `RefCell` suffices.
     #[cfg(all(unix, not(target_os = "macos")))]
     osc99_dbus: std::cell::RefCell<Option<osc99::Osc99DbusHandle>>,

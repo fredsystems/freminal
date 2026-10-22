@@ -7,19 +7,26 @@
 //! which id, whose signals are believed, the daemon-health breaker and the
 //! reconnect gate. Nothing here touches a bus or a thread.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
-use zbus::blocking::Connection;
+use zbus::Connection;
 
+use crate::gui::app_icon::FREMINAL_ICON_PNG;
 use crate::gui::osc99::presentation::{
-    Osc99DecodedIconCache, Osc99IconLookup, category_hint, escape_body_markup, sound_hint,
+    Osc99DecodedIconCache, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint,
+    decode_icon_image, escape_body_markup, sound_hint,
 };
 use crate::gui::osc99::{Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId};
 
+use super::plain::PlainNotification;
 use super::pump::PumpSignal;
-use super::wire::{NotifyArgs, NotifyHints, NotifyReply, is_method_timeout, urgency_byte};
+use super::wire::{
+    FREMINAL_ICON_NAME, NotifyArgs, NotifyHints, NotifyImage, NotifyReply, is_method_timeout,
+    urgency_byte,
+};
 use super::{Osc99DbusEvent, Osc99SystemAction};
 
 /// How long the dispatcher leaves a daemon alone after one of its calls timed
@@ -174,6 +181,9 @@ pub(super) struct DispatcherState {
     icon_lookup: Box<dyn Osc99IconLookup + Send>,
     /// The icons transmitted recently, already decoded.
     icon_cache: Osc99DecodedIconCache,
+    /// [`FREMINAL_ICON_PNG`], decoded and downscaled on first use; `None`
+    /// when it did not decode, so that is only logged and tried once.
+    plain_icon: OnceCell<Option<Osc99IconImage>>,
 }
 
 impl DispatcherState {
@@ -192,6 +202,7 @@ impl DispatcherState {
             health: Osc99DaemonHealth::Healthy,
             icon_lookup,
             icon_cache: Osc99DecodedIconCache::default(),
+            plain_icon: OnceCell::new(),
         }
     }
 
@@ -319,6 +330,52 @@ impl DispatcherState {
         }
     }
 
+    /// Build the `Notify` arguments for a plain `notification` (Task 149.2).
+    ///
+    /// What the notification asks for is its summary, body and urgency. The
+    /// rest is fixed: freminal as the application and its icon (by name, and
+    /// as the `image-data` hint, as downscaled as an OSC 99 icon is), no
+    /// replaced notification, no actions even when the daemon has the `actions`
+    /// capability (nothing listens for them), the daemon's default expiry, and
+    /// no category or sound hint. Summary and body are escaped only when the
+    /// daemon has the `body-markup` capability, as OSC 99's body is: the
+    /// specification only defines markup in the body, but some daemons also
+    /// format the summary (issue #560), and OSC 9 / OSC 777 text is untrusted.
+    ///
+    /// An icon that does not decode is left out (and logged once).
+    pub(super) fn plain_notify_args(&self, notification: &PlainNotification) -> NotifyArgs {
+        let escape = |text: &str| match self.capabilities.body_markup {
+            Osc99DaemonSupport::Supported => escape_body_markup(text),
+            Osc99DaemonSupport::Unsupported => text.to_owned(),
+        };
+        let image = self
+            .plain_icon
+            .get_or_init(|| {
+                let decoded = decode_icon_image(FREMINAL_ICON_PNG);
+                if decoded.is_none() {
+                    tracing::warn!("the embedded freminal icon did not decode; sending none");
+                }
+                decoded
+            })
+            .as_ref()
+            .map_or(NotifyImage::None, |image| NotifyImage::Data(image.clone()));
+        NotifyArgs {
+            app_name: DEFAULT_APP_NAME.to_owned(),
+            replaces_id: 0,
+            app_icon: FREMINAL_ICON_NAME.to_owned(),
+            summary: escape(&notification.summary),
+            body: escape(&notification.body),
+            actions: Vec::new(),
+            hints: NotifyHints {
+                urgency: urgency_byte(notification.urgency),
+                category: None,
+                sound: Osc99SoundHint::None,
+                image,
+            },
+            expire_timeout: -1,
+        }
+    }
+
     /// The daemon's id for `instance`, if the daemon displays it.
     pub(super) fn dbus_id_of(&self, instance: Osc99InstanceId) -> Option<u32> {
         self.by_instance
@@ -339,10 +396,8 @@ impl DispatcherState {
     /// leg. An `instance` that was already mapped under another id keeps only
     /// the new one.
     ///
-    /// With no known owner (the lookup failed, or nobody owned the name) the
-    /// sender of the reply is adopted as the owner: it is whoever the bus
-    /// routed the call to, and only the owner of the name can have answered
-    /// it.
+    /// The reply's sender is adopted as the owner when none is known (see
+    /// [`Self::adopt_reply_owner`]).
     pub(super) fn record_shown(
         &mut self,
         instance: Osc99InstanceId,
@@ -357,12 +412,7 @@ impl DispatcherState {
         if let Some(previous) = evicted {
             self.by_instance.remove(&previous);
         }
-        if matches!(self.daemon_owner, Osc99SignalSender::NoOwner)
-            && let Some(sender) = &reply.sender
-        {
-            tracing::debug!("OSC 99: adopting the sender of a Notify reply as the daemon's owner");
-            self.daemon_owner = Osc99SignalSender::Owner(sender.clone());
-        }
+        self.adopt_reply_owner(&reply);
         self.by_instance.insert(
             instance,
             Mapping {
@@ -371,6 +421,25 @@ impl DispatcherState {
             },
         );
         evicted
+    }
+
+    /// With no known owner (the lookup failed, or nobody owned the name),
+    /// adopt the sender of a successful `Notify` `reply` as the owner: it is
+    /// whoever the bus routed the call to, and only the owner of the name can
+    /// have answered it. A known owner, an unfiltered connection and a reply
+    /// with no sender (peer-to-peer) change nothing.
+    ///
+    /// A new owner makes the capabilities stale (see [`Self::capabilities_stale`]),
+    /// so the dispatcher fetches them after the command that adopted it.
+    pub(super) fn adopt_reply_owner(&mut self, reply: &NotifyReply) {
+        if matches!(self.daemon_owner, Osc99SignalSender::NoOwner)
+            && let Some(sender) = &reply.sender
+        {
+            tracing::debug!(
+                "desktop notifications: adopting the sender of a Notify reply as the daemon's owner"
+            );
+            self.daemon_owner = Osc99SignalSender::Owner(sender.clone());
+        }
     }
 
     /// Drop `instance`'s mappings, if it has any.
@@ -432,7 +501,9 @@ impl DispatcherState {
             }
             PumpSignal::OwnerChanged { new_owner } => self.on_owner_changed(new_owner.clone()),
             PumpSignal::Ended(kind) => {
-                tracing::warn!("OSC 99: the {kind:?} signal pump ended; no more signals");
+                tracing::warn!(
+                    "desktop notifications: the {kind:?} signal pump ended; no more signals"
+                );
                 self.on_signals_lost()
             }
         }
@@ -443,7 +514,7 @@ impl DispatcherState {
         let believed = self.daemon_owner.accepts(sender);
         if !believed {
             tracing::debug!(
-                "OSC 99: ignoring a {member} signal from a sender that is not the daemon"
+                "desktop notifications: ignoring a {member} signal from a sender that is not the daemon"
             );
         }
         believed
@@ -558,6 +629,102 @@ mod tests {
                 image: NotifyImage::None,
             }
         );
+    }
+
+    // ── Plain notifications (Task 149.2) ────────────────────────────────
+
+    fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {
+        PlainNotification {
+            summary: summary.to_owned(),
+            body: body.to_owned(),
+            urgency,
+        }
+    }
+
+    #[test]
+    fn plain_notify_args_have_freminals_fixed_content() {
+        let mut state = DispatcherState::default();
+        // Even a daemon with actions gets none: nothing listens for them.
+        state.set_capabilities(&strings(&["body", "actions", "sound"]));
+        let args = state.plain_notify_args(&plain("Title", "Body", NotificationUrgency::Critical));
+
+        assert_eq!(args.app_name, "freminal");
+        assert_eq!(args.replaces_id, 0);
+        assert_eq!(args.app_icon, "freminal");
+        assert_eq!(args.summary, "Title");
+        assert_eq!(args.body, "Body");
+        assert_eq!(args.actions, Vec::<String>::new());
+        assert_eq!(args.expire_timeout, -1);
+        assert_eq!(args.hints.urgency, 2);
+        assert_eq!(args.hints.category, None);
+        assert_eq!(args.hints.sound, Osc99SoundHint::None);
+    }
+
+    #[test]
+    fn plain_notify_args_map_urgency() {
+        let state = DispatcherState::default();
+        for (urgency, expected) in [
+            (NotificationUrgency::Low, 0),
+            (NotificationUrgency::Normal, 1),
+            (NotificationUrgency::Critical, 2),
+        ] {
+            assert_eq!(
+                state
+                    .plain_notify_args(&plain("t", "b", urgency))
+                    .hints
+                    .urgency,
+                expected,
+                "{urgency:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_notify_args_send_the_embedded_icon_as_a_downscaled_image() {
+        let args = DispatcherState::default().plain_notify_args(&plain(
+            "t",
+            "b",
+            NotificationUrgency::Normal,
+        ));
+
+        let NotifyImage::Data(image) = args.hints.image else {
+            panic!("the embedded icon must decode and be sent as image-data");
+        };
+        assert!(0 < image.width && image.width <= 256, "{}", image.width);
+        assert!(0 < image.height && image.height <= 256, "{}", image.height);
+        assert_eq!(image.rowstride, image.width * 4);
+        assert_eq!(
+            image.rgba.len(),
+            usize::try_from(image.width * image.height * 4).unwrap()
+        );
+    }
+
+    #[test]
+    fn plain_notify_args_escape_summary_and_body_only_with_body_markup() {
+        let text = plain("a<b>&c", "a<b>&c", NotificationUrgency::Normal);
+        let mut state = DispatcherState::default();
+
+        state.set_capabilities(&strings(&["body", "body-markup"]));
+        let escaped = state.plain_notify_args(&text);
+        assert_eq!(escaped.summary, "a<\u{200c}b>&\u{200c}c");
+        assert_eq!(escaped.body, "a<\u{200c}b>&\u{200c}c");
+
+        state.set_capabilities(&strings(&["body"]));
+        let raw = state.plain_notify_args(&text);
+        assert_eq!(raw.summary, "a<b>&c");
+        assert_eq!(raw.body, "a<b>&c");
+    }
+
+    #[test]
+    fn plain_notify_args_assume_body_markup_until_the_daemon_answers() {
+        let args = DispatcherState::default().plain_notify_args(&plain(
+            "<",
+            "&",
+            NotificationUrgency::Normal,
+        ));
+
+        assert_eq!(args.summary, "<\u{200c}");
+        assert_eq!(args.body, "&\u{200c}");
     }
 
     // ── Presentation: icon, sound, category, markup ─────────────────────
@@ -1521,6 +1688,31 @@ mod tests {
             DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
         senderless.record_shown(instance(1), None, peer_reply(7));
         assert_eq!(senderless.daemon_owner, Osc99SignalSender::NoOwner);
+    }
+
+    #[test]
+    fn adopting_a_reply_owner_tracks_nothing_and_obeys_the_same_rules_as_a_shown_instance() {
+        let mut state = DispatcherState::new(Osc99SignalSender::NoOwner, Box::new(NoIconLookup));
+        state.adopt_reply_owner(&peer_reply(7));
+        assert_eq!(state.daemon_owner, Osc99SignalSender::NoOwner);
+        assert!(!state.capabilities_stale());
+
+        state.adopt_reply_owner(&reply_from(7, ":1.7"));
+
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.7".to_owned())
+        );
+        assert!(state.capabilities_stale());
+        assert!(state.by_instance.is_empty(), "no instance is recorded");
+        assert!(state.by_dbus_id.is_empty());
+
+        state.adopt_reply_owner(&reply_from(8, ":1.9"));
+        assert_eq!(
+            state.daemon_owner,
+            Osc99SignalSender::Owner(":1.7".to_owned()),
+            "a known owner is kept"
+        );
     }
 
     #[test]

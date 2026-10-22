@@ -2,6 +2,15 @@
 
 ## Last updated
 
+Last updated: 2026-10-22 — Task 149 (zbus 6 migration and per-platform
+notification backends, #567). No status icon moves. Every system notification
+(OSC 9, OSC 777, OSC 133 `D` command-finished, the Settings "Test
+Notification" button and OSC 99) now has one native backend per platform:
+Linux/BSD uses freminal's own zbus 6 D-Bus service, Windows uses
+`tauri-winrt-notification` directly, and macOS uses `notify-rust`
+(`mac-notification-sys`), a macOS-only dependency. The OSC 99 notes below gain
+a paragraph on the legacy notifications that share each leg.
+
 Last updated: 2026-10-19 — Task 148 (security and fuzz findings remediation).
 No status icon moves; the rows below gain documented limits and policies, and
 OSC 1338 (implemented earlier, never listed) gets its row. (148.1) REP count
@@ -711,7 +720,8 @@ icon names are covered by the leg notes below.
   standard names shows as its bundled-font glyph in the toast's icon slot (Task
   138.C4); any other name is ignored.
 - **Linux/BSD leg:** one zbus connection, started when the config can use the
-  system leg. `Notify` carries `app_name` (`f=`, else `freminal`), `replaces_id`
+  system leg for OSC 99 or for a legacy category (see "Legacy notifications"
+  below). `Notify` carries `app_name` (`f=`, else `freminal`), `replaces_id`
   for an update, `expire_timeout` (-1, 0 or milliseconds), a `default` action plus
   one action per button (only when the daemon has `actions`), and the hints
   `urgency`, `category` (first `t=`), `suppress-sound` for `silent`, `sound-name`
@@ -767,6 +777,34 @@ icon names are covered by the leg notes below.
   standard cannot be resolved there and is ignored. A `c=1` request is answered
   with `p=close;untracked` when the notification is shown, and nothing follows.
   A display on this leg alone is shown, answered and forgotten at once.
+- **Legacy notifications (Task 149):** OSC 9, OSC 777, OSC 133 `D`
+  command-finished and the Settings "Test Notification" button use the same
+  native backend as OSC 99 on each platform, so no platform needs `notify-rust`
+  except macOS. They carry a summary, a body and (Linux/BSD only) an urgency,
+  and are never tracked: no instance, no events, no buttons.
+  - **Linux/BSD:** handed to the zbus service above (the service also starts
+    when a legacy category's routing can use the system leg). `Notify` carries
+    app name and icon `freminal`, `replaces_id` 0, no actions, expire timeout -1,
+    `Critical` urgency for an error and `Normal` otherwise, and freminal's icon
+    as `image-data` (downscaled to fit 256x256). The summary and body get a
+    U+200C after `<` and `&` when the daemon has `body-markup` (assumed until
+    `GetCapabilities` answers). The escaping follows that capability, so a
+    daemon that formats text without advertising `body-markup` gets raw text
+    (accepted: OSC 99's body behaves the same). At most 16 plain notifications
+    are in flight at once, a separate budget inside the service's shared command
+    queue so OSC 99 keeps its slots. A notification is dropped when that budget
+    or the queue is full, while the daemon is in its 30 s cooldown after a
+    timeout, and while the service is reconnecting (up to 30 s after a failed
+    connect or a lost connection). Before Task 149 every notification opened its
+    own connection, so none was dropped for that reason.
+  - **Windows:** a toast built directly with `tauri-winrt-notification`, in the
+    same style as the OSC 99 toast: the summary as the title, the body as the
+    text, silent, short, no scenario (an error is an ordinary toast).
+  - **macOS:** `notify-rust` with app name and icon `freminal`, the summary and
+    the body; no urgency.
+  - **macOS / Windows delivery:** one `freminal-notify` thread with a queue of
+    16 (separate from the OSC 99 thread); a notification that finds it full is
+    dropped.
 - **Lifecycle:** every notification displayed on a tracked leg becomes an
   instance keyed by pane and `i=`. Update in place, `p=close` and `p=alive` see
   only the requesting pane's instances (kitty's `p=close` looks across windows).

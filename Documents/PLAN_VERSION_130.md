@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147, 148   |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–150    |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -31,7 +31,8 @@ one plan document, grouped into milestones that ship as point releases:
 **Tiered decomposition.** Per `plan-decomposition`, only the next-up tasks carry a full
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
-**138** (activated 2026-10-12), and **148** (created 2026-10-18).
+**138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
+2026-10-22). **150** (created 2026-10-22) is an enriched stub.
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -56,6 +57,8 @@ enriched stubs again and get re-decomposed at activation.
 | 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Pending merge | 138                                |
+| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Stub          | 149                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -231,7 +234,8 @@ Two seams were considered and **not** made separate tasks:
 - **Then 138, 139, 140, 147 and 148**, which close out v0.13.0. Task 147 fixes everything Tasks
   126–131 left unscheduled; see "147 Execution model". Task 148 fixes the #553 fuzzing and
   security-audit findings; see "148 Execution model". Its high-severity subtasks should land
-  first, ahead of the rest of Task 147 if the two are not run in parallel.
+  first, ahead of the rest of Task 147 if the two are not run in parallel. Task 149 (#567,
+  the zbus 6 migration) is independent of all of them; see "149 Execution model".
 - v0.13.1 onward is activated per milestone, against the code as it then exists. Activation
   re-reads the stub, resolves its open questions with the maintainer, and decomposes it.
 
@@ -7641,6 +7645,18 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
   clean.
 - **Depends on:** nothing.
 
+#### 147.32 — Unused `RowStore` import in a `freminal-buffer` test module
+
+- **Source:** Task 149 final verification (2026-10-22). Predates Task 149 (the file is
+  unchanged on `task-149/zbus-6`); reproduces on `main`.
+- **Defect today:** `cargo bench --no-run --all` warns `unused import: RowStore` at
+  `freminal-buffer/src/buffer/screen_switch_tests.rs:26`. Clippy with `-D warnings` does not
+  see it, because the import is only unused in the bench-profile test build.
+- **Scope:** that one import (or its `cfg`), nothing else.
+- **Fix:** drop `RowStore` from the `use`, or gate it to the configuration that uses it.
+- **Tests / verification:** `cargo bench --no-run --all` emits no warnings.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -8810,6 +8826,463 @@ Group F — Hygiene:
   `scroll_slice_up_confined`; full-width margins or DECLRMM off still scroll whole rows.
   `landing_row_span_for_wrap` predicts the cursor's own row in that case. Tests: buffer and
   full-pipeline margin-confinement tests (both fail on the old code) and both pins.
+
+## Task 149 — zbus 6 Migration and Per-Platform Notification Backends
+
+### 149 Summary
+
+Close issue #567. `cargo deny check advisories` reports RUSTSEC-2026-0370 (`zvariant`),
+RUSTSEC-2026-0371 (`zbus_names`) and RUSTSEC-2026-0372 (`zvariant_derive`) as unmaintained:
+zbus 6.0.0 merged them into `zbus::wire`. The three are ignored in `deny.toml` until this task
+lands. Created and decomposed on 2026-10-22 on branch `task-149/zbus-6`.
+
+Two crates pull zbus 5 (`cargo tree -i zbus --target all --all-features`): freminal itself
+(the OSC 99 D-Bus service, Task 138) and `notify-rust` 4.18.2. notify-rust's zbus 6 bump
+(upstream PR #294) is unmerged, and dropping notify-rust alone would not clear the advisories,
+because freminal's own `zbus = 5.19.0` pulls the same three crates. Waiting for notify-rust
+would only save the Linux rerouting (149.2), so this task does not wait.
+
+notify-rust is needed only for its zbus backend on Linux/BSD and its `mac-notification-sys`
+backend on macOS. On Windows it wraps `tauri-winrt-notification`, which freminal already calls
+directly for OSC 99 (Task 138.C15). On Linux/BSD it refuses to build without a D-Bus backend
+(`compile_error!` in `xdg/mod.rs` unless `z` or `d` is on). So the end state is one native
+backend per platform, used by every notification source (OSC 9, OSC 777, OSC 133 `D`
+command-finished, the Settings "Test Notification" button, and OSC 99):
+
+| Platform  | Backend                                                |
+| --------- | ------------------------------------------------------ |
+| Linux/BSD | freminal's own D-Bus service (`osc99/dbus_service/`)   |
+| Windows   | `tauri-winrt-notification`, called directly            |
+| macOS     | `notify-rust` (`mac-notification-sys`), macOS-only dep |
+
+Out of scope: moving or renaming `osc99/dbus_service/` (see decisions), and any change to
+which notifications are shown or when (routing, gates and focus rules are untouched).
+
+### 149 Maintainer decisions (2026-10-22)
+
+- **Migrate now**, without waiting for a zbus-6 notify-rust.
+- **Windows goes direct to `tauri-winrt-notification`** for every notification source, for
+  consistency with OSC 99.
+- **notify-rust becomes a `cfg(target_os = "macos")` dependency** with
+  `default-features = false`. Without `z`, its optional zbus 5 never enters the graph.
+
+### 149 Orchestrator decisions (2026-10-22)
+
+These were made at decomposition. Each is a deliberate behaviour choice, listed so review can
+check the code against it.
+
+- **Linux legacy notifications ride the existing dispatcher**, as a new fire-and-forget
+  `DbusCommand` variant. They reuse its connection, circuit breaker, reconnect loop and daemon
+  capabilities. A separate one-shot `wire.rs` path was rejected: it would duplicate the
+  breaker and open a connection per notification, as notify-rust does today.
+- **Legacy notifications are not tracked.** They have no registry entry, no `Shown` /
+  `Closed` / `Activated` events and no actions (as today). When the service is reconnecting,
+  a legacy command is dropped with a `debug` log, as `report_unserved` does for `Close`.
+- **Linux legacy wire content changes in three small ways**, all toward what OSC 99 already
+  sends:
+  - the `desktop-entry` hint is now sent (the daemon can group by app);
+  - the icon is sent through the dispatcher's existing image path (the `image-data` key,
+    downscaled to at most 256 px) instead of a full-resolution `image_data` whose key notify-rust
+    chose from the server's spec version;
+  - the summary and body are escaped only when the daemon advertises `body-markup`
+    (`state.rs`), instead of always. Both are escaped, as before, because some daemons format
+    the summary too (#560). The escape is kept wherever the daemon would parse markup.
+
+  Unchanged: app name `freminal`, app icon `freminal`, summary fallback, `Critical` urgency for
+  `Error` and `Normal` otherwise, expire timeout `-1`, no actions.
+
+- **Windows legacy toasts match freminal's OSC 99 toast, not notify-rust's.** That means
+  `title(summary)`, `text1(body)` (left out for an empty body), silent, short duration, the
+  PowerShell app id, and **no
+  `Scenario::Reminder` for `Error`**. Task 138.C15 dropped the reminder scenario because a
+  reminder needs buttons, and 138.C17 stopped advertising urgency on Windows for that reason.
+  Today's `text1("")` / `text2(body)` layout is notify-rust's, not a freminal choice.
+- **macOS is unchanged.** The worker thread and queue stay for macOS and Windows, but carry a
+  freminal-owned payload instead of `notify_rust::Notification`, so the queue, respawn and
+  policy tests compile on every platform.
+- **`osc99/dbus_service/` keeps its path and names.** Moving it to a platform-neutral module
+  would make the diff mostly renames and hide the port. The module docs gain a paragraph
+  stating that the service also carries OSC 9 / 777 / 133 `D` notifications on Linux/BSD.
+- **Threading model under zbus 6:** keep the dispatcher thread and the pump threads. Each
+  zbus call becomes `zbus::block_on(...)`. Each pump becomes one
+  `zbus::block_on(async { while let Some(m) = stream.next().await { ... } })` loop. This is
+  safe because the pumps forward over **unbounded** crossbeam channels (`mod.rs:606`), so a
+  pump never blocks a thread inside `block_on`. 149.1 must confirm the multi-thread driver
+  hand-off in `zruntime` source and cite it in its status note. If that check fails, stop and
+  return to the orchestrator; collapsing into one async loop is a redesign, not a fallback.
+
+### 149 Subtasks
+
+Every subtask leaves `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings` green, and runs
+`cargo xtask check-windows`. macOS cannot be cross-checked locally (`mac-notification-sys`
+compiles Objective-C), so macOS-gated code is kept minimal and is verified by the macOS CI
+job. No benchmarks: nothing here is on a `freminal-bench-table` path.
+
+#### 149.1 — Port the D-Bus service to zbus 6
+
+- **Defect:** `osc99/dbus_service/` is written against zbus 5's blocking API
+  (`zbus::blocking::{Connection, MessageIterator}`), which zbus 6 removes. It also uses
+  `zvariant`, which is now `zbus::wire` and pulls the unmaintained crates.
+- **Scope:** `Cargo.toml` (workspace `zbus` entry: `6.0.0`, `default-features = false`,
+  features `default-rt` and `proxy`, comment updated), `freminal/Cargo.toml` (the dev-only
+  `p2p` feature), and every file under `freminal/src/gui/osc99/dbus_service/`
+  (`mod.rs`, `wire.rs`, `pump.rs`, `state.rs`, `test_rig.rs`, `breaker_tests.rs`, `wake.rs`
+  if touched). notify-rust is untouched, so zbus 5 stays in the lock file through it until
+  149.4.
+  - Blocking calls become async calls under `zbus::block_on`. The threading model is as
+    decided above.
+  - `MessageIterator` becomes `MessageStream`. `MatchRule::builder()` setters lose their `?`,
+    and `build()` gains one.
+  - `MethodFlags::NoAutoStart.into()` becomes `MethodFlags::NO_AUTO_START`. `Proxy::new`
+    takes the async connection.
+  - `zvariant` paths move to `zbus::{Type, Signature, wire, as_variant}`; `Value` /
+    `OwnedValue` become `Variant` / `OwnedVariant`. No deprecated `zbus::zvariant` alias may
+    remain.
+  - **Error classification (behaviour-critical).** zbus 6 converts every error reply through
+    `fdo::Error`, so `org.freedesktop.DBus.Error.NameHasNoOwner` and `ServiceUnknown` now
+    arrive as `zbus::Error::FDO(..)`, not `MethodError`. `is_method_error` / `is_no_daemon`
+    must match the `FDO` variants, or "no daemon" silently becomes a warning. Method timeouts
+    still surface as `Error::InputOutput` of kind `TimedOut` (`runtime/timeout.rs`), but only
+    from `Connection::call_method`, so `call_no_auto_start` keeps its own deadline.
+  - `Connection::close` is async. The test rig's p2p connection uses
+    `connection::Builder::unix_stream(std::os::unix::net::UnixStream)`.
+- **Deliverable:** the service behaves exactly as before. Every existing test passes, ported
+  but not weakened: no deleted assertions, no loosened timeouts. A new test proves that a
+  `NameHasNoOwner` and a `ServiceUnknown` reply are each classified as "no daemon" under
+  zbus 6.
+
+#### 149.2 — Route Linux/BSD legacy notifications through the D-Bus service
+
+- **Scope:** `freminal/src/gui/notifications.rs`, `freminal/src/gui/osc99/dbus_service/`
+  (`mod.rs`, `state.rs`, `wire.rs`), `freminal/src/gui/osc99/mod.rs` (re-exports),
+  `freminal/src/gui/osc99/glue.rs` and `host_capabilities.rs` (service start gating), and the
+  three callers: `app_impl.rs` (OSC 9 / 777), `frame_drain.rs` (OSC 133 `D`) and
+  `settings_dispatch.rs` (Test Notification).
+  - Add `DbusCommand::ShowPlain { notification: Box<PlainNotification> }`.
+    `PlainNotification` carries `summary`, `body` and `urgency` and lives in `dbus_service`.
+  - Add a pure builder `DispatcherState::plain_notify_args(&PlainNotification) -> NotifyArgs`
+    beside `notify_args`. It has no actions, `replaces_id` 0, expire `-1` and the embedded
+    freminal icon. Escaping of summary and body follows `body-markup`.
+  - The dispatcher sends it under `daemon_gate` / `note_call`, without `record_shown` or any
+    `Osc99DbusEvent`. `report_unserved` drops it with a `debug` log.
+  - Add a cloneable `PlainNotifySender` (wraps the command `Sender`). `Osc99DbusHandle`
+    exposes it, and the three callers receive it explicitly. **No new process-wide static.**
+  - The service starts when either OSC 99 may use the system leg (as now) or any legacy
+    category's routing can use the system leg. Add a helper beside `osc99_may_use_system_leg`
+    and test it.
+  - On Linux/BSD, `NotificationRouter::show_system` hands the request to the sender and no
+    longer touches notify-rust or the worker. On macOS and Windows it is unchanged in this
+    subtask.
+- **Deliverable:** with the fake daemon in `test_rig.rs`, an OSC 9 / command-finished request
+  produces one `Notify` call whose hints and arguments match the decisions above, including
+  `Critical` urgency for `Error`, no actions, and escaping only when the daemon advertises
+  `body-markup`. Further tests: a legacy command while reconnecting is dropped and never
+  answered; a legacy show while the breaker is open does not call `Notify`; the start-gating
+  helper's truth table.
+
+#### 149.3 — Windows legacy notifications go direct to `tauri-winrt-notification`
+
+- **Scope:** `freminal/src/gui/notifications.rs` and `freminal/src/gui/osc99/untracked.rs`
+  (only to share the toast-building helper, if one is extracted).
+  - The worker queue's payload becomes a freminal-owned `SystemNotification` (summary and
+    body; no kind, which neither platform reads) instead of `notify_rust::Notification`. On
+    Windows the worker builds a `Toast` exactly as decided above. On macOS it builds the same `notify_rust::Notification` as today
+    (appname, icon, summary, body; no urgency).
+  - The queue, respawn and policy tests stay platform-neutral. Tests that inspected a
+    `notify_rust::Notification` are replaced by tests of a pure mapping from request to
+    platform fields that compiles everywhere. Assertions are kept: summary fallback, the #560
+    escaping rule and urgency by kind. Only the type they inspect changes.
+  - In `untracked.rs`, the `build_macos_notification` tests that compile on Linux through
+    `cfg(any(target_os = "macos", test))` are re-gated or rewritten the same way, so nothing
+    outside macOS names `notify_rust`.
+- **Deliverable:** `notify_rust` is referenced only under `cfg(target_os = "macos")`. Windows
+  OSC 9 / 777 / 133 `D` toasts are built by the same path style as OSC 99.
+  `cargo xtask check-windows` is clean.
+
+#### 149.4 — Make notify-rust macOS-only and drop the advisory ignores
+
+- **Scope:** `Cargo.toml`, `freminal/Cargo.toml`, `Cargo.lock`, `deny.toml`, and the
+  documentation that names notify-rust or zbus for these paths:
+  - `Documents/ESCAPE_SEQUENCE_COVERAGE.md`
+  - `Documents/ESCAPE_SEQUENCE_GAPS.md`
+  - `Documents/KITTY_PROTOCOL_REFERENCE.md`
+  - `Documents/DESIGN_DECISIONS.md`
+  - stale comments in `main.rs` (the `zbus=warn` filter stays)
+  - the workspace comments at the `notify-rust` and `zbus` entries
+
+  The changes:
+
+  - notify-rust moves to `[target.'cfg(target_os = "macos")'.dependencies]` with
+    `default-features = false` and no features (`images_no_default_features` and `z` go).
+  - Remove the three RUSTSEC ignores.
+
+- **Deliverable:** `cargo tree --target all --all-features -i zvariant` finds nothing, and the
+  lock file has no zbus 5, `zvariant`, `zbus_names` or `zvariant_derive`.
+  `cargo deny check` passes with no ignores for #567. `cargo machete` is clean.
+
+### 149 Execution model
+
+Strictly sequential: 149.1, then 149.2, then 149.3, then 149.4. 149.2 and 149.3 both edit
+`notifications.rs`, and 149.2 depends on 149.1's port. Each subtask is one IMPLEMENTATION
+sub-agent pass followed by the orchestrator's full-diff review against this section. Then
+comes the verification suite, then a commit. When 149.4 is green, an adversarial CODE-REVIEW
+pass covers the whole `main...HEAD` diff. Every finding, nit through blocker, is remediated
+as a numbered `149.Cn` cleanup entry before the PR opens.
+
+### 149 Verification
+
+- `cargo xtask test`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, `cargo machete`, `cargo deny check`,
+  `cargo xtask check-windows`, `cargo xtask lint-markdown`.
+- Not covered by tests, and checked by the maintainer before merge: a real Linux desktop shows
+  OSC 9, command-finished, Test Notification and OSC 99 notifications with the freminal icon;
+  a Windows toast for OSC 9 and the Test Notification button, and an `Error`-kind toast that
+  is now an ordinary toast rather than a reminder; macOS unchanged (CI build plus a
+  manual check).
+
+### 149 Status notes
+
+- **149.1 (done):** zbus `6.0.0` with `default-rt` and `proxy` (`p2p` for tests). The
+  blocking calls are `zbus::block_on` around the async API; pumps loop over `MessageStream`
+  inside one `block_on`. Threading check: zruntime 0.2.0 `driver.rs` gives each thread its own
+  runtime with a driver "seat", parks a second `block_on` until it is woken, and runs work that
+  outlives every `block_on` on a helper thread (`driver.rs` module docs, `Driving::take`,
+  `OWN`). A connection's tasks run on the dispatcher's runtime. No thread blocks inside a
+  `block_on`: pumps only send on unbounded channels. `NameHasNoOwner` and `ServiceUnknown`
+  now arrive as `Error::FDO` (`error.rs`, `From<Message>`) and are matched there. A real
+  fake-daemon reply test pins it.
+- **149.2 (done):** `DbusCommand::ShowPlain` and `PlainNotifySender` live in
+  `dbus_service/plain.rs`, and `plain_notify_args` is in `state.rs`.
+  - Callers get a `SystemNotifySink` from `FreminalGui::system_notify_sink`.
+  - `PlainNotifyEntry::{Routed, SettingsTest}` gates the service start. The Test button
+    ignores `enabled`, as `route_test` does.
+  - **Deviation from the decisions above, accepted:** the summary is escaped as well as the
+    body, under the same `body-markup` condition, because the legacy path escaped both
+    (#560: some daemons format the summary).
+  - The app icon PNG is one `static` (`gui::run::FREMINAL_ICON_PNG`).
+  - `drain_command_finished_events` takes `&TabTitleConfig` instead of two fields, to stay
+    under the argument limit.
+  - End-to-end tests run `NotificationRouter::route` / `route_test` into the fake daemon.
+- **149.3 (done):** the macOS/Windows worker carries a freminal-owned `SystemNotification`
+  (summary, body; no kind, as neither platform reads one).
+  - **Windows:** `windows_toast` builds the OSC 99-style toast: title, `text1` (skipped when
+    the body is empty), silent, short, no scenario.
+  - **macOS:** `macos_notification` keeps today's content.
+  - **OSC 99 macOS builder:** in `untracked.rs` it is split into a pure
+    `macos_notification_fields` (tested everywhere) and a thin macOS-only conversion.
+  - `notify_rust` now appears only under `cfg(target_os = "macos")`. Its macOS APIs were
+    checked against notify-rust 4.18.2's source: every field and method used is public on
+    macOS. That code is not compiled locally; the macOS CI job compiles it.
+- **149.4 (done):** `notify-rust` 4.18.2 is a `cfg(target_os = "macos")` dependency with
+  `default-features = false`. The three RUSTSEC ignores are gone (`ignore = []`).
+  - `cargo tree --target all --all-features -i zvariant` (and `zbus_names`,
+    `zvariant_derive`) matches nothing.
+  - zbus 6.0.0 is the only zbus, used by freminal alone.
+  - `cargo deny check` passes all four sections. The lock file drops zbus 5, zbus_macros 5,
+    zbus_names, zvariant, zvariant_derive, zvariant_utils, async-broadcast, async-recursion
+    and enumflags2.
+  - Docs: `ESCAPE_SEQUENCE_COVERAGE.md` (a new "Legacy notifications" note),
+    `KITTY_PROTOCOL_REFERENCE.md` and `DESIGN_DECISIONS.md`.
+
+### 149 Cleanup entries
+
+From the adversarial review of 2026-10-22. Two parallel CODE-REVIEW passes covered the
+`main...HEAD` diff: one on the zbus port (Z1–Z14) and one on routing, platforms, dependencies
+and docs (R1–R14). Neither found a blocker. Every finding is fixed here or scheduled into
+Task 150 (structural ones; see "150 Evidence").
+
+- **149.C1 — Plain notifications share the OSC 99 command queue (R1, Z2; major).** Before,
+  OSC 9 / 777 / 133 `D` had their own 16-slot queue. Now a loop on OSC 9 can queue 256
+  `Notify` calls and starve OSC 99 `Show` / `Close`.
+  - Fix: `PlainNotifySender` shares an in-flight counter capped at 16
+    (`PLAIN_NOTIFICATION_BUDGET`). It is incremented on send and decremented when the
+    dispatcher handles or drops the command.
+  - Test: a full plain budget still lets an OSC 99 `Show` queue.
+  - Docs: `COMMAND_QUEUE_CAPACITY`, `plain.rs` and `ESCAPE_SEQUENCE_COVERAGE.md`.
+- **149.C2 — The `method_timeout` → `is_method_timeout` path is never exercised (Z1;
+  major).** Every breaker test feeds a synthetic timeout error. Fix: a rig variant whose
+  client sets a short `method_timeout`, and a fake-daemon summary that is never answered.
+  - Tests: `notify` and `close_notification` fail with `is_method_timeout`; at service level,
+    a hung `Notify` gives `ShowFailed`, then the gate skips.
+- **149.C3 — zbus 6 logs nothing (Z3).** Without its `tracing` feature, the `zbus=warn`
+  filters in `main.rs` are dead. Fix: enable zbus's `tracing` feature and keep the filters.
+- **149.C4 — `smol` is a second async stack kept for three small uses (Z4).** Fix: depend
+  on `async-io` (`Timer`) and `futures-lite` (`StreamExt`, `FutureExt::or`) directly, and
+  drop `smol`. Reword the comment: async-io drives its timers on its own process-wide thread.
+- **149.C5 — `serve` does not close the connection when the GUI is gone (Z5).** Fix: call
+  `close_connection` before returning `GuiGone`, so the pumps end, and shorten the shutdown
+  doc.
+- **149.C6 — Test-only error-name constants in production `mod.rs` (Z6).** Fix: move them
+  into `test_rig.rs`.
+- **149.C7 — The service imports the app icon from `gui::run` (R12, Z7).** Fix: a small
+  `gui::app_icon` module owns `FREMINAL_ICON_PNG`; `run.rs` and the service import it.
+- **149.C8 — Logging (R2, Z9).**
+  - Service-wide log lines no longer say "OSC 99:" on paths that serve every notification.
+  - A busy handle cell in `system_notify_sink` logs at debug instead of dropping silently.
+  - A plain notification dropped because the service is unavailable warns once, then logs
+    at debug.
+  - `ESCAPE_SEQUENCE_COVERAGE.md` records that notifications are dropped during the up-to-30 s
+    reconnect window. Before this task, each notification made its own connection.
+- **149.C9 — The service-start gate is untested as a whole (R3).** Fix: extract
+  `notification_service_wanted(&Config)` in `host_capabilities.rs` and use it from
+  `ensure_osc99_dbus_started`.
+  - Truth-table test, including `Config::default()`.
+  - A test that ties `plain_notifications_may_use_system_leg` to
+    `NotificationRouter::routing_for` for every `NotificationKind`, so a new kind cannot be
+    missed.
+- **149.C10 — The plain-path escape test lost the richer #560 input (R4).** Fix: restore the
+  `<a href=…>` input with per-character ZWNJ checks.
+  - Record in `ESCAPE_SEQUENCE_COVERAGE.md` that escaping follows the daemon's `body-markup`
+    capability. A daemon that formats text without advertising `body-markup` gets raw text.
+    This is accepted, because OSC 99's body already works this way.
+- **149.C11 — `MASTER_PLAN.md` mentions that stop at 148 (R5).** Fix: the dependency notes
+  and the reference list include 149 and 150.
+- **149.C12 — Stale comments and docs (R6, R14, Z10, Z11).**
+  - Code comments:
+    - `app_impl.rs` service-start comment;
+    - the `osc99_dbus` field doc in `gui/mod.rs`;
+    - the "thread is best-effort" test comment in `notifications.rs`;
+    - the zbus / Linux-section comments in both `Cargo.toml` files;
+    - the zruntime seat-hand-off sentence in `dbus_service/mod.rs` (each thread drives its own
+      runtime; the socket reader runs on the dispatcher's or the helper thread);
+    - "held for one routing call" (it is held for the rest of `update()`).
+  - `DESIGN_DECISIONS.md` wording.
+- **149.C13 — Plan text contradicts the shipped code (R7).** Fix: the 149 decisions and
+  subtask text are corrected:
+  - summary and body are both escaped;
+  - the worker payload has no `kind`;
+  - a Windows toast skips `text1` for an empty body.
+
+  The deviation notes stay.
+- **149.C14 — Unrelated reformatting of Task 148 status notes (R8).** It came from
+  `prettier --write` on the whole file; `main`'s copy already fails prettier, and the hook
+  skips markdown. Fix: revert those hunks.
+- **149.C15 — The notification sink is built every frame (R9).** Fix: build it only when
+  `drain_command_finished_events` has a notification to route. Take a shared borrow when the
+  service is already running.
+- **149.C16 — A test with no assertions (Z8).** Fix:
+  `sending_to_a_full_queue_or_a_gone_dispatcher_does_not_block_or_panic` asserts the queue
+  length and the dropped extra send.
+- **149.C17 — A plain `Notify` never adopts the reply's sender as the daemon owner (Z13).**
+  With bus tracking and a failed `GetNameOwner`, plain-only use never refreshes the
+  capabilities. Fix: `show_plain` adopts the owner as `record_shown` does, with a test.
+- **Status (2026-10-22):** C1–C17 are done in commits `7b304012` (C11, C13, C14),
+  `ed8db385` (C1, C2, C5, C6, C10, C16, C17 and the service side of C8 and C12) and
+  `d6fe5bbe` (C3, C4, C7, C9, C15 and the GUI and docs side of C8, C10 and C12).
+  - A confirmation review verified every entry and found no blocker or major. Its five
+    follow-ups are done in the next commit:
+    - the shutdown doc's sender-lifetime sentence;
+    - `routing_for` is private again, and its tie-in test moved to `notifications.rs`;
+    - a tested `DropLogLevel` for the warn-once drop log;
+    - `resolve_system_notify_sink`, with tests for the busy, running, unwanted and spawn
+      cases;
+    - an implicit slot drop.
+  - Enabling zbus's `tracing` feature moved `tokio` 1.53.2 → 1.53.3 in the lock file and
+    added `mio` / `wasi` entries. No target builds them (`cargo tree -e normal,build -i tokio`
+    is empty on Linux, Windows, macOS and FreeBSD).
+- **Scheduled into Task 150, not fixed here:**
+  - R10 / Z14 (`let _ = self;` in the non-Linux `system_notify_sink`);
+  - R11 (the repeated platform `cfg`);
+  - R13 (the untestable Windows toast builder; the dropped `Error` reminder scenario is added
+    to the maintainer's manual checks below);
+  - Z12 (the plain icon is cloned, 256 KiB, per notification; the OSC 99 path does the same,
+    and the icon pipeline moves in Task 150).
+
+## Task 150 — Desktop Notification Backend Extraction (stub)
+
+### 150 Summary
+
+Give the "show this notification on the OS" side of freminal one owner. Created as an
+enriched stub on 2026-10-22, from the Task 149 adversarial review and a maintainer
+discussion. **Not decomposed**: activate it against the code as it is after Task 149 merges.
+
+After Task 149, every system notification has exactly one native backend per platform, but
+the backends have no home of their own. They are spread across:
+
+- `freminal/src/gui/notifications.rs` (3,488 lines). It holds routing, plus the macOS/Windows
+  `freminal-notify` worker, its bounded queue and respawn policy, and the per-platform
+  builders.
+- `freminal/src/gui/osc99/` (about 18,000 lines). It holds the OSC 99 registry and protocol
+  logic, mixed with the Linux/BSD D-Bus service (`dbus_service/`). That service also carries
+  OSC 9 / 777 / 133 `D` since Task 149.2. The same directory holds the macOS/Windows
+  untracked backend (`untracked.rs`) and icon handling (`icon_decode.rs`, `icon_raster.rs`,
+  `icon_tempfiles.rs`, `icon_lookup.rs`, `presentation.rs`, `markup.rs`).
+
+Each backend was added where its first caller happened to be. That is the
+`freminal-extend-or-extract` trigger: the concept has no owner. The size of the files is only
+a symptom.
+
+### 150 Evidence (Task 149 adversarial review, 2026-10-22)
+
+Every one of these is a symptom of the missing owner. 149 fixed only what was a defect of its
+own change; the structural part is this task's.
+
+- **Shared queue.** Plain notifications (OSC 9 / 777 / 133 `D`) were put on the OSC 99
+  command queue, so a flood of one could starve the other. 149 added a separate cap (see the
+  149 cleanup entries). A backend that owns its queues would have made the budget explicit.
+- **Wrong names.** The service is named and logged as "OSC 99" (`Osc99DbusService`,
+  `Osc99DbusHandle`, `osc99_dbus` field, "OSC 99: …" log lines) although it carries every
+  Linux/BSD notification. 149 decided not to rename it, to keep the port reviewable.
+- **Repeated platform `cfg`s.** In `notifications.rs` the expression
+  `cfg(any(test, not(all(unix, not(target_os = "macos")))))` is repeated about 20 times around
+  the worker, queue and respawn machinery.
+- **Platform-shaped call sites.** `FreminalGui::system_notify_sink` has a non-Linux
+  `const fn` that does `let _ = self;` only so every platform has the same call site.
+  `SystemNotifySink` is a struct whose field exists on one platform only.
+- **Shared assets.** The app icon PNG was first put in `gui/run.rs` and imported by the D-Bus
+  service (149.C7 moved it to `gui::app_icon`). The plain icon is also cloned (256 KiB) per
+  notification, as the OSC 99 path clones its icons (review finding Z12). The icon pipeline
+  should share decoded images (`Arc`).
+- **Untestable builders.** The Windows toast builder cannot be unit-tested
+  (`tauri-winrt-notification`'s `Toast` has no getters). The macOS builders only compile on
+  macOS CI. 149.3 split the OSC 99 macOS builder into pure fields plus a thin conversion. The
+  same pattern is wanted for every platform builder.
+
+### 150 Proposed shape (decisions to confirm at activation)
+
+- **One interface, two request kinds.**
+  - **Plain** (fire-and-forget): summary, body, urgency. Used by OSC 9, OSC 777,
+    command-finished and the Settings Test button.
+  - **Tracked:** an instance id, with `Shown` / `ShowFailed` / `Closed` / `Activated` /
+    capability events coming back. Used by the OSC 99 registry.
+
+  Callers never name a platform. The backend owns the OS connection, worker threads, queue
+  budgets (per request kind), icon decoding and temp files, and markup escaping.
+- **Two steps (maintainer decision, 2026-10-22):**
+  1. **A module first.** `freminal/src/gui/desktop_notify/` (name to confirm), designed as if
+     it were a crate: an explicit public surface, nothing reaching into its internals, and no
+     behaviour change. The OSC 99 protocol logic (registry, filter, pane state, effects,
+     glue) stays in `osc99/` and becomes a caller.
+  2. **Then a mechanical move into a `freminal-notify` crate.** The maintainer approved the
+     crate in principle on 2026-10-22; confirm at activation that step 1's surface still
+     supports it. The crate may depend on `freminal-common` only (`freminal-architecture`):
+     - `icon_raster.rs` reads the bundled font through `crate::gui::font_manager`, so it
+       must take the font bytes as input instead;
+     - toast / glyph types from `crate::gui::icons` / `crate::gui::toast` must stay on the
+       caller's side.
+
+  The point of the crate is that zbus, `tauri-winrt-notification`, `notify-rust` and their
+  platform `cfg`s leave the `freminal` crate entirely.
+- **Wake-up integration.** The D-Bus service wakes idle windows through a
+  `Box<dyn Fn() + Send>` waker (`Osc99Wake`). That is already crate-safe; keep it.
+
+### 150 Open questions (resolve at activation)
+
+| Question                                                                            | Leaning                                    |
+| ----------------------------------------------------------------------------------- | ------------------------------------------ |
+| Module / crate name                                                                 | `desktop_notify` / `freminal-notify`       |
+| Does markup escaping (#560) belong to the backend or to the caller?                 | Backend: it depends on daemon capabilities |
+| Does the OSC 99 icon pipeline (decode, raster, temp files, lookup) move whole?      | Yes; it is platform presentation           |
+| One worker per platform for both kinds, or separate plain/tracked workers?          | One, with per-kind queue budgets           |
+| Rename `Osc99DbusEvent` / `Osc99SystemAction` etc. to backend-neutral names?        | Yes, in step 1                             |
+
+### 150 Scope limits
+
+- No behaviour change in either step: notification content, routing, gates, `p=?` answers
+  and capability broadcasts stay identical, and the existing tests prove it.
+- Out of scope: new notification features, and any change to which notifications are shown
+  or when.
 
 ---
 

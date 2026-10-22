@@ -10,6 +10,8 @@
 //! know by itself (Tasks 130.4, 138.15), and re-sends them to every pane when
 //! they change. Later facets (Task 146) are added here.
 
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_common::config::NotificationsConfig;
 use freminal_common::config::{Config, NotificationRouting};
 use freminal_common::host_capabilities::{
     HostCapabilities, KittyFileTransmission, Osc99ActivationReport, Osc99AutoExpiry,
@@ -83,13 +85,78 @@ pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
     if !(notifications.enabled && notifications.osc_99) {
         return false;
     }
+    routing_has_system_leg(notifications.routing_osc99)
+}
+
+/// Whether `routing` ever shows a desktop notification, at some focus state.
+#[cfg(all(unix, not(target_os = "macos")))]
+const fn routing_has_system_leg(routing: NotificationRouting) -> bool {
     // No wildcard: a new routing variant must be classified here.
-    match notifications.routing_osc99 {
+    match routing {
         NotificationRouting::System
         | NotificationRouting::Both
         | NotificationRouting::SystemWhenUnfocused => true,
         NotificationRouting::Toast | NotificationRouting::Disabled => false,
     }
+}
+
+/// The way a plain notification (OSC 9, OSC 777, OSC 133 `D` command-finished,
+/// the Settings "Test Notification" button) reaches the router, which decides
+/// whether the `enabled` master switch applies to it.
+///
+/// The same on every platform, so a call site needs no `cfg`: only Linux/BSD
+/// reads it (see `FreminalGui::system_notify_sink`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlainNotifyEntry {
+    /// `NotificationRouter::route`: nothing is shown unless
+    /// `notifications.enabled` is on.
+    Routed,
+    /// `NotificationRouter::route_test`, the Test Notification button: it
+    /// ignores `notifications.enabled`, so the user gets feedback while they
+    /// are still configuring routing. Its sample request is an OSC-text one,
+    /// so only `routing_osc_text` matters.
+    SettingsTest,
+}
+
+/// Whether `config` can route a plain notification that arrives through
+/// `entry` to the system (desktop-notification) leg.
+///
+/// The Linux/BSD notification service is started while this holds, so the
+/// first OSC 9 / command-finished notification does not wait for a connection
+/// that was never opened. The answer errs on the side of starting: a category
+/// counts when its routing uses the system leg at any focus state, whatever
+/// the per-source `osc_9` / `osc_777` / `on_command_finished` toggles say,
+/// because starting the service early is cheap and a missed start would drop
+/// notifications.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub(super) const fn plain_notifications_may_use_system_leg(
+    config: &NotificationsConfig,
+    entry: PlainNotifyEntry,
+) -> bool {
+    match entry {
+        PlainNotifyEntry::Routed => {
+            config.enabled
+                && (routing_has_system_leg(config.routing_osc_text)
+                    || routing_has_system_leg(config.routing_command_finished)
+                    || routing_has_system_leg(config.routing_error))
+        }
+        PlainNotifyEntry::SettingsTest => routing_has_system_leg(config.routing_osc_text),
+    }
+}
+
+/// Whether `config` can route any notification, OSC 99 or plain, to the
+/// system (desktop-notification) leg through the normal routed path: the
+/// condition for starting the Linux/BSD notification service from
+/// `FreminalGui::ensure_osc99_dbus_started`.
+///
+/// The Settings "Test Notification" button has its own entry
+/// ([`PlainNotifyEntry::SettingsTest`]) and starts the service itself.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub(super) const fn notification_service_wanted(config: &Config) -> bool {
+    osc99_may_use_system_leg(config)
+        || plain_notifications_may_use_system_leg(&config.notifications, PlainNotifyEntry::Routed)
 }
 
 /// The capabilities to re-broadcast when the Linux/BSD daemon's state goes
@@ -1201,6 +1268,146 @@ mod tests {
             assert!(!osc99_may_use_system_leg(&osc_99_off), "{routing:?}");
         }
         assert!(!osc99_may_use_system_leg(&Config::default()));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_system_leg_of_a_routing_is_every_variant_but_toast_and_disabled() {
+        for routing in ALL_ROUTINGS {
+            assert_eq!(
+                routing_has_system_leg(routing),
+                !matches!(
+                    routing,
+                    NotificationRouting::Toast | NotificationRouting::Disabled
+                ),
+                "{routing:?}"
+            );
+        }
+    }
+
+    /// A `[notifications]` config with every routing toast-only, so a test
+    /// turns on exactly the categories it is about.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn toast_only_notifications() -> NotificationsConfig {
+        NotificationsConfig {
+            enabled: true,
+            routing_osc_text: NotificationRouting::Toast,
+            routing_command_finished: NotificationRouting::Toast,
+            routing_error: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn routed_plain_notifications_need_the_master_switch_and_a_system_routing() {
+        assert!(!plain_notifications_may_use_system_leg(
+            &toast_only_notifications(),
+            PlainNotifyEntry::Routed
+        ));
+        for routing in ALL_ROUTINGS {
+            let expected = routing_has_system_leg(routing);
+            for category in 0..3 {
+                let mut config = toast_only_notifications();
+                match category {
+                    0 => config.routing_osc_text = routing,
+                    1 => config.routing_command_finished = routing,
+                    _ => config.routing_error = routing,
+                }
+                assert_eq!(
+                    plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::Routed),
+                    expected,
+                    "category {category}: {routing:?}"
+                );
+                config.enabled = false;
+                assert!(
+                    !plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::Routed),
+                    "the master switch is off: category {category}: {routing:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_test_button_ignores_the_master_switch_and_reads_only_the_osc_text_routing() {
+        for routing in ALL_ROUTINGS {
+            for enabled in [true, false] {
+                let mut config = toast_only_notifications();
+                config.enabled = enabled;
+                config.routing_osc_text = routing;
+                assert_eq!(
+                    plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::SettingsTest),
+                    routing_has_system_leg(routing),
+                    "{routing:?}, enabled = {enabled}"
+                );
+            }
+            // The other categories do not matter to the sample request.
+            let mut config = toast_only_notifications();
+            config.routing_command_finished = routing;
+            config.routing_error = routing;
+            assert!(
+                !plain_notifications_may_use_system_leg(&config, PlainNotifyEntry::SettingsTest),
+                "{routing:?}"
+            );
+        }
+    }
+
+    /// A config with notifications on and every routing toast-only, OSC 99
+    /// included, so a test turns on exactly the legs it is about.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn all_toast_config() -> Config {
+        Config {
+            notifications: NotificationsConfig {
+                osc_99: true,
+                routing_osc99: NotificationRouting::Toast,
+                ..toast_only_notifications()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_service_is_wanted_when_any_routed_notification_can_use_the_system_leg() {
+        assert!(!notification_service_wanted(&Config::default()));
+        assert!(!notification_service_wanted(&all_toast_config()));
+
+        // OSC 99 is off, but the error category can show a system notification.
+        let mut osc_99_off = all_toast_config();
+        osc_99_off.notifications.osc_99 = false;
+        osc_99_off.notifications.routing_osc99 = NotificationRouting::Toast;
+        osc_99_off.notifications.routing_error = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_99_off));
+
+        // OSC 99 is toast-only, but OSC 9 / 777 text can show a system one.
+        let mut osc_text = all_toast_config();
+        osc_text.notifications.routing_osc_text = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_text));
+
+        // Only OSC 99 uses the system leg.
+        let mut osc_99_alone = all_toast_config();
+        osc_99_alone.notifications.routing_osc99 = NotificationRouting::System;
+        assert!(notification_service_wanted(&osc_99_alone));
+
+        // The master switch off silences every one of them.
+        for mut config in [osc_99_off, osc_text, osc_99_alone] {
+            config.notifications.enabled = false;
+            assert!(!notification_service_wanted(&config));
+        }
+        let everything_system = Config {
+            notifications: NotificationsConfig {
+                enabled: false,
+                osc_99: true,
+                routing_osc99: NotificationRouting::System,
+                routing_osc_text: NotificationRouting::System,
+                routing_command_finished: NotificationRouting::System,
+                routing_error: NotificationRouting::System,
+                ..NotificationsConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(!notification_service_wanted(&everything_system));
     }
 
     // ── End to end through a pane's handler (Task 138.15) ───────────────

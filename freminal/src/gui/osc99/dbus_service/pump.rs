@@ -6,11 +6,15 @@
 //! The signal pumps: the threads that read signals off the bus connection
 //! and forward them to the dispatcher, and the match rules and parsers they
 //! use.
+//!
+//! A pump is one [`zbus::block_on`] around a loop over a [`MessageStream`]. The
+//! only thing it does between messages is a send on an unbounded channel, so it
+//! never blocks the thread it is driven on.
 
 use crossbeam_channel::Sender;
-use zbus::MatchRule;
-use zbus::blocking::MessageIterator;
+use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
+use zbus::{MatchRule, MessageStream};
 
 use super::{
     BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH,
@@ -57,23 +61,23 @@ pub(super) enum PumpSignal {
 /// The match rule for the daemon's `ActionInvoked` / `NotificationClosed`
 /// signals. It names no sender: see [`Osc99SignalSender`](super::state::Osc99SignalSender).
 pub(super) fn notification_signals_rule() -> zbus::Result<MatchRule<'static>> {
-    Ok(MatchRule::builder()
+    MatchRule::builder()
         .msg_type(MessageType::Signal)
-        .interface(NOTIFICATIONS_INTERFACE)?
-        .path(NOTIFICATIONS_PATH)?
-        .build())
+        .interface(NOTIFICATIONS_INTERFACE)
+        .path(NOTIFICATIONS_PATH)
+        .build()
 }
 
 /// The match rule for the bus driver's `NameOwnerChanged` signal about the
 /// notification daemon's name.
 pub(super) fn owner_changed_rule() -> zbus::Result<MatchRule<'static>> {
-    Ok(MatchRule::builder()
+    MatchRule::builder()
         .msg_type(MessageType::Signal)
-        .sender(BUS_DRIVER_NAME)?
-        .interface(BUS_DRIVER_INTERFACE)?
-        .member("NameOwnerChanged")?
-        .arg(0, NOTIFICATIONS_SERVICE)?
-        .build())
+        .sender(BUS_DRIVER_NAME)
+        .interface(BUS_DRIVER_INTERFACE)
+        .member("NameOwnerChanged")
+        .arg(0, NOTIFICATIONS_SERVICE)
+        .build()
 }
 
 /// Start a pump thread: forward the signals `parse` recognises from `messages`
@@ -81,7 +85,7 @@ pub(super) fn owner_changed_rule() -> zbus::Result<MatchRule<'static>> {
 pub(super) fn spawn_pump(
     name: &str,
     kind: PumpKind,
-    messages: MessageIterator,
+    messages: MessageStream,
     signals: Sender<PumpSignal>,
     parse: fn(&Message) -> Option<PumpSignal>,
 ) -> Result<(), StartError> {
@@ -96,38 +100,42 @@ pub(super) fn spawn_pump(
 /// then tell the dispatcher (if it is still there) that this pump is over.
 fn run_pump(
     kind: PumpKind,
-    messages: MessageIterator,
+    messages: MessageStream,
     signals: &Sender<PumpSignal>,
     parse: fn(&Message) -> Option<PumpSignal>,
 ) {
     forward_signals(messages, signals, parse);
     if signals.send(PumpSignal::Ended(kind)).is_err() {
-        tracing::debug!("OSC 99: the dispatcher is gone; the {kind:?} pump exits quietly");
+        tracing::debug!(
+            "desktop notifications: the dispatcher is gone; the {kind:?} pump exits quietly"
+        );
     }
 }
 
 /// Forward the signals `parse` recognises until the bus closes or the
 /// dispatcher is gone.
 fn forward_signals(
-    messages: MessageIterator,
+    mut messages: MessageStream,
     signals: &Sender<PumpSignal>,
     parse: fn(&Message) -> Option<PumpSignal>,
 ) {
-    for message in messages {
-        let message = match message {
-            Ok(message) => message,
-            Err(e) => {
-                tracing::warn!("OSC 99: notification signal stream failed: {e}");
+    zbus::block_on(async {
+        while let Some(message) = messages.next().await {
+            let message = match message {
+                Ok(message) => message,
+                Err(e) => {
+                    tracing::warn!("desktop notifications: notification signal stream failed: {e}");
+                    return;
+                }
+            };
+            if let Some(signal) = parse(&message)
+                && signals.send(signal).is_err()
+            {
+                // The dispatcher dropped its receiver: the GUI is gone.
                 return;
             }
-        };
-        if let Some(signal) = parse(&message)
-            && signals.send(signal).is_err()
-        {
-            // The dispatcher dropped its receiver: the GUI is gone.
-            return;
         }
-    }
+    });
 }
 
 /// The signal `message` carries, or `None` for any member other than
@@ -189,7 +197,7 @@ mod tests {
 
     #[test]
     fn parse_signal_reads_action_invoked() -> TestResult {
-        let message = signal("ActionInvoked")?.build(&(7u32, "2"))?;
+        let message = signal("ActionInvoked").build(&(7u32, "2"))?;
 
         assert_eq!(parse_signal(&message), Some(action_from(None, 7, "2")));
         Ok(())
@@ -197,8 +205,8 @@ mod tests {
 
     #[test]
     fn parse_signal_carries_the_sender() -> TestResult {
-        let message = signal("NotificationClosed")?
-            .sender(":1.5")?
+        let message = signal("NotificationClosed")
+            .sender(":1.5")
             .build(&(7u32, 3u32))?;
 
         assert_eq!(parse_signal(&message), Some(closed_from(Some(":1.5"), 7)));
@@ -207,7 +215,7 @@ mod tests {
 
     #[test]
     fn parse_signal_reads_notification_closed_whatever_the_reason() -> TestResult {
-        let message = signal("NotificationClosed")?.build(&(7u32, 3u32))?;
+        let message = signal("NotificationClosed").build(&(7u32, 3u32))?;
 
         assert_eq!(parse_signal(&message), Some(closed_from(None, 7)));
         Ok(())
@@ -215,7 +223,7 @@ mod tests {
 
     #[test]
     fn parse_signal_ignores_other_members() -> TestResult {
-        let message = signal("ActivationToken")?.build(&(7u32, "token"))?;
+        let message = signal("ActivationToken").build(&(7u32, "token"))?;
 
         assert_eq!(parse_signal(&message), None);
         Ok(())
@@ -223,7 +231,7 @@ mod tests {
 
     #[test]
     fn parse_signal_ignores_a_malformed_body() -> TestResult {
-        let message = signal("ActionInvoked")?.build(&"not a tuple")?;
+        let message = signal("ActionInvoked").build(&"not a tuple")?;
 
         assert_eq!(parse_signal(&message), None);
         Ok(())
@@ -259,9 +267,8 @@ mod tests {
     #[test]
     fn parse_owner_changed_ignores_a_sender_that_is_not_the_bus_driver() -> TestResult {
         let forged = name_owner_changed(":1.9", NOTIFICATIONS_SERVICE, ":1.9")?;
-        let senderless =
-            Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
-                .build(&(NOTIFICATIONS_SERVICE, "", ":1.9"))?;
+        let senderless = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")
+            .build(&(NOTIFICATIONS_SERVICE, "", ":1.9"))?;
 
         assert_eq!(parse_owner_changed(&forged), None);
         assert_eq!(parse_owner_changed(&senderless), None);
@@ -270,11 +277,11 @@ mod tests {
 
     #[test]
     fn parse_owner_changed_ignores_other_members_and_malformed_bodies() -> TestResult {
-        let other_member = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameLost")?
-            .sender(BUS_DRIVER_NAME)?
+        let other_member = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameLost")
+            .sender(BUS_DRIVER_NAME)
             .build(&(NOTIFICATIONS_SERVICE, "", ":1.6"))?;
-        let malformed = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")?
-            .sender(BUS_DRIVER_NAME)?
+        let malformed = Message::signal(BUS_DRIVER_PATH, BUS_DRIVER_INTERFACE, "NameOwnerChanged")
+            .sender(BUS_DRIVER_NAME)
             .build(&"not a tuple")?;
 
         assert_eq!(parse_owner_changed(&other_member), None);
