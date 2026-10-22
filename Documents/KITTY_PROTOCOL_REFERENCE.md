@@ -1,9 +1,9 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
 Last updated: 2026-10-22 — Task 150 — the notification backends moved from
-`gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and their threads are now named
-`freminal-notify-*`. The paths and thread names below are updated. No OSC 99
-behaviour changes.
+`gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and their
+threads are now named `freminal-notify-*`. The paths and thread names below are
+updated. No OSC 99 behaviour changes.
 
 Earlier: 2026-10-22 — Task 149 — the OSC 99 "Legs" note records that the
 legacy OSC 9 / 777 / 133 `D` notifications share each platform's native
@@ -601,11 +601,13 @@ The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
   as a backstop.
 - **Legs:** the keyed toast (`freminal/src/gui/toast/`), the Linux/BSD zbus
   service (`freminal-notify/src/linux/`, `freminal-notify/src/presentation.rs`,
-  `freminal-notify/src/icons/lookup.rs`, `freminal-notify/src/icons/decode.rs`), and the
-  untracked macOS/Windows backend (`freminal-notify/src/untracked.rs`,
-  `freminal-notify/src/icons/raster.rs`, `freminal-notify/src/icons/tempfiles.rs`,
-  `freminal-notify/src/icons/decode.rs`). The Linux/BSD service and the macOS/Windows backends also
-  show the legacy OSC 9 / 777 / 133 `D` notifications (Task 149): macOS uses
+  `freminal-notify/src/icons/lookup.rs`, `freminal-notify/src/icons/decode.rs`),
+  and the untracked macOS/Windows backend (`freminal-notify/src/untracked.rs`,
+  `freminal-notify/src/icons/raster.rs`,
+  `freminal-notify/src/icons/tempfiles.rs`,
+  `freminal-notify/src/icons/decode.rs`). The Linux/BSD service and the
+  macOS/Windows backends also show the legacy OSC 9 / 777 / 133 `D`
+  notifications (Task 149): macOS uses
   `notify-rust` (a macOS-only dependency), Windows `tauri-winrt-notification`
   and Linux/BSD the zbus service, so no other platform builds `notify-rust`.
 - **Routing and capabilities:** `route_osc99` in `freminal/src/gui/notifications.rs`

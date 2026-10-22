@@ -1158,11 +1158,11 @@ a test that agrees with you.
 ### What `freminal-notify` owns, and what stays a caller
 
 "Show this notification on the operating system" has one owner: the
-`freminal-notify` crate (`freminal-notify/src/`). It contains the OS backends (the Linux/BSD
-D-Bus service in `linux/`, the macOS/Windows plain worker and the macOS/Windows
-OSC 99 untracked worker), the icon pipeline (`icons/`: decode, raster, temp
-files, lookup), `presentation.rs`, body-markup escaping (`markup.rs`), the
-daemon capability types and the backend interface types.
+`freminal-notify` crate (`freminal-notify/src/`). It contains the OS backends
+(the Linux/BSD D-Bus service in `linux/`, the macOS/Windows plain worker and the
+macOS/Windows OSC 99 untracked worker), the icon pipeline (`icons/`: decode,
+raster, temp files, lookup), `presentation.rs`, body-markup escaping
+(`markup.rs`), the daemon capability types and the backend interface types.
 
 These stay outside it, as callers:
 

@@ -4,8 +4,8 @@
 
 Last updated: 2026-10-22 — Task 150 (desktop notification backend extraction).
 No status icon moves and no behaviour changes. The notification backends moved
-from `gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and the OSC 99 delivery thread is
-now named `freminal-notify-deliver`.
+from `gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and
+the OSC 99 delivery thread is now named `freminal-notify-deliver`.
 
 Last updated: 2026-10-22 — Task 149 (zbus 6 migration and per-platform
 notification backends, #567). No status icon moves. Every system notification

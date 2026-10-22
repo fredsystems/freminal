@@ -99,8 +99,9 @@ headlines:
   first-party crate inherits.
 - **Errors must be explicit, typed, and structured.** No `anyhow` in
   library crates (`freminal-common`, `freminal-buffer`,
-  `freminal-terminal-emulator`); `anyhow` / `color-eyre` OK in
-  `xtask`. Error variants encode what went wrong, not what to do.
+  `freminal-terminal-emulator`, `freminal-notify`); `anyhow` /
+  `color-eyre` OK in `xtask`. Error variants encode what went wrong,
+  not what to do.
 - **No `#[allow(dead_code)]` in production modules.** Acceptable only
   for test-only helpers and temporary refactors with an explicit
   TODO.
@@ -165,6 +166,17 @@ The full architecture invariants and what-not-to-leak rules live in the
 - **`freminal` (binary)** -- the GUI. `update()` is a pure read of the
   snapshot. All input flows through `Sender<InputEvent>`. `ViewState`
   is owned here, never shared.
+- **`freminal-notify`** -- OS desktop-notification backends (the
+  Linux/BSD D-Bus service, the macOS and Windows workers, the icon
+  pipeline). May depend only on `freminal-common` and external crates;
+  only the `freminal` binary depends on it. Platform `cfg` for
+  notifications lives here, not in the GUI. No egui, no windowing, no
+  emulator types. Test doubles exist only behind `cfg(test)` or the
+  `test-utils` feature.
+- **`freminal-windowing`** -- the winit + glutin + egui integration
+  layer. Owns the event loop, GL context management and egui rendering;
+  the `freminal` binary implements its `App` trait to receive per-window
+  update callbacks.
 - **`xtask`** -- build/CI orchestration. Subcommands: `ci`, `build`,
   `check`, `check-windows`, `lint`, `test`, `coverage`, `deny`, `machete`,
   `fuzz`, `fuzz-smoke`, `fuzz-replay`, `fuzz-cmin`, `fuzz-list`.
