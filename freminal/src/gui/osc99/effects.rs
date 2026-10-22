@@ -6,12 +6,12 @@ use std::sync::{Arc, Weak};
 
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
+use freminal_notify::{NotificationInstanceId, SystemDispatch, TrackedBackend, UntrackedBackend};
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::{Osc99Origin, Osc99ToastSpec, instance_toast_key};
 use crate::gui::notifications::send_reply_weak;
 use crate::gui::toast::{ToastContent, ToastPlacement, ToastStack};
-use freminal_notify::{NotificationInstanceId, SystemDispatch, TrackedBackend, UntrackedBackend};
 
 /// Something the registry asks the GUI to do.
 ///

@@ -35,7 +35,6 @@
 //! module exists to eliminate.
 
 use egui::{Color32, FontFamily, RichText};
-
 use freminal_notify::StandardIcon;
 
 /// A chrome action symbol, decoupled from its underlying glyph codepoint.

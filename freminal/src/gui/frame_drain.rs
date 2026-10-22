@@ -45,6 +45,7 @@
 //! grab-bag instead of the one real concept above.
 
 use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
+use freminal_notify::PlainSink;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::recording::RecordingSwap;
 use freminal_windowing::WindowId;
@@ -58,7 +59,6 @@ use super::panes::{self, PaneId};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 use super::{rendering, toast};
-use freminal_notify::PlainSink;
 
 /// Whether the OS window that owns the terminal surface has input focus
 /// this frame, for command-finished notification routing.

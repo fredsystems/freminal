@@ -18,13 +18,13 @@ use freminal_common::host_capabilities::{
 };
 
 use freminal_common::send_or_log;
+use freminal_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform, ServiceDemand};
 use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
 use super::FreminalGui;
 use super::tabs::TabManager;
 use super::window::PerWindowState;
-use freminal_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform, ServiceDemand};
 
 /// Resolve the host-dependent capability facts from the config, the platform
 /// and what is known about the Linux/BSD notification daemon.
@@ -77,7 +77,7 @@ const fn kitty_file_transmission(config: &Config) -> KittyFileTransmission {
 /// daemon's `GetCapabilities` answer is normally in before an application's
 /// first `p=?`.
 #[must_use]
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
     let notifications = &config.notifications;
     if !(notifications.enabled && notifications.osc_99) {
@@ -149,7 +149,7 @@ pub(super) const fn plain_notifications_may_use_system_leg(
 /// The Settings "Test Notification" button has its own entry
 /// ([`PlainNotifyEntry::SettingsTest`]) and starts the service itself.
 #[must_use]
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 pub(super) const fn notification_service_wanted(config: &Config) -> bool {
     osc99_may_use_system_leg(config)
         || plain_notifications_may_use_system_leg(&config.notifications, PlainNotifyEntry::Routed)
@@ -158,7 +158,7 @@ pub(super) const fn notification_service_wanted(config: &Config) -> bool {
 /// [`notification_service_wanted`] as the [`ServiceDemand`] the notification
 /// backend takes: the policy is decided here, and the backend only obeys.
 #[must_use]
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 pub(super) const fn notification_service_demand(config: &Config) -> ServiceDemand {
     if notification_service_wanted(config) {
         ServiceDemand::Wanted
@@ -1261,7 +1261,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_system_leg_is_wanted_only_when_osc_99_is_on_and_routing_uses_it() {
         for routing in ALL_ROUTINGS {
@@ -1286,7 +1285,6 @@ mod tests {
         assert!(!osc99_may_use_system_leg(&Config::default()));
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_system_leg_of_a_routing_is_every_variant_but_toast_and_disabled() {
         for routing in ALL_ROUTINGS {
@@ -1303,7 +1301,6 @@ mod tests {
 
     /// A `[notifications]` config with every routing toast-only, so a test
     /// turns on exactly the categories it is about.
-    #[cfg(all(unix, not(target_os = "macos")))]
     fn toast_only_notifications() -> NotificationsConfig {
         NotificationsConfig {
             enabled: true,
@@ -1314,7 +1311,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn routed_plain_notifications_need_the_master_switch_and_a_system_routing() {
         assert!(!plain_notifications_may_use_system_leg(
@@ -1344,7 +1340,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_test_button_ignores_the_master_switch_and_reads_only_the_osc_text_routing() {
         for routing in ALL_ROUTINGS {
@@ -1371,7 +1366,6 @@ mod tests {
 
     /// A config with notifications on and every routing toast-only, OSC 99
     /// included, so a test turns on exactly the legs it is about.
-    #[cfg(all(unix, not(target_os = "macos")))]
     fn all_toast_config() -> Config {
         Config {
             notifications: NotificationsConfig {
@@ -1383,7 +1377,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_service_is_wanted_when_any_routed_notification_can_use_the_system_leg() {
         assert!(!notification_service_wanted(&Config::default()));
@@ -1424,6 +1417,75 @@ mod tests {
             ..Config::default()
         };
         assert!(!notification_service_wanted(&everything_system));
+    }
+
+    #[test]
+    fn the_service_demand_is_wanted_exactly_when_the_service_is_wanted() {
+        let mut osc_text_system = all_toast_config();
+        osc_text_system.notifications.routing_osc_text = NotificationRouting::System;
+        let mut osc_99_system = all_toast_config();
+        osc_99_system.notifications.routing_osc99 = NotificationRouting::System;
+        let mut switched_off = osc_99_system.clone();
+        switched_off.notifications.enabled = false;
+
+        for (config, demand) in [
+            (Config::default(), ServiceDemand::NotWanted),
+            (all_toast_config(), ServiceDemand::NotWanted),
+            (switched_off, ServiceDemand::NotWanted),
+            (osc_text_system, ServiceDemand::Wanted),
+            (osc_99_system, ServiceDemand::Wanted),
+        ] {
+            assert_eq!(
+                notification_service_demand(&config),
+                demand,
+                "{:?}",
+                config.notifications
+            );
+            assert_eq!(
+                notification_service_demand(&config) == ServiceDemand::Wanted,
+                notification_service_wanted(&config)
+            );
+        }
+    }
+
+    #[test]
+    fn the_plain_demand_is_wanted_exactly_when_the_plain_gate_is_open() {
+        let toast_only = toast_only_notifications();
+        let mut osc_text_system = toast_only_notifications();
+        osc_text_system.routing_osc_text = NotificationRouting::System;
+        let mut error_system = toast_only_notifications();
+        error_system.routing_error = NotificationRouting::Both;
+        let mut switched_off = osc_text_system.clone();
+        switched_off.enabled = false;
+
+        // (config, entry, wanted)
+        for (config, entry, wanted) in [
+            (&toast_only, PlainNotifyEntry::Routed, false),
+            (&toast_only, PlainNotifyEntry::SettingsTest, false),
+            (&osc_text_system, PlainNotifyEntry::Routed, true),
+            (&osc_text_system, PlainNotifyEntry::SettingsTest, true),
+            (&error_system, PlainNotifyEntry::Routed, true),
+            // Only OSC text matters to the Test button.
+            (&error_system, PlainNotifyEntry::SettingsTest, false),
+            // The master switch gates the routed path and not the Test button.
+            (&switched_off, PlainNotifyEntry::Routed, false),
+            (&switched_off, PlainNotifyEntry::SettingsTest, true),
+        ] {
+            let expected = if wanted {
+                ServiceDemand::Wanted
+            } else {
+                ServiceDemand::NotWanted
+            };
+            assert_eq!(
+                plain_notification_demand(config, entry),
+                expected,
+                "{entry:?}, {config:?}"
+            );
+            assert_eq!(
+                plain_notification_demand(config, entry) == ServiceDemand::Wanted,
+                plain_notifications_may_use_system_leg(config, entry)
+            );
+        }
     }
 
     // ── End to end through a pane's handler (Task 138.15) ───────────────

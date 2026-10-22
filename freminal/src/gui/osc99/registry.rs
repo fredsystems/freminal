@@ -80,6 +80,7 @@ use freminal_common::buffer_states::osc99_notification::{
     Notification99Data, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
     Osc99Expiry,
 };
+use freminal_notify::NotificationInstanceId;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -90,7 +91,6 @@ use super::{
 };
 use crate::gui::panes::PaneId;
 use crate::gui::toast::ToastEvent;
-use freminal_notify::NotificationInstanceId;
 
 /// The most instances the registry keeps overall, as a backstop behind
 /// [`MAX_OSC99_INSTANCES_PER_PANE`]. The oldest is forgotten, with no reply,
@@ -827,6 +827,10 @@ mod tests {
     use freminal_common::buffer_states::osc99_notification::{
         NotificationOccasion, NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
+    use freminal_notify::test_support::{
+        RecordedShow, RecordingTrackedBackend, RecordingUntrackedBackend,
+    };
+    use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend};
     use freminal_windowing::WindowId;
 
     use super::*;
@@ -838,10 +842,6 @@ mod tests {
     use crate::gui::toast::{
         ToastEvent, ToastEventKind, ToastKey, ToastKind, ToastLifetime, ToastStack,
     };
-    use freminal_notify::test_support::{
-        RecordedShow, RecordingTrackedBackend, RecordingUntrackedBackend,
-    };
-    use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend};
 
     /// A live pane: its origin plus the strong reply handle that keeps it
     /// alive. Dropping the handle simulates the pane closing.

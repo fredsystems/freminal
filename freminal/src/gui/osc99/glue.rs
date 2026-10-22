@@ -24,6 +24,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use freminal_common::config::NotificationsConfig;
+use freminal_notify::{LinuxDaemon, PlainSink};
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, SystemNotifyEvent};
 use freminal_windowing::WindowId;
 use tracing::trace;
 
@@ -38,9 +41,6 @@ use crate::gui::host_capabilities::PlainNotifyEntry;
 use crate::gui::notifications::NotificationRouter;
 use crate::gui::toast::ToastStack;
 use crate::gui::window::PerWindowState;
-use freminal_notify::{LinuxDaemon, PlainSink};
-#[cfg(all(unix, not(target_os = "macos")))]
-use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, SystemNotifyEvent};
 
 /// How many OSC 99 requests may wait in `FreminalGui::deferred_osc99_requests`
 /// for a busy cell to free up. A cell is only ever busy transiently, so
@@ -657,7 +657,7 @@ impl FreminalGui {
     ///
     /// A busy handle cell leaves the service unstarted; the next call retries,
     /// and until then effects are applied against
-    /// [`NoTrackedBackend`](freminal_notify::NoTrackedBackend).
+    /// [`NoTrackedBackend`].
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn ensure_notification_service_started(&self) {
         self.notifier
@@ -670,13 +670,14 @@ impl FreminalGui {
     /// Settings "Test Notification" button) goes to be shown, for a routing
     /// call made through `entry` under `config`.
     ///
-    /// On Linux/BSD that is freminal's own D-Bus service: it is started here
-    /// when `config` can route to the system leg through `entry` (the Test
-    /// button ignores `notifications.enabled`, so it must be able to start the
-    /// service when the master switch is off) and already running otherwise.
-    /// A busy handle cell (logged at debug), or a service that is neither
-    /// running nor wanted, gives a sink that drops system notifications.
-    /// Callers build the sink only when they have a notification to route.
+    /// On Linux/BSD that is the `freminal-notify` crate's D-Bus service: it is
+    /// started here when `config` can route to the system leg through `entry`
+    /// (the Test button ignores `notifications.enabled`, so it must be able to
+    /// start the service when the master switch is off) and already running
+    /// otherwise. A busy handle cell (logged at debug), or a service that is
+    /// neither running nor wanted, gives a sink that drops system
+    /// notifications. Callers build the sink only when they have a notification
+    /// to route.
     ///
     /// Elsewhere the sink is the platform worker. The policy is decided here;
     /// [`DesktopNotifier::plain_sink`](freminal_notify::DesktopNotifier::plain_sink)
@@ -779,6 +780,9 @@ mod tests {
         Osc99ActivationReporting, Osc99CloseReporting, Osc99ControlKind, Osc99Expiry, Osc99Sound,
     };
     use freminal_common::config::NotificationRouting;
+    use freminal_notify::NotificationInstanceId;
+    use freminal_notify::test_support::RecordingTrackedBackend;
+    use freminal_notify::test_support::RecordingUntrackedBackend;
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
     use super::*;
@@ -788,9 +792,6 @@ mod tests {
         PaneKeyboardFocus, PaneVisibility, instance_toast_key,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
-    use freminal_notify::NotificationInstanceId;
-    use freminal_notify::test_support::RecordingTrackedBackend;
-    use freminal_notify::test_support::RecordingUntrackedBackend;
 
     // ── Fixtures ────────────────────────────────────────────────────────
 

@@ -4,6 +4,13 @@
 // https://opensource.org/licenses/MIT.
 
 //! The repaint wake the notification service uses to reach the GUI.
+//!
+//! This module is compiled on every platform, although only the Linux/BSD
+//! notification service reads what it tracks (through the waker). It does real
+//! work everywhere: `register`, `unregister` and `retarget` keep its target set
+//! current on every platform, so the state is always consistent even where
+//! nothing reads it. Keeping it platform-neutral also keeps the four call sites
+//! in `app_impl.rs` free of `cfg`.
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 

@@ -13,12 +13,12 @@
 //! - **Toast leg:** push an entry onto the in-app [`ToastStack`].
 //! - **System leg:** show a desktop notification, as an untracked "plain"
 //!   notification handed to a [`PlainSink`]. On Linux/BSD the sink reaches
-//!   freminal's own D-Bus notification service (see `osc99`). On macOS and
-//!   Windows it reaches a long-lived background worker thread: `notify-rust`
-//!   on macOS, and a toast built directly with `tauri-winrt-notification` on
-//!   Windows.
+//!   freminal's own D-Bus notification service (the `freminal-notify` crate).
+//!   On macOS and Windows it reaches a long-lived background worker thread:
+//!   `notify-rust` on macOS, and a toast built directly with
+//!   `tauri-winrt-notification` on Windows.
 //!   (OSC 99 is the exception: its system leg is driven by the registry through
-//!   the platform's own backend, see `osc99`.)
+//!   the platform's own `freminal-notify` backend, see `osc99`.)
 //!
 //! Routing is decided per [`NotificationKind`] using the focus-aware
 //! [`NotificationRouting::wants_toast`] / [`NotificationRouting::wants_system`]
@@ -37,6 +37,7 @@ use freminal_common::buffer_states::osc99_notification::{
 use freminal_common::buffer_states::window_manipulation::NotificationKind;
 use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::send_or_log;
+use freminal_notify::{LinuxDaemon, PlainNotification, PlainSink, SYSTEM_LEG, SystemLeg};
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
@@ -46,7 +47,6 @@ use super::osc99::{
     Osc99Registry, Osc99Request, PaneKeyboardFocus, PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
-use freminal_notify::{LinuxDaemon, PlainNotification, PlainSink, SYSTEM_LEG, SystemLeg};
 
 /// A fully-formed notification ready to be routed.
 ///
@@ -384,14 +384,15 @@ impl NotificationRouter {
     /// Show a desktop notification: the request is mapped to a
     /// [`PlainNotification`] and handed to `system` without blocking.
     ///
-    /// Where it goes is the sink's business (the D-Bus service on Linux/BSD,
-    /// the `freminal-notify` worker on macOS and Windows), and a notification
+    /// Where it goes is the sink's business (the `freminal-notify` crate's
+    /// D-Bus service on Linux/BSD, its plain-notification worker thread,
+    /// named `freminal-notify`, on macOS and Windows), and a notification
     /// that cannot be shown is dropped: a missing notification daemon is
     /// non-fatal.
     ///
     /// There is no test guard: the sink is explicit, so a test that passes
     /// [`PlainSink::nowhere`] reaches no desktop session, and one that passes
-    /// [`PlainSink::recording`] observes exactly what would be sent.
+    /// `PlainSink::recording` observes exactly what would be sent.
     fn show_system(req: &NotificationRequest, system: &PlainSink) {
         system.show(req.plain_notification());
     }
@@ -733,7 +734,6 @@ impl NotificationRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::host_capabilities::{PlainNotifyEntry, plain_notifications_may_use_system_leg};
     use crate::gui::osc99::{
         Osc99ControlRequest, Osc99EffectSink, Osc99Filter, Osc99IconPrime, Osc99Origin,
@@ -998,7 +998,6 @@ mod tests {
     /// Whether `routing` ever shows a desktop notification, at some focus
     /// state. An independent oracle for the plain gate: no wildcard, so a new
     /// routing variant must be classified here too.
-    #[cfg(all(unix, not(target_os = "macos")))]
     const fn routing_has_system_leg(routing: NotificationRouting) -> bool {
         match routing {
             NotificationRouting::System
@@ -1008,7 +1007,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     const ALL_ROUTINGS: [NotificationRouting; 5] = [
         NotificationRouting::Toast,
         NotificationRouting::System,
@@ -1017,7 +1015,6 @@ mod tests {
         NotificationRouting::Disabled,
     ];
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     fn toast_only_notifications() -> NotificationsConfig {
         NotificationsConfig {
             enabled: true,
@@ -1028,7 +1025,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn the_plain_gate_reads_the_routing_the_router_uses_for_every_kind() {
         type Setter = fn(&mut NotificationsConfig, NotificationRouting);

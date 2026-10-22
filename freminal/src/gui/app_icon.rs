@@ -3,8 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::gui::font_manager::bundled_regular_font_bytes;
 use freminal_notify::NotifyAssets;
+
+use crate::gui::font_manager::bundled_regular_font_bytes;
 
 /// freminal's application icon, the one PNG embedded in the binary. It is the
 /// OS window icon (`run`) and, on Linux/BSD, the picture of every plain
