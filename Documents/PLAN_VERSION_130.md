@@ -9269,7 +9269,8 @@ own change; the structural part is this task's.
   The point of the crate is that zbus, `tauri-winrt-notification`, `notify-rust` and their
   platform `cfg`s leave the `freminal` crate entirely.
 - **Wake-up integration.** The D-Bus service wakes idle windows through a
-  `Box<dyn Fn() + Send>` waker (`Osc99Wake`). That is already crate-safe; keep it.
+  `Box<dyn Fn() + Send>` waker (now `NotifyWake`, in the GUI). That is already crate-safe;
+  keep it.
 
 ### 150 Scope limits
 
@@ -9881,8 +9882,9 @@ Deliverable:
       `app_impl.rs` keeps one `#[cfg]`, with a comment giving the reason: the event types
       exist only where a tracked leg does.
   - **Accepted, with reasons:**
-    - Off Linux/BSD, `ensure_started` emits one `trace!` line. Otherwise clippy's
-      `missing_const_for_fn` would propagate a platform-only `const` up to the GUI caller.
+    - ~~Off Linux/BSD, `ensure_started` emits one `trace!` line.~~ **Reversed by 150.C18:**
+      `ensure_started` is now Linux/BSD-only, with one `#[cfg]` at each of its two call
+      sites.
     - The ported `route_through` helper no longer asserts that System routing pushes no
       toast. That is a router property, and it is asserted by the router tests in
       `notifications.rs`.
@@ -9892,7 +9894,9 @@ Deliverable:
     - `host_capabilities.rs`: `daemon_state_change`;
     - `osc99/mod.rs` and `registry.rs`: the Linux tracked-leg types and methods;
     - the one call in `app_impl.rs` described above;
-    - test modules.
+    - test modules;
+    - added by 150.C18: the `ensure_notification_service_started` calls in `app_impl.rs` and
+      `settings_dispatch.rs`, and the method itself in `glue.rs`.
 - **150.8 (done, `40dcbc30`).** Each of the four platform builders is now a pure fields
   function, tested on every platform, plus a thin conversion that only copies fields:
   - plain macOS: `macos_plain_fields`;
@@ -10030,11 +10034,33 @@ confirmed by diffing against `main` that the moved code changes no behaviour.
     call sites or a suppression. The non-Linux definition is kept: it states that
     platform's real semantics (nothing can fail, so there is nothing to feed back) and
     asserts them. This is not the R10 shape, and `main` had the same split one level up.
-  - **`NotifyWake`:** kept on every platform, with the reason in its module docs.
+  - **`NotifyWake`:** kept on every platform, with the reason in its module docs. Why this
+    is not the case `ensure_started` was: its methods change real state on every platform,
+    and nothing in it exists only to satisfy a lint. The off-Linux `ensure_started` had no
+    work at all, and its `trace!` existed only to defeat `missing_const_for_fn`. The waker
+    factory that `DesktopNotifier::new` drops off Linux/BSD is the remaining cost.
+  - The docs pass also added a `freminal-windowing` bullet to `agents.md` "Crate-specific
+    guidance", which no finding asked for. It was checked against that crate's `lib.rs`;
+    mention it in the PR description.
 
   C18 also moved three policy predicates to `any(test, Linux/BSD)`, and their pure-policy
   tests now run on every platform. Final counts: 9574 tests, clippy clean, `check-windows`
-  clean, rustdoc warnings for `freminal` 69 (unchanged).
+  clean, rustdoc warnings for `freminal` 69 public (unchanged) and 105 with private items
+  (three fewer, by C17).
+- **Confirmation review (2026-10-22)** of `5efce5ec..HEAD`: 22 of 23 entries FIXED or
+  accepted as documented, C20 partial. No blocker or major. Its nine new items were all
+  fixed in the follow-up commit:
+  - C20's stale `Osc99Wake` stub bullet;
+  - the `platform_worker` doc wording;
+  - the 150.7b note, marked as reversed by C18, with the new `cfg` sites listed;
+  - the `NotifyWake` versus `ensure_started` reasoning, now stated;
+  - the extra `freminal-windowing` bullet, recorded for the PR;
+  - two "egui frame thread" mentions in crate docs;
+  - the rustdoc figure;
+  - the moved `tombi` comment.
+
+  Items 7 and 10 needed no change: the nowhere test is structural by design, and the
+  prettier results on `agents.md` and this plan already fail on `main`.
 - **Manual-test finding, 2026-10-22: not a freminal defect.** The maintainer ran
   `test-scripts/osc99_notifications.py` against wayle 0.1.3.
   - **Step 6** (`[0001][0002]…`) is the intended numbered long body.

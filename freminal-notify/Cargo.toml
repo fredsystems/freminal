@@ -48,8 +48,8 @@ zbus = { workspace = true, features = ["p2p"] }
 # The macOS/Windows plain worker (`arc-swap`: its respawnable sender slot) and
 # the standard-icon raster (`swash`, `conv2`). Linux/BSD has neither: its
 # notifications go through the D-Bus service, which uses freedesktop icon
-# names. They are dev-dependencies too, because the crate's tests compile that
-# code on every platform.
+# names. The `[dev-dependencies]` table above lists them too, because the
+# crate's tests compile that code on every platform.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 arc-swap.workspace = true
 conv2.workspace = true

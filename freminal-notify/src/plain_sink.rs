@@ -13,10 +13,11 @@
 //!
 //! A test can never reach the OS through a sink. The only constructors that
 //! do are `PlainSink::through_service`, which needs a running service's
-//! sender, and `PlainSink::platform_worker`, which is private to this crate:
-//! the compiler allows only
-//! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) to
-//! call it. Every other sink drops the notification (`PlainSink::nowhere`) or
+//! sender, and `PlainSink::platform_worker`, which is private to this crate,
+//! so no caller (and none of the callers' tests) can reach it; inside the
+//! crate only
+//! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) calls
+//! it. Every other sink drops the notification (`PlainSink::nowhere`) or
 //! records it (`PlainSink::recording`).
 //!
 //! This matters most on macOS: `notify-rust`'s `show()` goes into the

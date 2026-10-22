@@ -5,7 +5,7 @@
 
 //! The macOS and Windows delivery worker for freminal's own notifications.
 //!
-//! Showing a notification can block, so it never runs on the egui frame thread:
+//! Showing a notification can block, so it never runs on the caller's frame thread:
 //! [`show_plain`] hands a [`PlainNotification`](super::PlainNotification) to one
 //! `freminal-notify` thread through a bounded queue, and starts a replacement
 //! (rate-limited) if that thread has exited. Linux and BSD have no such worker;
@@ -326,7 +326,7 @@ fn spawn_notify_worker() -> Option<Sender<PlainNotification>> {
 /// Show `notification` on the long-lived `freminal-notify` worker (macOS and
 /// Windows).
 ///
-/// Showing a notification can block, so it must not run on the egui frame
+/// Showing a notification can block, so it must not run on the caller's frame
 /// thread. Failures are logged and otherwise ignored -- a missing notification
 /// daemon is non-fatal.
 ///
