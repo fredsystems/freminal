@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator", "freminal-windowing", "portable-pty", "xtask"]
-default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator"]
+members = ["freminal", "freminal-buffer", "freminal-common", "freminal-notify", "freminal-terminal-emulator", "freminal-windowing", "portable-pty", "xtask"]
+default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-notify", "freminal-terminal-emulator"]
 # `fuzz/` is a standalone cargo-fuzz crate (nightly + sanitizers, its own
 # `[workspace]` and `Cargo.lock`); keep it out of this workspace.
 exclude = ["fuzz"]

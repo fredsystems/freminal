@@ -1,0 +1,74 @@
+[package]
+name = "freminal-notify"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+documentation.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+crossbeam-channel.workspace = true
+freminal-common = { path = "../freminal-common" }
+image.workspace = true
+tracing.workspace = true
+
+# The macOS/Windows plain worker (`arc-swap`: its respawnable sender slot) and
+# the standard-icon raster (`swash`, `conv2`). Linux/BSD has neither: its
+# notifications go through the D-Bus service, which uses freedesktop icon
+# names. They are dev-dependencies too, because the crate's tests compile that
+# code on every platform.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+arc-swap.workspace = true
+conv2.workspace = true
+swash.workspace = true
+
+# macOS system notifications (OSC 9 / 777 / 133 D / Test Notification and the
+# OSC 99 untracked leg) go through `notify-rust`'s `mac-notification-sys`
+# backend. Linux/BSD and Windows have their own backends (below).
+[target.'cfg(target_os = "macos")'.dependencies]
+notify-rust.workspace = true
+
+# Windows system notifications (OSC 9 / 777 / 133 D / Test Notification and the
+# OSC 99 untracked leg, Tasks 138.C15 and 149.3) are toasts built directly; the
+# OSC 99 one carries its image as an `appLogoOverride`.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification.workspace = true
+
+# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
+# Linux/BSD notification, OSC 99 and legacy alike.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Times out the service's `NO_AUTO_START` calls without a helper thread
+# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
+# thread, so it works inside `zbus::block_on`.
+async-io.workspace = true
+# `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
+futures-lite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+arc-swap.workspace = true
+conv2.workspace = true
+swash.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+# Test doubles and fixtures (`test_support`) for the callers' tests: the
+# recording backends, `PlainSink::recording`, `test_assets` and, on Linux/BSD,
+# the in-process fake notification daemon. Never enabled by a production build
+# of `freminal`; only its dev-dependency enables it. `zbus/p2p` is what the
+# fake daemon's socket-pair connection needs; zbus is a Linux/BSD-only
+# dependency, so the feature is a no-op elsewhere.
+test-utils = ["zbus/p2p"]
+
+[lints]
+workspace = true

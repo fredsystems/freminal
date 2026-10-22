@@ -158,6 +158,7 @@ egui.workspace = true
 egui_glow.workspace = true
 fontdb.workspace = true
 freminal-common = { path = "../freminal-common" }
+freminal-notify = { path = "../freminal-notify" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 freminal-windowing = { path = "../freminal-windowing" }
 glow.workspace = true
@@ -177,6 +178,9 @@ winit.workspace = true
 # dev dependencies
 [dev-dependencies]
 criterion.workspace = true
+# `test-utils` exposes the notification backend's test doubles
+# (`freminal_notify::test_support`); production builds never enable it.
+freminal-notify = { path = "../freminal-notify", features = ["test-utils"] }
 # `test-utils` exposes `WindowId::for_test`, so unit tests can construct a
 # `WindowId` (it wraps a winit handle and has no production constructor).
 freminal-windowing = { path = "../freminal-windowing", features = ["test-utils"] }
@@ -195,35 +199,6 @@ sysinfo.workspace = true
 # `OpenOptionsExt::custom_flags`.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-
-# macOS system notifications (OSC 9 / 777 / 133 D / Test Notification and the
-# OSC 99 untracked leg) go through `notify-rust`'s `mac-notification-sys`
-# backend. Linux/BSD and Windows have their own backends (below).
-[target.'cfg(target_os = "macos")'.dependencies]
-notify-rust.workspace = true
-
-# Windows system notifications (OSC 9 / 777 / 133 D / Test Notification and the
-# OSC 99 untracked leg, Tasks 138.C15 and 149.3) are toasts built directly; the
-# OSC 99 one carries its image as an `appLogoOverride`.
-[target.'cfg(windows)'.dependencies]
-tauri-winrt-notification.workspace = true
-
-# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
-# Linux/BSD notification, OSC 99 and legacy alike. The `p2p` feature is only
-# needed by the in-process fake notification server in the service's
-# integration test, so it is enabled for tests alone.
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-# Times out the service's `NO_AUTO_START` calls without a helper thread
-# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
-# thread, so it works inside `zbus::block_on`.
-async-io.workspace = true
-# `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
-futures-lite.workspace = true
-serde.workspace = true
-zbus.workspace = true
-
-[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
-zbus = { workspace = true, features = ["p2p"] }
 
 [features]
 default = []

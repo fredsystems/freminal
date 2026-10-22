@@ -129,7 +129,7 @@ fn windows_plain_toast_fields(notification: &PlainNotification) -> WindowsPlainT
 
 /// The Windows toast for `notification`: [`windows_plain_toast_fields`],
 /// copied into a `tauri-winrt-notification` toast, built directly in the same
-/// style as the OSC 99 toast (`desktop_notify::untracked`).
+/// style as the OSC 99 toast (`untracked`).
 #[cfg(target_os = "windows")]
 fn windows_toast(notification: &PlainNotification) -> tauri_winrt_notification::Toast {
     use tauri_winrt_notification::{Duration as ToastDuration, Toast};

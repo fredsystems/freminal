@@ -88,9 +88,9 @@ use super::{
     Osc99Effect, Osc99Filter, Osc99FilterVerdict, Osc99Leg, Osc99LegActivation, Osc99Origin,
     instance_from_toast_key, osc99_toast_spec,
 };
-use crate::gui::desktop_notify::NotificationInstanceId;
 use crate::gui::panes::PaneId;
 use crate::gui::toast::ToastEvent;
+use freminal_notify::NotificationInstanceId;
 
 /// The most instances the registry keeps overall, as a backstop behind
 /// [`MAX_OSC99_INSTANCES_PER_PANE`]. The oldest is forgotten, with no reply,
@@ -830,12 +830,6 @@ mod tests {
     use freminal_windowing::WindowId;
 
     use super::*;
-    use crate::gui::desktop_notify::test_support::{
-        RecordedShow, RecordingTrackedBackend, RecordingUntrackedBackend,
-    };
-    use crate::gui::desktop_notify::{
-        NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend,
-    };
     use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
         Osc99EffectSink, Osc99ToastSpec, apply_osc99_effects, instance_toast_key,
@@ -844,6 +838,10 @@ mod tests {
     use crate::gui::toast::{
         ToastEvent, ToastEventKind, ToastKey, ToastKind, ToastLifetime, ToastStack,
     };
+    use freminal_notify::test_support::{
+        RecordedShow, RecordingTrackedBackend, RecordingUntrackedBackend,
+    };
+    use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend};
 
     /// A live pane: its origin plus the strong reply handle that keeps it
     /// alive. Dropping the handle simulates the pane closing.

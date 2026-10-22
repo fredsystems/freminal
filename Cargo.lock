@@ -1490,7 +1490,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "arc-swap",
- "async-io",
  "clap",
  "conv2",
  "criterion",
@@ -1499,21 +1498,18 @@ dependencies = [
  "egui_glow",
  "fontdb",
  "freminal-common",
+ "freminal-notify",
  "freminal-terminal-emulator",
  "freminal-windowing",
- "futures-lite",
  "glow",
  "harfrust",
  "image",
  "libc",
- "notify-rust",
  "open",
  "regex",
  "rustc-hash",
- "serde",
  "swash",
  "sysinfo",
- "tauri-winrt-notification",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -1521,7 +1517,6 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "winit",
- "zbus",
 ]
 
 [[package]]
@@ -1557,6 +1552,27 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "freminal-notify"
+version = "0.13.0-beta.1"
+dependencies = [
+ "arc-swap",
+ "async-io",
+ "conv2",
+ "crossbeam-channel",
+ "freminal-common",
+ "futures-lite",
+ "image",
+ "notify-rust",
+ "serde",
+ "swash",
+ "tauri-winrt-notification",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "zbus",
 ]
 
 [[package]]

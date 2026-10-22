@@ -50,7 +50,6 @@ use freminal_terminal_emulator::recording::RecordingSwap;
 use freminal_windowing::WindowId;
 use tracing::{error, trace};
 
-use super::desktop_notify::PlainSink;
 use super::osc99::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, Osc99Request, PaneActivity, TabActivity,
     WindowMinimized, ZoomOcclusion,
@@ -59,6 +58,7 @@ use super::panes::{self, PaneId};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 use super::{rendering, toast};
+use freminal_notify::PlainSink;
 
 /// Whether the OS window that owns the terminal surface has input focus
 /// this frame, for command-finished notification routing.
@@ -548,7 +548,6 @@ mod tests {
         DeadPaneOutcome, WindowFocus, drain_command_finished_events,
         drain_window_manipulation_commands, osc99_pane_state,
     };
-    use crate::gui::desktop_notify::PlainSink;
     use crate::gui::osc99::{
         Osc99Request, PaneKeyboardFocus, PaneVisibility, TabActivity, WindowMinimized,
     };
@@ -564,6 +563,7 @@ mod tests {
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
     use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitleConfig};
+    use freminal_notify::PlainSink;
     use freminal_terminal_emulator::io::WindowCommand;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_windowing::WindowId;

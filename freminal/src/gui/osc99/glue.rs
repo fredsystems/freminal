@@ -33,14 +33,14 @@ use super::{
 };
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
-use crate::gui::desktop_notify::{LinuxDaemon, PlainSink};
-#[cfg(all(unix, not(target_os = "macos")))]
-use crate::gui::desktop_notify::{NoTrackedBackend, NoUntrackedBackend, SystemNotifyEvent};
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::host_capabilities::PlainNotifyEntry;
 use crate::gui::notifications::NotificationRouter;
 use crate::gui::toast::ToastStack;
 use crate::gui::window::PerWindowState;
+use freminal_notify::{LinuxDaemon, PlainSink};
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, SystemNotifyEvent};
 
 /// How many OSC 99 requests may wait in `FreminalGui::deferred_osc99_requests`
 /// for a busy cell to free up. A cell is only ever busy transiently, so
@@ -657,7 +657,7 @@ impl FreminalGui {
     ///
     /// A busy handle cell leaves the service unstarted; the next call retries,
     /// and until then effects are applied against
-    /// [`NoTrackedBackend`](crate::gui::desktop_notify::NoTrackedBackend).
+    /// [`NoTrackedBackend`](freminal_notify::NoTrackedBackend).
     pub(in crate::gui) fn ensure_notification_service_started(&self) {
         self.notifier
             .ensure_started(crate::gui::host_capabilities::notification_service_demand(
@@ -678,7 +678,7 @@ impl FreminalGui {
     /// Callers build the sink only when they have a notification to route.
     ///
     /// Elsewhere the sink is the platform worker. The policy is decided here;
-    /// [`DesktopNotifier::plain_sink`](crate::gui::desktop_notify::DesktopNotifier::plain_sink)
+    /// [`DesktopNotifier::plain_sink`](freminal_notify::DesktopNotifier::plain_sink)
     /// obeys it.
     pub(in crate::gui) fn system_notify_sink(
         &self,
@@ -781,15 +781,15 @@ mod tests {
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
     use super::*;
-    use crate::gui::desktop_notify::NotificationInstanceId;
-    use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
-    use crate::gui::desktop_notify::test_support::RecordingUntrackedBackend;
     use crate::gui::notifications::Osc99Control;
     use crate::gui::osc99::{
         Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99PaneState,
         PaneKeyboardFocus, PaneVisibility, instance_toast_key,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
+    use freminal_notify::NotificationInstanceId;
+    use freminal_notify::test_support::RecordingTrackedBackend;
+    use freminal_notify::test_support::RecordingUntrackedBackend;
 
     // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -1268,11 +1268,9 @@ mod tests {
         use freminal_common::config::Config;
 
         use super::*;
-        use crate::gui::desktop_notify::{
-            DaemonCapabilities, DaemonSupport, SystemAction, SystemNotifyEvent,
-        };
         use crate::gui::osc99::Osc99Leg;
         use freminal_common::host_capabilities::HostCapabilities;
+        use freminal_notify::{DaemonCapabilities, DaemonSupport, SystemAction, SystemNotifyEvent};
 
         fn system_config() -> NotificationsConfig {
             config(NotificationRouting::System)

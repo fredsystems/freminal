@@ -40,13 +40,13 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
-use super::desktop_notify::{LinuxDaemon, PlainNotification, PlainSink, SYSTEM_LEG, SystemLeg};
 use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
     Osc99Registry, Osc99Request, PaneKeyboardFocus, PaneVisibility,
 };
 use super::toast::{ToastKind, ToastStack};
+use freminal_notify::{LinuxDaemon, PlainNotification, PlainSink, SYSTEM_LEG, SystemLeg};
 
 /// A fully-formed notification ready to be routed.
 ///
@@ -733,7 +733,6 @@ impl NotificationRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::desktop_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::host_capabilities::{PlainNotifyEntry, plain_notifications_may_use_system_leg};
     use crate::gui::osc99::{
@@ -746,6 +745,7 @@ mod tests {
     };
     use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::FreminalToastRouting;
+    use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend};
     use freminal_terminal_emulator::io::Osc99CloseTracking;
 
     /// Route `request` and execute the effects `route_osc99` returns against
@@ -2428,8 +2428,7 @@ mod tests {
 
     #[test]
     fn legs_follow_routing_when_the_daemon_is_available() {
-        let daemon =
-            LinuxDaemon::Available(crate::gui::desktop_notify::DaemonCapabilities::ASSUMED);
+        let daemon = LinuxDaemon::Available(freminal_notify::DaemonCapabilities::ASSUMED);
         let legs =
             |routing, focus| resolve_osc99_legs(routing, focus, Osc99Leg::LinuxSystem, daemon);
         assert_eq!(
@@ -2519,7 +2518,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_with_the_bus_down_registers_and_shows_the_toast_leg_only() {
-        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
+        use freminal_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::SystemWhenUnfocused,
@@ -2782,7 +2781,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_system_routing_shows_through_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
+        use freminal_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -2826,7 +2825,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_hands_resolved_icon_bytes_to_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
+        use freminal_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::System,
@@ -2874,7 +2873,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn route_osc99_toast_routing_does_not_touch_the_system_backend() {
-        use crate::gui::desktop_notify::test_support::RecordingTrackedBackend;
+        use freminal_notify::test_support::RecordingTrackedBackend;
 
         let config = NotificationsConfig {
             routing_osc99: NotificationRouting::Toast,
@@ -3084,9 +3083,7 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     mod fake_daemon {
         use super::*;
-        use crate::gui::desktop_notify::test_support::{
-            TestResult, assert_no_queued_events, started,
-        };
+        use freminal_notify::test_support::{TestResult, assert_no_queued_events, started};
 
         #[test]
         fn an_osc_9_request_routed_to_system_is_one_escaped_notify_with_normal_urgency()

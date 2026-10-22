@@ -33,11 +33,11 @@ use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_terminal_emulator::io::InputEvent;
 
-use crate::gui::desktop_notify::NotificationInstanceId;
-#[cfg(all(unix, not(target_os = "macos")))]
-use crate::gui::desktop_notify::SystemAction;
 use crate::gui::notifications::Osc99Control;
 use crate::gui::toast::{ToastEventKind, ToastKey};
+use freminal_notify::NotificationInstanceId;
+#[cfg(all(unix, not(target_os = "macos")))]
+use freminal_notify::SystemAction;
 
 pub use effects::{Osc99Effect, Osc99EffectSink, apply_osc99_effects};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};

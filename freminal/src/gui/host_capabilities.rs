@@ -22,9 +22,9 @@ use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
 use super::FreminalGui;
-use super::desktop_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform, ServiceDemand};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
+use freminal_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform, ServiceDemand};
 
 /// Resolve the host-dependent capability facts from the config, the platform
 /// and what is known about the Linux/BSD notification daemon.
@@ -559,7 +559,6 @@ mod tests {
         }
     }
 
-    use crate::gui::desktop_notify::DaemonCapabilities;
     use crate::gui::panes::{Pane, PaneId};
     use crate::gui::pty::WindowCommandBudget;
     use crate::gui::tabs::{Tab, TabId};
@@ -568,6 +567,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use crossbeam_channel::Receiver;
     use freminal_common::pty_write::PtyWrite;
+    use freminal_notify::DaemonCapabilities;
     use freminal_terminal_emulator::io::SearchCorpus;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::state::internal::TerminalState;

@@ -1155,10 +1155,10 @@ a test that agrees with you.
 
 ## Desktop Notification Backends (Task 150)
 
-### What `desktop_notify` owns, and what stays a caller
+### What `freminal-notify` owns, and what stays a caller
 
-"Show this notification on the operating system" has one owner:
-`freminal/src/gui/desktop_notify/`. It contains the OS backends (the Linux/BSD
+"Show this notification on the operating system" has one owner: the
+`freminal-notify` crate (`freminal-notify/src/`). It contains the OS backends (the Linux/BSD
 D-Bus service in `linux/`, the macOS/Windows plain worker and the macOS/Windows
 OSC 99 untracked worker), the icon pipeline (`icons/`: decode, raster, temp
 files, lookup), `presentation.rs`, body-markup escaping (`markup.rs`), the
@@ -1196,13 +1196,13 @@ the OSC 99 router picks the registry's leg from it without a `#[cfg]`.
 
 ### The one-surface rule
 
-Outside code names only what `desktop_notify/mod.rs` re-exports, plus
-`desktop_notify::test_support` (`#[cfg(test)]`: the recording backends, the
-fake-daemon rig and the test assets). No path such as
-`desktop_notify::linux::state::...` appears outside the module, and nothing
-inside it imports `crate::gui`, egui, `freminal_windowing` or
-`freminal_terminal_emulator`. The module depends only on `freminal_common` and
-external crates, so that it can move into its own crate unchanged.
+Outside code names only what `freminal-notify/src/lib.rs` re-exports, plus
+`freminal_notify::test_support` (behind the `test-utils` feature: the
+recording backends, the fake-daemon rig and the test assets). No path such as
+`freminal_notify::linux::state::...` appears outside the crate, and nothing
+inside it imports the GUI, egui, `freminal_windowing` or
+`freminal_terminal_emulator`. The crate depends only on `freminal_common` and
+external crates.
 
 ### `DesktopNotifier` and `ServiceDemand`
 
@@ -1270,15 +1270,22 @@ requirement, not tidiness: on macOS `notify-rust`'s `show()` throws an uncatchab
 Objective-C exception from a binary that is not an `.app` bundle, as a
 `cargo test` binary is, and the process aborts during teardown.
 
-### Becoming a crate
+### The crate
 
-The module is built as if it were a crate because it is planned to become the
-`freminal-notify` crate (Task 150.10), depending only on `freminal-common`. That
-is why zbus, `tauri-winrt-notification` and `notify-rust` and their platform
-`cfg`s belong in it rather than in `freminal`. At that step `test_support`
-becomes a `test-support` feature, and the temporary dead-code exceptions on
-items only one platform reads (`NotifyAssets` fields, `StandardIcon` methods)
-go, because an exported item of a library is never dead code.
+`freminal-notify` is its own crate (Task 150.10) and depends only on
+`freminal-common`. That is why zbus, `tauri-winrt-notification` and `notify-rust`
+and their platform `cfg`s live in it rather than in `freminal`. Its submodules
+are private; the crate's public API is what `lib.rs` re-exports.
+
+`test_support` is compiled for the crate's own tests and for any build that
+enables the `test-utils` feature. `freminal` enables it in its
+`[dev-dependencies]` only, so a production build never contains the recording
+backends, `PlainSink::recording` or the fake daemon. The feature also turns on
+`zbus`'s `p2p` feature, which the fake daemon's socket-pair connection needs.
+
+An exported item of a library is never dead code, so the crate carries no
+dead-code exceptions: the `NotifyAssets` fields and the `StandardIcon` methods
+are plain `pub` items with no `cfg` gate or `expect`.
 
 ---
 
@@ -1288,7 +1295,7 @@ go, because an exported item of a library is never dead code.
 
 The clippy lint set is declared once, in `[workspace.lints.clippy]` in the root
 `Cargo.toml`, and inherited with `[lints] workspace = true` by every first-party
-crate: `freminal`, `freminal-buffer`, `freminal-common`,
+crate: `freminal`, `freminal-buffer`, `freminal-common`, `freminal-notify`,
 `freminal-terminal-emulator`, `freminal-windowing` and `xtask`. The crate-root
 `#![deny(...)]` blocks that used to repeat the set in every `lib.rs` / `main.rs`
 are gone. `xtask` previously lacked the `cargo`, `unwrap_used` and `expect_used`

@@ -27,8 +27,6 @@ pub enum StandardIcon {
 
 impl StandardIcon {
     /// Every standard icon, for exhaustive iteration.
-    // Follows its only callers (tests) until desktop_notify becomes a crate (150.10).
-    #[cfg(test)]
     pub const ALL: [Self; 8] = [
         Self::Error,
         Self::Warning,
@@ -61,8 +59,6 @@ impl StandardIcon {
     }
 
     /// The freedesktop icon name for this icon.
-    // Follows its callers (Linux/BSD presentation, tests) until desktop_notify becomes a crate (150.10).
-    #[cfg(any(all(unix, not(target_os = "macos")), test))]
     #[must_use]
     pub const fn freedesktop_name(self) -> &'static str {
         match self {
@@ -79,8 +75,6 @@ impl StandardIcon {
 
     /// The Nerd Font codepoint of this icon's glyph in the bundled
     /// `CaskaydiaCove` face.
-    // Follows its callers (macOS/Windows icon raster, tests) until desktop_notify becomes a crate (150.10).
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     #[must_use]
     pub const fn codepoint(self) -> char {
         match self {

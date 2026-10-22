@@ -47,7 +47,6 @@ pub mod chrome_style;
 mod close_guard;
 mod command_blocks;
 mod command_history;
-mod desktop_notify;
 mod frame_damage;
 mod frame_drain;
 mod geometry_interop;
@@ -431,9 +430,9 @@ struct FreminalGui {
     /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
     /// by the service-event router, which re-broadcasts the capabilities when
     /// the change alters them. Read on every platform (it is
-    /// [`desktop_notify::LinuxDaemon::assumed`] throughout where no service
+    /// [`freminal_notify::LinuxDaemon::assumed`] throughout where no service
     /// exists). Single-threaded GUI, so `Cell` suffices.
-    osc99_daemon: std::cell::Cell<desktop_notify::LinuxDaemon>,
+    osc99_daemon: std::cell::Cell<freminal_notify::LinuxDaemon>,
 
     /// The one owner of the operating-system notification backends: the
     /// Linux/BSD desktop-notification service (which carries every Linux/BSD
@@ -448,7 +447,7 @@ struct FreminalGui {
     /// other): it stops the service and joins the untracked worker, which
     /// deletes the OSC 99 icon temp files. Declared before `notify_wake`, so
     /// the service stops before its wake-up target goes.
-    notifier: desktop_notify::DesktopNotifier,
+    notifier: freminal_notify::DesktopNotifier,
 
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
@@ -658,8 +657,8 @@ impl FreminalGui {
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
-            osc99_daemon: std::cell::Cell::new(desktop_notify::LinuxDaemon::assumed()),
-            notifier: desktop_notify::DesktopNotifier::new(app_icon::notify_assets(), {
+            osc99_daemon: std::cell::Cell::new(freminal_notify::LinuxDaemon::assumed()),
+            notifier: freminal_notify::DesktopNotifier::new(app_icon::notify_assets(), {
                 let wake = notify_wake.clone();
                 move || wake.waker()
             }),

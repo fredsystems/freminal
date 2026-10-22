@@ -1,7 +1,7 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
 Last updated: 2026-10-22 — Task 150 — the notification backends moved from
-`gui/osc99/` to `gui/desktop_notify/`, and their threads are now named
+`gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and their threads are now named
 `freminal-notify-*`. The paths and thread names below are updated. No OSC 99
 behaviour changes.
 
@@ -600,11 +600,11 @@ The feature shipped in Task 99 (v0.11.0) and was made conformant by Task 138
   forgotten first, so a noisy pane cannot evict another pane's), and 128 overall
   as a backstop.
 - **Legs:** the keyed toast (`freminal/src/gui/toast/`), the Linux/BSD zbus
-  service (`desktop_notify/linux/`, `desktop_notify/presentation.rs`,
-  `desktop_notify/icons/lookup.rs`, `desktop_notify/icons/decode.rs`), and the
-  untracked macOS/Windows backend (`desktop_notify/untracked.rs`,
-  `desktop_notify/icons/raster.rs`, `desktop_notify/icons/tempfiles.rs`,
-  `desktop_notify/icons/decode.rs`). The Linux/BSD service and the macOS/Windows backends also
+  service (`freminal-notify/src/linux/`, `freminal-notify/src/presentation.rs`,
+  `freminal-notify/src/icons/lookup.rs`, `freminal-notify/src/icons/decode.rs`), and the
+  untracked macOS/Windows backend (`freminal-notify/src/untracked.rs`,
+  `freminal-notify/src/icons/raster.rs`, `freminal-notify/src/icons/tempfiles.rs`,
+  `freminal-notify/src/icons/decode.rs`). The Linux/BSD service and the macOS/Windows backends also
   show the legacy OSC 9 / 777 / 133 `D` notifications (Task 149): macOS uses
   `notify-rust` (a macOS-only dependency), Windows `tauri-winrt-notification`
   and Linux/BSD the zbus service, so no other platform builds `notify-rust`.

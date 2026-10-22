@@ -73,7 +73,7 @@ In scope:
 
 - The Freminal terminal emulator and its workspace crates
   (`freminal`, `freminal-terminal-emulator`, `freminal-buffer`,
-  `freminal-common`, `freminal-windowing`).
+  `freminal-common`, `freminal-notify`, `freminal-windowing`).
 - Escape-sequence, OSC, DCS, APC, and image-protocol parsing and handling.
 - Recording (`.frec`) and layout file parsing.
 - Configuration file loading.

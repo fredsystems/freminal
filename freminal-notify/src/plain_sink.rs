@@ -7,20 +7,20 @@
 //! macOS and Windows hand it to the `freminal-notify` worker.
 //!
 //! A test can never reach the OS through a sink. The only constructors that
-//! do are [`PlainSink::through_service`], which needs a running service's
-//! sender, and [`PlainSink::platform_worker`], which only
+//! do are `PlainSink::through_service`, which needs a running service's
+//! sender, and `PlainSink::platform_worker`, which only
 //! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) calls.
 //! Every other sink drops the notification
-//! ([`PlainSink::nowhere`]) or records it ([`PlainSink::recording`]).
+//! (`PlainSink::nowhere`) or records it (`PlainSink::recording`).
 //!
 //! This matters most on macOS: `notify-rust`'s `show()` goes into the
 //! Objective-C notification runtime, which throws an uncatchable foreign
 //! exception when called from a binary that is not an `.app` bundle, as a
 //! `cargo test` binary is. The process aborts, nondeterministically and on
 //! the worker thread, during test teardown. Tests must therefore use
-//! [`PlainSink::nowhere`] or [`PlainSink::recording`].
+//! `PlainSink::nowhere` or `PlainSink::recording`.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use std::sync::{Arc, Mutex, PoisonError};
 
 use freminal_common::buffer_states::osc99_notification::NotificationUrgency;
@@ -59,7 +59,7 @@ pub struct PlainSink {
 #[derive(Debug, Clone)]
 enum Route {
     /// Nowhere: the notification is dropped with a debug log.
-    #[cfg(any(test, all(unix, not(target_os = "macos"))))]
+    #[cfg(any(test, feature = "test-utils", all(unix, not(target_os = "macos"))))]
     Nowhere,
     /// The Linux/BSD D-Bus notification service.
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -68,14 +68,14 @@ enum Route {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     Worker,
     /// Test double: every notification is kept for [`PlainRecorder::taken`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     Recorder(Arc<Mutex<Vec<PlainNotification>>>),
 }
 
 impl PlainSink {
     /// A sink with nowhere to send a notification: for tests, and for when the
     /// notification service is not available.
-    #[cfg(any(test, all(unix, not(target_os = "macos"))))]
+    #[cfg(any(test, feature = "test-utils", all(unix, not(target_os = "macos"))))]
     #[must_use]
     pub const fn nowhere() -> Self {
         Self {
@@ -105,7 +105,7 @@ impl PlainSink {
 
     /// A sink that records what it is given instead of showing it, and the
     /// handle to read it back with.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
     pub fn recording() -> (Self, PlainRecorder) {
         let shared = Arc::new(Mutex::new(Vec::new()));
@@ -120,7 +120,7 @@ impl PlainSink {
     /// Show `notification` on this sink's destination, without blocking.
     pub fn show(&self, notification: PlainNotification) {
         match &self.route {
-            #[cfg(any(test, all(unix, not(target_os = "macos"))))]
+            #[cfg(any(test, feature = "test-utils", all(unix, not(target_os = "macos"))))]
             Route::Nowhere => {
                 tracing::debug!("no desktop notification service to show a notification; dropped");
             }
@@ -128,7 +128,7 @@ impl PlainSink {
             Route::Service(sender) => sender.send(notification),
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             Route::Worker => plain_worker::show_plain(notification),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             Route::Recorder(shared) => shared
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -138,13 +138,13 @@ impl PlainSink {
 }
 
 /// The read side of [`PlainSink::recording`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone)]
 pub struct PlainRecorder {
     shared: Arc<Mutex<Vec<PlainNotification>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl PlainRecorder {
     /// Take every notification recorded since the last call, oldest first.
     #[must_use]

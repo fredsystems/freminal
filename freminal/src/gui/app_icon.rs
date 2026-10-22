@@ -3,8 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use crate::gui::desktop_notify::NotifyAssets;
 use crate::gui::font_manager::bundled_regular_font_bytes;
+use freminal_notify::NotifyAssets;
 
 /// freminal's application icon, the one PNG embedded in the binary. It is the
 /// OS window icon (`run`) and, on Linux/BSD, the picture of every plain
@@ -24,7 +24,7 @@ pub(in crate::gui) fn notify_assets() -> NotifyAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::desktop_notify::test_support::test_assets;
+    use freminal_notify::test_support::test_assets;
 
     #[test]
     fn the_backend_test_assets_are_the_files_the_gui_embeds() {

@@ -34,7 +34,7 @@ pub enum SystemDispatch {
     /// The request was queued; its outcome arrives later as an
     /// `Osc99SystemLegEvent`. Only the Linux/BSD service (and the test
     /// backend) ever queues a request, so the variant exists only there.
-    #[cfg(any(all(unix, not(target_os = "macos")), test))]
+    #[cfg(any(all(unix, not(target_os = "macos")), test, feature = "test-utils"))]
     Queued,
     /// The request could not even be queued, so no event will ever follow.
     /// The caller must end the instance's system leg itself.
@@ -81,8 +81,9 @@ pub trait TrackedBackend {
     fn close(&mut self, instance: NotificationInstanceId) -> SystemDispatch;
 }
 
-/// The backend on a build or moment with no system-notification service: it
-/// displays nothing and reports every show and close as
+/// The backend on a build or moment with no system-notification service.
+///
+/// It displays nothing and reports every show and close as
 /// [`SystemDispatch::Failed`], so the registry ends the leg instead of
 /// waiting for an event that cannot come.
 ///
@@ -116,7 +117,7 @@ impl TrackedBackend for NoTrackedBackend {
 }
 
 /// One [`TrackedBackend::show`] call, as [`RecordingTrackedBackend`] saw it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedShow {
     /// The instance shown.
@@ -130,7 +131,7 @@ pub struct RecordedShow {
 /// A backend that records every show and close, for tests. It reports
 /// [`SystemDispatch::Queued`] for both unless `fail_shows` is set (which
 /// fails shows only).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Default)]
 pub struct RecordingTrackedBackend {
     /// Every show, in call order.
@@ -141,7 +142,7 @@ pub struct RecordingTrackedBackend {
     pub fail_shows: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl TrackedBackend for RecordingTrackedBackend {
     fn show(
         &mut self,

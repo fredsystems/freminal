@@ -54,6 +54,8 @@ freminal (binary -- GUI application)
   │   ├── freminal-buffer (cell-based terminal buffer model)
   │   │   └── freminal-common (shared types and utilities)
   │   └── freminal-common
+  ├── freminal-notify (OS desktop-notification backends)
+  │   └── freminal-common
   └── freminal-common
 
 xtask (build/CI orchestration -- not production code)

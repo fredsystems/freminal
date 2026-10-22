@@ -36,7 +36,7 @@
 
 use egui::{Color32, FontFamily, RichText};
 
-use crate::gui::desktop_notify::StandardIcon;
+use freminal_notify::StandardIcon;
 
 /// A chrome action symbol, decoupled from its underlying glyph codepoint.
 ///

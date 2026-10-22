@@ -6,10 +6,10 @@
 //! The icon pipeline: bounded decode, glyph raster, private temp files, XDG lookup.
 
 #[cfg(any(unix, target_os = "windows", test))]
-pub(super) mod decode;
+pub mod decode;
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(super) mod lookup;
+pub mod lookup;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-pub(super) mod raster;
+pub mod raster;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-pub(super) mod tempfiles;
+pub mod tempfiles;

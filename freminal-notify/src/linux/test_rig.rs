@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
+#[cfg(test)]
 use freminal_common::buffer_states::osc99_notification::{
     Notification99Data, NotificationOccasion, NotificationUrgency, Osc99ActivationFocus,
     Osc99ActivationReporting, Osc99CloseReporting, Osc99Expiry, Osc99Sound,
@@ -25,12 +26,20 @@ use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 use super::super::presentation::IconLookup;
 use super::super::test_support::test_assets;
 use super::super::{NotificationInstanceId, SystemDispatch, TrackedBackend};
+#[cfg(test)]
 use super::pump::PumpSignal;
 use super::state::OwnerTracking;
-use super::wire::{NotifyReply, fetch_capabilities};
+#[cfg(test)]
+use super::wire::NotifyReply;
+#[cfg(test)]
+use super::wire::fetch_capabilities;
+#[cfg(test)]
+use super::{BUS_DRIVER_INTERFACE, BUS_DRIVER_PATH};
+#[cfg(test)]
+use super::{BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE};
 use super::{
-    BUS_DRIVER_INTERFACE, BUS_DRIVER_NAME, BUS_DRIVER_PATH, LinuxNotifyHandle, LinuxNotifyService,
-    NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH, NOTIFICATIONS_SERVICE, SystemNotifyEvent,
+    LinuxNotifyHandle, LinuxNotifyService, NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH,
+    SystemNotifyEvent,
 };
 
 /// How long a test waits for something that must happen. Generous so a
@@ -53,12 +62,15 @@ pub(super) const ERROR_SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.Servi
 /// the timeout tests. Only calls that are never answered ever wait it out, and
 /// they must: a shorter value cannot make such a test flaky, it only shortens
 /// it. It is not used for any call the daemon does answer.
+#[cfg(test)]
 pub(super) const SHORT_METHOD_TIMEOUT: Duration = Duration::from_millis(200);
 
-pub(super) fn instance(n: u64) -> NotificationInstanceId {
+#[cfg(test)]
+pub(super) const fn instance(n: u64) -> NotificationInstanceId {
     NotificationInstanceId::new(n)
 }
 
+#[cfg(test)]
 pub(super) fn notification() -> Notification99Data {
     Notification99Data {
         id: None,
@@ -80,6 +92,7 @@ pub(super) fn notification() -> Notification99Data {
     }
 }
 
+#[cfg(test)]
 pub(super) fn with_buttons(labels: &[&str]) -> Notification99Data {
     Notification99Data {
         buttons: labels.iter().map(|label| (*label).to_owned()).collect(),
@@ -92,7 +105,8 @@ pub(super) fn strings(items: &[&str]) -> Vec<String> {
 }
 
 /// A `Notify` reply with no sender, as over a peer-to-peer connection.
-pub(super) fn peer_reply(dbus_id: u32) -> NotifyReply {
+#[cfg(test)]
+pub(super) const fn peer_reply(dbus_id: u32) -> NotifyReply {
     NotifyReply {
         dbus_id,
         sender: None,
@@ -100,6 +114,7 @@ pub(super) fn peer_reply(dbus_id: u32) -> NotifyReply {
 }
 
 /// A `Notify` reply sent by `sender`, as a bus stamps it.
+#[cfg(test)]
 pub(super) fn reply_from(dbus_id: u32, sender: &str) -> NotifyReply {
     NotifyReply {
         dbus_id,
@@ -108,6 +123,7 @@ pub(super) fn reply_from(dbus_id: u32, sender: &str) -> NotifyReply {
 }
 
 /// A `width` x `height` PNG of one opaque colour.
+#[cfg(test)]
 pub(super) fn png(width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
     let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]));
     let mut bytes = Vec::new();
@@ -118,6 +134,7 @@ pub(super) fn png(width: u32, height: u32) -> Result<Vec<u8>, image::ImageError>
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub(super) fn action_from(sender: Option<&str>, dbus_id: u32, key: &str) -> PumpSignal {
     PumpSignal::ActionInvoked {
         sender: sender.map(str::to_owned),
@@ -126,6 +143,7 @@ pub(super) fn action_from(sender: Option<&str>, dbus_id: u32, key: &str) -> Pump
     }
 }
 
+#[cfg(test)]
 pub(super) fn closed_from(sender: Option<&str>, dbus_id: u32) -> PumpSignal {
     PumpSignal::NotificationClosed {
         sender: sender.map(str::to_owned),
@@ -133,12 +151,14 @@ pub(super) fn closed_from(sender: Option<&str>, dbus_id: u32) -> PumpSignal {
     }
 }
 
+#[cfg(test)]
 pub(super) fn owner_changed(new_owner: Option<&str>) -> PumpSignal {
     PumpSignal::OwnerChanged {
         new_owner: new_owner.map(str::to_owned),
     }
 }
 
+#[cfg(test)]
 pub(super) fn timeout_error() -> zbus::Error {
     zbus::Error::from(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
@@ -147,6 +167,7 @@ pub(super) fn timeout_error() -> zbus::Error {
 }
 
 /// An error reply named `name`, as a daemon or the bus sends it.
+#[cfg(test)]
 pub(super) fn error_reply(name: &str) -> Result<zbus::Error, Box<dyn Error>> {
     let call = Message::method_call("/", "Ping").build(&())?;
     let reply = Message::error(&call.header(), name.to_owned()).build(&"details")?;
@@ -154,11 +175,13 @@ pub(super) fn error_reply(name: &str) -> Result<zbus::Error, Box<dyn Error>> {
 }
 
 /// A signal message from the notification daemon, awaiting its body.
+#[cfg(test)]
 pub(super) fn signal(member: &str) -> zbus::message::Builder<'_> {
     Message::signal(NOTIFICATIONS_PATH, NOTIFICATIONS_INTERFACE, member)
 }
 
 /// A `NameOwnerChanged` signal as the bus driver would send it.
+#[cfg(test)]
 pub(super) fn name_owner_changed(
     sender: &str,
     name: &str,
@@ -222,7 +245,7 @@ pub(super) const UNANSWERED_SUMMARY: &str = "unanswered";
 
 /// How the fake bus driver answers `GetNameOwner`.
 #[derive(Debug, Clone, Default)]
-pub(super) enum NameOwnerAnswer {
+pub enum NameOwnerAnswer {
     /// This unique name owns the name.
     Owner(String),
     /// Nobody does (`NameHasNoOwner`).
@@ -237,7 +260,7 @@ pub(super) enum NameOwnerAnswer {
 
 /// How the fake daemon answers `CloseNotification`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum CloseAnswer {
+pub enum CloseAnswer {
     /// Reply, then emit `NotificationClosed(id, 3)`, as the specification
     /// says a daemon does.
     #[default]
@@ -253,29 +276,29 @@ pub(super) enum CloseAnswer {
 
 /// Whether a call carried the `NO_AUTO_START` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Activation {
+pub enum Activation {
     Allowed,
     Suppressed,
 }
 
 /// What the fake daemon saw and how it should behave.
 #[derive(Default)]
-pub(super) struct DaemonLog {
+pub struct DaemonLog {
     /// Every `Notify` it displayed, in call order.
-    pub(super) notifies: Mutex<Vec<RecordedNotify>>,
+    pub notifies: Mutex<Vec<RecordedNotify>>,
     /// The id of every `CloseNotification` call, in call order.
-    pub(super) closes: Mutex<Vec<u32>>,
+    pub closes: Mutex<Vec<u32>>,
     /// Every method call, in call order, with its `NO_AUTO_START` flag.
-    pub(super) calls: Mutex<Vec<(String, Activation)>>,
+    pub calls: Mutex<Vec<(String, Activation)>>,
     /// How `CloseNotification` is answered.
-    pub(super) close_answer: Mutex<CloseAnswer>,
+    pub close_answer: Mutex<CloseAnswer>,
     /// What `GetCapabilities` answers.
-    pub(super) capabilities: Mutex<Vec<String>>,
+    pub capabilities: Mutex<Vec<String>>,
     /// The sender stamped on replies, as a bus stamps them. Over a
     /// peer-to-peer connection nothing does, hence `None`.
-    pub(super) reply_sender: Mutex<Option<String>>,
+    pub reply_sender: Mutex<Option<String>>,
     /// What `GetNameOwner` answers.
-    pub(super) name_owner: Mutex<NameOwnerAnswer>,
+    pub name_owner: Mutex<NameOwnerAnswer>,
 }
 
 /// Reply to the call `header` belongs to, with the body `build` makes,
@@ -554,12 +577,12 @@ pub(super) async fn serve_fake_daemon(
 /// A connected client and fake-daemon pair over a socket pair, plus the
 /// daemon's record of the calls it served.
 pub struct Rig {
-    pub(super) client: Connection,
-    pub(super) daemon: Connection,
-    pub(super) log: Arc<DaemonLog>,
+    pub client: Connection,
+    pub daemon: Connection,
+    pub log: Arc<DaemonLog>,
     /// Receives one `()` when the fake daemon's serve loop has returned, which
     /// it does once the client's end of the connection is closed.
-    pub(super) daemon_stopped: Receiver<()>,
+    pub daemon_stopped: Receiver<()>,
 }
 
 pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
@@ -568,6 +591,7 @@ pub(super) fn rig(advertised: &[&str]) -> Result<Rig, Box<dyn Error>> {
 
 /// A rig whose client gives up on a method call after `timeout`, as the
 /// production connection does after `DBUS_METHOD_TIMEOUT`.
+#[cfg(test)]
 pub(super) fn rig_with_method_timeout(
     advertised: &[&str],
     timeout: Duration,
@@ -627,6 +651,7 @@ fn rig_with(advertised: &[&str], method_timeout: Option<Duration>) -> Result<Rig
 
 /// A rig for a service that tracks owners as on a bus: `GetNameOwner`
 /// answers `owner` and every reply is stamped as sent by `replies_from`.
+#[cfg(test)]
 pub(super) fn bus_rig(
     advertised: &[&str],
     owner: NameOwnerAnswer,
@@ -657,11 +682,13 @@ impl Rig {
     /// serves calls in order, so once it answers a `GetCapabilities` (which
     /// the client's `method_timeout` does not bound) the log holds everything
     /// sent earlier, including calls it never answered.
+    #[cfg(test)]
     pub(super) fn settle(&self) -> zbus::Result<()> {
         fetch_capabilities(&self.client).map(|_| ())
     }
 
     /// Set how the daemon answers `CloseNotification` from now on.
+    #[cfg(test)]
     pub(super) fn answer_close(&self, answer: CloseAnswer) {
         *self
             .log
@@ -671,6 +698,7 @@ impl Rig {
     }
 
     /// The id of every `CloseNotification` call the daemon served.
+    #[cfg(test)]
     pub(super) fn closes(&self) -> Vec<u32> {
         self.log
             .closes
@@ -680,6 +708,7 @@ impl Rig {
     }
 
     /// Every method call the daemon served, with its flag.
+    #[cfg(test)]
     pub(super) fn calls(&self) -> Vec<(String, Activation)> {
         self.log
             .calls
@@ -689,6 +718,7 @@ impl Rig {
     }
 
     /// What the daemon will answer `GetCapabilities` with from now on.
+    #[cfg(test)]
     pub(super) fn advertise(&self, capabilities: &[&str]) {
         *self
             .log
@@ -698,6 +728,7 @@ impl Rig {
     }
 
     /// Stamp every reply from now on as sent by `sender`.
+    #[cfg(test)]
     pub(super) fn reply_as(&self, sender: &str) {
         *self
             .log
@@ -706,6 +737,7 @@ impl Rig {
             .unwrap_or_else(PoisonError::into_inner) = Some(sender.to_owned());
     }
 
+    #[cfg(test)]
     pub(super) fn emit_action(&self, dbus_id: u32, key: &str) -> zbus::Result<()> {
         zbus::block_on(self.daemon.emit_signal(
             None::<&str>,
@@ -716,6 +748,7 @@ impl Rig {
         ))
     }
 
+    #[cfg(test)]
     pub(super) fn emit_closed(&self, dbus_id: u32, reason: u32) -> zbus::Result<()> {
         zbus::block_on(self.daemon.emit_signal(
             None::<&str>,
@@ -729,6 +762,7 @@ impl Rig {
     /// A `NotificationClosed` signal stamped as sent by `sender`: what a
     /// bus delivers, which `emit_signal` over a peer-to-peer connection
     /// cannot produce.
+    #[cfg(test)]
     pub(super) fn emit_closed_from(&self, sender: &str, dbus_id: u32) -> zbus::Result<()> {
         let message = signal("NotificationClosed")
             .sender(sender.to_owned())
@@ -737,6 +771,7 @@ impl Rig {
     }
 
     /// An `ActionInvoked` signal stamped as sent by `sender`.
+    #[cfg(test)]
     pub(super) fn emit_action_from(
         &self,
         sender: &str,
@@ -750,6 +785,7 @@ impl Rig {
     }
 
     /// The bus driver's `NameOwnerChanged` for the daemon's name.
+    #[cfg(test)]
     pub(super) fn emit_owner_changed(&self, new_owner: &str) -> zbus::Result<()> {
         let message = name_owner_changed(BUS_DRIVER_NAME, NOTIFICATIONS_SERVICE, new_owner)?;
         zbus::block_on(self.daemon.send(&message))
@@ -759,6 +795,7 @@ impl Rig {
 /// Run `work` on its own thread and return its result, failing the test if it
 /// has not finished in [`EVENT_TIMEOUT`], so a call that is meant to time out
 /// but does not fails the test instead of hanging it.
+#[cfg(test)]
 pub(super) fn within_deadline<T, F>(work: F) -> Result<T, Box<dyn Error>>
 where
     T: Send + 'static,
@@ -789,6 +826,15 @@ pub(super) const SENTINEL: NotificationInstanceId = NotificationInstanceId::new(
 /// if the next event is the sentinel's, nothing was queued before it. A
 /// signal still travelling through a pump is not covered, so a test that
 /// ignores signals orders a later, observable signal behind them instead.
+///
+/// # Errors
+///
+/// Returns an error if no event arrives within `EVENT_TIMEOUT`.
+///
+/// # Panics
+///
+/// Panics if the close is not queued, or if the next event is not the
+/// sentinel's close.
 pub fn assert_no_queued_events(handle: &mut LinuxNotifyHandle) -> TestResult {
     assert_eq!(handle.close(SENTINEL), SystemDispatch::Queued);
     assert_eq!(
@@ -827,6 +873,15 @@ pub(super) fn spawn_on(
 
 /// Start the service against a fresh peer-to-peer rig and consume the
 /// `Capabilities` event, so a test begins with an empty event queue.
+///
+/// # Errors
+///
+/// Returns an error if the socket pair or the fake daemon cannot be set up,
+/// or if no event arrives within `EVENT_TIMEOUT`.
+///
+/// # Panics
+///
+/// Panics if the first event is not `Capabilities`.
 pub fn started(
     advertised: &[&str],
 ) -> Result<(Rig, LinuxNotifyHandle, Receiver<()>), Box<dyn Error>> {
@@ -846,10 +901,10 @@ pub(super) fn started_with(
 }
 
 /// An icon lookup that knows nothing, so a test touches no filesystem.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(super) struct NoIconLookup;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl IconLookup for NoIconLookup {
     fn matched_icon(&self, _name: &str) -> Option<String> {
         None

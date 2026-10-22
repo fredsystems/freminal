@@ -134,8 +134,8 @@ mod breaker_tests;
 mod plain;
 mod pump;
 mod state;
-#[cfg(test)]
-pub(super) mod test_rig;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_rig;
 mod wire;
 
 pub use plain::PlainNotifySender;
@@ -440,7 +440,7 @@ impl LinuxNotifyService {
 
     /// Start the service on an existing connection (a peer-to-peer one, in
     /// tests), tracking the daemon's owner as `owner_tracking` says.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     fn spawn_with_connection(
         connection: Connection,
         owner_tracking: OwnerTracking,

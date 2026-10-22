@@ -13,7 +13,7 @@
 //!
 //! Every method exists on every platform. Where a platform has no such
 //! backend the method does what a missing backend does: nothing is started,
-//! the tracked backend is [`NoTrackedBackend`](super::NoTrackedBackend), and
+//! the tracked backend is [`NoTrackedBackend`], and
 //! plain notifications go to the platform worker. The platform split lives in
 //! the private `platform` module below, as free functions: a method that read
 //! nothing from `self` on one platform would only exist to make call sites

@@ -11,33 +11,19 @@
 pub struct NotifyAssets {
     /// freminal's application icon, a PNG: the icon of plain (OSC 9 / 777 /
     /// 133 D) notifications on Linux/BSD.
-    #[cfg_attr(
-        all(not(test), any(target_os = "macos", target_os = "windows")),
-        expect(
-            dead_code,
-            reason = "read only on Linux/BSD; TODO(150.10): drop when desktop_notify becomes a crate, where exported fields are not dead code"
-        )
-    )]
     pub app_icon_png: &'static [u8],
     /// The bundled `CaskaydiaCove` regular face: the OSC 99 standard icons
     /// are drawn from it on macOS and Windows.
-    #[cfg_attr(
-        all(not(test), not(any(target_os = "macos", target_os = "windows"))),
-        expect(
-            dead_code,
-            reason = "read only on macOS and Windows; TODO(150.10): drop when desktop_notify becomes a crate, where exported fields are not dead code"
-        )
-    )]
     pub icon_font: &'static [u8],
 }
 
 /// The assets the backends' tests use: the same repository files the GUI
 /// embeds.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[must_use]
 pub const fn test_assets() -> NotifyAssets {
     NotifyAssets {
-        app_icon_png: include_bytes!("../../../../assets/icon.png"),
-        icon_font: include_bytes!("../../../../res/CaskaydiaCoveNerdFont-Regular.ttf"),
+        app_icon_png: include_bytes!("../../assets/icon.png"),
+        icon_font: include_bytes!("../../res/CaskaydiaCoveNerdFont-Regular.ttf"),
     }
 }

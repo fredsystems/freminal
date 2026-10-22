@@ -104,14 +104,14 @@ impl UntrackedBackend for NoUntrackedBackend {
 }
 
 /// A backend that records every notification it is handed, for tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Default)]
 pub struct RecordingUntrackedBackend {
     /// Every notification shown, in call order.
     pub shown: Vec<Notification99Data>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl UntrackedBackend for RecordingUntrackedBackend {
     fn show(&mut self, notification: &Notification99Data) {
         self.shown.push(notification.clone());
