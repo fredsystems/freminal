@@ -58,7 +58,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender};
 
 use super::NotifyAssets;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -71,6 +71,8 @@ use super::icons::raster::rasterize_standard_icon_png;
 use super::icons::tempfiles::IconTempFiles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::icons::tempfiles::default_icon_dir;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::queue::{Offered, offer};
 
 /// Shows a notification on the untracked system leg.
 ///
@@ -246,15 +248,15 @@ enum Submit {
 /// Offer `request` to `queue` without ever blocking.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn try_enqueue(queue: &Sender<DeliveryRequest>, request: DeliveryRequest) -> Submit {
-    match queue.try_send(request) {
-        Ok(()) => Submit::Queued,
-        Err(TrySendError::Full(_)) => {
+    match offer(queue, request) {
+        Ok(Offered::Queued) => Submit::Queued,
+        Ok(Offered::Full) => {
             tracing::debug!(
                 "OSC 99: untracked delivery queue is full ({QUEUE_CAPACITY}); notification dropped"
             );
             Submit::DroppedFull
         }
-        Err(TrySendError::Disconnected(_)) => {
+        Err(_) => {
             tracing::debug!("OSC 99: untracked delivery worker has stopped; notification dropped");
             Submit::WorkerGone
         }

@@ -20,8 +20,12 @@ mod icons;
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod markup;
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
+mod plain_worker;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod presentation;
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
+mod queue;
 mod standard_icon;
 mod untracked;
 
@@ -35,6 +39,10 @@ pub use linux::{
     Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99SystemAction, PlainNotification,
     PlainNotifySender,
 };
+#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
+pub use plain_worker::SystemNotification;
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub use plain_worker::show_plain;
 pub use standard_icon::StandardIcon;
 pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
 
