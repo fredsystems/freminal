@@ -37,8 +37,9 @@ pub(super) const fn urgency_byte(urgency: NotificationUrgency) -> u8 {
 }
 
 /// The icon-theme name of freminal's own icon, as `assets/freminal.desktop`
-/// names it. The last resort of icon resolution.
-const FREMINAL_ICON_NAME: &str = "freminal";
+/// names it. The last resort of icon resolution, and the `app_icon` of a
+/// plain notification.
+pub(super) const FREMINAL_ICON_NAME: &str = "freminal";
 
 /// The `bits_per_sample` field of the `image-data` structure.
 const IMAGE_BITS_PER_SAMPLE: i32 = 8;

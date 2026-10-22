@@ -3,7 +3,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! The Linux/BSD OSC 99 desktop-notification service (Task 138.12).
+//! The Linux/BSD desktop-notification service (Task 138.12).
+//!
+//! It carries every desktop notification freminal shows on Linux/BSD. OSC 99
+//! notifications are tracked: each has a registry entry, actions, and
+//! [`Osc99DbusEvent`]s. OSC 9, OSC 777, OSC 133 `D` command-finished and the
+//! Settings "Test Notification" button (Task 149.2) are untracked "plain"
+//! notifications: a summary, a body and an urgency, shown with
+//! [`PlainNotifySender`], with no actions and no events back. See `plain`.
 //!
 //! # Threads
 //!
@@ -44,7 +51,9 @@
 //!
 //! # Shutdown
 //!
-//! Dropping the handle closes the command channel, and the dispatcher thread
+//! Dropping the handle closes the command channel (once every
+//! [`PlainNotifySender`] cloned from it is dropped too, which the GUI only
+//! holds for the duration of one routing call), and the dispatcher thread
 //! returns the next time it looks at it: at once when idle, or after the call
 //! in flight (at most [`OSC99_DBUS_METHOD_TIMEOUT`]). Returning drops the
 //! event sender and the signal receiver. A signal pump is waiting on its
@@ -119,6 +128,7 @@
 
 #[cfg(test)]
 mod breaker_tests;
+mod plain;
 mod pump;
 mod state;
 #[cfg(test)]
@@ -126,6 +136,7 @@ mod test_rig;
 mod wake;
 mod wire;
 
+pub use plain::{PlainNotification, PlainNotifySender};
 pub use wake::Osc99Wake;
 
 use std::time::{Duration, Instant};
@@ -276,6 +287,11 @@ enum DbusCommand {
     /// [`Osc99DbusEvent::Closed`] (from the daemon's signal, or at once when
     /// there is nothing to close).
     Close { instance: Osc99InstanceId },
+    /// Display `notification` and forget it: no instance, no events, no
+    /// actions (see `plain`).
+    ShowPlain {
+        notification: Box<PlainNotification>,
+    },
 }
 
 /// The GUI's end of the service.
@@ -665,7 +681,8 @@ fn close_connection(connection: &Connection) -> zbus::Result<()> {
 }
 
 /// Answer a command that nothing will serve: a show fails and a close
-/// completes (with nothing displayed, there is nothing to close).
+/// completes (with nothing displayed, there is nothing to close). A plain
+/// notification is dropped without an answer.
 fn report_unserved(sink: &EventSink, command: &DbusCommand) {
     match command {
         DbusCommand::Show { instance, .. } => {
@@ -676,6 +693,10 @@ fn report_unserved(sink: &EventSink, command: &DbusCommand) {
         DbusCommand::Close { instance } => sink.emit(Osc99DbusEvent::Closed {
             instance: *instance,
         }),
+        // Nobody awaits a plain notification, so there is nothing to answer.
+        DbusCommand::ShowPlain { .. } => {
+            tracing::debug!("the notification service is unavailable; dropping a notification");
+        }
     }
 }
 
@@ -783,6 +804,9 @@ fn handle_command(
             notification,
         } => show_notification(connection, state, sink, instance, replaces, &notification),
         DbusCommand::Close { instance } => close_instance(connection, state, sink, instance),
+        DbusCommand::ShowPlain { notification } => {
+            plain::show_plain(connection, state, &notification);
+        }
     }
 }
 

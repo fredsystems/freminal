@@ -56,7 +56,10 @@ use crate::gui::toast::{ToastEventKind, ToastKey};
 pub use capabilities::Osc99DaemonCapabilities;
 pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
 #[cfg(all(unix, not(target_os = "macos")))]
-pub use dbus_service::{Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake};
+pub use dbus_service::{
+    Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake, PlainNotification,
+    PlainNotifySender,
+};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use effects::Osc99SystemDispatch;
 pub use effects::{
@@ -67,8 +70,6 @@ pub use effects::{RecordedShow, RecordingSystemBackend};
 pub use filter::{Osc99Filter, Osc99FilterVerdict};
 pub(in crate::gui) use glue::Osc99CellAccess;
 pub use icon_cache::Osc99IconCache;
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(in crate::gui) use markup::escape_body_markup;
 pub use pane_state::{
     Osc99Origin, Osc99PaneContext, Osc99PaneState, PaneActivity, PaneKeyboardFocus, PaneVisibility,
     TabActivity, WindowMinimized, ZoomOcclusion,

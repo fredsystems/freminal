@@ -35,7 +35,8 @@ use super::{
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
 use crate::gui::frame_drain::WindowFocus;
-use crate::gui::notifications::NotificationRouter;
+use crate::gui::host_capabilities::PlainNotifyEntry;
+use crate::gui::notifications::{NotificationRouter, SystemNotifySink};
 use crate::gui::toast::ToastStack;
 use crate::gui::window::PerWindowState;
 
@@ -658,7 +659,10 @@ impl FreminalGui {
 
     /// Start the Linux/BSD desktop-notification service if the config can
     /// route OSC 99 to the system leg
-    /// ([`osc99_may_use_system_leg`](crate::gui::host_capabilities::osc99_may_use_system_leg)).
+    /// ([`osc99_may_use_system_leg`](crate::gui::host_capabilities::osc99_may_use_system_leg)),
+    /// or can route a plain notification (OSC 9 / OSC 777 / command-finished)
+    /// there
+    /// ([`plain_notifications_may_use_system_leg`](crate::gui::host_capabilities::plain_notifications_may_use_system_leg)).
     /// It then lives for the rest of the process; calling this again is a
     /// no-op.
     ///
@@ -666,16 +670,73 @@ impl FreminalGui {
     /// and until then effects are applied against [`NoSystemBackend`].
     #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn ensure_osc99_dbus_started(&self) {
-        if !crate::gui::host_capabilities::osc99_may_use_system_leg(&self.config) {
+        let needed = crate::gui::host_capabilities::osc99_may_use_system_leg(&self.config)
+            || crate::gui::host_capabilities::plain_notifications_may_use_system_leg(
+                &self.config.notifications,
+                PlainNotifyEntry::Routed,
+            );
+        if !needed {
             return;
         }
         let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
             return;
         };
-        slot.get_or_insert_with(|| {
-            tracing::debug!("OSC 99: starting the desktop-notification service");
-            super::Osc99DbusService::spawn(self.osc99_wake.waker())
-        });
+        slot.get_or_insert_with(|| self.spawn_osc99_dbus());
+    }
+
+    /// Start the service, whose events are drained by the frame loop and whose
+    /// every event wakes an idle window.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn spawn_osc99_dbus(&self) -> super::Osc99DbusHandle {
+        tracing::debug!("starting the desktop-notification service");
+        super::Osc99DbusService::spawn(self.osc99_wake.waker())
+    }
+
+    /// Where a plain notification (OSC 9 / OSC 777 / command-finished / the
+    /// Settings "Test Notification" button) goes to be shown, for a routing
+    /// call made through `entry` under `config`.
+    ///
+    /// On Linux/BSD that is freminal's own D-Bus service: it is started here
+    /// when `config` can route to the system leg through `entry` (the Test
+    /// button ignores `notifications.enabled`, so it must be able to start the
+    /// service when the master switch is off) and already running otherwise.
+    /// A busy handle cell, or a service that is neither running nor wanted,
+    /// gives a sink that drops system notifications. Cheap enough to call every
+    /// frame: one cell borrow and, when the service is up, one `Sender` clone.
+    ///
+    /// Elsewhere the sink carries nothing and the platform worker is used.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(in crate::gui) fn system_notify_sink(
+        &self,
+        config: &NotificationsConfig,
+        entry: PlainNotifyEntry,
+    ) -> SystemNotifySink {
+        let Ok(mut slot) = self.osc99_dbus.try_borrow_mut() else {
+            return SystemNotifySink::none();
+        };
+        if slot.is_none()
+            && crate::gui::host_capabilities::plain_notifications_may_use_system_leg(config, entry)
+        {
+            *slot = Some(self.spawn_osc99_dbus());
+        }
+        slot.as_ref().map_or_else(SystemNotifySink::none, |handle| {
+            SystemNotifySink::through(handle.plain_sender())
+        })
+    }
+
+    /// [`Self::system_notify_sink`] where there is no desktop-notification
+    /// service (macOS and Windows): the platform worker shows the
+    /// notification, and the sink has nothing to carry.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    pub(in crate::gui) const fn system_notify_sink(
+        &self,
+        _config: &NotificationsConfig,
+        _entry: PlainNotifyEntry,
+    ) -> SystemNotifySink {
+        // The same signature as Linux/BSD's, which reads the service from
+        // `self`; the worker here is a process-wide queue.
+        let _ = self;
+        SystemNotifySink::none()
     }
 
     /// Run `f` with an [`Osc99EffectSink`] over `toasts` and the live

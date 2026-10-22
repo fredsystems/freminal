@@ -9030,7 +9030,27 @@ as a numbered `149.Cn` cleanup entry before the PR opens.
 
 ### 149 Status notes
 
-(none yet)
+- **149.1 (done):** zbus `6.0.0` with `default-rt` and `proxy` (`p2p` for tests). The
+  blocking calls are `zbus::block_on` around the async API; pumps loop over `MessageStream`
+  inside one `block_on`. Threading check: zruntime 0.2.0 `driver.rs` gives each thread its own
+  runtime with a driver "seat", parks a second `block_on` until it is woken, and runs work that
+  outlives every `block_on` on a helper thread (`driver.rs` module docs, `Driving::take`,
+  `OWN`). A connection's tasks run on the dispatcher's runtime. No thread blocks inside a
+  `block_on`: pumps only send on unbounded channels. `NameHasNoOwner` and `ServiceUnknown`
+  now arrive as `Error::FDO` (`error.rs`, `From<Message>`) and are matched there. A real
+  fake-daemon reply test pins it.
+- **149.2 (done):** `DbusCommand::ShowPlain` and `PlainNotifySender` live in
+  `dbus_service/plain.rs`, and `plain_notify_args` is in `state.rs`.
+  - Callers get a `SystemNotifySink` from `FreminalGui::system_notify_sink`.
+  - `PlainNotifyEntry::{Routed, SettingsTest}` gates the service start. The Test button
+    ignores `enabled`, as `route_test` does.
+  - **Deviation from the decisions above, accepted:** the summary is escaped as well as the
+    body, under the same `body-markup` condition, because the legacy path escaped both
+    (#560: some daemons format the summary).
+  - The app icon PNG is one `static` (`gui::run::FREMINAL_ICON_PNG`).
+  - `drain_command_finished_events` takes `&TabTitleConfig` instead of two fields, to stay
+    under the argument limit.
+  - End-to-end tests run `NotificationRouter::route` / `route_test` into the fake daemon.
 
 ### 149 Cleanup entries
 

@@ -1782,16 +1782,18 @@ impl freminal_windowing::App for FreminalGui {
         // it goes permanently stale for every other pane (regression that
         // left the visual bell overlay stuck; see `paint_bell_flash`).
         let window_focus = WindowFocus::from_bool(ctx.input(|i| i.focused));
-        let tab_title_policy = self.config.tab_title.policy;
-        let tab_title_separator = self.config.tab_title.separator.clone();
+        let system_notifications = self.system_notify_sink(
+            &self.config.notifications,
+            super::host_capabilities::PlainNotifyEntry::Routed,
+        );
         drain_command_finished_events(
             &mut win.tabs,
-            tab_title_policy,
-            &tab_title_separator,
+            &self.config.tab_title,
             &self.config.notifications,
             &self.config.bell,
             window_focus,
             &self.toasts,
+            &system_notifications,
         );
 
         // ── Poll all tabs for PTY death signals ───────────────────────────────
@@ -4476,12 +4478,17 @@ impl FreminalGui {
         if !events.osc_notifications.is_empty()
             && let Ok(mut toasts) = self.toasts.try_borrow_mut()
         {
+            let system_notifications = self.system_notify_sink(
+                &self.config.notifications,
+                super::host_capabilities::PlainNotifyEntry::Routed,
+            );
             for req in &events.osc_notifications {
                 crate::gui::notifications::NotificationRouter::route(
                     req,
                     &self.config.notifications,
                     window_focus.is_focused(),
                     &mut toasts,
+                    &system_notifications,
                 );
             }
         }

@@ -14,6 +14,12 @@ use renderer::WindowPostRenderer;
 
 use super::{FreminalGui, renderer};
 
+/// freminal's application icon, the one PNG embedded in the binary. It is the
+/// OS window icon ([`run`]) and, on Linux/BSD, the picture of every plain
+/// desktop notification (`osc99::dbus_service`). Defined here, beside the
+/// window-icon use that came first, so it is embedded once.
+pub(in crate::gui) static FREMINAL_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
+
 /// Launch the Freminal GUI application.
 ///
 /// # Errors
@@ -28,8 +34,7 @@ pub fn run(
     window_post: Arc<Mutex<WindowPostRenderer>>,
     recording_swap: freminal_terminal_emulator::recording::RecordingSwap,
 ) -> Result<()> {
-    let icon_bytes = include_bytes!("../../../assets/icon.png");
-    let image = image::load_from_memory(icon_bytes)
+    let image = image::load_from_memory(FREMINAL_ICON_PNG)
         .map_err(|e| anyhow::anyhow!("Failed to load window icon: {e}"))?;
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
