@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hasher};
+use std::sync::Arc;
 
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 
@@ -57,6 +58,10 @@ pub enum Osc99SoundHint {
 }
 
 /// Decoded icon pixels in the layout of the `image-data` hint.
+///
+/// Cloning is cheap: the pixel buffer is reference-counted, so handing the
+/// same decoded icon to many notifications shares one allocation (up to
+/// 256 KiB) rather than copying it each time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Osc99IconImage {
     /// Width in pixels.
@@ -65,8 +70,8 @@ pub struct Osc99IconImage {
     pub height: i32,
     /// Bytes per row (`width * 4`; the pixels are tightly packed).
     pub rowstride: i32,
-    /// RGBA, 8 bits per channel, row by row.
-    pub rgba: Vec<u8>,
+    /// RGBA, 8 bits per channel, row by row. Shared between clones.
+    pub rgba: Arc<[u8]>,
 }
 
 /// The freedesktop icon name for kitty's standard icon `name`, if it is one.
@@ -138,7 +143,8 @@ pub fn sound_hint(sound: &Osc99Sound) -> Osc99SoundHint {
 /// The bounded decode, orientation and downscale to 256x256 are
 /// [`decode_icon_rgba`]'s (shared with the macOS and Windows leg). `None` when
 /// the bytes do not decode (or break a limit) or the dimensions do not fit the
-/// hint's `i32` fields; the caller falls back to the next icon source.
+/// hint's `i32` fields; the caller falls back to the next icon source. Each
+/// call allocates a fresh pixel buffer; share the result by cloning it.
 #[must_use]
 pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
     let rgba = decode_icon_rgba(bytes)?;
@@ -148,7 +154,7 @@ pub fn decode_icon_image(bytes: &[u8]) -> Option<Osc99IconImage> {
         width: i32::try_from(width).ok()?,
         height: i32::try_from(height).ok()?,
         rowstride: i32::try_from(rowstride).ok()?,
-        rgba: rgba.into_raw(),
+        rgba: Arc::from(rgba.into_raw()),
     })
 }
 
@@ -191,6 +197,8 @@ pub struct Osc99DecodedIconCache {
 
 impl Osc99DecodedIconCache {
     /// [`decode_icon_image`] of `bytes`, from the cache when it holds them.
+    ///
+    /// A cache hit shares the cached pixel buffer rather than copying it.
     pub fn decode(&mut self, bytes: &[u8]) -> Option<Osc99IconImage> {
         let key = IconKey::of(bytes);
         if let Some(position) = self.entries.iter().position(|(cached, _)| *cached == key)
@@ -520,6 +528,19 @@ mod tests {
             1,
             "the second decode is a hit, not a new entry"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_cache_hit_shares_the_decoded_pixels_instead_of_copying_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = shaded_png(9)?;
+        let mut cache = Osc99DecodedIconCache::default();
+
+        let first = cache.decode(&bytes).ok_or("did not decode")?;
+        let second = cache.decode(&bytes).ok_or("did not decode")?;
+
+        assert!(Arc::ptr_eq(&first.rgba, &second.rgba));
         Ok(())
     }
 

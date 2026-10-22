@@ -182,7 +182,8 @@ pub(super) struct DispatcherState {
     icon_cache: Osc99DecodedIconCache,
     /// freminal's application icon, a PNG, as the GUI handed it over.
     app_icon_png: &'static [u8],
-    /// `app_icon_png`, decoded and downscaled on first use; `None` when it did
+    /// `app_icon_png`, decoded and downscaled on first use (every plain
+    /// notification then shares its pixel buffer); `None` when it did
     /// not decode, so that is only logged and tried once.
     plain_icon: OnceCell<Option<Osc99IconImage>>,
 }
@@ -593,6 +594,7 @@ impl Default for DispatcherState {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use freminal_common::buffer_states::osc99_notification::{
@@ -683,6 +685,20 @@ mod tests {
                 "{urgency:?}"
             );
         }
+    }
+
+    #[test]
+    fn consecutive_plain_notifications_share_one_icon_allocation() {
+        let state = DispatcherState::default();
+        let first = state.plain_notify_args(&plain("a", "b", NotificationUrgency::Normal));
+        let second = state.plain_notify_args(&plain("c", "d", NotificationUrgency::Low));
+
+        let (NotifyImage::Data(first), NotifyImage::Data(second)) =
+            (first.hints.image, second.hints.image)
+        else {
+            panic!("the embedded icon must decode and be sent as image-data");
+        };
+        assert!(Arc::ptr_eq(&first.rgba, &second.rgba));
     }
 
     #[test]

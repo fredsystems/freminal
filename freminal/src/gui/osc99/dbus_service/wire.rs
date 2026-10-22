@@ -148,7 +148,7 @@ impl<'a> From<&'a Osc99IconImage> for WireImage<'a> {
             has_alpha: AlwaysTrue,
             bits_per_sample: IMAGE_BITS_PER_SAMPLE,
             channels: IMAGE_CHANNELS,
-            data: &image.rgba,
+            data: &image.rgba[..],
         }
     }
 }
@@ -530,7 +530,7 @@ mod tests {
             (w, h, stride, alpha, bits, channels),
             (256, 256, 1024, true, 8, 4)
         );
-        assert_eq!(data, image.rgba);
+        assert_eq!(data, image.rgba[..]);
         assert!(!map.contains_key("image-path"));
         Ok(())
     }
