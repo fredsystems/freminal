@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! Showing notifications on the operating system.
 //!
 //! This crate is the single owner of "show this notification on the OS": the
@@ -36,20 +41,16 @@ mod standard_icon;
 mod untracked;
 
 pub use assets::NotifyAssets;
-#[cfg(any(all(unix, not(target_os = "macos")), test, feature = "test-utils"))]
-pub use backend::NoTrackedBackend;
-pub use backend::{NotificationInstanceId, SYSTEM_LEG, SystemDispatch, SystemLeg, TrackedBackend};
-#[cfg(any(all(unix, not(target_os = "macos")), test, feature = "test-utils"))]
-pub use capabilities::DaemonCapabilities;
-pub use capabilities::{DaemonSupport, LinuxDaemon, NotifyPlatform};
+pub use backend::{
+    NoTrackedBackend, NotificationInstanceId, SYSTEM_LEG, SystemDispatch, SystemLeg, TrackedBackend,
+};
+pub use capabilities::{DaemonCapabilities, DaemonSupport, LinuxDaemon, NotifyPlatform};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux::{SystemAction, SystemNotifyEvent};
 pub use notifier::{DesktopNotifier, ServiceDemand};
 pub use plain_sink::{PlainNotification, PlainSink};
 pub use standard_icon::StandardIcon;
-#[cfg(any(all(unix, not(target_os = "macos")), test, feature = "test-utils"))]
-pub use untracked::NoUntrackedBackend;
-pub use untracked::UntrackedBackend;
+pub use untracked::{NoUntrackedBackend, UntrackedBackend};
 
 /// Test doubles and fixtures for the callers' tests.
 #[cfg(any(test, feature = "test-utils"))]
@@ -58,5 +59,6 @@ pub mod test_support {
     pub use super::backend::{RecordedShow, RecordingTrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     pub use super::linux::test_rig::{TestResult, assert_no_queued_events, started};
+    pub use super::plain_sink::PlainRecorder;
     pub use super::untracked::RecordingUntrackedBackend;
 }

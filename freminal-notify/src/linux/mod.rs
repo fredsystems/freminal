@@ -6,7 +6,7 @@
 //! The Linux/BSD desktop-notification service (Task 138.12).
 //!
 //! It carries every desktop notification freminal shows on Linux/BSD. OSC 99
-//! notifications are tracked: each has a registry entry, actions, and
+//! notifications are tracked: each has an instance id, actions, and
 //! [`SystemNotifyEvent`]s. OSC 9, OSC 777, OSC 133 `D` command-finished and the
 //! Settings "Test Notification" button (Task 149.2) are untracked "plain"
 //! notifications: a summary, a body and an urgency, shown with
@@ -50,7 +50,7 @@
 //! empty, runtime and only polls its stream future; the dispatcher's runtime
 //! wakes that future when a message arrives.
 //!
-//! The GUI talks to the service through an [`LinuxNotifyHandle`]: commands go in
+//! The GUI talks to the service through a [`LinuxNotifyHandle`]: commands go in
 //! over one bounded crossbeam channel (a command that does not fit fails at
 //! the handle) and [`SystemNotifyEvent`]s come back over another,
 //! each event followed by a repaint wake so an idle window still drains it.
@@ -127,13 +127,15 @@
 //! by the pure functions in `presentation`, and the wire form of the hints is
 //! built in `wire`; this module only carries it. The XDG icon scan behind
 //! `n=` and `f=` starts on the first notification that needs it, not with the
-//! service (see `icon_lookup`).
+//! service (see `icons::lookup`).
 
 #[cfg(test)]
 mod breaker_tests;
 mod plain;
 mod pump;
 mod state;
+#[cfg(test)]
+mod test_helpers;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_rig;
 mod wire;
@@ -196,7 +198,7 @@ const DBUS_METHOD_TIMEOUT: Duration = Duration::from_secs(25);
 /// at a time, and a hung daemon holds each call for up to
 /// [`DBUS_METHOD_TIMEOUT`], so a program flooding OSC 99 must not grow
 /// the queue without bound. A command that does not fit fails at the handle
-/// (the registry then ends the leg). Plain notifications (OSC 9 / 777 /
+/// (the caller then ends the leg). Plain notifications (OSC 9 / 777 /
 /// 133 `D`) share this queue but are capped at
 /// `plain::PLAIN_NOTIFICATION_BUDGET` in flight, so a flood of them leaves
 /// the rest of it for OSC 99 `Show` and `Close`.
@@ -903,7 +905,7 @@ fn show_notification(
     }
 }
 
-/// Report a show as failed. The registry already forgot the replaced
+/// Report a show as failed. The caller already forgot the replaced
 /// instance, so its signals are of no interest either; but the daemon may
 /// still display it, so it gets a best-effort `CloseNotification` rather than
 /// staying on screen with nothing tracking it.
@@ -1070,6 +1072,7 @@ mod tests {
 
     use super::super::DaemonSupport;
     use super::super::test_support::test_assets;
+    use super::test_helpers::*;
     use super::test_rig::*;
     use super::*;
 

@@ -1566,6 +1566,8 @@ impl freminal_windowing::App for FreminalGui {
         // daemon's `GetCapabilities` answer normally arrives before an
         // application's first OSC 99 `p=?`; an answer that arrives later is
         // broadcast to the panes as a capability change.
+        // Only Linux/BSD has a notification service to start.
+        #[cfg(all(unix, not(target_os = "macos")))]
         self.ensure_notification_service_started();
 
         // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───

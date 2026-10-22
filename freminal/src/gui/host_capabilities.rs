@@ -77,6 +77,7 @@ const fn kitty_file_transmission(config: &Config) -> KittyFileTransmission {
 /// daemon's `GetCapabilities` answer is normally in before an application's
 /// first `p=?`.
 #[must_use]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
     let notifications = &config.notifications;
     if !(notifications.enabled && notifications.osc_99) {
@@ -148,6 +149,7 @@ pub(super) const fn plain_notifications_may_use_system_leg(
 /// The Settings "Test Notification" button has its own entry
 /// ([`PlainNotifyEntry::SettingsTest`]) and starts the service itself.
 #[must_use]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(super) const fn notification_service_wanted(config: &Config) -> bool {
     osc99_may_use_system_leg(config)
         || plain_notifications_may_use_system_leg(&config.notifications, PlainNotifyEntry::Routed)
@@ -156,6 +158,7 @@ pub(super) const fn notification_service_wanted(config: &Config) -> bool {
 /// [`notification_service_wanted`] as the [`ServiceDemand`] the notification
 /// backend takes: the policy is decided here, and the backend only obeys.
 #[must_use]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(super) const fn notification_service_demand(config: &Config) -> ServiceDemand {
     if notification_service_wanted(config) {
         ServiceDemand::Wanted

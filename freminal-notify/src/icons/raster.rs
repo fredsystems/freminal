@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! Rasterises a [`StandardIcon`] glyph to a PNG (macOS and Windows).
 //!
 //! The macOS and Windows notification APIs take an icon as an image file, and

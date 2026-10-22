@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! Content-addressed temp files for OSC 99 icons (macOS and Windows).
 //!
 //! The macOS and Windows notification APIs take an icon as a file path, so an
@@ -85,8 +90,8 @@ pub const STALE_DIR_AGE: Duration = Duration::from_hours(24);
 /// The start of every icon directory's name; the process id follows.
 ///
 /// The value deliberately keeps "osc99" so the startup sweep
-/// ([`sweep_stale_dirs`]) still removes directories left by builds before
-/// Task 150 (maintainer decision, Task 150).
+/// ([`sweep_stale_dirs`]) still removes the directories older builds left
+/// behind.
 const ICON_DIR_PREFIX: &str = "freminal-osc99-icons-";
 
 /// The directory the icons of process `pid` live in, under `base`:
@@ -346,8 +351,7 @@ fn current_uid(parent: &Path) -> io::Result<u32> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
     // The "osc99" in the probe name is kept for the same reason as in
-    // `ICON_DIR_PREFIX`: a probe left by a build before Task 150 stays
-    // recognisable.
+    // `ICON_DIR_PREFIX`: a probe left by an older build stays recognisable.
     let probe = parent.join(format!(
         "freminal-osc99-probe-{}-{}-{nanos}",
         std::process::id(),

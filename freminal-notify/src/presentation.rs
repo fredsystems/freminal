@@ -445,7 +445,7 @@ mod tests {
     }
 
     // The decoder's limits, orientation and alpha handling are tested with it
-    // in `icon_decode`; these cover the `image-data` layout it is packed into.
+    // in `icons::decode`; these cover the `image-data` layout it is packed into.
 
     #[test]
     fn a_small_png_decodes_to_the_hint_layout() -> Result<(), Box<dyn std::error::Error>> {

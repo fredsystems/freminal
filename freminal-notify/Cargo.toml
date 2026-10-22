@@ -2,12 +2,12 @@
 name = "freminal-notify"
 version.workspace = true
 edition.workspace = true
-description.workspace = true
-documentation.workspace = true
-repository.workspace = true
-readme.workspace = true
-license.workspace = true
 rust-version.workspace = true
+description = "Operating-system desktop notification backends for Freminal"
+documentation.workspace = true
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
@@ -18,6 +18,32 @@ crossbeam-channel.workspace = true
 freminal-common = { path = "../freminal-common" }
 image.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+arc-swap.workspace = true
+conv2.workspace = true
+swash.workspace = true
+tempfile.workspace = true
+
+# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
+# Linux/BSD notification, OSC 99 and legacy alike.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Times out the service's `NO_AUTO_START` calls without a helper thread
+# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
+# thread, so it works inside `zbus::block_on`.
+async-io.workspace = true
+# `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
+futures-lite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+zbus.workspace = true
+
+# The in-process fake notification daemon in the crate's own tests connects
+# through a socket pair, which needs zbus's `p2p` feature. The `test-utils`
+# feature below turns it on for freminal's tests; this dev-dependency turns it
+# on for `cargo test -p freminal-notify`, which does not enable that feature.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+zbus = { workspace = true, features = ["p2p"] }
 
 # The macOS/Windows plain worker (`arc-swap`: its respawnable sender slot) and
 # the standard-icon raster (`swash`, `conv2`). Linux/BSD has neither: its
@@ -38,27 +64,8 @@ notify-rust.workspace = true
 # Windows system notifications (OSC 9 / 777 / 133 D / Test Notification and the
 # OSC 99 untracked leg, Tasks 138.C15 and 149.3) are toasts built directly; the
 # OSC 99 one carries its image as an `appLogoOverride`.
-[target.'cfg(windows)'.dependencies]
+[target."cfg(windows)".dependencies]
 tauri-winrt-notification.workspace = true
-
-# Linux/BSD notification service (Tasks 138.12 and 149): it carries every
-# Linux/BSD notification, OSC 99 and legacy alike.
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-# Times out the service's `NO_AUTO_START` calls without a helper thread
-# (138.C26). async-io's timer is driven by async-io's own process-wide reactor
-# thread, so it works inside `zbus::block_on`.
-async-io.workspace = true
-# `StreamExt` for the signal pumps and `FutureExt::or` for the call deadline.
-futures-lite.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-zbus.workspace = true
-
-[dev-dependencies]
-arc-swap.workspace = true
-conv2.workspace = true
-swash.workspace = true
-tempfile.workspace = true
 
 [features]
 default = []

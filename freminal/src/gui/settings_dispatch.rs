@@ -279,6 +279,8 @@ impl FreminalGui {
 
         // Routing may now use the system leg: have the notification service
         // up before the next OSC 99 is routed, not at the next frame.
+        // Only Linux/BSD has a notification service to start.
+        #[cfg(all(unix, not(target_os = "macos")))]
         self.ensure_notification_service_started();
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed

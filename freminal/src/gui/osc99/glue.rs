@@ -653,11 +653,12 @@ impl FreminalGui {
     /// there
     /// ([`plain_notifications_may_use_system_leg`](crate::gui::host_capabilities::plain_notifications_may_use_system_leg)).
     /// It then lives for the rest of the process; calling this again is a
-    /// no-op, and so is calling it on a platform without the service.
+    /// no-op. Only Linux/BSD has a notification service to start.
     ///
     /// A busy handle cell leaves the service unstarted; the next call retries,
     /// and until then effects are applied against
     /// [`NoTrackedBackend`](freminal_notify::NoTrackedBackend).
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub(in crate::gui) fn ensure_notification_service_started(&self) {
         self.notifier
             .ensure_started(crate::gui::host_capabilities::notification_service_demand(

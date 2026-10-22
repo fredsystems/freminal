@@ -8,7 +8,7 @@
 //!
 //! OSC 9, OSC 777, OSC 133 `D` command-finished and the Settings "Test
 //! Notification" button show a summary and a body and need nothing back: no
-//! actions, no `Shown` / `Closed` / `Activated` events, no registry entry. They
+//! actions, no `Shown` / `Closed` / `Activated` events, no tracked instance. They
 //! are carried as [`DbusCommand::ShowPlain`] so they reuse the dispatcher's
 //! connection, circuit breaker, reconnect loop and the daemon's capabilities,
 //! instead of opening a connection of their own per notification.
@@ -233,6 +233,7 @@ mod tests {
     use super::super::super::test_support::test_assets;
     use super::super::super::{DaemonCapabilities, DaemonSupport, SystemDispatch, TrackedBackend};
     use super::super::state::OwnerTracking;
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::super::{SystemNotifyEvent, start};
     use super::*;

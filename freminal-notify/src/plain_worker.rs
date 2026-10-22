@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! The macOS and Windows delivery worker for freminal's own notifications.
 //!
 //! Showing a notification can block, so it never runs on the egui frame thread:
@@ -15,7 +20,6 @@ use std::{sync::OnceLock, time::Instant};
 use arc_swap::ArcSwapOption;
 use crossbeam_channel::Sender;
 
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 use super::plain_sink::PlainNotification;
 use super::queue::{Offered, offer};
 
@@ -64,46 +68,17 @@ fn macos_notification(notification: &PlainNotification) -> notify_rust::Notifica
     built
 }
 
-/// The application id a Windows toast is attributed to.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToastAppId {
-    /// The PowerShell app id: freminal has no `AppUserModelID` of its own.
-    PowerShell,
-}
-
-/// The sound a plain Windows toast plays.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlainToastSound {
-    /// No sound.
-    Silent,
-}
-
-/// How long a plain Windows toast stays up.
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlainToastDuration {
-    /// The short toast (about 7 s).
-    Short,
-}
-
 /// What freminal asks Windows to show for one plain notification: everything
 /// [`windows_plain_toast_fields`] decides, with no dependence on the
-/// presenter.
+/// presenter. The sound, the duration and the app id are fixed (see
+/// `windows_toast`), so they are not fields.
 #[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsPlainToastFields {
-    /// The application id the toast is attributed to.
-    app_id: ToastAppId,
     /// The toast's title.
     title: String,
     /// The text line; `None` for an empty body.
     text1: Option<String>,
-    /// The sound to play.
-    sound: PlainToastSound,
-    /// How long the toast stays up.
-    duration: PlainToastDuration,
 }
 
 /// Decide the Windows toast content for `notification`: the summary as the
@@ -119,11 +94,8 @@ struct WindowsPlainToastFields {
 #[cfg(any(target_os = "windows", test))]
 fn windows_plain_toast_fields(notification: &PlainNotification) -> WindowsPlainToastFields {
     WindowsPlainToastFields {
-        app_id: ToastAppId::PowerShell,
         title: notification.summary.clone(),
         text1: (!notification.body.is_empty()).then(|| notification.body.clone()),
-        sound: PlainToastSound::Silent,
-        duration: PlainToastDuration::Short,
     }
 }
 
@@ -135,20 +107,11 @@ fn windows_toast(notification: &PlainNotification) -> tauri_winrt_notification::
     use tauri_winrt_notification::{Duration as ToastDuration, Toast};
 
     let fields = windows_plain_toast_fields(notification);
-    let app_id = match fields.app_id {
-        ToastAppId::PowerShell => Toast::POWERSHELL_APP_ID,
-    };
-    let mut toast = Toast::new(app_id).title(&fields.title);
+    let mut toast = Toast::new(Toast::POWERSHELL_APP_ID).title(&fields.title);
     if let Some(text1) = &fields.text1 {
         toast = toast.text1(text1);
     }
-    toast
-        .sound(match fields.sound {
-            PlainToastSound::Silent => None,
-        })
-        .duration(match fields.duration {
-            PlainToastDuration::Short => ToastDuration::Short,
-        })
+    toast.sound(None).duration(ToastDuration::Short)
 }
 
 /// Show `notification` on this platform, logging a failure.
@@ -177,12 +140,10 @@ fn show_platform_notification(notification: &PlainNotification) {
 /// that emits OSC 9 / OSC 777 in a loop must not be able to grow an unbounded
 /// backlog (or an unbounded number of threads); past this, notifications are
 /// dropped.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 const SYSTEM_NOTIFICATION_QUEUE: usize = 16;
 
 /// What [`enqueue_bounded`] did with an item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 enum EnqueueOutcome {
     /// The item is waiting for the worker.
     Enqueued,
@@ -202,7 +163,6 @@ enum EnqueueOutcome {
 ///
 /// This is the whole queueing policy of the desktop-notification path, kept
 /// separate from the OS call so it is testable without one.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 fn enqueue_bounded<T>(queue: &Sender<T>, item: T) -> Result<EnqueueOutcome, T> {
     match offer(queue, item)? {
         Offered::Queued => Ok(EnqueueOutcome::Enqueued),
@@ -213,12 +173,10 @@ fn enqueue_bounded<T>(queue: &Sender<T>, item: T) -> Result<EnqueueOutcome, T> {
 /// The minimum time between two starts of the notification worker. A worker
 /// that panics on every notification must not turn into a thread spawned per
 /// notification.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 const NOTIFY_WORKER_RESPAWN_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Whether a dead (or absent) notification worker may be started again now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 enum RespawnDecision {
     /// Enough time has passed since the last start (or there was none).
     Respawn,
@@ -228,7 +186,6 @@ enum RespawnDecision {
 
 /// Decide whether a worker may be started, given the time since the previous
 /// start (`None` if there has never been one).
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 fn respawn_decision(since_last_spawn: Option<Duration>) -> RespawnDecision {
     match since_last_spawn {
         Some(elapsed) if elapsed < NOTIFY_WORKER_RESPAWN_MIN_INTERVAL => RespawnDecision::TooSoon,
@@ -237,13 +194,11 @@ fn respawn_decision(since_last_spawn: Option<Duration>) -> RespawnDecision {
 }
 
 /// Sentinel for "the worker has never been started".
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 const NEVER_SPAWNED: u64 = u64::MAX;
 
 /// Atomically claim the right to start a worker at `now_ms` (milliseconds
 /// since process start), recording it in `last_spawn_ms` when granted. Of
 /// several concurrent callers, at most one is granted.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 fn claim_respawn(last_spawn_ms: &AtomicU64, now_ms: u64) -> RespawnDecision {
     let last = last_spawn_ms.load(Ordering::Acquire);
     let since_last =
@@ -284,7 +239,6 @@ fn claim_notify_worker_respawn() -> RespawnDecision {
 /// replacement is installed with a compare-and-swap: if another caller
 /// installed one first, theirs is used and ours is dropped (its worker exits
 /// when the sender does). The enqueue is retried once on the new queue.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 fn enqueue_with_respawn<T>(
     slot: &ArcSwapOption<Sender<T>>,
     item: T,
@@ -319,7 +273,6 @@ fn enqueue_with_respawn<T>(
 }
 
 /// Whether two optional queue handles are the same allocation.
-#[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 fn same_queue<T>(a: Option<&std::sync::Arc<T>>, b: Option<&std::sync::Arc<T>>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
@@ -574,11 +527,11 @@ mod tests {
         }
     }
 
-    /// Slice 3 (#433): on macOS the worker attaches the bundled freminal
-    /// application icon by name so desktop notifications show the app icon.
-    /// The name matches `assets/freminal.desktop`'s `Icon=freminal`. (On
-    /// Linux/BSD the D-Bus service sends the same name, plus the icon itself
-    /// as `image-data`; see the notification service's `plain` module.)
+    /// On macOS the worker attaches the bundled freminal application icon by
+    /// name so desktop notifications show the app icon. The name matches
+    /// `assets/freminal.desktop`'s `Icon=freminal`. (On Linux/BSD the D-Bus
+    /// service sends the same name, plus the icon itself as `image-data`; see
+    /// the notification service's `plain` module.)
     #[test]
     fn macos_plain_fields_set_the_freminal_icon() {
         let fields = macos_plain_fields(&plain("Hello", "world"));
@@ -619,14 +572,6 @@ mod tests {
         let fields = windows_plain_toast_fields(&plain("Hello", ""));
         assert_eq!(fields.title, "Hello");
         assert_eq!(fields.text1, None);
-    }
-
-    #[test]
-    fn windows_plain_toast_fields_are_silent_short_and_powershell() {
-        let fields = windows_plain_toast_fields(&plain("Hello", "world"));
-        assert_eq!(fields.sound, PlainToastSound::Silent);
-        assert_eq!(fields.duration, PlainToastDuration::Short);
-        assert_eq!(fields.app_id, ToastAppId::PowerShell);
     }
 
     #[test]

@@ -1,15 +1,20 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! The interface types between the callers and the tracked system backend:
 //! the instance id, the dispatch result and the backend trait, with the no-op
 //! and recording implementations.
 
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 
-/// The registry's identity for one displayed notification.
+/// The caller's identity for one displayed notification.
 ///
 /// Unlike the application's `i=` id (which may be absent, reused, or shared
 /// by different panes), an instance id is unique for the process lifetime and
-/// is minted by the registry's `register`. The toast leg uses the raw value
-/// as its toast key.
+/// is minted by the caller. The toast leg uses the raw value as its toast
+/// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NotificationInstanceId(u64);
 
@@ -31,10 +36,9 @@ impl NotificationInstanceId {
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemDispatch {
-    /// The request was queued; its outcome arrives later as an
-    /// `Osc99SystemLegEvent`. Only the Linux/BSD service (and the test
-    /// backend) ever queues a request, so the variant exists only there.
-    #[cfg(any(all(unix, not(target_os = "macos")), test, feature = "test-utils"))]
+    /// The request was queued; its outcome arrives later as a system event
+    /// (see `SystemNotifyEvent` on Linux/BSD). Only the Linux/BSD service (and
+    /// the test backend) ever queues a request.
     Queued,
     /// The request could not even be queued, so no event will ever follow.
     /// The caller must end the instance's system leg itself.
@@ -62,10 +66,10 @@ pub const SYSTEM_LEG: SystemLeg = if cfg!(all(unix, not(target_os = "macos"))) {
     SystemLeg::Untracked
 };
 
-/// The Linux/BSD desktop-notification service as the effect executor sees it.
+/// The Linux/BSD desktop-notification service as the caller sees it.
 ///
-/// A trait so the executor and its tests need not reach a session bus, and so
-/// every platform compiles the same executor.
+/// A trait so the caller and its tests need not reach a session bus, and so
+/// every platform compiles the same caller.
 pub trait TrackedBackend {
     /// Display `notification` for `instance`, updating `replaces`'
     /// notification in place when that is set.
@@ -84,10 +88,10 @@ pub trait TrackedBackend {
 /// The backend on a build or moment with no system-notification service.
 ///
 /// It displays nothing and reports every show and close as
-/// [`SystemDispatch::Failed`], so the registry ends the leg instead of
+/// [`SystemDispatch::Failed`], so the caller ends the leg instead of
 /// waiting for an event that cannot come.
 ///
-/// macOS and Windows never route to the registry's `Osc99Leg::LinuxSystem`, so for them it
+/// macOS and Windows never route to the caller's tracked leg, so for them it
 /// is never called. On Linux/BSD it stands in while the service's handle is
 /// borrowed elsewhere.
 #[derive(Debug, Clone, Copy, Default)]

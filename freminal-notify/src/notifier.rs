@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! [`DesktopNotifier`]: the one owner of the operating-system notification
 //! backends.
 //!
@@ -11,13 +16,15 @@
 //! Dropping the notifier drops the service first and the untracked backend
 //! second, which is the order the GUI's two separate fields had.
 //!
-//! Every method exists on every platform. Where a platform has no such
-//! backend the method does what a missing backend does: nothing is started,
-//! the tracked backend is [`NoTrackedBackend`], and
-//! plain notifications go to the platform worker. The platform split lives in
-//! the private `platform` module below, as free functions: a method that read
-//! nothing from `self` on one platform would only exist to make call sites
-//! uniform.
+//! Most methods exist on every platform. Where a platform has no such backend
+//! the method does what a missing backend does: the tracked backend is
+//! [`NoTrackedBackend`], and plain notifications go to the platform worker.
+//! The methods that only a service can answer
+//! ([`DesktopNotifier::ensure_started`], `is_started` and `drain_events`)
+//! exist only on Linux/BSD, so a caller cannot call one where there is
+//! nothing to start. The platform split lives in the private `platform`
+//! module below, as free functions: a method that read nothing from `self` on
+//! one platform would only exist to make call sites uniform.
 //!
 //! The policy that decides whether the service is wanted stays with the
 //! caller, who passes it in as a [`ServiceDemand`]: the notifier only obeys.
@@ -74,11 +81,13 @@ impl DesktopNotifier {
     }
 
     /// Start the service if `demand` is [`ServiceDemand::Wanted`] and it is
-    /// not running. Calling this again once it runs is a no-op, and so is
-    /// calling it off Linux/BSD.
+    /// not running. Calling this again once it runs is a no-op.
     ///
     /// A busy handle cell leaves the service unstarted; the next call
     /// retries, and until then tracked requests fail.
+    ///
+    /// Only Linux/BSD has a service to start.
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub fn ensure_started(&self, demand: ServiceDemand) {
         platform::ensure_started(&self.service, demand);
     }
@@ -282,10 +291,6 @@ mod platform {
         }
     }
 
-    pub fn ensure_started(_service: &Service, demand: ServiceDemand) {
-        tracing::trace!(?demand, "no desktop-notification service on this platform");
-    }
-
     pub fn plain_sink(_service: &Service, _demand: impl FnOnce() -> ServiceDemand) -> PlainSink {
         PlainSink::platform_worker()
     }
@@ -395,7 +400,7 @@ mod tests {
         use std::cell::Cell;
 
         use super::super::super::linux::{DetachedQueue, detached_handle};
-        use super::super::super::plain_sink::PlainNotification;
+        use super::super::super::plain_sink::{PlainNotification, RouteKind};
         use super::*;
 
         /// A notifier whose service cell holds `handle`.
@@ -603,12 +608,14 @@ mod tests {
             let sink = notifier.plain_sink(|| ServiceDemand::NotWanted);
 
             // Reaches no service and starts none.
+            assert_eq!(sink.route_kind(), RouteKind::Nowhere);
             sink.show(PlainNotification {
                 summary: "Title".to_owned(),
                 body: "Body".to_owned(),
                 urgency: NotificationUrgency::Normal,
             });
             assert!(!notifier.is_started());
+            assert_eq!(notifier.drain_events(), []);
         }
 
         // ── is_started / drain_events ───────────────────────────────────

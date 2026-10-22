@@ -421,6 +421,7 @@ mod tests {
     use zbus::wire::{LE, to_bytes};
     use zbus::{OwnedVariant, Structure, Variant};
 
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::*;
 

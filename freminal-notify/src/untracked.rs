@@ -1,16 +1,21 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! The OSC 99 *untracked* system leg: a desktop notification freminal shows
 //! and then forgets.
 //!
 //! macOS and Windows give a background thread no way to observe a
 //! notification being activated or closed (the macOS callbacks need the main
 //! run loop), so on those platforms the system leg is fire-and-forget. The
-//! registry models that as `Osc99Leg::UntrackedSystem`:
-//! it emits `Osc99Effect::ShowUntrackedSystem`, answers
-//! a `c=1` request with `untracked` at once, and never waits for the leg.
+//! caller models that as an untracked leg: it asks for the notification to be
+//! shown, answers a `c=1` request with `untracked` at once, and never waits
+//! for the leg.
 //!
-//! The executor shows the notification through an [`UntrackedBackend`]:
+//! The caller shows the notification through an [`UntrackedBackend`]:
 //! `PlatformUntrackedBackend` on macOS and Windows, and
-//! [`NoUntrackedBackend`] everywhere else (the registry never routes to the
+//! [`NoUntrackedBackend`] everywhere else (the caller never routes to the
 //! untracked leg on Linux/BSD, whose system leg is the zbus service) and as
 //! the stand-in when the real backend is busy.
 //!
@@ -51,6 +56,8 @@ use freminal_common::buffer_states::osc99_notification::{Osc99Expiry, Osc99Sound
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::fmt;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::thread::JoinHandle;
@@ -64,6 +71,8 @@ use super::NotifyAssets;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::StandardIcon;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::assets::ByteLen;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::icons::decode::reencode_icon_png;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::icons::raster::rasterize_standard_icon_png;
@@ -76,8 +85,8 @@ use super::queue::{Offered, offer};
 
 /// Shows a notification on the untracked system leg.
 ///
-/// A trait so the executor and its tests reach no OS notification API and so
-/// every platform compiles the same executor.
+/// A trait so the caller and its tests reach no OS notification API and so
+/// every platform compiles the same caller.
 pub trait UntrackedBackend {
     /// Display `notification` and forget it. There is no handle, no later
     /// event and no way to close it; a failure to display is logged, not
@@ -88,7 +97,7 @@ pub trait UntrackedBackend {
 
 /// The backend that displays nothing.
 ///
-/// Linux/BSD production builds use it (their registry never produces an
+/// Linux/BSD production builds use it (their caller never produces an
 /// untracked leg), and every platform uses it as the stand-in when the real
 /// backend's cell is busy.
 #[derive(Debug, Clone, Copy, Default)]
@@ -266,7 +275,6 @@ fn try_enqueue(queue: &Sender<DeliveryRequest>, request: DeliveryRequest) -> Sub
 /// Turns a request's icon into a file path: the worker's half of the icon
 /// story.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-#[derive(Debug)]
 struct IconPreparer {
     /// The face the standard icons are drawn from.
     font: &'static [u8],
@@ -275,6 +283,19 @@ struct IconPreparer {
     /// The PNG drawn for each standard icon, computed at most once per
     /// process. `None` records a glyph that could not be drawn.
     drawn: HashMap<StandardIcon, Option<Vec<u8>>>,
+}
+
+/// `Debug` prints the font's length, not its roughly 2 MB of bytes, and which
+/// standard icons are drawn, not their PNGs.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl fmt::Debug for IconPreparer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IconPreparer")
+            .field("font", &ByteLen(self.font))
+            .field("icons", &self.icons)
+            .field("drawn", &self.drawn.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -731,12 +752,22 @@ fn show_on_platform(request: &DeliveryRequest, icon_path: Option<&Path>) {
 /// files. A worker that has died (its thread panicked) is replaced on the next
 /// notification.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[derive(Debug)]
 pub struct PlatformUntrackedBackend {
     /// The face the standard icons are drawn from.
     font: &'static [u8],
     /// The delivery worker, once spawned.
     worker: Option<DeliveryWorker>,
+}
+
+/// `Debug` prints the font's length, not its roughly 2 MB of bytes.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl fmt::Debug for PlatformUntrackedBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlatformUntrackedBackend")
+            .field("font", &ByteLen(self.font))
+            .field("worker", &self.worker)
+            .finish()
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1190,6 +1221,18 @@ mod tests {
     }
 
     // ── the icon preparer ───────────────────────────────────────────────
+
+    #[test]
+    fn the_icon_preparer_debug_prints_the_font_length_not_the_font() {
+        let (_root, store) = private_store();
+        let font = test_assets().icon_font;
+        let preparer = IconPreparer::new(font, store);
+
+        let printed = format!("{preparer:?}");
+
+        assert!(printed.contains(&format!("font: <{} bytes>", font.len())));
+        assert!(printed.len() < 1000, "{} chars", printed.len());
+    }
 
     #[test]
     fn a_standard_icon_is_drawn_once_and_reuses_one_file() {

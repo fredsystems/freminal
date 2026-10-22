@@ -190,6 +190,7 @@ pub(super) fn parse_owner_changed(message: &Message) -> Option<PumpSignal> {
 #[cfg(test)]
 mod tests {
     use super::super::BUS_DRIVER_PATH;
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::*;
 

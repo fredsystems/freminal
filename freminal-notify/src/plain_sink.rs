@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! Where plain notifications go to be shown on the operating system.
 //!
 //! OSC 9, OSC 777, OSC 133 `D` command-finished and the Settings "Test
@@ -8,10 +13,11 @@
 //!
 //! A test can never reach the OS through a sink. The only constructors that
 //! do are `PlainSink::through_service`, which needs a running service's
-//! sender, and `PlainSink::platform_worker`, which only
-//! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) calls.
-//! Every other sink drops the notification
-//! (`PlainSink::nowhere`) or records it (`PlainSink::recording`).
+//! sender, and `PlainSink::platform_worker`, which is private to this crate:
+//! the compiler allows only
+//! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) to
+//! call it. Every other sink drops the notification (`PlainSink::nowhere`) or
+//! records it (`PlainSink::recording`).
 //!
 //! This matters most on macOS: `notify-rust`'s `show()` goes into the
 //! Objective-C notification runtime, which throws an uncatchable foreign
@@ -97,7 +103,7 @@ impl PlainSink {
     /// worker (macOS and Windows).
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     #[must_use]
-    pub const fn platform_worker() -> Self {
+    pub(crate) const fn platform_worker() -> Self {
         Self {
             route: Route::Worker,
         }
@@ -133,6 +139,39 @@ impl PlainSink {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(notification),
+        }
+    }
+}
+
+/// Where a [`PlainSink`] sends what it is given, for tests that must tell the
+/// destinations apart without reaching any of them.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteKind {
+    /// The notification is dropped.
+    Nowhere,
+    /// The Linux/BSD D-Bus service.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Service,
+    /// The macOS / Windows worker.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    Worker,
+    /// A [`PlainRecorder`].
+    Recorder,
+}
+
+#[cfg(test)]
+impl PlainSink {
+    /// Which destination this sink sends to.
+    #[must_use]
+    pub fn route_kind(&self) -> RouteKind {
+        match &self.route {
+            Route::Nowhere => RouteKind::Nowhere,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Route::Service(_) => RouteKind::Service,
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            Route::Worker => RouteKind::Worker,
+            Route::Recorder(_) => RouteKind::Recorder,
         }
     }
 }
@@ -199,10 +238,13 @@ mod tests {
         );
     }
 
-    /// A sink with nowhere to go drops the notification without panicking or
-    /// blocking.
+    /// A sink with nowhere to go routes nowhere, and showing on it neither
+    /// panics nor blocks.
     #[test]
     fn a_sink_with_nowhere_to_go_drops_the_notification() {
-        PlainSink::nowhere().show(notification("lost", NotificationUrgency::Normal));
+        let sink = PlainSink::nowhere();
+        assert_eq!(sink.route_kind(), RouteKind::Nowhere);
+
+        sink.show(notification("lost", NotificationUrgency::Normal));
     }
 }

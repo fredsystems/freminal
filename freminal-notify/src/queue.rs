@@ -1,3 +1,8 @@
+// Copyright (C) 2024-2026 Fred Clausen
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT.
+
 //! The non-blocking offer to a bounded queue that the notification workers share.
 //!
 //! The macOS / Windows plain worker and the untracked OSC 99 worker both hand

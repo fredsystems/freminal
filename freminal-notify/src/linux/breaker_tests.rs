@@ -19,6 +19,7 @@ use freminal_common::buffer_states::osc99_notification::Notification99Data;
 
 use super::super::TrackedBackend;
 use super::state::{CloseTarget, DaemonGate, DispatcherState};
+use super::test_helpers::*;
 use super::test_rig::*;
 use super::{
     EventSink, SystemNotifyEvent, close_instance, close_replaced, refresh_capabilities,

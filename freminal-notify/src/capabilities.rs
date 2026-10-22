@@ -31,9 +31,7 @@ pub struct DaemonCapabilities {
     /// default action).
     pub actions: DaemonSupport,
     /// `body-markup`: the daemon renders markup in the body. Only the Linux/BSD
-    /// service reads it (to decide whether to escape the body), so the field
-    /// exists only there.
-    #[cfg(all(unix, not(target_os = "macos")))]
+    /// service reads it, to decide whether to escape the body.
     pub body_markup: DaemonSupport,
     /// `sound`: the daemon plays notification sounds.
     pub sound: DaemonSupport,
@@ -45,7 +43,6 @@ impl DaemonCapabilities {
     pub const ASSUMED: Self = Self {
         body: DaemonSupport::Supported,
         actions: DaemonSupport::Supported,
-        #[cfg(all(unix, not(target_os = "macos")))]
         body_markup: DaemonSupport::Supported,
         sound: DaemonSupport::Unsupported,
     };

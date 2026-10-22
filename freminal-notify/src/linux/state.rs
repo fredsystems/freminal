@@ -529,7 +529,7 @@ impl DispatcherState {
     /// under a *different* owner is reported [`SystemNotifyEvent::Closed`] and
     /// forgotten: the daemon that displayed it is gone and will never send
     /// the signals that would end its leg. This is freminal's choice, so the
-    /// registry can finish those legs and send the owed close reports instead
+    /// caller can finish those legs and send the owed close reports instead
     /// of leaving them open forever. An instance recorded under the new owner
     /// stays (a `Notify` that auto-started the daemon can be recorded before
     /// the change is processed), and so does one with no recorded owner,
@@ -602,6 +602,7 @@ mod tests {
     use super::super::super::presentation::SoundHint;
     use super::super::super::test_support::test_assets;
     use super::super::pump::PumpKind;
+    use super::super::test_helpers::*;
     use super::super::test_rig::*;
     use super::super::wire::NotifyImage;
     use super::*;
