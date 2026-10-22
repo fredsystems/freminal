@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
-use super::presentation::Osc99IconLookup;
+use super::super::presentation::Osc99IconLookup;
 
 /// The name of the thread that runs the scans.
 const SCAN_THREAD_NAME: &str = "freminal-osc99-icons";

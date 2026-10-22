@@ -19,7 +19,7 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::Format;
 
-use crate::gui::desktop_notify::StandardIcon;
+use super::super::StandardIcon;
 
 /// The tile colour. The tile is fully opaque inside its rounded outline.
 const TILE_RGB: [u8; 3] = [0x5A, 0x5A, 0x5A];
@@ -177,7 +177,7 @@ impl TileShape {
 mod tests {
     use super::*;
 
-    use crate::gui::desktop_notify::test_assets;
+    use super::super::super::assets::test_assets;
 
     fn font() -> &'static [u8] {
         test_assets().icon_font

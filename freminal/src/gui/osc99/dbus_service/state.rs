@@ -14,11 +14,12 @@ use std::time::{Duration, Instant};
 use freminal_common::buffer_states::osc99_notification::{Notification99Data, Osc99Expiry};
 use zbus::Connection;
 
-use crate::gui::osc99::presentation::{
-    Osc99DecodedIconCache, Osc99IconImage, Osc99IconLookup, Osc99SoundHint, category_hint,
-    decode_icon_image, escape_body_markup, sound_hint,
+use crate::gui::desktop_notify::{
+    Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99DecodedIconCache, Osc99IconImage,
+    Osc99IconLookup, Osc99SoundHint, category_hint, decode_icon_image, escape_body_markup,
+    sound_hint,
 };
-use crate::gui::osc99::{Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99InstanceId};
+use crate::gui::osc99::Osc99InstanceId;
 
 use super::plain::PlainNotification;
 use super::pump::PumpSignal;
@@ -586,7 +587,7 @@ impl Default for DispatcherState {
         Self::new(
             Osc99SignalSender::Unfiltered,
             Box::new(super::test_rig::NoIconLookup),
-            crate::gui::desktop_notify::test_assets().app_icon_png,
+            crate::gui::desktop_notify::test_support::test_assets().app_icon_png,
         )
     }
 }
@@ -605,8 +606,8 @@ mod tests {
     use super::super::test_rig::*;
     use super::super::wire::NotifyImage;
     use super::*;
-    use crate::gui::desktop_notify::test_assets;
-    use crate::gui::osc99::presentation::Osc99SoundHint;
+    use crate::gui::desktop_notify::Osc99SoundHint;
+    use crate::gui::desktop_notify::test_support::test_assets;
 
     // ── DispatcherState ─────────────────────────────────────────────────
 

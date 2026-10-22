@@ -150,13 +150,10 @@ use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_common::send_or_log;
 use zbus::{Connection, MessageStream};
 
-use super::icon_lookup::XdgIconLookup;
-use super::presentation::Osc99IconLookup;
-use super::{
-    Osc99DaemonCapabilities, Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend,
-    Osc99SystemDispatch,
+use super::{Osc99InstanceId, Osc99LegActivation, Osc99SystemBackend, Osc99SystemDispatch};
+use crate::gui::desktop_notify::{
+    NotifyAssets, Osc99DaemonCapabilities, Osc99IconLookup, XdgIconLookup,
 };
-use crate::gui::desktop_notify::NotifyAssets;
 use pump::{
     PumpKind, PumpSignal, notification_signals_rule, owner_changed_rule, parse_owner_changed,
     parse_signal, spawn_pump,
@@ -1082,8 +1079,8 @@ mod tests {
 
     use super::test_rig::*;
     use super::*;
-    use crate::gui::desktop_notify::test_assets;
-    use crate::gui::osc99::Osc99DaemonSupport;
+    use crate::gui::desktop_notify::Osc99DaemonSupport;
+    use crate::gui::desktop_notify::test_support::test_assets;
 
     #[test]
     fn system_actions_map_to_the_registry_activations() {

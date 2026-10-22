@@ -24,7 +24,7 @@ use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
 use super::FreminalGui;
-use super::osc99::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
+use super::desktop_notify::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 
@@ -541,7 +541,7 @@ mod tests {
         }
     }
 
-    use crate::gui::osc99::Osc99DaemonCapabilities;
+    use crate::gui::desktop_notify::Osc99DaemonCapabilities;
     use crate::gui::panes::{Pane, PaneId};
     use crate::gui::pty::WindowCommandBudget;
     use crate::gui::tabs::{Tab, TabId};

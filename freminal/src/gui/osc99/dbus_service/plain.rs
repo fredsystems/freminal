@@ -249,11 +249,10 @@ mod tests {
     use super::super::test_rig::*;
     use super::super::{Osc99DbusEvent, start};
     use super::*;
-    use crate::gui::desktop_notify::test_assets;
+    use crate::gui::desktop_notify::test_support::test_assets;
+    use crate::gui::desktop_notify::{Osc99DaemonCapabilities, Osc99DaemonSupport};
     use crate::gui::notifications::{NotificationRequest, NotificationRouter, SystemNotifySink};
-    use crate::gui::osc99::{
-        Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99SystemBackend, Osc99SystemDispatch,
-    };
+    use crate::gui::osc99::{Osc99SystemBackend, Osc99SystemDispatch};
     use crate::gui::toast::ToastStack;
 
     fn plain(summary: &str, body: &str, urgency: NotificationUrgency) -> PlainNotification {

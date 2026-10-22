@@ -826,11 +826,12 @@ mod tests {
     use freminal_windowing::WindowId;
 
     use super::*;
+    use crate::gui::desktop_notify::test_support::RecordingUntrackedBackend;
+    use crate::gui::desktop_notify::{NoUntrackedBackend, Osc99UntrackedBackend};
     use crate::gui::icons::ChromeIcon;
     use crate::gui::osc99::{
-        NoSystemBackend, NoUntrackedBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec,
-        Osc99UntrackedBackend, RecordedShow, RecordingSystemBackend, RecordingUntrackedBackend,
-        apply_osc99_effects,
+        NoSystemBackend, Osc99EffectSink, Osc99SystemBackend, Osc99ToastSpec, RecordedShow,
+        RecordingSystemBackend, apply_osc99_effects,
     };
     use crate::gui::panes::PaneIdGenerator;
     use crate::gui::toast::{

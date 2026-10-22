@@ -8,7 +8,8 @@ use crossbeam_channel::Sender;
 use freminal_common::buffer_states::osc99_notification::Notification99Data;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
-use super::{Osc99InstanceId, Osc99Origin, Osc99ToastSpec, Osc99UntrackedBackend};
+use super::{Osc99InstanceId, Osc99Origin, Osc99ToastSpec};
+use crate::gui::desktop_notify::Osc99UntrackedBackend;
 use crate::gui::notifications::send_reply_weak;
 use crate::gui::toast::{ToastContent, ToastPlacement, ToastStack};
 

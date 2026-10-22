@@ -52,11 +52,11 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
+use super::desktop_notify::Osc99LinuxDaemon;
 use super::frame_drain::WindowFocus;
 use super::osc99::{
-    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg,
-    Osc99LinuxDaemon, Osc99PaneState, Osc99Registry, Osc99Request, PaneKeyboardFocus,
-    PaneVisibility,
+    Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
+    Osc99Registry, Osc99Request, PaneKeyboardFocus, PaneVisibility,
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use super::osc99::{PlainNotification, PlainNotifySender};
@@ -1139,11 +1139,12 @@ impl NotificationRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::desktop_notify::NoUntrackedBackend;
     #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::host_capabilities::{PlainNotifyEntry, plain_notifications_may_use_system_leg};
     use crate::gui::osc99::{
-        NoSystemBackend, NoUntrackedBackend, Osc99ControlRequest, Osc99EffectSink, Osc99Filter,
-        Osc99IconPrime, Osc99Origin, Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
+        NoSystemBackend, Osc99ControlRequest, Osc99EffectSink, Osc99Filter, Osc99IconPrime,
+        Osc99Origin, Osc99SystemBackend, apply_osc99_effects, osc99_toast_spec,
     };
     use freminal_common::buffer_states::osc99_notification::{
         NotificationUrgency, Osc99ActivationFocus, Osc99ActivationReporting, Osc99CloseReporting,
@@ -3043,8 +3044,9 @@ mod tests {
 
     #[test]
     fn legs_follow_routing_when_the_daemon_is_available() {
-        let daemon =
-            Osc99LinuxDaemon::Available(crate::gui::osc99::Osc99DaemonCapabilities::ASSUMED);
+        let daemon = Osc99LinuxDaemon::Available(
+            crate::gui::desktop_notify::Osc99DaemonCapabilities::ASSUMED,
+        );
         let legs =
             |routing, focus| resolve_osc99_legs(routing, focus, Osc99Leg::LinuxSystem, daemon);
         assert_eq!(

@@ -19,29 +19,15 @@
 //!   events and drains focus requests, and the plain-input functions it is
 //!   built from.
 
-mod capabilities;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod dbus_service;
 mod effects;
 mod filter;
 mod glue;
 mod icon_cache;
-#[cfg(any(unix, target_os = "windows", test))]
-mod icon_decode;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod icon_lookup;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-mod icon_raster;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-mod icon_tempfiles;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod markup;
 mod pane_state;
-#[cfg(all(unix, not(target_os = "macos")))]
-mod presentation;
 mod registry;
 mod toast_spec;
-mod untracked;
 
 use std::sync::Weak;
 
@@ -52,9 +38,6 @@ use freminal_terminal_emulator::io::InputEvent;
 use crate::gui::notifications::Osc99Control;
 use crate::gui::toast::{ToastEventKind, ToastKey};
 
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
-pub use capabilities::Osc99DaemonCapabilities;
-pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use dbus_service::{
     Osc99DbusEvent, Osc99DbusHandle, Osc99DbusService, Osc99Wake, PlainNotification,
@@ -76,9 +59,6 @@ pub use pane_state::{
 };
 pub use registry::Osc99Registry;
 pub use toast_spec::{Osc99ToastSpec, osc99_toast_spec};
-#[cfg(test)]
-pub use untracked::RecordingUntrackedBackend;
-pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
 
 /// The registry's identity for one displayed notification.
 ///

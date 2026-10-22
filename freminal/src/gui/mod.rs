@@ -430,9 +430,9 @@ struct FreminalGui {
     /// unreachable. Feeds `host_capabilities::host_capabilities`; written only
     /// by the service-event router, which re-broadcasts the capabilities when
     /// the change alters them. Read on every platform (it is
-    /// [`osc99::Osc99LinuxDaemon::assumed`] throughout where no service
+    /// [`desktop_notify::Osc99LinuxDaemon::assumed`] throughout where no service
     /// exists). Single-threaded GUI, so `Cell` suffices.
-    osc99_daemon: std::cell::Cell<osc99::Osc99LinuxDaemon>,
+    osc99_daemon: std::cell::Cell<desktop_notify::Osc99LinuxDaemon>,
 
     /// The Linux/BSD desktop-notification service's handle. It carries every
     /// Linux/BSD notification, OSC 99 and plain (OSC 9 / 777, command-finished,
@@ -451,7 +451,7 @@ struct FreminalGui {
     /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
     /// Linux/BSD hold the no-op backend, the registry never routing to the
     /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
-    osc99_untracked: std::cell::RefCell<Box<dyn osc99::Osc99UntrackedBackend>>,
+    osc99_untracked: std::cell::RefCell<Box<dyn desktop_notify::Osc99UntrackedBackend>>,
 
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
@@ -660,8 +660,8 @@ impl FreminalGui {
             osc99_focus_requests: std::cell::RefCell::new(Vec::new()),
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
-            osc99_daemon: std::cell::Cell::new(osc99::Osc99LinuxDaemon::assumed()),
-            osc99_untracked: std::cell::RefCell::new(osc99::platform_untracked_backend(
+            osc99_daemon: std::cell::Cell::new(desktop_notify::Osc99LinuxDaemon::assumed()),
+            osc99_untracked: std::cell::RefCell::new(desktop_notify::platform_untracked_backend(
                 app_icon::notify_assets(),
             )),
             #[cfg(all(unix, not(target_os = "macos")))]

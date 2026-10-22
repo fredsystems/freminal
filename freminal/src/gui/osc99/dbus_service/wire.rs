@@ -17,7 +17,7 @@ use serde::{Serialize, Serializer};
 use zbus::proxy::MethodFlags;
 use zbus::{Connection, Signature, Type, as_variant};
 
-use crate::gui::osc99::presentation::{
+use crate::gui::desktop_notify::{
     Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
     choose_icon,
 };

@@ -30,12 +30,12 @@ use tracing::trace;
 #[cfg(all(unix, not(target_os = "macos")))]
 use super::Osc99DbusHandle;
 use super::{
-    NoSystemBackend, NoUntrackedBackend, Osc99Effect, Osc99EffectSink, Osc99IconCache,
-    Osc99LinuxDaemon, Osc99Origin, Osc99Registry, Osc99Request, Osc99SystemBackend,
-    Osc99UntrackedBackend, apply_osc99_effects,
+    NoSystemBackend, Osc99Effect, Osc99EffectSink, Osc99IconCache, Osc99Origin, Osc99Registry,
+    Osc99Request, Osc99SystemBackend, apply_osc99_effects,
 };
 use crate::gui::FreminalGui;
 use crate::gui::actions::{PaneFocusOutcome, focus_pane_in_tabs};
+use crate::gui::desktop_notify::{NoUntrackedBackend, Osc99LinuxDaemon, Osc99UntrackedBackend};
 use crate::gui::frame_drain::WindowFocus;
 use crate::gui::host_capabilities::PlainNotifyEntry;
 use crate::gui::notifications::{NotificationRouter, SystemNotifySink};
@@ -882,12 +882,13 @@ mod tests {
     use freminal_terminal_emulator::io::{GuiReply, InputEvent, Osc99CloseTracking};
 
     use super::*;
+    use crate::gui::desktop_notify::test_support::RecordingUntrackedBackend;
     use crate::gui::notifications::Osc99Control;
     #[cfg(all(unix, not(target_os = "macos")))]
     use crate::gui::osc99::dbus_service::{DetachedQueue, detached_handle};
     use crate::gui::osc99::{
         Osc99ControlRequest, Osc99DisplayRequest, Osc99IconPrime, Osc99InstanceId, Osc99PaneState,
-        PaneKeyboardFocus, PaneVisibility, RecordingSystemBackend, RecordingUntrackedBackend,
+        PaneKeyboardFocus, PaneVisibility, RecordingSystemBackend,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
 
@@ -1368,10 +1369,8 @@ mod tests {
         use freminal_common::config::Config;
 
         use super::*;
-        use crate::gui::osc99::{
-            Osc99DaemonCapabilities, Osc99DaemonSupport, Osc99DbusEvent, Osc99Leg,
-            dbus_service::Osc99SystemAction,
-        };
+        use crate::gui::desktop_notify::{Osc99DaemonCapabilities, Osc99DaemonSupport};
+        use crate::gui::osc99::{Osc99DbusEvent, Osc99Leg, dbus_service::Osc99SystemAction};
         use freminal_common::host_capabilities::HostCapabilities;
 
         fn system_config() -> NotificationsConfig {

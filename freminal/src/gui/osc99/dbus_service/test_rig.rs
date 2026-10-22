@@ -22,8 +22,8 @@ use futures_lite::StreamExt;
 use zbus::message::{Message, Type as MessageType};
 use zbus::{Connection, MessageStream, OwnedVariant, Structure, Variant};
 
-use crate::gui::desktop_notify::test_assets;
-use crate::gui::osc99::presentation::Osc99IconLookup;
+use crate::gui::desktop_notify::Osc99IconLookup;
+use crate::gui::desktop_notify::test_support::test_assets;
 use crate::gui::osc99::{Osc99InstanceId, Osc99SystemBackend, Osc99SystemDispatch};
 
 use super::pump::PumpSignal;

@@ -24,7 +24,7 @@ pub(in crate::gui) fn notify_assets() -> NotifyAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::desktop_notify::test_assets;
+    use crate::gui::desktop_notify::test_support::test_assets;
 
     #[test]
     fn the_backend_test_assets_are_the_files_the_gui_embeds() {

@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use freminal_common::buffer_states::osc99_notification::Osc99Sound;
 
-use super::icon_decode::decode_icon_rgba;
+use super::StandardIcon;
+use super::icons::decode::decode_icon_rgba;
 pub use super::markup::escape_body_markup;
-use crate::gui::desktop_notify::StandardIcon;
 
 /// How many decoded icons [`Osc99DecodedIconCache`] keeps.
 const DECODED_ICON_CACHE_ENTRIES: usize = 8;

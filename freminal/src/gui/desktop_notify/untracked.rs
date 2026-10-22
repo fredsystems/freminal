@@ -4,8 +4,8 @@
 //! macOS and Windows give a background thread no way to observe a
 //! notification being activated or closed (the macOS callbacks need the main
 //! run loop), so on those platforms the system leg is fire-and-forget. The
-//! registry models that as [`Osc99Leg::UntrackedSystem`](super::Osc99Leg):
-//! it emits [`Osc99Effect::ShowUntrackedSystem`](super::Osc99Effect), answers
+//! registry models that as [`Osc99Leg::UntrackedSystem`](crate::gui::osc99::Osc99Leg):
+//! it emits [`Osc99Effect::ShowUntrackedSystem`](crate::gui::osc99::Osc99Effect), answers
 //! a `c=1` request with `untracked` at once, and never waits for the leg.
 //!
 //! The executor shows the notification through an [`Osc99UntrackedBackend`]:
@@ -60,17 +60,17 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
+use super::NotifyAssets;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_decode::reencode_icon_png;
+use super::StandardIcon;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_raster::rasterize_standard_icon_png;
+use super::icons::decode::reencode_icon_png;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
-use super::icon_tempfiles::IconTempFiles;
+use super::icons::raster::rasterize_standard_icon_png;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use super::icons::tempfiles::IconTempFiles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use super::icon_tempfiles::default_icon_dir;
-use crate::gui::desktop_notify::NotifyAssets;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-use crate::gui::desktop_notify::StandardIcon;
+use super::icons::tempfiles::default_icon_dir;
 
 /// Shows a notification on the untracked system leg.
 ///
@@ -717,7 +717,7 @@ mod tests {
 
     use std::num::NonZeroU32;
 
-    use crate::gui::desktop_notify::test_assets;
+    use super::super::assets::test_assets;
 
     fn test_notification() -> Notification99Data {
         use freminal_common::buffer_states::osc99_notification::{

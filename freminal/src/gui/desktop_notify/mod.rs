@@ -13,9 +13,34 @@
 //! `freminal_windowing` and no `freminal_terminal_emulator`.
 
 mod assets;
+mod capabilities;
+mod icons;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod markup;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod presentation;
 mod standard_icon;
+mod untracked;
 
 pub use assets::NotifyAssets;
-#[cfg(test)]
-pub use assets::test_assets;
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub use capabilities::Osc99DaemonCapabilities;
+pub use capabilities::{Osc99DaemonSupport, Osc99LinuxDaemon, Osc99Platform};
 pub use standard_icon::StandardIcon;
+pub use untracked::{NoUntrackedBackend, Osc99UntrackedBackend, platform_untracked_backend};
+
+// Used by osc99::dbus_service until it moves here (150.4b).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use icons::lookup::XdgIconLookup;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use presentation::{
+    Osc99DecodedIconCache, Osc99IconChoice, Osc99IconImage, Osc99IconLookup, Osc99SoundHint,
+    category_hint, choose_icon, decode_icon_image, escape_body_markup, sound_hint,
+};
+
+/// Test doubles and fixtures for the callers' tests.
+#[cfg(test)]
+pub mod test_support {
+    pub use super::assets::test_assets;
+    pub use super::untracked::RecordingUntrackedBackend;
+}
