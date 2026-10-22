@@ -9893,6 +9893,25 @@ Deliverable:
     - `osc99/mod.rs` and `registry.rs`: the Linux tracked-leg types and methods;
     - the one call in `app_impl.rs` described above;
     - test modules.
+- **150.8 (done, `40dcbc30`).** Each of the four platform builders is now a pure fields
+  function, tested on every platform, plus a thin conversion that only copies fields:
+  - plain macOS: `macos_plain_fields`;
+  - plain Windows: `windows_plain_toast_fields`;
+  - untracked Windows: `windows_untracked_toast_fields`, with
+    `ToastImage { None, Logo, Unusable }`;
+  - untracked macOS already had this shape.
+
+  The orchestrator compared each old conversion with its new one; they make the same calls,
+  in the same order, with the same values. 14 new fields tests.
+  - **Defect found in review and fixed here:** 150.7a left the macOS-only test
+    `macos_notification_sets_freminal_icon` building a `PlainNotification` without
+    `urgency`, so the macOS test build would not have compiled. Linux and windows-gnu clippy
+    cannot see a macOS-only test. Its four assertions now live in a fields test that runs
+    everywhere.
+- **150.9 (done, `1772450f`).** A "Desktop Notification Backends (Task 150)" section in
+  `DESIGN_DECISIONS.md`. Moved paths and renamed threads are updated in the kitty reference
+  and COVERAGE, and COVERAGE, GAPS and the kitty reference each got a "Last updated" entry.
+  No skill named a moved item. No behaviour claim was found false.
 
 ### 150 Cleanup entries
 
