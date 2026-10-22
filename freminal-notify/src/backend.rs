@@ -132,9 +132,20 @@ pub struct RecordedShow {
     pub notification: Notification99Data,
 }
 
+/// How [`RecordingTrackedBackend`] answers a show.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RecordedShowAnswer {
+    /// Report [`SystemDispatch::Queued`].
+    #[default]
+    Queue,
+    /// Report [`SystemDispatch::Failed`], after recording the show.
+    Fail,
+}
+
 /// A backend that records every show and close, for tests. It reports
-/// [`SystemDispatch::Queued`] for both unless `fail_shows` is set (which
-/// fails shows only).
+/// [`SystemDispatch::Queued`] for both unless `show_answer` is
+/// [`RecordedShowAnswer::Fail`] (which fails shows only).
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Default)]
 pub struct RecordingTrackedBackend {
@@ -142,8 +153,8 @@ pub struct RecordingTrackedBackend {
     pub shown: Vec<RecordedShow>,
     /// Every closed instance, in call order.
     pub closed: Vec<NotificationInstanceId>,
-    /// Report every show as [`SystemDispatch::Failed`] (after recording it).
-    pub fail_shows: bool,
+    /// How every show is answered.
+    pub show_answer: RecordedShowAnswer,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -159,10 +170,9 @@ impl TrackedBackend for RecordingTrackedBackend {
             replaces,
             notification: notification.clone(),
         });
-        if self.fail_shows {
-            SystemDispatch::Failed
-        } else {
-            SystemDispatch::Queued
+        match self.show_answer {
+            RecordedShowAnswer::Queue => SystemDispatch::Queued,
+            RecordedShowAnswer::Fail => SystemDispatch::Failed,
         }
     }
 

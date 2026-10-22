@@ -828,7 +828,7 @@ mod tests {
         NotificationOccasion, NotificationUrgency, Osc99Expiry, Osc99Sound,
     };
     use freminal_notify::test_support::{
-        RecordedShow, RecordingTrackedBackend, RecordingUntrackedBackend,
+        RecordedShow, RecordedShowAnswer, RecordingTrackedBackend, RecordingUntrackedBackend,
     };
     use freminal_notify::{NoTrackedBackend, NoUntrackedBackend, TrackedBackend, UntrackedBackend};
     use freminal_windowing::WindowId;
@@ -3137,7 +3137,7 @@ mod tests {
             &[Osc99Leg::LinuxSystem],
         );
         let mut failing = RecordingTrackedBackend {
-            fail_shows: true,
+            show_answer: RecordedShowAnswer::Fail,
             ..RecordingTrackedBackend::default()
         };
         let (_, failed) = execute(effects, &mut toasts, &mut failing);

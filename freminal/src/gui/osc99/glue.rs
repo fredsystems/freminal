@@ -1272,6 +1272,7 @@ mod tests {
         use super::*;
         use crate::gui::osc99::Osc99Leg;
         use freminal_common::host_capabilities::HostCapabilities;
+        use freminal_notify::test_support::RecordedShowAnswer;
         use freminal_notify::{DaemonCapabilities, DaemonSupport, SystemAction, SystemNotifyEvent};
 
         fn system_config() -> NotificationsConfig {
@@ -1310,7 +1311,7 @@ mod tests {
         fn a_failed_system_show_is_fed_back_once_and_ends_the_leg() {
             let pane = LivePane::first();
             let mut rig = Rig::new();
-            rig.system.fail_shows = true;
+            rig.system.show_answer = RecordedShowAnswer::Fail;
 
             let (leftover, _) = rig.run(|registry, icons, sink| {
                 route_requests(

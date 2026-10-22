@@ -56,7 +56,7 @@ pub use untracked::{NoUntrackedBackend, UntrackedBackend};
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support {
     pub use super::assets::test_assets;
-    pub use super::backend::{RecordedShow, RecordingTrackedBackend};
+    pub use super::backend::{RecordedShow, RecordedShowAnswer, RecordingTrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     pub use super::linux::test_rig::{TestResult, assert_no_queued_events, started};
     pub use super::plain_sink::PlainRecorder;
