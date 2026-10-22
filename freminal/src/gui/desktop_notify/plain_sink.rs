@@ -8,8 +8,9 @@
 //!
 //! A test can never reach the OS through a sink. The only constructors that
 //! do are [`PlainSink::through_service`], which needs a running service's
-//! sender, and [`PlainSink::platform_worker`], which only the GUI's
-//! `system_notify_sink` calls. Every other sink drops the notification
+//! sender, and [`PlainSink::platform_worker`], which only
+//! [`DesktopNotifier::plain_sink`](super::DesktopNotifier::plain_sink) calls.
+//! Every other sink drops the notification
 //! ([`PlainSink::nowhere`]) or records it ([`PlainSink::recording`]).
 //!
 //! This matters most on macOS: `notify-rust`'s `show()` goes into the

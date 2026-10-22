@@ -40,7 +40,7 @@ use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::{GuiReply, InputEvent};
 
 use super::command_blocks::format_command_duration;
-use super::desktop_notify::{LinuxDaemon, PlainNotification, PlainSink};
+use super::desktop_notify::{LinuxDaemon, PlainNotification, PlainSink, SYSTEM_LEG, SystemLeg};
 use super::frame_drain::WindowFocus;
 use super::osc99::{
     Osc99DisplayRequest, Osc99Effect, Osc99FilterVerdict, Osc99IconCache, Osc99Leg, Osc99PaneState,
@@ -618,12 +618,10 @@ impl NotificationRouter {
         // legs are shown by the effects `register` returns below. Only
         // Linux/BSD observe a close or activation (through the notification
         // service); elsewhere the system notification is fire-and-forget and
-        // shown through the untracked backend. `cfg!` rather than `#[cfg]` so
-        // both variants are constructed on every platform.
-        let system_leg = if cfg!(all(unix, not(target_os = "macos"))) {
-            Osc99Leg::LinuxSystem
-        } else {
-            Osc99Leg::UntrackedSystem
+        // shown through the untracked backend.
+        let system_leg = match SYSTEM_LEG {
+            SystemLeg::Tracked => Osc99Leg::LinuxSystem,
+            SystemLeg::Untracked => Osc99Leg::UntrackedSystem,
         };
         let legs = resolve_osc99_legs(
             config.routing_osc99,
@@ -2415,10 +2413,9 @@ mod tests {
             &mut registry,
         );
 
-        let system_leg = if cfg!(all(unix, not(target_os = "macos"))) {
-            Osc99Leg::LinuxSystem
-        } else {
-            Osc99Leg::UntrackedSystem
+        let system_leg = match SYSTEM_LEG {
+            SystemLeg::Tracked => Osc99Leg::LinuxSystem,
+            SystemLeg::Untracked => Osc99Leg::UntrackedSystem,
         };
         let [entry] = registry.instances() else {
             panic!("a system-leg notification must be registered");

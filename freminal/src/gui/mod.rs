@@ -59,7 +59,6 @@ mod layout_ops;
 mod link_open;
 mod menu;
 mod notifications;
-#[cfg(all(unix, not(target_os = "macos")))]
 mod notify_wake;
 mod osc99;
 pub mod paste_guard;
@@ -436,28 +435,23 @@ struct FreminalGui {
     /// exists). Single-threaded GUI, so `Cell` suffices.
     osc99_daemon: std::cell::Cell<desktop_notify::LinuxDaemon>,
 
-    /// The Linux/BSD desktop-notification service's handle. It carries every
-    /// Linux/BSD notification, OSC 99 and plain (OSC 9 / 777, command-finished,
-    /// error) alike. It is started the first frame the config can route either
-    /// to the system leg (`FreminalGui::ensure_osc99_dbus_started`), or on
-    /// demand by `FreminalGui::system_notify_sink`, which the Settings "Test
-    /// Notification" button also uses with `enabled = false`. It is kept for the
-    /// rest of the process (dropping it stops the service). `None` until then.
-    /// Single-threaded GUI, so `RefCell` suffices.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    notify_service: std::cell::RefCell<Option<desktop_notify::LinuxNotifyHandle>>,
-
-    /// The macOS and Windows fire-and-forget desktop notification, which owns
-    /// the OSC 99 icon temp files and deletes them when it is dropped (the
-    /// application dropping this struct is the shutdown hook: the windowing
-    /// layer offers no other). A `Box<dyn>` so the field needs no `cfg`:
-    /// Linux/BSD hold the no-op backend, the registry never routing to the
-    /// untracked leg there. Single-threaded GUI, so `RefCell` suffices.
-    osc99_untracked: std::cell::RefCell<Box<dyn desktop_notify::UntrackedBackend>>,
+    /// The one owner of the operating-system notification backends: the
+    /// Linux/BSD desktop-notification service (which carries every Linux/BSD
+    /// notification, OSC 99 and plain (OSC 9 / 777, command-finished, error)
+    /// alike) and the macOS and Windows untracked backend.
+    ///
+    /// The service is started the first frame the config can route either to
+    /// the system leg (`FreminalGui::ensure_notification_service_started`), or
+    /// on demand by `FreminalGui::system_notify_sink`, which the Settings
+    /// "Test Notification" button also uses with `enabled = false`. Dropping
+    /// this struct is the shutdown hook (the windowing layer offers no
+    /// other): it stops the service and joins the untracked worker, which
+    /// deletes the OSC 99 icon temp files. Declared before `notify_wake`, so
+    /// the service stops before its wake-up target goes.
+    notifier: desktop_notify::DesktopNotifier,
 
     /// Where the notification service's repaint wake-ups go: re-pointed at the
     /// window being rendered each frame, so the service can wake an idle GUI.
-    #[cfg(all(unix, not(target_os = "macos")))]
     notify_wake: notify_wake::NotifyWake,
 
     /// Windows for which the user has already confirmed a force-close in the
@@ -610,6 +604,8 @@ impl FreminalGui {
             &config.notifications.osc99_filters,
         ));
 
+        let notify_wake = notify_wake::NotifyWake::default();
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
@@ -663,13 +659,11 @@ impl FreminalGui {
             deferred_osc99_requests: std::cell::RefCell::new(Vec::new()),
             pending_osc99_filter: std::cell::RefCell::new(None),
             osc99_daemon: std::cell::Cell::new(desktop_notify::LinuxDaemon::assumed()),
-            osc99_untracked: std::cell::RefCell::new(desktop_notify::platform_untracked_backend(
-                app_icon::notify_assets(),
-            )),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            notify_service: std::cell::RefCell::new(None),
-            #[cfg(all(unix, not(target_os = "macos")))]
-            notify_wake: notify_wake::NotifyWake::default(),
+            notifier: desktop_notify::DesktopNotifier::new(app_icon::notify_assets(), {
+                let wake = notify_wake.clone();
+                move || wake.waker()
+            }),
+            notify_wake,
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

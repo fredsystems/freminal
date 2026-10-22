@@ -279,8 +279,7 @@ impl FreminalGui {
 
         // Routing may now use the system leg: have the notification service
         // up before the next OSC 99 is routed, not at the next frame.
-        #[cfg(all(unix, not(target_os = "macos")))]
-        self.ensure_osc99_dbus_started();
+        self.ensure_notification_service_started();
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed
         // profile may have set `gui_theme` ephemerally; on Apply we re-derive it

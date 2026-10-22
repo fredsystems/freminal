@@ -10,9 +10,7 @@
 //! know by itself (Tasks 130.4, 138.15), and re-sends them to every pane when
 //! they change. Later facets (Task 146) are added here.
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use freminal_common::config::NotificationsConfig;
-use freminal_common::config::{Config, NotificationRouting};
+use freminal_common::config::{Config, NotificationRouting, NotificationsConfig};
 use freminal_common::host_capabilities::{
     HostCapabilities, KittyFileTransmission, Osc99ActivationReport, Osc99AutoExpiry,
     Osc99BodySupport, Osc99ButtonSupport, Osc99CloseEvents, Osc99Features, Osc99FocusSupport,
@@ -24,7 +22,7 @@ use freminal_terminal_emulator::io::InputEvent;
 use tracing::error;
 
 use super::FreminalGui;
-use super::desktop_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform};
+use super::desktop_notify::{DaemonSupport, LinuxDaemon, NotifyPlatform, ServiceDemand};
 use super::tabs::TabManager;
 use super::window::PerWindowState;
 
@@ -78,7 +76,6 @@ const fn kitty_file_transmission(config: &Config) -> KittyFileTransmission {
 /// The Linux/BSD notification service is started while this holds, so the
 /// daemon's `GetCapabilities` answer is normally in before an application's
 /// first `p=?`.
-#[cfg(all(unix, not(target_os = "macos")))]
 #[must_use]
 pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
     let notifications = &config.notifications;
@@ -89,7 +86,6 @@ pub(super) const fn osc99_may_use_system_leg(config: &Config) -> bool {
 }
 
 /// Whether `routing` ever shows a desktop notification, at some focus state.
-#[cfg(all(unix, not(target_os = "macos")))]
 const fn routing_has_system_leg(routing: NotificationRouting) -> bool {
     // No wildcard: a new routing variant must be classified here.
     match routing {
@@ -104,8 +100,8 @@ const fn routing_has_system_leg(routing: NotificationRouting) -> bool {
 /// the Settings "Test Notification" button) reaches the router, which decides
 /// whether the `enabled` master switch applies to it.
 ///
-/// The same on every platform, so a call site needs no `cfg`: only Linux/BSD
-/// reads it (see `FreminalGui::system_notify_sink`).
+/// The same on every platform, so a call site needs no `cfg` (see
+/// `FreminalGui::system_notify_sink`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlainNotifyEntry {
     /// `NotificationRouter::route`: nothing is shown unless
@@ -128,7 +124,6 @@ pub(super) enum PlainNotifyEntry {
 /// the per-source `osc_9` / `osc_777` / `on_command_finished` toggles say,
 /// because starting the service early is cheap and a missed start would drop
 /// notifications.
-#[cfg(all(unix, not(target_os = "macos")))]
 #[must_use]
 pub(super) const fn plain_notifications_may_use_system_leg(
     config: &NotificationsConfig,
@@ -148,15 +143,38 @@ pub(super) const fn plain_notifications_may_use_system_leg(
 /// Whether `config` can route any notification, OSC 99 or plain, to the
 /// system (desktop-notification) leg through the normal routed path: the
 /// condition for starting the Linux/BSD notification service from
-/// `FreminalGui::ensure_osc99_dbus_started`.
+/// `FreminalGui::ensure_notification_service_started`.
 ///
 /// The Settings "Test Notification" button has its own entry
 /// ([`PlainNotifyEntry::SettingsTest`]) and starts the service itself.
-#[cfg(all(unix, not(target_os = "macos")))]
 #[must_use]
 pub(super) const fn notification_service_wanted(config: &Config) -> bool {
     osc99_may_use_system_leg(config)
         || plain_notifications_may_use_system_leg(&config.notifications, PlainNotifyEntry::Routed)
+}
+
+/// [`notification_service_wanted`] as the [`ServiceDemand`] the notification
+/// backend takes: the policy is decided here, and the backend only obeys.
+#[must_use]
+pub(super) const fn notification_service_demand(config: &Config) -> ServiceDemand {
+    if notification_service_wanted(config) {
+        ServiceDemand::Wanted
+    } else {
+        ServiceDemand::NotWanted
+    }
+}
+
+/// [`plain_notifications_may_use_system_leg`] as a [`ServiceDemand`].
+#[must_use]
+pub(super) const fn plain_notification_demand(
+    config: &NotificationsConfig,
+    entry: PlainNotifyEntry,
+) -> ServiceDemand {
+    if plain_notifications_may_use_system_leg(config, entry) {
+        ServiceDemand::Wanted
+    } else {
+        ServiceDemand::NotWanted
+    }
 }
 
 /// The capabilities to re-broadcast when the Linux/BSD daemon's state goes

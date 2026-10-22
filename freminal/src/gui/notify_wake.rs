@@ -99,7 +99,8 @@ impl NotifyWake {
         self.lock_targets().preferred = Some(window);
     }
 
-    /// A waker for [`LinuxNotifyService::spawn`](crate::gui::desktop_notify::LinuxNotifyService::spawn).
+    /// A waker for the notification service: the one
+    /// [`DesktopNotifier::new`](crate::gui::desktop_notify::DesktopNotifier::new)'s factory makes.
     pub fn waker(&self) -> Box<dyn Fn() + Send> {
         let shared = Arc::clone(&self.shared);
         Box::new(move || shared.wake())

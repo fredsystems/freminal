@@ -41,6 +41,27 @@ pub enum SystemDispatch {
     Failed,
 }
 
+/// How an OSC 99 notification reaches the operating system on this platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemLeg {
+    /// Through the [`TrackedBackend`]: freminal observes the notification's
+    /// activation and close (Linux/BSD).
+    Tracked,
+    /// Through the [`UntrackedBackend`](super::UntrackedBackend): the
+    /// notification is shown and forgotten (macOS and Windows).
+    Untracked,
+}
+
+/// The system leg of the platform freminal is running on.
+///
+/// Defined with `cfg!` rather than `#[cfg]`, so both variants are constructed
+/// on every platform.
+pub const SYSTEM_LEG: SystemLeg = if cfg!(all(unix, not(target_os = "macos"))) {
+    SystemLeg::Tracked
+} else {
+    SystemLeg::Untracked
+};
+
 /// The Linux/BSD desktop-notification service as the effect executor sees it.
 ///
 /// A trait so the executor and its tests need not reach a session bus, and so

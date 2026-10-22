@@ -20,6 +20,7 @@ mod icons;
 mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod markup;
+mod notifier;
 mod plain_sink;
 #[cfg(any(test, not(all(unix, not(target_os = "macos")))))]
 mod plain_worker;
@@ -31,15 +32,20 @@ mod standard_icon;
 mod untracked;
 
 pub use assets::NotifyAssets;
-pub use backend::{NoTrackedBackend, NotificationInstanceId, SystemDispatch, TrackedBackend};
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub use backend::NoTrackedBackend;
+pub use backend::{NotificationInstanceId, SYSTEM_LEG, SystemDispatch, SystemLeg, TrackedBackend};
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 pub use capabilities::DaemonCapabilities;
 pub use capabilities::{DaemonSupport, LinuxDaemon, NotifyPlatform};
 #[cfg(all(unix, not(target_os = "macos")))]
-pub use linux::{LinuxNotifyHandle, LinuxNotifyService, SystemAction, SystemNotifyEvent};
+pub use linux::{SystemAction, SystemNotifyEvent};
+pub use notifier::{DesktopNotifier, ServiceDemand};
 pub use plain_sink::{PlainNotification, PlainSink};
 pub use standard_icon::StandardIcon;
-pub use untracked::{NoUntrackedBackend, UntrackedBackend, platform_untracked_backend};
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub use untracked::NoUntrackedBackend;
+pub use untracked::UntrackedBackend;
 
 /// Test doubles and fixtures for the callers' tests.
 #[cfg(test)]
@@ -48,7 +54,5 @@ pub mod test_support {
     pub use super::backend::{RecordedShow, RecordingTrackedBackend};
     #[cfg(all(unix, not(target_os = "macos")))]
     pub use super::linux::test_rig::{TestResult, assert_no_queued_events, started};
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub use super::linux::{DetachedQueue, detached_handle};
     pub use super::untracked::RecordingUntrackedBackend;
 }
