@@ -249,7 +249,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 146 | Kitty Clipboard (OSC 5522)                  | `PLAN_VERSION_130.md` (Task 146)              | Planned       | Tasks 129, 130, 133           |
 | 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
-| 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | In progress   | Task 138                      |
+| 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Pending merge | Task 138                      |
 | 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Stub          | Task 149                      |
 
 ---
@@ -841,7 +841,7 @@ Update this section as tasks complete:
 | 132  | 2026-10-11 | 2026-10-11 | 132.1-132.14, C1-C8, adversarial review; merged via PR #539 (`9a04f73e`)           |
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
-| 149  | 2026-10-22 |            | 149.1-149.4 on task-149/zbus-6 (#567)                                              |
+| 149  | 2026-10-22 |            | 149.1-149.4, C1-C17, two review passes; PR #575 pending                            |
 
 ---
 
