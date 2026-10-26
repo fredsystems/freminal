@@ -269,7 +269,7 @@ impl App for ChromeGallery {
         // panels now take a `&mut Ui`).
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
-            egui::Id::new("chrome_gallery_root"),
+            egui::Id::unique("chrome_gallery_root"),
             egui::UiBuilder::default(),
         );
         egui::CentralPanel::default().show(&mut root_ui, |ui| {

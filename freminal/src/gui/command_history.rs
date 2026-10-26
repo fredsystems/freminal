@@ -397,7 +397,7 @@ pub fn show_command_history_palette(
 
     let mut action = PaletteAction::None;
 
-    Area::new(egui::Id::new("command_history_overlay").with(pane_id))
+    Area::new(egui::Id::unique("command_history_overlay").with(pane_id))
         .order(Order::Foreground)
         .pivot(Align2::CENTER_TOP)
         .fixed_pos(anchor_pos)

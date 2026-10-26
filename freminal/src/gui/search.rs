@@ -645,7 +645,7 @@ pub fn show_search_bar(
     // it here and reusing it inside the closure costs nothing).
     let popup_frame = Frame::popup(ui.style());
 
-    let area_response = Area::new(egui::Id::new("search_overlay").with(pane_id))
+    let area_response = Area::new(egui::Id::unique("search_overlay").with(pane_id))
         .order(Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
         .fixed_pos(anchor_pos)

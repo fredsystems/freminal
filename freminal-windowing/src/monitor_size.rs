@@ -18,7 +18,7 @@
 //!
 //! # Computation
 //!
-//! Mirrors egui-winit 0.36.2 `update_viewport_info`:
+//! Mirrors egui-winit 0.37.0 `update_viewport_info`:
 //!
 //! ```text
 //! window.current_monitor()

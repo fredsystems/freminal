@@ -1910,7 +1910,7 @@ impl freminal_windowing::App for FreminalGui {
         // `show_inside` was renamed to `show` in egui 0.35).
         let mut chrome_root_ui = egui::Ui::new(
             ctx.clone(),
-            egui::Id::new("freminal_root"),
+            egui::Id::unique("freminal_root"),
             egui::UiBuilder::default(),
         );
 
@@ -2382,7 +2382,7 @@ impl freminal_windowing::App for FreminalGui {
 
                     border_rects.push(sensor_rect);
 
-                    let sensor_id = ui.id().with("pane_border_sensor").with(border_idx);
+                    let sensor_id = ui.scope_id().with("pane_border_sensor").with(border_idx);
                     let response =
                         ui.interact(sensor_rect, sensor_id, egui::Sense::click_and_drag());
 
@@ -4692,7 +4692,7 @@ impl FreminalGui {
         // was renamed to `show` in egui 0.35).
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
-            egui::Id::new("freminal_fatal_error_root"),
+            egui::Id::unique("freminal_fatal_error_root"),
             egui::UiBuilder::default(),
         );
         CentralPanel::default().show(&mut root_ui, |ui| {
@@ -5399,12 +5399,12 @@ mod tests {
         let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
                 big_rect,
-                egui::Id::new("root_content_area"),
+                egui::Id::unique("root_content_area"),
                 egui::Sense::hover(),
             );
             let _small = ui.interact(
                 small_rect,
-                egui::Id::new("band_widget"),
+                egui::Id::unique("band_widget"),
                 egui::Sense::click(),
             );
         });
@@ -5426,12 +5426,12 @@ mod tests {
         let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(
                 big_rect,
-                egui::Id::new("root_content_area"),
+                egui::Id::unique("root_content_area"),
                 egui::Sense::hover(),
             );
             let small_response = ui.interact(
                 small_rect,
-                egui::Id::new("band_widget"),
+                egui::Id::unique("band_widget"),
                 egui::Sense::click(),
             );
             small_hovered = small_response.hovered();
@@ -5464,7 +5464,7 @@ mod tests {
         let pointer_pos = small_rect.center();
         let band_layer_id = egui::LayerId::new(
             egui::Order::Background,
-            egui::Id::new("freminal_terminal_band").with(egui::Id::new("probe_window")),
+            egui::Id::unique("freminal_terminal_band").with(egui::Id::unique("probe_window")),
         );
 
         let ctx = egui::Context::default();
@@ -5473,7 +5473,7 @@ mod tests {
         let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
                 big_rect,
-                egui::Id::new("root_content_area"),
+                egui::Id::unique("root_content_area"),
                 egui::Sense::hover(),
             );
             let band_ui = ui.new_child(
@@ -5483,7 +5483,7 @@ mod tests {
             );
             let _small = band_ui.interact(
                 small_rect,
-                egui::Id::new("band_widget"),
+                egui::Id::unique("band_widget"),
                 egui::Sense::click(),
             );
         });
@@ -5499,7 +5499,7 @@ mod tests {
         let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(
                 big_rect,
-                egui::Id::new("root_content_area"),
+                egui::Id::unique("root_content_area"),
                 egui::Sense::hover(),
             );
             let band_ui = ui.new_child(
@@ -5509,7 +5509,7 @@ mod tests {
             );
             let small_response = band_ui.interact(
                 small_rect,
-                egui::Id::new("band_widget"),
+                egui::Id::unique("band_widget"),
                 egui::Sense::click(),
             );
             small_hovered = small_response.hovered();

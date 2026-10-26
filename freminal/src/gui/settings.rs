@@ -569,7 +569,7 @@ impl SettingsModal {
 
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
-            egui::Id::new("settings_root"),
+            egui::Id::unique("settings_root"),
             egui::UiBuilder::default(),
         );
 
@@ -2504,7 +2504,7 @@ impl SettingsModal {
     /// to `Confirming` or back to `Idle` on Escape.
     fn handle_recording_state(&mut self, ui: &Ui, effective_map: &BindingMap, action: KeyAction) {
         // Show a non-interactive overlay prompting for key input.
-        egui::Area::new(ui.id().with("key_recording_overlay"))
+        egui::Area::new(ui.scope_id().with("key_recording_overlay"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
@@ -2633,7 +2633,7 @@ impl SettingsModal {
         combo: KeyCombo,
         conflict: Option<KeyAction>,
     ) {
-        egui::Area::new(ui.id().with("key_confirm_overlay"))
+        egui::Area::new(ui.scope_id().with("key_confirm_overlay"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {

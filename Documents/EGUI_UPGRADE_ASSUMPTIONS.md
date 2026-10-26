@@ -11,7 +11,7 @@ re-tessellating, and re-painting the "chrome" (menu bar, tab bar, borders,
 overlays) on frames where the chrome provably did not change, while always
 freshly rebuilding the terminal band. To do this correctly it relies on a
 number of **undocumented, internal behaviours** of the egui stack
-(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.36.2**.
+(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.37.0**.
 
 These behaviours are not part of any crate's public API contract. A version
 bump — even a patch bump — could silently change one of them. The failure mode
@@ -21,7 +21,7 @@ runtime.
 
 To contain that risk:
 
-- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.36.2`) in the
+- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.37.0`) in the
   workspace `Cargo.toml`, as a matched set. This is deliberate — do not "clean
   it up" to a caret range.
 - `glow` is separately held at **0.17** (a caret range, not an exact pin)
@@ -470,6 +470,75 @@ checklist. This file is only for the silent, undocumented, internal behaviours.
 
 One entry per bump. Record what was checked and how, so the next bump can tell
 a genuine re-verification from a rubber stamp.
+
+### 0.36.2 → 0.37.0
+
+Method: downloaded the 0.36.2 and 0.37.0 `egui`, `epaint`, `egui_glow` and
+`egui-winit` crates from crates.io and `diff -u`'d every file named in the
+table above. The `Upstream (0.36.2)` line references in the rows were not
+re-measured; find the equivalent code by name.
+
+| File | Diff | Assumptions discharged |
+| --- | --- | --- |
+| `egui_glow/src/painter.rs` | identical | A1, A2 |
+| `epaint/src/textures.rs` | identical | A2 |
+| `egui/src/data/output.rs` | `WidgetType` → `Role`; new `TextSelectionSettled` | A2 |
+| `egui/src/layers.rs` | `ClippedShape::new`, after-rounding transforms; `drain` identical | A3 |
+| `epaint/src/tessellator.rs` | `transform_after_tessellation`, color glyphs, `Shape::Band` | A4, A5 |
+| `egui/src/context.rs` | `tessellate`, `graphics(_mut)`, `drain` call unchanged | A5, A7, A8, A10 |
+| `epaint/src/texture_atlas.rs` | one arithmetic rewrite (`/ 2.0` → `* 0.5`) | A6 (upstream half) |
+| `epaint/src/image.rs` | `std` → `alloc` path only | A6 (delta half) |
+| `egui/src/ui.rs` | `Ui::id` → `scope_id`; `new` / `new_child` layer logic unchanged | A9 |
+| `egui/src/hit_test.rs` | `visible` field on test helper; hidden-rule loop untouched | A11 |
+| `egui-winit/src/lib.rs` | primary selection, activation token, accessibility | A13, A14 |
+| `egui/src/data/input/raw_input.rs` | `append` keeps prior safe-area insets; `take` unchanged | A14 |
+
+Outcome: **all live assumptions held unchanged** (A12 stays retired). Notes:
+
+- **A4.** `ClippedShape` gained `transform_after_tessellation`; a callback's
+  `rect` is now multiplied by it. freminal never sets it, so it is the
+  identity and callbacks are emitted exactly as before, one primitive each, in
+  order, with the `Primitive::Callback(_) => true` merge-break intact.
+- **A6.** epaint 0.37 moved the font atlas behind a new
+  `epaint/src/text/glyph_atlas.rs`. Its `clear()` rebuilds the
+  `TextureAtlas` via `TextureAtlas::new`, which starts with
+  `dirty = Rectu::EVERYTHING`, so a reset still produces a whole-image delta.
+  `allocate` is unchanged (forward-only cursor).
+- **A5–A7 consumers.** The cached-chrome atlas self-heal (`atlas_grew`) and
+  `chrome_repaint_settled` named in A5, A6, A7 and A10 no longer exist in the
+  tree (removed with the chrome cache in 124.5). The head/band/tail split now
+  lives in `freminal-windowing/src/frame_paint.rs` and tessellates every slice
+  fresh each frame, so stale UVs cannot arise. The upstream behaviours were
+  still verified; the rows' `Our code` sites are stale and should be pruned
+  separately.
+- **A15.** egui-winit's `[features] default` set is unchanged, so the explicit
+  list stands. Its `wayland` feature now also enables
+  `arboard?/wayland-data-control`. Through feature unification this also moves
+  freminal's own direct `arboard` reads (menu paste, `PasteUnsafe`) on Wayland
+  onto the data-control protocol, falling back to X11 if the compositor lacks
+  it. It also adds `wl-clipboard-rs` and the `hashbrown` 0.15 / `foldhash` 0.1
+  duplicates. `ttf-parser` is still absent. `epaint` 0.37 still declares
+  `harfrust` 0.12 and `skrifa` 0.44, so the `<0.13` hold stands. `glow` stays
+  at 0.17 (`egui_glow` 0.37.0 still declares `glow = "0.17.0"`), and
+  `winit` 0.30.13, `glutin` 0.32.3, `glutin-winit` 0.5.0 and
+  `raw-window-handle` 0.6.2 are all unchanged in egui's own manifests.
+
+Absorbed alongside, as ordinary compile-time API changes rather than silent
+behaviour:
+
+- `Id::new` is deprecated in favour of `Id::unique` (same hash, so persisted
+  ids are unchanged) and `Ui::id` in favour of `Ui::scope_id` (same value).
+  All call sites were migrated.
+- `default_fonts` no longer includes the NotoEmoji and emoji-icon-font
+  fallbacks; they moved to a new `monochrome_emoji_fonts` feature. freminal's
+  chrome font stack starts from `FontDefinitions::default()`, so the workspace
+  enables `monochrome_emoji_fonts` to keep the 0.36 chrome fallback chain.
+- `OutputCommand::TextSelectionSettled` is new. egui-winit writes it to the
+  X11/Wayland PRIMARY selection, so a text selection in egui chrome (for
+  example a settings text field) now lands in PRIMARY, as in other X11 apps.
+- egui-winit's `create_window` now consumes `XDG_ACTIVATION_TOKEN` /
+  `DESKTOP_STARTUP_ID`. freminal builds its own `WindowAttributes` in
+  `freminal-windowing/src/event_loop.rs`, so this does not reach us.
 
 ### 0.36.1 → 0.36.2
 
