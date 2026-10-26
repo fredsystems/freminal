@@ -226,7 +226,7 @@ impl ToastStack {
         for (i, out) in outputs.iter().enumerate() {
             let [min_x, min_y, max_x, max_y] = out.hit_rect_logical;
             let rect = egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
-            let clicked = egui::Area::new(egui::Id::new(("toast_interaction", i)))
+            let clicked = egui::Area::new(egui::Id::unique(("toast_interaction", i)))
                 .order(egui::Order::Foreground)
                 .interactable(true)
                 .fixed_pos(rect.min)

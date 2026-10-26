@@ -944,7 +944,7 @@ fn render_context_menu(
     let mut action: Option<ContextMenuAction> = None;
     let mut close = false;
 
-    let area_id = ui.id().with("terminal_context_menu");
+    let area_id = ui.scope_id().with("terminal_context_menu");
 
     // Always render the Area so that egui tracks its bounds and interaction
     // state. The `InnerResponse.response` gives us `clicked_elsewhere()`
@@ -2994,7 +2994,7 @@ impl FreminalTerminalWidget {
             && !command_history_open
             && is_active_pane
         {
-            let terminal_id = ui.id().with("terminal_focus");
+            let terminal_id = ui.scope_id().with("terminal_focus");
             let focus_rect = ui.available_rect_before_wrap();
             let response = ui.interact(
                 focus_rect,
@@ -3077,7 +3077,7 @@ impl FreminalTerminalWidget {
             );
             let gutter_response = ui.interact(
                 gutter_hit_rect,
-                ui.id().with(("command_block_gutter", pane_id)),
+                ui.scope_id().with(("command_block_gutter", pane_id)),
                 egui::Sense::click(),
             );
             let hovered = gutter_response.hovered();
@@ -4946,7 +4946,7 @@ impl FreminalTerminalWidget {
                     egui::Tooltip::always_open(
                         ui.ctx().clone(),
                         ui.layer_id(),
-                        egui::Id::new("freminal_url_hover_tooltip"),
+                        egui::Id::unique("freminal_url_hover_tooltip"),
                         egui::PopupAnchor::Pointer,
                     )
                     .show(|ui| {

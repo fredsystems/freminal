@@ -1257,7 +1257,7 @@ impl ToastStack {
         let render_state_cb = std::sync::Arc::clone(render_state);
         let layer_painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("toast_overlay_gl"),
+            egui::Id::unique("toast_overlay_gl"),
         ));
         layer_painter.add(egui::PaintCallback {
             rect: ctx.content_rect(),

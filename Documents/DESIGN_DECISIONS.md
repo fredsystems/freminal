@@ -1329,7 +1329,7 @@ with a comment saying why. Production code never does.
 `clippy::multiple_crate_versions` (part of the `cargo` group) is explicitly
 allowed. Every duplicate crate version is **transitive** and cannot be fixed by
 changing one of our direct dependencies: they are dominated by the exact-pinned
-egui 0.36 / winit 0.30 windowing stack (objc2 0.5/0.6, smithay-client-toolkit
+egui 0.37 / winit 0.30 windowing stack (objc2 0.5/0.6, smithay-client-toolkit
 0.19/0.20, calloop, rustix 0.38/1, windows-sys 0.52-0.61), plus `thiserror` 1
 via `conv2` and `getrandom` 0.3 via `ahash`. A lint that can only be satisfied
 by moving that stack would be permanently red or permanently suppressed.

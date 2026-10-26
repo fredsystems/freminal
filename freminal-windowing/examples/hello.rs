@@ -14,7 +14,7 @@ impl App for HelloApp {
     ) {
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
-            egui::Id::new("hello_root"),
+            egui::Id::unique("hello_root"),
             egui::UiBuilder::default(),
         );
         egui::CentralPanel::default().show(&mut root_ui, |ui| {

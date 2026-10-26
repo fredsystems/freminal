@@ -7,7 +7,7 @@ default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-n
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.13.0-beta.1"
+version = "0.13.0-beta.2"
 edition = "2024"
 rust-version = "1.96.0"
 description = "A terminal emulator written in Rust"
@@ -20,8 +20,8 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-arboard = "3.6.1"
-arc-swap = "1.9.2"
+arboard = "3.7.0"
+arc-swap = "1.9.3"
 assert_cmd = "2.2.2"
 # Direct dependency for the Linux/BSD notification service: `Timer` bounds its
 # `NO_AUTO_START` calls. Its timer runs on async-io's own reactor thread, so
@@ -45,14 +45,17 @@ duct = "1.1.2"
 # deliberate, re-verified change against every assumption in
 # `Documents/EGUI_UPGRADE_ASSUMPTIONS.md`. egui / egui_glow / egui-winit must
 # move in lockstep, so all three are exact-pinned together.
-egui = { version = "=0.36.2", default-features = false, features = ["default_fonts", "persistence"] }
-egui_glow = { version = "=0.36.2", default-features = false }
+# `monochrome_emoji_fonts`: egui 0.37 split its bundled emoji fallbacks
+# (NotoEmoji, emoji-icon-font) out of `default_fonts`; this keeps the chrome
+# font stack `FontDefinitions::default()` built under 0.36.
+egui = { version = "=0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts", "persistence"] }
+egui_glow = { version = "=0.37.0", default-features = false }
 # egui-winit's default features are disabled only to stop it re-enabling
 # `winit/default` (which pulls `wayland-csd-adwaita` -> ab_glyph -> ttf-parser,
 # #530); the list below is its default set minus `winit/default`. The version
 # pin is unchanged and the `EGUI_UPGRADE_ASSUMPTIONS.md` checklist still
 # governs any bump.
-egui-winit = { version = "=0.36.2", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+egui-winit = { version = "=0.37.0", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 filedescriptor = "0.8.3"
 flate2 = "1.1.10"
 fontdb = "0.24.0"
@@ -60,7 +63,7 @@ futures = "0.3.34"
 # `StreamExt` (the signal pumps) and `FutureExt::or` (the call deadline) for the
 # Linux/BSD notification service.
 futures-lite = "2.6.1"
-# Held at 0.17 deliberately: `egui_glow` 0.36.2 declares `glow = "0.17.0"`, and
+# Held at 0.17 deliberately: `egui_glow` 0.37.0 declares `glow = "0.17.0"`, and
 # upstream cannot move to 0.18 because wgpu 30's `wgpu-hal` pins glow 0.17 (a
 # bump would split glow into two versions in egui's own graph). We hand
 # `Arc<glow::Context>` straight to `egui_glow::Painter`, so a mismatch here is
@@ -74,7 +77,7 @@ glutin-winit = "0.5.0"
 harfrust = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lazy_static = "1.5.1"
-libc = "0.2.190"
+libc = "0.2.191"
 log = "0.4.34"
 lz4_flex = "0.14.0"
 nix = "0.31.3"
@@ -87,7 +90,7 @@ nix = "0.31.3"
 # to -0372, #567), and the `images` features are unused (icons are decoded
 # with the workspace `image` crate).
 notify-rust = { version = "4.18.2", default-features = false }
-open = "5.4.4"
+open = "5.4.5"
 predicates = "3.1.4"
 proptest = "1.11.0"
 raw-window-handle = "0.6.2"
@@ -144,7 +147,7 @@ winreg = "0.56.0"
 # `tracing`, with no `log` fallback), so the `zbus=warn` filters in `main.rs`
 # only have an effect with it. Listed with `default-features = false` so the
 # choice is explicit and a future default (for example `tokio`) cannot slip in.
-zbus = { version = "6.0.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
+zbus = { version = "6.1.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint
@@ -178,7 +181,9 @@ cast_possible_wrap = "deny"
 
 # The duplicate versions are all transitive and not fixable by pinning our
 # direct dependencies (`cargo tree --workspace -d --target all -e normal,build`):
-#   - the exact-pinned egui 0.36 / winit 0.30 windowing stack: objc2 0.5/0.6
+#   - hashbrown 0.15 and foldhash 0.1 via arboard's `wayland-data-control`
+#     (wl-clipboard-rs -> petgraph), which egui-winit 0.37 enables;
+#   - the exact-pinned egui 0.37 / winit 0.30 windowing stack: objc2 0.5/0.6
 #     and its siblings (block2, objc2-app-kit, objc2-foundation, objc2-ui-kit,
 #     objc2-core-foundation), smithay-client-toolkit 0.19/0.20, calloop
 #     0.13/0.14 and calloop-wayland-source, rustix 0.38/1 with linux-raw-sys,

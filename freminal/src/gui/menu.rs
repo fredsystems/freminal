@@ -812,7 +812,7 @@ impl super::FreminalGui {
         index: usize,
         rename_buffer: &mut String,
     ) -> TabBarAction {
-        let edit_id = egui::Id::new(("tab_rename", tab_id));
+        let edit_id = egui::Id::unique(("tab_rename", tab_id));
         let edit = egui::TextEdit::singleline(rename_buffer)
             .id(edit_id)
             .desired_width(120.0);
