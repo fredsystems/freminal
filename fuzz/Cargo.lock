@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "freminal-buffer"
-version = "0.13.0-beta.1"
+version = "0.13.0-beta.2"
 dependencies = [
  "conv2",
  "freminal-common",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "freminal-common"
-version = "0.13.0-beta.1"
+version = "0.13.0-beta.2"
 dependencies = [
  "clap",
  "conv2",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "freminal-terminal-emulator"
-version = "0.13.0-beta.1"
+version = "0.13.0-beta.2"
 dependencies = [
  "arc-swap",
  "conv2",
