@@ -20,8 +20,8 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-arboard = "3.6.1"
-arc-swap = "1.9.2"
+arboard = "3.7.0"
+arc-swap = "1.9.3"
 assert_cmd = "2.2.2"
 # Direct dependency for the Linux/BSD notification service: `Timer` bounds its
 # `NO_AUTO_START` calls. Its timer runs on async-io's own reactor thread, so
@@ -74,7 +74,7 @@ glutin-winit = "0.5.0"
 harfrust = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lazy_static = "1.5.1"
-libc = "0.2.190"
+libc = "0.2.191"
 log = "0.4.34"
 lz4_flex = "0.14.0"
 nix = "0.31.3"
@@ -87,7 +87,7 @@ nix = "0.31.3"
 # to -0372, #567), and the `images` features are unused (icons are decoded
 # with the workspace `image` crate).
 notify-rust = { version = "4.18.2", default-features = false }
-open = "5.4.4"
+open = "5.4.5"
 predicates = "3.1.4"
 proptest = "1.11.0"
 raw-window-handle = "0.6.2"
@@ -144,7 +144,7 @@ winreg = "0.56.0"
 # `tracing`, with no `log` fallback), so the `zbus=warn` filters in `main.rs`
 # only have an effect with it. Listed with `default-features = false` so the
 # choice is explicit and a future default (for example `tokio`) cannot slip in.
-zbus = { version = "6.0.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
+zbus = { version = "6.1.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint
