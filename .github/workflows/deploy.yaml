@@ -36,7 +36,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-bundle and cargo-generate-rpm
-        run: cargo install cargo-bundle cargo-generate-rpm
+        run: cargo install --locked cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
@@ -101,7 +101,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-bundle and cargo-generate-rpm
-        run: cargo install cargo-bundle cargo-generate-rpm
+        run: cargo install --locked cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
@@ -224,7 +224,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+        run: cargo install --locked cargo-bundle
 
       - name: Bundle .app
         run: cargo bundle --release -p freminal

@@ -136,7 +136,7 @@ jobs:
         run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
 
       - name: Install cargo-bundle and cargo-generate-rpm
-        run: cargo install cargo-bundle cargo-generate-rpm
+        run: cargo install --locked cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
@@ -193,7 +193,7 @@ jobs:
         run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
 
       - name: Install cargo-bundle and cargo-generate-rpm
-        run: cargo install cargo-bundle cargo-generate-rpm
+        run: cargo install --locked cargo-bundle cargo-generate-rpm
 
       - name: Bundle .deb package and build release binary
         run: cargo bundle --release -p freminal
@@ -279,7 +279,7 @@ jobs:
         run: cargo xtask bump-version "${{ needs.check-changes.outputs.nightly_version }}"
 
       - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+        run: cargo install --locked cargo-bundle
 
       - name: Bundle .app
         run: cargo bundle --release -p freminal
