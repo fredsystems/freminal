@@ -251,7 +251,11 @@
             # The shared base + rust modules, exactly as mkCheck would build
             # them.  We merge their hooks/excludes/passthru ourselves so we can
             # add the tombi hook before handing the result to git-hooks.
-            baseModule = precommit.lib.mkBaseCheck { inherit system extraExcludes; };
+            baseModule = precommit.lib.mkBaseCheck {
+              inherit system extraExcludes;
+              # Self-hosted runner used by fuzz-nightly.yml.
+              extraActionlintRunnerLabels = [ "freminal-fuzz" ];
+            };
             rustModule = precommit.lib.mkRustCheck {
               inherit system extraExcludes;
               enableXtask = true;
