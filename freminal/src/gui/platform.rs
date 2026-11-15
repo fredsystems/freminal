@@ -127,7 +127,13 @@ pub fn read_cwd(pid: u32) -> Option<String> {
         // Build a minimally-populated System and refresh only the single PID
         // we care about.  `ProcessRefreshKind::nothing().with_cwd(...)` keeps
         // the syscall count to the minimum needed to fetch the CWD field.
-        let mut sys = System::new_with_specifics(RefreshKind::nothing());
+        let mut sys = match System::new_with_specifics(RefreshKind::nothing()) {
+            Ok(sys) => sys,
+            Err(e) => {
+                tracing::trace!("read_cwd: sysinfo System init failed: {e}");
+                return None;
+            }
+        };
         let sys_pid = Pid::from_u32(pid);
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[sys_pid]),

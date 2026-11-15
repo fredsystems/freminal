@@ -108,7 +108,7 @@
             };
           };
 
-          version = "0.13.0-beta.2";
+          version = "0.13.0-beta.3";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -178,9 +178,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.13.0-beta.2</string>
+                    <string>0.13.0-beta.3</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.13.0-beta.2</string>
+                    <string>0.13.0-beta.3</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -387,7 +387,12 @@
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                   pkgs.makeBinaryWrapper
                 ];
-                buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                # aws-lc: cargo-bundle's sigstore/rustls stack pulls aws-lc-sys,
+                # which nixpkgs builds against a system AWS-LC.
+                buildInputs = [
+                  pkgs.aws-lc
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                   pkgs.libxkbcommon
                   pkgs.wayland
                   pkgs.openssl
@@ -570,7 +575,7 @@
               # edit to this one binding.  The date must exist in the locked
               # rust-overlay revision (manifests/nightly/<year>/<date>.nix);
               # if it does not, evaluation fails with a missing-attribute error.
-              fuzzNightlyDate = "2026-09-28";
+              fuzzNightlyDate = "2026-11-14";
               fuzzToolchain = rustPkgs.rust-bin.nightly.${fuzzNightlyDate}.default;
 
               # Shared shell builder.  `extraTools` and `extraEnv` are the only

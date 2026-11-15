@@ -7,7 +7,7 @@ default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-n
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.13.0-beta.2"
+version = "0.13.0-beta.3"
 edition = "2024"
 rust-version = "1.96.0"
 description = "A terminal emulator written in Rust"
@@ -21,7 +21,7 @@ categories = ["command-line-utilities", "development-tools"]
 [workspace.dependencies]
 anyhow = "1.0.104"
 arboard = "3.7.0"
-arc-swap = "1.9.3"
+arc-swap = "1.9.5"
 assert_cmd = "2.2.2"
 # Direct dependency for the Linux/BSD notification service: `Timer` bounds its
 # `NO_AUTO_START` calls. Its timer runs on async-io's own reactor thread, so
@@ -30,7 +30,7 @@ async-io = "2.6.0"
 bitflags = "2.13.2"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
-clap-cargo = { version = "0.19.0", features = ["cargo_metadata"] }
+clap-cargo = { version = "0.19.1", features = ["cargo_metadata"] }
 clap-verbosity-flag = "3.0.4"
 color-eyre = "0.6.5"
 conv2 = "0.4.2"
@@ -57,7 +57,7 @@ egui_glow = { version = "=0.37.0", default-features = false }
 # governs any bump.
 egui-winit = { version = "=0.37.0", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
 filedescriptor = "0.8.3"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 fontdb = "0.24.0"
 futures = "0.3.34"
 # `StreamExt` (the signal pumps) and `FutureExt::or` (the call deadline) for the
@@ -78,9 +78,9 @@ harfrust = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lazy_static = "1.5.1"
 libc = "0.2.191"
-log = "0.4.34"
-lz4_flex = "0.14.0"
-nix = "0.31.3"
+log = "0.4.35"
+lz4_flex = "0.14.2"
+nix = "0.32.0"
 # macOS-only backend (`mac-notification-sys`) for the legacy OSC 9 / 777 /
 # 133 D / Settings "Test Notification" system notifications and the OSC 99
 # untracked leg. Linux/BSD shows them through freminal's own zbus service and
@@ -89,23 +89,23 @@ nix = "0.31.3"
 # D-Bus backends would pull the unmaintained zbus 5 crates (RUSTSEC-2026-0370
 # to -0372, #567), and the `images` features are unused (icons are decoded
 # with the workspace `image` crate).
-notify-rust = { version = "4.18.2", default-features = false }
+notify-rust = { version = "4.19.0", default-features = false }
 open = "5.4.5"
 predicates = "3.1.4"
-proptest = "1.11.0"
+proptest = "1.12.0"
 raw-window-handle = "0.6.2"
 regex = "1.13.1"
 rmp-serde = "1.3.1"
 rustc-hash = "2.1.3"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
-serial2 = "0.2.38"
+serial2 = "0.2.39"
 shared_library = "0.1.9"
 shell-words = "1.1.1"
 smol = "2.0.2"
 swash = "0.2.10"
 sys-locale = "0.3.2"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.3", default-features = false, features = ["system"] }
 tar = "0.4.46"
 # Direct dependency for every Windows notification: the OSC 99 untracked leg
 # (Task 138.C15, built directly so its image is an `appLogoOverride`) and
@@ -115,13 +115,13 @@ tauri-winrt-notification = "0.8.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
 thiserror = "2.0.21"
-toml = "1.1.6"
+toml = "1.2.1"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "parking_lot"] }
 unicode-segmentation = "1.13.3"
-unicode-width = "0.2.2"
+unicode-width = "0.2.3"
 vergen = { version = "10.0.3", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
 # default-features is off because winit's default `wayland-csd-adwaita` pulls
@@ -147,7 +147,7 @@ winreg = "0.56.0"
 # `tracing`, with no `log` fallback), so the `zbus=warn` filters in `main.rs`
 # only have an effect with it. Listed with `default-features = false` so the
 # choice is explicit and a future default (for example `tokio`) cannot slip in.
-zbus = { version = "6.1.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
+zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy", "tracing"] }
 
 # Members opt in with `[lints] workspace = true`. `portable-pty` deliberately
 # does NOT: it is vendored from wezterm and stays out of the workspace lint
@@ -193,7 +193,8 @@ cast_possible_wrap = "deny"
 #   - thiserror 1 via conv2 and calloop;
 #   - getrandom 0.3 and r-efi 5/6 via ahash (egui);
 #   - miniz_oxide 0.8 via png / backtrace vs 0.9 via flate2;
-#   - syn 3 via the zbus / bon proc-macros.
+#   - syn 3 via the zbus / bon proc-macros;
+#   - sysinfo 0.39 via vergen (build-dependency) vs our direct 0.40.
 # Duplicate tracking lives in `deny.toml` (`[bans] multiple-versions = "warn"`);
 # `cargo deny check` lists them. Revisit when the windowing stack moves.
 multiple_crate_versions = "allow"
