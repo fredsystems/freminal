@@ -252,6 +252,7 @@ jobs:
           : > "${RUNNER_TEMP}/infra-failures.txt"
           rm -f "${RUNNER_TEMP}/findings.md" "${RUNNER_TEMP}/findings-names.txt"
 
+          # shellcheck disable=SC2016 # single quotes are intentional: the script expands in the inner bash
           nix develop .#fuzz --command bash -e -c '
             set -euo pipefail
 

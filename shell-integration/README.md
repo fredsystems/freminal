@@ -4,7 +4,7 @@
 
 These scripts enable **command-aware rendering** in Freminal by emitting
 [OSC 133 (FinalTerm/FTCS)](https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/preexec.md)
-prompt-and-command lifecycle markers and [OSC 7](https://wezfurlong.org/wezterm/shell-integration.html#osc-7-escape-sequence-to-set-the-working-directory)
+prompt-and-command lifecycle markers and [OSC 7](https://wezterm.org/shell-integration.html#osc-7-escape-sequence-to-set-the-working-directory)
 working-directory notifications. Each marker carries a `freminal=1;fid=<id>`
 payload that lets Freminal distinguish its own integration from foreign
 OSC 133 emitters (system zsh, Starship, oh-my-zsh, GNOME VTE, etc.).

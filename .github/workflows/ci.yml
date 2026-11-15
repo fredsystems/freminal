@@ -40,14 +40,14 @@ jobs:
         run: |
           # PR mode: never skip
           if [ "${{ github.event_name }}" != "merge_group" ]; then
-            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ "${{ steps.merge-queue-ci-skipper.outputs.skip-check }}" = "true" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
   build-and-check:
@@ -72,6 +72,10 @@ jobs:
 
       # --- Enter your flake's devShell (same behavior as direnv) ---
       - name: Run checks in devShell
+        env:
+          # Lets the lychee link check use the GitHub API for github.com links
+          # instead of being rate limited.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           nix develop --impure --command bash -e -c '
             set -euxo pipefail
@@ -304,6 +308,7 @@ jobs:
           FREMINAL_FUZZ_CORPUS_DIR: ${{ runner.temp }}/fuzz-corpus
           FREMINAL_FUZZ_ARTIFACTS_DIR: ${{ runner.temp }}/fuzz-artifacts
         run: |
+          # shellcheck disable=SC2016 # single quotes are intentional: the script expands in the inner bash
           nix develop .#fuzz --command bash -e -c '
             set -euxo pipefail
             cargo xtask fuzz-smoke --time 30 --sandbox none 2>&1 \

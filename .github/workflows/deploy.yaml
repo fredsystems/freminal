@@ -292,7 +292,7 @@ jobs:
         run: |
           # Create a proper recursive zip for notarization
           ditto -c -k --keepParent Freminal.app Freminal.zip
-          echo "Zip size: $(ls -lh Freminal.zip | awk '{print $5}')"
+          echo "Zip size: $(du -h Freminal.zip | cut -f1)"
           echo "Zip contents:"
           zipinfo -1 Freminal.zip | head -30
 
