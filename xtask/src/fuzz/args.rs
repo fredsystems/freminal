@@ -350,7 +350,7 @@ mod tests {
                 .any(|a| a.to_string_lossy().starts_with("-dict")));
             // Identical apart from the one inserted argument, right after the
             // fixed arguments (`-error_exitcode` is the last of them).
-            let mut expected = without.clone();
+            let mut expected = without;
             expected.insert(10, OsString::from("-dict=/repo/fuzz/dict/ansi.dict"));
             assert_eq!(with, expected);
             assert_eq!(with[9], OsString::from("-error_exitcode=77"));

@@ -1412,7 +1412,7 @@ mod tests {
             for &join in &joins {
                 for &line_width in &line_widths {
                     let tag = FormatTag::default();
-                    let cells = vec![Cell::new(TChar::Ascii(b'x'), tag.clone())];
+                    let cells = vec![Cell::new(TChar::Ascii(b'x'), tag)];
                     let mut row = Row::from_cells(10, origin, join, cells);
                     row.line_width = line_width;
                     assert_byte_round_trip_exact(&row);
