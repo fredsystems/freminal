@@ -124,6 +124,3 @@ Before finishing any edit to `MASTER_PLAN.md`, verify all three:
   formally "released" / tagged. Marking the version-row `Complete` is
   correct (it reflects task completion, not a release); flag the tagging
   question to the maintainer separately.
-
-Base directory for this skill:
-file:///home/fred/GitHub/freminal/.opencode/skills/freminal-plan-status-lifecycle
