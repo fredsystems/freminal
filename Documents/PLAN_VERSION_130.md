@@ -10232,7 +10232,13 @@ size themselves per placement.
   - The image is stretched rather than aspect-fit and centred.
   - Placement id 0 does not match any virtual placement.
   - 16-colour ids are not accepted.
-  - The inheritance state is not cleared on cursor motion.
+  - Inheritance resolves from the last placeholder processed
+    (`TerminalHandler::prev_placeholder`, `resolve_placeholder_diacritics`), not from the
+    cell to the left on the same row as the kitty spec says, and it is not cleared on
+    cursor motion: CR, LF and CUP leave it in place (`scroll_ops.rs` `handle_newline` /
+    `handle_carriage_return`). A placeholder after CR LF or a cursor move inherits from an
+    unrelated cell. Reported by frext plan 08.11, whose kitty icons write explicit row and
+    column diacritics on every cell and so do not depend on the fix.
 
 **Scope sketch.** Work items G4, G5, G6 and G9:
 
