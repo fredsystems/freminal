@@ -80,6 +80,42 @@ if __freminal_should_init
         printf '\033]7;file://%s%s\007' $__freminal_hostname $PWD
     end
 
+    # ── sudo keeps TERMINFO (Task 151.12; on by default) ─────────────────────
+    # `sudo`'s default env_reset drops TERMINFO, so programs run under `sudo`
+    # lose freminal's own terminfo entry.  When freminal spawns the shell with
+    # `[shell_integration] sudo_preserve_terminfo = true` (the default) it lists
+    # `sudo` in $FREMINAL_SHELL_FEATURES (comma-separated, like Ghostty's
+    # $GHOSTTY_SHELL_FEATURES), and we wrap `sudo` to pass
+    # `--preserve-env=TERMINFO`.  `sudo -e` / `--edit` (sudoedit) is called
+    # unchanged.
+    #
+    # Reproduced from Ghostty's fish integration, names adapted:
+    # https://github.com/ghostty-org/ghostty/blob/d69f9ed83ca7275fa5afbba0fa968d0d9ada9f5a/src/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish#L97-L120
+    # As there, an existing `sudo` function or alias is left alone.
+    set -l __freminal_features (string split ',' -- "$FREMINAL_SHELL_FEATURES")
+    if contains sudo $__freminal_features; and test -n "$TERMINFO"; and test file = (type -t sudo 2> /dev/null; or echo "x")
+        # Wrap `sudo` command to ensure freminal terminfo is preserved
+        function sudo -d "Wrap sudo to preserve terminfo"
+            set --function sudo_has_sudoedit_flags no
+            for arg in $argv
+                # Check if argument is '-e' or '--edit' (sudoedit flags)
+                if string match -q -- -e "$arg"; or string match -q -- --edit "$arg"
+                    set --function sudo_has_sudoedit_flags yes
+                    break
+                end
+                # Check if argument is neither an option nor a key-value pair
+                if not string match -r -q -- "^-" "$arg"; and not string match -r -q -- "=" "$arg"
+                    break
+                end
+            end
+            if test "$sudo_has_sudoedit_flags" = yes
+                command sudo $argv
+            else
+                command sudo --preserve-env=TERMINFO $argv
+            end
+        end
+    end
+
     # ── OSC 1338 HISTFILE report (Task 72.15) ────────────────────────────────
     # Report fish's history file path on the FIRST prompt cycle so freminal
     # can seed the Quick Command History Palette with the file fish actually

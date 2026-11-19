@@ -390,6 +390,19 @@ limit = 10000
 # Default: true.
 # set_term_program = true
 
+# When true, the bundled bash/zsh/fish integrations wrap `sudo` so it keeps
+# TERMINFO (`sudo --preserve-env=TERMINFO ...`).  sudo's default env_reset drops
+# TERMINFO, so without this, programs run under sudo cannot find freminal's own
+# terminfo entry (the default TERM, xterm-freminal).  `sudo -e` / `--edit`
+# (sudoedit) is called unchanged.  Behaves like Ghostty's `sudo`
+# shell-integration feature, except that it is ON by default here (it is opt-in
+# in Ghostty).
+# A sudoers policy that forbids preserving the environment makes sudo refuse the
+# command; if yours does, set this to false.  Needs set_term_program = true;
+# applies to panes spawned after the change.
+# Default: true.
+# sudo_preserve_terminfo = true
+
 ## ##############################################################################
 # COMMAND BLOCKS (OSC 133 visualization)
 ## ##############################################################################

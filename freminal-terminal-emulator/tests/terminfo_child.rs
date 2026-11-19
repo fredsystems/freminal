@@ -38,7 +38,7 @@ use freminal_common::{
     term_name::{TermName, TermPlatform},
 };
 use freminal_terminal_emulator::io::{
-    FreminalPtyInputOutput, PtyRead, PtySpawnConfig, PtyWrite, ReplyQueue,
+    FreminalPtyInputOutput, PtyRead, PtySpawnConfig, PtyWrite, ReplyQueue, SudoTerminfo,
 };
 
 const END_MARKER: &str = "END_OF_CHILD_OUTPUT";
@@ -162,6 +162,7 @@ fn run_child() -> Option<String> {
         extra_env: Some(&pane_env),
         term: &term,
         set_term_program: false,
+        sudo_terminfo: SudoTerminfo::Unchanged,
     };
     // Holds the per-pane terminfo directory; it must outlive the child.
     let _pty = match FreminalPtyInputOutput::new(

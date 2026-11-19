@@ -148,7 +148,7 @@ let
       };
 
       shellIntegrationSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.shell_integration) set_term_program;
+        inherit (s.shell_integration) set_term_program sudo_preserve_terminfo;
       };
 
       commandBlocksSection = lib.filterAttrs (_: v: v != null) {
@@ -856,6 +856,19 @@ in
             When true, Freminal sets TERM_PROGRAM=freminal and
             TERM_PROGRAM_VERSION in the PTY environment and injects its
             shell-integration scripts (OSC 133 command blocks, OSC 7 cwd).
+            Null uses the default (true).
+          '';
+        };
+        sudo_preserve_terminfo = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, the bundled bash, zsh and fish integrations wrap sudo so
+            it keeps TERMINFO (sudo --preserve-env=TERMINFO ...), except for
+            sudo -e / --edit (sudoedit), which is called unchanged. On by
+            default, unlike Ghostty where it is opt-in: a sudoers policy that
+            forbids preserving the environment makes sudo refuse the command,
+            in which case set this to false. Requires set_term_program.
             Null uses the default (true).
           '';
         };

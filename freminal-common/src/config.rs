@@ -877,6 +877,7 @@ impl Default for CloseGuardConfig {
 /// ```toml
 /// [shell_integration]
 /// set_term_program = true
+/// sudo_preserve_terminfo = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -890,12 +891,26 @@ pub struct ShellIntegrationConfig {
     /// conflicts with either the inherited `TERM_PROGRAM` or with our shell
     /// hooks.
     pub set_term_program: bool,
+    /// When `true`, the bundled bash, zsh and fish integrations wrap `sudo`
+    /// so it keeps `TERMINFO` (`sudo --preserve-env=TERMINFO ...`), which
+    /// `sudo`'s default `env_reset` would otherwise drop, so programs run
+    /// under `sudo` still find freminal's own terminfo entry.  `sudo -e` /
+    /// `--edit` (sudoedit) is called unchanged.  Behaves like Ghostty's
+    /// `sudo` shell-integration feature, except that it is on by default
+    /// here (it is opt-in in Ghostty).
+    ///
+    /// Default: `true`.  A sudoers policy that forbids preserving the
+    /// environment makes `sudo` refuse the command; set this to `false`
+    /// there.  Has no effect unless `set_term_program` is also `true`, and
+    /// applies to panes spawned after the change.
+    pub sudo_preserve_terminfo: bool,
 }
 
 impl Default for ShellIntegrationConfig {
     fn default() -> Self {
         Self {
             set_term_program: true,
+            sudo_preserve_terminfo: true,
         }
     }
 }
@@ -2520,6 +2535,7 @@ size = 14.0
     fn shell_integration_and_command_blocks_round_trip_through_toml() {
         let mut cfg = Config::default();
         cfg.shell_integration.set_term_program = false;
+        cfg.shell_integration.sudo_preserve_terminfo = false;
         cfg.command_blocks.enabled = false;
         cfg.command_blocks.show_duration = false;
         cfg.command_blocks.duration_threshold_secs = 5.5;
@@ -2529,6 +2545,7 @@ size = 14.0
         let parsed: Config = toml::from_str(&toml).expect("re-parse");
 
         assert!(!parsed.shell_integration.set_term_program);
+        assert!(!parsed.shell_integration.sudo_preserve_terminfo);
         assert!(!parsed.command_blocks.enabled);
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
@@ -3748,6 +3765,8 @@ mode = "none"
         original.close_guard.unknown_blocks = !Config::default().close_guard.unknown_blocks;
         original.shell_integration.set_term_program =
             !Config::default().shell_integration.set_term_program;
+        original.shell_integration.sudo_preserve_terminfo =
+            !Config::default().shell_integration.sudo_preserve_terminfo;
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
         original.notifications.enabled = !Config::default().notifications.enabled;
         original.notifications.osc99_filters = vec!["title:^build".to_owned()];
@@ -3842,6 +3861,11 @@ mode = "none"
         assert_eq!(
             loaded.shell_integration.set_term_program, original.shell_integration.set_term_program,
             "shell_integration section dropped"
+        );
+        assert_eq!(
+            loaded.shell_integration.sudo_preserve_terminfo,
+            original.shell_integration.sudo_preserve_terminfo,
+            "shell_integration.sudo_preserve_terminfo dropped"
         );
         assert_eq!(
             loaded.command_blocks.enabled, original.command_blocks.enabled,
@@ -4028,6 +4052,34 @@ osc99_filters = ["app:^slack$", "all"]
         );
         assert!(cfg.notifications.osc_99);
         assert!(!cfg.notifications.enabled);
+    }
+
+    #[test]
+    fn sudo_preserve_terminfo_defaults_on_and_merges_through_partial() {
+        let mut cfg = Config::default();
+        assert!(
+            cfg.shell_integration.sudo_preserve_terminfo,
+            "sudo_preserve_terminfo is on by default (an opt-out)"
+        );
+        assert!(
+            cfg.shell_integration.set_term_program,
+            "the default for set_term_program must be unchanged"
+        );
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[shell_integration]
+sudo_preserve_terminfo = false
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+
+        assert!(!cfg.shell_integration.sudo_preserve_terminfo);
+        assert!(
+            cfg.shell_integration.set_term_program,
+            "an omitted key keeps its default inside a present section"
+        );
     }
 
     #[test]

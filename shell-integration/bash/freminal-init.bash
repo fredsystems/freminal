@@ -89,6 +89,43 @@ if [ -n "${HISTFILE:-}" ]; then
 	printf '\033]1338;HISTFILE=%s\007' "${HISTFILE}"
 fi
 
+# ── sudo keeps TERMINFO (Task 151.12; on by default) ─────────────────────────
+# `sudo`'s default env_reset drops TERMINFO, so programs run under `sudo`
+# lose freminal's own terminfo entry.  When freminal spawns the shell with
+# `[shell_integration] sudo_preserve_terminfo = true` (the default) it lists
+# `sudo` in $FREMINAL_SHELL_FEATURES (comma-separated, like Ghostty's
+# $GHOSTTY_SHELL_FEATURES), and we wrap `sudo` to pass
+# `--preserve-env=TERMINFO`.  `sudo -e` / `--edit` (sudoedit) is called
+# unchanged.
+#
+# Reproduced from Ghostty's bash integration, names adapted (and the two
+# variables read as `${VAR:-}`, so a user's `set -u` cannot trip on an unset one):
+# https://github.com/ghostty-org/ghostty/blob/d69f9ed83ca7275fa5afbba0fa968d0d9ada9f5a/src/shell-integration/bash/ghostty.bash#L89-L115
+# As there, this supports wrapping a `sudo` alias only if the alias
+# definition comes _after_ this function is defined; otherwise the alias
+# expansion takes precedence and `sudo` is not wrapped.
+if [[ "${FREMINAL_SHELL_FEATURES:-}" == *"sudo"* && -n "${TERMINFO:-}" ]]; then
+	function sudo {
+		builtin local sudo_has_sudoedit_flags="no"
+		for arg in "$@"; do
+			# Check if argument is '-e' or '--edit' (sudoedit flags)
+			if [[ "$arg" == "-e" || $arg == "--edit" ]]; then
+				sudo_has_sudoedit_flags="yes"
+				builtin break
+			fi
+			# Check if argument is neither an option nor a key-value pair
+			if [[ "$arg" != -* && "$arg" != *=* ]]; then
+				builtin break
+			fi
+		done
+		if [[ "$sudo_has_sudoedit_flags" == "yes" ]]; then
+			builtin command sudo "$@"
+		else
+			builtin command sudo --preserve-env=TERMINFO "$@"
+		fi
+	}
+fi
+
 # Per-command counter used to give each command lifecycle a unique `fid`
 # (A→B→C→D all share one fid; the next command gets a fresh one).
 #

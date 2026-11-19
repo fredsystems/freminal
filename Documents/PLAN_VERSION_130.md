@@ -11392,9 +11392,10 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
    activation), exactly as Ghostty does.** `sudo`'s default `env_reset` drops `TERMINFO`, so
    programs run under `sudo` lose the pane's entry. freminal's bash, zsh and fish integrations
    wrap `sudo` to pass `--preserve-env=TERMINFO`, except for `sudo -e` / `--edit`
-   (sudoedit), which is called unchanged. Like Ghostty's `sudo` shell-integration feature, it
-   is opt-in (off by default): a sudoers policy that forbids preserving the environment makes
-   the flag fail.
+   (sudoedit), which is called unchanged. It is **on by default** whenever the shell
+   integration is active, with a config toggle to opt out (maintainer decision; unlike
+   Ghostty, whose `sudo` feature defaults off). A sudoers policy that forbids preserving the
+   environment makes `sudo` refuse the command; those users turn the toggle off.
 
 **Decisions (orchestrator, recorded so they are not re-litigated).**
 
@@ -11538,10 +11539,10 @@ public), and a test that the path exists and compiles from stdin (`tic -x -o <tm
 file on stdin, skipped with a visible message when `tic` is absent). Runs after 151.8, before
 151.9. The README text is 151.10.
 
-##### 151.12 — `sudo` preserves `TERMINFO` (opt-in, as Ghostty)
+##### 151.12 — `sudo` preserves `TERMINFO` (on by default; Ghostty's wrapper logic)
 
 Scope: `freminal-common/src/config.rs` (`ShellIntegrationConfig`: a new TOML toggle, default
-off, full `freminal-config-options` checklist including Settings, `config_example.toml` and
+on, full `freminal-config-options` checklist including Settings, `config_example.toml` and
 the home-manager module), the spawn-time shell-integration environment in
 `freminal-terminal-emulator/src/io/pty.rs` (tell the scripts the feature is on, as Ghostty
 does with `GHOSTTY_SHELL_FEATURES`), the bundled bash, zsh and fish integration scripts, and
@@ -11615,6 +11616,19 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   that the stale one would win without `TERMINFO`), and that `TERM=xterm-256color` still
   resolves from the system database. README and `DESIGN_DECISIONS.md` updated. Surfaced
   decision 5 (151.12).
+- **151.12 (done).** `[shell_integration] sudo_preserve_terminfo` (TOML toggle, default
+  `true`, under the `set_term_program` master switch; full config checklist). The GUI
+  converts it to `SudoTerminfo { Preserve, Unchanged }` (`io/shell_features.rs`, no `Default`),
+  carried by `PtyTabConfig`, `TerminalEmulator::new` (now ten parameters, under its existing
+  `too_many_arguments` allow) and `PtySpawnConfig`; the spawn sets
+  `FREMINAL_SHELL_FEATURES=sudo` only when the integration is injected and the toggle is on,
+  and removes an inherited value otherwise. The bash, zsh and fish wrappers reproduce Ghostty
+  at `d69f9ed8` (`ghostty.bash` L89-115, `ghostty-integration` L305-327,
+  `ghostty-shell-integration.fish` L97-120), cited in each script; bash and zsh read the
+  variables as `${VAR:-}` (safe under `set -u`). As in Ghostty, the scan stops at the first
+  argument that is neither an option nor an assignment, so `sudo -u root -e file` is wrapped
+  and `sudo -e -u root file` is not (pinned by a test, noted in `DESIGN_DECISIONS.md`). Script
+  tests run all three shells against a fake `sudo`.
 
 #### 151 Status notes
 

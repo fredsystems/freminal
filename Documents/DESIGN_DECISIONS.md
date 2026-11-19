@@ -1431,7 +1431,18 @@ Installed copies:
 
 - **`sudo` drops `TERMINFO`** (its `env_reset`), as it does for kitty and Ghostty, so `sudo`
   programs only find a system-installed copy. Programs running as root or setuid ignore these
-  variables for the same reason.
+  variables for the same reason. The `[shell_integration] sudo_preserve_terminfo` toggle
+  (default on, maintainer decision 2026-11-19; Task 151.12) wraps `sudo` in the bundled bash,
+  zsh and fish integrations as `sudo --preserve-env=TERMINFO` (except `sudo -e` / `--edit`),
+  reproducing Ghostty's `sudo` shell-integration feature, including its argument scan: it
+  stops at the first argument that is neither an option nor an assignment, so
+  `sudo -u root -e file` is not recognised as sudoedit. Unlike Ghostty, where the feature is
+  opt-in, it is on by default whenever shell integration is active; a sudoers policy that
+  forbids preserving the environment makes `sudo` refuse the command, and the user then sets
+  the toggle to `false`. Freminal tells the scripts the feature is on through
+  `FREMINAL_SHELL_FEATURES=sudo` (a comma list like Ghostty's `GHOSTTY_SHELL_FEATURES`), set
+  at spawn only when the toggle is on and shell integration is injected, and removed otherwise
+  so a value inherited from a parent freminal pane cannot turn it on.
 - **Detached processes outlive the pane's temporary directory.** A tmux server started from a
   pane keeps running after the pane closes and deletes the per-pane directory, so it needs a
   system-wide or per-user copy.

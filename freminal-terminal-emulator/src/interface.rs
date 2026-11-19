@@ -51,7 +51,7 @@ pub use crate::input::{
 use conv2::ValueFrom;
 
 use crate::error::InterfaceError;
-use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig, ReplyQueue};
+use crate::io::{FreminalPtyInputOutput, GuiReply, PtySpawnConfig, ReplyQueue, SudoTerminfo};
 use crate::io::{FreminalTerminalSize, PtyRead, PtyWrite};
 use crate::snapshot::TerminalSnapshot;
 use crate::state::{TerminalSections, internal::TerminalState};
@@ -394,7 +394,9 @@ impl TerminalEmulator {
     ///
     // 72.6: 8th parameter is the shell-integration TERM_PROGRAM flag,
     // derived from the GUI's config and forwarded straight to PtySpawnConfig.
-    // 151.6: 9th parameter is the pane's resolved `TERM`, forwarded to
+    // 151.12: 9th parameter is the `sudo` wrapper toggle, forwarded to
+    // PtySpawnConfig.
+    // 151.6: 10th parameter is the pane's resolved `TERM`, forwarded to
     // PtySpawnConfig and the handler.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -406,6 +408,7 @@ impl TerminalEmulator {
         shell_override: Option<&str>,
         pane_id: u32,
         set_term_program: bool,
+        sudo_terminfo: SudoTerminfo,
         term: &TermName,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
@@ -458,6 +461,7 @@ impl TerminalEmulator {
                 cwd,
                 extra_env,
                 set_term_program,
+                sudo_terminfo,
                 term,
             },
             &initial_size,

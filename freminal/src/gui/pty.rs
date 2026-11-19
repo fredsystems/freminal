@@ -20,11 +20,14 @@ use freminal_common::args::Args;
 use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+use freminal_common::config::ShellIntegrationConfig;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_common::term_name::TermName;
 use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::{InputEvent, PtyRead, SearchCorpus, WindowCommand};
+use freminal_terminal_emulator::io::{
+    InputEvent, PtyRead, SearchCorpus, SudoTerminfo, WindowCommand,
+};
 use freminal_terminal_emulator::recording::{
     EventPayload, PtyEchoState, RecordingSwap, redact_input_for_echo,
 };
@@ -728,10 +731,27 @@ pub struct PtyTabConfig<'a> {
     /// When `true`, set `TERM_PROGRAM=freminal` on the child.  Forwarded
     /// from `config.shell_integration.set_term_program` (Task 72.6).
     pub set_term_program: bool,
+    /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
+    /// is on.  Converted from `config.shell_integration.sudo_preserve_terminfo`
+    /// (Task 151.12).
+    pub sudo_terminfo: SudoTerminfo,
     /// The pane's effective `TERM`, computed once at spawn with
     /// [`TermName::resolve`] (a `TERM` in `extra_env` wins over `[shell] term`).
     /// It is the child's `TERM` and what XTGETTCAP `TN` reports.
     pub term: TermName,
+}
+
+/// Convert the `[shell_integration] sudo_preserve_terminfo` TOML toggle into the
+/// typed value the spawn path carries.
+#[must_use]
+pub(super) const fn sudo_terminfo_from_config(
+    shell_integration: &ShellIntegrationConfig,
+) -> SudoTerminfo {
+    if shell_integration.sudo_preserve_terminfo {
+        SudoTerminfo::Preserve
+    } else {
+        SudoTerminfo::Unchanged
+    }
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -764,6 +784,7 @@ pub fn spawn_pty_tab(
         tab_cfg.shell_override,
         tab_cfg.recording_pane_id,
         tab_cfg.set_term_program,
+        tab_cfg.sudo_terminfo,
         &tab_cfg.term,
     )?;
 
@@ -2508,5 +2529,17 @@ mod tests {
             budget.outstanding(CommandClass::Viewport),
             MAX_OUTSTANDING_VIEWPORT_COMMANDS
         );
+    }
+
+    #[test]
+    fn sudo_terminfo_follows_the_config_toggle() {
+        let mut cfg = ShellIntegrationConfig::default();
+        assert_eq!(
+            sudo_terminfo_from_config(&cfg),
+            SudoTerminfo::Preserve,
+            "the default config preserves TERMINFO under sudo"
+        );
+        cfg.sudo_preserve_terminfo = false;
+        assert_eq!(sudo_terminfo_from_config(&cfg), SudoTerminfo::Unchanged);
     }
 }

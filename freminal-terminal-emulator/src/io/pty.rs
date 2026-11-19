@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, io::Write, path::Path, path::PathBuf};
 
+use super::shell_features::{SudoTerminfo, apply_shell_features_env};
 use super::{PtyRead, PtyWrite};
 use arc_swap::ArcSwapOption;
 use conv2::ValueFrom;
@@ -505,6 +506,11 @@ pub struct PtySpawnConfig<'a> {
     /// on the child process before applying `extra_env`.  Driven by
     /// `config.shell_integration.set_term_program` (Task 72.6).
     pub set_term_program: bool,
+    /// Whether the shell-integration `sudo` wrapper that preserves `TERMINFO`
+    /// is on.  Driven by `config.shell_integration.sudo_preserve_terminfo`
+    /// (Task 151.12, on by default); only takes effect when shell integration
+    /// is injected.
+    pub sudo_terminfo: SudoTerminfo,
     /// The `TERM` set on the child: the single per-pane value, already
     /// resolved with `[shell] term` and the pane's `extra_env` `TERM`
     /// (see [`TermName::resolve`]).  XTGETTCAP `TN` and the FREC `term`
@@ -684,6 +690,7 @@ pub fn run_terminal(
         cwd,
         extra_env,
         set_term_program,
+        sudo_terminfo,
         term,
     } = spawn_cfg;
     let pty_system = NativePtySystem::default();
@@ -780,6 +787,8 @@ pub fn run_terminal(
         && let Some(shell) = detect_shell(prog)
     {
         inject_shell_integration_env(&mut cmd, shell, resources.path(), prog);
+        // Tell the injected scripts which optional features are on (Task 151.12).
+        apply_shell_features_env(&mut cmd, sudo_terminfo);
     }
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
@@ -1514,7 +1523,7 @@ mod term_env_tests {
 #[cfg(all(test, unix))]
 mod child_term_real_pty_tests {
     use super::{PtySpawnConfig, ReplyQueue, run_terminal};
-    use crate::io::{PtyRead, PtyWrite};
+    use crate::io::{PtyRead, PtyWrite, SudoTerminfo};
     use freminal_common::{
         config::ShellConfig,
         pty_write::FreminalTerminalSize,
@@ -1546,6 +1555,7 @@ mod child_term_real_pty_tests {
             extra_env: pane_env,
             term: &term,
             set_term_program: false,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
         let _result = match run_terminal(
             write_rx,
@@ -1715,7 +1725,7 @@ mod shell_integration_injection_tests {
 #[cfg(all(test, unix))]
 mod echo_off_event_driven_tests {
     use super::{PtySpawnConfig, PtyWrite, ReplyQueue, run_terminal};
-    use crate::io::PtyRead;
+    use crate::io::{PtyRead, SudoTerminfo};
     use freminal_common::{pty_write::FreminalTerminalSize, term_name::TermName};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -1778,6 +1788,7 @@ mod echo_off_event_driven_tests {
             extra_env: None,
             term: &TermName::default(),
             set_term_program: false,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         let result = run_terminal(
@@ -1825,6 +1836,7 @@ mod echo_off_event_driven_tests {
             extra_env: None,
             term: &TermName::default(),
             set_term_program: false,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         let result = run_terminal(
@@ -1873,6 +1885,7 @@ mod echo_off_event_driven_tests {
             extra_env: None,
             term: &TermName::default(),
             set_term_program: false,
+            sudo_terminfo: SudoTerminfo::Unchanged,
         };
 
         // Keep the result bound (`_result`) so its channels/handles live for

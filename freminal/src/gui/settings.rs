@@ -1754,6 +1754,23 @@ impl SettingsModal {
              auto-loading of the bundled shell-integration scripts for bash, \
              zsh, and fish — no manual sourcing required.",
         );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.shell_integration.sudo_preserve_terminfo,
+            "Keep TERMINFO under sudo",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Wraps sudo in the bundled bash, zsh, and fish integrations as \
+             `sudo --preserve-env=TERMINFO`, so programs run under sudo still \
+             find Freminal's terminfo entry (sudo -e is unchanged).  On by \
+             default.  If a sudoers policy forbids preserving the environment, \
+             sudo refuses the command: turn this off.  Applies to newly opened \
+             panes.",
+        );
 
         ui.add_space(16.0);
         ui.separator();

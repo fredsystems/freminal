@@ -143,6 +143,10 @@ pub fn sync_to_disk(dir: &Path) -> InstallResult {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
+mod sudo_wrapper_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

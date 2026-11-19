@@ -87,6 +87,7 @@ impl FreminalGui {
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
                 set_term_program: self.config.shell_integration.set_term_program,
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(channels) => {
@@ -223,6 +224,7 @@ impl FreminalGui {
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: new_pane_id.raw().try_into().unwrap_or(u32::MAX),
                 set_term_program: self.config.shell_integration.set_term_program,
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(ch) => ch,
@@ -385,6 +387,7 @@ impl FreminalGui {
                 recording_swap: self.recording_swap.clone(),
                 recording_pane_id: pane_id.raw().try_into().unwrap_or(u32::MAX),
                 set_term_program: self.config.shell_integration.set_term_program,
+                sudo_terminfo: pty::sudo_terminfo_from_config(&self.config.shell_integration),
             },
         ) {
             Ok(ch) => ch,
