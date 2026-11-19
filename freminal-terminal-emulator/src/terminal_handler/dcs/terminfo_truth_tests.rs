@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use freminal_common::buffer_states::modes::{
-    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+    s8c1t::S8c1t,
 };
 
 use super::TerminalHandler;
@@ -389,10 +389,9 @@ const DECLARED_NOT_SENT: [(&str, &str); 3] = [
 ];
 
 /// The bytes the input encoder sends for `input`.
-fn encoded(input: &TerminalInput, decckm: Decckm, keypad: KeypadMode) -> Vec<u8> {
+fn encoded(input: &TerminalInput, decckm: Decckm) -> Vec<u8> {
     match input.to_payload(
         decckm,
-        keypad,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
@@ -421,14 +420,8 @@ fn modifiers_for_param(n: u8) -> KeyModifiers {
 /// Capability name to the bytes the encoder sends for it.
 type KeyCapabilities = BTreeMap<String, Vec<u8>>;
 
-fn expect(
-    expected: &mut KeyCapabilities,
-    name: &str,
-    input: &TerminalInput,
-    decckm: Decckm,
-    keypad: KeypadMode,
-) {
-    let previous = expected.insert(name.to_string(), encoded(input, decckm, keypad));
+fn expect(expected: &mut KeyCapabilities, name: &str, input: &TerminalInput, decckm: Decckm) {
+    let previous = expected.insert(name.to_string(), encoded(input, decckm));
     assert!(previous.is_none(), "{name} is checked twice");
 }
 
@@ -457,7 +450,7 @@ fn add_modified_families(expected: &mut KeyCapabilities) {
                 format!("{prefix}{n}")
             };
             let input = key(modifiers_for_param(n));
-            expect(expected, &name, &input, Decckm::Ansi, KeypadMode::Numeric);
+            expect(expected, &name, &input, Decckm::Ansi);
         }
     }
 
@@ -466,7 +459,7 @@ fn add_modified_families(expected: &mut KeyCapabilities) {
         ("kind", TerminalInput::ArrowDown(shift)),
         ("kri", TerminalInput::ArrowUp(shift)),
     ] {
-        expect(expected, name, &input, Decckm::Ansi, KeypadMode::Numeric);
+        expect(expected, name, &input, Decckm::Ansi);
     }
 }
 
@@ -484,7 +477,7 @@ fn add_plain_keys(expected: &mut KeyCapabilities) {
         ("kxIN", TerminalInput::InFocus),
         ("kxOUT", TerminalInput::LostFocus),
     ] {
-        expect(expected, name, &input, Decckm::Ansi, KeypadMode::Numeric);
+        expect(expected, name, &input, Decckm::Ansi);
     }
     for (name, input) in [
         ("khome", TerminalInput::Home(none)),
@@ -494,13 +487,7 @@ fn add_plain_keys(expected: &mut KeyCapabilities) {
         ("kcuf1", TerminalInput::ArrowRight(none)),
         ("kcub1", TerminalInput::ArrowLeft(none)),
     ] {
-        expect(
-            expected,
-            name,
-            &input,
-            Decckm::Application,
-            KeypadMode::Application,
-        );
+        expect(expected, name, &input, Decckm::Application);
     }
 }
 
@@ -514,7 +501,6 @@ fn add_function_keys(expected: &mut KeyCapabilities) {
             &format!("kf{number}"),
             &TerminalInput::FunctionKey(number, KeyModifiers::NONE),
             Decckm::Ansi,
-            KeypadMode::Numeric,
         );
     }
 
@@ -527,7 +513,6 @@ fn add_function_keys(expected: &mut KeyCapabilities) {
             &format!("kf{number}"),
             &TerminalInput::FunctionKey(function_key, modifiers_for_param(group_params[group])),
             Decckm::Ansi,
-            KeypadMode::Numeric,
         );
     }
 }

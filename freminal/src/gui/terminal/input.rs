@@ -26,7 +26,7 @@ use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, Key
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
     input::{
-        KKP_KP_0_CODEPOINT, KKP_KP_1_CODEPOINT, KKP_KP_2_CODEPOINT, KKP_KP_3_CODEPOINT,
+        Introducer, KKP_KP_0_CODEPOINT, KKP_KP_1_CODEPOINT, KKP_KP_2_CODEPOINT, KKP_KP_3_CODEPOINT,
         KKP_KP_4_CODEPOINT, KKP_KP_5_CODEPOINT, KKP_KP_6_CODEPOINT, KKP_KP_7_CODEPOINT,
         KKP_KP_8_CODEPOINT, KKP_KP_9_CODEPOINT, KKP_KP_ADD_CODEPOINT, KKP_KP_DECIMAL_CODEPOINT,
         KKP_KP_DIVIDE_CODEPOINT, KKP_KP_ENTER_CODEPOINT, KKP_KP_EQUAL_CODEPOINT,
@@ -256,16 +256,18 @@ pub const fn kitty_keycode_to_codepoint(key: winit::keyboard::KeyCode) -> Option
     }
 }
 
-/// Legacy (non-KKP) byte encoding for an egui-blocked keypad key.
+/// Legacy (non-KKP) byte encoding for an egui-blocked keypad key in numeric
+/// keypad mode (DECKPNM).
 ///
 /// The `is_blocked_key` intercept in `freminal-windowing` removes keypad
 /// digits/operators/Enter from egui unconditionally and routes them through
 /// the raw-key path, which normally emits `KittyFunctional` bytes. When the
 /// active screen has **no** relevant `kitty_keyboard_flags` bit set, that
 /// KKP encoding is empty and these keys would silently become no-ops. This
-/// provides the plain-terminal fallback (keypad numeric mode) so keypad
-/// input still reaches the PTY, matching xterm/kitty behaviour when the
-/// progressive keyboard protocol is disabled.
+/// provides the plain-terminal fallback so keypad input still reaches the
+/// PTY, matching xterm/kitty behaviour when the progressive keyboard
+/// protocol is disabled. Application keypad mode is handled by
+/// [`legacy_keypad_bytes`].
 ///
 /// Returns `None` for keys that have no legacy encoding (media,
 /// print/pause/menu) — those correctly stay no-ops without KKP.
@@ -291,6 +293,53 @@ const fn legacy_keypad_byte(key: winit::keyboard::KeyCode) -> Option<u8> {
         KeyCode::NumpadEqual => Some(b'='),
         KeyCode::NumpadEnter => Some(b'\r'),
         _ => None,
+    }
+}
+
+/// Final byte of the VT220 application-keypad `SS3` sequence for a keypad key
+/// (xterm `ctlseqs`, "VT220-style function keys" keypad table).
+///
+/// `None` for keys that are not on the keypad table (media, print/pause/menu).
+const fn application_keypad_final(key: winit::keyboard::KeyCode) -> Option<u8> {
+    use winit::keyboard::KeyCode;
+    match key {
+        KeyCode::Numpad0 => Some(b'p'),
+        KeyCode::Numpad1 => Some(b'q'),
+        KeyCode::Numpad2 => Some(b'r'),
+        KeyCode::Numpad3 => Some(b's'),
+        KeyCode::Numpad4 => Some(b't'),
+        KeyCode::Numpad5 => Some(b'u'),
+        KeyCode::Numpad6 => Some(b'v'),
+        KeyCode::Numpad7 => Some(b'w'),
+        KeyCode::Numpad8 => Some(b'x'),
+        KeyCode::Numpad9 => Some(b'y'),
+        KeyCode::NumpadDivide => Some(b'o'),
+        KeyCode::NumpadMultiply | KeyCode::NumpadStar => Some(b'j'),
+        KeyCode::NumpadSubtract => Some(b'm'),
+        KeyCode::NumpadAdd => Some(b'k'),
+        KeyCode::NumpadDecimal => Some(b'n'),
+        KeyCode::NumpadComma => Some(b'l'),
+        KeyCode::NumpadEqual => Some(b'X'),
+        KeyCode::NumpadEnter => Some(b'M'),
+        _ => None,
+    }
+}
+
+/// Legacy (non-KKP) bytes for an egui-blocked keypad key, honouring DECKPAM.
+///
+/// Numeric keypad mode sends the plain byte ([`legacy_keypad_byte`]).
+/// Application keypad mode sends the VT220 `SS3 <final>` form
+/// ([`application_keypad_final`]), with the `SS3` introducer chosen by S8C1T.
+fn legacy_keypad_bytes(
+    key: winit::keyboard::KeyCode,
+    keypad_mode: KeypadMode,
+    s8c1t: S8c1t,
+) -> Option<Vec<u8>> {
+    match keypad_mode {
+        KeypadMode::Numeric => legacy_keypad_byte(key).map(|b| vec![b]),
+        KeypadMode::Application => {
+            application_keypad_final(key).map(|f| Introducer::Ss3.frame(s8c1t, &[f]))
+        }
     }
 }
 
@@ -371,8 +420,8 @@ pub const fn raw_mods_to_key_modifiers(
 /// `TerminalInput::KittyFunctional`'s `to_payload` produces the KKP `CSI u`
 /// encoding. When KKP is off, that encoding is empty; for keypad
 /// digits/operators/Enter this function then falls back to their plain
-/// legacy byte (see [`legacy_keypad_byte`]) so keypad input still reaches
-/// the PTY (the windowing intercept already removed them from egui, so
+/// legacy encoding (see [`legacy_keypad_bytes`], which honours DECKPAM) so
+/// keypad input still reaches the PTY (the windowing intercept already removed them from egui, so
 /// without this they would be dropped entirely). Media/print/pause/menu keys
 /// have no legacy encoding and correctly stay no-ops without KKP.
 ///
@@ -460,8 +509,7 @@ pub fn drain_pending_raw_keys(
         // input still reaches the PTY. Releases have no legacy encoding.
         let bytes = if bytes.is_empty() {
             if event.pressed {
-                legacy_keypad_byte(event.key_code)
-                    .map(|b| vec![b])
+                legacy_keypad_bytes(event.key_code, modes.keypad_app_mode, modes.s8c1t)
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -1154,7 +1202,6 @@ fn encode_terminal_inputs(
         .flat_map(|input| {
             match input.to_payload(
                 modes.cursor_key_app_mode,
-                modes.keypad_app_mode,
                 modes.modify_other_keys,
                 modes.application_escape_key,
                 modes.backarrow_sends_bs,
@@ -3948,6 +3995,118 @@ mod raw_key_tests {
         assert!(s.any(), "right Super still held");
         s.right = false;
         assert!(!s.any());
+    }
+}
+
+#[cfg(test)]
+mod application_keypad_tests {
+    //! Task 147.5: application keypad mode (DECKPAM) sends the VT220 `SS3`
+    //! form on the live raw-key path, honouring S8C1T.
+
+    use super::*;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+    use freminal_windowing::{RawKeyEvent, RawKeyMods};
+    use winit::keyboard::KeyCode;
+
+    /// One press of `key` drained against `snap`; the bytes sent to the PTY.
+    fn press(snap: &TerminalSnapshot, key: KeyCode) -> Vec<u8> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: key,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        drain_pending_raw_keys(&mut pending, &tx, snap, false, &[]);
+        let mut sent = Vec::new();
+        while let Ok(InputEvent::Key(bytes)) = rx.try_recv() {
+            sent.extend(bytes);
+        }
+        sent
+    }
+
+    fn snapshot_after(input: &[u8]) -> TerminalSnapshot {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(input);
+        emu.build_snapshot()
+    }
+
+    /// Every keypad key with its numeric byte and its application `SS3` final.
+    const KEYS: [(KeyCode, u8, u8); 18] = [
+        (KeyCode::Numpad0, b'0', b'p'),
+        (KeyCode::Numpad1, b'1', b'q'),
+        (KeyCode::Numpad2, b'2', b'r'),
+        (KeyCode::Numpad3, b'3', b's'),
+        (KeyCode::Numpad4, b'4', b't'),
+        (KeyCode::Numpad5, b'5', b'u'),
+        (KeyCode::Numpad6, b'6', b'v'),
+        (KeyCode::Numpad7, b'7', b'w'),
+        (KeyCode::Numpad8, b'8', b'x'),
+        (KeyCode::Numpad9, b'9', b'y'),
+        (KeyCode::NumpadDecimal, b'.', b'n'),
+        (KeyCode::NumpadSubtract, b'-', b'm'),
+        (KeyCode::NumpadComma, b',', b'l'),
+        (KeyCode::NumpadAdd, b'+', b'k'),
+        (KeyCode::NumpadMultiply, b'*', b'j'),
+        (KeyCode::NumpadDivide, b'/', b'o'),
+        (KeyCode::NumpadEqual, b'=', b'X'),
+        (KeyCode::NumpadEnter, b'\r', b'M'),
+    ];
+
+    #[test]
+    fn application_mode_sends_ss3_for_every_keypad_key() {
+        let snap = snapshot_after(b"\x1b=");
+        for (key, _, fin) in KEYS {
+            assert_eq!(press(&snap, key), [0x1b, b'O', fin], "{key:?}");
+        }
+        // The other physical spelling of `*`.
+        assert_eq!(press(&snap, KeyCode::NumpadStar), b"\x1bOj");
+    }
+
+    #[test]
+    fn application_mode_uses_the_eight_bit_ss3_after_s8c1t() {
+        let snap = snapshot_after(b"\x1b G\x1b=");
+        for (key, _, fin) in KEYS {
+            assert_eq!(press(&snap, key), [0x8f, fin], "{key:?}");
+        }
+    }
+
+    #[test]
+    fn numeric_mode_is_unchanged() {
+        for snap in [snapshot_after(b""), snapshot_after(b"\x1b G")] {
+            for (key, byte, _) in KEYS {
+                assert_eq!(press(&snap, key), [byte], "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_mode_is_unchanged_in_application_mode() {
+        let mut snap = snapshot_after(b"\x1b=");
+        snap.kitty_keyboard_flags = 1;
+        assert_eq!(press(&snap, KeyCode::Numpad1), b"\x1b[57400u");
+        assert_eq!(press(&snap, KeyCode::NumpadEnter), b"\x1b[57414u");
+    }
+
+    #[test]
+    fn deckpam_then_deckpnm_switches_the_encoding() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"5");
+
+        emu.handle_incoming_data(b"\x1b=");
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"\x1bOu");
+
+        emu.handle_incoming_data(b"\x1b>");
+        assert_eq!(press(&emu.build_snapshot(), KeyCode::Numpad5), b"5");
+    }
+
+    #[test]
+    fn unmapped_key_sends_nothing_in_application_mode() {
+        let snap = snapshot_after(b"\x1b=");
+        assert_eq!(press(&snap, KeyCode::MediaPlayPause), Vec::<u8>::new());
+        assert_eq!(press(&snap, KeyCode::PrintScreen), Vec::<u8>::new());
     }
 }
 

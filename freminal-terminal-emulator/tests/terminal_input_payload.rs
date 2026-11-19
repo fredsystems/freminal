@@ -16,8 +16,8 @@
 //!     most terminal applications (including nano) expect.
 
 use freminal_common::buffer_states::modes::{
-    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+    s8c1t::S8c1t,
 };
 use freminal_terminal_emulator::input::{
     KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload,
@@ -28,7 +28,6 @@ use freminal_terminal_emulator::input::{
 fn payload_bytes(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -361,7 +360,6 @@ fn ctrl_c_and_ctrl_x_are_different() {
 fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Application,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -573,7 +571,6 @@ fn key_modifiers_all_combinations() {
 fn payload_bytes_mok2(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -622,7 +619,6 @@ fn ctrl_a_modify_other_keys_level_0() {
 fn ctrl_a_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -653,7 +649,6 @@ fn arrow_up_unaffected_by_modify_other_keys() {
 fn payload_bytes_aek(input: &TerminalInput) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
@@ -718,7 +713,6 @@ fn enter_unaffected_by_application_escape_key() {
 fn ctrl_b_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'B').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -737,7 +731,6 @@ fn ctrl_b_modify_other_keys_level_1() {
 fn ctrl_z_modify_other_keys_level_1() {
     match TerminalInput::Ctrl(b'Z').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         1,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -801,7 +794,6 @@ fn ctrl_space_modify_other_keys_level_2() {
 fn escape_with_both_mok2_and_aek() {
     match TerminalInput::Escape.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
@@ -824,7 +816,6 @@ fn escape_with_both_mok2_and_aek() {
 fn ctrl_c_with_both_mok2_and_aek() {
     match TerminalInput::Ctrl(b'c').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
@@ -845,7 +836,6 @@ fn ctrl_c_with_both_mok2_and_aek() {
 fn ctrl_a_with_aek_and_mok0() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,
@@ -868,7 +858,6 @@ fn ctrl_a_with_aek_and_mok0() {
 fn backspace_decbkm_set_sends_bs() {
     match TerminalInput::Backspace.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -889,7 +878,6 @@ fn backspace_decbkm_set_sends_bs() {
 fn backspace_decbkm_reset_sends_del() {
     match TerminalInput::Backspace.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
@@ -917,7 +905,6 @@ fn backspace_decbkm_reset_sends_del() {
 fn enter_lnm_reset_sends_cr() {
     match TerminalInput::Enter.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -943,7 +930,6 @@ fn enter_lnm_reset_sends_cr() {
 fn enter_lnm_set_sends_cr_lf() {
     match TerminalInput::Enter.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -970,7 +956,6 @@ fn enter_lnm_set_sends_cr_lf() {
 fn linefeed_unaffected_by_lnm_set() {
     match TerminalInput::LineFeed.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -997,7 +982,6 @@ fn linefeed_unaffected_by_lnm_set() {
 fn payload_bytes_kkp(input: &TerminalInput, flags: u32) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
@@ -1241,7 +1225,6 @@ fn kkp_flag_4_plus_report_all_ascii() {
 fn payload_bytes_kkp_meta(input: &TerminalInput, flags: u32, meta: &KeyEventMeta) -> Vec<u8> {
     match input.to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         0,
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsDel,
@@ -1638,7 +1621,6 @@ fn ascii_a_unaffected_by_mok2() {
 fn kkp_takes_precedence_over_mok2() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2, // MOK level 2
         ApplicationEscapeKey::Reset,
         Decbkm::BackarrowSendsBs,
@@ -1660,7 +1642,6 @@ fn kkp_takes_precedence_over_mok2() {
 fn ctrl_a_with_aek_and_mok2() {
     match TerminalInput::Ctrl(b'A').to_payload(
         Decckm::Ansi,
-        KeypadMode::Numeric,
         2,
         ApplicationEscapeKey::Set,
         Decbkm::BackarrowSendsBs,

@@ -25,8 +25,8 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use freminal_common::buffer_states::{
     modes::{
-        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-        keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+        s8c1t::S8c1t,
     },
     sixel::parse_sixel,
 };
@@ -462,7 +462,6 @@ fn bench_to_payload(c: &mut Criterion) {
                 for (key, decckm) in &keys {
                     let payload = std::hint::black_box(key).to_payload(
                         *decckm,
-                        KeypadMode::Numeric,
                         0,
                         ApplicationEscapeKey::Reset,
                         Decbkm::BackarrowSendsDel,

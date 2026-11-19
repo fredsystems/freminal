@@ -7817,6 +7817,12 @@ Stale stub text was corrected at the same time:
   `bench_to_payload` (added before the change, row added to `freminal-bench-table`):
   interleaved minimum of 10, `legacy_mix` 160.8 → 147.6 ns, `kkp_mix` 210.8 → 199.6 ns
   (machine load about 13; within noise). Surfaced 147.C1.
+- **147.5 (done).** The raw-key keypad path (`drain_pending_raw_keys`) honours DECKPAM:
+  `legacy_keypad_bytes` sends `SS3 p`…`SS3 y`, `n m l k j o X M` through
+  `Introducer::Ss3` (8-bit `0x8F` under S8C1T); numeric and kitty paths unchanged.
+  `TerminalInput::KeyPad`, its arms, its twelve tests and `to_payload`'s keypad parameter are
+  deleted. New tests drive real snapshots (`ESC =`, `ESC >`, `ESC SP G`). No benchmark: the
+  only encoder change is removed arms and one fewer parameter.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

@@ -766,7 +766,6 @@ impl TerminalState {
     /// Will return an error if the write fails
     pub fn write(&self, to_write: &TerminalInput) -> Result<(), InternalStateError> {
         let decckm = self.cursor_key_mode();
-        let keypad_app = self.modes.keypad_mode;
         let modify_other_keys = self.handler.modify_other_keys_level();
         let application_escape_key = self.handler.application_escape_key();
         let backarrow_sends_bs = self.modes.backarrow_key_mode;
@@ -774,7 +773,6 @@ impl TerminalState {
         let kitty_keyboard_flags = self.handler.kitty_keyboard_flags();
         match to_write.to_payload(
             decckm,
-            keypad_app,
             modify_other_keys,
             application_escape_key,
             backarrow_sends_bs,

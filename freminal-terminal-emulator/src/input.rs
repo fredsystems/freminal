@@ -13,8 +13,8 @@ use std::borrow::Cow;
 use std::io::Write as _;
 
 use freminal_common::buffer_states::modes::{
-    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+    application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+    s8c1t::S8c1t,
 };
 
 /// Key event type for KKP flag 2 (report event types).
@@ -536,7 +536,6 @@ pub enum TerminalInput {
     Escape,
     InFocus,
     LostFocus,
-    KeyPad(u8),
     // Function keys F1–F35 (F1–F12 have legacy encodings; F13–F35 are
     // KKP-only, see `to_payload_kkp`'s `FunctionKey` arm).
     FunctionKey(u8, KeyModifiers),
@@ -570,7 +569,6 @@ impl TerminalInput {
     pub fn to_payload(
         &self,
         decckm_mode: Decckm,
-        keypad_mode: KeypadMode,
         modify_other_keys: u8,
         application_escape_key: ApplicationEscapeKey,
         backarrow_sends_bs: Decbkm,
@@ -588,7 +586,6 @@ impl TerminalInput {
             return self.to_payload_kkp(
                 kitty_keyboard_flags,
                 decckm_mode,
-                keypad_mode,
                 backarrow_sends_bs,
                 line_feed_mode,
                 s8c1t,
@@ -690,32 +687,6 @@ impl TerminalInput {
                 None if decckm_mode == Decckm::Application => static_sequence!(ss3, s8c1t, "F"),
                 None => static_sequence!(csi, s8c1t, "F"),
             },
-            Self::KeyPad(c) => {
-                if keypad_mode == KeypadMode::Numeric {
-                    TerminalInputPayload::Single(*c)
-                } else {
-                    match c {
-                        0 => static_sequence!(csi, s8c1t, "Op"),
-                        1 => static_sequence!(csi, s8c1t, "Oq"),
-                        2 => static_sequence!(csi, s8c1t, "Or"),
-                        3 => static_sequence!(csi, s8c1t, "Os"),
-                        4 => static_sequence!(csi, s8c1t, "Ot"),
-                        5 => static_sequence!(csi, s8c1t, "Ou"),
-                        6 => static_sequence!(csi, s8c1t, "Ov"),
-                        7 => static_sequence!(csi, s8c1t, "Ow"),
-                        8 => static_sequence!(csi, s8c1t, "Ox"),
-                        9 => static_sequence!(csi, s8c1t, "Oy"),
-                        b'-' => static_sequence!(csi, s8c1t, "Om"),
-                        b',' => static_sequence!(csi, s8c1t, "Ol"),
-                        b'.' => static_sequence!(csi, s8c1t, "On"),
-                        b'\n' => static_sequence!(csi, s8c1t, "OM"),
-                        _ => {
-                            warn!("Unknown keypad key: {c}");
-                            TerminalInputPayload::Single(*c)
-                        }
-                    }
-                }
-            }
             Self::Tab => TerminalInputPayload::Single(char_to_ctrl_code(b'i')),
             // Why \e[3~? It seems like we are emulating the vt510. Other terminals do it, so we
             // can too
@@ -927,7 +898,6 @@ impl TerminalInput {
         &self,
         flags: u32,
         decckm_mode: Decckm,
-        keypad_mode: KeypadMode,
         backarrow_sends_bs: Decbkm,
         line_feed_mode: Lnm,
         s8c1t: S8c1t,
@@ -1137,32 +1107,6 @@ impl TerminalInput {
                 (None, Some(m)) => modified_csi_tilde(s8c1t, 6, m),
                 (None, None) => static_sequence!(csi, s8c1t, "6~"),
             },
-            Self::KeyPad(c) => {
-                if keypad_mode == KeypadMode::Numeric {
-                    TerminalInputPayload::Single(*c)
-                } else {
-                    match c {
-                        0 => static_sequence!(csi, s8c1t, "Op"),
-                        1 => static_sequence!(csi, s8c1t, "Oq"),
-                        2 => static_sequence!(csi, s8c1t, "Or"),
-                        3 => static_sequence!(csi, s8c1t, "Os"),
-                        4 => static_sequence!(csi, s8c1t, "Ot"),
-                        5 => static_sequence!(csi, s8c1t, "Ou"),
-                        6 => static_sequence!(csi, s8c1t, "Ov"),
-                        7 => static_sequence!(csi, s8c1t, "Ow"),
-                        8 => static_sequence!(csi, s8c1t, "Ox"),
-                        9 => static_sequence!(csi, s8c1t, "Oy"),
-                        b'-' => static_sequence!(csi, s8c1t, "Om"),
-                        b',' => static_sequence!(csi, s8c1t, "Ol"),
-                        b'.' => static_sequence!(csi, s8c1t, "On"),
-                        b'\n' => static_sequence!(csi, s8c1t, "OM"),
-                        _ => {
-                            warn!("Unknown keypad key: {c}");
-                            TerminalInputPayload::Single(*c)
-                        }
-                    }
-                }
-            }
             Self::LostFocus => static_sequence!(csi, s8c1t, "O"),
             Self::InFocus => static_sequence!(csi, s8c1t, "I"),
             Self::FunctionKey(n, mods) => {
@@ -1348,15 +1292,14 @@ impl TerminalInput {
 mod tests {
     use super::*;
     use freminal_common::buffer_states::modes::{
-        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm,
-        keypad::KeypadMode, lnm::Lnm, s8c1t::S8c1t,
+        application_escape_key::ApplicationEscapeKey, decbkm::Decbkm, decckm::Decckm, lnm::Lnm,
+        s8c1t::S8c1t,
     };
 
     /// Convenience: call `to_payload` with all-default modes and zero KKP flags.
     fn to_payload_defaults(input: &TerminalInput) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1371,7 +1314,6 @@ mod tests {
     fn to_payload_kkp(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1395,7 +1337,6 @@ mod tests {
         };
         input.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1465,7 +1406,6 @@ mod tests {
     fn arrow_right_application_mode() {
         let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1520,7 +1460,6 @@ mod tests {
     fn arrow_left_application_mode() {
         let p = TerminalInput::ArrowLeft(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1542,7 +1481,6 @@ mod tests {
     fn arrow_up_application_mode() {
         let p = TerminalInput::ArrowUp(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1564,7 +1502,6 @@ mod tests {
     fn arrow_down_application_mode() {
         let p = TerminalInput::ArrowDown(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1588,7 +1525,6 @@ mod tests {
     fn home_application_mode() {
         let p = TerminalInput::Home(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1620,7 +1556,6 @@ mod tests {
     fn end_application_mode() {
         let p = TerminalInput::End(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1808,89 +1743,6 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
-    // ── to_payload: KeyPad ───────────────────────────────────────────────────
-
-    #[test]
-    fn keypad_numeric_mode_sends_raw_byte() {
-        let p = TerminalInput::KeyPad(b'5').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Numeric,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            0,
-            S8c1t::SevenBit,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'5'));
-    }
-
-    #[test]
-    fn keypad_application_mode_digits() {
-        let payload_for = |c: u8| -> TerminalInputPayload {
-            TerminalInput::KeyPad(c).to_payload(
-                Decckm::Ansi,
-                KeypadMode::Application,
-                0,
-                ApplicationEscapeKey::Reset,
-                Decbkm::BackarrowSendsDel,
-                Lnm::LineFeed,
-                0,
-                S8c1t::SevenBit,
-                &KeyEventMeta::PRESS,
-            )
-        };
-        assert_eq!(payload_for(0), TerminalInputPayload::Many(b"\x1b[Op"));
-        assert_eq!(payload_for(1), TerminalInputPayload::Many(b"\x1b[Oq"));
-        assert_eq!(payload_for(2), TerminalInputPayload::Many(b"\x1b[Or"));
-        assert_eq!(payload_for(3), TerminalInputPayload::Many(b"\x1b[Os"));
-        assert_eq!(payload_for(4), TerminalInputPayload::Many(b"\x1b[Ot"));
-        assert_eq!(payload_for(5), TerminalInputPayload::Many(b"\x1b[Ou"));
-        assert_eq!(payload_for(6), TerminalInputPayload::Many(b"\x1b[Ov"));
-        assert_eq!(payload_for(7), TerminalInputPayload::Many(b"\x1b[Ow"));
-        assert_eq!(payload_for(8), TerminalInputPayload::Many(b"\x1b[Ox"));
-        assert_eq!(payload_for(9), TerminalInputPayload::Many(b"\x1b[Oy"));
-    }
-
-    #[test]
-    fn keypad_application_mode_special_keys() {
-        let payload_for = |c: u8| -> TerminalInputPayload {
-            TerminalInput::KeyPad(c).to_payload(
-                Decckm::Ansi,
-                KeypadMode::Application,
-                0,
-                ApplicationEscapeKey::Reset,
-                Decbkm::BackarrowSendsDel,
-                Lnm::LineFeed,
-                0,
-                S8c1t::SevenBit,
-                &KeyEventMeta::PRESS,
-            )
-        };
-        assert_eq!(payload_for(b'-'), TerminalInputPayload::Many(b"\x1b[Om"));
-        assert_eq!(payload_for(b','), TerminalInputPayload::Many(b"\x1b[Ol"));
-        assert_eq!(payload_for(b'.'), TerminalInputPayload::Many(b"\x1b[On"));
-        assert_eq!(payload_for(b'\n'), TerminalInputPayload::Many(b"\x1b[OM"));
-    }
-
-    #[test]
-    fn keypad_application_mode_unknown_key_fallback() {
-        // A byte not in the match → fallback to Single
-        let p = TerminalInput::KeyPad(b'!').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Application,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            0,
-            S8c1t::SevenBit,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'!'));
-    }
-
     // ── to_payload: Enter with LNM ───────────────────────────────────────────
 
     #[test]
@@ -1903,7 +1755,6 @@ mod tests {
     fn enter_lnm_newline_sends_crlf() {
         let p = TerminalInput::Enter.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -1933,7 +1784,6 @@ mod tests {
         assert_eq!(Decbkm::default(), Decbkm::BackarrowSendsDel);
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::default(),
@@ -1949,7 +1799,6 @@ mod tests {
     fn backspace_decbkm_bs_sends_bs() {
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsBs,
@@ -1973,7 +1822,6 @@ mod tests {
     fn escape_application_escape_key_sends_csi_sequence() {
         let p = TerminalInput::Escape.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Set,
             Decbkm::BackarrowSendsDel,
@@ -1999,7 +1847,6 @@ mod tests {
     fn ctrl_c_level0_sends_etx() {
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0, // modifyOtherKeys=0 → legacy
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2015,7 +1862,6 @@ mod tests {
     fn ctrl_c_level2_sends_csi27_sequence() {
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             2, // modifyOtherKeys=2
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2070,7 +1916,6 @@ mod tests {
     fn kkp_enter_disambiguate_only_lnm_newline_sends_crlf() {
         let p = TerminalInput::Enter.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2102,7 +1947,6 @@ mod tests {
     fn kkp_backspace_disambiguate_only_decbkm_bs() {
         let p = TerminalInput::Backspace.to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsBs,
@@ -2156,7 +2000,6 @@ mod tests {
     fn kkp_arrow_right_application_mode() {
         let p = TerminalInput::ArrowRight(KeyModifiers::NONE).to_payload(
             Decckm::Application,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2468,40 +2311,6 @@ mod tests {
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
-    // ── to_payload_kkp: KeyPad ───────────────────────────────────────────────
-
-    #[test]
-    fn kkp_keypad_numeric_mode() {
-        let p = TerminalInput::KeyPad(b'5').to_payload(
-            Decckm::Ansi,
-            KeypadMode::Numeric,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            1,
-            S8c1t::SevenBit,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Single(b'5'));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode() {
-        let p = TerminalInput::KeyPad(0).to_payload(
-            Decckm::Ansi,
-            KeypadMode::Application,
-            0,
-            ApplicationEscapeKey::Reset,
-            Decbkm::BackarrowSendsDel,
-            Lnm::LineFeed,
-            1,
-            S8c1t::SevenBit,
-            &KeyEventMeta::PRESS,
-        );
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Op"));
-    }
-
     // ── to_payload_kkp: ASCII plain (report_all flag) ────────────────────────
 
     #[test]
@@ -2533,7 +2342,6 @@ mod tests {
         // Actually Press has no code so it is omitted; the modifier is just 5.
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2555,7 +2363,6 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2578,7 +2385,6 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2600,7 +2406,6 @@ mod tests {
         };
         let p = TerminalInput::Ctrl(b'c').to_payload(
             Decckm::Ansi,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2839,7 +2644,6 @@ mod tests {
     fn to_payload_kkp_app(input: &TerminalInput, flags: u32) -> TerminalInputPayload {
         input.to_payload(
             Decckm::Application,
-            KeypadMode::Application,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
@@ -2984,69 +2788,6 @@ mod tests {
     fn kkp_pagedown_with_modifier() {
         let p = to_payload_kkp(&TerminalInput::PageDown(SHIFT), 1);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;2~".to_vec()));
-    }
-
-    // ── KKP: keypad in application mode ──────────────────────────────────────
-
-    #[test]
-    fn kkp_keypad_application_mode_digits() {
-        let expected_suffixes = b"pqrstuvwxy";
-        for (digit, suffix) in (0u8..=9).zip(expected_suffixes.iter()) {
-            let p = to_payload_kkp_app(&TerminalInput::KeyPad(digit), 1);
-            let expected = [0x1b, b'[', b'O', *suffix];
-            assert_eq!(
-                p,
-                TerminalInputPayload::Many(
-                    // The Many variant holds a &'static [u8]; match the exact expected
-                    match digit {
-                        0 => b"\x1b[Op",
-                        1 => b"\x1b[Oq",
-                        2 => b"\x1b[Or",
-                        3 => b"\x1b[Os",
-                        4 => b"\x1b[Ot",
-                        5 => b"\x1b[Ou",
-                        6 => b"\x1b[Ov",
-                        7 => b"\x1b[Ow",
-                        8 => b"\x1b[Ox",
-                        9 => b"\x1b[Oy",
-                        _ => unreachable!(),
-                    }
-                ),
-                "keypad {digit} in app mode should produce ESC[O{}",
-                expected[3] as char
-            );
-        }
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_minus() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'-'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Om"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_comma() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b','), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[Ol"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_dot() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'.'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[On"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_enter() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'\n'), 1);
-        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[OM"));
-    }
-
-    #[test]
-    fn kkp_keypad_application_mode_unknown() {
-        let p = to_payload_kkp_app(&TerminalInput::KeyPad(b'?'), 1);
-        // Unknown keypad key in app mode should fallback to Single
-        assert_eq!(p, TerminalInputPayload::Single(b'?'));
     }
 
     // ── KKP: function keys ──────────────────────────────────────────────────
@@ -3667,7 +3408,6 @@ mod s8c1t_tests {
     fn encode(row: &Row, s8c1t: S8c1t, meta: &KeyEventMeta) -> Vec<u8> {
         match row.key.to_payload(
             row.decckm,
-            KeypadMode::Numeric,
             row.modify_other_keys,
             row.application_escape_key,
             Decbkm::BackarrowSendsDel,
@@ -4136,7 +3876,6 @@ mod s8c1t_tests {
                     .flat_map(|input| {
                         match input.to_payload(
                             Decckm::Ansi,
-                            KeypadMode::Numeric,
                             0,
                             ApplicationEscapeKey::Reset,
                             Decbkm::BackarrowSendsDel,
@@ -4163,7 +3902,6 @@ mod s8c1t_tests {
         let r = row("up", TerminalInput::ArrowUp(NONE), b"", b"");
         let payload = r.key.to_payload(
             r.decckm,
-            KeypadMode::Numeric,
             0,
             ApplicationEscapeKey::Reset,
             Decbkm::BackarrowSendsDel,
