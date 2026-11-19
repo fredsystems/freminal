@@ -391,7 +391,9 @@ Which operations, and which attributes, are decided as follows (Task 140,
   reverse, blink or OSC 8 hyperlink is copied, so an open hyperlink no longer
   leaks into erased cells. The stored background is used as it is, so SGR 7 does
   not swap it (xterm's `cur_background`). With a default background the tag is
-  visually default and rows erased with it stay sparse. This is the tie-break
+  visually default and rows erased with it stay sparse. DCH fills the cells it
+  vacates at the right edge with the same tag (as xterm and kitty do; a default
+  background leaves the row sparse). This is the tie-break
   the project applies when the reference terminals disagree: xterm and Ghostty
   blank with the background only, kitty (`line_apply_cursor`) and WezTerm copy
   the whole pen, and freminal follows xterm and Ghostty, consistent with the
@@ -404,8 +406,9 @@ Which operations, and which attributes, are decided as follows (Task 140,
   take the background, because they blank cells inside an existing row rather
   than creating one.
 - **The erase methods read the format from `Buffer`**, through `erase_tag()`,
-  rather than taking it as a parameter. The earlier design threaded the format
-  through every erase call; one helper that every blanking site uses is what
+  rather than taking it as a parameter. Task 48's text described the current
+  format as an explicit parameter of every erase method, but the code read the
+  buffer's current format; one helper that every blanking site uses is what
   keeps the rule above uniform.
 
 ---

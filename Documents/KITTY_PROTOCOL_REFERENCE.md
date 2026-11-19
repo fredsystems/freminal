@@ -6,7 +6,10 @@ protocol page, and written to the shipped behaviour: SGR 21, `4:N`, SGR 221 and
 222, the underline colour rules, per-cell underline geometry, the background-only
 erase tag, the terminfo entry, freminal's deliberate differences from kitty and
 where it is implemented. The roadmap row now reads "Filled in; conformant". No
-other section changed.
+other section changed. Review fixes: DCH fills its vacated right edge, an
+overflowing `4:N` is dashed, DECDHL rows lay decorations out in the doubled box,
+and the narrow-cell solid dash is recorded as matching kitty (four differences
+remain).
 
 Earlier: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
 distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
@@ -1025,9 +1028,9 @@ so neither needed a storage change.
   `222` clears faint only. `22` is unchanged: it clears both. DECRQSS `$q m` already
   reports a double underline as `4:2`, so SGR 21 is reported that way.
 - **`4:N`.** `4:0` is none, `4:1` to `4:5` are the five styles, `N` above 5 is
-  dashed, and an empty `4:` is single. The clamp lives in the SGR handler, not in
-  the strict 0 to 5 mapping `UnderlineStyle::from_sgr_param` keeps for other
-  callers.
+  dashed (including a value too large for `usize`, which saturates), and an empty
+  `4:` is single. The clamp lives in the SGR handler, not in the strict 0 to 5
+  mapping `UnderlineStyle::from_sgr_param` keeps for other callers.
 - **Underline colour under reverse video.** An explicit underline colour (`58`) is
   never swapped by SGR 7 or DECSCNM. A default underline follows the effective
   foreground, so it stays visible against a swapped background (Tasks 115.2,
@@ -1039,19 +1042,27 @@ so neither needed a storage change.
   thickness + 1; when the lower line would leave the cell both move up to sit on
   the bottom edge. Curly, dotted and dashed are laid out **per cell on the cell
   grid**, so a pattern is identical whatever the text-run boundaries, and on
-  DECDWL rows the pattern scales with the doubled cell:
+  DECDWL rows the pattern scales with the doubled cell. On DECDHL rows the
+  decoration is laid out in the doubled box exactly as the glyph is scaled, then
+  clipped to the row's own half, so it appears once, on the half where the doubled
+  glyph's underline falls:
   - curly is one cosine period per cell, so adjacent cells join, with the
     amplitude reduced as needed to keep the stroke inside the cell;
   - dotted is `max(1, floor(cell_width / (2 * thickness)))` evenly spaced dots per
     cell;
   - dashed is two dashes per cell positioned so the right dash of one cell and the
-    left dash of the next join into one longer dash.
+    left dash of the next join into one longer dash. In a cell too narrow for two
+    separate dashes (6 to 7 px wide, or under 4 px) the dashes touch or overlap and
+    the cell is one solid dash; kitty's two dash writes overlap into one line in
+    the same cells (and it draws one full dash under 4 px), so this matches kitty.
 - **Erased cells take only the background.** Cells blanked by ED, EL, ECH, ICH,
   DCH, the DECLRMM column-confined scroll fills and the alternate-screen clear
   carry the stored background colour and nothing else (no foreground, weight,
   underline, reverse, blink or OSC 8 link), so an underline set before an erase is
-  not smeared across the blanked cells. Whole-row IL, DL, SU, SD and line-feed
-  fills use default attributes.
+  not smeared across the blanked cells. DCH fills the cells vacated at the right
+  edge with that tag, as xterm and kitty do; with a default background the row
+  stays sparse. Whole-row IL, DL, SU, SD and line-feed fills use default
+  attributes.
 - **Terminfo.** The bundled `xterm-freminal` entry (`res/freminal.ti`) lists `Su`,
   `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns. Child processes
   are started with `TERM=xterm-256color`, so that entry is used only if a user sets
@@ -1067,15 +1078,11 @@ so neither needed a storage change.
 2. **Double-underline lines use the font stroke thickness.** kitty draws the two
    lines as 1 px rows; freminal draws them as lines of the font's stroke thickness,
    clamped to the cell, with a gap of thickness + 1.
-3. **Dashes in a narrow cell are solid.** A dashed cell whose two dashes would
-   touch or overlap (a cell under 4 px wide, or one 6 to 7 px wide) is drawn as one
-   solid dash. At the default 8 px cell, and at any width where the two dashes stay
-   apart, the layout is two dashes per cell.
-4. **Erase is background-only.** kitty copies the whole pen (foreground, bold,
+3. **Erase is background-only.** kitty copies the whole pen (foreground, bold,
    underline and so on) into erased cells; freminal copies only the background
    colour, as xterm and Ghostty do. A reverse-video erase does not swap the stored
    background.
-5. **Whole-row IL, DL, SU and SD do not take the background.** They fill with
+4. **Whole-row IL, DL, SU and SD do not take the background.** They fill with
    default attributes, which matches kitty; they are listed because freminal's own
    earlier documentation claimed they were BCE-aware.
 
@@ -1089,13 +1096,15 @@ so neither needed a storage change.
   `handle_underline_subparam` with `MAX_UNDERLINE_STYLE_PARAM` (5).
 - **Apply** (`freminal-terminal-emulator/src/terminal_handler/sgr.rs`): `apply_sgr`
   handles `ResetFaint` by removing `FontDecorations::Faint` only.
-- **Erase tag** (`freminal-buffer/src/buffer/resize_and_alt.rs`):
-  `Buffer::erase_tag()`, used by `erase.rs`, `lines.rs` (ICH, DCH), `scroll.rs`
-  (the DECLRMM column fills) and `clear_alternate_screen`.
-- **Renderer** (`freminal/src/gui/renderer/vertex.rs`): `push_run_decorations`
-  (out of line, so the undecorated path stays tight), `clamp_to_cell`,
-  `push_underline_quads` and the per-style helpers `push_double_underline`,
-  `push_curly_underline`, `push_dotted_underline` and `push_dashed_underline`.
+- **Erase tag** (`freminal-buffer/src/buffer/erase.rs`): `Buffer::erase_tag()`,
+  used by the erase methods there, `lines.rs` (ICH, DCH), `scroll.rs` (the DECLRMM
+  column fills) and `clear_alternate_screen` in `resize_and_alt.rs`. The DCH
+  right-edge fill is in `Row::delete_cells_at` (`freminal-buffer/src/row.rs`).
+- **Renderer** (`freminal/src/gui/renderer/decorations.rs`): `push_run_decorations`
+  (out of line, so the undecorated path stays tight), `RowLayout` and
+  `clip_quads_to_rows` (DECDHL rows), `clamp_to_cell`, `push_underline_quads` and
+  the per-style helpers `push_double_underline`, `push_curly_underline`,
+  `push_dotted_underline` and `push_dashed_underline`.
 - **Terminfo** (`res/freminal.ti`, `res/terminfo.tar`,
   `freminal-terminal-emulator/build.rs`): `build.rs` passes `-x` to `tic`, because
   without it the user-defined capabilities `Su`, `Smulx` and `Setulc` are dropped
@@ -1105,10 +1114,11 @@ so neither needed a storage change.
   `freminal-terminal-emulator/tests/sgr_underline_styles.rs`;
   `freminal-buffer/tests/erase_bce_tests.rs` and
   `freminal-terminal-emulator/tests/erase_bce_end_to_end.rs` (the erase tag per
-  operation and end to end); the geometry tests in `vertex.rs` (box clamps,
-  run-boundary independence, DECDWL scaling, double spacing, curly continuity, dash
-  joins, dot spacing); and `terminfo_source_advertises_styled_underline_caps_matching_xtgettcap`
-  in `dcs.rs`.
+  operation and end to end); the geometry tests in `decorations.rs` (box clamps,
+  run-boundary independence, DECDWL and DECDHL layout, double spacing, curly
+  continuity, dash joins, dot spacing); and
+  `terminfo_source_advertises_styled_underline_caps_matching_xtgettcap` in
+  `dcs.rs`.
 - **Benchmarks:** `instanced_bg_decorated` in `freminal/benches/render_loop_bench.rs`
   (a decoration-heavy corpus added by this task) and the erase benches
   `bench_erase_display`, `bench_erase_display_full` and `bench_erase_display_bce`.

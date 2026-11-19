@@ -43,38 +43,38 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | In progress   | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
-| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
-| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
-| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned       | 140                                |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete    | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete    | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete    | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete    | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete    | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete    | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete    | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete    | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete    | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | In progress | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned     | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete    | None                               |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete    | 138                                |
+| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete    | 149                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned     | 140                                |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -10691,8 +10691,8 @@ What:
 - Tests: for each operation, an active tag with fg, bold, underline, reverse, blink, an OSC 8
   URL and a background leaves erased cells with the background only; reverse with no background
   gives default cells (and the row stays sparse); a default tag keeps rows sparse; the
-  alternate-screen clear is unchanged; end to end through `handle_incoming_data`, `ESC[1;4;31;44m
-  ESC[K` gives blank cells with only the blue background.
+  alternate-screen clear is unchanged; end to end through `handle_incoming_data`,
+  `ESC[1;4;31;44m ESC[K` gives blank cells with only the blue background.
 - Benchmark: `bench_erase_display`, `bench_erase_display_full`, `bench_erase_display_bce`
   before and after (15%).
 
@@ -10748,7 +10748,8 @@ markdownlint and `prettier --check` on the named files.
 - **140.2 (done).** `Buffer::erase_tag()` (background only, not swapped by SGR 7) is used by
   ED, EL, ECH, ICH, DCH, the DECLRMM column-confined fills (so IL/DL under DECLRMM take it) and
   `clear_alternate_screen`. Whole-row IL/DL/SU/SD and line feeds are unchanged. Plain DCH writes
-  no fill; its tag only reaches a split wide glyph's remnant, which is tested. New
+  no fill; its tag only reaches a split wide glyph's remnant, which is tested (superseded by
+  140.C2: plain DCH now fills the vacated right edge). New
   `freminal-buffer/tests/erase_bce_tests.rs` (17) and
   `freminal-terminal-emulator/tests/erase_bce_end_to_end.rs` (4); 19 of the 21 fail on the old
   code (the two that pass are the sparse-row and whole-row guards). Changed expectation:
@@ -10781,8 +10782,9 @@ markdownlint and `prettier --check` on the named files.
 - **140.5 (done).** COVERAGE, GAPS, `SGR.md`, the BCE section of `DESIGN_DECISIONS.md` (which
   wrongly called IL/DL BCE-aware and described the format as an erase parameter) and a new
   "Underlines and SGR parity" section in the kitty reference with five documented differences
-  from kitty. Orchestrator fix: COVERAGE said every dashed cell under 8 px may be solid; only
-  6–7 px and sub-4 px cells are.
+  from kitty (four after 140.C4: the narrow-cell dash turned out to match kitty). Orchestrator
+  fix: COVERAGE said every dashed cell under 8 px may be solid; only 6–7 px and sub-4 px cells
+  are.
 
 ### 140 Cleanup entries
 
@@ -10877,9 +10879,27 @@ this section and the repo rules. No blocker. Every finding, nit and above, is fi
 - **R1:** DCH rows and BCE summaries match the fixed code. **R2:** COVERAGE notes DECDHL
   decorations. **R6:** the narrow-cell dash is "matches kitty", not a difference (four
   differences remain). **R12:** wording fixes. **R13:** the `infocmp` output in the 140.4 note;
-  move `Su`/`Smulx`/`Setulc` to the end of the entry. **R14:** list the docs to update in Task
-  151. **R7:** re-measure 140.3 against a baseline of the pre-140.3 commit taken on an idle
+  move `Su`/`Smulx`/`Setulc` to the end of the entry. **R14:** list the docs to update in
+  Task 151. **R7:** re-measure 140.3 against a baseline of the pre-140.3 commit taken on an idle
   machine, and record it.
+- **Status: done.** R1, R2, R6, R12 and R14 in COVERAGE, GAPS, `DESIGN_DECISIONS.md`, the
+  kitty reference and the Task 151 stub (sub-agent; orchestrator also fixed two wraps in this
+  plan that markdown parsed as list items). **R13** (orchestrator): `Su`/`Smulx`/`Setulc` moved
+  to the end of the entry; `res/terminfo.tar` is byte-identical afterwards. A first attempt with
+  an indented `#` comment line made `tic` swallow `Su` into a bogus name, and the 140.4 test
+  caught it; the comment was dropped. `infocmp -x -A` on the entry extracted from the tar:
+
+  ```text
+  am, bce, ccc, hs, km, mc5i, mir, msgr, npc, xenl, Su,
+  Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m,
+  Smulx=\E[4:%p1%dm,
+  ```
+
+  **R7** (orchestrator): the pre-140.3 commit (`78791a73`) with the current bench file, measured
+  idle as `pre140_3_idle`, against the branch head (after 140.C3). Everything is within 15%:
+  `instanced_bg` −3.5% / +0.5%, `instanced_bg_decorated` −0.2% / −0.8% (no change),
+  `instanced_bg_indexed` −2.1% / −0.6%, `instanced_bg_partial_dirty` +1.0% to +9.0% (worst
+  `one_row` `sparse_10_percent` +9.0%). The earlier −20% figures were load artefacts.
 
 ---
 
@@ -11186,8 +11206,33 @@ the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy"
 - **One table of truth** shared by the `.ti` and `lookup_termcap`, or a test that compares them
   for every capability (140.4's test covers three).
 - Docs: the `DESIGN_DECISIONS.md` TERM strategy (reversed, with reasons), the ssh consequence
-  and how to fix it (install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x
-  -`, or set `[shell] term`), COVERAGE/GAPS, README.
+  and how to fix it (install the terminfo package,
+  `infocmp -x xterm-freminal | ssh host tic -x -`, or set `[shell] term`), COVERAGE/GAPS,
+  README.
+- **Update every sentence that says children get `TERM=xterm-256color`** (found 2026-11-19
+  with `rg xterm-256color Documents/ freminal*/src`; re-run the search at activation):
+  - `ESCAPE_SEQUENCE_COVERAGE.md`: the Task 140 "Last updated" entry ("child processes get
+    `TERM=xterm-256color`, so the entry is used only if a user sets `TERM=xterm-freminal`") and
+    the SGR row ("programs get `TERM=xterm-256color` and discover these through XTGETTCAP").
+  - `ESCAPE_SEQUENCE_GAPS.md`: the Task 140 "Last updated" entry ("programs get
+    `TERM=xterm-256color`, so what they discover at runtime comes from XTGETTCAP").
+  - `KITTY_PROTOCOL_REFERENCE.md`, "Underlines and SGR parity", Terminfo bullet ("Child
+    processes are started with `TERM=xterm-256color`, so that entry is used only if a user sets
+    `TERM=xterm-freminal`").
+  - `MASTER_PLAN.md`: the Task 12 dependency note ("Strategy: stay with `TERM=xterm-256color`
+    (matching WezTerm/Alacritty)") and the Task 92 "Dropped Tasks" entry ("freminal deliberately
+    advertises `TERM=xterm-256color`"; it already carries a Task 151 addendum).
+  - `PLAN_VERSION_090.md` (Task 76.6 notes): "XTGETTCAP `TN` stays `xterm-256color`" and
+    "`io::pty::run_terminal` sets `TERM=xterm-256color` as the documented Task-12 compatibility
+    strategy".
+  - `PLAN_VERSION_150.md`: "Whether a `freminal` TERM is introduced at all (today:
+    `TERM=xterm-256color` + XTGETTCAP per Task 12)".
+  - `PLAN_VERSION_130.md` itself: the 140.4 status note ("children run with
+    `TERM=xterm-256color`") and 140.C1 are history and stay.
+  - Code comments: `freminal-terminal-emulator/src/io/pty.rs` (the "TERM Strategy" comment and
+    the `cmd.env("TERM", "xterm-256color")` block, ~605-633) and
+    `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (the `TN` comment, "Freminal
+    deliberately presents as `xterm-256color`", and the Task 76.6 regression test near it).
 
 **Open questions.**
 
