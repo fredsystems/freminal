@@ -102,6 +102,11 @@ impl TerminalHandler {
     ///
     /// `Hard` does not restore the DECCOLM width; [`Self::full_reset`] does,
     /// because that needs the buffer's pre-reset width.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive destructuring has one line per field, so that classifying \
+                  a new field is a compile error; splitting it would defeat that check"
+    )]
     pub(crate) fn reset(&mut self, kind: ResetKind) {
         // No `..`: adding a field without classifying it is a compile error.
         let Self {
@@ -129,6 +134,7 @@ impl TerminalHandler {
             allow_alt_screen: _, // xterm does not reset it: survives both
             pre_deccolm_width,
             host_capabilities: _, // host facts (config + platform), not terminal state: survives both
+            term_name: _,         // the spawned child's TERM, not terminal state: survives both
             pointer_shape_stack,
             progress,
             progress_updated_at,

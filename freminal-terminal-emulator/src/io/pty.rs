@@ -13,6 +13,7 @@ use conv2::ValueFrom;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use freminal_common::{
     pty_write::FreminalTerminalSize,
+    term_name::TermName,
     terminal_size::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     terminfo::TERMINFO,
 };
@@ -411,6 +412,11 @@ pub struct PtySpawnConfig<'a> {
     /// on the child process before applying `extra_env`.  Driven by
     /// `config.shell_integration.set_term_program` (Task 72.6).
     pub set_term_program: bool,
+    /// The `TERM` set on the child: the single per-pane value, already
+    /// resolved with `[shell] term` and the pane's `extra_env` `TERM`
+    /// (see [`TermName::resolve`]).  XTGETTCAP `TN` and the FREC `term`
+    /// metadata use the same value.
+    pub term: &'a TermName,
 }
 
 /// Build the `(key, value)` pairs Freminal sets on every PTY child to
@@ -434,6 +440,24 @@ pub fn term_program_env_pairs() -> [(&'static str, String); 2] {
         ("TERM_PROGRAM", String::from("freminal")),
         ("TERM_PROGRAM_VERSION", version),
     ]
+}
+
+/// Set `TERM` on the child to the pane's resolved [`TermName`].
+fn apply_term_env(cmd: &mut CommandBuilder, term: &TermName) {
+    cmd.env("TERM", term.as_str());
+}
+
+/// Apply the per-pane `env` map to the child.
+///
+/// `TERM` is skipped: it was folded into the pane's [`TermName`] and already set by
+/// [`apply_term_env`], so setting it again could only introduce a value that
+/// disagrees with what XTGETTCAP `TN` and the FREC metadata report.
+fn apply_extra_env(cmd: &mut CommandBuilder, env: &HashMap<String, String>) {
+    for (key, value) in env {
+        if !TermName::is_env_key(key) {
+            cmd.env(key, value);
+        }
+    }
 }
 
 /// Shell flavour recognised by Freminal's spawn-time shell-integration
@@ -567,6 +591,7 @@ pub fn run_terminal(
         cwd,
         extra_env,
         set_term_program,
+        term,
     } = spawn_cfg;
     let pty_system = NativePtySystem::default();
 
@@ -608,29 +633,28 @@ pub fn run_terminal(
     // Use TERMINFO_DIRS (colon-separated search path) instead of TERMINFO
     // (single exclusive directory).  TERMINFO is exclusive: if set, ncurses
     // ONLY looks there — and our tarball only contains `freminal` /
-    // `xterm-freminal`, not `xterm-256color`.  With TERMINFO_DIRS, ncurses
-    // checks our directory first but falls back to the system terminfo so
-    // readline and other programs can find xterm-256color capabilities.
+    // `xterm-freminal`, not a configured `TERM` such as `xterm-256color`.  With
+    // TERMINFO_DIRS, ncurses checks our directory first but falls back to the
+    // system terminfo so readline and other programs can find those entries.
     if let Some(termcaps) = termcaps {
         let termcaps_str = termcaps.display();
         cmd.env("TERMINFO_DIRS", format!("{termcaps_str}:"));
         cmd.env_remove("TERMINFO");
     }
-    // TERM Strategy: We set TERM=xterm-256color rather than a custom value like
-    // "xterm-freminal" for maximum compatibility. Programs like neovim, tmux, and
-    // many TUI apps have hardcoded behavior based on TERM — setting it to an
-    // unrecognized value causes them to fall back to minimal capabilities. This is
-    // the same approach used by WezTerm, Alacritty, and most modern terminals.
+    // TERM Strategy: children get `TERM=xterm-freminal` by default (Task 151).  The
+    // entry is accurate (it is checked against XTGETTCAP and the parser/handler
+    // by tests) and the `xterm-` prefix keeps programs that match `xterm*`
+    // working, as `xterm-kitty` and `xterm-ghostty` do.  The bundled entry is
+    // extracted per PTY onto TERMINFO_DIRS above, so it resolves even where
+    // nothing is installed.  The value is configurable with `[shell] term`, and a
+    // `TERM` in the pane's `env` wins over it.  On Windows the default stays
+    // `xterm-256color`: there is no terminfo distribution path and MSYS2/Cygwin
+    // programs read their own databases.
     //
-    // For capabilities beyond what xterm-256color declares (e.g., true color, styled
-    // underlines, clipboard via OSC 52), we rely on XTGETTCAP (DCS +q) responses.
-    // Modern programs query these at startup to discover extra features. See
-    // `TerminalHandler::lookup_termcap` in freminal-buffer for the full list.
-    //
-    // The custom freminal.ti entry in res/ exists as a reference but is not used by
-    // child processes. The TERMINFO_DIRS env var includes the extracted tarball so
-    // that programs that check for a valid TERMINFO directory find one.
-    cmd.env("TERM", "xterm-256color");
+    // `term` is the already-resolved single value (`TermName::resolve`); it is also
+    // what XTGETTCAP `TN` and the FREC metadata report.  The per-pane `extra_env`
+    // loop below skips `TERM` so it cannot override this value with a different one.
+    apply_term_env(&mut cmd, term);
     cmd.env("COLORTERM", "truecolor");
 
     // Shell integration: announce ourselves to scripts via TERM_PROGRAM.
@@ -724,9 +748,7 @@ pub fn run_terminal(
     // Apply per-pane extra environment variables from the layout.
     // These are applied last so they can override any default env vars set above.
     if let Some(env) = extra_env {
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        apply_extra_env(&mut cmd, env);
     }
 
     let mut child = pair
@@ -1141,6 +1163,172 @@ mod reader_send_failure_tests {
 }
 
 #[cfg(test)]
+mod term_env_tests {
+    use super::{TermName, apply_extra_env, apply_term_env};
+    use freminal_common::{config::ShellConfig, term_name::TermPlatform};
+    use portable_pty::CommandBuilder;
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+
+    fn child_term(shell: &ShellConfig, pane_env: Option<&HashMap<String, String>>) -> String {
+        let term = TermName::resolve(shell, TermPlatform::Other, pane_env);
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_term_env(&mut cmd, &term);
+        if let Some(env) = pane_env {
+            apply_extra_env(&mut cmd, env);
+        }
+        let Some(value) = cmd.get_env("TERM") else {
+            panic!("TERM was not set");
+        };
+        assert_eq!(value, OsStr::new(term.as_str()), "child TERM != effective");
+        term.as_str().to_owned()
+    }
+
+    #[test]
+    fn config_default_sets_xterm_freminal() {
+        assert_eq!(child_term(&ShellConfig::default(), None), "xterm-freminal");
+    }
+
+    #[test]
+    fn config_override_sets_the_configured_term() {
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(child_term(&shell, None), "xterm-256color");
+    }
+
+    #[test]
+    fn pane_env_term_wins_and_is_not_set_twice() {
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        let env = HashMap::from([
+            ("TERM".to_owned(), "screen-256color".to_owned()),
+            ("OTHER".to_owned(), "kept".to_owned()),
+        ]);
+        assert_eq!(child_term(&shell, Some(&env)), "screen-256color");
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_extra_env(&mut cmd, &env);
+        assert_eq!(cmd.get_env("OTHER"), Some(OsStr::new("kept")));
+        // `get_env` falls back to the parent's environment, so look at the
+        // explicit overrides only.
+        assert!(
+            cmd.iter_extra_env_as_str().all(|(key, _)| key != "TERM"),
+            "the env loop must leave TERM to the resolved value"
+        );
+    }
+
+    #[test]
+    fn extra_env_cannot_override_a_different_resolved_term() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_term_env(&mut cmd, &TermName::platform_default(TermPlatform::Other));
+        let env = HashMap::from([("TERM".to_owned(), "dumb".to_owned())]);
+        apply_extra_env(&mut cmd, &env);
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-freminal")));
+    }
+}
+
+/// A real child must see exactly the resolved `TERM`.
+#[cfg(all(test, unix))]
+mod child_term_real_pty_tests {
+    use super::{PtySpawnConfig, ReplyQueue, run_terminal};
+    use crate::io::{PtyRead, PtyWrite};
+    use freminal_common::{
+        config::ShellConfig,
+        pty_write::FreminalTerminalSize,
+        term_name::{TermName, TermPlatform},
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+
+    fn term_seen_by_child(
+        shell: &ShellConfig,
+        pane_env: Option<&HashMap<String, String>>,
+    ) -> String {
+        let term = TermName::resolve(shell, TermPlatform::Other, pane_env);
+        let (_write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (_reply_tx, reply_rx) = crossbeam_channel::bounded::<PtyWrite>(1);
+        let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
+        let spawn_cfg = PtySpawnConfig {
+            command: Some((
+                String::from("/bin/sh"),
+                vec![
+                    String::from("-c"),
+                    String::from("printf 'TERM=<%s>' \"$TERM\"; sleep 30"),
+                ],
+            )),
+            shell: None,
+            cwd: None,
+            extra_env: pane_env,
+            term: &term,
+            set_term_program: false,
+        };
+        let _result = match run_terminal(
+            write_rx,
+            ReplyQueue {
+                rx: reply_rx,
+                queued_bytes: Arc::new(AtomicUsize::new(0)),
+                pending_resize: Arc::new(arc_swap::ArcSwapOption::const_empty()),
+            },
+            send_tx,
+            spawn_cfg,
+            None,
+            &FreminalTerminalSize {
+                width: 80,
+                height: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            0,
+        ) {
+            Ok(result) => result,
+            Err(e) => panic!("run_terminal failed: {e}"),
+        };
+
+        let mut collected = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            while let Ok(read) = send_rx.try_recv() {
+                collected.extend_from_slice(&read.buf);
+            }
+            let text = String::from_utf8_lossy(&collected).into_owned();
+            if let Some(start) = text.find("TERM=<")
+                && let Some(len) = text[start..].find('>')
+            {
+                return text[start + "TERM=<".len()..start + len].to_owned();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "child never reported TERM; got {:?}",
+            String::from_utf8_lossy(&collected)
+        );
+    }
+
+    #[test]
+    fn child_sees_the_default_the_override_and_the_pane_env_term() {
+        assert_eq!(
+            term_seen_by_child(&ShellConfig::default(), None),
+            "xterm-freminal"
+        );
+
+        let shell = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        assert_eq!(term_seen_by_child(&shell, None), "xterm-256color");
+
+        let env = HashMap::from([("TERM".to_owned(), "screen-256color".to_owned())]);
+        assert_eq!(term_seen_by_child(&shell, Some(&env)), "screen-256color");
+    }
+}
+
+#[cfg(test)]
 mod shell_integration_injection_tests {
     use super::{Shell, detect_shell, inject_shell_integration_env};
     use portable_pty::CommandBuilder;
@@ -1249,7 +1437,7 @@ mod shell_integration_injection_tests {
 mod echo_off_event_driven_tests {
     use super::{PtySpawnConfig, PtyWrite, ReplyQueue, run_terminal};
     use crate::io::PtyRead;
-    use freminal_common::pty_write::FreminalTerminalSize;
+    use freminal_common::{pty_write::FreminalTerminalSize, term_name::TermName};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -1309,6 +1497,7 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
+            term: &TermName::default(),
             set_term_program: false,
         };
 
@@ -1355,6 +1544,7 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
+            term: &TermName::default(),
             set_term_program: false,
         };
 
@@ -1402,6 +1592,7 @@ mod echo_off_event_driven_tests {
             shell: None,
             cwd: None,
             extra_env: None,
+            term: &TermName::default(),
             set_term_program: false,
         };
 

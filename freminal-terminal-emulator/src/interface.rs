@@ -69,7 +69,7 @@ use freminal_common::buffer_states::modes::{
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
-use freminal_common::{args::Args, buffer_states::tchar::TChar, send_or_log};
+use freminal_common::{args::Args, buffer_states::tchar::TChar, send_or_log, term_name::TermName};
 
 /// Mode-related fields extracted from the emulator state for a snapshot.
 ///
@@ -386,10 +386,16 @@ impl TerminalEmulator {
     /// `scrollback_limit` overrides the default scrollback history size when
     /// `Some(n)` is provided.  `None` keeps the compiled-in default (10000).
     ///
+    /// `term` is the pane's resolved `TERM` (see [`TermName::resolve`]): it is set
+    /// on the child's environment and reported by XTGETTCAP `TN`, so the two
+    /// cannot disagree.
+    ///
     /// # Errors
     ///
     // 72.6: 8th parameter is the shell-integration TERM_PROGRAM flag,
     // derived from the GUI's config and forwarded straight to PtySpawnConfig.
+    // 151.6: 9th parameter is the pane's resolved `TERM`, forwarded to
+    // PtySpawnConfig and the handler.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         args: &Args,
@@ -400,6 +406,7 @@ impl TerminalEmulator {
         shell_override: Option<&str>,
         pane_id: u32,
         set_term_program: bool,
+        term: &TermName,
     ) -> Result<(Self, Receiver<PtyRead>), InterfaceError> {
         // Two channels feed the PTY writer thread (GHSA-6cxq-f7hx-92v2):
         // `write_tx`, unbounded, carries user input; `reply_tx`, bounded,
@@ -451,6 +458,7 @@ impl TerminalEmulator {
                 cwd,
                 extra_env,
                 set_term_program,
+                term,
             },
             &initial_size,
             pane_id,
@@ -471,6 +479,8 @@ impl TerminalEmulator {
         internal.handler.set_control_tx(write_tx.clone());
         internal.handler.set_reply_budget(queued_reply_bytes);
         internal.handler.set_pending_resize(pending_resize);
+        // XTGETTCAP `TN` reports the same `TERM` the child was just given.
+        internal.handler.set_term_name(term.clone());
 
         let ret = Self {
             internal,

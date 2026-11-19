@@ -11564,6 +11564,18 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   `from_toml_str`, which has none). `[shell]` was already a whole-section `ConfigPartial`
   entry, so only the guard test changed. Settings Shell tab, `config_example.toml` and the
   home-manager option are wired.
+- **151.6 (done).** `TermName` (`term_name.rs`) with `TermName::resolve(&ShellConfig,
+  TermPlatform, pane env)`: a pane `env` `TERM` (taken as given), then `[shell] term`, then
+  the platform default. Every spawn site (`tab_spawning.rs` new tab, split and layout leaf;
+  `app_impl.rs` initial and second spawn) resolves it once and passes it through
+  `PtyTabConfig` to `TerminalEmulator::new` (now nine parameters, under its existing
+  `too_many_arguments` allow) and `PtySpawnConfig`. `run_terminal` sets `TERM` once
+  (`apply_term_env`) and the extra-env loop skips `TERM`. XTGETTCAP `TN` reads the handler's
+  `term_name` (`lookup_termcap` now takes it); the Task 76.6 guard checks `TN` equals the
+  child's `TERM`. FREC `term` is per recording, so it records the `[shell] term` resolution
+  (`recording_term`); a pane-level `env` `TERM` is not visible in the header. `reset()` grew
+  one line past `too_many_lines` with the new reset-table row and carries an `#[expect]`
+  with the reason. A Unix test spawns a real `/bin/sh` and checks `$TERM` in each case.
 
 ---
 

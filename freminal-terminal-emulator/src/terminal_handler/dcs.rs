@@ -283,7 +283,7 @@ impl TerminalHandler {
                 continue;
             }
 
-            if let Some(value) = Self::lookup_termcap(&cap_name) {
+            if let Some(value) = Self::lookup_termcap(&cap_name, self.term_name.as_str()) {
                 let hex_value = Self::hex_encode(value);
                 self.write_dcs_response(&format!("1+r{hex_name}={hex_value}"));
             } else {
@@ -349,8 +349,9 @@ impl TerminalHandler {
     /// Look up a termcap/terminfo capability by decoded name.
     ///
     /// Returns `Some(value_str)` for known capabilities, `None` for unknown ones.
-    /// The returned string is the raw value (not yet hex-encoded).
-    fn lookup_termcap(name: &str) -> Option<&'static str> {
+    /// The returned string is the raw value (not yet hex-encoded).  `term` is the
+    /// pane's `TERM`, the only capability that is not a constant (`TN`).
+    fn lookup_termcap<'a>(name: &str, term: &'a str) -> Option<&'a str> {
         match name {
             // RGB — terminal supports direct-color (24-bit) via SGR 38/48;2;R;G;B
             "RGB" => Some("8/8/8"),
@@ -366,16 +367,12 @@ impl TerminalHandler {
             "setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
             // colors — number of colors supported
             "colors" | "Co" => Some("256"),
-            // TN — terminal name.  This MUST match the runtime `TERM` value
-            // (`xterm-256color`, set in `io::pty::run_terminal`), since TN is
-            // defined as "the value of $TERM".  Freminal deliberately presents
-            // as `xterm-256color` for maximum compatibility (the Task-12
-            // strategy mirroring WezTerm/Alacritty); the freminal identity is
-            // advertised separately via `TERM_PROGRAM=freminal` (Task 72.6)
-            // and the XTVERSION `>|XTerm(Freminal ...)` payload.  Do not change
-            // TN to `freminal` — it would desync from TERM and break terminfo
-            // lookups.
-            "TN" => Some("xterm-256color"),
+            // TN — terminal name: the value of $TERM.  It is the `TERM` the pane's child
+            // was actually given (`TermName::resolve`, computed once at spawn), never a
+            // constant, so the two cannot desync.  The freminal identity is advertised
+            // separately via `TERM_PROGRAM=freminal` (Task 72.6) and the XTVERSION
+            // `>|XTerm(Freminal ...)` payload.
+            "TN" => Some(term),
             // Ms — set selection (clipboard) via OSC 52
             "Ms" => Some("\x1b]52;%p1%s;%p2%s\x1b\\"),
             // Se — reset cursor to default style (DECSCUSR 0, which restores the
@@ -434,9 +431,11 @@ mod tests {
     use freminal_common::{
         buffer_states::{modes::s8c1t::S8c1t, terminal_output::TerminalOutput},
         colors::TerminalColor,
+        config::ShellConfig,
         cursor::CursorVisualStyle,
         pty_write::PtyWrite,
         sgr::SelectGraphicRendition,
+        term_name::{TermName, TermPlatform},
     };
 
     use super::TerminalHandler;
@@ -920,9 +919,11 @@ mod tests {
         assert_eq!(response, "\x1bP1+r636F6C6F7273=323536\x1b\\");
     }
 
-    #[test]
-    fn xtgettcap_known_capability_tn() {
+    /// Answer a `TN` query on a handler whose child was given `term`, and
+    /// return the decoded `TN` value.
+    fn tn_reply_for(term: &TermName) -> String {
         let mut handler = TerminalHandler::new(80, 24);
+        handler.set_term_name(term.clone());
         let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
         handler.set_write_tx(tx);
 
@@ -931,13 +932,72 @@ mod tests {
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        // Regression guard (Task 76.6): TN must report `xterm-256color`, the
-        // same value as the runtime `TERM` env var.  TN is "the value of
-        // $TERM"; reporting `freminal` would desync from TERM and break
-        // terminfo lookups.  Freminal advertises its identity via
-        // TERM_PROGRAM and XTVERSION instead.
-        let expected_hex = TerminalHandler::hex_encode("xterm-256color");
+        let Some(hex_value) = response
+            .strip_prefix("\x1bP1+r544E=")
+            .and_then(|r| r.strip_suffix("\x1b\\"))
+        else {
+            panic!("unexpected TN reply: {response:?}");
+        };
+        TerminalHandler::hex_decode(hex_value).unwrap_or_else(|| panic!("TN value is not hex"))
+    }
+
+    #[test]
+    fn xtgettcap_known_capability_tn() {
+        // Regression guard (Task 76.6, reworked by Task 151.6): TN is "the value
+        // of $TERM", so it must equal the `TERM` the pane's child was given.  A
+        // freshly constructed handler holds the platform default.
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let dcs = build_dcs_payload(b"+q544E");
+        handler.handle_device_control_string(&dcs);
+
+        let response = recv_pty_response(&rx);
+        let expected_hex = TerminalHandler::hex_encode(TermName::default().as_str());
         assert_eq!(response, format!("\x1bP1+r544E={expected_hex}\x1b\\"));
+    }
+
+    #[test]
+    fn xtgettcap_tn_default_is_xterm_freminal_off_windows() {
+        let term = TermName::platform_default(TermPlatform::Other);
+        assert_eq!(tn_reply_for(&term), "xterm-freminal");
+    }
+
+    #[test]
+    fn xtgettcap_tn_equals_the_resolved_term_in_every_precedence_case() {
+        let env =
+            std::collections::HashMap::from([("TERM".to_owned(), "screen-256color".to_owned())]);
+        let configured = ShellConfig {
+            term: Some("xterm-256color".to_owned()),
+            ..ShellConfig::default()
+        };
+        let cases = [
+            (ShellConfig::default(), None, "xterm-freminal"),
+            (configured.clone(), None, "xterm-256color"),
+            (configured, Some(&env), "screen-256color"),
+            (ShellConfig::default(), Some(&env), "screen-256color"),
+        ];
+        for (shell, pane_env, expected) in cases {
+            let term = TermName::resolve(&shell, TermPlatform::Other, pane_env);
+            assert_eq!(term.as_str(), expected);
+            assert_eq!(tn_reply_for(&term), expected);
+        }
+    }
+
+    #[test]
+    fn xtgettcap_tn_survives_a_full_reset() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.set_term_name(TermName::resolve(
+            &ShellConfig {
+                term: Some("xterm-256color".to_owned()),
+                ..ShellConfig::default()
+            },
+            TermPlatform::Other,
+            None,
+        ));
+        handler.full_reset();
+        assert_eq!(handler.term_name().as_str(), "xterm-256color");
     }
 
     #[test]
@@ -970,7 +1030,7 @@ mod tests {
         assert_eq!(response1, "\x1bP1+r524742=382F382F38\x1b\\");
 
         let response2 = recv_pty_response(&rx);
-        let tn_hex = TerminalHandler::hex_encode("xterm-256color");
+        let tn_hex = TerminalHandler::hex_encode(TermName::default().as_str());
         assert_eq!(response2, format!("\x1bP1+r544E={tn_hex}\x1b\\"));
     }
 
@@ -1330,6 +1390,9 @@ mod tests {
     // Table of truth: `res/freminal.ti` against `lookup_termcap`
     // ------------------------------------------------------------------
 
+    /// The `TERM` handed to `lookup_termcap` where the test is not about `TN`.
+    const TEST_TERM: &str = "xterm-freminal";
+
     const TERMINFO_SOURCE: &str = include_str!("../../../res/freminal.ti");
     const DCS_SOURCE: &str = include_str!("dcs.rs");
 
@@ -1502,7 +1565,7 @@ mod tests {
     /// The names `lookup_termcap` answers, read from its match arms so that
     /// a newly added arm cannot escape the table-of-truth test.
     fn xtgettcap_answered_names() -> Vec<&'static str> {
-        let Some(start) = DCS_SOURCE.find("fn lookup_termcap(name: &str)") else {
+        let Some(start) = DCS_SOURCE.find("fn lookup_termcap<'a>(name: &str") else {
             panic!("lookup_termcap not found");
         };
         let body = &DCS_SOURCE[start..];
@@ -1584,7 +1647,7 @@ mod tests {
                 .map_or(name, |(_, terminfo)| *terminfo);
             assert_eq!(
                 entry.get(terminfo_name).map(String::as_str),
-                TerminalHandler::lookup_termcap(name),
+                TerminalHandler::lookup_termcap(name, TEST_TERM),
                 "XTGETTCAP {name} disagrees with {terminfo_name} in res/freminal.ti"
             );
         }
@@ -1604,7 +1667,7 @@ mod tests {
             );
             let answers = candidates
                 .iter()
-                .filter_map(|candidate| TerminalHandler::lookup_termcap(candidate))
+                .filter_map(|candidate| TerminalHandler::lookup_termcap(candidate, TEST_TERM))
                 .collect::<Vec<_>>();
 
             if answers.is_empty() {
@@ -1623,7 +1686,7 @@ mod tests {
         for name in TERMINFO_ONLY.iter().copied() {
             assert!(entry.contains_key(name), "stale TERMINFO_ONLY name {name}");
             assert_eq!(
-                TerminalHandler::lookup_termcap(name),
+                TerminalHandler::lookup_termcap(name, TEST_TERM),
                 None,
                 "{name} is answered by XTGETTCAP, so it is not terminfo-only"
             );

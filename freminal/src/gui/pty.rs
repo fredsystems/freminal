@@ -22,6 +22,7 @@ use freminal_common::buffer_states::modes::theme::Theming;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
+use freminal_common::term_name::TermName;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, PtyRead, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::recording::{
@@ -727,6 +728,10 @@ pub struct PtyTabConfig<'a> {
     /// When `true`, set `TERM_PROGRAM=freminal` on the child.  Forwarded
     /// from `config.shell_integration.set_term_program` (Task 72.6).
     pub set_term_program: bool,
+    /// The pane's effective `TERM`, computed once at spawn with
+    /// [`TermName::resolve`] (a `TERM` in `extra_env` wins over `[shell] term`).
+    /// It is the child's `TERM` and what XTGETTCAP `TN` reports.
+    pub term: TermName,
 }
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
@@ -759,6 +764,7 @@ pub fn spawn_pty_tab(
         tab_cfg.shell_override,
         tab_cfg.recording_pane_id,
         tab_cfg.set_term_program,
+        &tab_cfg.term,
     )?;
 
     apply_initial_state(&mut terminal.internal.handler, initial_state);

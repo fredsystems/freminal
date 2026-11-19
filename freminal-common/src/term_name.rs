@@ -8,9 +8,15 @@
 //! [`TermPlatform`] selects the platform default and [`validate_term_name`] checks a
 //! user-configured value (`[shell] term`).  Both are pure so every platform's behaviour is
 //! testable on every host.  `ShellConfig::effective_term` (in [`crate::config`]) combines them
-//! into the single resolved value.
+//! into the configured value, and [`TermName::resolve`] adds the per-pane `env` override to give
+//! the single value computed once per pane at spawn.
+
+use std::collections::HashMap;
+use std::fmt;
 
 use thiserror::Error;
+
+use crate::config::ShellConfig;
 
 /// The default `TERM`: freminal's own terminfo entry.
 pub const DEFAULT_TERM: &str = "xterm-freminal";
@@ -49,6 +55,75 @@ impl TermPlatform {
             Self::Windows => WINDOWS_DEFAULT_TERM,
             Self::Other => DEFAULT_TERM,
         }
+    }
+}
+
+/// The environment variable that carries the terminal name.
+const TERM_ENV_KEY: &str = "TERM";
+
+/// The `TERM` a pane advertises: the one value used for the child's environment, XTGETTCAP `TN`
+/// and the FREC `term` metadata.
+///
+/// Computed once per pane at spawn by [`TermName::resolve`].  A `TERM` in the pane's (or the
+/// layout's) `env` map wins over `[shell] term`, which wins over the platform default.  The `env`
+/// value is taken verbatim: it is an explicit instruction for that pane, and honouring it exactly
+/// is what keeps the child, `TN` and the recording in agreement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermName(String);
+
+impl TermName {
+    /// Resolve the `TERM` for a pane spawned on `platform` with the given `[shell]` config and
+    /// per-pane `env` map.
+    #[must_use]
+    pub fn resolve(
+        shell: &ShellConfig,
+        platform: TermPlatform,
+        pane_env: Option<&HashMap<String, String>>,
+    ) -> Self {
+        let term = pane_env
+            .and_then(Self::env_override)
+            .unwrap_or_else(|| shell.effective_term(platform));
+        Self(term.to_owned())
+    }
+
+    /// The `TERM` set by a per-pane `env` map, if it has one.
+    #[must_use]
+    pub fn env_override(env: &HashMap<String, String>) -> Option<&str> {
+        env.get(TERM_ENV_KEY).map(String::as_str)
+    }
+
+    /// Whether `key` names the `TERM` variable in a per-pane `env` map.
+    ///
+    /// The spawn path skips this key when it applies the map, because the value is already
+    /// folded into the [`TermName`] it sets.
+    #[must_use]
+    pub fn is_env_key(key: &str) -> bool {
+        key == TERM_ENV_KEY
+    }
+
+    /// The default `TERM` on `platform`, for panes with no configuration to read.
+    #[must_use]
+    pub fn platform_default(platform: TermPlatform) -> Self {
+        Self(platform.default_term().to_owned())
+    }
+
+    /// The name as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for TermName {
+    /// The default `TERM` on the platform this binary was compiled for.
+    fn default() -> Self {
+        Self::platform_default(TermPlatform::current())
+    }
+}
+
+impl fmt::Display for TermName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -109,6 +184,97 @@ mod tests {
     fn platform_defaults() {
         assert_eq!(TermPlatform::Other.default_term(), "xterm-freminal");
         assert_eq!(TermPlatform::Windows.default_term(), "xterm-256color");
+    }
+
+    fn shell_with_term(term: Option<&str>) -> ShellConfig {
+        ShellConfig {
+            term: term.map(str::to_owned),
+            ..ShellConfig::default()
+        }
+    }
+
+    fn env_with_term(term: &str) -> HashMap<String, String> {
+        HashMap::from([("TERM".to_owned(), term.to_owned())])
+    }
+
+    #[test]
+    fn resolve_uses_the_platform_default_without_config_or_env() {
+        let shell = shell_with_term(None);
+        for platform in [TermPlatform::Other, TermPlatform::Windows] {
+            assert_eq!(
+                TermName::resolve(&shell, platform, None).as_str(),
+                platform.default_term()
+            );
+            assert_eq!(
+                TermName::resolve(&shell, platform, Some(&HashMap::new())).as_str(),
+                platform.default_term()
+            );
+        }
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, None).as_str(),
+            "xterm-freminal"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_the_configured_term_over_the_default() {
+        let shell = shell_with_term(Some("xterm-256color"));
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, None).as_str(),
+            "xterm-256color"
+        );
+    }
+
+    #[test]
+    fn resolve_ignores_an_invalid_configured_term() {
+        let shell = shell_with_term(Some("a b"));
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, None).as_str(),
+            "xterm-freminal"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_the_pane_env_term_over_config() {
+        let shell = shell_with_term(Some("xterm-256color"));
+        let env = env_with_term("screen-256color");
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, Some(&env)).as_str(),
+            "screen-256color"
+        );
+        assert_eq!(
+            TermName::resolve(&shell_with_term(None), TermPlatform::Windows, Some(&env)).as_str(),
+            "screen-256color"
+        );
+    }
+
+    #[test]
+    fn resolve_ignores_unrelated_env_entries() {
+        let shell = shell_with_term(None);
+        let env = HashMap::from([("TERM_PROGRAM".to_owned(), "other".to_owned())]);
+        assert_eq!(
+            TermName::resolve(&shell, TermPlatform::Other, Some(&env)).as_str(),
+            "xterm-freminal"
+        );
+    }
+
+    #[test]
+    fn env_key_is_exactly_term() {
+        assert!(TermName::is_env_key("TERM"));
+        assert!(!TermName::is_env_key("TERM_PROGRAM"));
+        assert!(!TermName::is_env_key("term"));
+    }
+
+    #[test]
+    fn default_is_the_current_platform_default() {
+        assert_eq!(
+            TermName::default().as_str(),
+            TermPlatform::current().default_term()
+        );
+        assert_eq!(
+            TermName::default().to_string(),
+            TermName::default().as_str()
+        );
     }
 
     #[test]
