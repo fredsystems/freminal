@@ -843,7 +843,7 @@ Update this section as tasks complete:
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
 | 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
 | 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
-| 139  | 2026-11-19 |            | Activated and decomposed (139.1-139.5); in progress on `task-139/pointer-shapes`      |
+| 139  | 2026-11-19 |            | 139.1 done; 139.2-139.5 in progress on `task-139/pointer-shapes`                   |
 
 ---
 

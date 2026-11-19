@@ -8,6 +8,11 @@
 //!
 //! The variants map 1-to-1 onto `egui::CursorIcon` so the GUI can convert
 //! without carrying an egui dependency into the common crate.
+//!
+//! [`PointerShape::from_name`] is the one name table: the CSS cursor names from
+//! the kitty pointer-shapes specification, freminal's extras, and kitty's
+//! legacy X11 aliases.  [`PointerShape::css_name`] gives the canonical name of
+//! a shape, which is also what `Display` prints.
 
 use std::fmt;
 
@@ -91,110 +96,118 @@ pub enum PointerShape {
     ZoomOut,
 }
 
-impl fmt::Display for PointerShape {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl PointerShape {
+    /// Look up a pointer shape by its OSC 22 name.
+    ///
+    /// This is the single name table.  It accepts the 30 CSS cursor names from
+    /// the kitty pointer-shapes specification, freminal's extras (`none`,
+    /// `context-menu`, `all-scroll`), the CSS names `col-resize` / `row-resize`
+    /// (aliases of `ew-resize` / `ns-resize`), and kitty's legacy X11 aliases.
+    ///
+    /// Matching is case-sensitive and the name is not trimmed.  Anything not in
+    /// the table, including the empty string, returns `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let shape = match name {
+            "default" | "left_ptr" | "arrow" => Self::Default,
+            "none" => Self::None,
+            "text" | "xterm" | "ibeam" | "beam" => Self::Text,
+            "vertical-text" => Self::VerticalText,
+            "pointer" | "pointing_hand" | "hand2" | "hand" => Self::Pointer,
+            "context-menu" => Self::ContextMenu,
+            "help" | "question_arrow" | "whats_this" => Self::Help,
+            "progress" | "half-busy" | "left_ptr_watch" => Self::Progress,
+            "wait" | "clock" | "watch" => Self::Wait,
+            "cell" | "plus" | "cross" => Self::Cell,
+            "crosshair" | "tcross" => Self::Crosshair,
+            "move" | "fleur" | "pointer-move" => Self::Move,
+            "no-drop" | "dnd-no-drop" => Self::NoDrop,
+            "not-allowed" | "forbidden" | "crossed_circle" => Self::NotAllowed,
+            "grab" | "openhand" | "hand1" => Self::Grab,
+            "grabbing" | "closedhand" | "dnd-none" => Self::Grabbing,
+            "alias" | "dnd-link" => Self::Alias,
+            "copy" | "dnd-copy" => Self::Copy,
+            "all-scroll" => Self::AllScroll,
+            "ew-resize" | "col-resize" | "sb_h_double_arrow" | "split_h" => Self::ResizeHorizontal,
+            "ns-resize" | "row-resize" | "sb_v_double_arrow" | "split_v" => Self::ResizeVertical,
+            "nesw-resize" | "size_bdiag" | "size-bdiag" => Self::ResizeNeSw,
+            "nwse-resize" | "size_fdiag" | "size-fdiag" => Self::ResizeNwSe,
+            "e-resize" | "right_side" => Self::ResizeEast,
+            "se-resize" | "bottom_right_corner" => Self::ResizeSouthEast,
+            "s-resize" | "bottom_side" => Self::ResizeSouth,
+            "sw-resize" | "bottom_left_corner" => Self::ResizeSouthWest,
+            "w-resize" | "left_side" => Self::ResizeWest,
+            "nw-resize" | "top_left_corner" => Self::ResizeNorthWest,
+            "n-resize" | "top_side" => Self::ResizeNorth,
+            "ne-resize" | "top_right_corner" => Self::ResizeNorthEast,
+            "zoom-in" | "zoom_in" => Self::ZoomIn,
+            "zoom-out" | "zoom_out" => Self::ZoomOut,
+            _ => return Option::None,
+        };
+        Some(shape)
+    }
+
+    /// The canonical name of this shape.
+    ///
+    /// A shape set through an alias is reported by this name.  Every
+    /// canonical name is accepted by [`PointerShape::from_name`] and maps back
+    /// to the same variant.
+    #[must_use]
+    pub const fn css_name(self) -> &'static str {
         match self {
-            Self::Default => write!(f, "default"),
-            Self::None => write!(f, "none"),
-            Self::Text => write!(f, "text"),
-            Self::VerticalText => write!(f, "vertical-text"),
-            Self::Pointer => write!(f, "pointer"),
-            Self::ContextMenu => write!(f, "context-menu"),
-            Self::Help => write!(f, "help"),
-            Self::Progress => write!(f, "progress"),
-            Self::Wait => write!(f, "wait"),
-            Self::Cell => write!(f, "cell"),
-            Self::Crosshair => write!(f, "crosshair"),
-            Self::Move => write!(f, "move"),
-            Self::NoDrop => write!(f, "no-drop"),
-            Self::NotAllowed => write!(f, "not-allowed"),
-            Self::Grab => write!(f, "grab"),
-            Self::Grabbing => write!(f, "grabbing"),
-            Self::Alias => write!(f, "alias"),
-            Self::Copy => write!(f, "copy"),
-            Self::AllScroll => write!(f, "all-scroll"),
-            Self::ResizeHorizontal => write!(f, "col-resize"),
-            Self::ResizeVertical => write!(f, "row-resize"),
-            Self::ResizeNeSw => write!(f, "nesw-resize"),
-            Self::ResizeNwSe => write!(f, "nwse-resize"),
-            Self::ResizeEast => write!(f, "e-resize"),
-            Self::ResizeSouthEast => write!(f, "se-resize"),
-            Self::ResizeSouth => write!(f, "s-resize"),
-            Self::ResizeSouthWest => write!(f, "sw-resize"),
-            Self::ResizeWest => write!(f, "w-resize"),
-            Self::ResizeNorthWest => write!(f, "nw-resize"),
-            Self::ResizeNorth => write!(f, "n-resize"),
-            Self::ResizeNorthEast => write!(f, "ne-resize"),
-            Self::ZoomIn => write!(f, "zoom-in"),
-            Self::ZoomOut => write!(f, "zoom-out"),
+            Self::Default => "default",
+            Self::None => "none",
+            Self::Text => "text",
+            Self::VerticalText => "vertical-text",
+            Self::Pointer => "pointer",
+            Self::ContextMenu => "context-menu",
+            Self::Help => "help",
+            Self::Progress => "progress",
+            Self::Wait => "wait",
+            Self::Cell => "cell",
+            Self::Crosshair => "crosshair",
+            Self::Move => "move",
+            Self::NoDrop => "no-drop",
+            Self::NotAllowed => "not-allowed",
+            Self::Grab => "grab",
+            Self::Grabbing => "grabbing",
+            Self::Alias => "alias",
+            Self::Copy => "copy",
+            Self::AllScroll => "all-scroll",
+            Self::ResizeHorizontal => "ew-resize",
+            Self::ResizeVertical => "ns-resize",
+            Self::ResizeNeSw => "nesw-resize",
+            Self::ResizeNwSe => "nwse-resize",
+            Self::ResizeEast => "e-resize",
+            Self::ResizeSouthEast => "se-resize",
+            Self::ResizeSouth => "s-resize",
+            Self::ResizeSouthWest => "sw-resize",
+            Self::ResizeWest => "w-resize",
+            Self::ResizeNorthWest => "nw-resize",
+            Self::ResizeNorth => "n-resize",
+            Self::ResizeNorthEast => "ne-resize",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
         }
     }
 }
 
+impl fmt::Display for PointerShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.css_name())
+    }
+}
+
 impl From<&str> for PointerShape {
-    /// Convert an xcursor / CSS cursor name to a `PointerShape`.
+    /// Convert an xcursor / CSS cursor name to a `PointerShape`, trimming the
+    /// name first.  Unknown names and empty strings map to
+    /// `PointerShape::Default`.
     ///
-    /// Unknown names and empty strings map to `PointerShape::Default`.
+    /// TODO(139.3): temporary shim so the OSC 22 parser keeps compiling.  Task
+    /// 139.3 removes it in favour of [`PointerShape::from_name`], which is
+    /// case-sensitive, does not trim, and reports unknown names.
     fn from(name: &str) -> Self {
-        match name.trim() {
-            // Hide cursor
-            "none" => Self::None,
-            // Text
-            "text" | "xterm" => Self::Text,
-            "vertical-text" => Self::VerticalText,
-            // Pointer
-            "pointer" | "hand" | "hand2" => Self::Pointer,
-            // Help
-            "help" => Self::Help,
-            // Context menu
-            "context-menu" => Self::ContextMenu,
-            // Progress
-            "progress" | "left_ptr_watch" => Self::Progress,
-            // Wait
-            "wait" | "watch" => Self::Wait,
-            // Crosshair
-            "crosshair" => Self::Crosshair,
-            // Cell
-            "cell" => Self::Cell,
-            // Move
-            "move" | "fleur" => Self::Move,
-            // No-drop
-            "no-drop" => Self::NoDrop,
-            // Not-allowed
-            "not-allowed" => Self::NotAllowed,
-            // Grab
-            "grab" => Self::Grab,
-            // Grabbing
-            "grabbing" => Self::Grabbing,
-            // Alias
-            "alias" => Self::Alias,
-            // Copy
-            "copy" => Self::Copy,
-            // All-scroll
-            "all-scroll" => Self::AllScroll,
-            // Horizontal resize
-            "col-resize" | "ew-resize" => Self::ResizeHorizontal,
-            // Vertical resize
-            "row-resize" | "ns-resize" => Self::ResizeVertical,
-            // Diagonal resize NE-SW
-            "nesw-resize" => Self::ResizeNeSw,
-            // Diagonal resize NW-SE
-            "nwse-resize" => Self::ResizeNwSe,
-            // Directional resizes
-            "e-resize" => Self::ResizeEast,
-            "se-resize" => Self::ResizeSouthEast,
-            "s-resize" => Self::ResizeSouth,
-            "sw-resize" => Self::ResizeSouthWest,
-            "w-resize" => Self::ResizeWest,
-            "nw-resize" => Self::ResizeNorthWest,
-            "n-resize" => Self::ResizeNorth,
-            "ne-resize" => Self::ResizeNorthEast,
-            // Zoom
-            "zoom-in" => Self::ZoomIn,
-            "zoom-out" => Self::ZoomOut,
-            // Unknown names, empty string, and explicit "default"/"arrow"/"left_ptr" all map here
-            _ => Self::Default,
-        }
+        Self::from_name(name.trim()).unwrap_or_default()
     }
 }
 
@@ -380,6 +393,233 @@ mod tests {
     }
 
     #[test]
+    fn shim_trims_and_defaults_unknown() {
+        assert_eq!(PointerShape::from(" text "), PointerShape::Text);
+        assert_eq!(PointerShape::from("\tpointer"), PointerShape::Pointer);
+        assert_eq!(PointerShape::from("Pointer"), PointerShape::Default);
+        assert_eq!(PointerShape::from("TEXT"), PointerShape::Default);
+    }
+
+    // ── from_name / css_name ────────────────────────────────────────
+
+    const SPEC_NAMES: [(&str, PointerShape); 30] = [
+        ("alias", PointerShape::Alias),
+        ("cell", PointerShape::Cell),
+        ("copy", PointerShape::Copy),
+        ("crosshair", PointerShape::Crosshair),
+        ("default", PointerShape::Default),
+        ("e-resize", PointerShape::ResizeEast),
+        ("ew-resize", PointerShape::ResizeHorizontal),
+        ("grab", PointerShape::Grab),
+        ("grabbing", PointerShape::Grabbing),
+        ("help", PointerShape::Help),
+        ("move", PointerShape::Move),
+        ("n-resize", PointerShape::ResizeNorth),
+        ("ne-resize", PointerShape::ResizeNorthEast),
+        ("nesw-resize", PointerShape::ResizeNeSw),
+        ("no-drop", PointerShape::NoDrop),
+        ("not-allowed", PointerShape::NotAllowed),
+        ("ns-resize", PointerShape::ResizeVertical),
+        ("nw-resize", PointerShape::ResizeNorthWest),
+        ("nwse-resize", PointerShape::ResizeNwSe),
+        ("pointer", PointerShape::Pointer),
+        ("progress", PointerShape::Progress),
+        ("s-resize", PointerShape::ResizeSouth),
+        ("se-resize", PointerShape::ResizeSouthEast),
+        ("sw-resize", PointerShape::ResizeSouthWest),
+        ("text", PointerShape::Text),
+        ("vertical-text", PointerShape::VerticalText),
+        ("w-resize", PointerShape::ResizeWest),
+        ("wait", PointerShape::Wait),
+        ("zoom-in", PointerShape::ZoomIn),
+        ("zoom-out", PointerShape::ZoomOut),
+    ];
+
+    const EXTRA_NAMES: [(&str, PointerShape); 3] = [
+        ("none", PointerShape::None),
+        ("context-menu", PointerShape::ContextMenu),
+        ("all-scroll", PointerShape::AllScroll),
+    ];
+
+    const CSS_ALIASES: [(&str, PointerShape); 2] = [
+        ("col-resize", PointerShape::ResizeHorizontal),
+        ("row-resize", PointerShape::ResizeVertical),
+    ];
+
+    const KITTY_ALIASES: [(&str, PointerShape); 46] = [
+        ("left_ptr", PointerShape::Default),
+        ("arrow", PointerShape::Default),
+        ("xterm", PointerShape::Text),
+        ("ibeam", PointerShape::Text),
+        ("beam", PointerShape::Text),
+        ("pointing_hand", PointerShape::Pointer),
+        ("hand2", PointerShape::Pointer),
+        ("hand", PointerShape::Pointer),
+        ("question_arrow", PointerShape::Help),
+        ("whats_this", PointerShape::Help),
+        ("clock", PointerShape::Wait),
+        ("watch", PointerShape::Wait),
+        ("half-busy", PointerShape::Progress),
+        ("left_ptr_watch", PointerShape::Progress),
+        ("tcross", PointerShape::Crosshair),
+        ("plus", PointerShape::Cell),
+        ("cross", PointerShape::Cell),
+        ("fleur", PointerShape::Move),
+        ("pointer-move", PointerShape::Move),
+        ("right_side", PointerShape::ResizeEast),
+        ("top_right_corner", PointerShape::ResizeNorthEast),
+        ("top_left_corner", PointerShape::ResizeNorthWest),
+        ("top_side", PointerShape::ResizeNorth),
+        ("bottom_right_corner", PointerShape::ResizeSouthEast),
+        ("bottom_left_corner", PointerShape::ResizeSouthWest),
+        ("bottom_side", PointerShape::ResizeSouth),
+        ("left_side", PointerShape::ResizeWest),
+        ("sb_h_double_arrow", PointerShape::ResizeHorizontal),
+        ("split_h", PointerShape::ResizeHorizontal),
+        ("sb_v_double_arrow", PointerShape::ResizeVertical),
+        ("split_v", PointerShape::ResizeVertical),
+        ("size_bdiag", PointerShape::ResizeNeSw),
+        ("size-bdiag", PointerShape::ResizeNeSw),
+        ("size_fdiag", PointerShape::ResizeNwSe),
+        ("size-fdiag", PointerShape::ResizeNwSe),
+        ("zoom_in", PointerShape::ZoomIn),
+        ("zoom_out", PointerShape::ZoomOut),
+        ("dnd-link", PointerShape::Alias),
+        ("dnd-copy", PointerShape::Copy),
+        ("forbidden", PointerShape::NotAllowed),
+        ("crossed_circle", PointerShape::NotAllowed),
+        ("dnd-no-drop", PointerShape::NoDrop),
+        ("openhand", PointerShape::Grab),
+        ("hand1", PointerShape::Grab),
+        ("closedhand", PointerShape::Grabbing),
+        ("dnd-none", PointerShape::Grabbing),
+    ];
+
+    const ALL_VARIANTS: [PointerShape; 33] = [
+        PointerShape::Default,
+        PointerShape::None,
+        PointerShape::Text,
+        PointerShape::VerticalText,
+        PointerShape::Pointer,
+        PointerShape::ContextMenu,
+        PointerShape::Help,
+        PointerShape::Progress,
+        PointerShape::Wait,
+        PointerShape::Cell,
+        PointerShape::Crosshair,
+        PointerShape::Move,
+        PointerShape::NoDrop,
+        PointerShape::NotAllowed,
+        PointerShape::Grab,
+        PointerShape::Grabbing,
+        PointerShape::Alias,
+        PointerShape::Copy,
+        PointerShape::AllScroll,
+        PointerShape::ResizeHorizontal,
+        PointerShape::ResizeVertical,
+        PointerShape::ResizeNeSw,
+        PointerShape::ResizeNwSe,
+        PointerShape::ResizeEast,
+        PointerShape::ResizeSouthEast,
+        PointerShape::ResizeSouth,
+        PointerShape::ResizeSouthWest,
+        PointerShape::ResizeWest,
+        PointerShape::ResizeNorthWest,
+        PointerShape::ResizeNorth,
+        PointerShape::ResizeNorthEast,
+        PointerShape::ZoomIn,
+        PointerShape::ZoomOut,
+    ];
+
+    #[test]
+    fn from_name_maps_every_table_entry() {
+        let tables: [&[(&str, PointerShape)]; 4] =
+            [&SPEC_NAMES, &EXTRA_NAMES, &CSS_ALIASES, &KITTY_ALIASES];
+        for table in tables {
+            for (name, expected) in table {
+                assert_eq!(
+                    PointerShape::from_name(name),
+                    Some(*expected),
+                    "name {name:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn css_name_round_trips_spec_and_extra_names() {
+        for (name, _) in SPEC_NAMES.iter().chain(EXTRA_NAMES.iter()) {
+            let shape = PointerShape::from_name(name).expect("table name");
+            assert_eq!(shape.css_name(), *name);
+        }
+    }
+
+    #[test]
+    fn from_name_of_css_name_is_identity_for_every_variant() {
+        for variant in ALL_VARIANTS {
+            assert_eq!(
+                PointerShape::from_name(variant.css_name()),
+                Some(variant),
+                "variant {variant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn css_name_of_aliases_is_canonical() {
+        assert_eq!(PointerShape::ResizeHorizontal.css_name(), "ew-resize");
+        assert_eq!(PointerShape::ResizeVertical.css_name(), "ns-resize");
+        for (alias, shape) in CSS_ALIASES.iter().chain(KITTY_ALIASES.iter()) {
+            let canonical = shape.css_name();
+            assert_ne!(canonical, *alias, "{alias:?} is not canonical");
+            assert_eq!(PointerShape::from_name(canonical), Some(*shape));
+        }
+    }
+
+    #[test]
+    fn display_delegates_to_css_name() {
+        for variant in ALL_VARIANTS {
+            assert_eq!(variant.to_string(), variant.css_name());
+        }
+    }
+
+    #[test]
+    fn from_name_is_case_sensitive() {
+        assert_eq!(PointerShape::from_name("Pointer"), None);
+        assert_eq!(PointerShape::from_name("TEXT"), None);
+        assert_eq!(PointerShape::from_name("Default"), None);
+        assert_eq!(PointerShape::from_name("Left_Ptr"), None);
+    }
+
+    #[test]
+    fn from_name_does_not_trim() {
+        assert_eq!(PointerShape::from_name(" text"), None);
+        assert_eq!(PointerShape::from_name("text "), None);
+        assert_eq!(PointerShape::from_name("\ttext"), None);
+        assert_eq!(PointerShape::from_name("   "), None);
+    }
+
+    #[test]
+    fn from_name_rejects_unknown_and_empty() {
+        assert_eq!(PointerShape::from_name(""), None);
+        assert_eq!(PointerShape::from_name("banana"), None);
+        assert_eq!(PointerShape::from_name("not-a-cursor"), None);
+        assert_eq!(PointerShape::from_name("text,pointer"), None);
+        assert_eq!(PointerShape::from_name("__current__"), None);
+    }
+
+    #[test]
+    fn shim_agrees_with_from_name_for_every_table_entry() {
+        let tables: [&[(&str, PointerShape)]; 4] =
+            [&SPEC_NAMES, &EXTRA_NAMES, &CSS_ALIASES, &KITTY_ALIASES];
+        for table in tables {
+            for (name, expected) in table {
+                assert_eq!(PointerShape::from(*name), *expected, "name {name:?}");
+            }
+        }
+    }
+
+    #[test]
     fn default_display_roundtrip() {
         assert_eq!(PointerShape::Default.to_string(), "default");
     }
@@ -419,8 +659,8 @@ mod tests {
         assert_eq!(PointerShape::Alias.to_string(), "alias");
         assert_eq!(PointerShape::Copy.to_string(), "copy");
         assert_eq!(PointerShape::AllScroll.to_string(), "all-scroll");
-        assert_eq!(PointerShape::ResizeHorizontal.to_string(), "col-resize");
-        assert_eq!(PointerShape::ResizeVertical.to_string(), "row-resize");
+        assert_eq!(PointerShape::ResizeHorizontal.to_string(), "ew-resize");
+        assert_eq!(PointerShape::ResizeVertical.to_string(), "ns-resize");
         assert_eq!(PointerShape::ResizeNeSw.to_string(), "nesw-resize");
         assert_eq!(PointerShape::ResizeNwSe.to_string(), "nwse-resize");
         assert_eq!(PointerShape::ResizeEast.to_string(), "e-resize");

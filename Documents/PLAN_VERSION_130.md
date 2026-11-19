@@ -10367,7 +10367,11 @@ Verification: markdownlint and `prettier --check` on the three files.
 
 ### 139 Status notes
 
-(none yet)
+- **139.1 (done).** `PointerShape::from_name` (the one table: 30 spec names, three extras,
+  `col-resize` / `row-resize`, 46 kitty aliases) and `css_name`; `Display` delegates. Every
+  name the old `From<&str>` accepted maps identically through the temporary shim. Changed
+  expectation: `display_all_pointer_shape_variants` (`ew-resize`, `ns-resize`; canonical-name
+  decision).
 
 ### 139 Cleanup entries
 
