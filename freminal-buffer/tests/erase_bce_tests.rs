@@ -223,6 +223,92 @@ fn dch_blanks_a_split_wide_glyph_with_the_background_only() {
     assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
     assert_erased(&buf, 0, 1..2);
     assert_eq!(buf.rows()[0].resolve_cell(2).tchar(), &TChar::Ascii(b'C'));
+    assert_erased(&buf, 0, WIDTH - 2..WIDTH);
+    assert_eq!(buf.rows()[0].cells().len(), WIDTH);
+}
+
+#[test]
+fn dch_of_a_wide_head_fills_every_vacated_column() {
+    // Deleting one column that holds a wide head removes both of its columns,
+    // so two columns are vacated at the right edge.
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), emoji("🙂"), TChar::Ascii(b'C')]);
+    buf.set_format(loud_tag());
+    buf.set_cursor_pos(Some(1), Some(0));
+    buf.delete_chars(1);
+
+    assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_eq!(buf.rows()[0].resolve_cell(1).tchar(), &TChar::Ascii(b'C'));
+    for col in 2..WIDTH - 2 {
+        assert_eq!(
+            buf.rows()[0].resolve_cell(col).tag(),
+            &FormatTag::default(),
+            "col {col} is outside the vacated columns"
+        );
+    }
+    assert_erased(&buf, 0, WIDTH - 2..WIDTH);
+}
+
+#[test]
+fn dch_fills_the_vacated_right_edge_with_the_background_only() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(3);
+
+    assert_untouched(&buf, 1, 0..2);
+    assert_untouched(&buf, 1, 2..WIDTH - 3);
+    assert_erased(&buf, 1, WIDTH - 3..WIDTH);
+    assert_untouched(&buf, 0, 0..WIDTH);
+    assert_untouched(&buf, 2, 0..WIDTH);
+}
+
+#[test]
+fn dch_larger_than_the_remaining_columns_fills_to_the_right_edge() {
+    let mut buf = filled(loud_tag());
+    buf.set_cursor_pos(Some(7), Some(1));
+    buf.delete_chars(100);
+
+    assert_untouched(&buf, 1, 0..7);
+    assert_erased(&buf, 1, 7..WIDTH);
+    assert_eq!(buf.rows()[1].cells().len(), WIDTH);
+}
+
+#[test]
+fn dch_past_the_stored_content_still_fills_the_right_edge() {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+    buf.set_format(loud_tag());
+    buf.set_cursor_pos(Some(5), Some(0));
+    buf.delete_chars(3);
+
+    assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_eq!(buf.rows()[0].resolve_cell(1).tchar(), &TChar::Ascii(b'B'));
+    assert_erased(&buf, 0, WIDTH - 3..WIDTH);
+}
+
+#[test]
+fn dch_with_a_default_background_keeps_the_row_sparse() {
+    let reverse_only = FormatTag {
+        colors: StateColors::default()
+            .with_color(TerminalColor::Red)
+            .with_reverse_video(ReverseVideo::On),
+        ..FormatTag::default()
+    };
+    let mut buf = filled(reverse_only);
+    buf.set_cursor_pos(Some(2), Some(1));
+    buf.delete_chars(3);
+
+    assert_eq!(
+        buf.rows()[1].cells().len(),
+        WIDTH - 3,
+        "no explicit cells at the right edge"
+    );
+
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+    buf.set_cursor_pos(Some(5), Some(0));
+    buf.delete_chars(3);
+    assert_eq!(buf.rows()[0].cells().len(), 2);
 }
 
 #[test]

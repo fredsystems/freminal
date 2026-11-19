@@ -156,14 +156,6 @@ fn sgr_222_resets_faint_only() {
     );
 }
 
-#[test]
-fn sgr_22_resets_bold_and_faint() {
-    assert_eq!(
-        extract_sgrs("\x1b[22m"),
-        vec![SelectGraphicRendition::NormalIntensity]
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Mixed semicolon/colon forms
 // ---------------------------------------------------------------------------

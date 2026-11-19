@@ -10843,6 +10843,14 @@ this section and the repo rules. No blocker. Every finding, nit and above, is fi
 - **R4:** `erase_tag` moves to `buffer/erase.rs`. **R10:** hoisted out of the ED/EL row loops.
 - **R11:** drop `sgr_22_clears_both_bold_and_faint` and the integration `sgr_22_resets_*`
   (existing `NormalIntensity` tests cover them).
+- **Status: done.** R1 lives in `Row::delete_cells_at`: with a non-default erase tag the
+  vacated columns (`logical_end - start`, wider than `n` when a wide glyph widens the deletion)
+  take the tag, and a DCH past the stored content still fills the edge; a default tag keeps the
+  row sparse. Five new DCH tests, four of which fail on the old code (the sparse-row one pins
+  existing behaviour). R3: `parse_colon_parts` saturates only the first `4:` subparameter;
+  colour overflow and `4:x` stay `Invalid`. R11 is covered by
+  `sgr_normal_intensity_clears_bold_and_faint` and the CSI `22m` assertion. No DCH benchmark
+  exists.
 
 #### 140.C3 — Renderer review fixes
 

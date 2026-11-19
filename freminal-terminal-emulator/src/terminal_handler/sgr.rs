@@ -382,16 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn sgr_22_clears_both_bold_and_faint() {
-        let mut tag = FormatTag::default();
-        apply_number(&mut tag, 1);
-        apply_number(&mut tag, 2);
-        apply_number(&mut tag, 22);
-        assert_eq!(tag.font_weight, FontWeight::Normal);
-        assert!(!tag.font_decorations.contains(FontDecorations::Faint));
-    }
-
-    #[test]
     fn sgr_italic_toggle() {
         let mut tag = FormatTag::default();
         apply_sgr(&mut tag, &SelectGraphicRendition::Italic);

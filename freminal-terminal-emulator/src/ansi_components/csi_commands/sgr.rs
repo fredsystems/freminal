@@ -10,6 +10,7 @@ use crate::ansi_components::csi_commands::sgr_color::{
     SgrColorError, SgrColorForm, parse_sgr_color,
 };
 use crate::ansi_components::tracer::escape_sequence_for_log;
+use crate::error::AnsiParseError;
 use freminal_common::buffer_states::fonts::UnderlineStyle;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::TerminalColor;
@@ -204,11 +205,7 @@ const fn color_sgr(primary: usize, color: TerminalColor) -> TerminalOutput {
 /// - `58:2:...:R:G:B` — truecolor underline color
 /// - `38:5:IDX` / `48:5:IDX` / `58:5:IDX` — 256-color palette
 fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) -> SgrFlow {
-    let Ok(parts) = segment
-        .split(|b| *b == b':')
-        .map(parse_param_as::<usize>)
-        .collect::<Result<Vec<Option<usize>>, _>>()
-    else {
+    let Ok(parts) = parse_colon_parts(segment) else {
         output.push(TerminalOutput::Invalid);
         return SgrFlow::Continue;
     };
@@ -233,6 +230,33 @@ fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) -> Sg
         }
     }
     SgrFlow::Continue
+}
+
+/// Parse the colon-separated values of one SGR segment.
+///
+/// A value that is not a number makes the whole segment unusable. The one
+/// exception is the style of an underline (`4:N`), where a number too large
+/// for `usize` saturates so that it clamps to a dashed underline like any
+/// other `N` above the highest style.
+fn parse_colon_parts(segment: &[u8]) -> Result<Vec<Option<usize>>, AnsiParseError> {
+    let mut raw = segment.split(|b| *b == b':');
+    let primary = parse_param_as::<usize>(raw.next().unwrap_or_default())?;
+    let mut parts = vec![primary];
+    for (index, bytes) in raw.enumerate() {
+        let is_underline_style = primary == Some(4) && index == 0;
+        let value = match parse_param_as::<usize>(bytes) {
+            Err(_)
+                if is_underline_style
+                    && !bytes.is_empty()
+                    && bytes.iter().all(u8::is_ascii_digit) =>
+            {
+                Some(usize::MAX)
+            }
+            other => other?,
+        };
+        parts.push(value);
+    }
+    Ok(parts)
 }
 
 /// Extract a colon-form colour (`38:5:N`, `38:2:[CS:]R:G:B`, and the `48` /
@@ -461,6 +485,61 @@ mod tests {
             output,
             vec![TerminalOutput::Sgr(
                 SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Single)
+            )]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_underline_overflow_saturates_to_dashed() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:99999999999999999999", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(
+                SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Dashed)
+            )]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_overflow_in_a_colour_stays_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"38:5:99999999999999999999", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn sgr_colon_form_non_numeric_underline_style_stays_invalid() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:x", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(output, vec![TerminalOutput::Invalid]);
+    }
+
+    #[test]
+    fn sgr_colon_form_underline_ignores_extra_subparams() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:2:3", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(
+                SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Double)
+            )]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_21_is_double_underline() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"21:5", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(
+                SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Double)
             )]
         );
     }

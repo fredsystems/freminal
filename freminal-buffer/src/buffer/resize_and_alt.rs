@@ -12,7 +12,7 @@
 
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
-    cursor::{CursorState, StateColors},
+    cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
     row_number::RowNumber,
@@ -1198,27 +1198,6 @@ impl Buffer {
     #[must_use]
     pub const fn format(&self) -> &FormatTag {
         &self.current_tag
-    }
-
-    /// The format tag given to cells blanked by an erase (back-colour erase).
-    ///
-    /// It carries the stored background colour of the current format and
-    /// nothing else: no foreground, weight, decoration, blink, reverse flag or
-    /// hyperlink. The stored background is used as is, so SGR 7 (reverse video)
-    /// does not swap it, as in xterm's `cur_background`. With a default
-    /// background the tag is visually default, so rows erased with it stay
-    /// sparse.
-    ///
-    /// Used by ED, EL, ECH, ICH, DCH, the DECLRMM column-confined scroll fills
-    /// and [`Self::clear_alternate_screen`]. Whole-row fills (IL, DL, SU, SD
-    /// and line feeds) deliberately use the default format instead.
-    #[must_use]
-    pub(in crate::buffer) fn erase_tag(&self) -> FormatTag {
-        FormatTag {
-            colors: StateColors::default()
-                .with_background_color(self.current_tag.colors.background_color),
-            ..FormatTag::default()
-        }
     }
 
     /// Set whether Line Feed Mode (LNM) is enabled.
