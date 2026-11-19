@@ -1,5 +1,15 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-11-19 — Task 139 (OSC 22 pointer shapes), closed. The OSC 22
+row in "OSC Gaps" is removed: set, push, pop and query now work on per-screen
+stacks cleared by RIS and DECSTR, with kitty's name table and parsing rules (see
+`ESCAPE_SEQUENCE_COVERAGE.md`). No other gap row was itemised for the rest of
+Task 139 (the name table, the stack depth, the reply framing, the unset entry).
+Not gaps, but deliberate differences from kitty recorded in
+`KITTY_PROTOCOL_REFERENCE.md`: a 64-name cap per request, a support query that
+answers `1` for every accepted name including aliases, and `__default__` /
+`__grabbed__` reporting freminal's own `default`. Nothing in OSC 22 remains open.
+
 Last updated: 2026-10-22 — Task 150 (desktop notification backend extraction).
 No gap row is added or removed and no behaviour changes: the notification
 backends moved from `gui/osc99/` to the `freminal-notify` crate
@@ -135,7 +145,7 @@ keyboard protocol is substantially compliant". Both are replaced by pointers
 to the v0.13.x tasks (graphics: Tasks 135, 136; keyboard: Task 137), and OSC 99
 conformance (Task 138, closed 2026-10-12; see the entry above) is added. New gap
 entries, each with its planned task: OSC 21 / colour stack (Task 144), OSC 22
-pointer shapes (Task 139), OSC 5522 (Task 146), OSC 5113 (Task 102), OSC 72
+pointer shapes (Task 139; closed 2026-11-19, see the entry above), OSC 5522 (Task 146), OSC 5113 (Task 102), OSC 72
 (Task 105), OSC 10/11 set not reaching rendering (Task 132; closed by the
 2026-10-11 entry above), a new "CSI Gaps" section for unscroll (Task 142),
 DECCARA / DECSACE (Task 143), XTSAVE/XTRESTORE, `CSI 22 J` and the mouse-leave
@@ -314,11 +324,12 @@ implemented (Tasks 13, 100) but **not conformant**: the 2026-10-08 audit found a
 keypad/media/print/pause/menu keys) has a sound encoder, but the GUI layer feeding it
 drops Alt/Super on text keys and modified Enter; that is Task 137 (v0.13.1). The
 lock-key half of Task 114 was reverted (see below). OSC 99 is conformant with kitty 0.49.2
-(Task 138, v0.13.0, including 138.C4 and 138.C5). The remaining gaps are:
+(Task 138, v0.13.0, including 138.C4 and 138.C5), and so is OSC 22 pointer shapes
+(Task 139, v0.13.0). The remaining gaps are:
 
 - **Kitty protocol compliance (v0.13.x):** see the 2026-10-08 audit in
   `PLAN_VERSION_130.md` and the "Kitty Protocol Gaps" tables below. Graphics (Tasks 135,
-  136), keyboard (Task 137), pointer shapes (Task 139), underlines and
+  136), keyboard (Task 137), underlines and
   SGR (Task 140), misc extensions (Task 141), unscroll (Task 142), DECCARA/DECSACE
   (Task 143), colour control (Task 144), multiple cursors (Task 103), text sizing
   (Task 104), file transfer (Task 102), clipboard (Task 146), drag and drop (Task 105)
@@ -361,7 +372,6 @@ the prior panel-fill-only white inversion.
 | ----------------- | ---------- | ---- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 66            | ⬜         | ⬜   | v0.13.3 Task 104 | Kitty text sizing — not implemented; the handler is a vestigial no-op that warn-logs/silently consumes the payload. Not a Contour code (Contour uses `CSI ? 996 n` / `?2031`). DECRPM ?2031 is the adaptive-theme query path we implement |
 | OSC 21            | 🟨         | ⬜   | v0.13.2 Task 144 | Kitty color control — missing; payloads are warn-logged by the unknown-OSC path. Also owns `@alpha` (the colour-spec parser does not accept it), `cursor_text` and `visual_bell`, whose only setter is OSC 21                             |
-| OSC 22            | 🟨         | 🚧   | v0.13.0 Task 139 | Pointer shapes — plain set/reset works; push (`>`), pop (`<`), query (`?`) and `=` reset the shape to default; no stack, no query reply                                                                                                   |
 | OSC 30001 / 30101 | ⬜         | ⬜   | v0.13.2 Task 144 | Kitty colour stack push / pop — missing (with `CSI # P` / `# Q` / `# R`; see CSI Gaps)                                                                                                                                                    |
 | OSC 5113          | 🟨         | ⬜   | v0.13.3 Task 102 | Kitty file transfer — missing; chunks are warn-logged                                                                                                                                                                                     |
 | OSC 5522          | 🟨         | ⬜   | v0.13.3 Task 146 | Kitty clipboard — missing; payloads are warn-logged. OSC 52 selection parameter, clear and binary data are also Task 146                                                                                                                  |

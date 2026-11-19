@@ -10392,6 +10392,10 @@ Verification: markdownlint and `prettier --check` on the three files.
   RIS and DECSTR, tmux passthrough with an unwrapped reply, mixed ops in one read, reply order
   between DSR and DA1, S8C1T framing) and two `terminal_state` fuzz seeds; `fuzz-replay` is
   clean. No production bug found.
+- **139.5 (done).** COVERAGE (OSC 22 rows ✅; RIS / DECSTR rows; OSC 22 left the token-target
+  list), GAPS (OSC 22 row removed), and a new "Pointer shapes (OSC 22)" section in the kitty
+  reference with the three deliberate differences from kitty. Prettier re-padded the COVERAGE
+  OSC table.
 
 ### 139 Cleanup entries
 
