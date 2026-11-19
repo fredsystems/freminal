@@ -11388,6 +11388,13 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
      `releases/latest/download/…` is not used, because every release today is a prerelease
      and GitHub's `latest` skips prereleases.
    - `tic -x` run without root installs to `~/.terminfo`, which needs no privileges.
+5. **`sudo` keeps `TERMINFO` through the shell integration (2026-11-19, added after
+   activation), exactly as Ghostty does.** `sudo`'s default `env_reset` drops `TERMINFO`, so
+   programs run under `sudo` lose the pane's entry. freminal's bash, zsh and fish integrations
+   wrap `sudo` to pass `--preserve-env=TERMINFO`, except for `sudo -e` / `--edit`
+   (sudoedit), which is called unchanged. Like Ghostty's `sudo` shell-integration feature, it
+   is opt-in (off by default): a sudoers policy that forbids preserving the environment makes
+   the flag fail.
 
 **Decisions (orchestrator, recorded so they are not re-litigated).**
 
@@ -11531,6 +11538,20 @@ public), and a test that the path exists and compiles from stdin (`tic -x -o <tm
 file on stdin, skipped with a visible message when `tic` is absent). Runs after 151.8, before
 151.9. The README text is 151.10.
 
+##### 151.12 — `sudo` preserves `TERMINFO` (opt-in, as Ghostty)
+
+Scope: `freminal-common/src/config.rs` (`ShellIntegrationConfig`: a new TOML toggle, default
+off, full `freminal-config-options` checklist including Settings, `config_example.toml` and
+the home-manager module), the spawn-time shell-integration environment in
+`freminal-terminal-emulator/src/io/pty.rs` (tell the scripts the feature is on, as Ghostty
+does with `GHOSTTY_SHELL_FEATURES`), the bundled bash, zsh and fish integration scripts, and
+their tests. The wrapper follows Ghostty's `ghostty.bash`, `ghostty-integration` (zsh) and
+`ghostty-shell-integration.fish` logic exactly (read their source; cite it): it is defined
+only when the feature is on and `TERMINFO` is set, scans the arguments for `-e` / `--edit`
+before the first non-option argument and then calls `sudo` unchanged, and otherwise calls
+`command sudo --preserve-env=TERMINFO "$@"`. Docs: the README Terminfo section and the
+`DESIGN_DECISIONS.md` sudo limit. Runs after 151.C1 (same spawn code).
+
 ##### 151.9 — A real child resolves the entry
 
 Scope: a new integration test in `freminal-terminal-emulator/tests/`. It spawns a real PTY
@@ -11553,7 +11574,7 @@ install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x -`, o
 #### 151 Execution model
 
 Serial inside the worktree: 151.1, 151.2, 151.3, 151.4, 151.5, 151.6, 151.7, 151.8, 151.11,
-151.9, 151.10. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
+151.9, 151.10, 151.C1, 151.12. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
 (whole diff, every new file read, compared with this section) before the orchestrator commits
 it. Then an adversarial review of `main...HEAD`; every finding, nit and above, becomes a
 `151.Cn` entry and is fixed before the PR, followed by a confirmation review. Files shared
@@ -11583,6 +11604,17 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
 - **Verification:** `terminfo_child.rs` without the empty-`HOME` workaround, plus a stale
   `~/.terminfo` copy in a temp `HOME`.
 - **Scheduling:** within Task 151, after 151.10 and before the adversarial review.
+- **Status: Resolved (2026-11-19).** Research (ncurses 6.6 `include/term_entry.h:94-109`,
+  `tinfo/db_iterator.c:312-365`, `read_entry.c:902-910`; Apple's `ncurses-79` and ncurses 5.7
+  identical; experiments): the order is `$TERMINFO`, `$HOME/.terminfo`, `$TERMINFO_DIRS`, the
+  compiled-in default, and `TERMINFO` is not exclusive (the first directory with the entry
+  wins; misses fall through). kitty (`child.py`) and Ghostty (`Exec.zig`) set `TERMINFO` and
+  leave `TERMINFO_DIRS` alone. `run_terminal` now does the same (`apply_terminfo_env`), and
+  the old comment calling `TERMINFO` exclusive is corrected. `terminfo_child.rs` plants a
+  stale `colors#8` copy in the child's `~/.terminfo` and checks the pane's entry wins (and
+  that the stale one would win without `TERMINFO`), and that `TERM=xterm-256color` still
+  resolves from the system database. README and `DESIGN_DECISIONS.md` updated. Surfaced
+  decision 5 (151.12).
 
 #### 151 Status notes
 

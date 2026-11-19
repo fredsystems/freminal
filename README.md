@@ -163,7 +163,7 @@ curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/fremi
 
 Every release also attaches the file as `freminal.ti`, matching that version: `https://github.com/fredsystems/freminal/releases/download/<tag>/freminal.ti`.
 
-Run without root, `tic -x` installs the entry to `~/.terminfo`. That needs no privileges, but a copy there is found before the one Freminal provides, so it stays in use after you upgrade Freminal. Delete it (on Linux, `~/.terminfo/x/xterm-freminal`) to go back to the bundled one.
+Run without root, `tic -x` installs the entry to `~/.terminfo`. That needs no privileges. Inside a Freminal pane the pane's own copy is used regardless, so it never goes stale after an upgrade; other terminals and `ssh` sessions on that account use the `~/.terminfo` copy.
 
 Packages that carry the entry system-wide, which also covers `sudo` and tmux servers that outlive a pane:
 

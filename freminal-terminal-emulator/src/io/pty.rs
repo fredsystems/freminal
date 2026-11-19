@@ -205,11 +205,19 @@ fn terminfo_source(platform: TerminfoPlatform, bundle_dir: Option<PathBuf>) -> T
     }
 }
 
-/// The `TERMINFO_DIRS` value for a child: `dir` (the bundle directory when there is
-/// one, otherwise the per-pane temporary directory) first, then the empty entry,
-/// which ncurses reads as the system default.
-fn terminfo_dirs_value(dir: &Path) -> String {
-    format!("{}:", dir.display())
+/// Point the child's `TERMINFO` at `dir` (the bundle directory when there is one,
+/// otherwise the per-pane temporary directory).
+///
+/// `TERMINFO` is the first place ncurses looks and is not exclusive: the first
+/// directory in its search order that holds the requested entry wins, and a
+/// lookup that misses falls through to the rest (ncurses `db_iterator.c`:
+/// `$TERMINFO`, then `$HOME/.terminfo`, then `$TERMINFO_DIRS`, then the compiled-in
+/// default).  So a stale per-user `~/.terminfo` copy cannot shadow the pane's
+/// entry, and `TERM=xterm-256color` still resolves from the system database.
+/// The inherited `TERMINFO_DIRS` is left untouched.  This is what kitty and
+/// Ghostty do with their bundled directories.
+fn apply_terminfo_env(cmd: &mut CommandBuilder, dir: &Path) {
+    cmd.env("TERMINFO", dir);
 }
 
 #[derive(Error, Debug)]
@@ -715,21 +723,18 @@ pub fn run_terminal(
         shell.map_or_else(CommandBuilder::new_default_prog, CommandBuilder::new)
     };
 
-    // Use TERMINFO_DIRS (colon-separated search path) instead of TERMINFO
-    // (single exclusive directory).  TERMINFO is exclusive: if set, ncurses
-    // ONLY looks there — and our tarball only contains `freminal` /
-    // `xterm-freminal`, not a configured `TERM` such as `xterm-256color`.  With
-    // TERMINFO_DIRS, ncurses checks our directory first but falls back to the
-    // system terminfo so readline and other programs can find those entries.
+    // TERMINFO is searched before `~/.terminfo` and is not exclusive: ncurses
+    // falls through to the remaining locations when the entry is not in it (see
+    // `apply_terminfo_env`), so our tarball holding only `freminal` /
+    // `xterm-freminal` does not hide a configured `TERM` such as `xterm-256color`.
     if let Some(termcaps) = termcaps {
-        cmd.env("TERMINFO_DIRS", terminfo_dirs_value(termcaps));
-        cmd.env_remove("TERMINFO");
+        apply_terminfo_env(&mut cmd, termcaps);
     }
     // TERM Strategy: children get `TERM=xterm-freminal` by default (Task 151).  The
     // entry is accurate (it is checked against XTGETTCAP and the parser/handler
     // by tests) and the `xterm-` prefix keeps programs that match `xterm*`
     // working, as `xterm-kitty` and `xterm-ghostty` do.  The bundled entry is
-    // extracted per PTY onto TERMINFO_DIRS above, so it resolves even where
+    // extracted per PTY and named by `TERMINFO` above, so it resolves even where
     // nothing is installed.  The value is configurable with `[shell] term`, and a
     // `TERM` in the pane's `env` wins over it.  On Windows the default stays
     // `xterm-256color`: there is no terminfo distribution path and MSYS2/Cygwin
@@ -1272,31 +1277,39 @@ mod bundle_terminfo_tests {
     }
 
     #[test]
-    fn terminfo_dirs_has_the_chosen_dir_first_and_the_system_default_last() {
+    fn terminfo_env_is_the_chosen_dir_alone() {
         let bundle = Path::new("/Applications/Freminal.app/Contents/Resources/terminfo");
-        assert_eq!(
-            terminfo_dirs_value(bundle),
-            "/Applications/Freminal.app/Contents/Resources/terminfo:"
-        );
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_terminfo_env(&mut cmd, bundle);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(bundle.as_os_str()));
+
         let pane = Path::new("/run/user/1000/.tmpAbC123");
-        assert_eq!(terminfo_dirs_value(pane), "/run/user/1000/.tmpAbC123:");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_terminfo_env(&mut cmd, pane);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(pane.as_os_str()));
     }
 
     #[test]
-    fn bundle_present_dirs_do_not_mention_a_per_pane_dir() {
-        // With a bundle dir the source is `Bundle`, so no temp dir exists to
-        // appear in the search path: the value is exactly bundle dir + default.
+    fn terminfo_env_leaves_terminfo_dirs_alone() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            std::env::var_os("TERMINFO_DIRS").as_deref()
+        );
+    }
+
+    #[test]
+    fn bundle_source_sets_terminfo_to_the_bundle_dir() {
         let dir = PathBuf::from("/Applications/Freminal.app/Contents/Resources/terminfo");
         let TerminfoSource::Bundle(chosen) =
             terminfo_source(TerminfoPlatform::MacOs, Some(dir.clone()))
         else {
             panic!("expected the bundle source");
         };
-        let value = terminfo_dirs_value(&chosen);
-        assert_eq!(
-            value.split(':').collect::<Vec<_>>(),
-            [dir.to_str().unwrap_or(""), ""]
-        );
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_terminfo_env(&mut cmd, &chosen);
+        assert_eq!(cmd.get_env("TERMINFO"), Some(dir.as_os_str()));
     }
 }
 

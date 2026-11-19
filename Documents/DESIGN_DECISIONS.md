@@ -1362,7 +1362,8 @@ A wrong capability is worse than a missing one once programs trust it, so the en
   `CSI 0 SP q` (DECSCUSR 0 restores the configured cursor style).
 - An integration test spawns a real child through the production spawn path and checks that
   `infocmp -x xterm-freminal` and `tput` resolve the entry from the directory freminal put on
-  `TERMINFO_DIRS`.
+  `TERMINFO`, with a stale `~/.terminfo` copy present in the child's `HOME`, and that
+  `TERM=xterm-256color` still resolves from the system database.
 
 ### Which value the child gets
 
@@ -1393,7 +1394,7 @@ uses. The compiled tree is committed under `res/terminfo/` and `build.rs` keeps 
 embedded `res/terminfo.tar`, in step with `res/freminal.ti`. Packaging copies the committed
 files, so no package build needs `tic`.
 
-The child's `TERMINFO_DIRS` is `<dir>:`, where `<dir>` is, in order of preference:
+The child's `TERMINFO` is `<dir>`, where `<dir>` is, in order of preference:
 
 1. **macOS, inside a `.app` bundle:** `Contents/Resources/terminfo`, when that directory exists.
    The release workflows and the Nix Darwin package copy the tree into the bundle (before
@@ -1401,11 +1402,18 @@ The child's `TERMINFO_DIRS` is `<dir>:`, where `<dir>` is, in order of preferenc
    `cargo bundle` has no such directory.
 2. **Otherwise (Linux, a raw macOS binary):** a per-pane temporary directory that the embedded
    tar is extracted into, deleted when the pane closes.
-3. The trailing empty entry makes ncurses fall through to the system database, so entries
-   that are installed system-wide, and every other `TERM`, still resolve.
 
-On Windows nothing is extracted and neither `TERMINFO_DIRS` nor `TERMINFO` is touched. On the
-other platforms `TERMINFO` is removed from the child's environment and `TERMINFO_DIRS` is set.
+`TERMINFO` is not an exclusive directory, and it outranks the user's home. ncurses searches
+`$TERMINFO`, then `$HOME/.terminfo`, then `$TERMINFO_DIRS` (an empty element means the system
+database), then the compiled-in default (`db_iterator.c`; the same order is in Apple's
+ncurses and in ncurses 5.7). The first directory that holds the requested entry wins and a
+miss falls through to the next, so the tree here, which holds only `xterm-freminal` and
+`freminal`, does not hide the system entries and every other `TERM` still resolves. kitty and
+Ghostty set `TERMINFO` to their bundled directory the same way. The inherited `TERMINFO_DIRS`
+is left as it is.
+
+On Windows nothing is extracted and `TERMINFO` is not touched. On the other platforms
+`TERMINFO` is set to the directory above, replacing any inherited value.
 
 Installed copies:
 
@@ -1421,16 +1429,16 @@ Installed copies:
 
 ### Known limits
 
-- **`sudo` drops `TERMINFO_DIRS`**, as it does for kitty and Ghostty, so `sudo` programs only
-  find a system-installed copy.
+- **`sudo` drops `TERMINFO`** (its `env_reset`), as it does for kitty and Ghostty, so `sudo`
+  programs only find a system-installed copy. Programs running as root or setuid ignore these
+  variables for the same reason.
 - **Detached processes outlive the pane's temporary directory.** A tmux server started from a
   pane keeps running after the pane closes and deletes the per-pane directory, so it needs a
   system-wide or per-user copy.
-- **A per-user `~/.terminfo` copy is searched before `TERMINFO_DIRS`.** ncurses reads
-  `~/.terminfo` first, so a copy installed there (the `tic -x` fallback below installs exactly
-  that) is used instead of the bundle or per-pane copy, and keeps being used after freminal is
-  upgraded. This is the current behaviour; it is tracked as Task 151.C1 in
-  `PLAN_VERSION_130.md`.
+- **A per-user `~/.terminfo` copy no longer shadows the pane's entry**, because `TERMINFO` is
+  searched first, so a copy installed there by the `tic -x` fallback below cannot go stale
+  inside a pane after freminal is upgraded. It is still the copy that other terminals and ssh
+  sessions on the same account use, since they do not set `TERMINFO`.
 - **Remote hosts have no entry** unless one of the fallbacks is used. Copying it automatically
   belongs to SSH integration (Task 86); there is deliberately no install subcommand
   (Task 92 stays dropped).
@@ -1441,7 +1449,7 @@ The README documents installing the entry on any host, with or without freminal 
 Ghostty's terminfo help page does:
 
 - From inside a freminal pane (every build, the AppImage included, because each pane has the
-  entry on `TERMINFO_DIRS`): `infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -`.
+  entry on `TERMINFO`): `infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -`.
 - From anywhere, from the source file:
   `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -`,
   or piped through `ssh YOUR-SERVER -- tic -x -`. `res/freminal.ti` is therefore a public URL

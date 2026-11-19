@@ -8,7 +8,7 @@
 #
 # Freminal defaults to TERM=xterm-freminal. A copy of the entry is embedded in
 # the binary and extracted per pane, but sudo, detached tmux servers and other
-# processes that do not inherit TERMINFO_DIRS need it installed system-wide.
+# processes that do not inherit TERMINFO need it installed system-wide.
 { freminal-flake }:
 {
   config,
