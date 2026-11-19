@@ -7659,6 +7659,22 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Tests / verification:** `cargo bench --no-run --all` emits no warnings.
 - **Depends on:** nothing.
 
+#### 147.33 — Plain-text status cells in the coverage tables
+
+- **Source:** CodeRabbit on PR #587 (Task 140), with the maintainer's decision (2026-11-19) to
+  convert the whole files in one pass rather than two rows.
+- **Defect today:** `markdown-lint-discipline` forbids emoji in table cells (their display width
+  is ambiguous, so linters and prettier disagree about alignment), but the status columns of
+  `ESCAPE_SEQUENCE_COVERAGE.md` (about 196 cells, with a ✅/🚧/❌ legend), `SGR.md` (about 29)
+  and the gap tables in `ESCAPE_SEQUENCE_GAPS.md` use them throughout.
+- **Scope:** those three files only: their status cells and legends become plain text (for
+  example `done`, `partial`, `missing`, `not planned`), with the legend rewritten to match;
+  tables re-padded with `prettier --write` by file name. No wording changes beyond the status
+  values. Update the `freminal-escape-sequence-docs` skill if it names the emoji markers.
+- **Tests / verification:** markdownlint and `prettier --check` on the three files; a grep for
+  the emoji markers in their tables is empty.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -7736,7 +7752,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26, 147.27, 147.28, 147.29, 147.30 and 147.31 are independent.
+- 147.19, 147.26, 147.27, 147.28, 147.29, 147.30, 147.31 and 147.33 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -10592,7 +10608,8 @@ WezTerm `csi.rs` and `terminalstate/mod.rs`). Results, stub claim by stub claim:
 3. **Erased cells take only the current background colour** (xterm and Ghostty, the standing
    tie-break; consistent with the Task 131 alternate-screen clear). This also stops an open
    OSC 8 hyperlink leaking into erased cells.
-4. **IL/DL/scroll fills stay default-attributed** (kitty parity; keeps scrollback rows sparse).
+4. **Whole-row IL/DL/scroll fills stay default-attributed** (kitty parity; keeps scrollback rows
+   sparse). The DECLRMM column-confined fills take the background-only erase tag (decision 3).
    Only the docs that claim otherwise are corrected.
 5. **Underline geometry: clamp every decoration to the cell box, and lay dotted, dashed and
    curly out per cell, anchored to the cell grid**, so a pattern is the same whatever the run
@@ -10946,6 +10963,31 @@ fixed in 140.C5:
   round-trip test. N11: `instanced_bg_decorated_dhl` (every row pair DECDHL): 35.3 µs at 80x24
   and 194.5 µs at 200x50, against 27.6 µs and 152.2 µs for the same corpus without DECDHL
   (first measurement, no earlier baseline exists). Tests: 9748.
+
+#### 140.C6 — PR #587 review comments
+
+- **Copilot (DCH on doubled rows):** on DECDWL/DECDHL rows the visible row is half the
+  buffer width, and text already wraps at the halved margin, but DCH (and ICH and ECH) shift,
+  fill and count image cells across the full width. The new DCH fill therefore lands in the
+  hidden half and the visible right edge stays default. **Declined (maintainer, 2026-11-19):
+  matches xterm.** xterm's stored-cell operations run across the full row width
+  (`ScrnDeleteChar` / `ScrnInsertChar` take `ScrnRightMargin`, which is `MaxCols - 1` without
+  DECLRMM; `ClearRight` uses `MaxCols`); only text writes use the halved `LineMaxCol`. xterm's
+  double-width branch in `DeleteChar` / `InsertChar` only paints the fill at the visible edge,
+  and a later repaint shows the stored cells. kitty and Ghostty do not implement DECDWL.
+  Four tests in `erase_bce_tests.rs` pin the full-width behaviour (DCH, ICH and ECH on a
+  DECDWL row, DCH on a DECDHL row). Tests: 9755.
+- **CodeRabbit, outside the diff (`row.rs` `delete_cells_at_with_right_limit`):** the DECLRMM DCH
+  path returns early when the cursor is past the stored cells, so its margin edge is never
+  filled (the case 140.C2 fixed for plain DCH). **Fixed:** the early return now applies only
+  when the tag is visually default; `dch_under_declrmm_past_stored_cells_fills_the_margin_edge`
+  fails on the old code. ICH under DECLRMM never had the early return (guard test added).
+- **CodeRabbit (decision 4 wording):** "IL/DL/scroll fills" now says whole-row, and names the
+  column-confined fills. Fixed by the orchestrator.
+- **CodeRabbit (emoji in the new SGR 221/222 table rows):** the rule is real, but both files
+  use emoji status cells throughout (196 in COVERAGE, 29 in `SGR.md`). **Maintainer decision:**
+  keep them in the new rows for consistency and convert the whole files in one pass, scheduled
+  as 147.33.
 
 ---
 

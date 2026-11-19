@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use freminal_buffer::buffer::Buffer;
+use freminal_buffer::{buffer::Buffer, row::LineWidth};
 use freminal_common::{
     buffer_states::{
         cursor::{ReverseVideo, StateColors},
@@ -322,6 +322,143 @@ fn dch_under_declrmm_fills_the_gap_with_the_background_only() {
     assert_untouched(&buf, 1, 0..5);
     assert_erased(&buf, 1, 5..7);
     assert_untouched(&buf, 1, 7..WIDTH);
+}
+
+#[test]
+fn dch_under_declrmm_past_stored_cells_fills_the_margin_edge() {
+    // The cursor sits beyond the stored `AB`, inside the margins [2, 6]. The
+    // vacated margin edge still takes the erase tag; the stored content is
+    // not extended past the right margin.
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+    buf.set_format(loud_tag());
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(3, 7); // 0-based columns [2, 6]
+    buf.set_cursor_pos(Some(5), Some(0));
+    buf.delete_chars(1);
+
+    assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_eq!(buf.rows()[0].resolve_cell(1).tchar(), &TChar::Ascii(b'B'));
+    for col in 2..6 {
+        let cell = buf.rows()[0].resolve_cell(col);
+        assert_eq!(cell.tag(), &FormatTag::default(), "col {col} stays default");
+        assert_eq!(cell.tchar(), &TChar::Space, "col {col} is blank");
+    }
+    assert_erased(&buf, 0, 6..7);
+    assert_eq!(buf.rows()[0].cells().len(), 7);
+}
+
+#[test]
+fn dch_under_declrmm_past_stored_cells_with_default_tag_stays_sparse() {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(3, 7); // 0-based columns [2, 6]
+    buf.set_cursor_pos(Some(5), Some(0));
+    buf.delete_chars(1);
+
+    assert_eq!(buf.rows()[0].cells().len(), 2);
+}
+
+#[test]
+fn ich_under_declrmm_past_stored_cells_fills_the_inserted_cells() {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.insert_text(&[TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+    buf.set_format(loud_tag());
+    buf.set_declrmm(Declrmm::Enabled);
+    buf.set_left_right_margins(3, 7); // 0-based columns [2, 6]
+    buf.set_cursor_pos(Some(5), Some(0));
+    buf.insert_spaces(1);
+
+    assert_erased(&buf, 0, 5..6);
+    assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+}
+
+/// A `WIDTH`-wide buffer whose first row is DECDWL and holds `ABCDE` (the
+/// visible half is five columns), with the loud tag active and the cursor at
+/// column 1.
+fn double_width_abcde() -> Buffer {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.set_cursor_line_width(LineWidth::DoubleWidth);
+    let text: Vec<TChar> = b"ABCDE".iter().map(|&b| TChar::Ascii(b)).collect();
+    buf.insert_text(&text);
+    buf.set_format(loud_tag());
+    buf.set_cursor_pos(Some(1), Some(0));
+    buf
+}
+
+fn assert_blank_default(buf: &Buffer, row: usize, cols: std::ops::Range<usize>) {
+    for col in cols {
+        let cell = buf.rows()[row].resolve_cell(col);
+        assert_eq!(cell.tag(), &FormatTag::default(), "col {col} stays default");
+        assert_eq!(cell.tchar(), &TChar::Space, "col {col} is blank");
+    }
+}
+
+// xterm: DCH/ICH/ECH act on the stored row, not the visible half of a DECDWL
+// line. `ScrnDeleteChar` (screen.c) takes its right edge from `ScrnRightMargin`,
+// which is `MaxCols - 1` without DECLRMM, and `LineMaxCol` is used only by text
+// writes. The vacated cells are therefore the last columns of the full row.
+#[test]
+fn dch_on_a_double_width_row_acts_on_the_full_row_width() {
+    let mut buf = double_width_abcde();
+    buf.delete_chars(2);
+
+    let row = &buf.rows()[0];
+    assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_eq!(row.resolve_cell(1).tchar(), &TChar::Ascii(b'D'));
+    assert_eq!(row.resolve_cell(2).tchar(), &TChar::Ascii(b'E'));
+    assert_blank_default(&buf, 0, 3..WIDTH - 2);
+    assert_erased(&buf, 0, WIDTH - 2..WIDTH);
+    assert_eq!(buf.rows()[0].cells().len(), WIDTH);
+}
+
+// xterm: `ScrnInsertChar` shifts `[col, ScrnRightMargin]` of the stored row
+// (`MaxCols - 1` without DECLRMM), so text moves past the visible half into the
+// hidden half rather than being discarded at the visible edge.
+#[test]
+fn ich_on_a_double_width_row_acts_on_the_full_row_width() {
+    let mut buf = double_width_abcde();
+    buf.insert_spaces(2);
+
+    let row = &buf.rows()[0];
+    assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_erased(&buf, 0, 1..3);
+    for (col, ch) in [(3, b'B'), (4, b'C'), (5, b'D'), (6, b'E')] {
+        assert_eq!(
+            buf.rows()[0].resolve_cell(col).tchar(),
+            &TChar::Ascii(ch),
+            "col {col} holds the shifted text, hidden half included"
+        );
+    }
+    assert_blank_default(&buf, 0, 7..WIDTH);
+}
+
+// xterm: `ClearRight` (ECH) clears `min(n, MaxCols - cur_col)` cells, so a huge
+// count reaches the end of the stored row, not the end of the visible half.
+#[test]
+fn ech_on_a_double_width_row_clears_to_the_full_row_width() {
+    let mut buf = double_width_abcde();
+    buf.erase_chars(usize::MAX);
+
+    assert_eq!(buf.rows()[0].resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+    assert_erased(&buf, 0, 1..WIDTH);
+}
+
+// Same xterm rule on DECDHL: line height does not change the stored width.
+#[test]
+fn dch_on_a_double_height_row_acts_on_the_full_row_width() {
+    let mut buf = Buffer::new(WIDTH, HEIGHT);
+    buf.set_cursor_line_width(LineWidth::DoubleHeightTop);
+    let text: Vec<TChar> = b"ABCDE".iter().map(|&b| TChar::Ascii(b)).collect();
+    buf.insert_text(&text);
+    buf.set_format(loud_tag());
+    buf.set_cursor_pos(Some(1), Some(0));
+    buf.delete_chars(2);
+
+    assert_eq!(buf.rows()[0].resolve_cell(1).tchar(), &TChar::Ascii(b'D'));
+    assert_eq!(buf.rows()[0].resolve_cell(2).tchar(), &TChar::Ascii(b'E'));
+    assert_erased(&buf, 0, WIDTH - 2..WIDTH);
 }
 
 #[test]

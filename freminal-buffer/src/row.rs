@@ -1166,8 +1166,9 @@ impl Row {
         self.ensure_live();
         let limit = right_limit.min(self.width);
         let width = self.width;
+        let fill_edge = !tag.is_visually_default();
 
-        if n == 0 || col >= limit || col >= self.cells_vec_mut().len() {
+        if n == 0 || col >= limit || (col >= self.cells_vec_mut().len() && !fill_edge) {
             return;
         }
 
