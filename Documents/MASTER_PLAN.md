@@ -368,7 +368,8 @@ persists to `config.toml` and takes effect immediately via hot-reload.
 **Task 12:** Independent. Audits the `freminal.ti` terminfo source for correctness, fixes the
 build.rs rerun detection bug, and audits XTGETTCAP responses. Strategy: stay with
 `TERM=xterm-256color` (matching WezTerm/Alacritty) and use XTGETTCAP to advertise extra
-capabilities. Low scope (4 subtasks).
+capabilities (superseded by Task 151: children now get `TERM=xterm-freminal` by default; see
+`DESIGN_DECISIONS.md` "TERM Strategy"). Low scope (4 subtasks).
 
 **Task 13:** Depends on Task 1. Implements inline image display via OSC protocols: iTerm2 inline
 images (Phase 1), Kitty graphics protocol minimal subset (Phase 2), Sixel (Phase 3, deferred).

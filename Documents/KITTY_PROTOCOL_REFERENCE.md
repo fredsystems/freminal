@@ -1064,10 +1064,10 @@ so neither needed a storage change.
   stays sparse. Whole-row IL, DL, SU, SD and line-feed fills use default
   attributes.
 - **Terminfo.** The bundled `xterm-freminal` entry (`res/freminal.ti`) lists `Su`,
-  `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns. Child processes
-  are started with `TERM=xterm-256color`, so that entry is used only if a user sets
-  `TERM=xterm-freminal`; the capabilities programs discover at runtime come from
-  XTGETTCAP.
+  `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns (a test keeps
+  the two identical). Child processes are started with `TERM=xterm-freminal` by
+  default (Task 151), so programs read the entry from terminfo as well as from
+  XTGETTCAP; `[shell] term` can select another `TERM`.
 
 ### Documented differences from kitty (underlines)
 

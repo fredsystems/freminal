@@ -11660,6 +11660,14 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   `infocmp`. The child gets an empty `HOME` through the pane `env`, because ncurses searches
   `~/.terminfo` before `TERMINFO_DIRS`; that surfaced 151.C1. 20 sequential runs and 5 under
   load passed. Its macOS CI run settles the Apple ncurses question.
+- **151.10 (done).** New "TERM Strategy (Task 151)" in `DESIGN_DECISIONS.md` and a README
+  "Terminfo" section (symptom, the three decision-4 commands, the release asset, the
+  `~/.terminfo` note, packages, the `[shell] term` escape hatch). The listed
+  `xterm-256color` sentences are updated (COVERAGE, GAPS, kitty reference, `FREC_FORMAT.md`;
+  history notes in `PLAN_VERSION_090.md`, `PLAN_VERSION_150.md` and `MASTER_PLAN.md` get a
+  "superseded by Task 151" line). The GAPS "XTGETTCAP capability expansion" row is closed by
+  151.2. The `kbs` comments in `decbkm.rs` and `input.rs` stay accurate (`\177` in both
+  entries).
 
 ---
 

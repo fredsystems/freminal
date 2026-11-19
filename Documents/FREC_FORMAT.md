@@ -63,7 +63,7 @@ immediately after the fixed header.
 struct RecordingMetadata {
     freminal_version: String,           // e.g. "0.7.0"
     created_at: u64,                    // Unix epoch seconds
-    term: String,                       // e.g. "xterm-256color"
+    term: String,                       // e.g. "xterm-freminal"
     initial_topology: TopologySnapshot, // full window/tab/pane tree at recording start
     scrollback_limit: u32,
 }
@@ -109,6 +109,11 @@ enum PaneNodeSnapshot {
     },
 }
 ```
+
+`term` records the `TERM` that the `[shell] term` setting resolves to (the platform
+default, `xterm-freminal` or `xterm-256color` on Windows, when it is unset), the same
+value XTGETTCAP `TN` reports. There is one header per recording, so a `TERM` set in an
+individual pane's or layout's `env` table is not reflected there.
 
 The initial topology captures the full window/tab/pane tree at recording start.
 All subsequent topology changes are captured as events (see `WindowCreate`,

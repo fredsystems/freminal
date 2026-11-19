@@ -136,6 +136,51 @@ All settings are optional and can also be edited in the Settings window from the
 
 ---
 
+## Terminfo
+
+Freminal sets `TERM=xterm-freminal` for the programs it runs, so they get its real capabilities (curly and coloured underlines, synchronized output, true colour and more) from terminfo. The `xterm-` prefix keeps programs that look for `xterm*` working. On Windows the default stays `xterm-256color`.
+
+Freminal embeds the entry and makes it available to every pane, so it works locally with nothing installed. A host that does not have it, such as a server you `ssh` into, fails with a message like this:
+
+```text
+'xterm-freminal': unknown terminal type.
+```
+
+Programs may also complain that the terminal is unknown or fall back to a dumb terminal. Install the entry on that host with whichever of these suits you.
+
+From inside a Freminal pane (the entry is available there in every build):
+
+```bash
+infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -
+```
+
+From anywhere, without Freminal, using the source file:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | ssh YOUR-SERVER -- tic -x -
+```
+
+Every release also attaches the file as `freminal.ti`, matching that version: `https://github.com/fredsystems/freminal/releases/download/<tag>/freminal.ti`.
+
+Run without root, `tic -x` installs the entry to `~/.terminfo`. That needs no privileges, but a copy there is found before the one Freminal provides, so it stays in use after you upgrade Freminal. Delete it (on Linux, `~/.terminfo/x/xterm-freminal`) to go back to the bundled one.
+
+Packages that carry the entry system-wide, which also covers `sudo` and tmux servers that outlive a pane:
+
+- The `.deb` and `.rpm` packages install it under `/usr/share/terminfo`.
+- Nix: `packages.<system>.terminfo` provides only `share/terminfo`, for servers that do not need Freminal itself. On NixOS, import `freminal.nixosModules.default` and set `programs.freminal.terminfo.enable = true;`.
+
+If you would rather not install anything, tell Freminal to use a `TERM` that every host knows by setting this in `config.toml` (see [Configuration](#configuration)):
+
+```toml
+[shell]
+term = "xterm-256color"
+```
+
+It applies to new panes. A `TERM` set in a layout's or pane's `env` table overrides it for that pane.
+
+---
+
 ## Command line
 
 ```text

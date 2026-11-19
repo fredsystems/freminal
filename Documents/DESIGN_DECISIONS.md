@@ -1321,6 +1321,140 @@ are plain `pub` items with no `cfg` gate or `expect`.
 
 ---
 
+## TERM Strategy (Task 151)
+
+### The reversed decision
+
+Task 12 decided that freminal would keep `TERM=xterm-256color` (as WezTerm and Alacritty do)
+and advertise anything extra through XTGETTCAP. Task 92 (a terminfo self-install subcommand)
+was dropped on the strength of that decision. Task 151 reverses it: children get
+`TERM=xterm-freminal` by default. The reasons:
+
+- **The entry was never read.** `res/terminfo.tar` was embedded and extracted for every PTY,
+  but the child's `TERM` named an entry that tar did not contain, so nothing used it.
+- **XTGETTCAP is a poor substitute.** Only programs that send the query see its answers, and
+  it is a runtime round trip per program. Terminfo is what ncurses, `tput`, tmux, vim and
+  readline already read.
+- **Programs should know which terminal they are in.** Capabilities such as `Smulx`,
+  `Setulc`, `Sync` and `Tc` are declared once, accurately, instead of being inherited from
+  an xterm that does not behave like freminal.
+- **The `xterm-` prefix keeps compatibility.** Programs that match `xterm*` keep working, as
+  they do for `xterm-kitty` and `xterm-ghostty`.
+
+The price is the ssh case: a host that does not have the entry reports `unknown terminal type`.
+The README's "Terminfo" section gives the fixes (below).
+
+### The entry is checked, not trusted
+
+A wrong capability is worse than a missing one once programs trust it, so the entry
+(`res/freminal.ti`) is held to what freminal does:
+
+- It was audited capability by capability against the parser, handler and input encoder
+  (Task 151.1). Capabilities freminal does not implement are not declared: `invis` and the
+  SGR 8 part of `sgr` (conceal is parsed and ignored), and `km` (Alt sends no 8th bit).
+  `acsc` is `xterm-256color`'s value.
+- A test parses `res/freminal.ti` and compares it with `lookup_termcap`, the XTGETTCAP
+  table. Every name XTGETTCAP answers must match the entry, except a short list of
+  XTGETTCAP-only names, and every entry capability is either answered identically or sits in
+  an explicit terminfo-only list with a reason. A new arm on either side fails the test. Every
+  `k*` value is also compared with the bytes the encoder sends.
+- XTGETTCAP `TN` reports the pane's actual `TERM`, so the two cannot disagree. `Se` is
+  `CSI 0 SP q` (DECSCUSR 0 restores the configured cursor style).
+- An integration test spawns a real child through the production spawn path and checks that
+  `infocmp -x xterm-freminal` and `tput` resolve the entry from the directory freminal put on
+  `TERMINFO_DIRS`.
+
+### Which value the child gets
+
+The effective `TERM` is resolved once per pane at spawn (`TermName::resolve`), in this order:
+
+1. A `TERM` in the pane's `env` table, or the layout's (taken as given, not validated).
+2. `[shell] term` in `config.toml`.
+3. The platform default: `xterm-freminal`, and `xterm-256color` on Windows.
+
+That single value is used for the child's environment, for XTGETTCAP `TN`, and for the FREC
+recording header. The header is per recording, not per pane, so it records the `[shell] term`
+resolution; a `TERM` set in one pane's `env` is not visible there.
+
+A `[shell] term` value is passed through unchecked apart from a syntax check (non-empty, at
+most 128 bytes, no whitespace, control characters or `/`). An invalid value is dropped with a
+config warning and the platform default is used. freminal does not check that the named entry
+exists: it cannot see the remote end of an ssh session. Changes apply to new panes only.
+
+**Windows keeps `xterm-256color`.** There is no terminfo distribution path on Windows, and
+MSYS2 and Cygwin programs running under ConPTY read their own terminfo databases, which do not
+have `xterm-freminal`. `TERM` is still set, and `[shell] term` is honoured on every platform.
+
+### How terminfo reaches programs
+
+The entry is shipped in two directory layouts: the letter layout (`x/xterm-freminal`,
+`f/freminal`) that most ncurses uses, and the hex layout (`78/…`, `66/…`) that Apple's ncurses
+uses. The compiled tree is committed under `res/terminfo/` and `build.rs` keeps it, and the
+embedded `res/terminfo.tar`, in step with `res/freminal.ti`. Packaging copies the committed
+files, so no package build needs `tic`.
+
+The child's `TERMINFO_DIRS` is `<dir>:`, where `<dir>` is, in order of preference:
+
+1. **macOS, inside a `.app` bundle:** `Contents/Resources/terminfo`, when that directory exists.
+   The release workflows and the Nix Darwin package copy the tree into the bundle (before
+   `codesign --deep` in the workflows). Nothing is extracted. A `.app` built locally with
+   `cargo bundle` has no such directory.
+2. **Otherwise (Linux, a raw macOS binary):** a per-pane temporary directory that the embedded
+   tar is extracted into, deleted when the pane closes.
+3. The trailing empty entry makes ncurses fall through to the system database, so entries
+   that are installed system-wide, and every other `TERM`, still resolve.
+
+On Windows nothing is extracted and neither `TERMINFO_DIRS` nor `TERMINFO` is touched. On the
+other platforms `TERMINFO` is removed from the child's environment and `TERMINFO_DIRS` is set.
+
+Installed copies:
+
+- The `.deb` and `.rpm` install `/usr/share/terminfo/{x,f}/…` (the `.deb` is repacked by
+  `assets/ci/fix-linux-icon-metadata.sh`).
+- The flake's `packages.<system>.terminfo` contains only `share/terminfo` (all four layouts),
+  with no GUI dependencies, for servers that do not install freminal. The main package
+  installs the same tree.
+- The NixOS module option `programs.freminal.terminfo.enable` adds that package to
+  `environment.systemPackages`. The home-manager module stays for desktops.
+- The AppImage ships nothing extra and relies on per-pane extraction. Users who need the
+  entry system-wide install one of the packages above or use the fallback commands.
+
+### Known limits
+
+- **`sudo` drops `TERMINFO_DIRS`**, as it does for kitty and Ghostty, so `sudo` programs only
+  find a system-installed copy.
+- **Detached processes outlive the pane's temporary directory.** A tmux server started from a
+  pane keeps running after the pane closes and deletes the per-pane directory, so it needs a
+  system-wide or per-user copy.
+- **A per-user `~/.terminfo` copy is searched before `TERMINFO_DIRS`.** ncurses reads
+  `~/.terminfo` first, so a copy installed there (the `tic -x` fallback below installs exactly
+  that) is used instead of the bundle or per-pane copy, and keeps being used after freminal is
+  upgraded. This is the current behaviour; it is tracked as Task 151.C1 in
+  `PLAN_VERSION_130.md`.
+- **Remote hosts have no entry** unless one of the fallbacks is used. Copying it automatically
+  belongs to SSH integration (Task 86); there is deliberately no install subcommand
+  (Task 92 stays dropped).
+
+### The fallback that always works
+
+The README documents installing the entry on any host, with or without freminal present, as
+Ghostty's terminfo help page does:
+
+- From inside a freminal pane (every build, the AppImage included, because each pane has the
+  entry on `TERMINFO_DIRS`): `infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -`.
+- From anywhere, from the source file:
+  `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -`,
+  or piped through `ssh YOUR-SERVER -- tic -x -`. `res/freminal.ti` is therefore a public URL
+  and must not be moved or renamed; its header comment says so.
+- A version-pinned copy: every release and nightly carries `freminal.ti` as an asset.
+  `releases/latest/download/…` is not used, because every release so far is a prerelease and
+  GitHub's `latest` skips prereleases.
+
+`tic -x` run without root installs to `~/.terminfo`, which needs no privileges. Setting
+`[shell] term = "xterm-256color"` is the other way out, at the cost of the extra capabilities.
+
+---
+
 ## Workspace Lint Configuration (issue 552)
 
 ### Where the lints live
