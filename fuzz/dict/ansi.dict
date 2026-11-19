@@ -101,6 +101,9 @@ osc_shell_integration="\x1b]133;A"
 osc_iterm_file="\x1b]1337;File="
 osc_histfile="\x1b]1338;HISTFILE="
 osc_pointer_shape="\x1b]22;"
+osc_pointer_push="\x1b]22;>"
+osc_pointer_pop="\x1b]22;<"
+osc_pointer_query_current="\x1b]22;?__current__"
 
 # --- DCS -------------------------------------------------------------------
 dcs_xtgettcap="\x1bP+q"

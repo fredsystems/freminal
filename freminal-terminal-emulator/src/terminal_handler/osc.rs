@@ -171,10 +171,8 @@ impl TerminalHandler {
                     .push(WindowManipulation::QueryClipboard(sel.clone()));
             }
 
-            // OSC 22 — set pointer (mouse cursor) shape.
-            AnsiOscType::SetPointerShape(shape) => {
-                self.pointer_shape = *shape;
-            }
+            // OSC 22 — kitty pointer shapes: set, push, pop and query.
+            AnsiOscType::PointerShape(op) => self.handle_osc_pointer_shape(op),
 
             // OSC 9;4 — ConEmu-style progress-state update (issue #507).
             //

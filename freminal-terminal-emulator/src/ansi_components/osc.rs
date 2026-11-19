@@ -10,7 +10,6 @@ use crate::ansi_components::tracer::{
 use crate::error::AnsiParseError;
 use freminal_common::buffer_states::ftcs::{is_known_ftcs_marker, parse_ftcs_params};
 use freminal_common::buffer_states::osc::{AnsiOscToken, AnsiOscType, OscTarget, UrlResponse};
-use freminal_common::buffer_states::pointer_shape::PointerShape;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::osc_clipboard::{MAX_OSC52_WRITE_BYTES, handle_osc_clipboard};
@@ -20,6 +19,7 @@ use super::osc_colors::{
 };
 use super::osc_iterm2::handle_osc_iterm2;
 use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_99, handle_osc_notify_777};
+use super::osc_pointer_shape::handle_osc_pointer_shape;
 use super::osc_shell_info::handle_osc_shell_info;
 
 /// Default maximum size of an OSC sequence, in bytes.
@@ -375,27 +375,6 @@ impl AnsiOscParser {
     }
 }
 
-/// Extract the pointer-shape name from OSC 22 parameters and emit the
-/// corresponding terminal output.
-///
-/// The second parameter contains the xcursor/CSS name string. An empty or
-/// absent token resets the pointer shape to the default.
-fn handle_osc_pointer_shape(params: &[Option<AnsiOscToken>], output: &mut Vec<TerminalOutput>) {
-    let shape_name = params
-        .get(1)
-        .and_then(|t| {
-            if let Some(AnsiOscToken::String(s)) = t {
-                Some(s.as_str())
-            } else {
-                None
-            }
-        })
-        .unwrap_or("");
-    output.push(TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(
-        PointerShape::from(shape_name),
-    )));
-}
-
 /// Push `TerminalOutput::Invalid` and build the matching `ParserOutcome` for
 /// an OSC body whose number or parameters could not be parsed.
 fn invalid_osc_params(raw_params: &[u8], output: &mut Vec<TerminalOutput>) -> ParserOutcome {
@@ -577,10 +556,12 @@ fn dispatch_osc_target(
         }
         OscTarget::RemoteHost => push_osc_text(raw_params, output, AnsiOscType::RemoteHost),
         OscTarget::Url => handle_osc_url(raw_params, output),
-        // OSC 22 — set the pointer (mouse cursor) shape.
-        OscTarget::PointerShape => with_osc_tokens(raw_params, output, |params, out| {
-            handle_osc_pointer_shape(&params, out);
-        }),
+        // OSC 22 — kitty pointer shapes (set / push / pop / query). Parsed from
+        // the raw bytes: the body is a comma-separated name list.
+        OscTarget::PointerShape => {
+            handle_osc_pointer_shape(raw_params, output);
+            ParserOutcome::Finished
+        }
         OscTarget::ITerm2 => {
             handle_osc_iterm2(raw_params, output);
             ParserOutcome::Finished
@@ -703,7 +684,9 @@ mod tests {
     use freminal_common::buffer_states::osc_color::{
         ColorRequest, DynamicColorOp, PaletteColorOp, PaletteReset,
     };
-    use freminal_common::buffer_states::pointer_shape::PointerShape;
+    use freminal_common::buffer_states::pointer_shape::{
+        PointerShape, PointerShapeEntry, PointerShapeOp, PointerShapeQuery,
+    };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::url::Url;
     use freminal_common::colors::DynamicColorSlot;
@@ -778,48 +761,89 @@ mod tests {
     // OSC 22 — pointer (cursor) shape
     // ------------------------------------------------------------------
 
+    fn pointer_op(op: PointerShapeOp) -> TerminalOutput {
+        TerminalOutput::OscResponse(AnsiOscType::PointerShape(op))
+    }
+
     #[test]
     fn osc22_set_pointer_shape_text() {
         // OSC 22 ; text BEL
-        let output = feed_osc(b"22;text\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(PointerShape::Text))
-        ));
+        assert_eq!(
+            feed_osc(b"22;text\x07"),
+            [pointer_op(PointerShapeOp::Set(vec![
+                PointerShapeEntry::Shape(PointerShape::Text)
+            ]))]
+        );
     }
 
     #[test]
     fn osc22_set_pointer_shape_crosshair() {
         // OSC 22 ; crosshair BEL
-        let output = feed_osc(b"22;crosshair\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(PointerShape::Crosshair))
-        ));
+        assert_eq!(
+            feed_osc(b"22;crosshair\x07"),
+            [pointer_op(PointerShapeOp::Set(vec![
+                PointerShapeEntry::Shape(PointerShape::Crosshair)
+            ]))]
+        );
     }
 
     #[test]
-    fn osc22_empty_shape_resets_to_default() {
-        // OSC 22 ; BEL — empty name → default pointer shape
-        let output = feed_osc(b"22;\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(PointerShape::Default))
-        ));
+    fn osc22_empty_shape_is_an_unset_entry() {
+        // OSC 22 ; BEL — an empty name stores the "unset" entry (kitty).
+        assert_eq!(
+            feed_osc(b"22;\x07"),
+            [pointer_op(PointerShapeOp::Set(vec![
+                PointerShapeEntry::Unset
+            ]))]
+        );
     }
 
     #[test]
-    fn osc22_no_param_defaults_to_default_shape() {
-        // OSC 22 BEL — no second param
-        let output = feed_osc(b"22\x07");
-        assert_eq!(output.len(), 1);
-        assert!(matches!(
-            &output[0],
-            TerminalOutput::OscResponse(AnsiOscType::SetPointerShape(PointerShape::Default))
-        ));
+    fn osc22_no_param_is_an_unset_entry() {
+        // OSC 22 BEL — no `;` at all is an empty set.
+        assert_eq!(
+            feed_osc(b"22\x07"),
+            [pointer_op(PointerShapeOp::Set(vec![
+                PointerShapeEntry::Unset
+            ]))]
+        );
+    }
+
+    #[test]
+    fn osc22_unknown_name_is_dropped_not_reset() {
+        assert_eq!(
+            feed_osc(b"22;banana\x07"),
+            [pointer_op(PointerShapeOp::Set(vec![]))]
+        );
+    }
+
+    #[test]
+    fn osc22_push_pop_query_prefixes_through_the_parser() {
+        assert_eq!(
+            feed_osc(b"22;>wait,help\x07"),
+            [pointer_op(PointerShapeOp::Push(vec![
+                PointerShape::Wait,
+                PointerShape::Help
+            ]))]
+        );
+        assert_eq!(feed_osc(b"22;<\x07"), [pointer_op(PointerShapeOp::Pop)]);
+        assert_eq!(
+            feed_osc(b"22;?__current__,text\x07"),
+            [pointer_op(PointerShapeOp::Query(vec![
+                PointerShapeQuery::Current,
+                PointerShapeQuery::Supported
+            ]))]
+        );
+    }
+
+    #[test]
+    fn osc22_through_the_full_parser_with_st_terminator() {
+        let mut parser = FreminalAnsiParser::new();
+        let output = parser.push(b"\x1b]22;>fleur\x1b\\");
+        assert_eq!(
+            output,
+            [pointer_op(PointerShapeOp::Push(vec![PointerShape::Move]))]
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1326,14 +1350,19 @@ mod tests {
 
     #[test]
     fn tokenising_targets_with_non_utf8_byte_still_invalid() {
-        // OSC 52 clipboard and the pointer-shape target, which tokenise.
+        // OSC 52 clipboard, which tokenises.
         // (Titles and OSC 7 no longer tokenise; see the 129.6 tests below.
         // Neither does OSC 8; see the 129.7 tests below. Neither does OSC 133;
         // see the 129.8 tests below. Neither do the colour targets; see the
-        // 132.13 tests below.)
-        for payload in [&b"52;c;\xe9\x07"[..], b"22;\xe9\x07"] {
-            assert_invalid(payload);
-        }
+        // 132.13 tests below. Neither does OSC 22; see the next test.)
+        assert_invalid(b"52;c;\xe9\x07");
+    }
+
+    #[test]
+    fn osc22_with_non_utf8_name_is_an_unknown_name_not_invalid() {
+        let (output, outcome) = feed_osc_with_outcome(b"22;\xe9\x07");
+        assert_no_invalid(&output, &outcome);
+        assert_eq!(output, [pointer_op(PointerShapeOp::Set(vec![]))]);
     }
 
     // ── Colour targets split the raw body (Task 132.13) ─────────────────────

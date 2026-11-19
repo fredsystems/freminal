@@ -1,6 +1,15 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
-Last updated: 2026-10-22 — Task 150 — the notification backends moved from
+Last updated: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
+distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
+is conformant: the wire format, the four operations, the query items, the
+per-screen stacks and their reset, the name table (the 30 CSS names, the
+`col-resize` / `row-resize` aliases and kitty's 46 aliases), the GUI
+interaction, freminal's four deliberate differences from kitty and where it is
+implemented. The roadmap row now reads
+"Filled in; conformant". No other section changed.
+
+Earlier: 2026-10-22 — Task 150 — the notification backends moved from
 `gui/osc99/` to the `freminal-notify` crate (`freminal-notify/src/`), and their
 threads are now named `freminal-notify-*`. The paths and thread names below are
 updated. No OSC 99 behaviour changes.
@@ -40,15 +49,15 @@ Last updated: 2026-10-08 — Task 126.4 — roadmap table and future-version stu
 renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
 
-**Superseded current-state sections.** Every "freminal current-state" section in
-this file except notifications (graphics, keyboard) predates the **2026-10-08
-compliance audit** in `PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)").
-That audit found real spec deviations in every protocol freminal had claimed to
+**Superseded current-state sections.** The graphics and keyboard "freminal
+current-state" sections predate the **2026-10-08 compliance audit** in
+`PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)"); the notifications and
+pointer-shape sections were written after it. That audit found real spec deviations in every protocol freminal had claimed to
 support, so statements here that a protocol is "implemented" or "done" describe
 the feature surface that shipped, not conformance to the kitty spec. Where this
 file and the audit disagree, the audit wins. Each protocol task in v0.13.x
 refreshes its own section here as it lands; the notifications section was
-refreshed by Task 138 and is current.
+refreshed by Task 138 and is current, as is the pointer-shapes section (Task 139).
 
 ## Provenance and scope
 
@@ -64,17 +73,19 @@ limits that freminal must match — the mechanical surface — not the upstream
 prose, rationale, or examples.
 
 - Source: the kitty terminal documentation, sections _Desktop notifications_,
-  _Terminal graphics protocol_, and _Comprehensive keyboard handling in
-  terminals_.
+  _Mouse pointer shapes_, _Terminal graphics protocol_, and _Comprehensive
+  keyboard handling in terminals_.
 - Upstream authority (always defer to these; this file is a snapshot):
   - <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
+  - <https://sw.kovidgoyal.net/kitty/pointer-shapes/>
   - <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
   - <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 - Distilled from upstream as of **2026-07-05** (keyboard key tables reconfirmed
   during Task 101 and Task 114 — the functional-key codepoint table was
   re-checked against upstream when wiring the raw-winit delivery path),
   corresponding to kitty **~0.47.x**. The desktop-notifications section was
-  re-distilled on **2026-10-12** against kitty **0.49.2**.
+  re-distilled on **2026-10-12** against kitty **0.49.2**, and the pointer-shapes
+  section was distilled on **2026-11-19** against the same baseline.
 - Attribution: the kitty documentation is authored by Kovid Goyal and is
   licensed GPL-3.0. This file is a distilled derivative for implementation
   reference within freminal.
@@ -94,7 +105,7 @@ achievable and verifiable.
 | Protocol                                | Milestone | Task(s)                                               | Status in this doc                                    |
 | --------------------------------------- | --------- | ----------------------------------------------------- | ----------------------------------------------------- |
 | Desktop notifications (OSC 99)          | v0.13.0   | 138 (conformance; 99 shipped)                         | Filled in; conformant                                 |
-| Pointer shapes (OSC 22)                 | v0.13.0   | 139                                                   | Not covered                                           |
+| Pointer shapes (OSC 22)                 | v0.13.0   | 139                                                   | Filled in; conformant                                 |
 | Underlines and SGR parity               | v0.13.0   | 140                                                   | Not covered                                           |
 | Graphics protocol                       | v0.13.1   | 135, 136 (conformance and placement; 13, 100 shipped) | Filled in                                             |
 | Keyboard protocol                       | v0.13.1   | 137 (conformance; 35, 101, 114 shipped)               | Filled in                                             |
@@ -732,6 +743,219 @@ advertised there.
 On Linux/BSD, `actions` (report, focus, buttons), `body` and `sound` follow the
 daemon. The toast, on every platform, plays no sounds and shows no transmitted
 icon images (standard icon names show as glyphs).
+
+---
+
+## Pointer shapes (OSC 22)
+
+Reference for Task 139. OSC 22 lets a terminal program choose the mouse pointer
+shape over the terminal, with a stack for push and pop, a query for support and
+the current shape, and separate stacks for the main and alternate screens. The
+simplest form, `OSC 22 ; name ST`, is xterm's original and is the form old
+programs still send.
+
+**Baseline: kitty 0.49.2** (this section was distilled from the upstream page on
+2026-11-19; the feature was added to kitty in 0.31.0, and the section was
+re-checked against kitty 0.51.0, whose only OSC 22 change, #10838, fixes
+animated pointers restarting and kitty's own pointer refresh on a screen switch;
+freminal has no animated pointers and publishes a new snapshot, with a repaint,
+on every switch, so neither applies). freminal conforms to it
+(Task 139, v0.13.0). Where the spec is silent, freminal follows kitty's reference
+implementation; where freminal deliberately differs from kitty, the difference is
+listed under "Documented differences from kitty (OSC 22)" below.
+
+### Envelope (OSC 22)
+
+```text
+ESC ] 22 ; <optional first char> <comma-separated list of shape names> ST
+```
+
+- `ESC ]` is `0x1B 0x5D`. `ST` is `ESC \` = `0x1B 0x5C`; BEL also terminates a
+  request.
+- Spaces above are for clarity only and are never sent.
+- The first byte of the body selects the operation only if it is `=`, `>`, `<` or
+  `?`. Any other first byte (or an empty body) is a set, and the byte belongs to
+  the first name.
+- The rest is split on `,`. Names are not trimmed and are matched
+  case-sensitively. A name that is not valid UTF-8 is an unknown name.
+- `OSC 22` with no `;` at all is the same as `OSC 22 ; ST`: a set with one empty
+  name.
+- Examples from the spec: `OSC 22 ; pointer ST` (set), `OSC 22 ; ST` (reset to
+  default), `OSC 22 ; >wait ST` (push), `OSC 22 ; < ST` (pop),
+  `OSC 22 ; ?__current__ ST` (query).
+
+### Operations
+
+| First char  | Operation | Behaviour                                                                                                                                                                                                    |
+| ----------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `=` or none | set       | Applies each name in order to the active screen's stack: the top entry is replaced (an empty stack first grows to one entry). It never pushes or clears, so entries below survive. The last valid name wins. |
+| `>`         | push      | Pushes each valid, non-empty name in order; the last is the top and the current shape. Capacity is 16; a push onto a full stack evicts the bottom entry. Empty and unknown names are skipped.                |
+| `<`         | pop       | Pops exactly one entry. The names are ignored. A pop of an empty stack does nothing. An empty stack means the terminal may use whatever shape it likes (freminal shows the default arrow).                   |
+| `?`         | query     | Always answered; see the query items below. Never changes the stack.                                                                                                                                         |
+
+- An **empty name in a set** stores an _unset_ entry on top: the visible shape is
+  the default, `__current__` answers `0`, and the entries below survive (a later
+  pop reveals them again). An empty set on a one-entry stack therefore replaces
+  that entry.
+- **Unknown names** are ignored one at a time. A set or push whose names are all
+  unknown changes nothing.
+- A set, push or pop writes nothing to the application.
+
+### Query items
+
+The reply is one comma-joined item per queried name, in order:
+
+| Query item    | Reply item                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------ |
+| a shape name  | `1` if the terminal accepts the name for set and push, otherwise `0`. An empty name is `0`.      |
+| `__current__` | The canonical CSS name of the current shape, or `0` when the stack is empty or its top is unset. |
+| `__default__` | The shape used when none is set. freminal answers `default`.                                     |
+| `__grabbed__` | The shape used while the mouse is grabbed. freminal answers `default`.                           |
+
+Examples from the spec: `OSC 22 ; ?__current__ ST` answers `OSC 22 ; 0 ST` on an
+empty stack, and `OSC 22 ; ?pointer,crosshair,no-such-name,wait ST` answers
+`OSC 22 ; 1,1,0,1 ST`. A query with no names (`OSC 22 ; ? ST`) is one empty name
+and answers `0`.
+
+The reply is always `OSC 22 ; list ST`: ST-terminated even when the request ended
+in BEL, and 8-bit framed (`0x9D` ... `0x9C`) when S8C1T is active. It is produced
+on the PTY thread in stream order, so a query before a DA1 in the same write is
+answered first.
+
+### Stacks, screens and reset
+
+- The terminal keeps **separate stacks for the main and alternate screens**, so a
+  full-screen program that is suspended leaves the shell's shape alone. An
+  alternate-screen stack persists across alternate-screen switches (`?47`,
+  `?1047`, `?1049`) and across sessions; only a reset empties it.
+- **RIS and DECSTR both empty both stacks.** Nothing else does.
+- Each stack holds 16 entries (the spec minimum and kitty's value).
+- The shape that applies is the active screen's top entry, or the default for an
+  empty stack or an unset top.
+
+### Pointer shape names
+
+Valid names are the 30 CSS cursor names: `alias`, `cell`, `copy`, `crosshair`,
+`default`, `e-resize`, `ew-resize`, `grab`, `grabbing`, `help`, `move`,
+`n-resize`, `ne-resize`, `nesw-resize`, `no-drop`, `not-allowed`, `ns-resize`,
+`nw-resize`, `nwse-resize`, `pointer`, `progress`, `s-resize`, `se-resize`,
+`sw-resize`, `text`, `vertical-text`, `w-resize`, `wait`, `zoom-in`, `zoom-out`.
+
+freminal accepts these, plus:
+
+- the CSS names `col-resize` and `row-resize`, as aliases of `ew-resize` and
+  `ns-resize`;
+- kitty's 46 legacy X11 / internal aliases, for set and push and (unlike kitty)
+  for the support query:
+
+| Canonical name | Aliases                          |
+| -------------- | -------------------------------- |
+| `default`      | `left_ptr`, `arrow`              |
+| `text`         | `xterm`, `ibeam`, `beam`         |
+| `pointer`      | `pointing_hand`, `hand2`, `hand` |
+| `help`         | `question_arrow`, `whats_this`   |
+| `wait`         | `clock`, `watch`                 |
+| `progress`     | `half-busy`, `left_ptr_watch`    |
+| `crosshair`    | `tcross`                         |
+| `cell`         | `plus`, `cross`                  |
+| `move`         | `fleur`, `pointer-move`          |
+| `e-resize`     | `right_side`                     |
+| `ne-resize`    | `top_right_corner`               |
+| `nw-resize`    | `top_left_corner`                |
+| `n-resize`     | `top_side`                       |
+| `se-resize`    | `bottom_right_corner`            |
+| `sw-resize`    | `bottom_left_corner`             |
+| `s-resize`     | `bottom_side`                    |
+| `w-resize`     | `left_side`                      |
+| `ew-resize`    | `sb_h_double_arrow`, `split_h`   |
+| `ns-resize`    | `sb_v_double_arrow`, `split_v`   |
+| `nesw-resize`  | `size_bdiag`, `size-bdiag`       |
+| `nwse-resize`  | `size_fdiag`, `size-fdiag`       |
+| `zoom-in`      | `zoom_in`                        |
+| `zoom-out`     | `zoom_out`                       |
+| `alias`        | `dnd-link`                       |
+| `copy`         | `dnd-copy`                       |
+| `not-allowed`  | `forbidden`, `crossed_circle`    |
+| `no-drop`      | `dnd-no-drop`                    |
+| `grab`         | `openhand`, `hand1`              |
+| `grabbing`     | `closedhand`, `dnd-none`         |
+
+A shape set through an alias is reported by its canonical name (`__current__`
+after `OSC 22 ; =left_ptr ST` answers `default`; after `>fleur` it answers
+`move`). There is one lookup table and no separate character check: a name is
+valid exactly when it is in the table.
+
+### Interaction with other terminal features
+
+- **Mouse reporting.** The feature is independent of it: the shape applies
+  whether or not the application enabled mouse reporting, and freminal does not
+  change the shape when it does.
+- **Where the shape shows.** freminal applies the active screen's shape only when
+  the pointer is over ordinary terminal content in the pane under the pointer. The
+  command-block gutter, a collapsed fold placeholder and a hovered URL or OSC 8
+  link take precedence and show the pointing hand (the spec lets the terminal
+  override the shape for links and while dragging a selection). Nothing in freminal
+  sets a different shape during a selection drag.
+- **tmux passthrough.** An OSC 22 inside `DCS tmux ;` passthrough runs through the
+  real parser; its reply is written unwrapped.
+
+### Documented differences from kitty (OSC 22)
+
+freminal is MIT and kitty is GPLv3, so kitty's behaviour was read for what it
+does, not copied. These are the places freminal deliberately differs:
+
+1. **A 64-name cap per request.** At most 64 comma-separated names (empty ones
+   included) are read from one request, for every operation; the rest are
+   ignored. kitty has no cap. The cap bounds the reply one query can produce, as
+   the XTGETTCAP cap does. No real request comes near it.
+2. **The support query answers `1` for every accepted name.** freminal accepts
+   kitty's aliases for set and push, and a name that can be set is supported, so
+   `?left_ptr` answers `1`. kitty accepts the aliases too but answers `0` for most
+   of them (it answers `1` for `arrow`, `beam` and `hand`).
+3. **`__default__` and `__grabbed__` report freminal's own value.** Both answer
+   `default`: freminal shows the default arrow over terminal content when no shape
+   is set, and it does not change the pointer while mouse reporting is on. kitty
+   answers its own configured shapes.
+4. **`col-resize` and `row-resize` are accepted.** They are CSS cursor names
+   outside the spec table, kept from freminal's earlier OSC 22 support as aliases
+   of `ew-resize` and `ns-resize`. A shape set through them is reported by its
+   canonical name, so `__current__` still answers a spec name. kitty does not
+   know them (it ignores a set and answers `0` to a query).
+
+A query for `none`, `context-menu` or `all-scroll` answers `0`, as in kitty:
+those CSS cursor names are outside the spec table and are not accepted.
+
+### freminal current-state: pointer shapes — conformant (Task 139, v0.13.0)
+
+- **Name table and types**
+  (`freminal-common/src/buffer_states/pointer_shape.rs`):
+  `PointerShape::from_name` is the one table and `css_name` gives the canonical
+  name (`Display` delegates to it). `PointerShapeOp` (`Set`, `Push`, `Pop`,
+  `Query`), `PointerShapeEntry` (a shape or `Unset`), `PointerShapeQuery` and
+  `MAX_OSC22_NAMES` describe a parsed request; the transport variant is
+  `AnsiOscType::PointerShape` (`freminal-common/src/buffer_states/osc.rs`).
+- **Parser** (`freminal-terminal-emulator/src/ansi_components/osc_pointer_shape.rs`):
+  works on the raw OSC body (not the token path) and emits exactly one
+  `PointerShapeOp` per sequence. Ignored names are debug-logged by length only.
+- **Handler** (`freminal-terminal-emulator/src/terminal_handler/osc_pointer.rs`):
+  applies an op to the active screen's stack and writes the one reply of a query
+  through `write_osc_response`.
+- **Stack** (`freminal-terminal-emulator/src/terminal_handler/pointer_shape_stack.rs`):
+  `PointerShapeStack` with kitty's set, push (evicting the bottom at
+  `POINTER_SHAPE_STACK_DEPTH`, 16), pop and clear. The handler holds a
+  `ScreenScoped<PointerShapeStack>`, one stack per screen.
+- **Reset** (`freminal-terminal-emulator/src/terminal_handler/reset.rs`): RIS and
+  DECSTR clear both stacks (the exhaustive reset table, Task 131.8).
+- **Snapshot and GUI:** `TerminalSnapshot::pointer_shape` is the active screen's
+  resolved shape (`Default` for an empty stack or an unset top). The GUI maps it to
+  an `egui::CursorIcon` in `freminal/src/gui/terminal/widget.rs`
+  (`cursor_icon_for`), only over terminal content.
+- **Tests:** the unit tests next to each file above,
+  `freminal-terminal-emulator/tests/osc22_pointer_shapes.rs` (end to end through
+  `TerminalState` and `build_snapshot`: per-screen stacks for `?47`, `?1047` and
+  `?1049`, RIS and DECSTR, tmux passthrough, reply order, S8C1T framing, and the
+  16-entry and 64-name caps), `freminal-terminal-emulator/tests/reset_table.rs`,
+  and three `terminal_state` fuzz seeds (`fuzz/seeds/terminal_state/osc22_*`).
 
 ---
 

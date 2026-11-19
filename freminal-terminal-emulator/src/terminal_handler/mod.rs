@@ -64,6 +64,7 @@ use freminal_common::{
     themes::ThemePalette,
 };
 use kitty_keyboard_stack::KittyKeyboardStack;
+use pointer_shape_stack::PointerShapeStack;
 use reset::ResetKind;
 use screen_scoped::ScreenScoped;
 use scroll_ops::{AltScreenAction, AltScreenMode};
@@ -92,6 +93,8 @@ mod kitty_keyboard_stack;
 mod notify_99;
 mod osc;
 mod osc_colors;
+mod osc_pointer;
+mod pointer_shape_stack;
 mod pty_writer;
 mod reports;
 mod reset;
@@ -332,11 +335,14 @@ pub struct TerminalHandler {
     /// Host-dependent capability facts (configuration and platform) the GUI
     /// supplies; see [`HostCapabilities`]. Default is everything unsupported.
     host_capabilities: HostCapabilities,
-    /// Pointer (mouse cursor) shape requested via OSC 22.
+    /// Pointer (mouse cursor) shape stacks requested via OSC 22, one per
+    /// screen.
     ///
-    /// Defaults to `PointerShape::Default` (OS default arrow).
-    /// Reset to `Default` by `OSC 22 ; ST` (empty name) or full reset.
-    pointer_shape: PointerShape,
+    /// The active shape is the top entry of the active screen's stack, or
+    /// `PointerShape::Default` (OS default arrow) when it is empty or its top
+    /// is unset.  Screen switches touch neither stack; RIS and DECSTR clear
+    /// both.
+    pointer_shape_stack: ScreenScoped<PointerShapeStack>,
     /// Current progress state reported via OSC 9;4 (issue #507).
     ///
     /// Defaults to inactive/0%. Updated by applying successive
@@ -529,7 +535,7 @@ impl TerminalHandler {
             allow_alt_screen: AllowAltScreen::Allow,
             pre_deccolm_width: None,
             host_capabilities: HostCapabilities::default(),
-            pointer_shape: PointerShape::Default,
+            pointer_shape_stack: ScreenScoped::default(),
             progress: ProgressReport::default(),
             progress_updated_at: None,
             multipart_state: None,
@@ -631,10 +637,14 @@ impl TerminalHandler {
 
     /// Get the current pointer (mouse cursor) shape requested via OSC 22.
     ///
-    /// Returns `PointerShape::Default` when no override is active.
+    /// Returns the active screen's top stack entry, or
+    /// `PointerShape::Default` when the stack is empty or its top is unset.
     #[must_use]
-    pub const fn pointer_shape(&self) -> PointerShape {
-        self.pointer_shape
+    pub fn pointer_shape(&self) -> PointerShape {
+        self.pointer_shape_stack
+            .get(self.buffer.kind())
+            .current()
+            .unwrap_or_default()
     }
 
     /// Get the current progress state reported via OSC 9;4 (issue #507).
@@ -816,7 +826,7 @@ impl TerminalHandler {
     ///   kitty);
     /// - reverse wrap (`?45`) and extended reverse wrap (`?1045`) → off
     ///   (xterm, Ghostty, `WezTerm`);
-    /// - the OSC 22 pointer shape → default, and **both** kitty keyboard
+    /// - **both** OSC 22 pointer-shape stacks and **both** kitty keyboard
     ///   stacks (main and alternate) → empty (kitty's `do_screen_reset`);
     /// - the OSC 9;4 progress state, which is freminal-private (issue
     ///   #507).
@@ -3100,30 +3110,24 @@ mod tests {
     fn osc22_set_and_read_pointer_shape() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Text,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Text);
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Text,
-            "OSC 22 must update pointer_shape to Text"
+            "a set of Text replaces the top entry of the active screen's stack, so the shape is Text"
         );
     }
 
     #[test]
-    fn osc22_reset_via_default_shape() {
+    fn osc22_set_default_shape_shows_default() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Crosshair,
-        ));
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Default,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Crosshair);
+        set_pointer_shape(&mut handler, PointerShape::Default);
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Default,
-            "OSC 22 with Default shape must reset to Default"
+            "setting Default replaces the top entry with an ordinary Default entry, which shows Default"
         );
     }
 
@@ -3131,15 +3135,90 @@ mod tests {
     fn osc22_full_reset_clears_pointer_shape() {
         let mut handler = TerminalHandler::new(80, 24);
 
-        handler.handle_osc(&AnsiOscType::SetPointerShape(
-            freminal_common::buffer_states::pointer_shape::PointerShape::Pointer,
-        ));
+        set_pointer_shape(&mut handler, PointerShape::Pointer);
         handler.full_reset();
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Default,
             "full_reset must clear pointer_shape to Default"
         );
+    }
+
+    fn set_pointer_shape(
+        handler: &mut TerminalHandler,
+        shape: freminal_common::buffer_states::pointer_shape::PointerShape,
+    ) {
+        use freminal_common::buffer_states::pointer_shape::{PointerShapeEntry, PointerShapeOp};
+
+        handler.handle_osc(&AnsiOscType::PointerShape(PointerShapeOp::Set(vec![
+            PointerShapeEntry::Shape(shape),
+        ])));
+    }
+
+    #[test]
+    fn osc22_set_on_alternate_screen_leaves_primary_shape_alone() {
+        use freminal_common::buffer_states::pointer_shape::PointerShape;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        set_pointer_shape(&mut handler, PointerShape::Text);
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        assert_eq!(
+            handler.pointer_shape(),
+            PointerShape::Default,
+            "the alternate screen starts with its own empty stack"
+        );
+        set_pointer_shape(&mut handler, PointerShape::Crosshair);
+        assert_eq!(handler.pointer_shape(), PointerShape::Crosshair);
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
+        assert_eq!(
+            handler.pointer_shape(),
+            PointerShape::Text,
+            "a set on the alternate screen must not change the primary's shape"
+        );
+    }
+
+    #[test]
+    fn osc22_shapes_survive_an_alternate_screen_round_trip() {
+        use freminal_common::buffer_states::pointer_shape::PointerShape;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        set_pointer_shape(&mut handler, PointerShape::Text);
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        set_pointer_shape(&mut handler, PointerShape::Crosshair);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
+        assert_eq!(handler.pointer_shape(), PointerShape::Text);
+
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        assert_eq!(
+            handler.pointer_shape(),
+            PointerShape::Crosshair,
+            "the alternate stack persists across screen switches"
+        );
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Primary))]);
+        assert_eq!(
+            handler.pointer_shape(),
+            PointerShape::Text,
+            "the primary stack persists too"
+        );
+    }
+
+    #[test]
+    fn osc22_full_reset_clears_both_screens_stacks() {
+        use freminal_common::buffer_states::pointer_shape::PointerShape;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        set_pointer_shape(&mut handler, PointerShape::Text);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        set_pointer_shape(&mut handler, PointerShape::Crosshair);
+
+        handler.full_reset();
+
+        assert_eq!(handler.pointer_shape(), PointerShape::Default);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::XtExtscrn(XtExtscrn::Alternate))]);
+        assert_eq!(handler.pointer_shape(), PointerShape::Default);
     }
 
     // ------------------------------------------------------------------

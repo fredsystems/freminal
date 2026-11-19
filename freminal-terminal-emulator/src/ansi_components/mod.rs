@@ -14,6 +14,7 @@ pub mod osc_clipboard;
 pub mod osc_colors;
 pub mod osc_iterm2;
 pub mod osc_notify;
+pub mod osc_pointer_shape;
 pub mod osc_shell_info;
 pub mod standard;
 pub mod tracer;

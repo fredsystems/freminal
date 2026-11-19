@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::buffer_states::{
     ftcs::FtcsMarker,
     osc_color::{DynamicColorOp, PaletteColorOp, PaletteReset},
-    pointer_shape::PointerShape,
+    pointer_shape::PointerShapeOp,
     progress::ProgressUpdate,
     url::Url,
 };
@@ -109,8 +109,8 @@ pub enum OscTarget {
     /// OSC 110-119 — reset the dynamic colour for code `n - 100`. Carries the
     /// OSC number (`110..=119`).
     ResetDynamicColor(u16),
-    /// OSC 22 — set/reset the X11 pointer (mouse cursor) shape.  One-way
-    /// command, no response expected.
+    /// OSC 22 — kitty pointer shapes: set, push, pop and query the pointer
+    /// (mouse cursor) shape.  Only a query is answered.
     PointerShape,
     /// OSC 66 — Konsole/zsh color-scheme notification (one-way; no response).
     /// Silently consumed.
@@ -291,10 +291,8 @@ pub enum AnsiOscType {
     DynamicColors(Vec<DynamicColorOp>),
     /// OSC 110 / 111 / 112 / 117 / 119 — reset one dynamic colour slot.
     ResetDynamicColor(DynamicColorSlot),
-    /// OSC 22 — set the pointer (mouse cursor) shape.
-    ///
-    /// An empty name or `"default"` resets to the OS default.
-    SetPointerShape(PointerShape),
+    /// OSC 22 — one kitty pointer-shape operation (set, push, pop or query).
+    PointerShape(PointerShapeOp),
     /// OSC 1338 `HISTFILE=<path>` — freminal-private shell-information
     /// sub-command reporting the live shell's history-file path.
     ///
@@ -385,7 +383,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetPaletteColors(reset) => write!(f, "ResetPaletteColors({reset:?})"),
             Self::DynamicColors(ops) => write!(f, "DynamicColors({ops:?})"),
             Self::ResetDynamicColor(slot) => write!(f, "ResetDynamicColor({slot:?})"),
-            Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
+            Self::PointerShape(op) => write!(f, "PointerShape({op:?})"),
             Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
             Self::Notify {
                 source,
@@ -721,12 +719,20 @@ mod tests {
     }
 
     #[test]
-    fn display_ansi_osc_set_pointer_shape() {
-        let s =
-            AnsiOscType::SetPointerShape(crate::buffer_states::pointer_shape::PointerShape::Text)
-                .to_string();
-        assert!(s.contains("SetPointerShape"), "got: {s}");
-        assert!(s.contains("text"), "got: {s}");
+    fn display_ansi_osc_pointer_shape() {
+        use crate::buffer_states::pointer_shape::{PointerShape, PointerShapeEntry};
+
+        let s = AnsiOscType::PointerShape(PointerShapeOp::Set(vec![PointerShapeEntry::Shape(
+            PointerShape::Text,
+        )]))
+        .to_string();
+        assert!(s.contains("PointerShape"), "got: {s}");
+        assert!(s.contains("Set"), "got: {s}");
+        assert!(s.contains("Text"), "got: {s}");
+        assert_eq!(
+            AnsiOscType::PointerShape(PointerShapeOp::Pop).to_string(),
+            "PointerShape(Pop)"
+        );
     }
 
     #[test]

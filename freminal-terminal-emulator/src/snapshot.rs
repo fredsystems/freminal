@@ -381,10 +381,12 @@ pub struct TerminalSnapshot {
     /// the theme's `cursor` field.
     pub cursor_color_override: Option<(u8, u8, u8)>,
 
-    /// Pointer (mouse cursor) shape requested by the application via OSC 22.
+    /// Pointer (mouse cursor) shape requested by the application via OSC 22:
+    /// the top entry of the active screen's pointer-shape stack.
     ///
-    /// The GUI maps this to `egui::CursorIcon` during the render pass.
-    /// `PointerShape::Default` means no override — use the OS default arrow.
+    /// The GUI maps this to `egui::CursorIcon` during the render pass.  An
+    /// empty stack and an unset top entry both yield `PointerShape::Default`
+    /// (the OS default arrow).
     pub pointer_shape: PointerShape,
 
     /// Current progress state reported via OSC 9;4 (issue #507).

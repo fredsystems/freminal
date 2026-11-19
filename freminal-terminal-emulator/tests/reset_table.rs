@@ -485,6 +485,59 @@ fn decstr_resets_the_pointer_shape() {
     );
 }
 
+#[test]
+fn ris_resets_the_pointer_shape() {
+    use freminal_common::buffer_states::pointer_shape::PointerShape;
+
+    let mut rig = Rig::new(80, 24);
+    rig.feed(b"\x1b]22;text\x1b\\");
+    assert_eq!(
+        rig.state.handler.pointer_shape(),
+        PointerShape::Text,
+        "sanity: OSC 22 changed the shape"
+    );
+    rig.feed(RIS);
+    assert_eq!(
+        rig.state.handler.pointer_shape(),
+        PointerShape::Default,
+        "RIS must reset the pointer shape"
+    );
+}
+
+/// Both reset kinds clear the pointer-shape stack of both screens.
+#[test]
+fn resets_clear_both_screens_pointer_shape_stacks() {
+    use freminal_common::buffer_states::pointer_shape::PointerShape;
+
+    for reset in [RIS, DECSTR] {
+        let mut rig = Rig::new(80, 24);
+        rig.feed(b"\x1b]22;text\x1b\\");
+        rig.feed(b"\x1b[?1049h");
+        rig.feed(b"\x1b]22;crosshair\x1b\\");
+        assert_eq!(
+            rig.state.handler.pointer_shape(),
+            PointerShape::Crosshair,
+            "sanity: the alternate screen has its own shape"
+        );
+
+        rig.feed(reset);
+
+        // Whichever screen the reset leaves active, force each in turn.
+        rig.feed(b"\x1b[?1049l");
+        assert_eq!(
+            rig.state.handler.pointer_shape(),
+            PointerShape::Default,
+            "reset {reset:?} must clear the primary stack"
+        );
+        rig.feed(b"\x1b[?1049h");
+        assert_eq!(
+            rig.state.handler.pointer_shape(),
+            PointerShape::Default,
+            "reset {reset:?} must clear the alternate stack"
+        );
+    }
+}
+
 // ── DECSTR and the per-screen DECSC slot ────────────────────────────────────
 
 #[test]
