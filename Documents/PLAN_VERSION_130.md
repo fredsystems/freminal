@@ -7804,6 +7804,21 @@ Stale stub text was corrected at the same time:
 - **Verification:** a VT52-mode test for SO/SI matching the chosen reference.
 - **Scheduling:** within Task 147, before 147.17.
 
+#### 147.C3 — `kent` joins the encoder-checked terminfo set after Task 151
+
+- **Surfaced:** Task 151 confirmation review, N6 (2026-11-19).
+- **Impact:** Task 151 (PR #588) lists `kent=\EOM` in `DECLARED_NOT_SENT` in its
+  table-of-truth test (`terminal_handler/dcs/terminfo_truth_tests.rs`), because on `main`
+  keypad Enter never sends it. 147.5 makes keypad Enter in application mode send `SS3 M`,
+  which is `kent`'s value, so once both are on one branch `kent` is sent and must be checked
+  against the encoder like every other `k*` capability.
+- **Scope of fix:** that test file only (move `kent` out of `DECLARED_NOT_SENT` and check it
+  against the 147.5 raw-key keypad path's bytes in application keypad mode).
+- **Verification:** the table-of-truth test passes with `kent` checked and fails if the
+  keypad Enter bytes change.
+- **Scheduling:** when Task 147 rebases onto `main` after #588 merges (if Task 147 merges
+  first instead, Task 151 does it on its rebase). Before the Task 147 adversarial review.
+
 ### 147 Status notes
 
 - **147.1 (done).** `Mode::UnknownQuery { namespace, params }` reuses `ModeNamespace`; the
