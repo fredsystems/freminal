@@ -12,7 +12,7 @@
 
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
-    cursor::{CursorState, StateColors},
+    cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
     row_number::RowNumber,
@@ -1405,19 +1405,14 @@ impl Buffer {
     /// foreground, weight, decoration, hyperlink or blink). The blanks are
     /// stored with the same mechanism ED uses ([`Row::clear_with_tag`]): with a
     /// default background the rows stay sparse, otherwise every cell is an
-    /// explicit blank. Note that ED itself currently copies the whole format
-    /// into the blanks, not just the background; whether that is right is the
-    /// open erase-format question routed to Task 140.
+    /// explicit blank. ED, EL and the other erases blank with the same
+    /// tag ([`Self::erase_tag`]).
     pub fn clear_alternate_screen(&mut self) {
         if self.kind != BufferType::Alternate {
             return;
         }
 
-        let blank_tag = FormatTag {
-            colors: StateColors::default()
-                .with_background_color(self.current_tag.colors.background_color),
-            ..FormatTag::default()
-        };
+        let blank_tag = self.erase_tag();
         let width = self.width;
         self.rows = RowStore::from_rows_at(
             self.rows.next_number(),

@@ -10,7 +10,7 @@
 //! GPU by the [`super::gpu`] module.
 
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
-use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, UnderlineStyle};
+use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations};
 use freminal_common::buffer_states::modes::decscnm::ScreenInversion;
 use freminal_common::colors::ResolvedColors;
 use freminal_common::cursor::CursorVisualStyle;
@@ -64,7 +64,7 @@ pub(super) fn gl_f32_u32(val: u32) -> f32 {
 ///
 /// DECDWL and DECDHL rows render at 2× horizontal width; normal rows are 1×.
 #[inline]
-const fn x_scale(lw: LineWidth) -> f32 {
+pub(super) const fn x_scale(lw: LineWidth) -> f32 {
     match lw {
         LineWidth::Normal => 1.0,
         LineWidth::DoubleWidth | LineWidth::DoubleHeightTop | LineWidth::DoubleHeightBottom => 2.0,
@@ -107,7 +107,7 @@ const fn x_scale(lw: LineWidth) -> f32 {
 /// whole-screen DECSCNM by XOR, via the opposite-accessor trick documented
 /// above (Task 115.2).
 #[inline]
-const fn effective_fg(
+pub(super) const fn effective_fg(
     colors: &freminal_common::buffer_states::cursor::StateColors,
     screen_inversion: ScreenInversion,
 ) -> freminal_common::colors::TerminalColor {
@@ -525,10 +525,6 @@ pub fn build_background_instances(
     let shaped_lines = frame.shaped_lines;
     let cell_width = frame.cell_width;
     let cell_height = frame.cell_height;
-    let ascent = frame.ascent;
-    let underline_offset = frame.underline_offset;
-    let strikeout_offset = frame.strikeout_offset;
-    let stroke_size = frame.stroke_size;
     let selection = frame.selection;
     let selection_is_block = frame.selection_is_block;
     let match_highlights = frame.match_highlights;
@@ -585,77 +581,10 @@ pub fn build_background_instances(
 
         // --- Underline and strikethrough decoration quads ---
         for run in &line.runs {
-            let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let underline_style = run.font_decorations.underline_style();
-            let has_strike = run
-                .font_decorations
-                .contains(FontDecorations::Strikethrough);
-
-            if !underline_style.is_active() && !has_strike {
-                continue;
-            }
-
-            let col_end = run.col_start + run_col_count(run);
-            let x0 = gl_f32(run.col_start) * gl_f32_u32(cell_width) * scale;
-            let x1 = gl_f32(col_end) * gl_f32_u32(cell_width) * scale;
-
-            if underline_style.is_active() {
-                // Use underline color if set, otherwise fall back to
-                // foreground. The underline color ITSELF is independent of
-                // fg/bg inversion and is deliberately NOT routed through
-                // `effective_fg` — only the fallback-to-foreground path is,
-                // so the underline stays visible against a DECSCNM-swapped
-                // background (Task 115.2).
-                let ul_color_raw = run.colors.underline_color();
-                let ul_color = if matches!(
-                    ul_color_raw,
-                    freminal_common::colors::TerminalColor::DefaultUnderlineColor
-                ) {
-                    internal_color_to_gl(
-                        effective_fg(&run.colors, screen_inversion),
-                        is_faint,
-                        colors,
-                    )
-                } else {
-                    internal_color_to_gl(ul_color_raw, is_faint, colors)
-                };
-
-                // underline_offset from swash is negative (below baseline in font
-                // coords).  In top-down pixel coords the baseline is at
-                // y_top + ascent, so subtracting the (negative) offset places the
-                // line below the baseline.
-                let ul_y = y_top + ascent - underline_offset;
-
-                let cw = gl_f32_u32(cell_width);
-                push_underline_quads(
-                    deco,
-                    underline_style,
-                    &UnderlineParams {
-                        x0,
-                        x1,
-                        ul_y,
-                        thick: stroke_size.max(1.0),
-                        cell_width: cw,
-                        color: ul_color,
-                    },
-                );
-            }
-
-            if has_strike {
-                // Task 115.2: strikethrough uses the effective (DECSCNM ×
-                // SGR-7 composed) foreground so it stays visible under
-                // whole-screen reverse video.
-                let fg_color = internal_color_to_gl(
-                    effective_fg(&run.colors, screen_inversion),
-                    is_faint,
-                    colors,
-                );
-                // strikeout_offset from OS/2 is positive (above baseline in font
-                // coords).  In top-down pixel coords, subtracting it from the
-                // baseline places the line above the baseline (middle of cell).
-                let st_top = y_top + ascent - strikeout_offset;
-                let st_bot = st_top + stroke_size.max(1.0);
-                push_quad(deco, x0, st_top, x1, st_bot, fg_color);
+            let flags = run.font_decorations;
+            if flags.underline_style().is_active() || flags.contains(FontDecorations::Strikethrough)
+            {
+                super::decorations::push_run_decorations(deco, frame, run, y_top, lw);
             }
         }
     }
@@ -1672,7 +1601,7 @@ pub(super) const fn quad_vertices(
     x1: f32,
     y1: f32,
     color: [f32; 4],
-) -> [f32; VERTS_PER_QUAD * DECO_VERTEX_FLOATS] {
+) -> [f32; QUAD_FLOATS] {
     let [r, g, b, a] = color;
     [
         x0, y0, r, g, b, a, x1, y0, r, g, b, a, x0, y1, r, g, b, a, x1, y0, r, g, b, a, x1, y1, r,
@@ -1680,143 +1609,39 @@ pub(super) const fn quad_vertices(
     ]
 }
 
+/// Number of floats in one solid-colour quad (see [`quad_vertices`]).
+pub(super) const QUAD_FLOATS: usize = VERTS_PER_QUAD * DECO_VERTEX_FLOATS;
+
+/// The rectangle and colour a quad built by [`quad_vertices`] encodes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct QuadBounds {
+    pub(super) x0: f32,
+    pub(super) y0: f32,
+    pub(super) x1: f32,
+    pub(super) y1: f32,
+    pub(super) color: [f32; 4],
+}
+
+/// Decode a quad built by [`quad_vertices`] back into its rectangle and
+/// colour, reading the same layout `quad_vertices` writes: vertex 0 is
+/// `(x0, y0)`, vertex 1 is `(x1, y0)` and vertex 2 is `(x0, y1)`.
+pub(super) const fn quad_bounds(quad: &[f32; QUAD_FLOATS]) -> QuadBounds {
+    const V1: usize = DECO_VERTEX_FLOATS;
+    const V2: usize = 2 * DECO_VERTEX_FLOATS;
+    QuadBounds {
+        x0: quad[0],
+        y0: quad[1],
+        x1: quad[V1],
+        y1: quad[V2 + 1],
+        color: [quad[2], quad[3], quad[4], quad[5]],
+    }
+}
+
 /// Push a solid-color axis-aligned quad (2 triangles = 6 vertices) into `verts`.
 ///
 /// Vertex layout: `x, y, r, g, b, a` (see [`quad_vertices`]).
 pub(super) fn push_quad(verts: &mut Vec<f32>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
     verts.extend_from_slice(&quad_vertices(x0, y0, x1, y1, color));
-}
-
-// ---------------------------------------------------------------------------
-//  Underline style geometry
-// ---------------------------------------------------------------------------
-
-/// Number of segments used to approximate a sine wave for curly underlines.
-const CURLY_SEGMENTS: u32 = 8;
-
-/// Parameters for underline rendering, bundled to stay within the 7-argument
-/// lint limit.
-struct UnderlineParams {
-    x0: f32,
-    x1: f32,
-    ul_y: f32,
-    /// Clamped stroke thickness: `stroke.max(1.0)`.  Computed once at
-    /// construction so style-specific helpers share a single clamp.
-    thick: f32,
-    cell_width: f32,
-    color: [f32; 4],
-}
-
-/// Push decoration quads for the given underline style.
-///
-/// All styles share the same vertical anchor (`ul_y`, the font's underline
-/// position below the baseline).  `thick` is the clamped line thickness
-/// (`stroke.max(1.0)`) and `cell_width` is the cell width in pixels.
-fn push_underline_quads(deco: &mut Vec<f32>, style: UnderlineStyle, p: &UnderlineParams) {
-    match style {
-        UnderlineStyle::None => {}
-        UnderlineStyle::Single => {
-            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + p.thick, p.color);
-        }
-        UnderlineStyle::Double => {
-            let gap = p.thick.mul_add(2.0, 1.0);
-            push_quad(deco, p.x0, p.ul_y, p.x1, p.ul_y + p.thick, p.color);
-            push_quad(
-                deco,
-                p.x0,
-                p.ul_y + gap,
-                p.x1,
-                p.ul_y + gap + p.thick,
-                p.color,
-            );
-        }
-        UnderlineStyle::Curly => {
-            push_curly_underline(deco, p);
-        }
-        UnderlineStyle::Dotted => {
-            push_dotted_underline(deco, p);
-        }
-        UnderlineStyle::Dashed => {
-            push_dashed_underline(deco, p);
-        }
-    }
-}
-
-/// Push quads approximating a sine-wave curly underline.
-///
-/// The wave amplitude is `2 * thick` and the period is one cell width.
-/// Each cell is subdivided into [`CURLY_SEGMENTS`] vertical-strip quads whose
-/// top and bottom edges follow the sine curve.
-fn push_curly_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let amplitude = p.thick * 2.0;
-    let span = p.x1 - p.x0;
-    if span <= 0.0 || p.cell_width <= 0.0 {
-        return;
-    }
-
-    let seg_width = p.cell_width / gl_f32_u32(CURLY_SEGMENTS);
-    let total_segs_f = (span / seg_width).ceil();
-    let total_segs = total_segs_f.approx_as::<usize>().unwrap_or(0);
-
-    for i in 0..total_segs {
-        let sx = seg_width.mul_add(gl_f32(i), p.x0);
-        let ex = (sx + seg_width).min(p.x1);
-
-        // Phase within the sine period (0..2π per cell width).
-        let phase_start = (sx - p.x0) / p.cell_width * std::f32::consts::TAU;
-        let phase_end = (ex - p.x0) / p.cell_width * std::f32::consts::TAU;
-
-        let y_start = amplitude.mul_add(phase_start.sin(), p.ul_y);
-        let y_end = amplitude.mul_add(phase_end.sin(), p.ul_y);
-
-        let y_min = y_start.min(y_end);
-        let y_max = y_start.max(y_end) + p.thick;
-
-        push_quad(deco, sx, y_min, ex, y_max, p.color);
-    }
-}
-
-/// Push quads for a dotted underline.
-///
-/// Each dot is a square with side = `thick`, with a gap of `thick` between
-/// dots.
-fn push_dotted_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let step = p.thick * 2.0;
-    if step <= 0.0 {
-        return;
-    }
-
-    let span = p.x1 - p.x0;
-    let dot_count_f = (span / step).ceil();
-    let dot_count = dot_count_f.approx_as::<usize>().unwrap_or(0);
-
-    for i in 0..dot_count {
-        let x = step.mul_add(gl_f32(i), p.x0);
-        let dot_end = (x + p.thick).min(p.x1);
-        push_quad(deco, x, p.ul_y, dot_end, p.ul_y + p.thick, p.color);
-    }
-}
-
-/// Push quads for a dashed underline.
-///
-/// Each dash is `cell_width / 2` wide with a gap of `cell_width / 4`.
-fn push_dashed_underline(deco: &mut Vec<f32>, p: &UnderlineParams) {
-    let dash_len = (p.cell_width * 0.5).max(2.0);
-    let gap_len = (p.cell_width * 0.25).max(1.0);
-    let step = dash_len + gap_len;
-    if step <= 0.0 {
-        return;
-    }
-
-    let span = p.x1 - p.x0;
-    let dash_count_f = (span / step).ceil();
-    let dash_count = dash_count_f.approx_as::<usize>().unwrap_or(0);
-
-    for i in 0..dash_count {
-        let x = step.mul_add(gl_f32(i), p.x0);
-        let dash_end = (x + dash_len).min(p.x1);
-        push_quad(deco, x, p.ul_y, dash_end, p.ul_y + p.thick, p.color);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3401,6 +3226,22 @@ mod tests {
         assert_eq!(
             quad_vertices(1.0, 2.0, 30.0, 40.0, color).as_slice(),
             pushed.as_slice()
+        );
+    }
+
+    #[test]
+    fn quad_bounds_round_trips_quad_vertices() {
+        let color = [0.25, 0.5, 0.75, 0.5];
+        let quad = quad_vertices(1.0, 2.0, 30.0, 40.0, color);
+        assert_eq!(
+            quad_bounds(&quad),
+            QuadBounds {
+                x0: 1.0,
+                y0: 2.0,
+                x1: 30.0,
+                y1: 40.0,
+                color,
+            }
         );
     }
 

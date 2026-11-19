@@ -373,33 +373,62 @@ stored separately on the format run so it can differ from foreground color.
 
 ---
 
-## Background Color Erase (BCE) (Task 48)
+## Background Color Erase (BCE) (Task 48, refined by Task 140)
 
-All erase operations (ED, EL, ECH, DCH, ICH, IL, DL) must fill erased cells
-with the **current** SGR background color, not a fixed default. The current
-SGR format is threaded as an explicit parameter into every erase method on
-`Buffer` — this makes the dependency visible at every call site and avoids a
-hidden read of mutable state during erase.
+Cells blanked by an erase take the **current** SGR background color, not a
+fixed default. The old behavior of writing `default_cell()` was incorrect and
+user-visible: `tput clear` with a non-default background produces a one-color
+field in other terminals but not in pre-Task-48 Freminal.
 
-The old behavior of writing `default_cell()` is incorrect and user-visible:
-`tput clear` with a non-default background produces a one-color field in
-other terminals but not in pre-Task-48 Freminal.
+Which operations, and which attributes, are decided as follows (Task 140,
+2026-11-19):
+
+- **Erased cells take only the background.** ED, EL, ECH, ICH, DCH, the
+  column-confined fills used while DECLRMM is enabled (these also cover IL, DL,
+  SU, SD and margin-triggered scrolls) and the alternate-screen clear all blank
+  with one tag, built by `Buffer::erase_tag()`: the stored background colour of
+  the current format and nothing else. No foreground, weight, underline,
+  reverse, blink or OSC 8 hyperlink is copied, so an open hyperlink no longer
+  leaks into erased cells. The stored background is used as it is, so SGR 7 does
+  not swap it (xterm's `cur_background`). With a default background the tag is
+  visually default and rows erased with it stay sparse. Background-only is the
+  tie-break the project applies when the reference terminals disagree: xterm
+  and Ghostty blank with the background only, kitty (`line_apply_cursor`) and
+  WezTerm copy the whole pen, and freminal follows xterm and Ghostty, consistent
+  with the Task 131 alternate-screen clear. It is a deliberate difference from
+  kitty.
+- **DCH fills the cells it vacates at the right edge** with the same tag, as
+  xterm and kitty do; with a default background the row stays sparse.
+- **Whole-row IL, DL, SU, SD and line-feed scrolling fill with default
+  attributes, not BCE.** The rows they create are `Row::new` with no format
+  (kitty parity), which keeps scrollback rows sparse. Earlier text here, and
+  the escape-sequence coverage table, said IL and DL were BCE-aware; that was
+  wrong and was corrected in Task 140. Only the DECLRMM column-confined variants
+  take the background, because they blank cells inside an existing row rather
+  than creating one.
+- **The erase methods read the format from `Buffer`**, through `erase_tag()`,
+  rather than taking it as a parameter. Task 48's text described the current
+  format as an explicit parameter of every erase method, but the code read the
+  buffer's current format; one helper that every blanking site uses is what
+  keeps the rule above uniform.
 
 ---
 
 ## DECDWL / DECDHL Line Width (Task 49)
 
 DECDWL (double-width lines) and DECDHL (double-height lines) are modeled as a
-`LineWidth` enum on each row: `Single`, `Double`, `DoubleHeightTop`,
+`LineWidth` enum on each row: `Normal`, `DoubleWidth`, `DoubleHeightTop`,
 `DoubleHeightBottom`. The cursor column is **halved** when on a double-width
 line — writing at logical column 40 on a double-width line puts the cursor at
 physical column 80. Cursor horizontal movement commands (CUF, CUB) scale by
 the line's width.
 
-Only the top half of a DECDHL pair is rendered; the bottom half is blank and
-the top half is stretched vertically in the render pipeline. This matches VT100
-behavior and is the pragmatic choice — real double-height rendering would
-require two-pass text layout.
+Both halves of a DECDHL pair are rendered. Each row draws its glyphs scaled to
+twice the cell height from the pair's top (the bottom half is shifted up one
+cell), so each row shows its own half of the doubled glyph. Underline and
+strikethrough are laid out in the same doubled box and clipped to the row
+(Task 140). (Earlier text here said only the top half was rendered; that no
+longer describes the code.)
 
 ---
 

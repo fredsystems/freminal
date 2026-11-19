@@ -503,7 +503,7 @@ impl Buffer {
             0
         };
 
-        let tag = self.current_tag.clone();
+        let tag = self.erase_tag();
         if self.declrmm_enabled == Declrmm::Enabled {
             // ICH: shift only within [col, scroll_region_right]; cells that
             // fall off the right margin are discarded.
@@ -546,9 +546,9 @@ impl Buffer {
         // operation removes them without updating image_cell_count.
         let remaining_images = if self.image_cell_count > 0 {
             let end_col = if self.declrmm_enabled == Declrmm::Enabled {
-                (col + n).min(self.scroll_region_right + 1)
+                col.saturating_add(n).min(self.scroll_region_right + 1)
             } else {
-                col + n
+                col.saturating_add(n)
             };
             self.collect_and_clear_image_ids_in_rows(row, row + 1, Some(col), Some(end_col));
             // Count Kitty images that survived the sweep in the deleted range.
@@ -557,15 +557,15 @@ impl Buffer {
             0
         };
 
+        let tag = self.erase_tag();
         if self.declrmm_enabled == Declrmm::Enabled {
             self.rows[row].delete_cells_at_with_right_limit(
                 col,
                 n,
                 self.scroll_region_right + 1,
-                &self.current_tag.clone(),
+                &tag,
             );
         } else {
-            let tag = self.current_tag.clone();
             self.rows[row].delete_cells_at(col, n, &tag);
         }
 

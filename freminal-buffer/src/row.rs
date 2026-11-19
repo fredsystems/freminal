@@ -1053,7 +1053,7 @@ impl Row {
 
         self.dirty = true;
 
-        let end = (col + n).min(self.width);
+        let end = col.saturating_add(n).min(self.width);
 
         // Extend the backing storage up to `end` if needed, filling with default blanks.
         if self.cells_vec_mut().len() < end {
@@ -1166,8 +1166,9 @@ impl Row {
         self.ensure_live();
         let limit = right_limit.min(self.width);
         let width = self.width;
+        let fill_edge = !tag.is_visually_default();
 
-        if n == 0 || col >= limit || col >= self.cells_vec_mut().len() {
+        if n == 0 || col >= limit || (col >= self.cells_vec_mut().len() && !fill_edge) {
             return;
         }
 
@@ -1207,17 +1208,22 @@ impl Row {
     /// range left to fill the gap. Implements VT DCH (Delete Character).
     ///
     /// - Cursor does not move (caller's responsibility).
-    /// - If `col` is beyond the stored cells, this is a no-op.
+    /// - If `col` is beyond the stored cells and `tag` is visually default, this is a
+    ///   no-op.
     /// - If `n` exceeds the cells to the right of `col`, everything from `col` onward
     ///   is removed.
     /// - Wide-glyph cleanup: if `col` lands on a continuation cell, back up to its
     ///   head and extend the deletion to cover the whole glyph. If `col` lands on a
     ///   head, extend the deletion to include all its trailing continuation cells.
     /// - BCE: the `tag` parameter is used for any blank cells created during
-    ///   wide-glyph boundary cleanup (e.g. when a deletion splits a wide glyph).
+    ///   wide-glyph boundary cleanup (e.g. when a deletion splits a wide glyph), and
+    ///   for the cells vacated at the right edge of the row. When `tag` is visually
+    ///   default the vacated cells stay implicit and the row stays sparse.
     pub fn delete_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
         self.ensure_live();
-        if n == 0 || col >= self.cells_vec_mut().len() {
+        let width = self.width;
+        let fill_edge = !tag.is_visually_default();
+        if n == 0 || col >= width || (col >= self.cells_vec_mut().len() && !fill_edge) {
             return;
         }
 
@@ -1241,12 +1247,16 @@ impl Row {
         }
 
         // Extend deletion to cover any trailing continuations of a head at `start`.
-        let mut end = (start + n).min(cells.len());
+        // `logical_end` is the unclamped end of the deleted columns; `end` is the
+        // same bound clamped to the stored cells.
+        let mut logical_end = start.saturating_add(n);
+        let mut end = logical_end.min(cells.len());
 
         // If the cell at `start` is a wide head, make sure we include all of its
         // continuation cells (they may already be covered, but let's be safe).
         if start < cells.len() && cells[start].is_head() {
             let head_width = cells[start].display_width();
+            logical_end = logical_end.max(start + head_width);
             end = end.max((start + head_width).min(cells.len()));
         }
 
@@ -1268,11 +1278,22 @@ impl Row {
             }
         }
 
-        // Clamp end to actual length
-        let end = end.min(cells.len());
-
         // --- Remove the range [start..end] by draining it ---------------
-        cells.drain(start..end);
+        if start < end {
+            cells.drain(start..end);
+        }
+
+        // BCE: the columns vacated at the right edge take the erase tag. They are
+        // the last `logical_end - start` columns of the row, clamped to the row.
+        if fill_edge {
+            let vacated = (logical_end - start).min(width - start);
+            if cells.len() < width {
+                cells.resize(width, Cell::blank_with_tag(FormatTag::default()));
+            }
+            for cell in cells.iter_mut().skip(width - vacated) {
+                *cell = Cell::blank_with_tag(tag.clone());
+            }
+        }
 
         // Trim trailing visually-default blanks to maintain the sparse-row invariant.
         trim_trailing_blanks(cells, FormatTag::is_visually_default);

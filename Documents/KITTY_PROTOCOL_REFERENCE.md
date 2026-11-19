@@ -1,6 +1,17 @@
 # Kitty Protocol Reference (freminal implementation notes)
 
-Last updated: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
+Last updated: 2026-11-19 — Task 140 — new "Underlines and SGR parity" section,
+distilled from the kitty 0.49.2 underlines page and the SGR part of the misc
+protocol page, and written to the shipped behaviour: SGR 21, `4:N`, SGR 221 and
+222, the underline colour rules, per-cell underline geometry, the background-only
+erase tag, the terminfo entry, freminal's deliberate differences from kitty and
+where it is implemented. The roadmap row now reads "Filled in; conformant". No
+other section changed. Review fixes: DCH fills its vacated right edge, an
+overflowing `4:N` is dashed, DECDHL rows lay decorations out in the doubled box,
+and the narrow-cell solid dash and the whole-row IL/DL/SU/SD fills are recorded as
+matching kitty (three differences remain).
+
+Earlier: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
 distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
 is conformant: the wire format, the four operations, the query items, the
 per-screen stacks and their reset, the name table (the 30 CSS names, the
@@ -106,7 +117,7 @@ achievable and verifiable.
 | --------------------------------------- | --------- | ----------------------------------------------------- | ----------------------------------------------------- |
 | Desktop notifications (OSC 99)          | v0.13.0   | 138 (conformance; 99 shipped)                         | Filled in; conformant                                 |
 | Pointer shapes (OSC 22)                 | v0.13.0   | 139                                                   | Filled in; conformant                                 |
-| Underlines and SGR parity               | v0.13.0   | 140                                                   | Not covered                                           |
+| Underlines and SGR parity               | v0.13.0   | 140                                                   | Filled in; conformant                                 |
 | Graphics protocol                       | v0.13.1   | 135, 136 (conformance and placement; 13, 100 shipped) | Filled in                                             |
 | Keyboard protocol                       | v0.13.1   | 137 (conformance; 35, 101, 114 shipped)               | Filled in                                             |
 | Multiple cursors (CSI)                  | v0.13.2   | 103                                                   | Stub                                                  |
@@ -120,9 +131,8 @@ achievable and verifiable.
 | Clipboard (OSC 5522)                    | v0.13.3   | 146                                                   | Not covered                                           |
 | Drag and drop (OSC 72)                  | v0.13.4   | 105                                                   | Stub (stable upstream; blocked locally by winit 0.30) |
 
-Colored/styled underlines and the base kitty keyboard/graphics subsets are
-already shipped (Tasks 35, 13) and are covered here only where v0.11.0 extends
-them.
+Colored/styled underlines shipped in Task 47 and were brought to full parity by
+Task 140; the base kitty keyboard/graphics subsets are already shipped (Tasks 35, 13) and are covered here only where v0.11.0 extends them.
 
 Shared foundation work for these tasks (CSI dispatch, wire infrastructure, reverse
 path, screen-scoped state, colour foundation, consent prompt, Unicode width) is
@@ -956,6 +966,162 @@ those CSS cursor names are outside the spec table and are not accepted.
   `?1049`, RIS and DECSTR, tmux passthrough, reply order, S8C1T framing, and the
   16-entry and 64-name caps), `freminal-terminal-emulator/tests/reset_table.rs`,
   and three `terminal_state` fuzz seeds (`fuzz/seeds/terminal_state/osc22_*`).
+
+---
+
+## Underlines and SGR parity
+
+Reference for Task 140. kitty re-purposes SGR codes that modern terminals do not
+use to give text coloured and styled underlines, chiefly the curly (wavy) line
+editors draw under misspellings and errors. The SGR part of the misc protocol
+adds independent control of bold and faint. freminal supports both.
+
+**Baseline: kitty 0.49.2** (this section was distilled from the upstream
+underlines page and the misc-protocol SGR paragraph on 2026-11-19). freminal
+conforms to it (Task 140, v0.13.0). Where the spec is silent, freminal follows
+kitty's reference behaviour, read for what it does and not copied (kitty is GPLv3,
+freminal is MIT). Where freminal deliberately differs, the difference is listed
+under "Documented differences from kitty (underlines)" below.
+
+### Underline SGR codes
+
+```text
+ESC [ 4:0 m   no underline
+ESC [ 4:1 m   straight (single) underline
+ESC [ 4:2 m   double underline
+ESC [ 4:3 m   curly underline
+ESC [ 4:4 m   dotted underline
+ESC [ 4:5 m   dashed underline
+ESC [ 4 m     straight underline (backwards compatible)
+ESC [ 24 m    no underline (backwards compatible)
+ESC [ 58 ... m  set the underline colour (same forms as 38 and 48)
+ESC [ 59 m    reset the underline colour
+```
+
+- **`4:N`** selects the style. `N` above 5 is not an error: it is dashed (kitty
+  clamps with `MIN(5, N)`). An empty subparameter (`4:`) is a single underline.
+- **SGR 21 is double underline**, as in kitty, xterm, Ghostty and WezTerm. It is
+  the same as `4:2`, and SGR 24 clears it. SGR 21 is not bold-off, which older
+  terminals (and freminal before Task 140) used it for.
+- **SGR 24** clears every underline style.
+- **Underline colour.** `58` takes the same forms as `38` and `48`; `59` resets it.
+  The underline colour must stay the same under reverse video when it is set, and
+  follow the foreground when it is not.
+- **Detection.** A program queries the terminfo database for the `Su` boolean
+  capability. freminal answers `Su`, `Smulx` and `Setulc` through XTGETTCAP.
+
+### Independent bold and faint (misc protocol, SGR part)
+
+```text
+ESC [ 22 m    bold and faint both off
+ESC [ 221 m   bold off only
+ESC [ 222 m   faint off only
+```
+
+The decimal `221` and `222` are kitty's; they are not in ECMA-48. Bold and faint
+are separate attributes in freminal (the font weight and the `Faint` decoration),
+so neither needed a storage change.
+
+### freminal behaviour
+
+- **`21`, `221`, `222`.** `21` is the double underline, `221` clears bold only and
+  `222` clears faint only. `22` is unchanged: it clears both. DECRQSS `$q m` already
+  reports a double underline as `4:2`, so SGR 21 is reported that way.
+- **`4:N`.** `4:0` is none, `4:1` to `4:5` are the five styles, `N` above 5 is
+  dashed (including a value too large for `usize`, which saturates), and an empty
+  `4:` is single. The clamp lives in the SGR handler, not in the strict 0 to 5
+  mapping `UnderlineStyle::from_sgr_param` keeps for other callers.
+- **Underline colour under reverse video.** An explicit underline colour (`58`) is
+  never swapped by SGR 7 or DECSCNM. A default underline follows the effective
+  foreground, so it stays visible against a swapped background (Tasks 115.2,
+  132.C5).
+- **Underline geometry.** Every underline and the strikethrough is clamped to the
+  cell box: the thickness is the font stroke thickness, at least 1 px and at most
+  the cell height, and the line is positioned inside the cell. Single is one quad
+  across the run. Double is two lines of that thickness separated by a gap of
+  thickness + 1; when the lower line would leave the cell both move up to sit on
+  the bottom edge. Curly, dotted and dashed are laid out **per cell on the cell
+  grid**, so a pattern is identical whatever the text-run boundaries, and on
+  DECDWL rows the pattern scales with the doubled cell. On DECDHL rows the
+  decoration is laid out in the doubled box exactly as the glyph is scaled, then
+  clipped to the row's own half, so it appears once, on the half where the doubled
+  glyph's underline falls:
+  - curly is one cosine period per cell, so adjacent cells join, with the
+    amplitude reduced as needed to keep the stroke inside the cell;
+  - dotted is `max(1, floor(cell_width / (2 * thickness)))` evenly spaced dots per
+    cell;
+  - dashed is two dashes per cell positioned so the right dash of one cell and the
+    left dash of the next join into one longer dash. In a cell too narrow for two
+    separate dashes (6 to 7 px wide, or under 4 px) the dashes touch or overlap and
+    the cell is one solid dash; kitty's two dash writes overlap into one line in
+    the same cells (and it draws one full dash under 4 px), so this matches kitty.
+- **Erased cells take only the background.** Cells blanked by ED, EL, ECH, ICH,
+  DCH, the DECLRMM column-confined scroll fills and the alternate-screen clear
+  carry the stored background colour and nothing else (no foreground, weight,
+  underline, reverse, blink or OSC 8 link), so an underline set before an erase is
+  not smeared across the blanked cells. DCH fills the cells vacated at the right
+  edge with that tag, as xterm and kitty do; with a default background the row
+  stays sparse. Whole-row IL, DL, SU, SD and line-feed fills use default
+  attributes.
+- **Terminfo.** The bundled `xterm-freminal` entry (`res/freminal.ti`) lists `Su`,
+  `Smulx` and `Setulc`, with exactly the strings XTGETTCAP returns. Child processes
+  are started with `TERM=xterm-256color`, so that entry is used only if a user sets
+  `TERM=xterm-freminal`; the capabilities programs discover at runtime come from
+  XTGETTCAP.
+
+### Documented differences from kitty (underlines)
+
+1. **An empty `4:;` is a single underline.** freminal's SGR tokeniser cannot tell
+   `4:;...` from a trailing `4:`, and both are a single underline (the kitty rule
+   for an empty subparameter). kitty gives no underline for the `4:;` form, which is
+   an artefact of its parser, not specified behaviour.
+2. **Double-underline lines use the font stroke thickness.** kitty draws the two
+   lines as 1 px rows; freminal draws them as lines of the font's stroke thickness,
+   clamped to the cell, with a gap of thickness + 1.
+3. **Erase is background-only.** kitty copies the whole pen (foreground, bold,
+   underline and so on) into erased cells; freminal copies only the background
+   colour, as xterm and Ghostty do. A reverse-video erase does not swap the stored
+   background.
+
+Not a difference: whole-row IL, DL, SU and SD fill with default attributes, as kitty does.
+freminal's own earlier documentation wrongly called them BCE-aware.
+
+### freminal current-state: underlines and SGR parity — conformant (Task 140, v0.13.0)
+
+- **SGR numbers** (`freminal-common/src/sgr.rs`):
+  `SelectGraphicRendition::from_usize` maps `21` to
+  `UnderlineWithStyle(UnderlineStyle::Double)`, `221` to `ResetBold` and `222` to
+  the new `ResetFaint`; `22` stays `NormalIntensity`.
+- **`4:N`** (`freminal-terminal-emulator/src/ansi_components/csi_commands/sgr.rs`):
+  `handle_underline_subparam` with `MAX_UNDERLINE_STYLE_PARAM` (5).
+- **Apply** (`freminal-terminal-emulator/src/terminal_handler/sgr.rs`): `apply_sgr`
+  handles `ResetFaint` by removing `FontDecorations::Faint` only.
+- **Erase tag** (`freminal-buffer/src/buffer/erase.rs`): `Buffer::erase_tag()`,
+  used by the erase methods there, `lines.rs` (ICH, DCH), `scroll.rs` (the DECLRMM
+  column fills) and `clear_alternate_screen` in `resize_and_alt.rs`. The DCH
+  right-edge fill is in `Row::delete_cells_at` (`freminal-buffer/src/row.rs`).
+- **Renderer** (`freminal/src/gui/renderer/decorations.rs`): `push_run_decorations`
+  (out of line, so the undecorated path stays tight), `RowLayout` and
+  `clip_quads_to_rows` (DECDHL rows), `clamp_to_cell`, `push_underline_quads` and
+  the per-style helpers `push_double_underline`, `push_curly_underline`,
+  `push_dotted_underline` and `push_dashed_underline`.
+- **Terminfo** (`res/freminal.ti`, `res/terminfo.tar`,
+  `freminal-terminal-emulator/build.rs`): `build.rs` passes `-x` to `tic`, because
+  without it the user-defined capabilities `Su`, `Smulx` and `Setulc` are dropped
+  with only a warning and never reach the compiled entry. `lookup_termcap`
+  (`freminal-terminal-emulator/src/terminal_handler/dcs.rs`) is the XTGETTCAP side.
+- **Tests:** the unit tests next to each file above;
+  `freminal-terminal-emulator/tests/sgr_underline_styles.rs`;
+  `freminal-buffer/tests/erase_bce_tests.rs` and
+  `freminal-terminal-emulator/tests/erase_bce_end_to_end.rs` (the erase tag per
+  operation and end to end); the geometry tests in `decorations.rs` (box clamps,
+  run-boundary independence, DECDWL and DECDHL layout, double spacing, curly
+  continuity, dash joins, dot spacing); and
+  `terminfo_source_advertises_styled_underline_caps_matching_xtgettcap` in
+  `dcs.rs`.
+- **Benchmarks:** `instanced_bg_decorated` in `freminal/benches/render_loop_bench.rs`
+  (a decoration-heavy corpus added by this task) and the erase benches
+  `bench_erase_display`, `bench_erase_display_full` and `bench_erase_display_bce`.
 
 ---
 

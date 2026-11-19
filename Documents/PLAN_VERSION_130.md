@@ -22,7 +22,7 @@ one plan document, grouped into milestones that ship as point releases:
 
 | Milestone | Codename                                   | Tasks                        |
 | --------- | ------------------------------------------ | ---------------------------- |
-| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–150    |
+| v0.13.0   | Foundations, Safety & Small Conformance    | 126–132, 138–140, 147–151    |
 | v0.13.1   | Shipped-Protocol Conformance (heavy)       | 134, 135, 136, 137           |
 | v0.13.2   | New Protocols: Small & Medium              | 103, 141, 142, 143, 144, 145 |
 | v0.13.3   | New Protocols: Text Sizing, Transfer, Clip | 133, 104, 102, 146           |
@@ -32,7 +32,7 @@ one plan document, grouped into milestones that ship as point releases:
 subtask breakdown: **126**, **127**, **128**, **129** (activated 2026-10-09), and **130** and **131**
 (activated 2026-10-10), **147** (created 2026-10-11), **132** (activated 2026-10-11), and
 **138** (activated 2026-10-12), **148** (created 2026-10-18), and **149** (created
-2026-10-22), **150** (activated 2026-10-22), and **139** (activated 2026-11-19).
+2026-10-22), **150** (activated 2026-10-22), and **139** and **140** (activated 2026-11-19).
 Everything else is an **enriched stub**:
 goal, audit findings, durable decisions and open questions, with no subtasks. Tasks 102, 103
 and 104 were previously decomposed. The audit found factual errors in those breakdowns (for
@@ -53,12 +53,13 @@ enriched stubs again and get re-decomposed at activation.
 | 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
 | 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
 | 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Pending merge | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | Complete      | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Pending merge | None                               |
 | 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
 | 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
 | 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
 | 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
+| 151 | Own TERM & Terminfo Distribution            | v0.13.0   | M     | Planned       | 140                                |
 | 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
 | 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
 | 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
@@ -7658,6 +7659,22 @@ documented in 147.17. A subtask may update a COVERAGE or GAPS row that it closes
 - **Tests / verification:** `cargo bench --no-run --all` emits no warnings.
 - **Depends on:** nothing.
 
+#### 147.33 — Plain-text status cells in the coverage tables
+
+- **Source:** CodeRabbit on PR #587 (Task 140), with the maintainer's decision (2026-11-19) to
+  convert the whole files in one pass rather than two rows.
+- **Defect today:** `markdown-lint-discipline` forbids emoji in table cells (their display width
+  is ambiguous, so linters and prettier disagree about alignment), but the status columns of
+  `ESCAPE_SEQUENCE_COVERAGE.md` (about 196 cells, with a ✅/🚧/❌ legend), `SGR.md` (about 29)
+  and the gap tables in `ESCAPE_SEQUENCE_GAPS.md` use them throughout.
+- **Scope:** those three files only: their status cells and legends become plain text (for
+  example `done`, `partial`, `missing`, `not planned`), with the legend rewritten to match;
+  tables re-padded with `prettier --write` by file name. No wording changes beyond the status
+  values. Update the `freminal-escape-sequence-docs` skill if it names the emoji markers.
+- **Tests / verification:** markdownlint and `prettier --check` on the three files; a grep for
+  the emoji markers in their tables is empty.
+- **Depends on:** nothing.
+
 #### 147.17 — Documentation
 
 - **Scope:**
@@ -7735,7 +7752,7 @@ Stale stub text was corrected at the same time:
   independent of each other and of the two chains. Run them in any order, or in parallel
   worktrees per `parallel-work-isolation`.
 - 147.6 → 147.12 → 147.18 run in order (the saved-cursor state, then the same buffer file).
-- 147.19, 147.26, 147.27, 147.28, 147.29, 147.30 and 147.31 are independent.
+- 147.19, 147.26, 147.27, 147.28, 147.29, 147.30, 147.31 and 147.33 are independent.
 - 147.17 runs last.
 - Every subtask goes through the orchestrator's full-diff review. Each behaviour fix needs a
   test that fails on the old code. The task ends with an adversarial review and a
@@ -10514,6 +10531,464 @@ ACCEPTED-AS-DOCUMENTED. No BLOCKER or MAJOR. New findings, all fixed in 139.C3:
   `widget.rs` is moved and corrected, and a test pins explicit icons for that function.
 - **N10 (nit):** verification results are recorded above.
 
+**Merged** 2026-11-19 via PR #586 (`9fb9d63a`).
+
+---
+
+## Task 140 — Underline & SGR Parity
+
+### 140 Summary
+
+**Goal.** SGR and underline behaviour matches the kitty underline spec
+(<https://sw.kovidgoyal.net/kitty/underlines/>) and the SGR part of the misc protocol
+(<https://sw.kovidgoyal.net/kitty/misc-protocol/>):
+
+- SGR 21 is double underline;
+- `4:N` follows kitty's rules;
+- SGR 221 and 222 reset bold and faint independently;
+- erased cells take only the background colour;
+- underline geometry is clamped to the cell and tiles per cell;
+- the shipped terminfo advertises styled and coloured underlines.
+
+Activated and decomposed on 2026-11-19 on branch `task-140/underline-sgr-parity`, from `main`
+at `9fb9d63a` (after PR #586).
+
+### 140 Activation recon (2026-11-19)
+
+Three read-only passes: the emulator SGR, erase and terminfo paths; the GUI underline renderer;
+and reference-terminal source (kitty `cursor.c`, `line.c`, `decorations.c`, `terminfo.py`;
+xterm `charproc.c`, `screen.c`, `ptyx.h`; Ghostty `sgr.zig`, `Screen.zig`, `style.zig`;
+WezTerm `csi.rs` and `terminalstate/mod.rs`). Results, stub claim by stub claim:
+
+- **SGR 21 is bold-off: confirmed.** `freminal-common/src/sgr.rs` maps `21` to `ResetBold`,
+  and the handler clears bold only. kitty, xterm, Ghostty and WezTerm all treat 21 as double
+  underline. Only `sgr_reset_bold_clears_font_weight` pins the apply side, and it tests the
+  `ResetBold` variant, not the number 21.
+- **`4:N` with N>5 clears the underline: confirmed.** `handle_underline_subparam`
+  (`ansi_components/csi_commands/sgr.rs`) maps through `UnderlineStyle::from_sgr_param`, which
+  returns `None` for anything but 1–5. An empty `4:` also clears it. Pinned by
+  `sgr_colon_underline_style_unknown_value_clears` (`tests/sgr_underline_styles.rs`). kitty
+  clamps with `MIN(5, N)`; Ghostty and WezTerm draw a single underline; xterm ignores `4:N`.
+- **SGR 221/222 are missing: confirmed.** Both fall to `Unknown`. kitty: 221 clears bold only,
+  222 clears faint only, 22 clears both. Ghostty and WezTerm do not implement them. Bold
+  (`FontWeight`) and faint (`FontDecorations::Faint`) are already separate, so no storage
+  change is needed.
+- **Underline geometry: confirmed.** `push_underline_quads` (`freminal/src/gui/renderer/vertex.rs`)
+  never sees the cell height, so double (down to `ul_y + 3*thick + 1`) and curly
+  (`ul_y ± 2*thick`, plus `thick`) can leave the cell. Dotted and dashed start at the run's
+  `x0`, so their phase restarts at every text run, and their pitches do not divide the cell
+  width. On DECDWL rows `x0`/`x1` are scaled but the pattern's `cell_width` is not. There are
+  no geometry tests, and only `Single` is ever constructed in tests. kitty draws each style
+  as a per-cell sprite clamped to the cell, so patterns tile across cells.
+- **Default underline colour wrong under SGR 7 + DECSCNM: refuted.** Fixed by 132.C5 and
+  pinned by `default_underline_follows_the_effective_foreground_under_sgr7_and_decscnm`.
+  Nothing to do.
+- **`Su`/`Smulx`/`Setulc` absent from `res/freminal.ti`: confirmed.** XTGETTCAP answers all
+  three (`terminal_handler/dcs.rs` `lookup_termcap`). `build.rs` rebuilds `res/terminfo.tar`
+  with `tic` when the source changes; `tic` is in the dev shell. kitty's `terminfo.py` defines
+  `Su` (boolean), `Smulx=\E[4:%p1%dm` and a colon-form `Setulc`.
+- **Erase copies the whole format tag: confirmed.** ED, EL, ECH, ICH and DCH (and the DECLRMM
+  column-scroll fills) write `Cell::blank_with_tag(current_tag.clone())`, so erased cells get
+  fg, bold, underline, reverse, blink and even an open OSC 8 URL. The alternate-screen clear
+  (Task 131) is already background-only. References split two against two: xterm (colour
+  flags only, `ClearCells`) and Ghostty (`blankCell`, background only) on one side; kitty
+  (`line_apply_cursor`, full pen) and WezTerm (`clone_sgr_only`) on the other.
+- **New finding: the BCE docs over-claim.** IL, DL, SU, SD and line-feed scrolling fill new
+  rows with default attributes (`scroll.rs`: "Scroll-created blank rows use default background
+  (no BCE)"). Only the DECLRMM column-confined variants use the current tag. COVERAGE and
+  `DESIGN_DECISIONS.md` say IL and DL are BCE-aware.
+- **No benchmark corpus contains decorations**, so the decoration build has no meaningful
+  regression bench today.
+
+### 140 Decisions (maintainer, 2026-11-19)
+
+1. **SGR 21 is double underline**, as in all four reference terminals. SGR 24 clears it.
+2. **`4:N` follows kitty.** N>5 clamps to dashed; an empty `4:` subparameter is a single
+   underline; `4:0` is no underline.
+3. **Erased cells take only the current background colour** (xterm and Ghostty, the standing
+   tie-break; consistent with the Task 131 alternate-screen clear). This also stops an open
+   OSC 8 hyperlink leaking into erased cells.
+4. **Whole-row IL/DL/scroll fills stay default-attributed** (kitty parity; keeps scrollback rows
+   sparse). The DECLRMM column-confined fills take the background-only erase tag (decision 3).
+   Only the docs that claim otherwise are corrected.
+5. **Underline geometry: clamp every decoration to the cell box, and lay dotted, dashed and
+   curly out per cell, anchored to the cell grid**, so a pattern is the same whatever the run
+   boundaries. Position and thickness still come from the font metrics.
+
+### 140 Decisions (orchestrator, recorded so they are not re-litigated)
+
+- **kitty is GPLv3, freminal is MIT.** kitty is read for observable behaviour only. The
+  per-cell layouts below are freminal's own, specified here, with the same intent as
+  kitty's sprites; no kitty code is copied.
+- **SGR numbers.** `21` maps to `UnderlineWithStyle(Double)`; `221` maps to the existing
+  `ResetBold` (bold off only); `222` maps to a new `ResetFaint` (faint off only). `22` keeps
+  clearing both. DECRQSS already reports `4:2` for a double underline, so no reply change.
+- **Empty `4:`.** freminal's SGR tokeniser cannot tell a trailing `4:` from `4:;…`; kitty's
+  differing answer for the second form (no underline) is an artefact of its parser. Both are a
+  single underline in freminal. Recorded as a difference from kitty.
+- **`4:N` clamping lives in the SGR handler**, not in `UnderlineStyle::from_sgr_param`, which
+  keeps its strict 0–5 mapping for any other caller.
+- **The erase tag.** It is `FormatTag::default()` with
+  `StateColors::default().with_background_color(current_tag.colors.background_color)`: the
+  stored background, not swapped by SGR 7 (xterm `cur_background`). One `Buffer` helper builds
+  it, and every BCE site uses it, including `clear_alternate_screen`. Row sparsity rules are
+  unchanged.
+- **Per-cell geometry.** Let `cw` be the drawn cell width (`cell_width * scale` on DECDWL rows),
+  `ch` the cell height, `top` the row's top and `bot = top + ch`, and for cell `c` of a run
+  `cx = c * cw`.
+  - **Thickness and position:** `t = clamp(stroke_size.max(1), 1, ch)`;
+    `ul_y = clamp(top + ascent - underline_offset, top, bot - t)`.
+  - **Single:** one quad `[x0, x1) × [ul_y, ul_y + t)`, unchanged apart from the clamp.
+  - **Double:** two lines of height `t` separated by a gap of `t + 1` (today's spacing). If the
+    lower line would pass `bot`, the lower line moves to `bot - t` and the upper to
+    `bot - t - (t + 1) - t`; the upper is finally clamped to `≥ top`. Each line is one quad
+    across the run.
+  - **Curly:** one period per cell, `y = centre - amp * cos(2π (x - cx) / cw)`, so every cell
+    starts and ends at the same height and adjacent cells join. `amp = min(2t, …)` reduced so
+    `centre ± amp` plus `t` stays inside `[top, bot)`; `centre = ul_y`, moved up only as far as
+    needed to fit. `CURLY_SEGMENTS` strips per cell, as today.
+  - **Dotted:** per cell, `n = max(1, floor(cw / (2t)))` dots, slot `s = cw / n`, dot width
+    `d = max(1, min(t, floor(s / 2)))`, dot `i` at `x = cx + round((i + 0.5) s - d / 2)`.
+  - **Dashed:** per cell, `q = floor(cw / 4)`, dash width `w = cw - 3q`; dashes at
+    `[cx, cx + w)` and `[cx + 3q, cx + cw)`. The right dash of one cell and the left dash of
+    the next join into one longer dash.
+  - **Strikethrough** is clamped the same way as single.
+- **Terminfo.** `Su` (boolean), `Smulx=\E[4:%p1%dm` and `Setulc` use exactly the strings
+  freminal's XTGETTCAP already returns, so the two cannot disagree.
+
+### 140 Execution model
+
+Serial, on one checkout (`task-140/underline-sgr-parity`). Each subtask is implemented by a
+sub-agent, reviewed by the orchestrator against this text (the whole diff, every new file read
+in full), verified again by the orchestrator, and only then committed by the orchestrator.
+Order: 140.1, 140.2, 140.3, 140.4, 140.5. An adversarial review of `main...HEAD` against this
+section and the kitty spec follows 140.5; every finding, nit and above, becomes a `140.Cn`
+entry and is fixed (or routed to the task that owns the code) before the PR.
+
+### 140 Subtasks
+
+Every subtask's verification is `cargo xtask test` and
+`cargo clippy --all-targets --all-features -- -D warnings`. Prohibitions for every subtask: do
+NOT touch files outside scope, do NOT commit, do NOT update plan documents, do NOT proceed to
+the next subtask; no `unwrap`/`expect` outside tests, no raw numeric `as` casts (`conv2`), no
+new `bool` fields or parameters, no `#[allow(dead_code)]`; do not delete or weaken a test
+assertion except where the subtask says the pinned behaviour changes. Stop condition for all:
+report files changed, every test whose expectation changed (with the decision that changed it),
+and verification results, then await review.
+
+#### 140.1 — SGR 21, `4:N`, 221 and 222
+
+Scope: `freminal-common/src/sgr.rs` (and its tests);
+`freminal-terminal-emulator/src/ansi_components/csi_commands/sgr.rs`;
+`freminal-terminal-emulator/src/terminal_handler/sgr.rs`;
+`freminal-terminal-emulator/tests/sgr_underline_styles.rs` and any SGR test that pins 21 or
+`4:N>5`.
+
+What:
+
+- `21` → `UnderlineWithStyle(UnderlineStyle::Double)`; `221` → `ResetBold`; `222` → new
+  `ResetFaint`, which removes `FontDecorations::Faint` only.
+- `handle_underline_subparam`: N>5 is dashed; an empty subparameter is single; `4:0` is none.
+- Tests: `21` gives a double underline and DECRQSS `4:2`; `24` after `21` clears it; `21`
+  leaves bold alone; `221` clears bold and keeps faint; `222` clears faint and keeps bold; `22`
+  clears both; `4:6` and `4:255` are dashed; `4:` is single; `from_usize` tests for 21, 22, 221
+  and 222. `sgr_colon_underline_style_unknown_value_clears` changes (decision 2).
+
+#### 140.2 — Erased cells take only the background colour
+
+Scope: `freminal-buffer/src/buffer/` (`erase.rs`, `lines.rs`, `scroll.rs` column fills,
+`resize_and_alt.rs` `clear_alternate_screen`, and wherever the new helper lives);
+`freminal-buffer/src/row.rs` only if a signature must change; `freminal-buffer/tests/` erase
+and BCE tests; `freminal-terminal-emulator/tests/` only for a new end-to-end test.
+
+What:
+
+- One `Buffer` helper builds the erase tag as decided. ED 0/1/2, EL 0/1/2, ECH, ICH, DCH (both
+  variants), the DECLRMM column-scroll fills and `clear_alternate_screen` use it.
+- Tests: for each operation, an active tag with fg, bold, underline, reverse, blink, an OSC 8
+  URL and a background leaves erased cells with the background only; reverse with no background
+  gives default cells (and the row stays sparse); a default tag keeps rows sparse; the
+  alternate-screen clear is unchanged; end to end through `handle_incoming_data`,
+  `ESC[1;4;31;44m ESC[K` gives blank cells with only the blue background.
+- Benchmark: `bench_erase_display`, `bench_erase_display_full`, `bench_erase_display_bce`
+  before and after (15%).
+
+#### 140.3 — Underline geometry: clamped and per cell
+
+Scope: `freminal/src/gui/renderer/vertex.rs` (`push_underline_quads` and its helpers,
+`UnderlineParams`, the strikethrough quad, tests); `freminal/benches/render_loop_bench.rs`.
+
+What:
+
+- **First**, add a decoration-heavy corpus to `render_loop_bench.rs` (every underline style
+  plus strikethrough, with colour changes splitting runs) and an `instanced_bg_decorated`
+  bench; capture the baseline on the unchanged renderer.
+- Implement the per-cell geometry exactly as decided. `UnderlineParams` gains the cell height
+  and the drawn cell width.
+- Tests, on the `deco` buffer: every quad of every style stays inside the cell box, including
+  for an offset below the cell, a negative offset and a thickness larger than the cell; a run of
+  six cells and the same cells split into runs of two and four produce the same quad positions;
+  on a DECDWL row the pattern scales with the cell; the two double lines do not overlap when
+  they fit; curly is continuous at cell boundaries; dashed joins across a boundary.
+- Benchmark: the new bench and `instanced_bg` before and after (15%).
+
+#### 140.4 — Terminfo advertises styled and coloured underlines
+
+Scope: `res/freminal.ti`; `res/terminfo.tar` (regenerated by the build); a test beside
+`lookup_termcap` in `freminal-terminal-emulator/src/terminal_handler/dcs.rs` or the terminfo
+module; `freminal-terminal-emulator/build.rs` (only to pass `-x` to `tic`; scope widened at
+execution, see the 140.4 status note).
+
+What: add `Su`, `Smulx` and `Setulc` to the `xterm-freminal` entry with exactly XTGETTCAP's
+strings. Rebuild the tar through `build.rs`. A test reads `res/freminal.ti` (`include_str!`)
+and checks that each of the three is present and matches `lookup_termcap`. Verify with
+`infocmp -x` on the compiled entry and record the output.
+
+#### 140.5 — Documentation
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/SGR.md`, `Documents/DESIGN_DECISIONS.md` (the BCE paragraph),
+`Documents/KITTY_PROTOCOL_REFERENCE.md` (an underlines section against kitty 0.49.2).
+
+What: the dual-document update per `freminal-escape-sequence-docs`: SGR 21, `4:N`, 221/222
+(❌ → ✅), erase attributes, the IL/DL/scroll fill correction, terminfo; the GAPS rows removed
+or closed; both "Last updated" headers; the difference from kitty for `4:;`. Verification:
+markdownlint and `prettier --check` on the named files.
+
+### 140 Status notes
+
+- **140.1 (done).** `21` is `UnderlineWithStyle(Double)`, `221` is `ResetBold`, `222` is the
+  new `ResetFaint`; `22` is unchanged. `handle_underline_subparam` clamps N>5 to dashed
+  (`MAX_UNDERLINE_STYLE_PARAM`), and an empty `4:` is single. Changed expectation:
+  `sgr_colon_underline_style_unknown_value_clears` became
+  `sgr_colon_underline_style_above_five_is_dashed` (decision 2).
+- **140.2 (done).** `Buffer::erase_tag()` (background only, not swapped by SGR 7) is used by
+  ED, EL, ECH, ICH, DCH, the DECLRMM column-confined fills (so IL/DL under DECLRMM take it) and
+  `clear_alternate_screen`. Whole-row IL/DL/SU/SD and line feeds are unchanged. Plain DCH writes
+  no fill; its tag only reaches a split wide glyph's remnant, which is tested (superseded by
+  140.C2: plain DCH now fills the vacated right edge). New
+  `freminal-buffer/tests/erase_bce_tests.rs` (17) and
+  `freminal-terminal-emulator/tests/erase_bce_end_to_end.rs` (4); 19 of the 21 fail on the old
+  code (the two that pass are the sparse-row and whole-row guards). Changed expectation:
+  `insert_space_tests::ich_preserves_shifted_tags` (ICH blanks of a bold tag are now default;
+  decision 3). Benchmarks (no change detected by Criterion): `erase_display` −7.8%,
+  `erase_display_full` −2.7%, `erase_display_bce` +4.7%.
+- **140.3 (done).** Per-cell geometry as decided, in a new out-of-line `push_run_decorations`
+  (kept out of `build_background_instances` so the undecorated path stays tight); strikethrough
+  is clamped with the same `clamp_to_cell`. **Deviation, accepted:** a dashed cell whose two
+  dashes would touch or overlap (`w ≥ 3q`, e.g. 6–7 px cells, or under 4 px) is one solid dash;
+  at the default 8 px cell the layout is exactly the spec's. New `instanced_bg_decorated` bench
+  and corpus, baseline captured before the change. 11 geometry tests (box clamps across seven
+  metric cases, run-boundary independence, DECDWL scaling, double spacing and relocation,
+  curly continuity, dash joins, dot spacing); no existing assertion changed. Orchestrator rerun
+  on an idle machine against `before_140_3`: worst `instanced_bg_indexed` 80x24 +9.5%,
+  `instanced_bg_decorated` −17% to −20% and `instanced_bg` −20% to −27% (the baseline was taken
+  under load, so the improvements are overstated; superseded by the idle re-measure in the
+  140.C4 status).
+- **140.4 (done).** `Su`, `Smulx` and `Setulc` added to `xterm-freminal` with XTGETTCAP's strings.
+  **Scope widened at execution:** `build.rs` ran `tic` without `-x`, which drops user-defined
+  capabilities with only a warning, so the new entries would never have reached
+  `res/terminfo.tar`. `tic` now gets `-x`; the orchestrator checked that `-x` alone leaves the
+  existing entry unchanged (`infocmp -x` identical). `infocmp -x` on the entry extracted from the
+  regenerated tar shows all three. New test
+  `terminfo_source_advertises_styled_underline_caps_matching_xtgettcap` ties the source to
+  `lookup_termcap`. A rebuild leaves the tar byte-identical. **Caveat found after commit
+  (maintainer question):** children run with `TERM=xterm-256color`, so no program looks up the
+  bundled `xterm-freminal` entry; the capabilities reach programs only through XTGETTCAP. The
+  docs say so. Making the bundled terminfo actually reach programs is outside Task 140; see
+  140.C1.
+- **140.5 (done).** COVERAGE, GAPS, `SGR.md`, the BCE section of `DESIGN_DECISIONS.md` (which
+  wrongly called IL/DL BCE-aware and described the format as an erase parameter) and a new
+  "Underlines and SGR parity" section in the kitty reference with five documented differences
+  from kitty (three after 140.C4 and 140.C5: the narrow-cell dash and the whole-row fills
+  turned out to match kitty). Orchestrator
+  fix: COVERAGE said every dashed cell under 8 px may be solid; only 6–7 px and sub-4 px cells
+  are.
+
+### 140 Cleanup entries
+
+#### 140.C1 — The bundled terminfo entry is never used
+
+- **Surfaced:** maintainer question after 140.4 (2026-11-19). Predates Task 140.
+- **Impact:** `res/terminfo.tar` is embedded and extracted for every PTY, and children get
+  `TERMINFO_DIRS=<tempdir>:`, but they also get `TERM=xterm-256color`
+  (`freminal-terminal-emulator/src/io/pty.rs` ~600–633). The temp dir holds only `freminal` and
+  `xterm-freminal`, so no program ever reads the bundled entry; ncurses resolves
+  `xterm-256color` from the system database. The flake package does not install the entry
+  either (`postInstall` copies icons only). Capabilities beyond `xterm-256color` reach programs
+  only through XTGETTCAP, and only programs that query it.
+- **Options (maintainer decision pending):** (1) keep `xterm-256color` and delete or
+  document-as-reference the bundled entry and its extraction; (2) an opt-in `[shell] term`
+  option (default `xterm-256color`, or `xterm-freminal`) plus installing the entry to
+  `$out/share/terminfo`; (3) default `TERM=xterm-freminal` as kitty and Ghostty do, which breaks
+  ssh to hosts without the entry until SSH integration (Task 86) and reverses the recorded TERM
+  decision (Task 92 was dropped for this reason).
+- **Verification, whichever option:** an integration test that spawns a real PTY child with the
+  production environment (the same code path as `run_terminal`) and runs `tput`/`infocmp -x`
+  inside it, asserting what the child actually resolves. Under today's code it would show the
+  entry is unreachable.
+- **Scheduling:** moved to Task 151 (maintainer decision 2026-11-19: freminal defaults to its
+  own `TERM` and ships the terminfo entry for remote hosts). Not blocking the Task 140 PR.
+
+### 140 Adversarial review (2026-11-19)
+
+One CODE-REVIEW pass over `main...HEAD` against the kitty underline and misc-protocol pages,
+this section and the repo rules. No blocker. Every finding, nit and above, is fixed:
+
+| ID  | Sev   | Finding (short)                                                         | Disposition |
+| --- | ----- | ----------------------------------------------------------------------- | ----------- |
+| R1  | major | plain DCH never fills the vacated right edge, docs say it does          | 140.C2      |
+| R2  | minor | DECDHL decorations are not scaled vertically like the glyphs            | 140.C3      |
+| R3  | minor | an overflowing `4:N` is `Invalid`, not dashed; no `4:2:3` / `21:x` test | 140.C2      |
+| R4  | minor | `erase_tag` lives in `resize_and_alt.rs`, not `erase.rs`                | 140.C2      |
+| R5  | minor | decoration geometry grew `vertex.rs`; give it `renderer/decorations.rs` | 140.C3      |
+| R6  | minor | narrow-cell solid dashes match kitty; docs call them a difference       | 140.C4      |
+| R7  | minor | 140.3 benchmarks compared against a baseline taken under load           | 140.C4      |
+| R8  | minor | geometry tests miss zero height, DECDHL, wide glyphs, tiny cells        | 140.C3      |
+| R9  | nit   | redundant decoration early-out in `push_run_decorations`                | 140.C3      |
+| R10 | nit   | `erase_tag()` rebuilt per row in the ED loops                           | 140.C2      |
+| R11 | nit   | `sgr_22_*` tests duplicate the existing `NormalIntensity` tests         | 140.C2      |
+| R12 | nit   | BCE history wording, meta-notes in COVERAGE rows, a ragged wrap         | 140.C4      |
+| R13 | nit   | 140.4 note lacks the `infocmp` output; new caps sit mid-entry in `.ti`  | 140.C4      |
+| R14 | nit   | Task 151 must list the "`TERM=xterm-256color`" doc sentences            | 140.C4      |
+
+#### 140.C2 — Emulator and buffer review fixes
+
+- **R1:** plain DCH (no DECLRMM) fills the `n` vacated cells at the right edge with
+  `erase_tag()`, as xterm and kitty do; with a default background the row stays sparse (no
+  explicit cells). Tests: a loud tag fills the right edge with the background only; a default
+  tag leaves the row sparse; a split wide glyph still works.
+- **R3:** a `4:` subparameter that overflows `usize` saturates (dashed) instead of making the
+  segment `Invalid`; tests for that, for `4:2:3` (double, extra colons ignored) and `21:x`
+  (double underline).
+- **R4:** `erase_tag` moves to `buffer/erase.rs`. **R10:** hoisted out of the ED/EL row loops.
+- **R11:** drop `sgr_22_clears_both_bold_and_faint` and the integration `sgr_22_resets_*`
+  (existing `NormalIntensity` tests cover them).
+- **Status: done.** R1 lives in `Row::delete_cells_at`: with a non-default erase tag the
+  vacated columns (`logical_end - start`, wider than `n` when a wide glyph widens the deletion)
+  take the tag, and a DCH past the stored content still fills the edge; a default tag keeps the
+  row sparse. Five new DCH tests, four of which fail on the old code (the sparse-row one pins
+  existing behaviour). R3: `parse_colon_parts` saturates only the first `4:` subparameter;
+  colour overflow and `4:x` stay `Invalid`. R11 is covered by
+  `sgr_normal_intensity_clears_bold_and_faint` and the CSI `22m` assertion. R4: `erase_tag`
+  moved to `erase.rs`; R10: hoisted out of the ED row loops (EL touches one row). No DCH
+  benchmark exists.
+
+#### 140.C3 — Renderer review fixes
+
+- **R5:** the decoration geometry (`push_run_decorations`, `UnderlineParams`, `clamp_to_cell`,
+  the style helpers) and its tests move to a new `freminal/src/gui/renderer/decorations.rs`;
+  pure move plus the R2 change.
+- **R2:** on DECDHL rows the decoration is laid out in the doubled box (the pair's top at the
+  top half's row top, height `2 * cell_height`, ascent, offsets and stroke doubled), exactly as
+  the glyph is scaled, then each quad is clipped to the row's own visible cell and dropped if
+  empty. So the underline appears once, on the half where the doubled glyph's underline falls.
+- **R8:** tests for `cell_height == 0` (no quads), DECDHL top and bottom halves, runs with a
+  two-column glyph, cells 2–4 px high for curly and double; the run-boundary test uses a stroke
+  whose old dot pitch did not divide the cell, so it fails on the old code.
+- **R9:** remove the redundant early-out.
+- **Status: done.** The move left the count at 9727; `effective_fg` and `x_scale` became
+  `pub(super)` (inside `renderer`) for the new module. DECDHL uses a `RowLayout` that mirrors
+  the glyph path exactly (doubled box at the pair top, bottom half shifted up one cell) and
+  `clip_quads_to_rows`. Seven new tests (9734); breaking the doubled scale or the clip fails four
+  each. The `STROKE_3` run-boundary case fails on pre-140.3 code (old dot pitch 6 restarted at
+  each run: 8 quads whole, 9 split).
+
+#### 140.C4 — Docs and plan review fixes
+
+- **R1:** DCH rows and BCE summaries match the fixed code. **R2:** COVERAGE notes DECDHL
+  decorations. **R6:** the narrow-cell dash is "matches kitty", not a difference (four
+  differences remain). **R12:** wording fixes. **R13:** the `infocmp` output in the 140.4 note;
+  move `Su`/`Smulx`/`Setulc` to the end of the entry. **R14:** list the docs to update in
+  Task 151. **R7:** re-measure 140.3 against a baseline of the pre-140.3 commit taken on an idle
+  machine, and record it.
+- **Status: done.** R1, R2, R6, R12 and R14 in COVERAGE, GAPS, `DESIGN_DECISIONS.md`, the
+  kitty reference and the Task 151 stub (sub-agent; orchestrator also fixed two wraps in this
+  plan that markdown parsed as list items). **R13** (orchestrator): `Su`/`Smulx`/`Setulc` moved
+  to the end of the entry; `res/terminfo.tar` is byte-identical afterwards. A first attempt with
+  an indented `#` comment line made `tic` swallow `Su` into a bogus name, and the 140.4 test
+  caught it; the comment was dropped. `infocmp -x -A` on the entry extracted from the tar:
+
+  ```text
+  am, bce, ccc, hs, km, mc5i, mir, msgr, npc, xenl, Su,
+  Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m,
+  Smulx=\E[4:%p1%dm,
+  ```
+
+  **R7** (orchestrator): the pre-140.3 commit (`78791a73`) with the current bench file, measured
+  idle as `pre140_3_idle`, against the branch head (after 140.C3). Everything is within 15%:
+  `instanced_bg` −3.5% / +0.5%, `instanced_bg_decorated` −0.2% / −0.8% (no change),
+  `instanced_bg_indexed` −2.1% / −0.6%, `instanced_bg_partial_dirty` +1.0% to +9.0% (worst
+  `one_row` `sparse_10_percent` +9.0%). The earlier −20% figures were load artefacts.
+
+### 140 Confirmation review (2026-11-19)
+
+A second CODE-REVIEW pass over `fd0870ec..HEAD` and `main...HEAD`: R1–R13 FIXED (R3 and R12
+with a nit each, R7 not reproducible by reading), R14 PARTIAL. No blocker. New findings, all
+fixed in 140.C5:
+
+| ID  | Sev   | Finding (short)                                                         |
+| --- | ----- | ----------------------------------------------------------------------- |
+| N1  | minor | whole-row IL/DL fills match kitty, yet are listed as a difference       |
+| N2  | nit   | DCH sentence broke the BCE tie-break antecedent; ragged wrap            |
+| N3  | nit   | stale comment in the split-wide-glyph DCH test                          |
+| N4  | minor | `CSI <huge> P` overflows `col + n` / `start + n` (debug panic)          |
+| N5  | nit   | Task 151 cites a `DESIGN_DECISIONS.md` TERM section that does not exist |
+| N6  | nit   | Task 151 list misses the FREC `term` metadata and `FREC_FORMAT.md`      |
+| N7  | nit   | `DESIGN_DECISIONS.md` DECDWL/DECDHL section is stale                    |
+| N8  | nit   | R3 says `21:x` is tested; the test is `21:5` (`21:x` is `Invalid`)      |
+| N9  | nit   | DCH tests miss a short row, last column, `n = 0`, end-to-end `CSI P`    |
+| N10 | nit   | quad layout indices duplicated in `clip_quads_to_rows` and test helper  |
+| N11 | nit   | no benchmark exercises the DECDHL decoration clip                       |
+| N12 | nit   | plan notes: 140.C2 status omits R4/R10, 140.3 note lacks a pointer      |
+
+#### 140.C5 — Confirmation-review fixes
+
+- **Orchestrator (docs and plan):** N1 (three differences; the whole-row fills recorded as a
+  match), N2 and N7 (`DESIGN_DECISIONS.md`), N5 and N6 (Task 151 stub), N12 (status notes).
+  The 140.C4 commit is typed `docs:` although it also reordered `res/freminal.ti` (no
+  compiled change); recorded here rather than rewriting history.
+- **Sub-agent (code):** N4 saturating arithmetic at every count-driven DCH/ICH/ECH site, with
+  huge-count tests and a `terminal_state` fuzz reproducer; N3; N8 (`21:x` is `Invalid`, tested);
+  N9 tests; N10 a shared quad-decode helper beside `quad_vertices`; N11 a DECDHL decorated
+  bench.
+- **Status: done.** N4 used `saturating_add` at `row.rs` (`delete_cells_at`,
+  `erase_cells_at`), `lines.rs` (the DCH image sweep, both branches) and `erase.rs` (the ECH
+  image sweep, which also overflowed); the ICH paths and DECLRMM DCH already clamped `n`.
+  The huge-count tests panic on the old arithmetic; reproducer
+  `fuzz/regressions/terminal_state/dch-huge-count-overflow`, and `fuzz-replay` is clean for
+  every target. N9: for `ABCDE`, col 1, `n = 2`, the remaining text is `ADE` in columns 0–2,
+  columns 3–7 are default blanks and 8–9 take the fill (the entry above had the blank range
+  wrong). N10: `QUAD_FLOATS`, `QuadBounds` and `quad_bounds` beside `quad_vertices`, with a
+  round-trip test. N11: `instanced_bg_decorated_dhl` (every row pair DECDHL): 35.3 µs at 80x24
+  and 194.5 µs at 200x50, against 27.6 µs and 152.2 µs for the same corpus without DECDHL
+  (first measurement, no earlier baseline exists). Tests: 9748.
+
+#### 140.C6 — PR #587 review comments
+
+- **Copilot (DCH on doubled rows):** on DECDWL/DECDHL rows the visible row is half the
+  buffer width, and text already wraps at the halved margin, but DCH (and ICH and ECH) shift,
+  fill and count image cells across the full width. The new DCH fill therefore lands in the
+  hidden half and the visible right edge stays default. **Declined (maintainer, 2026-11-19):
+  matches xterm.** xterm's stored-cell operations run across the full row width
+  (`ScrnDeleteChar` / `ScrnInsertChar` take `ScrnRightMargin`, which is `MaxCols - 1` without
+  DECLRMM; `ClearRight` uses `MaxCols`); only text writes use the halved `LineMaxCol`. xterm's
+  double-width branch in `DeleteChar` / `InsertChar` only paints the fill at the visible edge,
+  and a later repaint shows the stored cells. kitty and Ghostty do not implement DECDWL.
+  Four tests in `erase_bce_tests.rs` pin the full-width behaviour (DCH, ICH and ECH on a
+  DECDWL row, DCH on a DECDHL row). Tests: 9755.
+- **CodeRabbit, outside the diff (`row.rs` `delete_cells_at_with_right_limit`):** the DECLRMM DCH
+  path returns early when the cursor is past the stored cells, so its margin edge is never
+  filled (the case 140.C2 fixed for plain DCH). **Fixed:** the early return now applies only
+  when the tag is visually default; `dch_under_declrmm_past_stored_cells_fills_the_margin_edge`
+  fails on the old code. ICH under DECLRMM never had the early return (guard test added).
+- **CodeRabbit (decision 4 wording):** "IL/DL/scroll fills" now says whole-row, and names the
+  column-confined fills. Fixed by the orchestrator.
+- **CodeRabbit (emoji in the new SGR 221/222 table rows):** the rule is real, but both files
+  use emoji status cells throughout (196 in COVERAGE, 29 in `SGR.md`). **Maintainer decision:**
+  keep them in the new rows for consistency and convert the whole files in one pass, scheduled
+  as 147.33.
+
 ---
 
 ## Shipped-protocol conformance stubs (v0.13.0 / v0.13.1)
@@ -10764,31 +11239,101 @@ under "Task 138 — Desktop Notifications (OSC 99) Conformance" above.
 Activated and decomposed on 2026-11-19. The audit findings, decisions and subtasks now live
 under "Task 139 — Pointer Shapes (OSC 22) Completion" above.
 
-### Task 140 — Underline & SGR Parity (stub, v0.13.0)
+### Task 140 — Underline & SGR Parity (activated)
 
-**Goal.** Close the small SGR and underline gaps.
+Activated and decomposed on 2026-11-19. The audit findings, decisions and subtasks now live
+under "Task 140 — Underline & SGR Parity" above.
 
-**Audit findings.**
+---
 
-- **SGR 21 means bold-off; kitty means double underline.** `SGR.md` marks it ✅.
-- **`4:N` with N>5 clears the underline**; kitty clamps to dashed (test-pinned).
-- **SGR 221/222** (independent bold-off and faint-off) are missing.
-- **Underline geometry.** Double and curly lines are unclamped to the cell box, and the
-  dot/dash phase restarts per text run. Geometry is untested.
-- **The default underline colour is wrong under SGR 7 + DECSCNM.**
-- **`Su`/`Smulx`/`Setulc` are reachable only via XTGETTCAP**; they are absent from
-  `res/freminal.ti`.
-- **Erase copies the whole format tag into blank cells**, not just the background colour.
-  Verify against xterm/kitty before treating it as a bug.
+### Task 151 — Own TERM & Terminfo Distribution (stub, v0.13.0)
 
-**Scope sketch.** Work items A.1–A.4 from the audit, plus SGR 221/222 and an SGR 21
-behaviour change. Underline vertex tests and pixel goldens. Terminfo additions plus
-`terminfo.tar` rebuild.
+**Goal.** Programs running in freminal know they are in freminal, and get freminal's real
+capabilities from terminfo, not only from XTGETTCAP. Children get `TERM=xterm-freminal` by
+default, the bundled entry is accurate, and hosts that do not install freminal can be given
+the entry. Created 2026-11-19 from 140.C1; reverses the recorded "TERM Strategy" decision
+(the comment in `io/pty.rs` and the Task 12 and Task 92 notes in `MASTER_PLAN.md`) that Task 92
+was dropped under.
+
+**Findings (140.C1).**
+
+- `res/terminfo.tar` is embedded and extracted per PTY into a temp dir on `TERMINFO_DIRS`, but
+  children get `TERM=xterm-256color`, so nothing reads it.
+- The flake package does not install the entry (`postInstall` copies icons only), and neither
+  module installs it.
+- The `.ti` file was kept "as a reference" (source comment in `io/pty.rs`), so it has never
+  been exercised: it must be audited before it becomes authoritative.
+- XTGETTCAP `TN` is pinned to `xterm-256color` by a regression test (Task 76.6), so that it
+  cannot desync from `TERM`.
+- Task 86 (SSH integration, which would copy the entry to remote hosts) is a v0.15.0 stub; it is
+  not done.
+
+**Durable decisions (maintainer, 2026-11-19).**
+
+1. **Children get `TERM=xterm-freminal` by default.** The `xterm-` prefix keeps programs that
+   match `xterm*` working (as `xterm-kitty` and `xterm-ghostty` do).
+2. **`[shell] term` config option**, default `xterm-freminal`, so a user can go back to
+   `xterm-256color` (or anything). Full `freminal-config-options` wiring. Layout and pane `env`
+   still override it.
+3. **Flake `packages.<system>.terminfo`**: only `$out/share/terminfo`, with no GUI
+   dependencies, for servers that do not install freminal. The main package also installs the
+   entry under `$out/share/terminfo`.
+4. **A NixOS module option** (for example `programs.freminal.terminfo.enable`) that adds the
+   terminfo package to the system for headless servers. The home-manager module stays for
+   desktops.
+5. **XTGETTCAP `TN` reports the pane's actual `TERM`**, so it can never desync. The Task 76.6
+   regression test changes accordingly.
+
+**Required at activation.**
+
+- **Audit the entry first** (READ-ONLY): every capability in `res/freminal.ti` checked against
+  what the parser and handler do, and every capability XTGETTCAP answers present in the entry.
+  A wrong capability is worse than a missing one once programs trust it.
+- **The PTY-spawn test** from 140.C1: spawn a real child with the production environment and run
+  `tput` / `infocmp -x` inside it, asserting the entry resolves with the expected values; keep
+  the per-PTY `TERMINFO_DIRS` extraction so it resolves even where nothing is installed.
+- **One table of truth** shared by the `.ti` and `lookup_termcap`, or a test that compares them
+  for every capability (140.4's test covers three).
+- Docs: a new `DESIGN_DECISIONS.md` section for the TERM strategy (none exists today; the
+  reversed decision, with reasons), the ssh consequence
+  and how to fix it (install the terminfo package,
+  `infocmp -x xterm-freminal | ssh host tic -x -`, or set `[shell] term`), COVERAGE/GAPS,
+  README.
+- **Update every sentence that says children get `TERM=xterm-256color`** (found 2026-11-19
+  with `rg xterm-256color Documents/ freminal*/src`; re-run the search at activation):
+  - `ESCAPE_SEQUENCE_COVERAGE.md`: the Task 140 "Last updated" entry ("child processes get
+    `TERM=xterm-256color`, so the entry is used only if a user sets `TERM=xterm-freminal`") and
+    the SGR row ("programs get `TERM=xterm-256color` and discover these through XTGETTCAP").
+  - `ESCAPE_SEQUENCE_GAPS.md`: the Task 140 "Last updated" entry ("programs get
+    `TERM=xterm-256color`, so what they discover at runtime comes from XTGETTCAP").
+  - `KITTY_PROTOCOL_REFERENCE.md`, "Underlines and SGR parity", Terminfo bullet ("Child
+    processes are started with `TERM=xterm-256color`, so that entry is used only if a user sets
+    `TERM=xterm-freminal`").
+  - `MASTER_PLAN.md`: the Task 12 dependency note ("Strategy: stay with `TERM=xterm-256color`
+    (matching WezTerm/Alacritty)") and the Task 92 "Dropped Tasks" entry ("freminal deliberately
+    advertises `TERM=xterm-256color`"; it already carries a Task 151 addendum).
+  - `PLAN_VERSION_090.md` (Task 76.6 notes): "XTGETTCAP `TN` stays `xterm-256color`" and
+    "`io::pty::run_terminal` sets `TERM=xterm-256color` as the documented Task-12 compatibility
+    strategy".
+  - `PLAN_VERSION_150.md`: "Whether a `freminal` TERM is introduced at all (today:
+    `TERM=xterm-256color` + XTGETTCAP per Task 12)".
+  - `PLAN_VERSION_130.md` itself: the 140.4 status note ("children run with
+    `TERM=xterm-256color`") and 140.C1 are history and stay.
+  - Code comments: `freminal-terminal-emulator/src/io/pty.rs` (the "TERM Strategy" comment and
+    the `cmd.env("TERM", "xterm-256color")` block, ~605-633) and
+    `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (the `TN` comment, "Freminal
+    deliberately presents as `xterm-256color`", and the Task 76.6 regression test near it).
+  - FREC recording metadata hard-codes the value: `freminal/src/main.rs` (`term:
+    "xterm-256color"`) and `freminal/src/gui/recording.rs` (the same), plus the example in
+    `Documents/FREC_FORMAT.md`; record the pane's actual `TERM` instead.
 
 **Open questions.**
 
-- SGR 21 → double underline: a behaviour change, maintainer sign-off required.
-- The erase-format (BCE) question.
+- macOS: does the system ncurses read the extended (`tic -x`) entry from `TERMINFO_DIRS`?
+  Verify on the macOS CI job before relying on it.
+- Windows (ConPTY): whether `TERM` is set at all today, and whether anything changes.
+- What freminal does if `[shell] term` names an entry it does not ship (pass through, with a
+  warning).
 
 ---
 
