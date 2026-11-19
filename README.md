@@ -154,7 +154,7 @@ From inside a Freminal pane (the entry is available there in every build):
 infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -
 ```
 
-From anywhere, without Freminal, using the source file. On a remote host:
+From anywhere, without Freminal, using the source file (`curl` runs on this machine, `tic` on the server):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | ssh YOUR-SERVER -- tic -x -
@@ -178,7 +178,9 @@ Every release also attaches the file as `freminal.ti`, matching that version: `h
 
 Outside Freminal, `tic -x` run without root installs the entry to `~/.terminfo`, which needs no privileges; inside a pane it does not (see above), hence `-o ~/.terminfo`. Inside a Freminal pane the pane's own copy is searched first, so it never goes stale after an upgrade; other terminals and `ssh` sessions on that account use the `~/.terminfo` copy.
 
-A `TERMINFO` you export yourself (a private database for a custom `TERM`) stays reachable: Freminal moves it to the front of the pane's `TERMINFO_DIRS`, ahead of any `TERMINFO_DIRS` you set, and the system database stays reachable too.
+A `TERMINFO` you export yourself (a private database for a custom `TERM`) stays reachable: Freminal moves it to the front of the pane's `TERMINFO_DIRS`, ahead of any `TERMINFO_DIRS` you set, and the system database stays reachable too. Because it moves into `TERMINFO_DIRS`, it is searched after `~/.terminfo`, so an entry of the same name in `~/.terminfo` shadows the one in your `TERMINFO`.
+
+Freminal also sets `FREMINAL_TERMINFO` to the pane's directory. It is internal and not a setting: it lets a Freminal started inside a pane recognise the `TERMINFO` it inherited as its parent pane's, so nested panes do not chain every ancestor's directory into `TERMINFO_DIRS`. Do not set or rely on it.
 
 Packages that carry the entry system-wide, which also covers `sudo` and tmux servers that outlive a pane:
 

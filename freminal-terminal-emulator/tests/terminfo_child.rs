@@ -23,6 +23,8 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -31,6 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
+use common::skip_unless_ci;
 use crossbeam_channel::RecvTimeoutError;
 use freminal_common::{
     config::ShellConfig,
@@ -95,30 +98,6 @@ else
 fi
 echo END_OF_CHILD_OUTPUT
 "#;
-
-/// Whether the `CI` variable marks this as a CI run: set and non-empty.
-fn is_ci(value: Option<std::ffi::OsString>) -> bool {
-    value.is_some_and(|value| !value.is_empty())
-}
-
-/// Report that a terminfo tool is missing.  Locally that skips the test; on CI
-/// (`CI` set and non-empty) every Unix runner has the tools, so a missing one
-/// fails instead of letting the test pass without checking anything.
-fn skip_unless_ci(reason: &str) {
-    assert!(
-        !is_ci(std::env::var_os("CI")),
-        "CI is set, so a missing terminfo tool is a failure, not a skip: {reason}"
-    );
-    eprintln!("SKIPPED: {reason}");
-}
-
-#[test]
-fn ci_is_a_set_and_non_empty_variable() {
-    assert!(!is_ci(None));
-    assert!(!is_ci(Some(std::ffi::OsString::new())));
-    assert!(is_ci(Some(std::ffi::OsString::from("true"))));
-    assert!(is_ci(Some(std::ffi::OsString::from("1"))));
-}
 
 /// Install a deliberately stale `xterm-freminal` (8 colours) under `home/.terminfo`.
 ///
@@ -343,7 +322,7 @@ fn terminfo_does_not_hide_other_term_values() {
         "child ended before finishing; full child output:\n{output}"
     );
     if output.contains(SKIP_XTERM_256COLOR_MARKER) {
-        eprintln!("SKIPPED: the system has no xterm-256color terminfo entry");
+        skip_unless_ci("the system has no xterm-256color terminfo entry");
         return;
     }
     assert!(

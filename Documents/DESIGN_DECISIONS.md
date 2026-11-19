@@ -977,9 +977,10 @@ variants and the corresponding `pending_shell_action` field on
 Each shipped script starts with a `# freminal-shell-integration v<N>`
 comment (or `<!-- ... -->` for README.md). A single Rust constant
 `FREMINAL_SHELL_INTEGRATION_VERSION: u32` lives in `shell_integration.rs`.
-A `cargo test` invariant asserts the constant matches the marker in every
-shipped script. Forgetting to bump the constant after editing a script
-fails CI.
+A `cargo test` invariant asserts that the marker line in every shipped
+script agrees with the constant. It does not detect an edited script whose
+marker and constant were both left unchanged, so bumping the version after
+editing a script is a discipline, not a CI gate.
 
 The runtime install path (`sync_to_disk`) does NOT read the version
 marker. It compares bytes directly. The version is purely a development-
@@ -1426,7 +1427,18 @@ On Windows nothing is extracted and `TERMINFO` is not touched. On the other plat
 the user exported for a custom `TERM`) is not discarded: it is moved to the front of the child's
 `TERMINFO_DIRS`, followed by the inherited `TERMINFO_DIRS`, or by an empty element (which
 ncurses reads as the system database) when that is unset. Without an inherited `TERMINFO` the
-inherited `TERMINFO_DIRS` is left alone.
+inherited `TERMINFO_DIRS` is left alone. Because the user's directory moves into
+`TERMINFO_DIRS`, it is searched after `~/.terminfo`, so a same-named entry in `~/.terminfo`
+shadows it (it ranked first while it was `TERMINFO`).
+
+`FREMINAL_TERMINFO` is set to the same directory as `TERMINFO`. It is internal, not a setting,
+and exists for one reason: a freminal started inside a pane inherits the parent pane's
+`TERMINFO`, which is not the user's. An inherited `TERMINFO` that equals the pane's own
+directory, or equals the inherited `FREMINAL_TERMINFO` (set by a parent freminal pane), is
+therefore not moved into `TERMINFO_DIRS`; otherwise each nesting level would add another
+ancestor's temporary directory to the list. A `TERMINFO` the user exports inside a pane
+differs from `FREMINAL_TERMINFO` and is kept. Both variables are set even when
+`set_term_program` is off.
 
 Installed copies:
 

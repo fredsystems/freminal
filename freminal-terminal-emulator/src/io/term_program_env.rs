@@ -23,6 +23,12 @@ pub enum TermProgramEnv {
     /// Set `TERM_PROGRAM` / `TERM_PROGRAM_VERSION` and inject the shell
     /// integration into a recognised shell.
     Advertise,
-    /// Set neither and inject nothing; the child's environment is left as is.
+    /// Set neither `TERM_PROGRAM` nor `TERM_PROGRAM_VERSION` and inject no shell
+    /// integration (an inherited `TERM_PROGRAM` is not touched).
+    ///
+    /// This is not a pristine environment: the spawn path still sets `TERM`,
+    /// `TERMINFO` and `FREMINAL_TERMINFO` (and the other variables every pane
+    /// gets), and still removes an inherited `FREMINAL_SHELL_FEATURES`, so a
+    /// parent pane's feature list never reaches an un-integrated child.
     Omit,
 }

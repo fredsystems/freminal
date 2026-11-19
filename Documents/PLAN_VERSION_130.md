@@ -11177,7 +11177,8 @@ combination, in legacy mode as well.
   Super on text keys, Alt+Backspace (B3) and the kitty-protocol encoding remain here.
 - **B2 (high), modified Enter is dropped entirely** (`gui/terminal/input.rs:1894-1899`).
 - **B3 (high), Enter/Tab/Backspace/Escape carry no modifiers.** Shift+Tab sends HT instead of
-  `CSI Z`.
+  `CSI Z`. The terminfo entry declares `kcbt=\E[Z` (Task 151), so fixing B3 makes it
+  true; the Task 151 table-of-truth test then moves `kcbt` out of `DECLARED_NOT_SENT`.
 - **B4 (high), key identity comes from typed text.**
   - Non-ASCII text is emitted as one `CSI u` per UTF-8 byte.
   - Shifted symbols lose Shift and use the wrong code.
@@ -11721,6 +11722,47 @@ R1, R6, R7, R8, R9, R10, R11, R18. Scope: `README.md`, `Documents/DESIGN_DECISIO
   decided, plus the R2 and R14 behaviour in the README and `DESIGN_DECISIONS.md`.
   `FREC_FORMAT.md` already agreed. R7 and R8 were done by the orchestrator in 151.C2's
   commit.
+
+#### 151 Confirmation review (2026-11-19)
+
+A second CODE-REVIEW pass over `7dee17d0..HEAD`: R1–R16, R18 and R20 FIXED; R17
+ACCEPTED-AS-DOCUMENTED; R19 FIXED for Task 151's tests (the `sleep 30` echo-off tests predate
+the branch and need the PTY held open); R21 PARTIAL (N1, N4). New findings:
+
+| ID  | Sev   | Finding (short)                                                                 | Disposition |
+| --- | ----- | ------------------------------------------------------------------------------- | ----------- |
+| N1  | major | CI-strict skip fails the stdin-compile test on `windows-latest` (no `tic`)      | 151.C4      |
+| N2  | minor | nested freminal panes carry the parent pane's `TERMINFO` into `TERMINFO_DIRS`   | 151.C4      |
+| N3  | nit   | a user `TERMINFO` now ranks after `~/.terminfo`; not documented                 | 151.C4      |
+| N4  | nit   | missing `xterm-256color` still skips silently on CI                             | 151.C4      |
+| N5  | nit   | CI-skip helpers duplicated in two test files                                    | 151.C4      |
+| N6  | nit   | `kcbt` declared, never sent; `kent` exemption is conditional on Task 147        | routed      |
+| N7  | nit   | README "On a remote host:" heading over a command run locally                   | 151.C4      |
+| N8  | nit   | `TermProgramEnv` doc overstates what `Omit` leaves alone                        | 151.C4      |
+| N9  | nit   | `DESIGN_DECISIONS.md` says a forgotten version bump fails CI; it does not       | 151.C4      |
+
+- **N6 routing:** sending `CSI Z` for Shift+Tab is Task 137 B3 (modifiers on Tab), so `kcbt`
+  stays declared (it is the standard value) and Task 137's stub gains the note. `kent`:
+  147.5 makes keypad Enter in application mode send `SS3 M`, which is `kent`'s value, so
+  whichever of the Task 147 and Task 151 PRs merges second moves `kent` from
+  `DECLARED_NOT_SENT` to the encoder-checked set (a merge-time reconciliation, recorded in
+  both tasks' notes).
+- **N2 decision:** an inherited `TERMINFO` equal to the pane's own directory is dropped; a
+  pane marks its directory with a `FREMINAL_TERMINFO` variable naming it, and an inherited
+  `TERMINFO` equal to the inherited `FREMINAL_TERMINFO` (a parent freminal pane's directory)
+  is not carried into `TERMINFO_DIRS`.
+
+##### 151.C4 — Confirmation-review fixes
+
+N1 (gate the `tic` tests to Unix, or exempt Windows from the CI-strict rule), N2 (as decided),
+N3, N4, N5 (a shared `tests/common` helper), N7, N8, N9.
+
+- **Status: done (2026-11-19).** N1: the stdin-compile test and its source constant are
+  `#[cfg(unix)]`. N2: the child also gets `FREMINAL_TERMINFO=<pane dir>`; `terminfo_env`
+  drops an inherited `TERMINFO` equal to the pane's directory or to the inherited
+  `FREMINAL_TERMINFO`, tested for nested panes, the bundle duplicate and a user value under a
+  nested pane. N3–N5, N7–N9 as recorded (`tests/common/mod.rs` holds the CI-strict helper).
+  `terminfo_child` passed 10 of 10, and with `CI=1`.
 
 #### 151 Status notes
 

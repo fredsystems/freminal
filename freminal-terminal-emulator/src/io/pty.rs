@@ -208,10 +208,19 @@ fn terminfo_source(platform: TerminfoPlatform, bundle_dir: Option<PathBuf>) -> T
     }
 }
 
-/// The terminfo variables the child is given: `TERMINFO` always, `TERMINFO_DIRS`
-/// only when a user-supplied `TERMINFO` has to stay reachable.
+/// Names the pane's own terminfo directory in the child's environment.
+///
+/// Internal: freminal sets it next to `TERMINFO`, so a freminal started inside a
+/// pane can tell the `TERMINFO` it inherits (the parent pane's directory) from one
+/// the user exported.  It is not a setting and nothing reads it but freminal.
+const FREMINAL_TERMINFO_ENV: &str = "FREMINAL_TERMINFO";
+
+/// The terminfo variables the child is given: `TERMINFO` and `FREMINAL_TERMINFO`
+/// always, `TERMINFO_DIRS` only when a user-supplied `TERMINFO` has to stay
+/// reachable.
 #[derive(Debug, PartialEq, Eq)]
 struct TerminfoEnv {
+    /// Both `TERMINFO` and `FREMINAL_TERMINFO` are set to this.
     terminfo: PathBuf,
     /// `None` leaves the inherited `TERMINFO_DIRS` (set or not) untouched.
     terminfo_dirs: Option<OsString>,
@@ -236,14 +245,25 @@ struct TerminfoEnv {
 /// parent's `TERMINFO_DIRS`; when that is unset (or empty) the value ends with an
 /// empty element, which ncurses reads as the compiled-in default, so the system
 /// database stays reachable.  Without an inherited `TERMINFO` the inherited
-/// `TERMINFO_DIRS` is left alone.
+/// `TERMINFO_DIRS` is left alone.  Because the moved directory is searched after
+/// `~/.terminfo`, a same-named entry there shadows the user's `TERMINFO`.
+///
+/// An inherited `TERMINFO` that freminal itself set is not the user's and is not
+/// moved, or nested panes would chain every ancestor's temporary directory into
+/// `TERMINFO_DIRS`.  It is freminal's when it equals `dir`, or when it equals the
+/// inherited `FREMINAL_TERMINFO` (the directory a parent freminal pane named).  A
+/// `TERMINFO` the user exported inside a pane differs from `FREMINAL_TERMINFO` and
+/// is kept.  Paths are compared as `OsStr`, byte for byte.
 fn terminfo_env(
     dir: &Path,
     inherited_terminfo: Option<&OsStr>,
+    inherited_freminal_terminfo: Option<&OsStr>,
     inherited_terminfo_dirs: Option<&OsStr>,
 ) -> TerminfoEnv {
     let terminfo_dirs = inherited_terminfo
         .filter(|inherited| !inherited.is_empty())
+        .filter(|inherited| *inherited != dir.as_os_str())
+        .filter(|inherited| inherited_freminal_terminfo != Some(*inherited))
         .map(|inherited| {
             let mut dirs = inherited.to_os_string();
             dirs.push(":");
@@ -261,8 +281,14 @@ fn terminfo_env(
 /// Apply [`terminfo_env`] to `cmd`, reading the inherited values from the
 /// builder's environment (which starts as the parent's).
 fn apply_terminfo_env(cmd: &mut CommandBuilder, dir: &Path) {
-    let env = terminfo_env(dir, cmd.get_env("TERMINFO"), cmd.get_env("TERMINFO_DIRS"));
+    let env = terminfo_env(
+        dir,
+        cmd.get_env("TERMINFO"),
+        cmd.get_env(FREMINAL_TERMINFO_ENV),
+        cmd.get_env("TERMINFO_DIRS"),
+    );
     cmd.env("TERMINFO", &env.terminfo);
+    cmd.env(FREMINAL_TERMINFO_ENV, &env.terminfo);
     if let Some(dirs) = env.terminfo_dirs {
         cmd.env("TERMINFO_DIRS", dirs);
     }
@@ -1365,6 +1391,7 @@ mod bundle_terminfo_tests {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.env_remove("TERMINFO");
         cmd.env_remove("TERMINFO_DIRS");
+        cmd.env_remove(FREMINAL_TERMINFO_ENV);
         if let Some(terminfo) = terminfo {
             cmd.env("TERMINFO", terminfo);
         }
@@ -1385,6 +1412,7 @@ mod bundle_terminfo_tests {
         let mut cmd = cmd_inheriting(None, None);
         apply_terminfo_env(&mut cmd, pane);
         assert_eq!(cmd.get_env("TERMINFO"), Some(pane.as_os_str()));
+        assert_eq!(cmd.get_env(FREMINAL_TERMINFO_ENV), Some(pane.as_os_str()));
     }
 
     #[test]
@@ -1392,8 +1420,9 @@ mod bundle_terminfo_tests {
         let dir = Path::new("/pane");
         let user = OsStr::new("/home/u/my-terminfo");
         let dirs = OsStr::new("/opt/a:/opt/b");
-        let case =
-            |terminfo: Option<&OsStr>, dirs: Option<&OsStr>| terminfo_env(dir, terminfo, dirs);
+        let case = |terminfo: Option<&OsStr>, dirs: Option<&OsStr>| {
+            terminfo_env(dir, terminfo, None, dirs)
+        };
         let expect = |terminfo_dirs: Option<&str>| TerminfoEnv {
             terminfo: PathBuf::from("/pane"),
             terminfo_dirs: terminfo_dirs.map(OsString::from),
@@ -1417,6 +1446,75 @@ mod bundle_terminfo_tests {
         assert_eq!(
             case(Some(user), Some(OsStr::new(""))),
             expect(Some("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn pure_terminfo_env_does_not_chain_a_freminal_set_terminfo() {
+        let dir = Path::new("/pane");
+        let parent_dir = OsStr::new("/parent-pane");
+        let user = OsStr::new("/home/u/my-terminfo");
+        let dirs = OsStr::new("/opt/a:/opt/b");
+        let expect = |terminfo_dirs: Option<&str>| TerminfoEnv {
+            terminfo: PathBuf::from("/pane"),
+            terminfo_dirs: terminfo_dirs.map(OsString::from),
+        };
+
+        // Bundle (or reused) directory: the inherited TERMINFO is already this pane's.
+        assert_eq!(
+            terminfo_env(dir, Some(dir.as_os_str()), None, Some(dirs)),
+            expect(None)
+        );
+        assert_eq!(
+            terminfo_env(dir, Some(dir.as_os_str()), Some(dir.as_os_str()), None),
+            expect(None)
+        );
+        // Nested freminal: TERMINFO is the parent pane's directory, named by
+        // FREMINAL_TERMINFO, so it is not carried over.
+        assert_eq!(
+            terminfo_env(dir, Some(parent_dir), Some(parent_dir), None),
+            expect(None)
+        );
+        assert_eq!(
+            terminfo_env(dir, Some(parent_dir), Some(parent_dir), Some(dirs)),
+            expect(None)
+        );
+        // A user's TERMINFO with no FREMINAL_TERMINFO is kept.
+        assert_eq!(
+            terminfo_env(dir, Some(user), None, Some(dirs)),
+            expect(Some("/home/u/my-terminfo:/opt/a:/opt/b"))
+        );
+        // Freminal in freminal, the user exported their own TERMINFO in the parent
+        // pane: it differs from the parent's FREMINAL_TERMINFO, so it is kept.
+        assert_eq!(
+            terminfo_env(dir, Some(user), Some(parent_dir), None),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+        // An empty FREMINAL_TERMINFO never matches a non-empty TERMINFO.
+        assert_eq!(
+            terminfo_env(dir, Some(user), Some(OsStr::new("")), None),
+            expect(Some("/home/u/my-terminfo:"))
+        );
+    }
+
+    #[test]
+    fn terminfo_env_names_the_pane_dir_in_freminal_terminfo() {
+        let mut cmd = cmd_inheriting(Some("/parent-pane"), None);
+        cmd.env(FREMINAL_TERMINFO_ENV, "/parent-pane");
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(cmd.get_env("TERMINFO"), Some(OsStr::new("/tmp/x")));
+        assert_eq!(
+            cmd.get_env(FREMINAL_TERMINFO_ENV),
+            Some(OsStr::new("/tmp/x"))
+        );
+        assert_eq!(cmd.get_env("TERMINFO_DIRS"), None);
+
+        let mut cmd = cmd_inheriting(Some("/home/u/my-terminfo"), None);
+        cmd.env(FREMINAL_TERMINFO_ENV, "/parent-pane");
+        apply_terminfo_env(&mut cmd, Path::new("/tmp/x"));
+        assert_eq!(
+            cmd.get_env("TERMINFO_DIRS"),
+            Some(OsStr::new("/home/u/my-terminfo:"))
         );
     }
 
