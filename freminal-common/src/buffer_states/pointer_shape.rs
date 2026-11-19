@@ -4,15 +4,18 @@
 // https://opensource.org/licenses/MIT.
 
 //! `PointerShape` — typed representation of the X11/CSS pointer cursor shape
-//! set by `OSC 22 ; <name> ST`.
+//! requested through `OSC 22`, and the types of the OSC 22 operations.
 //!
-//! The variants map 1-to-1 onto `egui::CursorIcon` so the GUI can convert
-//! without carrying an egui dependency into the common crate.
+//! The variants map onto `egui::CursorIcon` so the GUI can convert without
+//! carrying an egui dependency into the common crate.  A [`PointerShape`] is
+//! one shape; the protocol state is a per-screen stack of
+//! [`PointerShapeEntry`] values, which an OSC 22 request sets, pushes or pops
+//! (see [`PointerShapeOp`]).
 //!
-//! [`PointerShape::from_name`] is the one name table: the CSS cursor names from
-//! the kitty pointer-shapes specification, freminal's extras, and kitty's
-//! legacy X11 aliases.  [`PointerShape::css_name`] gives the canonical name of
-//! a shape, which is also what `Display` prints.
+//! [`PointerShape::from_name`] is the one name table: the 30 CSS cursor names
+//! from the kitty pointer-shapes specification, the CSS aliases `col-resize` /
+//! `row-resize`, and kitty's legacy X11 aliases.  [`PointerShape::css_name`]
+//! gives the canonical name of a shape, which is also what `Display` prints.
 
 use std::fmt;
 
@@ -20,26 +23,26 @@ use std::fmt;
 /// OSC 22.
 ///
 /// An application sends `OSC 22 ; <name> ST` to request a specific X11 /
-/// CSS pointer shape.  An empty name or `"default"` resets to the OS default.
+/// CSS pointer shape.  The type is exactly one shape: OSC 22 sets, pushes and
+/// pops it on a per-screen stack of [`PointerShapeEntry`] values.  An empty set
+/// name stores an unset entry (which shows [`PointerShape::Default`]);
+/// `"default"` is an ordinary shape, not a reset.
 ///
 /// The variants are named after their `egui::CursorIcon` counterparts so that
 /// the GUI layer can convert with a simple `match` — no string comparison at
 /// render time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PointerShape {
-    /// Default OS pointer (arrow).  Also the reset / "no override" state.
+    /// Default OS pointer (arrow).  Also what an empty stack or an unset top
+    /// entry shows.
     #[default]
     Default,
-    /// Hide the cursor entirely.
-    None,
     /// I-beam for text selection.
     Text,
     /// Vertical I-beam.
     VerticalText,
     /// Pointing-hand (links / clickable items).
     Pointer,
-    /// Context-menu cursor.
-    ContextMenu,
     /// Help / question-mark cursor.
     Help,
     /// Spinning progress indicator (cursor + busy).
@@ -64,8 +67,6 @@ pub enum PointerShape {
     Alias,
     /// Copy arrow.
     Copy,
-    /// All-scroll (four arrows).
-    AllScroll,
     /// Horizontal resize (east–west).
     ResizeHorizontal,
     /// Vertical resize (north–south).
@@ -152,9 +153,9 @@ impl PointerShape {
     /// Look up a pointer shape by its OSC 22 name.
     ///
     /// This is the single name table.  It accepts the 30 CSS cursor names from
-    /// the kitty pointer-shapes specification, freminal's extras (`none`,
-    /// `context-menu`, `all-scroll`), the CSS names `col-resize` / `row-resize`
-    /// (aliases of `ew-resize` / `ns-resize`), and kitty's legacy X11 aliases.
+    /// the kitty pointer-shapes specification, the CSS names `col-resize` /
+    /// `row-resize` (aliases of `ew-resize` / `ns-resize`), and kitty's legacy
+    /// X11 aliases.
     ///
     /// Matching is case-sensitive and the name is not trimmed.  Anything not in
     /// the table, including the empty string, returns `None`.
@@ -162,11 +163,9 @@ impl PointerShape {
     pub fn from_name(name: &str) -> Option<Self> {
         let shape = match name {
             "default" | "left_ptr" | "arrow" => Self::Default,
-            "none" => Self::None,
             "text" | "xterm" | "ibeam" | "beam" => Self::Text,
             "vertical-text" => Self::VerticalText,
             "pointer" | "pointing_hand" | "hand2" | "hand" => Self::Pointer,
-            "context-menu" => Self::ContextMenu,
             "help" | "question_arrow" | "whats_this" => Self::Help,
             "progress" | "half-busy" | "left_ptr_watch" => Self::Progress,
             "wait" | "clock" | "watch" => Self::Wait,
@@ -179,7 +178,6 @@ impl PointerShape {
             "grabbing" | "closedhand" | "dnd-none" => Self::Grabbing,
             "alias" | "dnd-link" => Self::Alias,
             "copy" | "dnd-copy" => Self::Copy,
-            "all-scroll" => Self::AllScroll,
             "ew-resize" | "col-resize" | "sb_h_double_arrow" | "split_h" => Self::ResizeHorizontal,
             "ns-resize" | "row-resize" | "sb_v_double_arrow" | "split_v" => Self::ResizeVertical,
             "nesw-resize" | "size_bdiag" | "size-bdiag" => Self::ResizeNeSw,
@@ -194,7 +192,7 @@ impl PointerShape {
             "ne-resize" | "top_right_corner" => Self::ResizeNorthEast,
             "zoom-in" | "zoom_in" => Self::ZoomIn,
             "zoom-out" | "zoom_out" => Self::ZoomOut,
-            _ => return Option::None,
+            _ => return None,
         };
         Some(shape)
     }
@@ -208,11 +206,9 @@ impl PointerShape {
     pub const fn css_name(self) -> &'static str {
         match self {
             Self::Default => "default",
-            Self::None => "none",
             Self::Text => "text",
             Self::VerticalText => "vertical-text",
             Self::Pointer => "pointer",
-            Self::ContextMenu => "context-menu",
             Self::Help => "help",
             Self::Progress => "progress",
             Self::Wait => "wait",
@@ -225,7 +221,6 @@ impl PointerShape {
             Self::Grabbing => "grabbing",
             Self::Alias => "alias",
             Self::Copy => "copy",
-            Self::AllScroll => "all-scroll",
             Self::ResizeHorizontal => "ew-resize",
             Self::ResizeVertical => "ns-resize",
             Self::ResizeNeSw => "nesw-resize",
@@ -255,16 +250,6 @@ mod tests {
     use super::PointerShape;
 
     #[test]
-    fn empty_string_is_not_a_name() {
-        assert_eq!(PointerShape::from_name(""), None);
-    }
-
-    #[test]
-    fn whitespace_only_is_not_a_name() {
-        assert_eq!(PointerShape::from_name("   "), None);
-    }
-
-    #[test]
     fn explicit_default_names() {
         assert_eq!(
             PointerShape::from_name("default"),
@@ -278,11 +263,6 @@ mod tests {
             PointerShape::from_name("left_ptr"),
             Some(PointerShape::Default)
         );
-    }
-
-    #[test]
-    fn none_cursor() {
-        assert_eq!(PointerShape::from_name("none"), Some(PointerShape::None));
     }
 
     #[test]
@@ -315,14 +295,6 @@ mod tests {
     #[test]
     fn help_cursor() {
         assert_eq!(PointerShape::from_name("help"), Some(PointerShape::Help));
-    }
-
-    #[test]
-    fn context_menu_cursor() {
-        assert_eq!(
-            PointerShape::from_name("context-menu"),
-            Some(PointerShape::ContextMenu)
-        );
     }
 
     #[test]
@@ -391,14 +363,6 @@ mod tests {
     fn alias_and_copy() {
         assert_eq!(PointerShape::from_name("alias"), Some(PointerShape::Alias));
         assert_eq!(PointerShape::from_name("copy"), Some(PointerShape::Copy));
-    }
-
-    #[test]
-    fn all_scroll() {
-        assert_eq!(
-            PointerShape::from_name("all-scroll"),
-            Some(PointerShape::AllScroll)
-        );
     }
 
     #[test]
@@ -485,12 +449,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_name_is_not_a_name() {
-        assert_eq!(PointerShape::from_name("banana"), None);
-        assert_eq!(PointerShape::from_name("not-a-cursor"), None);
-    }
-
     // ── from_name / css_name ────────────────────────────────────────
 
     const SPEC_NAMES: [(&str, PointerShape); 30] = [
@@ -524,12 +482,6 @@ mod tests {
         ("wait", PointerShape::Wait),
         ("zoom-in", PointerShape::ZoomIn),
         ("zoom-out", PointerShape::ZoomOut),
-    ];
-
-    const EXTRA_NAMES: [(&str, PointerShape); 3] = [
-        ("none", PointerShape::None),
-        ("context-menu", PointerShape::ContextMenu),
-        ("all-scroll", PointerShape::AllScroll),
     ];
 
     const CSS_ALIASES: [(&str, PointerShape); 2] = [
@@ -586,46 +538,82 @@ mod tests {
         ("dnd-none", PointerShape::Grabbing),
     ];
 
-    const ALL_VARIANTS: [PointerShape; 33] = [
-        PointerShape::Default,
-        PointerShape::None,
-        PointerShape::Text,
-        PointerShape::VerticalText,
-        PointerShape::Pointer,
-        PointerShape::ContextMenu,
-        PointerShape::Help,
-        PointerShape::Progress,
-        PointerShape::Wait,
-        PointerShape::Cell,
-        PointerShape::Crosshair,
-        PointerShape::Move,
-        PointerShape::NoDrop,
-        PointerShape::NotAllowed,
-        PointerShape::Grab,
-        PointerShape::Grabbing,
-        PointerShape::Alias,
-        PointerShape::Copy,
-        PointerShape::AllScroll,
-        PointerShape::ResizeHorizontal,
-        PointerShape::ResizeVertical,
-        PointerShape::ResizeNeSw,
-        PointerShape::ResizeNwSe,
-        PointerShape::ResizeEast,
-        PointerShape::ResizeSouthEast,
-        PointerShape::ResizeSouth,
-        PointerShape::ResizeSouthWest,
-        PointerShape::ResizeWest,
-        PointerShape::ResizeNorthWest,
-        PointerShape::ResizeNorth,
-        PointerShape::ResizeNorthEast,
-        PointerShape::ZoomIn,
-        PointerShape::ZoomOut,
-    ];
+    /// Declares [`ALL_VARIANTS`] and [`variant_name`] from one list.
+    ///
+    /// `variant_name` is an exhaustive `match` with no wildcard, so a
+    /// [`PointerShape`] variant missing from this list fails to compile.  The
+    /// array is built from the same list, so it cannot omit a listed variant.
+    macro_rules! declare_variants {
+        ($($variant:ident),+ $(,)?) => {
+            const ALL_VARIANTS: [PointerShape; [$(stringify!($variant)),+].len()] =
+                [$(PointerShape::$variant),+];
+
+            const fn variant_name(variant: PointerShape) -> &'static str {
+                match variant {
+                    $(PointerShape::$variant => stringify!($variant)),+
+                }
+            }
+        };
+    }
+
+    declare_variants!(
+        Default,
+        Text,
+        VerticalText,
+        Pointer,
+        Help,
+        Progress,
+        Wait,
+        Cell,
+        Crosshair,
+        Move,
+        NoDrop,
+        NotAllowed,
+        Grab,
+        Grabbing,
+        Alias,
+        Copy,
+        ResizeHorizontal,
+        ResizeVertical,
+        ResizeNeSw,
+        ResizeNwSe,
+        ResizeEast,
+        ResizeSouthEast,
+        ResizeSouth,
+        ResizeSouthWest,
+        ResizeWest,
+        ResizeNorthWest,
+        ResizeNorth,
+        ResizeNorthEast,
+        ZoomIn,
+        ZoomOut,
+    );
+
+    #[test]
+    fn all_variants_lists_every_variant_exactly_once() {
+        for (index, variant) in ALL_VARIANTS.iter().enumerate() {
+            assert_eq!(
+                variant_name(*variant),
+                format!("{variant:?}"),
+                "variant {variant:?}"
+            );
+            assert!(
+                !ALL_VARIANTS[..index].contains(variant),
+                "variant {variant:?} is listed twice"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_extras_are_not_names() {
+        for name in ["none", "context-menu", "all-scroll"] {
+            assert_eq!(PointerShape::from_name(name), None, "name {name:?}");
+        }
+    }
 
     #[test]
     fn from_name_maps_every_table_entry() {
-        let tables: [&[(&str, PointerShape)]; 4] =
-            [&SPEC_NAMES, &EXTRA_NAMES, &CSS_ALIASES, &KITTY_ALIASES];
+        let tables: [&[(&str, PointerShape)]; 3] = [&SPEC_NAMES, &CSS_ALIASES, &KITTY_ALIASES];
         for table in tables {
             for (name, expected) in table {
                 assert_eq!(
@@ -638,10 +626,10 @@ mod tests {
     }
 
     #[test]
-    fn css_name_round_trips_spec_and_extra_names() {
-        for (name, _) in SPEC_NAMES.iter().chain(EXTRA_NAMES.iter()) {
+    fn css_name_round_trips_spec_names() {
+        for (name, _) in SPEC_NAMES {
             let shape = PointerShape::from_name(name).expect("table name");
-            assert_eq!(shape.css_name(), *name);
+            assert_eq!(shape.css_name(), name);
         }
     }
 
@@ -723,9 +711,7 @@ mod tests {
 
     #[test]
     fn display_all_pointer_shape_variants() {
-        assert_eq!(PointerShape::None.to_string(), "none");
         assert_eq!(PointerShape::VerticalText.to_string(), "vertical-text");
-        assert_eq!(PointerShape::ContextMenu.to_string(), "context-menu");
         assert_eq!(PointerShape::Help.to_string(), "help");
         assert_eq!(PointerShape::Progress.to_string(), "progress");
         assert_eq!(PointerShape::Wait.to_string(), "wait");
@@ -738,7 +724,6 @@ mod tests {
         assert_eq!(PointerShape::Grabbing.to_string(), "grabbing");
         assert_eq!(PointerShape::Alias.to_string(), "alias");
         assert_eq!(PointerShape::Copy.to_string(), "copy");
-        assert_eq!(PointerShape::AllScroll.to_string(), "all-scroll");
         assert_eq!(PointerShape::ResizeHorizontal.to_string(), "ew-resize");
         assert_eq!(PointerShape::ResizeVertical.to_string(), "ns-resize");
         assert_eq!(PointerShape::ResizeNeSw.to_string(), "nesw-resize");

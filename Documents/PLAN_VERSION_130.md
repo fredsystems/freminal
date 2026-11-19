@@ -43,37 +43,37 @@ enriched stubs again and get re-decomposed at activation.
 
 ## Task Summary
 
-| #   | Task                                        | Milestone | Scope | Status        | Depends on                         |
-| --- | ------------------------------------------- | --------- | ----- | ------------- | ---------------------------------- |
-| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete      | None                               |
-| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete      | 126 (schedule only)                |
-| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete      | 126.3                              |
-| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete      | None                               |
-| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete      | 129                                |
-| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete      | 130.1–130.3 (foundation)           |
-| 132 | Colour Foundation                           | v0.13.0   | L     | Complete      | 126.1                              |
-| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete      | 129, 130                           |
-| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | In progress   | 129, 130, 131                      |
-| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned       | None                               |
-| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned       | 130, 131                           |
-| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete      | None                               |
-| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete      | 138                                |
-| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete      | 149                                |
-| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned       | None                               |
-| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned       | 126.2, 129, 130, 131               |
-| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned       | 135                                |
-| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned       | 128, 131; architecture sign-off    |
-| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned       | 127, 128, 131, 132, 141            |
-| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned       | 128, 131                           |
-| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned       | 128                                |
-| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned       | 128, 140                           |
-| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned       | 128, 129, 130, 132                 |
-| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned       | 129; maintainer decision           |
-| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned       | None                               |
-| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned       | 129, 134, 103                      |
-| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned       | 129, 130, 133                      |
-| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned       | 102, 133; windowing DnD capability |
+| #   | Task                                        | Milestone | Scope | Status      | Depends on                         |
+| --- | ------------------------------------------- | --------- | ----- | ----------- | ---------------------------------- |
+| 126 | Pre-existing Safety Gate                    | v0.13.0   | S     | Complete    | None                               |
+| 127 | Unfocused / Inactive-Pane Cursor (#531)     | v0.13.0   | M     | Complete    | 126 (schedule only)                |
+| 128 | Prefix- & Intermediate-Aware CSI Dispatch   | v0.13.0   | M     | Complete    | 126.3                              |
+| 129 | Kitty Wire Infrastructure                   | v0.13.0   | L     | Complete    | None                               |
+| 130 | Reverse-Path & Capability-Query Consistency | v0.13.0   | L     | Complete    | 129                                |
+| 131 | Screen-Scoped State & Reset Lifecycle       | v0.13.0   | L     | Complete    | 130.1–130.3 (foundation)           |
+| 132 | Colour Foundation                           | v0.13.0   | L     | Complete    | 126.1                              |
+| 138 | Desktop Notifications (OSC 99) Conformance  | v0.13.0   | L     | Complete    | 129, 130                           |
+| 139 | Pointer Shapes (OSC 22) Completion          | v0.13.0   | M     | In progress | 129, 130, 131                      |
+| 140 | Underline & SGR Parity                      | v0.13.0   | S     | Planned     | None                               |
+| 147 | v0.13.0 Correctness Cleanup                 | v0.13.0   | L     | Planned     | 130, 131                           |
+| 148 | Security & Fuzz Findings Remediation        | v0.13.0   | XL    | Complete    | None                               |
+| 149 | zbus 6 Migration & Notification Backends    | v0.13.0   | M     | Complete    | 138                                |
+| 150 | Desktop Notification Backend Extraction     | v0.13.0   | L     | Complete    | 149                                |
+| 134 | Unicode Width & Segmentation Conformance    | v0.13.1   | XL    | Planned     | None                               |
+| 135 | Graphics Protocol Conformance               | v0.13.1   | L     | Planned     | 126.2, 129, 130, 131               |
+| 136 | Graphics Placement Model & Z-Layers         | v0.13.1   | XL    | Planned     | 135                                |
+| 137 | Keyboard Protocol Conformance               | v0.13.1   | XL    | Planned     | 128, 131; architecture sign-off    |
+| 103 | Multiple Cursors                            | v0.13.2   | L     | Planned     | 127, 128, 131, 132, 141            |
+| 141 | Misc Protocol Extensions                    | v0.13.2   | M     | Planned     | 128, 131                           |
+| 142 | Unscroll (`CSI Ps + T`)                     | v0.13.2   | M     | Planned     | 128                                |
+| 143 | DECCARA / DECSACE                           | v0.13.2   | M     | Planned     | 128, 140                           |
+| 144 | Color Control (OSC 21) & Colour Stack       | v0.13.2   | L     | Planned     | 128, 129, 130, 132                 |
+| 145 | Kitty Shell-Integration Compatibility       | v0.13.2   | M     | Planned     | 129; maintainer decision           |
+| 133 | Shared Consent Prompt                       | v0.13.3   | M     | Planned     | None                               |
+| 104 | Kitty Text Sizing (OSC 66)                  | v0.13.3   | XL    | Planned     | 129, 134, 103                      |
+| 102 | Kitty File Transfer (OSC 5113)              | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 146 | Kitty Clipboard (OSC 5522)                  | v0.13.3   | XL    | Planned     | 129, 130, 133                      |
+| 105 | Kitty Drag & Drop (OSC 72)                  | v0.13.4   | XL    | Planned     | 102, 133; windowing DnD capability |
 
 **Numbering.** Task numbers here are **allocation order, not execution order**, following the
 freminal convention recorded in `MASTER_PLAN.md`. Milestones carry execution order. Tasks
@@ -10164,8 +10164,9 @@ marked **(differs from kitty)**.
   a push onto a full stack evicts the bottom.
 - **Name table.** Accepted for set, push and the support query:
   - the 30 spec CSS names;
-  - freminal's existing extras `none`, `context-menu`, `all-scroll`, and `col-resize` /
-    `row-resize` as aliases of `ew-resize` / `ns-resize`;
+  - freminal's existing extras `none`, `context-menu`, `all-scroll` (**superseded by review
+    finding R7: removed**), and `col-resize` / `row-resize` as aliases of `ew-resize` /
+    `ns-resize`;
   - kitty's full alias table: `left_ptr`, `arrow` → default; `xterm`, `ibeam`, `beam` → text;
     `pointing_hand`, `hand2`, `hand` → pointer; `question_arrow`, `whats_this` → help;
     `clock`, `watch` → wait; `half-busy`, `left_ptr_watch` → progress; `tcross` → crosshair;
@@ -10397,9 +10398,88 @@ Verification: markdownlint and `prettier --check` on the three files.
   reference with the three deliberate differences from kitty. Prettier re-padded the COVERAGE
   OSC table.
 
+### 139 Adversarial review (2026-11-19)
+
+One CODE-REVIEW pass over `main...HEAD` against the kitty spec, kitty's source, this section and
+the repo rules. No BLOCKER or MAJOR. The wire behaviour, the name table, the stack semantics,
+the reply framing and ordering, the per-screen stacks and the resets were all confirmed
+against kitty. Findings and dispositions:
+
+| ID  | Sev   | Finding (short)                                                         | Disposition                  |
+| --- | ----- | ----------------------------------------------------------------------- | ---------------------------- |
+| R1  | minor | `PointerShape` / module docs still describe a reset, not a stack        | 139.C1                       |
+| R2  | minor | `seventeenth_push_evicts_the_bottom` passes without eviction            | 139.C1                       |
+| R3  | minor | MASTER_PLAN Completion note and two "decomposed" lists stale            | 139.C2                       |
+| R4  | minor | MASTER_PLAN and the 130 status table no longer prettier-clean           | 139.C2                       |
+| R5  | minor | COVERAGE "Dispatch" bullet lists stale token targets                    | 139.C2                       |
+| R6  | minor | no handler/e2e test of a >16-name push or a >64-name query reply        | 139.C1                       |
+| R7  | minor | `none` / `context-menu` / `all-scroll` are outside the spec table       | 139.C1 (remove the extras)   |
+| R8  | minor | possible `redundant_closure_for_method_calls` in `osc_pointer.rs`       | not a defect (clippy clean)  |
+| R9  | minor | unrelated Task 150 status commit on the branch                          | 139.C2 (PR description note) |
+| R10 | nit   | kitty 0.51.0 shipped; baseline still 0.49.2                             | 139.C2                       |
+| R11 | nit   | grammar in the kitty reference header                                   | 139.C2                       |
+| R12 | nit   | parser splits for a pop; `iter.count()` scans the whole body            | 139.C1                       |
+| R13 | nit   | duplicated name tests; `ALL_VARIANTS` not compile-time exhaustive       | 139.C1                       |
+| R14 | nit   | stale assertion messages in `terminal_handler/mod.rs` OSC 22 tests      | 139.C1                       |
+| R15 | nit   | snapshot `pointer_shape` doc imprecise                                  | 139.C1                       |
+| R16 | nit   | fuzz seeds and dictionary miss the cap and non-UTF-8                    | 139.C1                       |
+| R17 | nit   | a >64-name query reply has 64 items, so positions past 64 are lost      | not a defect (decision kept) |
+| R18 | nit   | GAPS says "closed" before merge                                         | 139.C2 (re-check at merge)   |
+| R19 | nit   | cleanup section empty                                                   | this entry                   |
+
+- **R7 (decision changed):** the spec defines the valid names and says `__current__` answers
+  "a name from the table … or 0"; `none`, `context-menu` and `all-scroll` are not in it, and
+  `none` lets a program hide the pointer over the pane until the next reset. The extras are
+  removed from the name table, and with them the now-unreachable `PointerShape::None`,
+  `ContextMenu` and `AllScroll` variants and their GUI arms. `col-resize` / `row-resize` stay:
+  they are aliases and report the canonical `ew-resize` / `ns-resize`. This supersedes the
+  "freminal's existing extras" bullet of "139 Decisions".
+- **R8:** `cargo clippy --all-targets --all-features -- -D warnings` was run by the
+  orchestrator after 139.3 and is clean: `css_name` is a `const fn` taking `self`, which the
+  lint does not suggest replacing here.
+- **R17:** answering `0` for names past the cap would make the reply unbounded again (about one
+  byte per input byte up to the 1 MiB OSC cap). The cap decision stands; it is documented.
+
 ### 139 Cleanup entries
 
-(none yet)
+#### 139.C1 — Review fixes: code, tests and the name-table extras
+
+- **Surfaced:** adversarial review R1, R2, R6, R7, R12–R16.
+- **Scope:** `freminal-common/src/buffer_states/pointer_shape.rs`;
+  `freminal-terminal-emulator/src/ansi_components/osc_pointer_shape.rs`;
+  `terminal_handler/osc_pointer.rs`; `terminal_handler/mod.rs` (OSC 22 test messages);
+  `freminal-terminal-emulator/src/snapshot.rs` (field doc);
+  `freminal-terminal-emulator/tests/osc22_pointer_shapes.rs`; `freminal/src/gui/terminal/widget.rs`
+  (the three removed variants' arms and the test that uses `None`); `fuzz/seeds/terminal_state/`;
+  `fuzz/dict/ansi.dict`; the OSC 22 claims about the extras in `ESCAPE_SEQUENCE_COVERAGE.md` and
+  `KITTY_PROTOCOL_REFERENCE.md`.
+- **Fix:** rewrite the stale docs (R1, R15); make the eviction test fail without eviction (R2);
+  add a >16-name single push and a >64-name query reply test (R6); remove the extras (R7);
+  split only for set/push/query and stop counting the remainder (R12); drop the exactly
+  duplicated tests and add a compile-time exhaustive variant guard (R13); reword the messages
+  (R14); add a seed with >64 names and a non-UTF-8 name, and `>`, `<`, `?__current__`
+  dictionary tokens (R16).
+- **Verification:** the suite, clippy, `check-windows`, `fuzz-replay`, markdownlint.
+
+#### 139.C2 — Review fixes: plan and doc bookkeeping
+
+- **Surfaced:** adversarial review R3–R5, R9–R11, R18.
+- **Fix (orchestrator):** MASTER_PLAN Completion note and both "decomposed" lists (R3); the
+  table widths (R4); the COVERAGE "Dispatch" bullet (R5); state the 0.51.0 re-check in the
+  kitty reference: its changelog's OSC 22 fix (#10838) is about kitty's own pointer refresh on
+  a screen switch, which freminal gets from rebuilding the snapshot (R10); the header grammar
+  (R11). R9 and R18 are PR-time checks: the PR description names the Task 150 status commit,
+  and the GAPS wording is re-checked at merge.
+- **Status: done (both).** 139.C1: the extras and their three variants are removed (a query
+  for them answers `0`); a test-only `declare_variants!` macro builds `ALL_VARIANTS` from the
+  same list as an exhaustive `match`, so a missing variant fails to compile (it replaces the
+  suggested index guard, which would not have caught an omission); the eviction test fails
+  without eviction; new e2e tests for a 20-name push and a 70-name query; the parser no longer
+  splits for a pop or counts the remainder; new seed `osc22_cap_and_invalid_utf8` and three
+  dictionary tokens. Deleted tests: three exact duplicates and the three tests of the removed
+  extras (now pinned as "not names"). 139.C2: as listed above; the MASTER_PLAN and 130 status
+  tables were re-padded for the narrower Status column. The implementing sub-agent briefly ran
+  `git stash` / `git stash pop`; the orchestrator confirmed every plan edit survived.
 
 ---
 

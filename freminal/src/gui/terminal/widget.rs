@@ -5504,11 +5504,9 @@ const fn cursor_icon_for(target: PointerTarget, osc22_shape: PointerShape) -> Cu
 const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     match shape {
         PointerShape::Default => CursorIcon::Default,
-        PointerShape::None => CursorIcon::None,
         PointerShape::Text => CursorIcon::Text,
         PointerShape::VerticalText => CursorIcon::VerticalText,
         PointerShape::Pointer => CursorIcon::PointingHand,
-        PointerShape::ContextMenu => CursorIcon::ContextMenu,
         PointerShape::Help => CursorIcon::Help,
         PointerShape::Progress => CursorIcon::Progress,
         PointerShape::Wait => CursorIcon::Wait,
@@ -5521,7 +5519,6 @@ const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
         PointerShape::Grabbing => CursorIcon::Grabbing,
         PointerShape::Alias => CursorIcon::Alias,
         PointerShape::Copy => CursorIcon::Copy,
-        PointerShape::AllScroll => CursorIcon::AllScroll,
         PointerShape::ResizeHorizontal => CursorIcon::ResizeHorizontal,
         PointerShape::ResizeVertical => CursorIcon::ResizeVertical,
         PointerShape::ResizeNeSw => CursorIcon::ResizeNeSw,
@@ -8226,7 +8223,7 @@ mod pointer_target_tests {
             PointerShape::Text,
             PointerShape::Wait,
             PointerShape::Grab,
-            PointerShape::None,
+            PointerShape::NotAllowed,
         ] {
             assert_eq!(
                 cursor_icon_for(PointerTarget::TerminalContent, shape),

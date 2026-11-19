@@ -3,9 +3,10 @@
 Last updated: 2026-11-19 — Task 139 — new "Pointer shapes (OSC 22)" section,
 distilled from the kitty 0.49.2 page and written to the shipped behaviour, which
 is conformant: the wire format, the four operations, the query items, the
-per-screen stacks and their reset, the name table (30 CSS names, freminal's
-extras and kitty's 46 aliases), the GUI interaction, freminal's three deliberate
-differences from kitty and where it is implemented. The roadmap row now reads
+per-screen stacks and their reset, the name table (the 30 CSS names, the
+`col-resize` / `row-resize` aliases and kitty's 46 aliases), the GUI
+interaction, freminal's three deliberate differences from kitty and where it is
+implemented. The roadmap row now reads
 "Filled in; conformant". No other section changed.
 
 Earlier: 2026-10-22 — Task 150 — the notification backends moved from
@@ -49,7 +50,7 @@ renumbered to the v0.13.x plan; current-state sections flagged as superseded
 (see the note below).
 
 **Superseded current-state sections.** Every "freminal current-state" section in
-this file except notifications and pointer shapes (graphics, keyboard) predates the **2026-10-08
+this file except notifications and pointer shapes (that is, graphics and keyboard) predates the **2026-10-08
 compliance audit** in `PLAN_VERSION_130.md` ("Compliance audit (2026-10-08)").
 That audit found real spec deviations in every protocol freminal had claimed to
 support, so statements here that a protocol is "implemented" or "done" describe
@@ -754,7 +755,10 @@ simplest form, `OSC 22 ; name ST`, is xterm's original and is the form old
 programs still send.
 
 **Baseline: kitty 0.49.2** (this section was distilled from the upstream page on
-2026-11-19; the feature was added to kitty in 0.31.0). freminal conforms to it
+2026-11-19; the feature was added to kitty in 0.31.0, and the section was
+re-checked against kitty 0.51.0, whose only OSC 22 change, #10838, fixes kitty's
+own pointer refresh on a screen switch; freminal rebuilds the snapshot on every
+switch, so it has no such gap). freminal conforms to it
 (Task 139, v0.13.0). Where the spec is silent, freminal follows kitty's reference
 implementation; where freminal deliberately differs from kitty, the difference is
 listed under "Documented differences from kitty (OSC 22)" below.
@@ -838,8 +842,6 @@ Valid names are the 30 CSS cursor names: `alias`, `cell`, `copy`, `crosshair`,
 
 freminal accepts these, plus:
 
-- three further CSS cursor names that are not in the kitty table: `none`,
-  `context-menu` and `all-scroll`;
 - the CSS names `col-resize` and `row-resize`, as aliases of `ew-resize` and
   `ns-resize`;
 - kitty's 46 legacy X11 / internal aliases, for set and push and (unlike kitty)
@@ -914,9 +916,10 @@ does, not copied. These are the places freminal deliberately differs:
    is set, and it does not change the pointer while mouse reporting is on. kitty
    answers its own configured shapes.
 
-freminal also accepts `none`, `context-menu`, `all-scroll`, `col-resize` and
-`row-resize`, which are not in kitty's table (an extension, not a difference in
-behaviour for any name kitty accepts).
+freminal also accepts `col-resize` and `row-resize`, which are not in kitty's
+table (an extension, not a difference in behaviour for any name kitty accepts).
+A query for `none`, `context-menu` or `all-scroll` answers `0`, as in kitty:
+those CSS cursor names are outside the spec table and are not accepted.
 
 ### freminal current-state: pointer shapes — conformant (Task 139, v0.13.0)
 

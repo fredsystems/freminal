@@ -57,27 +57,39 @@ fn parse_body(body: &[u8]) -> PointerShapeOp {
         Some((first @ (b'=' | b'>' | b'<' | b'?'), rest)) => (Some(*first), rest),
         _ => (None, body),
     };
-    let segments = bounded_segments(names);
     match prefix {
-        Some(b'>') => {
-            PointerShapeOp::Push(segments.iter().filter_map(|s| known_shape(s)).collect())
-        }
         Some(b'<') => PointerShapeOp::Pop,
-        Some(b'?') => PointerShapeOp::Query(segments.iter().map(|s| classify_query(s)).collect()),
-        _ => PointerShapeOp::Set(segments.iter().filter_map(|s| set_entry(s)).collect()),
+        Some(b'>') => PointerShapeOp::Push(
+            bounded_segments(names)
+                .iter()
+                .filter_map(|s| known_shape(s))
+                .collect(),
+        ),
+        Some(b'?') => PointerShapeOp::Query(
+            bounded_segments(names)
+                .iter()
+                .map(|s| classify_query(s))
+                .collect(),
+        ),
+        _ => PointerShapeOp::Set(
+            bounded_segments(names)
+                .iter()
+                .filter_map(|s| set_entry(s))
+                .collect(),
+        ),
     }
 }
 
 /// The first [`MAX_OSC22_NAMES`] comma-separated segments of `names`.
 ///
-/// An empty `names` is one empty segment.  Segments past the cap are ignored
-/// and counted in a single `debug!`.
+/// An empty `names` is one empty segment.  Segments past the cap are ignored;
+/// whether any exist is logged once at `debug!`, without a count (counting
+/// would scan the whole body).
 fn bounded_segments(names: &[u8]) -> Vec<&[u8]> {
     let mut iter = names.split(|b| *b == b',');
     let segments: Vec<&[u8]> = iter.by_ref().take(MAX_OSC22_NAMES).collect();
-    let ignored = iter.count();
-    if ignored > 0 {
-        tracing::debug!("OSC 22: {ignored} names past the {MAX_OSC22_NAMES}-name cap ignored");
+    if iter.next().is_some() {
+        tracing::debug!("OSC 22: names past the {MAX_OSC22_NAMES}-name cap ignored");
     }
     segments
 }
@@ -324,8 +336,24 @@ mod tests {
     #[test]
     fn query_aliases_are_supported() {
         assert_eq!(
-            parse(b"22;?left_ptr,col-resize,none"),
+            parse(b"22;?left_ptr,col-resize,row-resize"),
             PointerShapeOp::Query(vec![Supported, Supported, Supported])
+        );
+    }
+
+    #[test]
+    fn query_removed_extras_are_unsupported() {
+        assert_eq!(
+            parse(b"22;?none,context-menu,all-scroll"),
+            PointerShapeOp::Query(vec![Unsupported, Unsupported, Unsupported])
+        );
+        assert_eq!(
+            parse(b"22;none,context-menu,all-scroll"),
+            PointerShapeOp::Set(vec![])
+        );
+        assert_eq!(
+            parse(b"22;>none,context-menu,all-scroll"),
+            PointerShapeOp::Push(vec![])
         );
     }
 
@@ -421,6 +449,28 @@ mod tests {
                 .any(|(level, text)| *level == tracing::Level::DEBUG
                     && text.contains(&format!("length {}", SECRET.len()))),
             "ignored name should be logged by length at debug: {events:?}"
+        );
+    }
+
+    #[test]
+    fn names_past_the_cap_are_logged_once_without_a_count() {
+        let events = crate::log_capture::capture(|| {
+            let _ = parse(&names(">", MAX_OSC22_NAMES + 5, "text"));
+            let _ = parse(&names(">", MAX_OSC22_NAMES, "text"));
+        });
+        let capped: Vec<_> = events
+            .iter()
+            .filter(|(_, text)| text.contains("cap ignored"))
+            .collect();
+        assert_eq!(
+            capped.len(),
+            1,
+            "only the over-cap request logs: {events:?}"
+        );
+        assert_eq!(capped[0].0, tracing::Level::DEBUG);
+        assert!(
+            !capped[0].1.contains('5'),
+            "the log must not carry a count: {capped:?}"
         );
     }
 }

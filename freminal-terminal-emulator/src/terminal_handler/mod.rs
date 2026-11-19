@@ -3114,12 +3114,12 @@ mod tests {
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Text,
-            "OSC 22 must update pointer_shape to Text"
+            "a set of Text replaces the top entry of the active screen's stack, so the shape is Text"
         );
     }
 
     #[test]
-    fn osc22_reset_via_default_shape() {
+    fn osc22_set_default_shape_shows_default() {
         let mut handler = TerminalHandler::new(80, 24);
 
         set_pointer_shape(&mut handler, PointerShape::Crosshair);
@@ -3127,7 +3127,7 @@ mod tests {
         assert_eq!(
             handler.pointer_shape(),
             freminal_common::buffer_states::pointer_shape::PointerShape::Default,
-            "OSC 22 with Default shape must reset to Default"
+            "setting Default replaces the top entry with an ordinary Default entry, which shows Default"
         );
     }
 

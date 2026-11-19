@@ -373,3 +373,62 @@ fn seven_bit_mode_restores_escape_framing() {
     rig.feed(b"\x1b F");
     assert_eq!(rig.current(), reply("0"));
 }
+
+// ── 9. Caps ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn one_push_of_more_than_sixteen_names_keeps_the_last_sixteen() {
+    const NAMES: [(&str, PointerShape); 20] = [
+        ("text", PointerShape::Text),
+        ("help", PointerShape::Help),
+        ("wait", PointerShape::Wait),
+        ("cell", PointerShape::Cell),
+        ("crosshair", PointerShape::Crosshair),
+        ("move", PointerShape::Move),
+        ("grab", PointerShape::Grab),
+        ("grabbing", PointerShape::Grabbing),
+        ("alias", PointerShape::Alias),
+        ("copy", PointerShape::Copy),
+        ("pointer", PointerShape::Pointer),
+        ("progress", PointerShape::Progress),
+        ("no-drop", PointerShape::NoDrop),
+        ("not-allowed", PointerShape::NotAllowed),
+        ("zoom-in", PointerShape::ZoomIn),
+        ("zoom-out", PointerShape::ZoomOut),
+        ("ew-resize", PointerShape::ResizeHorizontal),
+        ("ns-resize", PointerShape::ResizeVertical),
+        ("e-resize", PointerShape::ResizeEast),
+        ("w-resize", PointerShape::ResizeWest),
+    ];
+    let list = NAMES.map(|(name, _)| name).join(",");
+    let mut rig = Rig::new();
+    let written = rig.feed(format!("\x1b]22;>{list}\x1b\\").as_bytes());
+    assert!(written.is_empty(), "a push writes nothing, got {written:?}");
+    assert_eq!(
+        rig.shape(),
+        PointerShape::ResizeWest,
+        "the last name is the top"
+    );
+
+    for _ in 0..15 {
+        rig.feed(b"\x1b]22;<\x1b\\");
+    }
+    assert_eq!(
+        rig.shape(),
+        NAMES[4].1,
+        "after 15 pops the bottom survivor is the 5th name: the first four were evicted"
+    );
+    assert_eq!(rig.current(), reply(NAMES[4].0));
+
+    rig.feed(b"\x1b]22;<\x1b\\");
+    assert_eq!(rig.shape(), PointerShape::Default, "16 entries, now empty");
+    assert_eq!(rig.current(), reply("0"));
+}
+
+#[test]
+fn a_query_of_more_than_sixty_four_names_replies_with_exactly_sixty_four_items() {
+    let list = vec!["text"; 70].join(",");
+    let mut rig = Rig::new();
+    let written = rig.feed(format!("\x1b]22;?{list}\x1b\\").as_bytes());
+    assert_eq!(written, reply(&vec!["1"; 64].join(",")));
+}

@@ -165,6 +165,21 @@ mod tests {
     }
 
     #[test]
+    fn removed_extras_are_unsupported_and_cannot_be_set() {
+        let mut rig = Rig::new();
+        assert_eq!(
+            rig.query("none,context-menu,all-scroll"),
+            reply("0,0,0"),
+            "the freminal-only extras are not in the name table"
+        );
+        rig.feed(b"\x1b]22;text\x1b\\");
+        assert_eq!(rig.feed(b"\x1b]22;none\x1b\\"), NOTHING);
+        assert_eq!(rig.feed(b"\x1b]22;>context-menu,all-scroll\x1b\\"), NOTHING);
+        assert_eq!(rig.query("__current__"), reply("text"));
+        assert_eq!(rig.shape(), PointerShape::Text);
+    }
+
+    #[test]
     fn empty_query_name_is_unsupported() {
         let mut rig = Rig::new();
         assert_eq!(rig.feed(b"\x1b]22;?\x1b\\"), reply("0"));
@@ -211,10 +226,16 @@ mod tests {
         for _ in 0..16 {
             rig.feed(b"\x1b]22;>help\x1b\\");
         }
-        for _ in 0..15 {
+        for _ in 0..16 {
             rig.feed(b"\x1b]22;<\x1b\\");
         }
-        assert_eq!(rig.shape(), PointerShape::Help, "bottom `text` was evicted");
+        assert_eq!(
+            rig.query("__current__"),
+            reply("0"),
+            "17 pushes onto a depth-16 stack evict the bottom `text`; without eviction the 16 \
+             pops would leave `text` as the top"
+        );
+        assert_eq!(rig.shape(), PointerShape::Default);
     }
 
     #[test]
