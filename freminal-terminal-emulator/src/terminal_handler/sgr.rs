@@ -174,6 +174,9 @@ pub(super) fn apply_sgr(tag: &mut FormatTag, sgr: &SelectGraphicRendition) {
         SelectGraphicRendition::ResetBold => {
             tag.font_weight = FontWeight::Normal;
         }
+        SelectGraphicRendition::ResetFaint => {
+            tag.font_decorations.remove(FontDecorations::Faint);
+        }
         // NormalIntensity resets both bold AND faint
         SelectGraphicRendition::NormalIntensity => {
             tag.font_weight = FontWeight::Normal;
@@ -327,6 +330,63 @@ mod tests {
         apply_sgr(&mut tag, &SelectGraphicRendition::Bold);
         apply_sgr(&mut tag, &SelectGraphicRendition::Faint);
         apply_sgr(&mut tag, &SelectGraphicRendition::NormalIntensity);
+        assert_eq!(tag.font_weight, FontWeight::Normal);
+        assert!(!tag.font_decorations.contains(FontDecorations::Faint));
+    }
+
+    /// Apply the SGR a bare `CSI <n> m` produces.
+    fn apply_number(tag: &mut FormatTag, n: usize) {
+        apply_sgr(tag, &SelectGraphicRendition::from_usize(n));
+    }
+
+    #[test]
+    fn sgr_21_sets_double_underline_and_leaves_bold_alone() {
+        let mut tag = FormatTag::default();
+        apply_number(&mut tag, 1);
+        apply_number(&mut tag, 21);
+        assert_eq!(tag.font_weight, FontWeight::Bold);
+        assert!(tag.font_decorations.contains(FontDecorations::Underline));
+        assert_eq!(
+            tag.font_decorations.underline_style(),
+            UnderlineStyle::Double
+        );
+    }
+
+    #[test]
+    fn sgr_24_after_21_clears_double_underline() {
+        let mut tag = FormatTag::default();
+        apply_number(&mut tag, 21);
+        apply_number(&mut tag, 24);
+        assert!(!tag.font_decorations.contains(FontDecorations::Underline));
+        assert_eq!(tag.font_decorations.underline_style(), UnderlineStyle::None);
+    }
+
+    #[test]
+    fn sgr_221_clears_bold_and_keeps_faint() {
+        let mut tag = FormatTag::default();
+        apply_number(&mut tag, 1);
+        apply_number(&mut tag, 2);
+        apply_number(&mut tag, 221);
+        assert_eq!(tag.font_weight, FontWeight::Normal);
+        assert!(tag.font_decorations.contains(FontDecorations::Faint));
+    }
+
+    #[test]
+    fn sgr_222_clears_faint_and_keeps_bold() {
+        let mut tag = FormatTag::default();
+        apply_number(&mut tag, 1);
+        apply_number(&mut tag, 2);
+        apply_number(&mut tag, 222);
+        assert_eq!(tag.font_weight, FontWeight::Bold);
+        assert!(!tag.font_decorations.contains(FontDecorations::Faint));
+    }
+
+    #[test]
+    fn sgr_22_clears_both_bold_and_faint() {
+        let mut tag = FormatTag::default();
+        apply_number(&mut tag, 1);
+        apply_number(&mut tag, 2);
+        apply_number(&mut tag, 22);
         assert_eq!(tag.font_weight, FontWeight::Normal);
         assert!(!tag.font_decorations.contains(FontDecorations::Faint));
     }
@@ -722,6 +782,21 @@ mod tests {
         assert!(
             response.contains("4:2"),
             "double underline response should contain '4:2': {response}"
+        );
+    }
+
+    #[test]
+    fn build_sgr_response_after_sgr_21_reports_4_2() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_sgr(&SelectGraphicRendition::from_usize(21));
+        let response = handler.build_sgr_response();
+        assert!(
+            response.split(';').any(|p| p == "4:2"),
+            "SGR 21 response should contain '4:2': {response}"
+        );
+        assert!(
+            !response.split(';').any(|p| p == "1"),
+            "SGR 21 must not set bold: {response}"
         );
     }
 

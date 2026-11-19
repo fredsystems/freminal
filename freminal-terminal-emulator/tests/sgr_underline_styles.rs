@@ -100,10 +100,68 @@ fn sgr_colon_underline_style_dashed() {
 }
 
 #[test]
-fn sgr_colon_underline_style_unknown_value_clears() {
-    // 4:6 is not a defined style — should produce NotUnderlined (same as 4:0)
-    let sgrs = extract_sgrs("\x1b[4:6m");
-    assert_eq!(sgrs, vec![SelectGraphicRendition::NotUnderlined]);
+fn sgr_colon_underline_style_above_five_is_dashed() {
+    // Like kitty, 4:N with N > 5 clamps to the highest style (dashed).
+    for seq in ["\x1b[4:6m", "\x1b[4:255m"] {
+        let sgrs = extract_sgrs(seq);
+        assert_eq!(
+            sgrs,
+            vec![SelectGraphicRendition::UnderlineWithStyle(
+                UnderlineStyle::Dashed
+            )],
+            "{seq:?}"
+        );
+    }
+}
+
+#[test]
+fn sgr_colon_underline_style_empty_is_single() {
+    let sgrs = extract_sgrs("\x1b[4:m");
+    assert_eq!(
+        sgrs,
+        vec![SelectGraphicRendition::UnderlineWithStyle(
+            UnderlineStyle::Single
+        )]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SGR 21 (double underline), 221 / 222 (bold / faint off separately)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sgr_21_is_double_underline() {
+    let sgrs = extract_sgrs("\x1b[21m");
+    assert_eq!(
+        sgrs,
+        vec![SelectGraphicRendition::UnderlineWithStyle(
+            UnderlineStyle::Double
+        )]
+    );
+}
+
+#[test]
+fn sgr_221_resets_bold_only() {
+    assert_eq!(
+        extract_sgrs("\x1b[221m"),
+        vec![SelectGraphicRendition::ResetBold]
+    );
+}
+
+#[test]
+fn sgr_222_resets_faint_only() {
+    assert_eq!(
+        extract_sgrs("\x1b[222m"),
+        vec![SelectGraphicRendition::ResetFaint]
+    );
+}
+
+#[test]
+fn sgr_22_resets_bold_and_faint() {
+    assert_eq!(
+        extract_sgrs("\x1b[22m"),
+        vec![SelectGraphicRendition::NormalIntensity]
+    );
 }
 
 // ---------------------------------------------------------------------------

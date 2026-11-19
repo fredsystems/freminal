@@ -19,7 +19,13 @@ pub enum SelectGraphicRendition {
     Faint,
     ReverseVideo,
     ResetReverseVideo,
+    /// SGR 221 — bold off only; faint is left untouched.
+    ///
+    /// SGR 21 is *not* this: it is double underline.
     ResetBold,
+    /// SGR 222 — faint off only; bold is left untouched.
+    ResetFaint,
+    /// SGR 22 — bold and faint both off.
     NormalIntensity,
     NotUnderlined,
     NotItalic,
@@ -91,7 +97,7 @@ impl SelectGraphicRendition {
             18 => Self::AlternativeFont8,
             19 => Self::AlternativeFont9,
             20 => Self::FontFranktur,
-            21 => Self::ResetBold,
+            21 => Self::UnderlineWithStyle(UnderlineStyle::Double),
             22 => Self::NormalIntensity,
             23 => Self::NotItalic,
             24 => Self::NotUnderlined,
@@ -168,6 +174,8 @@ impl SelectGraphicRendition {
             105 => Self::Background(TerminalColor::BrightMagenta),
             106 => Self::Background(TerminalColor::BrightCyan),
             107 => Self::Background(TerminalColor::BrightWhite),
+            221 => Self::ResetBold,
+            222 => Self::ResetFaint,
             _ => Self::Unknown(val),
         }
     }
@@ -254,6 +262,38 @@ mod tests {
         assert_eq!(
             SelectGraphicRendition::from_usize(48),
             SelectGraphicRendition::Background(TerminalColor::DefaultBackground)
+        );
+    }
+
+    #[test]
+    fn from_usize_21_is_double_underline() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(21),
+            SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Double)
+        );
+    }
+
+    #[test]
+    fn from_usize_22_is_normal_intensity() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(22),
+            SelectGraphicRendition::NormalIntensity
+        );
+    }
+
+    #[test]
+    fn from_usize_221_is_reset_bold() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(221),
+            SelectGraphicRendition::ResetBold
+        );
+    }
+
+    #[test]
+    fn from_usize_222_is_reset_faint() {
+        assert_eq!(
+            SelectGraphicRendition::from_usize(222),
+            SelectGraphicRendition::ResetFaint
         );
     }
 

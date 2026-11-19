@@ -10738,7 +10738,11 @@ markdownlint and `prettier --check` on the named files.
 
 ### 140 Status notes
 
-(none yet)
+- **140.1 (done).** `21` is `UnderlineWithStyle(Double)`, `221` is `ResetBold`, `222` is the
+  new `ResetFaint`; `22` is unchanged. `handle_underline_subparam` clamps N>5 to dashed
+  (`MAX_UNDERLINE_STYLE_PARAM`), and an empty `4:` is single. Changed expectation:
+  `sgr_colon_underline_style_unknown_value_clears` became
+  `sgr_colon_underline_style_above_five_is_dashed` (decision 2).
 
 ---
 

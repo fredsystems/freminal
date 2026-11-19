@@ -197,7 +197,8 @@ const fn color_sgr(primary: usize, color: TerminalColor) -> TerminalOutput {
 /// primary SGR parameter; subsequent values are subparameters.
 ///
 /// Supported colon forms:
-/// - `4:N` — underline style (N=0 off, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed)
+/// - `4:N` — underline style (N=0 off, 1 single, 2 double, 3 curly, 4 dotted,
+///   5 dashed; N>5 is dashed; an empty `4:` is single)
 /// - `38:2:...:R:G:B` — truecolor foreground
 /// - `48:2:...:R:G:B` — truecolor background
 /// - `58:2:...:R:G:B` — truecolor underline color
@@ -257,10 +258,20 @@ fn handle_colon_color(
     }
 }
 
-/// Handle `4:N` underline subparameter.
+/// The highest `4:N` value with its own style; larger values clamp to dashed.
+const MAX_UNDERLINE_STYLE_PARAM: usize = 5;
+
+/// Handle `4:N` underline subparameter, following kitty: `4:0` is no
+/// underline, an empty `4:` is a single underline, and `N` above
+/// [`MAX_UNDERLINE_STYLE_PARAM`] clamps to dashed.
 fn handle_underline_subparam(parts: &[Option<usize>], output: &mut Vec<TerminalOutput>) {
-    let style_param = parts.get(1).copied().flatten().unwrap_or(0);
-    let style = UnderlineStyle::from_sgr_param(style_param);
+    let style = parts
+        .get(1)
+        .copied()
+        .flatten()
+        .map_or(UnderlineStyle::Single, |n| {
+            UnderlineStyle::from_sgr_param(n.min(MAX_UNDERLINE_STYLE_PARAM))
+        });
 
     if style.is_active() {
         output.push(TerminalOutput::Sgr(
@@ -422,6 +433,61 @@ mod tests {
         assert_eq!(
             output,
             vec![TerminalOutput::Sgr(SelectGraphicRendition::NotUnderlined)]
+        );
+    }
+
+    #[test]
+    fn sgr_colon_form_underline_above_five_is_dashed() {
+        for seq in [&b"4:6"[..], b"4:255", b"4:99999"] {
+            let mut output = Vec::new();
+            let result = ansi_parser_inner_csi_finished_sgr(seq, &mut output);
+            assert_eq!(result, ParserOutcome::Finished);
+            assert_eq!(
+                output,
+                vec![TerminalOutput::Sgr(
+                    SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Dashed)
+                )],
+                "{seq:?} must clamp to dashed"
+            );
+        }
+    }
+
+    #[test]
+    fn sgr_colon_form_empty_underline_subparam_is_single() {
+        let mut output = Vec::new();
+        let result = ansi_parser_inner_csi_finished_sgr(b"4:", &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert_eq!(
+            output,
+            vec![TerminalOutput::Sgr(
+                SelectGraphicRendition::UnderlineWithStyle(UnderlineStyle::Single)
+            )]
+        );
+    }
+
+    #[test]
+    fn sgr_21_is_double_underline() {
+        assert_eq!(
+            parse_csi_sequence(b"21m"),
+            vec![sgr(SelectGraphicRendition::UnderlineWithStyle(
+                UnderlineStyle::Double
+            ))]
+        );
+    }
+
+    #[test]
+    fn sgr_221_and_222_reset_bold_and_faint_separately() {
+        assert_eq!(
+            parse_csi_sequence(b"221m"),
+            vec![sgr(SelectGraphicRendition::ResetBold)]
+        );
+        assert_eq!(
+            parse_csi_sequence(b"222m"),
+            vec![sgr(SelectGraphicRendition::ResetFaint)]
+        );
+        assert_eq!(
+            parse_csi_sequence(b"22m"),
+            vec![sgr(SelectGraphicRendition::NormalIntensity)]
         );
     }
 
