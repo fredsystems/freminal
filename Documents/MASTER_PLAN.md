@@ -250,7 +250,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 147 | v0.13.0 Correctness Cleanup                 | `PLAN_VERSION_130.md` (Task 147)              | Planned       | Tasks 130, 131                |
 | 148 | Security & Fuzz Findings Remediation        | `PLAN_VERSION_130.md` (Task 148)              | Complete      | None                          |
 | 149 | zbus 6 Migration & Notification Backends    | `PLAN_VERSION_130.md` (Task 149)              | Complete      | Task 138                      |
-| 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Pending merge | Task 149                      |
+| 150 | Desktop Notification Backend Extraction     | `PLAN_VERSION_130.md` (Task 150)              | Complete      | Task 149                      |
 
 ---
 
@@ -842,7 +842,7 @@ Update this section as tasks complete:
 | 138  | 2026-10-12 | 2026-10-13 | 138.1-138.18, C1-C27, reviews, manual test; merged via PR #555 (`dd82b54b`)        |
 | 148  | 2026-10-19 | 2026-10-19 | 148.1-148.27, C1-C12 except C6; merged via PR #572 (`1d9b7166`)                    |
 | 149  | 2026-10-22 | 2026-10-22 | 149.1-149.4, C1-C17, two review passes; merged via PR #575 (`fd3c7ede`)            |
-| 150  | 2026-10-22 |            | 150.1-150.10, C1-C23, two review passes; PR #576 pending                           |
+| 150  | 2026-10-22 | 2026-10-22 | 150.1-150.10, C1-C26, two review passes; merged via PR #576 (`c359cf3d`)           |
 
 ---
 
