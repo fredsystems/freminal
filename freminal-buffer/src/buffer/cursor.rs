@@ -21,6 +21,19 @@ use crate::row::{RowJoin, RowOrigin};
 use super::clamped_offset;
 use crate::buffer::Buffer;
 
+/// Whether a saved cursor was in the pending-wrap position.
+///
+/// The live cursor encodes pending wrap as `pos.x == width` (one past the last
+/// column). A save keeps the column clamped to `width - 1` and records the
+/// pending state separately, so the saved column is always a real column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::buffer) enum SavedWrapState {
+    /// The cursor sat on a real column; the next print stays on the row.
+    Settled,
+    /// The cursor had written the last column; the next print wraps.
+    Pending,
+}
+
 /// A DECSC-saved cursor.
 ///
 /// DECSC saves the cursor's *screen* position, not a place in the content
@@ -39,6 +52,12 @@ use crate::buffer::Buffer;
 /// `ParkedScreen::saved_cursor` for the parked one), so a switch parks the
 /// outgoing screen's slot with it rather than carrying it across; a DECSC on
 /// one screen is never restored by a DECRC on the other.
+///
+/// DECSC also saves the pending-wrap flag and DECRC restores it (xterm
+/// `CursorSave`/`CursorRestore` keep `do_wrap` in `DECSC_FLAGS`; Ghostty and
+/// `WezTerm` do the same), but only while the screen width is unchanged since
+/// the save. After a resize the saved column no longer names the right edge,
+/// so DECRC clamps the column and clears pending wrap.
 #[derive(Debug, Clone)]
 pub(in crate::buffer) struct SavedCursor {
     /// The cursor state at the time of the save, with `pos` in screen
@@ -47,6 +66,10 @@ pub(in crate::buffer) struct SavedCursor {
     /// The origin-mode (DECOM) state at the time of the save. xterm's
     /// `DECSC_FLAGS` include `ORIGIN`, so DECRC restores it.
     pub(in crate::buffer) decom: Decom,
+    /// Whether the cursor was in the pending-wrap position at the time of the
+    /// save. When `Pending`, `cursor.pos.x` is the right-edge column
+    /// (`width - 1` at save time).
+    pub(in crate::buffer) wrap: SavedWrapState,
 }
 
 impl Buffer {
@@ -261,13 +284,21 @@ impl Buffer {
     /// Implements DECSC – Save Cursor.
     ///
     /// Saves the cursor's **screen** position (see [`SavedCursor`]) together
-    /// with its associated `CursorState` and the DECOM (origin mode) state.
+    /// with its associated `CursorState`, the DECOM (origin mode) state and
+    /// whether the cursor is in the pending-wrap position (`x == width`).
     pub fn save_cursor(&mut self) {
         let mut cursor = self.cursor.clone();
         cursor.pos = self.cursor_screen_pos();
+        let wrap = if self.width > 0 && cursor.pos.x >= self.width {
+            cursor.pos.x = self.width - 1;
+            SavedWrapState::Pending
+        } else {
+            SavedWrapState::Settled
+        };
         self.saved_cursor = Some(SavedCursor {
             cursor,
             decom: self.decom_enabled,
+            wrap,
         });
     }
 
@@ -289,6 +320,12 @@ impl Buffer {
     /// between save and restore never produces an out-of-bounds cursor, and
     /// the cursor is never placed in off-screen scrollback.
     ///
+    /// A save made in the pending-wrap position restores pending wrap, so the
+    /// next printed character wraps (xterm, Ghostty, `WezTerm`). That holds only
+    /// while the saved column is still the right edge, i.e. the width has not
+    /// changed since the save: after a resize the column is clamped and pending
+    /// wrap is cleared.
+    ///
     /// The slot is per screen: each screen has its own DECSC slot, parked and
     /// restored with the screen (xterm `sc[]`, Ghostty `saved_cursor` per
     /// screen). A save made on one screen is therefore **not** visible on the
@@ -298,14 +335,21 @@ impl Buffer {
         let saved = self.saved_cursor.clone().unwrap_or_else(|| SavedCursor {
             cursor: CursorState::default(),
             decom: Decom::NormalCursor,
+            wrap: SavedWrapState::Settled,
         });
         let buffer_y = self.buffer_row_for_screen_row(saved.cursor.pos.y);
 
         self.cursor = saved.cursor;
         self.decom_enabled = saved.decom;
-        // Clamp to current dimensions after restore.
+        // Clamp to current dimensions after restore; pending wrap survives
+        // only while the saved column is still the right edge.
         if self.width > 0 {
-            self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
+            let at_edge = self.cursor.pos.x == self.width - 1;
+            self.cursor.pos.x = if saved.wrap == SavedWrapState::Pending && at_edge {
+                self.width
+            } else {
+                self.cursor.pos.x.min(self.width - 1)
+            };
         }
         self.cursor.pos.y = buffer_y;
         self.debug_assert_invariants();

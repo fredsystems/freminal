@@ -7830,6 +7830,12 @@ Stale stub text was corrected at the same time:
   `TerminalInput::KeyPad`, its arms, its twelve tests and `to_payload`'s keypad parameter are
   deleted. New tests drive real snapshots (`ESC =`, `ESC >`, `ESC SP G`). No benchmark: the
   only encoder change is removed arms and one fewer parameter.
+- **147.6 (done).** `SavedCursor` gains `wrap: SavedWrapState { Settled, Pending }`; a save at
+  `x == width` stores column `width - 1` plus `Pending`, and DECRC restores `x = width` while
+  the saved column is still the right edge (width unchanged). After a resize it clamps and
+  clears pending wrap; 147.18 replaces that with full resize tracking. All three save paths
+  share `Buffer::save_cursor`/`restore_cursor`. Tests at buffer and emulator level, for
+  DECSC, `CSI s`/`u`, `?1048` and `?1049`.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 

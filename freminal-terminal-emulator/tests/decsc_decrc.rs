@@ -193,3 +193,75 @@ fn decrc_keeps_the_live_hyperlink() {
         "DECRC must not reopen a hyperlink that was closed after the save"
     );
 }
+
+/// Task 147.6: DECSC saves the pending-wrap flag and DECRC restores it
+/// (xterm `CursorSave` / `CursorRestore` keep `do_wrap`), so the next printed
+/// character wraps instead of overwriting the last column. Covers all three
+/// save paths: `ESC 7`, `CSI s`, and `?1048`.
+#[test]
+fn decrc_restores_pending_wrap_on_every_save_path() {
+    for (label, save, restore) in [
+        ("DECSC", "\x1b7", "\x1b8"),
+        ("SCOSC", "\x1b[s", "\x1b[u"),
+        ("?1048", "\x1b[?1048h", "\x1b[?1048l"),
+    ] {
+        let mut h = TerminalHandler::new(10, 5);
+        feed(&mut h, "abcdefghij");
+        feed(&mut h, save);
+        feed(&mut h, "\x1b[4;1H");
+        feed(&mut h, restore);
+        feed(&mut h, "K");
+
+        assert_eq!(pos(&h), (1, 1), "{label}: K wrapped to row 1");
+        assert_eq!(cell_at(&h, 0, 1).into_utf8(), "K", "{label}");
+        assert_eq!(
+            cell_at(&h, 9, 0).into_utf8(),
+            "j",
+            "{label}: j not overwritten"
+        );
+    }
+}
+
+#[test]
+fn decrc_restores_pending_wrap_across_mode_1049() {
+    let mut h = TerminalHandler::new(10, 5);
+    feed(&mut h, "abcdefghij\x1b[?1049h\x1b[2;2Hxyz\x1b[?1049l");
+    feed(&mut h, "K");
+
+    assert_eq!(pos(&h), (1, 1), "K wrapped after leaving 1049");
+    assert_eq!(cell_at(&h, 0, 1).into_utf8(), "K");
+    assert_eq!(cell_at(&h, 9, 0).into_utf8(), "j");
+}
+
+#[test]
+fn decrc_without_pending_wrap_overwrites_the_last_column() {
+    for (label, save, restore) in [
+        ("DECSC", "\x1b7", "\x1b8"),
+        ("SCOSC", "\x1b[s", "\x1b[u"),
+        ("?1048", "\x1b[?1048h", "\x1b[?1048l"),
+    ] {
+        let mut h = TerminalHandler::new(10, 5);
+        feed(&mut h, "abcdefghi");
+        feed(&mut h, save);
+        feed(&mut h, "\x1b[4;1H");
+        feed(&mut h, restore);
+        feed(&mut h, "K");
+
+        assert_eq!(cell_at(&h, 9, 0).into_utf8(), "K", "{label}");
+        assert_eq!(pos(&h).1, 0, "{label}: no wrap");
+    }
+}
+
+#[test]
+fn decrc_after_a_narrowing_resize_clamps_without_pending_wrap() {
+    let mut h = TerminalHandler::new(10, 5);
+    feed(&mut h, "abcdefghij\x1b7\x1b[4;1H");
+    h.handle_resize(5, 5, 0, 0);
+    feed(&mut h, "\x1b8");
+    assert_eq!(pos(&h).0, 4, "clamped to the new right edge");
+
+    let row = pos(&h).1;
+    feed(&mut h, "K");
+    assert_eq!(pos(&h).1, row, "the print did not wrap");
+    assert_eq!(cell_at(&h, 4, row).into_utf8(), "K");
+}

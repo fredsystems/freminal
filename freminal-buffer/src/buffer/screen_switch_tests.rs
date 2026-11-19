@@ -836,3 +836,93 @@ fn parking_the_primary_moves_its_image_store() {
     let blank = Row::new(20);
     assert_eq!(buf.rows()[0].characters(), blank.characters());
 }
+
+// ── DECSC saves the pending-wrap flag (Task 147.6) ───────────────────────
+
+#[test]
+fn decrc_restores_pending_wrap_so_the_next_print_wraps() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor.pos.x, 10, "precondition: pending wrap");
+    buf.save_cursor();
+
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.restore_cursor();
+    assert_eq!(
+        buf.cursor.pos.x, 10,
+        "pending wrap is restored, not clamped"
+    );
+    assert_eq!(buf.cursor_screen_pos().y, 0);
+
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 1, "K wrapped to the next row");
+    assert_eq!(row_text(&buf, 1), "K");
+    assert_eq!(row_text(&buf, 0), "abcdefghij");
+}
+
+#[test]
+fn decrc_without_pending_wrap_restores_the_column_as_before() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghi"));
+    assert_eq!(buf.cursor.pos.x, 9, "precondition: last column, no pending");
+    buf.save_cursor();
+
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 9);
+
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 0, "K stayed on the row");
+    assert_eq!(buf.cursor.pos.x, 10, "and it entered pending wrap itself");
+}
+
+#[test]
+fn decrc_after_a_narrowing_resize_clamps_and_clears_pending_wrap() {
+    let mut buf = Buffer::new(10, 5);
+    buf.set_cursor_pos(Some(0), Some(2));
+    buf.insert_text(&text("abcdefghij"));
+    assert_eq!(buf.cursor.pos.x, 10, "precondition: pending wrap");
+    buf.save_cursor();
+
+    buf.set_size(5, 5, 0);
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 4, "clamped to the new right edge");
+
+    let row = buf.cursor_screen_pos().y;
+    buf.insert_text(&text("K"));
+    assert_eq!(
+        buf.cursor_screen_pos().y,
+        row,
+        "no wrap on the print after a resize-clamped restore"
+    );
+    assert_eq!(buf.cursor.pos.x, 5, "K filled the last column");
+}
+
+#[test]
+fn decrc_after_a_widening_resize_clears_pending_wrap() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    buf.save_cursor();
+
+    buf.set_size(20, 5, 0);
+    buf.restore_cursor();
+    assert_eq!(buf.cursor.pos.x, 9, "the saved column, no longer the edge");
+    assert_eq!(buf.cursor_screen_pos().y, 0);
+}
+
+#[test]
+fn decrc_pending_wrap_survives_an_alternate_screen_round_trip() {
+    let mut buf = Buffer::new(10, 5);
+    buf.insert_text(&text("abcdefghij"));
+    buf.save_cursor();
+
+    buf.switch_to_alternate();
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf.switch_to_primary();
+    buf.restore_cursor();
+
+    assert_eq!(buf.cursor.pos.x, 10, "pending wrap still restored");
+    buf.insert_text(&text("K"));
+    assert_eq!(buf.cursor_screen_pos().y, 1);
+}
