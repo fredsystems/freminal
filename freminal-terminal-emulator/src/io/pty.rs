@@ -1784,6 +1784,11 @@ mod child_term_real_pty_tests {
         pane_env: Option<&HashMap<String, String>>,
     ) -> String {
         let term = TermName::resolve(shell, TermPlatform::Other, pane_env);
+        // An explicit working directory: with none, portable-pty starts the child in
+        // `$HOME`, which does not exist in a build sandbox (Nix's `/homeless-shelter`).
+        let Ok(workdir) = tempfile::tempdir() else {
+            panic!("tempdir");
+        };
         let (_write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
         let (_reply_tx, reply_rx) = crossbeam_channel::bounded::<PtyWrite>(1);
         let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
@@ -1796,7 +1801,7 @@ mod child_term_real_pty_tests {
                 ],
             )),
             shell: None,
-            cwd: None,
+            cwd: Some(workdir.path()),
             extra_env: pane_env,
             term: &term,
             term_program: TermProgramEnv::Omit,

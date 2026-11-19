@@ -162,7 +162,8 @@ fn run_child() -> Option<String> {
             vec![String::from("-c"), String::from(SCRIPT)],
         )),
         shell: None,
-        cwd: None,
+        // Explicit, so a build sandbox's missing `$HOME` cannot fail the spawn.
+        cwd: Some(home.path()),
         extra_env: Some(&pane_env),
         term: &term,
         term_program: TermProgramEnv::Omit,

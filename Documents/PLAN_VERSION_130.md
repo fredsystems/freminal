@@ -11768,6 +11768,10 @@ N3, N4, N5 (a shared `tests/common` helper), N7, N8, N9.
   build sandbox has no `/usr/bin/env`. Fixed by the orchestrator: the generated fixture names
   the `sh` found on `PATH` absolutely (it is a test fixture, not a shipped script, so
   `shebang-env-discipline` does not apply).
+  The second build then failed `child_term_real_pty_tests`: with no working directory,
+  portable-pty starts the child in `$HOME`, which does not exist in the sandbox
+  (`/homeless-shelter`; the flake already skips three echo-off PTY tests for this). The new
+  real-child tests now pass an explicit working directory instead of joining the skip list.
 
 #### 151 Status notes
 
