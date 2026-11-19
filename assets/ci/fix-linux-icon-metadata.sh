@@ -18,6 +18,11 @@
 # lands the icon in hicolor/scalable/apps -- so this script only touches the
 # desktop file.
 #
+# The .deb also gets the compiled xterm-freminal terminfo entry (Task 151) under
+# usr/share/terminfo, so TERM=xterm-freminal resolves for sudo and detached
+# processes.  The AppImage is deliberately left without it: it relies on
+# freminal's per-pane extraction.
+#
 # Requirements: dpkg-deb, unsquashfs + mksquashfs (squashfs-tools), python3.
 #
 # Usage:
@@ -26,9 +31,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_SRC="${SCRIPT_DIR}/../freminal.desktop"
+TERMINFO_SRC="${SCRIPT_DIR}/../../res/terminfo"
 
 if [[ ! -f "${DESKTOP_SRC}" ]]; then
 	echo "error: canonical desktop file not found at ${DESKTOP_SRC}" >&2
+	exit 1
+fi
+
+if [[ ! -f "${TERMINFO_SRC}/x/xterm-freminal" || ! -f "${TERMINFO_SRC}/f/freminal" ]]; then
+	echo "error: compiled terminfo entries not found under ${TERMINFO_SRC}" >&2
 	exit 1
 fi
 
@@ -41,7 +52,7 @@ APPIMAGE_PATH="${2:?usage: fix-linux-icon-metadata.sh <deb> <appimage>}"
 # --root-owner-group keeps the rebuilt package's files owned by root:root.
 patch_deb() {
 	local deb="$1"
-	echo "::group::Patching desktop entry in $(basename "${deb}")"
+	echo "::group::Patching desktop entry and terminfo in $(basename "${deb}")"
 	local workdir
 	workdir="$(mktemp -d)"
 	dpkg-deb -R "${deb}" "${workdir}"
@@ -51,6 +62,13 @@ patch_deb() {
 	cp "${DESKTOP_SRC}" "${dest}"
 	echo "Installed desktop entry:"
 	cat "${dest}"
+
+	local terminfo_dest="${workdir}/usr/share/terminfo"
+	mkdir -p "${terminfo_dest}/x" "${terminfo_dest}/f"
+	install -m 0644 "${TERMINFO_SRC}/x/xterm-freminal" "${terminfo_dest}/x/xterm-freminal"
+	install -m 0644 "${TERMINFO_SRC}/f/freminal" "${terminfo_dest}/f/freminal"
+	echo "Installed terminfo entries:"
+	find "${terminfo_dest}" -type f
 
 	dpkg-deb --root-owner-group -b "${workdir}" "${deb}"
 	rm -rf "${workdir}"

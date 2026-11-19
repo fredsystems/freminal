@@ -11375,6 +11375,19 @@ Activated and decomposed on 2026-11-19 on branch `task-151/own-term`, from `main
    want the entry system-wide (sudo, detached tmux servers) install the deb, the rpm, the
    flake `terminfo` package or the NixOS module option. The detached-process limit is
    documented.
+4. **A fallback that always works (2026-11-19, added after activation).** In addition to the
+   planned distribution, the README documents installing the entry on any host, with or
+   without freminal present, as Ghostty's terminfo help page does:
+   - from inside a freminal pane (every build, the AppImage included, because each pane has
+     the entry on `TERMINFO_DIRS`): `infocmp -x xterm-freminal | ssh HOST -- tic -x -`;
+   - from anywhere, without freminal: the source file on GitHub,
+     `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -`
+     (or piped through `ssh HOST -- tic -x -`). `res/freminal.ti` therefore becomes a public
+     URL and must not be moved or renamed;
+   - a version-pinned copy: every release and nightly carries `freminal.ti` as an asset.
+     `releases/latest/download/…` is not used, because every release today is a prerelease
+     and GitHub's `latest` skips prereleases.
+   - `tic -x` run without root installs to `~/.terminfo`, which needs no privileges.
 
 **Decisions (orchestrator, recorded so they are not re-litigated).**
 
@@ -11509,6 +11522,15 @@ the AppImage is unchanged, per decision 3), `flake.nix` (`packages.<system>.term
 adds the terminfo package to `environment.systemPackages`). Verification adds `nixfmt`,
 `statix`, `deadnix`, `nix flake check` and `nix build .#terminfo`.
 
+##### 151.11 — `freminal.ti` as a release asset and a stable URL
+
+Scope: `.github/workflows/deploy.yaml` and `nightly.yml` (attach `res/freminal.ti` to the
+release, named `freminal.ti`, through the existing release-upload step), the `res/freminal.ti`
+header comment (the file is linked from the README by its raw `main` URL, so its path is
+public), and a test that the path exists and compiles from stdin (`tic -x -o <tmp> -` with the
+file on stdin, skipped with a visible message when `tic` is absent). Runs after 151.8, before
+151.9. The README text is 151.10.
+
 ##### 151.9 — A real child resolves the entry
 
 Scope: a new integration test in `freminal-terminal-emulator/tests/`. It spawns a real PTY
@@ -11523,13 +11545,15 @@ Not on Windows.
 Scope: a new "TERM strategy" section in `DESIGN_DECISIONS.md` (the reversed decision and its
 reasons, the `TERMINFO_DIRS` order, the sudo and detached-process limits, and how to fix ssh:
 install the terminfo package, `infocmp -x xterm-freminal | ssh host tic -x -`, or set
-`[shell] term`), every sentence in the list above, COVERAGE/GAPS (XTGETTCAP rows from 151.2,
+`[shell] term`), a README "Terminfo" section with decision 4's three commands (in-pane
+`infocmp`, the raw GitHub URL, the release asset), the `~/.terminfo` note and the
+`[shell] term = "xterm-256color"` escape hatch, every sentence in the list above, COVERAGE/GAPS (XTGETTCAP rows from 151.2,
 `TN`), README, `FREC_FORMAT.md`.
 
 #### 151 Execution model
 
-Serial inside the worktree: 151.1, 151.2, 151.3, 151.4, 151.5, 151.6, 151.7, 151.8, 151.9,
-151.10. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
+Serial inside the worktree: 151.1, 151.2, 151.3, 151.4, 151.5, 151.6, 151.7, 151.8, 151.11,
+151.9, 151.10. Each subtask is implemented by a sub-agent and reviewed in full by the orchestrator
 (whole diff, every new file read, compared with this section) before the orchestrator commits
 it. Then an adversarial review of `main...HEAD`; every finding, nit and above, becomes a
 `151.Cn` entry and is fixed before the PR, followed by a confirmation review. Files shared
@@ -11589,6 +11613,16 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
   `TerminfoPlatform`, `TerminfoSource { Unused, Bundle, PerPaneExtraction }` and
   `terminfo_dirs_value`; on macOS a present bundle directory replaces per-pane extraction.
   Neither `cargo bundle` nor the macOS workflow was run locally.
+- **151.8 (done).** rpm `assets` and the repacked `.deb` (`fix-linux-icon-metadata.sh`
+  `patch_deb` only; the AppImage is untouched) install `/usr/share/terminfo/{x,f}/…`.
+  `packages.<system>.terminfo` copies the committed tree (source filtered with
+  `lib.fileset`, all four layouts) into `$out/share/terminfo`; the main package installs it
+  too. `nixosModules.default` (`nix/nixos-module.nix`): `programs.freminal.terminfo.enable`
+  and `.package`, added to `environment.systemPackages` under `lib.hiPrio` so a
+  mixed-revision profile resolves deterministically. Verified: `nix build .#terminfo` plus
+  `infocmp`, `nix flake check --no-build`, a `nixosSystem` evaluation with and without the
+  option, darwin `drvPath` evaluation. Not run locally: the full package build and a real
+  rpm/deb.
 
 ---
 
