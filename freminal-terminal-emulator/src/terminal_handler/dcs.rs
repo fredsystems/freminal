@@ -399,8 +399,30 @@ impl TerminalHandler {
             "smkx" => Some("\x1b[?1h\x1b="),
             // rmkx — exit keypad transmit mode (back to numeric)
             "rmkx" => Some("\x1b[?1l\x1b>"),
+            // indn / SF — scroll forward N lines (SU); respects the scroll region
+            "indn" | "SF" => Some("\x1b[%p1%dS"),
+            // rin / SR — scroll reverse N lines (SD); respects the scroll region // codespell:ignore rin
+            "rin" | "SR" => Some("\x1b[%p1%dT"), // codespell:ignore rin
+            // query-os-name — `uname -s` of the host, as answered by kitty and foot.
+            // Not a terminfo capability. `kitty-query-os_name` is kitty's own
+            // namespace and is deliberately not answered.
+            "query-os-name" | "query-os_name" => Some(os_name_for_target(std::env::consts::OS)),
             _ => None,
         }
+    }
+}
+
+/// Map a Rust `target_os` name (as in `std::env::consts::OS`) to the
+/// `uname -s` name reported for `query-os-name`.
+fn os_name_for_target(target_os: &str) -> &'static str {
+    match target_os {
+        "linux" => "Linux",
+        "macos" => "Darwin",
+        "freebsd" => "FreeBSD",
+        "openbsd" => "OpenBSD",
+        "netbsd" => "NetBSD",
+        "windows" => "Windows",
+        _ => "Unknown",
     }
 }
 
@@ -1204,6 +1226,103 @@ mod tests {
         );
     }
 
+    /// Send one XTGETTCAP request for `names` and return every reply.
+    fn xtgettcap_replies(names: &[&str]) -> Vec<String> {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let hex_names = names
+            .iter()
+            .map(|n| TerminalHandler::hex_encode(n))
+            .collect::<Vec<_>>()
+            .join(";");
+        let dcs = build_dcs_payload(format!("+q{hex_names}").as_bytes());
+        handler.handle_device_control_string(&dcs);
+
+        names.iter().map(|_| recv_pty_response(&rx)).collect()
+    }
+
+    fn expected_reply(name: &str, value: &str) -> String {
+        format!(
+            "\x1bP1+r{}={}\x1b\\",
+            TerminalHandler::hex_encode(name),
+            TerminalHandler::hex_encode(value)
+        )
+    }
+
+    #[test]
+    fn xtgettcap_scroll_capabilities_and_aliases() {
+        for (name, value) in [
+            ("indn", "\x1b[%p1%dS"),
+            ("SF", "\x1b[%p1%dS"),
+            ("rin", "\x1b[%p1%dT"), // codespell:ignore rin
+            ("SR", "\x1b[%p1%dT"),
+        ] {
+            assert_eq!(
+                xtgettcap_replies(&[name]),
+                vec![expected_reply(name, value)],
+                "{name}"
+            );
+        }
+        assert_eq!(
+            xtgettcap_replies(&["indn"]),
+            vec!["\x1bP1+r696E646E=1B5B257031256453\x1b\\".to_string()]
+        );
+    }
+
+    #[test]
+    fn xtgettcap_query_os_name_and_alias() {
+        let os = super::os_name_for_target(std::env::consts::OS);
+        for name in ["query-os-name", "query-os_name"] {
+            assert_eq!(
+                xtgettcap_replies(&[name]),
+                vec![expected_reply(name, os)],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtgettcap_does_not_answer_kitty_query_os_name() {
+        let name = "kitty-query-os_name";
+        let hex_name = TerminalHandler::hex_encode(name);
+        assert_eq!(
+            xtgettcap_replies(&[name]),
+            vec![format!("\x1bP0+r{hex_name}\x1b\\")]
+        );
+    }
+
+    #[test]
+    fn xtgettcap_mixed_request_with_os_name_and_scroll_caps() {
+        let os = super::os_name_for_target(std::env::consts::OS);
+        assert_eq!(
+            xtgettcap_replies(&["query-os-name", "indn", "nosuchcap", "SR"]),
+            vec![
+                expected_reply("query-os-name", os),
+                expected_reply("indn", "\x1b[%p1%dS"),
+                format!("\x1bP0+r{}\x1b\\", TerminalHandler::hex_encode("nosuchcap")),
+                expected_reply("SR", "\x1b[%p1%dT"),
+            ]
+        );
+    }
+
+    #[test]
+    fn os_name_for_target_maps_uname_names() {
+        for (target, expected) in [
+            ("linux", "Linux"),
+            ("macos", "Darwin"),
+            ("freebsd", "FreeBSD"),
+            ("openbsd", "OpenBSD"),
+            ("netbsd", "NetBSD"),
+            ("windows", "Windows"),
+            ("dragonfly", "Unknown"),
+            ("", "Unknown"),
+        ] {
+            assert_eq!(super::os_name_for_target(target), expected, "{target}");
+        }
+    }
+
     /// Extract a string capability from the `xterm-freminal` entry in
     /// `res/freminal.ti`, undoing the terminfo source escapes `\E` and `\:`.
     fn terminfo_source_string(entry: &str, name: &str) -> Option<String> {
@@ -1240,7 +1359,8 @@ mod tests {
         );
         assert_eq!(TerminalHandler::lookup_termcap("Su"), Some(""));
 
-        for name in ["Smulx", "Setulc"] {
+        let caps = ["Smulx", "Setulc", "indn", "rin"]; // codespell:ignore rin
+        for name in caps {
             let from_source = terminfo_source_string(&entry, name);
             assert!(from_source.is_some(), "{name} missing from terminfo");
             assert_eq!(

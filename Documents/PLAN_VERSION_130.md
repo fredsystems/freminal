@@ -11537,7 +11537,11 @@ COVERAGE/GAPS) are reconciled by rebasing whichever PR merges second.
 
 #### 151 Status notes
 
-(none yet)
+- **151.1 (done).** See "151 Audit".
+- **151.2 (done).** `lookup_termcap` answers `indn`/`SF`, `rin`/`SR` (byte-identical to the <!-- codespell:ignore rin -->
+  entry, which already had both) and `query-os-name`/`query-os_name` through the pure
+  `os_name_for_target`. `kitty-query-os_name` is not answered. The `.ti`-vs-XTGETTCAP test
+  now also checks `indn` and `rin`. <!-- codespell:ignore rin -->
 
 ---
 
