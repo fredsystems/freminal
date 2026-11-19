@@ -140,6 +140,10 @@ fn tree_paths() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 /// build script only rewrites a committed file when its bytes differ, so the
 /// directives settle after one extra run rather than re-running forever.
 ///
+/// The committed bytes are whatever the build host's `tic` produced, and they can
+/// differ between ncurses versions.  The tests check tree/tar consistency and
+/// `res/freminal.ti` against `tic` on the same host, not a fixed byte image.
+///
 /// `tic -x` compiles into a temporary directory in `$OUT_DIR`; the compiled
 /// bytes of each entry are then written to the four paths of [`tree_paths`]
 /// (identical bytes in the letter and hex copies).  The archive is packed from

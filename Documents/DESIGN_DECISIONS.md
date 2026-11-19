@@ -1357,25 +1357,34 @@ A wrong capability is worse than a missing one once programs trust it, so the en
   table. Every name XTGETTCAP answers must match the entry, except a short list of
   XTGETTCAP-only names, and every entry capability is either answered identically or sits in
   an explicit terminfo-only list with a reason. A new arm on either side fails the test. Every
-  `k*` value is also compared with the bytes the encoder sends.
+  `k*` value is also compared with the bytes the encoder sends, except `kent`, `kcbt` and
+  `kmous`, which are declared but not sent and sit in an explicit `DECLARED_NOT_SENT` list
+  with the reason for each.
 - XTGETTCAP `TN` reports the pane's actual `TERM`, so the two cannot disagree. `Se` is
   `CSI 0 SP q` (DECSCUSR 0 restores the configured cursor style).
 - An integration test spawns a real child through the production spawn path and checks that
   `infocmp -x xterm-freminal` and `tput` resolve the entry from the directory freminal put on
   `TERMINFO`, with a stale `~/.terminfo` copy present in the child's `HOME`, and that
   `TERM=xterm-256color` still resolves from the system database.
+- The committed tree under `res/terminfo/` holds the bytes the build host's `tic` produced,
+  and they can differ between ncurses versions. The tests therefore check that the tree and
+  `res/terminfo.tar` agree with each other and that `res/freminal.ti` compiles, on the same
+  host, to the committed entry; they do not pin one byte image across hosts.
 
 ### Which value the child gets
 
 The effective `TERM` is resolved once per pane at spawn (`TermName::resolve`), in this order:
 
-1. A `TERM` in the pane's `env` table, or the layout's (taken as given, not validated).
+1. A `TERM` in the pane's `env` table, or the layout's (taken as given, not validated). An
+   empty value is ignored. On Windows the key is matched case-insensitively (`term` names
+   `TERM`, as the environment does there); elsewhere only `TERM` itself matches.
 2. `[shell] term` in `config.toml`.
 3. The platform default: `xterm-freminal`, and `xterm-256color` on Windows.
 
 That single value is used for the child's environment, for XTGETTCAP `TN`, and for the FREC
-recording header. The header is per recording, not per pane, so it records the `[shell] term`
-resolution; a `TERM` set in one pane's `env` is not visible there.
+recording header, with one limitation: the header is per recording, not per pane, so it
+records the `[shell] term` resolution (steps 2 and 3) and a `TERM` set in one pane's `env` is
+not reflected there. `FREC_FORMAT.md` says the same.
 
 A `[shell] term` value is passed through unchecked apart from a syntax check (non-empty, at
 most 128 bytes, no whitespace, control characters or `/`). An invalid value is dropped with a
@@ -1413,7 +1422,11 @@ Ghostty set `TERMINFO` to their bundled directory the same way. The inherited `T
 is left as it is.
 
 On Windows nothing is extracted and `TERMINFO` is not touched. On the other platforms
-`TERMINFO` is set to the directory above, replacing any inherited value.
+`TERMINFO` is set to the directory above. An inherited non-empty `TERMINFO` (a private database
+the user exported for a custom `TERM`) is not discarded: it is moved to the front of the child's
+`TERMINFO_DIRS`, followed by the inherited `TERMINFO_DIRS`, or by an empty element (which
+ncurses reads as the system database) when that is unset. Without an inherited `TERMINFO` the
+inherited `TERMINFO_DIRS` is left alone.
 
 Installed copies:
 
@@ -1443,11 +1456,22 @@ Installed copies:
   `FREMINAL_SHELL_FEATURES=sudo` (a comma list like Ghostty's `GHOSTTY_SHELL_FEATURES`), set
   at spawn only when the toggle is on and shell integration is injected, and removed otherwise
   so a value inherited from a parent freminal pane cannot turn it on.
+- **Other users and other environments cannot read the pane's directory.** The per-pane
+  directory is a temporary directory created mode 0700, so `sudo -u otheruser`, `su`, `doas`
+  and containers (`docker exec -it` passes `TERM` but not the entry) cannot read it, and
+  those tools typically reset the environment as well. They need a system-wide copy or
+  `[shell] term`. ssh is not the only such case.
+- **`tic -x` inside a pane installs into the pane's directory.** `tic` writes to `$TERMINFO`
+  first, and in a pane that is the pane's temporary (or signed-bundle) directory, so the
+  documented local installs name their target: `tic -x -o ~/.terminfo -` per user and
+  `sudo env -u TERMINFO tic -x -` system-wide (the sudo wrapper keeps `TERMINFO`, so it has
+  to be unset for a system install). `ssh HOST -- tic -x -` is unaffected because ssh does not
+  forward `TERMINFO`.
 - **Detached processes outlive the pane's temporary directory.** A tmux server started from a
   pane keeps running after the pane closes and deletes the per-pane directory, so it needs a
   system-wide or per-user copy.
 - **A per-user `~/.terminfo` copy no longer shadows the pane's entry**, because `TERMINFO` is
-  searched first, so a copy installed there by the `tic -x` fallback below cannot go stale
+  searched first, so a copy installed there by the `tic -x -o ~/.terminfo` fallback below cannot go stale
   inside a pane after freminal is upgraded. It is still the copy that other terminals and ssh
   sessions on the same account use, since they do not set `TERMINFO`.
 - **Remote hosts have no entry** unless one of the fallbacks is used. Copying it automatically
@@ -1461,15 +1485,17 @@ Ghostty's terminfo help page does:
 
 - From inside a freminal pane (every build, the AppImage included, because each pane has the
   entry on `TERMINFO`): `infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -`.
-- From anywhere, from the source file:
-  `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -`,
-  or piped through `ssh YOUR-SERVER -- tic -x -`. `res/freminal.ti` is therefore a public URL
-  and must not be moved or renamed; its header comment says so.
+- From anywhere, from the source file, piped through `ssh YOUR-SERVER -- tic -x -`, or on the
+  local machine with an explicit target (see the limit above):
+  `curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -o ~/.terminfo -`
+  per user, or `... | sudo env -u TERMINFO tic -x -` system-wide. `res/freminal.ti` is therefore
+  a public URL and must not be moved or renamed; its header comment says so.
 - A version-pinned copy: every release and nightly carries `freminal.ti` as an asset.
   `releases/latest/download/…` is not used, because every release so far is a prerelease and
   GitHub's `latest` skips prereleases.
 
-`tic -x` run without root installs to `~/.terminfo`, which needs no privileges. Setting
+Outside freminal, `tic -x` run without root installs to `~/.terminfo`, which needs no
+privileges; inside a pane it does not, which is why the local forms above use `-o`. Setting
 `[shell] term = "xterm-256color"` is the other way out, at the cost of the extra capabilities.
 
 ---

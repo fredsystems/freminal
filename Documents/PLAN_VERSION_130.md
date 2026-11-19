@@ -11714,6 +11714,14 @@ R1, R6, R7, R8, R9, R10, R11, R18. Scope: `README.md`, `Documents/DESIGN_DECISIO
 (comment), `freminal-terminal-emulator/build.rs` (comment), `freminal-terminal-emulator/src/recording.rs`
 (doc example), `Documents/FREC_FORMAT.md`; the plan items are the orchestrator's.
 
+- **Status: done (2026-11-19).** R1: the README and `DESIGN_DECISIONS.md` local installs name
+  their target (`tic -x -o ~/.terminfo -`; `sudo env -u TERMINFO tic -x -`, because the sudo
+  wrapper keeps `TERMINFO`); the `ssh … tic -x -` forms are unchanged. R6, R9 (new
+  "The `sudo` Wrapper (Terminfo)" section in `shell-integration/README.md`), R10, R11, R18 as
+  decided, plus the R2 and R14 behaviour in the README and `DESIGN_DECISIONS.md`.
+  `FREC_FORMAT.md` already agreed. R7 and R8 were done by the orchestrator in 151.C2's
+  commit.
+
 #### 151 Status notes
 
 - **151.1 (done).** See "151 Audit".

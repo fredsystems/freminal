@@ -47,8 +47,11 @@ DEB_PATH="${1:?usage: fix-linux-icon-metadata.sh <deb> <appimage>}"
 APPIMAGE_PATH="${2:?usage: fix-linux-icon-metadata.sh <deb> <appimage>}"
 
 # ── Patch the .deb ───────────────────────────────────────────────────────────
-# dpkg-deb -R / -b round-trips the package and regenerates md5sums, so simply
-# overwriting the desktop file in the extracted tree is sufficient.
+# dpkg-deb -R / -b round-trips the package but does NOT regenerate
+# DEBIAN/md5sums: the replaced desktop file keeps its old checksum and the new
+# terminfo files are not listed.  dpkg does not require md5sums to be complete
+# (only `debsums`-style verification looks at it), so overwriting the files in
+# the extracted tree is sufficient.
 # --root-owner-group keeps the rebuilt package's files owned by root:root.
 patch_deb() {
 	local deb="$1"

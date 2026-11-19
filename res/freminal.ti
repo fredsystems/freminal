@@ -1,9 +1,13 @@
 #       Source of truth for freminal's terminfo entry.  freminal-terminal-emulator/build.rs
 #       compiles this file with `tic -x` into res/terminfo/ (letter and hex
-#       layouts) and packs that tree into res/terminfo.tar.  Every capability
-#       here is implemented by freminal, and every value that the XTGETTCAP handler
-#       (`lookup_termcap` in terminal_handler/dcs.rs) also answers must be identical
-#       to the one below; a test in that file enforces it.
+#       layouts) and packs that tree into res/terminfo.tar.  Capabilities are
+#       declared only where freminal implements them, with two standard key
+#       capabilities as the exception: `kcbt` and `kent` are declared but not
+#       sent by the input encoder (see DECLARED_NOT_SENT in
+#       terminal_handler/dcs/terminfo_truth_tests.rs, which records why).  Every
+#       value that the XTGETTCAP handler (`lookup_termcap` in
+#       terminal_handler/dcs.rs) also answers must be identical to the one below;
+#       a test enforces it.
 #
 #       This path is public.  The README links the file's raw URL on `main`,
 #       https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti,

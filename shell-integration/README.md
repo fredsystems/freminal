@@ -57,6 +57,42 @@ same feature surface.
 
 ---
 
+## The `sudo` Wrapper (Terminfo)
+
+`sudo` resets its environment, so a program run under `sudo` normally loses
+`TERMINFO`, the variable that points at Freminal's own `xterm-freminal`
+terminfo entry. The bash, zsh and fish integrations therefore define a `sudo`
+wrapper that calls `sudo --preserve-env=TERMINFO ...`. It is the same feature
+as Ghostty's `sudo` shell-integration option, except that Freminal turns it on
+by default.
+
+- **Setting:** `[shell_integration] sudo_preserve_terminfo` in `config.toml`
+  (default `true`; also in the Settings modal's Shell Integration tab). It
+  applies to new panes and only does anything under `set_term_program = true`
+  (the default), because that same flag controls whether the integration is
+  injected at all.
+- **Signal to the scripts:** Freminal sets `FREMINAL_SHELL_FEATURES=sudo` (a
+  comma-separated list, like Ghostty's `GHOSTTY_SHELL_FEATURES`) when the
+  toggle is on and the integration is injected, and removes the variable
+  otherwise, so a value inherited from a parent Freminal pane cannot switch the
+  wrapper on. The wrapper is only defined when the variable contains `sudo` and
+  `TERMINFO` is set.
+- **sudoedit:** `sudo -e` / `sudo --edit` is passed through unchanged, with no
+  `--preserve-env`.
+- **Argument scan:** as in Ghostty, the wrapper looks at the arguments up to the
+  first one that is neither an option nor a `NAME=value` assignment. So
+  `sudo -u root -e file` is wrapped (the scan stops at `root`, before it sees
+  `-e`), while `sudo -e -u root file` is treated as sudoedit and is not.
+- **Sudoers caveat:** a sudoers policy that forbids preserving the environment
+  makes `sudo --preserve-env=TERMINFO` refuse the command. If yours does, set
+  `sudo_preserve_terminfo = false`.
+- **Installing the entry system-wide:** because the wrapper keeps `TERMINFO`,
+  `tic` run under it would write into the pane's directory. Use
+  `sudo env -u TERMINFO tic -x -` for a system-wide install (see the README's
+  Terminfo section).
+
+---
+
 ## User-Edit Warning
 
 These files are **overwritten on every freminal launch** — Freminal compares

@@ -60,7 +60,9 @@ pub struct RecordingMetadata {
     pub freminal_version: String,
     /// Unix epoch seconds when recording started.
     pub created_at: u64,
-    /// `$TERM` value (e.g. "xterm-256color").
+    /// The `TERM` that the `[shell] term` setting resolves to (e.g. "xterm-freminal", the
+    /// default; "xterm-256color" on Windows). One value per recording, so a `TERM` set in
+    /// an individual pane's or layout's `env` table is not reflected here.
     pub term: String,
     /// Full window/tab/pane tree at recording start.
     pub initial_topology: TopologySnapshot,

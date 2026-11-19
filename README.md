@@ -154,16 +154,31 @@ From inside a Freminal pane (the entry is available there in every build):
 infocmp -x xterm-freminal | ssh YOUR-SERVER -- tic -x -
 ```
 
-From anywhere, without Freminal, using the source file:
+From anywhere, without Freminal, using the source file. On a remote host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -
 curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | ssh YOUR-SERVER -- tic -x -
 ```
 
+On this machine, name where the entry goes. Inside a Freminal pane `TERMINFO` points at the pane's own copy, and `tic` writes to `$TERMINFO` first, so a bare `tic -x -` would install into that temporary (or app-bundle) directory instead of anywhere lasting. For your account only:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | tic -x -o ~/.terminfo -
+```
+
+System-wide:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fredsystems/freminal/main/res/freminal.ti | sudo env -u TERMINFO tic -x -
+```
+
+The `env -u TERMINFO` matters because Freminal's `sudo` wrapper (below) keeps `TERMINFO` for the command it runs, which would send `tic` back to the pane's directory. `ssh` does not forward `TERMINFO`, so the `ssh YOUR-SERVER -- tic -x -` forms need nothing extra.
+
 Every release also attaches the file as `freminal.ti`, matching that version: `https://github.com/fredsystems/freminal/releases/download/<tag>/freminal.ti`.
 
-Run without root, `tic -x` installs the entry to `~/.terminfo`. That needs no privileges. Inside a Freminal pane the pane's own copy is used regardless, so it never goes stale after an upgrade; other terminals and `ssh` sessions on that account use the `~/.terminfo` copy.
+Outside Freminal, `tic -x` run without root installs the entry to `~/.terminfo`, which needs no privileges; inside a pane it does not (see above), hence `-o ~/.terminfo`. Inside a Freminal pane the pane's own copy is searched first, so it never goes stale after an upgrade; other terminals and `ssh` sessions on that account use the `~/.terminfo` copy.
+
+A `TERMINFO` you export yourself (a private database for a custom `TERM`) stays reachable: Freminal moves it to the front of the pane's `TERMINFO_DIRS`, ahead of any `TERMINFO_DIRS` you set, and the system database stays reachable too.
 
 Packages that carry the entry system-wide, which also covers `sudo` and tmux servers that outlive a pane:
 
@@ -186,7 +201,9 @@ If you would rather not install anything, tell Freminal to use a `TERM` that eve
 term = "xterm-256color"
 ```
 
-It applies to new panes. A `TERM` set in a layout's or pane's `env` table overrides it for that pane.
+It applies to new panes. A `TERM` set in a layout's or pane's `env` table overrides it for that pane (an empty value is ignored; on Windows the key `TERM` matches in any case). The order is: the pane's `env` `TERM`, then `[shell] term`, then the default.
+
+The pane's terminfo directory is a temporary directory private to your user (mode 0700), so anything that runs as someone else, or in another environment, cannot read it (the macOS app-bundle copy is readable, but these tools generally do not carry `TERMINFO` over either): `sudo -u otheruser`, `su`, `doas`, and containers (`docker exec -it` passes `TERM` but not the entry). Those need a system-wide copy (above) or `[shell] term = "xterm-256color"`, the same as `ssh`.
 
 ---
 
