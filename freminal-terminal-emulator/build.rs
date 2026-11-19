@@ -121,6 +121,10 @@ fn git_path(relative: &str) -> Option<String> {
 /// differs from the committed `res/terminfo.tar`, the committed copy is
 /// updated.  This avoids dirtying the git working tree when nothing changed.
 ///
+/// `tic` is invoked with `-x` because user-defined (extended) capabilities
+/// such as `Su`, `Smulx` and `Setulc` are otherwise dropped with an
+/// "unknown capability" warning and never reach the compiled entry.
+///
 /// Requires `tic` (from ncurses) to be present on `$PATH`.  If `tic` is
 /// missing the function prints a warning and returns `Ok(())` so that builds
 /// in environments without `tic` (e.g. Windows CI) are not broken.
@@ -156,6 +160,7 @@ fn rebuild_terminfo() -> Result<(), Box<dyn std::error::Error>> {
 
     let tic_status = Command::new("tic")
         .args([
+            "-x",
             "-o",
             terminfo_build_dir.to_str().ok_or("non-UTF-8 OUT_DIR")?,
             ti_src.to_str().ok_or("non-UTF-8 ti path")?,

@@ -1204,6 +1204,53 @@ mod tests {
         );
     }
 
+    /// Extract a string capability from the `xterm-freminal` entry in
+    /// `res/freminal.ti`, undoing the terminfo source escapes `\E` and `\:`.
+    fn terminfo_source_string(entry: &str, name: &str) -> Option<String> {
+        let start = entry.find(&format!(" {name}="))? + name.len() + 2;
+        let mut out = String::new();
+        let mut chars = entry[start..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                ',' => break,
+                '\\' => match chars.next()? {
+                    'E' => out.push('\x1b'),
+                    other => out.push(other),
+                },
+                other => out.push(other),
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn terminfo_source_advertises_styled_underline_caps_matching_xtgettcap() {
+        let source = include_str!("../../../res/freminal.ti");
+        let entry = source
+            .lines()
+            .skip_while(|l| !l.starts_with("xterm-freminal|"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!entry.is_empty(), "xterm-freminal entry not found");
+
+        let without_escaped_commas = entry.replace("\\,", "");
+        assert!(
+            without_escaped_commas.split(',').any(|t| t.trim() == "Su"),
+            "boolean Su missing from terminfo"
+        );
+        assert_eq!(TerminalHandler::lookup_termcap("Su"), Some(""));
+
+        for name in ["Smulx", "Setulc"] {
+            let from_source = terminfo_source_string(&entry, name);
+            assert!(from_source.is_some(), "{name} missing from terminfo");
+            assert_eq!(
+                from_source.as_deref(),
+                TerminalHandler::lookup_termcap(name),
+                "{name} in res/freminal.ti disagrees with XTGETTCAP"
+            );
+        }
+    }
+
     #[test]
     fn xtgettcap_known_capability_khome() {
         let mut handler = TerminalHandler::new(80, 24);
