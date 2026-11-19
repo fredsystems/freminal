@@ -64,7 +64,7 @@ use freminal_common::buffer_states::format_tag::FormatTag;
 use freminal_common::buffer_states::modes::{
     alternate_scroll::AlternateScroll, application_escape_key::ApplicationEscapeKey,
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
-    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
+    mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket, s8c1t::S8c1t,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 
@@ -86,6 +86,7 @@ struct SnapshotModeFields {
     backarrow_sends_bs: Decbkm,
     alternate_scroll: AlternateScroll,
     line_feed_mode: Lnm,
+    s8c1t: S8c1t,
     kitty_keyboard_flags: u32,
 }
 
@@ -1064,6 +1065,7 @@ impl TerminalEmulator {
             backarrow_sends_bs: mode_fields.backarrow_sends_bs,
             alternate_scroll: mode_fields.alternate_scroll,
             line_feed_mode: mode_fields.line_feed_mode,
+            s8c1t: mode_fields.s8c1t,
             kitty_keyboard_flags: mode_fields.kitty_keyboard_flags,
             cwd,
             shell_histfile,
@@ -1210,6 +1212,7 @@ impl TerminalEmulator {
             backarrow_sends_bs: self.internal.modes.backarrow_key_mode,
             alternate_scroll: self.internal.modes.alternate_scroll,
             line_feed_mode: self.internal.modes.line_feed_mode,
+            s8c1t: *self.internal.handler.s8c1t_mode(),
             kitty_keyboard_flags: self.internal.handler.kitty_keyboard_flags(),
         }
     }
@@ -1446,6 +1449,30 @@ mod tests {
             }
             other => panic!("expected Resize message, got: {other:?}"),
         }
+    }
+
+    // ── build_snapshot: S8C1T ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_snapshot_carries_s8c1t_mode() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
+
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::EightBit);
+
+        emu.handle_incoming_data(b"\x1b F");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
+    }
+
+    #[test]
+    fn build_snapshot_s8c1t_is_reset_by_ris() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::EightBit);
+
+        emu.handle_incoming_data(b"\x1bc");
+        assert_eq!(emu.build_snapshot().s8c1t, S8c1t::SevenBit);
     }
 
     // ── build_snapshot: cache invalidation ────────────────────────────────────

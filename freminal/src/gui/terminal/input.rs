@@ -19,7 +19,7 @@ use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, s8c1t::S8c1t,
 };
 use freminal_common::buffer_states::row_number::RowNumber;
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
@@ -1110,6 +1110,11 @@ pub(super) struct InputModes {
     application_escape_key: ApplicationEscapeKey,
     backarrow_sends_bs: Decbkm,
     line_feed_mode: Lnm,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "TODO(147.4): read by the encoders")
+    )]
+    s8c1t: S8c1t,
     kitty_keyboard_flags: u32,
 }
 
@@ -1123,6 +1128,7 @@ impl InputModes {
             application_escape_key: snap.application_escape_key,
             backarrow_sends_bs: snap.backarrow_sends_bs,
             line_feed_mode: snap.line_feed_mode,
+            s8c1t: snap.s8c1t,
             kitty_keyboard_flags: snap.kitty_keyboard_flags,
         }
     }
@@ -3489,6 +3495,35 @@ mod key_modifiers_tests {
     fn no_modifiers_no_super_held_is_empty() {
         let km = egui_mods_to_key_modifiers(Modifiers::default(), false);
         assert!(km.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod input_modes_s8c1t_tests {
+    //! Task 147.3: S8C1T reaches `InputModes` through the snapshot.
+
+    use super::*;
+    use freminal_terminal_emulator::interface::TerminalEmulator;
+
+    #[test]
+    fn from_snapshot_carries_s8c1t_set_by_the_emulator() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::SevenBit
+        );
+
+        emu.handle_incoming_data(b"\x1b G");
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::EightBit
+        );
+
+        emu.handle_incoming_data(b"\x1b F");
+        assert_eq!(
+            InputModes::from_snapshot(&emu.build_snapshot()).s8c1t,
+            S8c1t::SevenBit
+        );
     }
 }
 

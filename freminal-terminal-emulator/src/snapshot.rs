@@ -31,6 +31,7 @@ use freminal_common::{
             lnm::Lnm,
             mouse::{MouseEncoding, MouseTrack},
             rl_bracket::RlBracket,
+            s8c1t::S8c1t,
         },
         pointer_shape::PointerShape,
         progress::ProgressReport,
@@ -297,6 +298,14 @@ pub struct TerminalSnapshot {
     /// consulting the emulator.
     pub line_feed_mode: Lnm,
 
+    /// C1 control transmission mode (`S8C1T` / `S7C1T`, `ESC SP G` / `ESC SP F`).
+    ///
+    /// Needed by the GUI-side input encoders so that CSI / SS3 introducers they
+    /// generate (keys, mouse reports, focus, bracketed-paste markers) can use
+    /// the 8-bit forms when the application has enabled 8-bit C1 controls.
+    /// Reset to `SevenBit` by a full reset (RIS).
+    pub s8c1t: S8c1t,
+
     /// Currently active Kitty keyboard protocol flags (stack top, 0 if empty).
     ///
     /// When non-zero, the GUI must encode key events using KKP format instead
@@ -491,6 +500,7 @@ impl TerminalSnapshot {
             application_escape_key: ApplicationEscapeKey::Reset,
             backarrow_sends_bs: Decbkm::BackarrowSendsDel,
             line_feed_mode: Lnm::LineFeed,
+            s8c1t: S8c1t::SevenBit,
             kitty_keyboard_flags: 0,
             alternate_scroll: AlternateScroll::Disabled,
             cwd: None,
@@ -522,6 +532,11 @@ mod tests {
     #[test]
     fn empty_modify_other_keys_is_zero() {
         assert_eq!(TerminalSnapshot::empty().modify_other_keys, 0);
+    }
+
+    #[test]
+    fn empty_s8c1t_is_seven_bit() {
+        assert_eq!(TerminalSnapshot::empty().s8c1t, S8c1t::SevenBit);
     }
 
     #[test]

@@ -7786,6 +7786,10 @@ Stale stub text was corrected at the same time:
   RIS, `0x9B`". Benchmarks (quiet machine, vs `before_147_2`): `parser_push` −5.0%,
   `parser_push_sgr` +2.4% / +1.4%, `parse_and_handle_80x24` −0.7%,
   `handle_incoming_data_4096` −1.6%. The GAPS "per read" paragraph goes in 147.17.
+- **147.3 (done).** `TerminalSnapshot::s8c1t` (from the handler's mirror, so RIS resets it)
+  and `InputModes::s8c1t`, which carries the temporary `TODO(147.4)` dead-code exception.
+  Not added to change detection: it changes nothing rendered, and the encoders read the
+  latest snapshot.
 - **147.22 moved to Task 151 (151.2)** by maintainer decision (2026-11-19), so Task 151 owns
   `lookup_termcap` and `res/freminal.ti`. Task 151 runs in the worktree `../freminal-151`.
 
